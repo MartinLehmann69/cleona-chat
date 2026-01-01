@@ -38,8 +38,8 @@ class LocalDiscovery {
   NativeUdpSender? _nativeSender;
 
   /// iOS native sendto() bypass for discovery. Dart's send() returns 0 on
-  /// iOS (errno 64/65). Same fd-based approach as Transport.IosUdpSender —
-  /// finds the discovery socket's fd and calls sendto() directly.
+  /// iOS (errno 64/65). Uses a fresh native socket (not Dart's fd, which is
+  /// unstable on iOS — fd gets recycled → ENOTSOCK/EBADF).
   IosUdpSender? _iosSender;
 
   // Receive-side diagnostics for LAN-Discovery (2026-05-15). The pre-existing
@@ -143,14 +143,16 @@ class LocalDiscovery {
     }
 
     // iOS: Dart's RawDatagramSocket.send() returns 0 for all destinations
-    // (errno 64/65). Find the discovery socket's fd and use native sendto().
+    // (errno 64/65). Create a fresh native socket for sending — Dart's
+    // discovery socket fd is unstable on iOS (gets recycled → ENOTSOCK).
+    // Receives still go through Dart's socket above.
     if (Platform.isIOS) {
       try {
-        _iosSender = IosUdpSender.open(discoveryPort);
+        _iosSender = IosUdpSender.createSendOnly();
         if (_iosSender != null) {
-          _log.info('iOS native discovery sender attached (fd=${_iosSender!.fd} port $discoveryPort)');
+          _log.info('iOS native discovery send-socket created (fd=${_iosSender!.fd})');
         } else {
-          _log.warn('iOS native discovery sender: fd not found for port $discoveryPort');
+          _log.warn('iOS native discovery send-socket: creation failed');
         }
       } catch (e) {
         _log.warn('iOS native discovery sender init failed: $e');

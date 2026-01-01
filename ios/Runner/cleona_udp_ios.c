@@ -61,6 +61,22 @@ int cleona_ios_sendto(int fd, const char* dest_ip, int dest_port,
     return (int)sent;
 }
 
+/* Create a fresh UDP socket for sending only (broadcast + unicast).
+ * Used by discovery where Dart's socket fd is unstable on iOS (fd gets
+ * recycled between scan and first send → ENOTSOCK/EBADF).
+ * Returns the fd (>= 0) on success, or -errno on failure. */
+__attribute__((visibility("default"), used))
+int cleona_ios_create_send_socket(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        extern int errno;
+        return -errno;
+    }
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_BROADCAST, &yes, sizeof(yes));
+    return fd;
+}
+
 /* Peek at the socket's receive buffer without consuming data.
  * Diagnostic: detects data stuck in kernel buffer that Dart's event loop
  * isn't reading (kqueue/CFSocket integration bug).
