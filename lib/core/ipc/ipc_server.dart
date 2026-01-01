@@ -980,6 +980,7 @@ class IpcServer {
             seedDeviceIdHex: req.params['seedDeviceIdHex'] as String?,
             seedDxkB64: req.params['seedDxkB64'] as String?,
             seedDmkB64: req.params['seedDmkB64'] as String?,
+            seedEpB64: req.params['seedEpB64'] as String?,
           );
           _sendResponse(client, IpcResponse(
             id: req.id,
@@ -1010,6 +1011,7 @@ class IpcServer {
             targetDeviceIdHex: req.params['targetDeviceIdHex'] as String?,
             targetDxkB64: req.params['targetDxkB64'] as String?,
             targetDmkB64: req.params['targetDmkB64'] as String?,
+            targetEpB64: req.params['targetEpB64'] as String?,
           );
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;

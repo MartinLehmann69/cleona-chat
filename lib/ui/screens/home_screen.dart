@@ -738,12 +738,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 Navigator.pop(ctx);
 
                 // Register seed peers if available, wait for PONGs, then send CR.
-                // Welle 5 §8.1.1: forward Device-KEM pubkeys + deviceId so the
-                // daemon can build the First-CR-Bootstrap InfrastructureFrame.
+                // §8.1.1 rev3: v2 seeds carry ep (trust-anchor), v1 carry dxk/dmk.
                 final dxk = seed.deviceX25519Pk;
                 final dmk = seed.deviceMlKemPk;
                 final dxkB64 = dxk != null ? base64.encode(dxk) : null;
                 final dmkB64 = dmk != null ? base64.encode(dmk) : null;
+                final ep = seed.userEd25519Pk;
+                final epB64 = ep != null ? base64Url.encode(ep).replaceAll('=', '') : null;
                 if (seed.seedPeers.isNotEmpty || seed.ownAddresses.isNotEmpty) {
                   service.addPeersFromContactSeed(
                     seed.nodeIdHex,
@@ -752,6 +753,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     targetDeviceIdHex: seed.deviceIdHex,
                     targetDxkB64: dxkB64,
                     targetDmkB64: dmkB64,
+                    targetEpB64: epB64,
                   );
                   Future.delayed(const Duration(seconds: 3), () {
                     service.sendContactRequest(
@@ -759,6 +761,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                       seedDeviceIdHex: seed.deviceIdHex,
                       seedDxkB64: dxkB64,
                       seedDmkB64: dmkB64,
+                      seedEpB64: epB64,
                     );
                   });
                 } else {
@@ -767,6 +770,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     seedDeviceIdHex: seed.deviceIdHex,
                     seedDxkB64: dxkB64,
                     seedDmkB64: dmkB64,
+                    seedEpB64: epB64,
                   );
                 }
 

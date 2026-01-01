@@ -163,8 +163,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       );
     }).toList();
 
-    // §8.1.1 rev2: QR includes dxk/dmk (DHT fallback unreliable for
-    // cross-network scans). Compact binary + zstd keeps QR manageable.
+    // §8.1.1 rev3: v2 ContactSeed carries userEd25519Pk (32B trust-anchor)
+    // instead of dxk/dmk (1216B). toQrBytes() always emits v2 binary format.
     // Use widget.identity for userId/displayName (explicit, not IPC state).
     final idNodeIdHex = widget.identity.nodeIdHex ?? service.nodeIdHex;
     final idDisplayName = widget.identity.displayName;
@@ -175,8 +175,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       seedPeers: seedPeerList,
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
-      deviceX25519Pk: service.deviceX25519Pk.isEmpty ? null : service.deviceX25519Pk,
-      deviceMlKemPk: service.deviceMlKemPk.isEmpty ? null : service.deviceMlKemPk,
+      userEd25519Pk: service.userEd25519Pk,
     );
     final qrBytes = qrSeed.toQrBytes();
     final qrCode = qr_lib.QrCode.fromUint8List(
@@ -191,8 +190,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       seedPeers: seedPeerList,
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
-      deviceX25519Pk: service.deviceX25519Pk.isEmpty ? null : service.deviceX25519Pk,
-      deviceMlKemPk: service.deviceMlKemPk.isEmpty ? null : service.deviceMlKemPk,
+      userEd25519Pk: service.userEd25519Pk,
     );
     final shareUri = shareSeed.toUri();
 

@@ -3,8 +3,6 @@ import 'dart:io';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
-import 'package:cleona/core/crypto/device_keys_store.dart';
-import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
@@ -351,13 +349,6 @@ Future<void> _exportContactSeed(_HeadlessConfig config) async {
   );
   await identity.initKeys();
 
-  final baseDir = '${AppPaths.home}/.cleona';
-  final fileEnc = FileEncryption(baseDir: baseDir);
-  final deviceKeys = DeviceKeysStore.loadOrCreate(
-    baseDir: baseDir,
-    fileEnc: fileEnc,
-  );
-
   // Local IPs (non-loopback, non-link-local)
   final interfaces = await NetworkInterface.list();
   final localIps = <String>[];
@@ -393,8 +384,7 @@ Future<void> _exportContactSeed(_HeadlessConfig config) async {
     seedPeers: const [],
     channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
     deviceIdHex: identity.deviceNodeIdHex,
-    deviceX25519Pk: deviceKeys.kem.x25519PublicKey,
-    deviceMlKemPk: deviceKeys.kem.mlKemPublicKey,
+    userEd25519Pk: identity.ed25519PublicKey,
   );
 
   stdout.writeln(seed.toUri());

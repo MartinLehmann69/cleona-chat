@@ -380,7 +380,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.81';
+  static const String kCurrentAppVersion = '3.1.82';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -2546,9 +2546,13 @@ class CleonaService implements ICleonaService {
           _log.warn('QR seed: malformed dxk/dmk — DKR cache not primed: $e');
         }
       }
+      final hasDkr = targetDxkB64 != null && targetDmkB64 != null;
+      final hasEp = targetEpB64 != null;
       _log.info('QR seed: added target user=${targetNodeIdHex.substring(0, 8)} '
           'device=${targetDeviceIdHex.substring(0, 8)} '
-          'with ${addresses.length} addresses + DKR cache (protected, no DV-neighbor)');
+          'with ${addresses.length} addresses'
+          '${hasDkr ? " + DKR cache" : hasEp ? " + ep trust-anchor" : " (no keys)"}'
+          ' (protected, no DV-neighbor)');
     } else {
       _log.info('QR seed: added target ${targetNodeIdHex.substring(0, 8)} '
           'with ${addresses.length} addresses (protected, legacy URI)');
