@@ -443,7 +443,6 @@ abstract class ICleonaService {
   List<ContactInfo> get storedForDeliveryContacts;
   ContactInfo? getContact(String nodeIdHex);
   List<Conversation> get sortedConversations;
-  List<PeerSummary> get peerSummaries;
 
   /// Central, stable CR generator. Network data is computed once when
   /// the mesh converges (peers confirmed + public IP discovered) and
@@ -1314,7 +1313,7 @@ abstract class ICleonaService {
   /// "network change" of §11.8.2, through its one entry
   /// (`networkChangeEdge`, `mycelium_seam.dart`) — for the whole host, with
   /// the router mapping (§7.3). Answers `debounced` (bool),
-  /// `remainingSeconds` (int, only when debounced) and `peersFound` (int).
+  /// `remainingSeconds` (int, only when debounced).
   Future<Map<String, dynamic>> reconnect();
 
   Future<void> stop();

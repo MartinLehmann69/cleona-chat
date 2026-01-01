@@ -126,9 +126,14 @@ extension StateSnapshotOps on CleonaService {
       'storedForDeliveryContacts':
           storedForDeliveryContacts.map((c) => c.toJson()).toList(),
       'currentCall': currentCall?.toJson(),
+      // S411 (run 6, gui-34 34.G02): the desktop UI reads the group call
+      // from this snapshot (ipc_client.dart, `currentGroupCall`) and clears
+      // it when the key is missing — it never was here, so every refresh
+      // closed the GroupCallScreen right after it opened. Only
+      // `get_group_call_state` carried it.
+      'currentGroupCall': currentGroupCall?.toJson(),
       'isMuted': isMuted,
       'isSpeakerEnabled': isSpeakerEnabled,
-      'peerSummaries': peerSummaries.map((p) => p.toJson()).toList(),
       // §11/G-11: the start-peer candidates from the entry pool. The NODE
       // holds them, the GUI's ContactSeed builder needs them — and between
       // the two lies the IPC trench under Linux/Windows/macOS. Without this

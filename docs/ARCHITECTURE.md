@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:4bb608ce8b6b, 2026-10-30). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:9e39828ac741, 2026-11-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -904,7 +904,7 @@ of identities to look up (§13.7).
 **Profile layout:**
 
 ```
-~/.cleona/                     (Linux)   %APPDATA%/Cleona/   (Windows)
+~/.cleona/ or ~/.cleona-beta/  (Linux, §21.4)   %APPDATA%/Cleona/   (Windows)
 files/.cleona/                 (Android, app-private)
 
   device.db                              # the device database (§4.5.3, §21.4.1): the identities
@@ -2487,7 +2487,8 @@ is no timer in the delivery layer that expires messages and no background
 retry loop. At the edges of §8.2 the node sends again, under the same
 identifier, what is neither acknowledged nor placed — except call
 signals, which are not sent again at an edge and end with their call
-(§17.2). Where the
+(§17.2), and ephemeral messages (§9.2), which are sent once on steps 1 and 3,
+take no post box and are never sent again. Where the
 application sets itself a limit — a call must ring within 10 s (§17.2) —
 the limit is the application's: it stops the sending, as this section
 provides, and the delivery layer learns of nothing but the stop.
@@ -3022,7 +3023,7 @@ from here rather than choosing one:
 | 0x10-0x1F | messages (§9) |
 | 0x20-0x2F | handing on by code (§8.1): `0x20`–`0x23` |
 | 0x30-0x3F | post box (§8.2) |
-| 0x40-0x4F | public-address discovery and knocking (§7.3); board question `0x43` and answer `0x44` (§11.8a); keep-alive measurement `0x45`–`0x47` and open check `0x48`–`0x4A` (§8.1) |
+| 0x40-0x4F | public-address discovery and knocking (§7.3); board question `0x43` and answer `0x44` (§11.8a); keep-alive measurement `0x45`–`0x47` and open check `0x48`–`0x4A` (§8.1); who are you `0x4B`, answer `0x4C` (§11.8) |
 | 0x50-0x5F | media (§9.4): announcement `0x50`, fragment `0x51`, hold `0x52`, held `0x53`, collect `0x54` (identifier ‖ optional first missing stripe, or first stripe ‖ bitmap of the missing ones), nothing here or end of pass `0x55` (identifier ‖ optional fragments sent); stream (§17.6): ask `0x56`, cookies or refusal `0x57`, join `0x58`, frame `0x59`, missing `0x5A` (the recipient's lists; the sender's end of pass) |
 | 0x60-0x6F | groups (§16.2) — shared key (§16.2.5): hold `0x60` (channel value ‖ collect public key ‖ generation public key ‖ author key with its certificate ‖ signature ‖ entry ‖ proof of work on the first deposit under a value), held or refused `0x61`, question `0x62` (channel values ‖ state root ‖ collect public key ‖ generation public key ‖ signature), same `0x63`, list of entry hashes, each with the kind of its entry, `0x64`, fetch `0x65`, entry `0x66`, end of pass `0x67` (number handed out, or nothing here), nudge `0x68` |
 | 0x70-0x7F | update (§26.6.1) |
@@ -3320,6 +3321,7 @@ follows a move of its own path by path validation (§17.4).
 | try of a stale or remembered address | at the next edge, address question `0x40` |
 | failure of an address | §11.3a |
 | new or returning address of a genuine packet | one request `0x40` (§11.3a repeats); confirmed only by its answer |
+| who are you | `0x4B` (16 random bytes) beside the `0x40` of §11.8.5 and §11.8.6, at an address's first answer and at an address first heard through a new handshake; `0x4C` (the same 16 bytes + node identifier 16 B); at most one per address and edge, at most 64 at one occasion; silence says nothing (a 4.2.3 node drops the kind) |
 | refill after a removal | at most one round per minute, while below 32 |
 | removal memory | until the next network change |
 | link renewal after silence | 120 s, before the next real sending after an own pause |
@@ -9388,21 +9390,25 @@ these outside this encryption is impermissible.
 described in §4.5.3: post-box packets in the device database, media
 pieces as sealed files under `mycelium/bulk/`.
 
-**Where the profile lies.** All identity data sits in one directory,
-`.cleona`, below a per-platform home:
+**Where the profile lies.** All identity data sits in one directory per
+network channel, `.cleona` (live) or `.cleona-beta` (beta), below a
+per-platform home:
 
 | Platform | Location |
 |---|---|
-| Linux | `$HOME/.cleona` |
-| Windows | `%USERPROFILE%\.cleona`, else `%APPDATA%\.cleona` |
-| macOS | `$HOME/.cleona`, or Application Support where the platform resolves one |
+| Linux | `$HOME/.cleona`, `$HOME/.cleona-beta` |
+| Windows | `%USERPROFILE%\.cleona`, `%USERPROFILE%\.cleona-beta`, else the same names under `%APPDATA%` |
+| macOS | `$HOME/.cleona`, `$HOME/.cleona-beta`, or Application Support where the platform resolves one |
 | Android | `/data/data/<package>/files/.cleona` — app-private, and the package name carries the `.beta` suffix, so beta and live have **separate** profiles |
 | iOS | the app container; where `HOME` is unset it is derived from the bundle path |
 
-On the three desktop platforms the directory carries **no channel
-suffix** — a beta build and a live build on the same account therefore
-use the **same** profile directory, and only one of them can own it at a
-time (§15.1 single-instance lock).
+On the three desktop platforms the directory carries the network channel:
+`.cleona` for live, `.cleona-beta` for beta, as on Android. A beta build and
+a live build on the same account use separate profiles, separate
+single-instance locks and separate IPC endpoints, and both can run at the
+same time. A beta profile found in `.cleona` from a version before this rule
+moves to `.cleona-beta` once, at the first start of a version that follows
+it; the move is complete or has not happened, and no data is deleted.
 
 Importing the 24-word seed is the regular recovery path (§13).
 
@@ -9915,7 +9921,8 @@ are independent of the delivery model:
 - **Single-instance guard, machine-global:** exactly one Cleona daemon
   per machine and OS user, independent of `--base-dir`/`--profile`. On
   startup the daemon takes flock+PID on
-  `$HOME/.cleona-daemon.lock` or `%USERPROFILE%\.cleona-daemon.lock` —
+  `$HOME/.cleona-daemon.lock` or `%USERPROFILE%\.cleona-daemon.lock`
+  (beta: `.cleona-beta-daemon.lock`) —
   a **sibling** of the profile directory, not inside it, and deliberately
   environment-independent (not `$XDG_RUNTIME_DIR`, which is missing
   depending on the startup context and would let two starts pick
@@ -10332,10 +10339,16 @@ GUI `cleona`
 dart:ffi → GTK3 + libappindicator3 (deliberately not the system_tray
 plugin, which breaks with modern Wayland sessions), notifications via
 `notify-send`/D-Bus, sounds via PipeWire (`pw-play`) with PulseAudio
-fallback (`paplay`).
+fallback (`paplay`). Package installations (`.deb`, `.rpm`, AppImage) are
+read-only for the user; follow-up updates run via the in-network update path
+into a per-user copy under `~/.local/share/cleona/app`
+(`~/.local/share/cleona-beta/app` for beta), and the launcher starts the newer
+of the two. No administrator rights are requested — as on Windows.
 
 **Windows Desktop.** Always-on full retention (§8). Distributed via an Inno
-Setup installer to `%LOCALAPPDATA%\Cleona Chat\` (no admin rights;
+Setup installer to `%LOCALAPPDATA%\Cleona Chat\` for live and
+`%LOCALAPPDATA%\Cleona Beta\` for beta, each with its own installer identity,
+so that both can be installed side by side (no admin rights;
 start-menu entry, optional desktop shortcut, optional daemon autostart
 via `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; follow-up
 updates run via the in-network update path, not via a new installer
@@ -12059,8 +12072,11 @@ Apple CI via Fastlane), Google Play (maintainer-signed APK), the
 project website. F-Droid is excluded (it requires an OSS license).
 Linux packaging via `scripts/build-linux-packages.sh` produces an
 AppImage (universal, no installation), a `.deb` (Debian/Ubuntu/Mint), and
-an `.rpm` (Fedora/openSUSE/RHEL), all installing to `/opt/cleona/` with
-a wrapper at `/usr/bin/cleona-chat` and a `.desktop` entry.
+an `.rpm` (Fedora/openSUSE/RHEL), installing to `/opt/cleona/` with a wrapper
+at `/usr/bin/cleona-chat` and a `.desktop` entry for live, and to
+`/opt/cleona-beta/` with `/usr/bin/cleona-chat-beta` and its own `.desktop`
+entry for beta (package `cleona-chat-beta`, which replaces a former beta
+installation of `cleona-chat`).
 
 **The website does not belong in this chapter.** `cleona.org` is its own
 sub-project (a separate repository). Here it is named exclusively
@@ -12163,7 +12179,10 @@ Beta and live are installable in parallel: `chat.cleona.cleona` ("Cleona
 Chat", standard icon) versus `chat.cleona.cleona.beta` ("Cleona Beta",
 icon with a red BETA banner), separate data directories
 (`/data/data/<package>/`), separate identities, separate contacts, no
-shared state — both can run at the same time. Network-channel detection
+shared state — both can run at the same time. The same holds on Linux,
+Windows and macOS (§21.4, §22.6, §26.2): separate installation, separate
+profile, separate name and icon. On macOS the beta bundle identifier is
+`chat.cleona.cleona.beta`. Network-channel detection
 runs on Android at runtime from the package name
 (`AppPaths.packageName`: `.beta` suffix → beta network channel,
 otherwise live), on desktop via `--dart-define=NETWORK_CHANNEL`;
@@ -12399,7 +12418,10 @@ fallback to the full binary when no matching path exists (say, because a
 node was offline for more than two releases). The patch container is
 Cleona's own (zstd frames, sizes and SHA-256 of base and result), not the
 bzip2 container of classic bsdiff. The expected savings are
-above 90 % — typically a few MB instead of several dozen MB.
+above 90 % — typically a few MB instead of several dozen MB. Deltas currently
+exist for Android only; a desktop update object is a compressed archive, on
+which a delta saves next to nothing, so desktop nodes collect the full binary
+(owner decision 07.10.2026).
 
 The manifest names every delta together with its **content hash and
 length**, per platform and per source version; without both, a node can
@@ -12954,7 +12976,7 @@ Inventory per `pubspec.yaml`:
 | `path` / `path_provider` | `^1.9.0` / `^2.1.0` | path arithmetic, platform-specific directories |
 | `connectivity_plus` | `^6.0.0` | detection of the network state (Wi-Fi / cellular / none) |
 | `qr` / `qr_flutter` | `^3.0.2` / `^4.1.0` | QR generation for ContactSeed |
-| `mobile_scanner` | `^6.0.0` | QR capture via the camera |
+| `mobile_scanner` | `^7.4.2` | QR capture via the camera |
 | `video_player` | `^2.11.1` | inline video playback in chat |
 | `just_audio` | `^0.10.5` | audio playback (voice messages, sounds) |
 | `record` | `^6.2.0` | recording of voice messages (AAC) |
@@ -12971,6 +12993,12 @@ Inventory per `pubspec.yaml`:
 | `collection` | `^1.18.0` | collection helper functions |
 | `meta` | `^1.15.0` | annotations (`@visibleForTesting`, among others) |
 | `cupertino_icons` | `^1.0.8` | icon set |
+| `sqlite3` | `^3.5.2` | encrypted message store (§4.5.3) |
+| `provider` | `^6.1.0` | state of the interface |
+| `protobuf` | `^4.0.0` | runtime of the generated Protobuf classes |
+| `crypto` | `^3.0.7` | SHA-256 for files and log redaction |
+| `dbus` | `^0.7.12` | desktop notifications on Linux |
+| `mycelium` | local package | delivery layer (§22.4.1) |
 
 Besides network-change detection, `connectivity_plus` carries the
 **connection type** for the rule "cellular is the last resort" (§22.6)
@@ -12981,10 +13009,22 @@ and the data-saver-mode suggestion when a metered connection is detected
 
 ### 27.7 External tools (runtime)
 
-`ffmpeg` (optional, speech transcription), `wl-clipboard` and `xclip`
-(optional, binary clipboard), `pw-play` with `paplay` fallback
-(notification sounds, Linux); on Windows the bundled `cleona-play.exe`
-(§22.6). No network relevance.
+**Linux.** Required at runtime: `parecord` and `pactl` (pulseaudio-utils) and
+`ffmpeg` — the `record` package records voice messages through them;
+`ffprobe`/`ffplay` play them back; `pw-play` with `paplay` fallback play the
+notification sounds; a file dialog program (`zenity`, `kdialog` or `qarma`) for
+`file_picker`; `secret-tool` and `libsecret-1` for the key ring; an AppIndicator
+library for the tray; `xdg-open`; `rsync` for applying an update; and the
+libraries the ELF files of the bundle link against (among them
+`libpipewire-0.3` and `libwebrtc_audio_processing` for `cleona_voice`).
+Optional, each for one function: `nmcli`, `tracepath`, `wl-clipboard`/`xclip`
+(binary clipboard), `smbclient`/`sftp`/`curl` (archive), `iw` or `iwgetid`
+(Wi-Fi name), `fswebcam`. The `.deb` and `.rpm` declare them
+(`scripts/build-linux-packages.sh`: the ELF part derived from the bundle at
+build time, the rest listed with its code location); AppImage and tar.gz cannot,
+there the app names a missing program when the function is used. The lab
+installs the same list (`scripts/vm/vm-deploy.sh`). **Windows:** the bundled
+`cleona-play.exe` (§22.6). No network relevance.
 
 ---
 

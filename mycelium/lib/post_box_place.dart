@@ -85,8 +85,9 @@ class PostBoxPlacing {
     required List<Neighbour> withWhom,
     List<Neighbour> reserve = const [],
     bool Function()? ended,
+    Uint8List? sending,
   }) {
-    final id = depositId(underValue, content, kIdLength);
+    final id = depositId(underValue, sending ?? content, kIdLength);
     final idHex = asHex(id);
     // The same packet still being placed (B-18): the new run replaces it,
     // as a new sending of the same packet replaces the previous one.
@@ -112,6 +113,12 @@ class PostBoxPlacing {
         if (!identical(_deposits[idHex], h)) return; // replaced meanwhile
         if (ended?.call() ?? false) {
           report?.call('deposit dropped — acknowledged before its proof of work (§7.1)');
+          _depositEnd(idHex);
+          return;
+        }
+        // Two late receipts of the sending this one replaced (same id, S411):
+        // both holders hold it, there is nothing left to leave.
+        if (h.placed != null) {
           _depositEnd(idHex);
           return;
         }
@@ -224,7 +231,9 @@ class PostBoxPlacing {
     if (answer != null && !answer.isCompleted) answer.complete();
     if (node != ownNode) onNode?.call(from.$1, from.$2, node);
     if (h.node >= 2) h.complete(); // placed at the second 0x31 (§8.2)
-    if (h.finished) _depositEnd(idHex);
+    // Before `sentAt` a late receipt of a replaced sending counts, but the run
+    // still computes its proof of work: nobody was asked yet, nothing ended.
+    if (h.sentAt != null && h.finished) _depositEnd(idHex);
     return true;
   }
 

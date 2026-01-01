@@ -7,21 +7,40 @@
 ;   OutputDir     e.g. "C:\Users\Cleona"
 ;   OutputName    e.g. "cleona-chat-3.1.147-beta-windows-x64-setup"
 
+;   Channel       "beta" or "live" (default beta). v4_2 section 26.2: beta and
+;                 live install side by side, each with its own identity. Live
+;                 keeps the identity every earlier setup carried.
+
+#ifndef Channel
+  #define Channel "beta"
+#endif
+#if Channel == "live"
+  #define ProductName "Cleona Chat"
+  #define ProductAppId "{{8F4A9C2E-7B3D-4E1F-A5C8-2D9E6F0B1A4C}"
+  #define AutostartValue "CleonaDaemon"
+  #define IconAsset "app_icon.ico"
+#else
+  #define ProductName "Cleona Beta"
+  #define ProductAppId "{{C2D7E1A4-3F96-4B58-9E0D-71A6B4F2C853}"
+  #define AutostartValue "CleonaBetaDaemon"
+  #define IconAsset "app_icon_beta.ico"
+#endif
+
 [Setup]
-AppId={{8F4A9C2E-7B3D-4E1F-A5C8-2D9E6F0B1A4C}
-AppName=Cleona Chat
+AppId={#ProductAppId}
+AppName={#ProductName}
 AppVersion={#AppVersion}
-AppVerName=Cleona Chat {#AppVersion}
+AppVerName={#ProductName} {#AppVersion}
 AppPublisher=Cleona Project
 AppPublisherURL=https://cleona.org
-DefaultDirName={localappdata}\Cleona Chat
-DefaultGroupName=Cleona Chat
+DefaultDirName={localappdata}\{#ProductName}
+DefaultGroupName={#ProductName}
 DisableProgramGroupPage=yes
 OutputDir={#OutputDir}
 OutputBaseFilename={#OutputName}
 Compression=lzma2/ultra64
 SolidCompression=yes
-SetupIconFile={#BuildDir}\data\flutter_assets\assets\app_icon.ico
+SetupIconFile={#BuildDir}\data\flutter_assets\assets\{#IconAsset}
 UninstallDisplayIcon={app}\cleona.exe
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -41,15 +60,15 @@ english.FirewallStatus=Windows Firewall: allowing incoming connections for Cleon
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
-Name: "autostart"; Description: "Cleona Chat beim Windows-Start automatisch starten"; GroupDescription: "Autostart:"
+Name: "autostart"; Description: "{#ProductName} beim Windows-Start automatisch starten"; GroupDescription: "Autostart:"
 
 [Files]
 Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\Cleona Chat"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\cleona.exe"
-Name: "{group}\Cleona Chat deinstallieren"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Cleona Chat"; Filename: "{app}\cleona.exe"; Tasks: desktopicon
+Name: "{group}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\data\flutter_assets\assets\{#IconAsset}"
+Name: "{group}\{#ProductName} deinstallieren"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#ProductName}"; Filename: "{app}\cleona.exe"; IconFilename: "{app}\data\flutter_assets\assets\{#IconAsset}"; Tasks: desktopicon
 
 [Registry]
 ; S367: der Daemon liegt in {app}\bin\ — `dart build cli` bettet den Pfad
@@ -58,18 +77,51 @@ Name: "{autodesktop}\Cleona Chat"; Filename: "{app}\cleona.exe"; Tasks: desktopi
 ; Oeffnen der Ablage mit Exit 0 — fuer die GUI ununterscheidbar von
 ; "laeuft, oeffnet nur keinen Socket". Die [Files]-Zeile oben nimmt das
 ; Unterverzeichnis ueber `recursesubdirs` ohnehin mit.
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CleonaDaemon"; ValueData: """{app}\bin\cleona-daemon.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#AutostartValue}"; ValueData: """{app}\bin\cleona-daemon.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{app}\cleona.exe"; Description: "Cleona Chat starten"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\cleona.exe"; Description: "{#ProductName} starten"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
-Filename: "taskkill"; Parameters: "/IM cleona-daemon.exe /F"; Flags: runhidden; RunOnceId: "KillDaemon"
-Filename: "taskkill"; Parameters: "/IM cleona.exe /F"; Flags: runhidden; RunOnceId: "KillGui"
+; Only this installation's processes: the same image names run from the other
+; channel's folder next to it.
+Filename: "powershell.exe"; Parameters: "-NoProfile -NonInteractive -Command ""Get-Process cleona,cleona-daemon -EA SilentlyContinue | Where-Object {{ $_.Path -like '{app}\*' } | Stop-Process -Force"""; Flags: runhidden; RunOnceId: "KillOwn"
 
 [Code]
 var
   ResultCode: Integer;
+
+procedure StopProcessesIn(const Folder: String);
+begin
+  Exec('powershell.exe', '-NoProfile -NonInteractive -Command "Get-Process cleona,cleona-daemon -EA SilentlyContinue | Where-Object { $_.Path -like ''' + Folder + '\*'' } | Stop-Process -Force"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+end;
+
+#if Channel != "live"
+{ A former beta installation under "Cleona Chat" (every setup before the split,
+  51 of 51 releases were beta). It would stay in the start menu, and its
+  autostart would run the old daemon against the same profile. Its uninstaller
+  has no step that touches the profile. A folder marked live is the other
+  channel's and stays. }
+procedure RemoveFormerBetaInstallation;
+var
+  OldDir, Channel, Uninstaller: String;
+  Ansi: AnsiString;
+begin
+  OldDir := ExpandConstant('{localappdata}\Cleona Chat');
+  if LoadStringFromFile(OldDir + '\data\channel', Ansi) then
+  begin
+    Channel := Trim(String(Ansi));
+    if Channel = 'live' then Exit;
+  end;
+  if not RegQueryStringValue(HKCU,
+      'Software\Microsoft\Windows\CurrentVersion\Uninstall\{8F4A9C2E-7B3D-4E1F-A5C8-2D9E6F0B1A4C}_is1',
+      'UninstallString', Uninstaller) then Exit;
+  StopProcessesIn(OldDir);
+  Exec(RemoveQuotes(Uninstaller), '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Log(Format('Former beta installation removed: exit %d', [ResultCode]));
+  RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'CleonaDaemon');
+end;
+#endif
 
 { The inbound firewall rule of the daemon (v4_2 section 22, "Windows
   Desktop"; S407). The setup installs without administrator rights; this is
@@ -93,7 +145,7 @@ begin
     breaks at the space of "Cleona Chat" and nothing is set (exit 1,
     measured on the lab VM 14.10.2026). }
   if ShellExec('runas', ExpandConstant('{cmd}'),
-      '/d /s /c ""' + ExpandConstant('{app}\cleona-firewall.cmd') + '" ' + Action + ' "' + Daemon + '""',
+      '/d /s /c ""' + ExpandConstant('{app}\cleona-firewall.cmd') + '" ' + Action + ' "' + Daemon + '" {#Channel}"',
       ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code) then
     Log(Format('Firewall helper "%s" ended with %d', [Action, Code]))
   else
@@ -106,8 +158,11 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
   begin
-    Exec('taskkill', '/IM cleona-daemon.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-    Exec('taskkill', '/IM cleona.exe /F', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    { Only this installation's processes; the other channel keeps running. }
+    StopProcessesIn(ExpandConstant('{app}'));
+#if Channel != "live"
+    RemoveFormerBetaInstallation;
+#endif
     Sleep(1000);
   end;
   if CurStep = ssPostInstall then

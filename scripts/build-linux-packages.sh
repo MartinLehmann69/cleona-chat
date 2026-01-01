@@ -151,16 +151,12 @@ LINUX_DEB_RECOMMENDS=(
   "smbclient"
   "openssh-client"
   "curl"
-  # archive/archive_network.dart readCurrentSsid: iwgetid, only when nmcli
-  # gives no Wi-Fi name. Ubuntu 26.04 has no wireless-tools any more and no
-  # other package ships iwgetid (measured 29.10.2026 on the lab nodes:
+  # archive/archive_network.dart readCurrentSsid: iw, then iwgetid, only when
+  # nmcli gives no Wi-Fi name. Ubuntu 26.04 has no wireless-tools any more and
+  # no other package ships iwgetid (measured 29.10.2026 on the lab nodes:
   # `apt-cache policy wireless-tools` -> candidate (none), no reverse
-  # provides); there the name comes from nmcli (network-manager above). It
-  # stays a Recommends for the releases that have it: apt skips a Recommends
-  # without a candidate and installs the rest (S410-LABOR-SKRIPTE.md). `iw`
-  # is NOT an alternative here — it is another program, the code does not
-  # call it.
-  "wireless-tools"
+  # provides); iw is there (6.17, measured 02.11.2026, S411).
+  "iw | wireless-tools"
 )
 LINUX_DEB_SUGGESTS=(
   # ui/screens/identity_detail_screen.dart: fswebcam (profile photo from
@@ -197,6 +193,7 @@ LINUX_RPM_RECOMMENDS=(
   "/usr/bin/smbclient"
   "/usr/bin/sftp"
   "/usr/bin/curl"
+  "(/usr/sbin/iw or /usr/bin/iw)"
 )
 
 # "a", "b | c" -> "a, b | c" (one Depends line).
@@ -238,6 +235,69 @@ if [ ! -d "$BUNDLE_DIR" ]; then
   echo "Run first: flutter build linux --release"
   exit 1
 fi
+
+# The channel beside the version; the starter compares it with the per-user
+# copy (§22.6). scripts/release-build.sh writes it. Without it no copy would
+# ever be started and an in-network update would seem to do nothing.
+if [ ! -s "$BUNDLE_DIR/data/channel" ]; then
+  echo "ERROR: $BUNDLE_DIR/data/channel is missing"
+  exit 1
+fi
+
+# Beta and live install side by side (v4_2 §26.2, D-89). The beta package
+# replaces a former beta installation of `cleona-chat`: only below the version
+# that introduced the split, because an unversioned Conflicts would also forbid
+# the live package next to it. Every package below it is beta (51 of 51
+# releases, S411-PARALLEL.md).
+SPLIT_VERSION="4.2.5"
+DEB_SUPERSEDES=""
+RPM_SUPERSEDES=""
+WINDOW_CLASS="chat.cleona.cleona"
+INSTALL_NAME="cleona"
+if [ "$(cat "$BUNDLE_DIR/data/channel")" != "live" ]; then
+  APP_NAME="cleona-chat-beta"
+  DISPLAY_NAME="Cleona Beta"
+  INSTALL_NAME="cleona-beta"
+  WINDOW_CLASS="chat.cleona.cleona.beta"
+  ICON_PATH="$SRC_DIR/assets/app_icon_beta.png"
+  DEB_SUPERSEDES="Conflicts: cleona-chat (<< $SPLIT_VERSION)
+Replaces: cleona-chat (<< $SPLIT_VERSION)"
+  RPM_SUPERSEDES="Obsoletes:      cleona-chat < $SPLIT_VERSION"
+fi
+
+# Writes the starter of a package to $1; $2 is a shell expression for the
+# bundle of the package. It starts the higher version of that bundle and the
+# per-user copy (v4_2 §22.6, D-85) with the libraries of the one it starts. A
+# copy that is incomplete, not executable or of another channel is passed over
+# and left alone; a tie stays with the package. `UserCopy.preferredBundle` in
+# lib/core/update/user_copy.dart makes the same decision for a restart.
+write_starter() {
+  {
+    printf '#!/bin/bash\nPACKAGE_BUNDLE="%s"\n' "$2"
+    cat << 'STARTER'
+version_of() { sed -n 's/.*"version" *: *"\([^"]*\)".*/\1/p' "$1/data/flutter_assets/version.json" 2>/dev/null; }
+channel_of() { cat "$1/data/channel" 2>/dev/null; }
+if [ "$(channel_of "$PACKAGE_BUNDLE")" = "live" ]; then
+  COPY="$HOME/.local/share/cleona/app"
+else
+  COPY="$HOME/.local/share/cleona-beta/app"
+fi
+BUNDLE="$PACKAGE_BUNDLE"
+if [ -f "$COPY/.user-copy-complete" ] && [ -x "$COPY/cleona" ] &&
+   [ -n "$(channel_of "$COPY")" ] && [ "$(channel_of "$COPY")" = "$(channel_of "$PACKAGE_BUNDLE")" ]; then
+  COPY_VERSION="$(version_of "$COPY")"
+  PACKAGE_VERSION="$(version_of "$PACKAGE_BUNDLE")"
+  if [ -n "$COPY_VERSION" ] && [ "$COPY_VERSION" != "$PACKAGE_VERSION" ] &&
+     [ "$(printf '%s\n%s\n' "$COPY_VERSION" "$PACKAGE_VERSION" | LC_ALL=C sort -V | tail -n 1)" = "$COPY_VERSION" ]; then
+    BUNDLE="$COPY"
+  fi
+fi
+export LD_LIBRARY_PATH="$BUNDLE/lib:${LD_LIBRARY_PATH:-}"
+exec "$BUNDLE/cleona" "$@"
+STARTER
+  } > "$1"
+  chmod +x "$1"
+}
 
 # The packages that provide the libraries the ELF files of the bundle link
 # against, minus what the bundle carries itself — one per line. Fails (exit
@@ -307,12 +367,12 @@ create_desktop_entry() {
 Type=Application
 Name=$DISPLAY_NAME
 Comment=$DESCRIPTION
-Exec=cleona-chat
-Icon=cleona-chat
+Exec=$APP_NAME
+Icon=$APP_NAME
 Categories=Network;InstantMessaging;Chat;
 Keywords=messenger;chat;p2p;encrypted;quantum;
 Terminal=false
-StartupWMClass=chat.cleona.cleona
+StartupWMClass=$WINDOW_CLASS
 MimeType=x-scheme-handler/cleona;
 EOF
 }
@@ -355,34 +415,21 @@ appimage_bundle_system_lib libsodium.so libsodium.so.26 libsodium.so.23 || exit 
 appimage_bundle_system_lib libzstd.so libzstd.so.1 || exit 1
 
 # Wrapper-Script
-cat > "$APPDIR/usr/bin/cleona-chat" << 'WRAPPER'
-#!/bin/bash
-SELF_DIR="$(dirname "$(readlink -f "$0")")"
-APP_DIR="$SELF_DIR/../lib/cleona"
-export LD_LIBRARY_PATH="$APP_DIR/lib:${LD_LIBRARY_PATH:-}"
-exec "$APP_DIR/cleona" "$@"
-WRAPPER
-chmod +x "$APPDIR/usr/bin/cleona-chat"
+write_starter "$APPDIR/usr/bin/$APP_NAME" '$(dirname "$(readlink -f "$0")")/../lib/cleona'
 
 # Desktop-Entry + Icon
-create_desktop_entry "$APPDIR/usr/share/applications/cleona-chat.desktop"
+create_desktop_entry "$APPDIR/usr/share/applications/$APP_NAME.desktop"
 if [ -f "$ICON_PATH" ]; then
-  cp "$ICON_PATH" "$APPDIR/usr/share/icons/hicolor/256x256/apps/cleona-chat.png"
+  cp "$ICON_PATH" "$APPDIR/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png"
 fi
 
 # AppRun
-cat > "$APPDIR/AppRun" << 'APPRUN'
-#!/bin/bash
-SELF_DIR="$(dirname "$(readlink -f "$0")")"
-export LD_LIBRARY_PATH="$SELF_DIR/usr/lib/cleona/lib:${LD_LIBRARY_PATH:-}"
-exec "$SELF_DIR/usr/lib/cleona/cleona" "$@"
-APPRUN
-chmod +x "$APPDIR/AppRun"
+write_starter "$APPDIR/AppRun" '$(dirname "$(readlink -f "$0")")/usr/lib/cleona'
 
 # Desktop + icon in the root (AppImage convention)
-cp "$APPDIR/usr/share/applications/cleona-chat.desktop" "$APPDIR/"
+cp "$APPDIR/usr/share/applications/$APP_NAME.desktop" "$APPDIR/"
 if [ -f "$ICON_PATH" ]; then
-  cp "$ICON_PATH" "$APPDIR/cleona-chat.png"
+  cp "$ICON_PATH" "$APPDIR/$APP_NAME.png"
 fi
 
 # Build AppImage
@@ -404,32 +451,27 @@ echo "[2/3] Creating Debian package (.deb)..."
 DEB_DIR="$OUTPUT_DIR/deb-build"
 rm -rf "$DEB_DIR"
 mkdir -p "$DEB_DIR/DEBIAN"
-mkdir -p "$DEB_DIR/opt/cleona"
+mkdir -p "$DEB_DIR/opt/$INSTALL_NAME"
 mkdir -p "$DEB_DIR/usr/bin"
 mkdir -p "$DEB_DIR/usr/share/applications"
 mkdir -p "$DEB_DIR/usr/share/icons/hicolor/256x256/apps"
 
 # Bundle kopieren
-cp -r "$BUNDLE_DIR"/* "$DEB_DIR/opt/cleona/"
+cp -r "$BUNDLE_DIR"/* "$DEB_DIR/opt/$INSTALL_NAME/"
 
 # Wrapper-Script
-cat > "$DEB_DIR/usr/bin/cleona-chat" << 'WRAPPER'
-#!/bin/bash
-export LD_LIBRARY_PATH="/opt/cleona/lib:${LD_LIBRARY_PATH:-}"
-exec /opt/cleona/cleona "$@"
-WRAPPER
-chmod +x "$DEB_DIR/usr/bin/cleona-chat"
+write_starter "$DEB_DIR/usr/bin/$APP_NAME" /opt/$INSTALL_NAME
 
 # Desktop-Entry
-create_desktop_entry "$DEB_DIR/usr/share/applications/cleona-chat.desktop"
+create_desktop_entry "$DEB_DIR/usr/share/applications/$APP_NAME.desktop"
 
 # Icon
 if [ -f "$ICON_PATH" ]; then
-  cp "$ICON_PATH" "$DEB_DIR/usr/share/icons/hicolor/256x256/apps/cleona-chat.png"
+  cp "$ICON_PATH" "$DEB_DIR/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png"
 fi
 
 # Control file
-INSTALLED_SIZE=$(du -sk "$DEB_DIR/opt/cleona" | cut -f1)
+INSTALLED_SIZE=$(du -sk "$DEB_DIR/opt/$INSTALL_NAME" | cut -f1)
 cat > "$DEB_DIR/DEBIAN/control" << EOF
 Package: $APP_NAME
 Version: $VERSION
@@ -447,10 +489,19 @@ Depends: $DEB_DEPENDS_LINE
 Recommends: $DEB_RECOMMENDS_LINE
 Suggests: $DEB_SUGGESTS_LINE
 EOF
+if [ -n "$DEB_SUPERSEDES" ]; then
+  printf '%s\n' "$DEB_SUPERSEDES" >> "$DEB_DIR/DEBIAN/control"
+fi
 
 # Post-Install (cleona:// URI-Handler registrieren)
-cat > "$DEB_DIR/DEBIAN/postinst" << 'POSTINST'
+cat > "$DEB_DIR/DEBIAN/postinst" << POSTINST
 #!/bin/bash
+# An upgrade from a package built without --root-owner-group (up to 4.2.3)
+# replaces the files but leaves existing directories as they are: measured
+# with dpkg 1.22.6, /opt/$INSTALL_NAME stayed 1002:1002 775 (S411-MISC.md). That uid
+# could still swap the program every user starts.
+chown -R root:root /opt/$INSTALL_NAME
+chmod -R u=rwX,go=rX /opt/$INSTALL_NAME
 update-desktop-database /usr/share/applications 2>/dev/null || true
 gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 POSTINST
@@ -459,8 +510,8 @@ chmod +x "$DEB_DIR/DEBIAN/postinst"
 # OWNER AND MODES OF THE PAYLOAD (S410-I6-MESSUNG, finding 3). Without
 # --root-owner-group dpkg-deb records the uid/gid of the build user, and the
 # build user's umask 0002 left directories and programs group-writable
-# (measured: `drwxrwxr-x claude/claude ./opt/cleona/`, installed on Ubuntu
-# 24.04 as `UNKNOWN:UNKNOWN 775 /opt/cleona` — owned by whoever is uid 1002
+# (measured: `drwxrwxr-x claude/claude ./opt/$INSTALL_NAME/`, installed on Ubuntu
+# 24.04 as `UNKNOWN:UNKNOWN 775 /opt/$INSTALL_NAME` — owned by whoever is uid 1002
 # there, and that group could replace the program every user starts).
 #   * --root-owner-group: "Set the owner and group for each entry in the
 #     filesystem tree data to root with id 0 (since dpkg 1.19.0)" — dpkg-deb(1),
@@ -502,23 +553,18 @@ mkdir -p "$RPM_BUILD"/{SPECS,BUILD,RPMS,SOURCES,SRPMS}
 # Tarball for rpmbuild
 TAR_NAME="${APP_NAME}-${VERSION}"
 TAR_DIR="$RPM_BUILD/SOURCES/$TAR_NAME"
-mkdir -p "$TAR_DIR/opt/cleona"
+mkdir -p "$TAR_DIR/opt/$INSTALL_NAME"
 mkdir -p "$TAR_DIR/usr/bin"
 mkdir -p "$TAR_DIR/usr/share/applications"
 mkdir -p "$TAR_DIR/usr/share/icons/hicolor/256x256/apps"
 
-cp -r "$BUNDLE_DIR"/* "$TAR_DIR/opt/cleona/"
+cp -r "$BUNDLE_DIR"/* "$TAR_DIR/opt/$INSTALL_NAME/"
 
-cat > "$TAR_DIR/usr/bin/cleona-chat" << 'WRAPPER'
-#!/bin/bash
-export LD_LIBRARY_PATH="/opt/cleona/lib:${LD_LIBRARY_PATH:-}"
-exec /opt/cleona/cleona "$@"
-WRAPPER
-chmod +x "$TAR_DIR/usr/bin/cleona-chat"
+write_starter "$TAR_DIR/usr/bin/$APP_NAME" /opt/$INSTALL_NAME
 
-create_desktop_entry "$TAR_DIR/usr/share/applications/cleona-chat.desktop"
+create_desktop_entry "$TAR_DIR/usr/share/applications/$APP_NAME.desktop"
 if [ -f "$ICON_PATH" ]; then
-  cp "$ICON_PATH" "$TAR_DIR/usr/share/icons/hicolor/256x256/apps/cleona-chat.png"
+  cp "$ICON_PATH" "$TAR_DIR/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png"
 fi
 # Modes as for the .deb (finding 3): nobody but the owner writes. The owner
 # is root through %defattr in the spec.
@@ -535,7 +581,7 @@ for r in "${LINUX_RPM_REQUIRES[@]}"; do RPM_DEPS="${RPM_DEPS}Requires:       $r"
 for r in "${LINUX_RPM_RECOMMENDS[@]}"; do RPM_DEPS="${RPM_DEPS}Recommends:     $r"$'\n'; done
 
 # PRIVATE LIBRARIES STAY PRIVATE (S410, I-6 follow-up). rpmbuild's AutoProv
-# announced every .so under /opt/cleona as a package capability — measured
+# announced every .so under /opt/$INSTALL_NAME as a package capability — measured
 # on the 4.2.99 test package: `rpm -qp --provides` listed liboqs.so.9,
 # libopus.so.0, libsqlite3.so, libflutter_linux_gtk.so and eleven more. dnf
 # could then satisfy a FOREIGN package's dependency with Cleona's private
@@ -544,7 +590,7 @@ for r in "${LINUX_RPM_RECOMMENDS[@]}"; do RPM_DEPS="${RPM_DEPS}Recommends:     $
 # dependency_generators.md, rpm 4.18:
 # https://rpm.org/user_doc/dependency_generators.html):
 #   * %__provides_exclude_from — a PATH regex: no provides from anything
-#     under /opt/cleona/.
+#     under /opt/$INSTALL_NAME/.
 #   * %__requires_exclude — a DEPENDENCY regex: AutoReq still derives what
 #     the ELF files need from the system (libgtk-3.so.0, libc.so.6 …), but
 #     not what the bundle itself satisfies (libflutter_linux_gtk.so,
@@ -562,7 +608,7 @@ if [ -z "$RPM_PRIVATE_NAMES" ] || ! grep -qF 'liboqs[.]so' <<<"$RPM_PRIVATE_NAME
   echo "ERROR: cannot derive the private library names of the bundle (no liboqs.so) — no .rpm is built"
   exit 1
 fi
-RPM_FILTERS="%global __provides_exclude_from ^/opt/cleona/.*\$"$'\n'
+RPM_FILTERS="%global __provides_exclude_from ^/opt/$INSTALL_NAME/.*\$"$'\n'
 RPM_FILTERS="${RPM_FILTERS}%global __requires_exclude ^(${RPM_PRIVATE_NAMES})[(]"$'\n'
 
 # THE PAYLOAD ARRIVES BYTE-IDENTICAL (S410-I6-MESSUNG, finding 1). After
@@ -602,6 +648,7 @@ Summary:        $DISPLAY_NAME - $DESCRIPTION
 License:        Proprietary
 URL:            $HOMEPAGE
 Source0:        %{name}-%{version}.tar.gz
+${RPM_SUPERSEDES}
 ${RPM_DEPS}
 %description
 Cleona Chat is a decentralized peer-to-peer messenger with post-quantum
@@ -612,16 +659,16 @@ cryptographic - no phone number or email required.
 %setup -q
 
 %install
-mkdir -p %{buildroot}/opt/cleona
+mkdir -p %{buildroot}/opt/$INSTALL_NAME
 mkdir -p %{buildroot}/usr/bin
 mkdir -p %{buildroot}/usr/share/applications
 mkdir -p %{buildroot}/usr/share/icons/hicolor/256x256/apps
 
-cp -r opt/cleona/* %{buildroot}/opt/cleona/
-cp usr/bin/cleona-chat %{buildroot}/usr/bin/
-cp usr/share/applications/cleona-chat.desktop %{buildroot}/usr/share/applications/
-if [ -f usr/share/icons/hicolor/256x256/apps/cleona-chat.png ]; then
-  cp usr/share/icons/hicolor/256x256/apps/cleona-chat.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/
+cp -r opt/$INSTALL_NAME/* %{buildroot}/opt/$INSTALL_NAME/
+cp usr/bin/$APP_NAME %{buildroot}/usr/bin/
+cp usr/share/applications/$APP_NAME.desktop %{buildroot}/usr/share/applications/
+if [ -f usr/share/icons/hicolor/256x256/apps/$APP_NAME.png ]; then
+  cp usr/share/icons/hicolor/256x256/apps/$APP_NAME.png %{buildroot}/usr/share/icons/hicolor/256x256/apps/
 fi
 
 %post
@@ -630,10 +677,10 @@ gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 
 %files
 %defattr(-,root,root,-)
-/opt/cleona/
-/usr/bin/cleona-chat
-/usr/share/applications/cleona-chat.desktop
-/usr/share/icons/hicolor/256x256/apps/cleona-chat.png
+/opt/$INSTALL_NAME/
+/usr/bin/$APP_NAME
+/usr/share/applications/$APP_NAME.desktop
+/usr/share/icons/hicolor/256x256/apps/$APP_NAME.png
 
 %changelog
 EOF
@@ -644,7 +691,7 @@ if command -v rpmbuild &> /dev/null; then
   RPM_FILE=$(find "$RPM_BUILD/RPMS" -name "*.rpm" | head -1)
   if [ -n "$RPM_FILE" ]; then
     # Check of the BUILT package, not of the spec (finding 1): unpack the
-    # payload and compare every entry under opt/cleona with the bundle —
+    # payload and compare every entry under opt/$INSTALL_NAME with the bundle —
     # same names, same bytes (sha256), same symlink targets. Plus owner
     # root/root and no group/other write for every entry (rpm -qp --dump:
     # path size mtime digest mode owner group …). A finding removes the
@@ -661,10 +708,10 @@ if command -v rpmbuild &> /dev/null; then
     RPM_BAD=""
     if ! (cd "$RPM_CHECK_DIR" && rpm2cpio "$RPM_FILE" | cpio -idm --quiet); then
       RPM_BAD="the payload cannot be unpacked (rpm2cpio | cpio)"
-    elif [ ! -d "$RPM_CHECK_DIR/opt/cleona" ]; then
-      RPM_BAD="the payload has no opt/cleona"
+    elif [ ! -d "$RPM_CHECK_DIR/opt/$INSTALL_NAME" ]; then
+      RPM_BAD="the payload has no opt/$INSTALL_NAME"
     else
-      RPM_DIFF=$(diff <(rpm_inventory "$BUNDLE_DIR") <(rpm_inventory "$RPM_CHECK_DIR/opt/cleona")) \
+      RPM_DIFF=$(diff <(rpm_inventory "$BUNDLE_DIR") <(rpm_inventory "$RPM_CHECK_DIR/opt/$INSTALL_NAME")) \
         || RPM_BAD="payload differs from the bundle (< bundle, > rpm):"$'\n'"$(printf '%s\n' "$RPM_DIFF" | head -20)"
     fi
     RPM_MODES=$(rpm -qp --dump "$RPM_FILE" 2>/dev/null | awk '

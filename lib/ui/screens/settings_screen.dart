@@ -268,20 +268,20 @@ class SettingsScreen extends StatelessWidget {
               ),
               ListTile(
                 leading: const Icon(Icons.people),
-                title: Text(locale.get('connected_peers')),
-                // §22.7.3/§24.4.1: the partner counts carry a separate label
-                // PER DIRECTION. A single number left open
-                // whether it means one's own delivery or the contribution for
-                // others — two different statements (§25.4).
+                title: Text(locale.get('settings_neighbours')),
+                // §22.7.3/§24.4.1: the counts carry a separate label PER
+                // DIRECTION. A single number left open whether it means one's
+                // own delivery or the contribution for others — two different
+                // statements (E-41).
                 // S405 A-2: no subtitle where the delivery layer has no
                 // such number (mycelium) — a 0 there would be a claim.
                 subtitle: service.syncPartnersOutbound == null ||
                         service.syncPartnersInbound == null
                     ? null
                     : Text(
-                        '${locale.get('stats_sync_partners_outbound')}: '
+                        '${locale.get('stats_answering_neighbours')}: '
                         '${service.syncPartnersOutbound} · '
-                        '${locale.get('stats_sync_partners_inbound')}: '
+                        '${locale.get('stats_inbound_addresses')}: '
                         '${service.syncPartnersInbound}',
                       ),
                 trailing: const Icon(Icons.chevron_right),

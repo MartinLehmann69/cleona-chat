@@ -116,6 +116,9 @@ class OutsideRoute {
   void Function(Uint8List packet, InternetAddress from, int fromPort)?
       onOpenCheck;
 
+  /// 0x4B-0x4C, "who are you" (§11.8, D-87) — `who_question.dart`.
+  void Function(Uint8List packet, InternetAddress from, int fromPort)? onWho;
+
   /// Alone on the wire — for probes and for anyone who does not otherwise use
   /// this socket. Here there is no splitter, hence no
   /// second route out.
@@ -154,6 +157,8 @@ class OutsideRoute {
       onProbe?.call(packet, from, fromPort);
     } else if (kinds.isOpenCheck(kind)) {
       onOpenCheck?.call(packet, from, fromPort);
+    } else if (kinds.isWho(kind)) {
+      onWho?.call(packet, from, fromPort);
     } else if (kind == kKindWhatIsMyAddress) {
       _onWhatIsMyAddress(packet, from, fromPort);
     } else if (kind == kKindYourAddressIs) {

@@ -6,8 +6,11 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart'
     show hexFrom, shortFrom, ownTarget, roll;
 import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
+import 'package:mycelium/neighbour_found_by.dart';
+export 'package:mycelium/neighbour_found_by.dart' show NeighbourSource;
 import 'package:mycelium/neighbours.dart' as nb;
 import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
+import 'package:mycelium/own_former.dart' show ownFormer;
 
 /// Open the call in the segment and carry its finds into the node.
 ///
@@ -92,7 +95,8 @@ bool neighbourFound(
   // (§11.8.4), dated now: it returns a removed address (§11.8.6). A foreign
   // call is a hint that carries no time and does not (S407-LB-P7, C-8).
   final fresh = neighbourAdd(k, address.rawAddress, port,
-      confirmedAt: answer ? DateTime.now() : null);
+      confirmedAt: answer ? DateTime.now() : null,
+      source: NeighbourSource.localSegment);
   // B1 (S388): whoever names its node identifier IN AN ANSWER counts ONCE
   // under each of its addresses (`readiness.dart`). One's own address is
   // neither entered nor confirmed. A foreign call teaches the readiness
@@ -136,7 +140,8 @@ bool neighbourFound(
 /// says nothing newer than any removal and does not bring it back (§11.8.6
 /// "or one that carries no time — is not admitted"; S407-LB-P7, C-8: until
 /// here it was always admitted and wiped the removal memory).
-bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
+bool neighbourAdd(Node k, List<int> ip, int port,
+    {DateTime? confirmedAt, NeighbourSource? source}) {
   // S390: here stood `ip.length != 4` — „only IPv4 is remembered". That was
   // the SECOND door next to `Neighbourhood.possible`, and it leads the
   // sources 2 (call), 3 (card, via `Host.neighbourRemember`) and 4
@@ -153,6 +158,11 @@ bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
     k.report('Neighbour hint ${a.address}:$port not admitted — own address');
     return false;
   }
+  if (ownFormer(k, CardAddress(Uint8List.fromList(a.rawAddress), port))) {
+    k.report('Neighbour hint ${a.address}:$port not admitted — a former own '
+        'address of this run');
+    return false;
+  }
   final known = k.neighbourhood.holding(a, port) != null;
   final dropped = k.readiness.dropped;
   final removedAt = dropped.removedAt(a, port);
@@ -167,6 +177,9 @@ bool neighbourAdd(Node k, List<int> ip, int port, {DateTime? confirmedAt}) {
   }
   final fresh = k.neighbourhood.remember(a, port);
   if (fresh) dropped.forget(a, port);
+  if (fresh && source != null) {
+    k.neighbourhood.noteFoundBy(k.neighbourhood.holding(a, port)!, source);
+  }
   // S394 V1 (§11.1): a hint in an address family without socket is neither
   // stored nor tried — measured 24.09.2026, Node1 without IPv6 admitted
   // IPv6 hints and tried them.

@@ -20,7 +20,8 @@ import 'dart:typed_data';
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/bundle.dart';
 import 'package:mycelium/envelope.dart' show PostBox;
-import 'package:mycelium/first_contact.dart' show FirstContactError, PacketKind;
+import 'package:mycelium/first_contact.dart' show FirstContactError, PacketKind, Report, Send;
+import 'package:mycelium/first_contact_pair.dart' show pairHook;
 
 /// Lengths of the anonymous bundle request: bare, IPv4 and IPv6 way back.
 const Set<int> kBundlePleaLengths = {17, 40, 52};
@@ -44,6 +45,24 @@ Uint8List bundleAnswerBuild(Uint8List randomValue, PostBox me) =>
           ..add(randomValue)
           ..add(bundleBuild(randomValue, me)))
         .toBytes();
+
+/// Packet (1) for [me]'s invitation: hand out the own bundle. It is public —
+/// nothing is given away here that is not public anyway.
+/// §15.5 "The way back for the bundle": directly when the request came
+/// directly; under the reply code through the named neighbour when it came
+/// through one — [from] is then the forwarder's address (S394-7).
+/// (Moved here from `first_contact_invitation.dart`, line budget, S411.)
+void bundlePleaCame(Uint8List packet, CardAddress from, bool forwarded,
+    PostBox me, Send send, Report? report) {
+  final r = bundlePleaRead(packet);
+  final bundle = bundleAnswerBuild(r.randomValue, me);
+  final back = r.replyCode != null && r.neighbour != null;
+  report?.call(!forwarded ? 'Bundle handed out directly' : back
+      ? 'Bundle handed out under the reply code'
+      : 'Bundle request through a neighbour without a way back — not answerable');
+  if (!forwarded) send(bundle, from);
+  if (forwarded && back) pairHook[me]?.underCodeSend(r.replyCode!, r.neighbour!, bundle);
+}
 
 /// Reads a bundle request (0). Throws [FirstContactError] on a length the
 /// document does not name or on a broken address.

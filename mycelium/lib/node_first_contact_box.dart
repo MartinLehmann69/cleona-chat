@@ -94,12 +94,15 @@ extension NodeFirstContactBox on Node {
   /// not throw (see [NodeDeposit.deposit]).
   Future<(bool done, int acknowledged)> depositNamed(
       Uint8List content, Uint8List value, List<CardAddress> named,
-      {List<CardAddress> at = const [], bool Function()? ended}) {
+      {List<CardAddress> at = const [],
+      bool Function()? ended,
+      Uint8List? sending}) {
     final c = holdersNamedFirst(named, at: at);
     return deposit(content, value,
         withWhom: c.take(kDepositHolders).toList(),
         reserve: c.skip(kDepositHolders).toList(),
-        ended: ended);
+        ended: ended,
+        sending: sending);
   }
 
   /// The questions under which [i]'s invitation post boxes are collected:

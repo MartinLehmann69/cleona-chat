@@ -461,12 +461,12 @@ extension CleonaServiceMycelium on CleonaService {
     }
     final mycelium.Outbound? a;
     try {
-      // An ephemeral indicator never rests: hours later it would claim
-      // someone is typing right now. Whether a way exists (§7.1: one of the
-      // three addresses) the delivery layer decides (`sendIfWay`,
-      // S408-LEBENSLAUF P18); the app asks nothing before it.
+      // An ephemeral indicator goes once on steps 1 and 3 and never rests
+      // (§9.3, D-86): hours later it would claim someone is typing right now.
+      // Whether a way exists (§7.1: one of the three addresses) the delivery
+      // layer decides (`sendIfWay`); the app asks nothing before it.
       a = ephemeral
-          ? mycelium.MailboxOutbound(p).sendIfWay(identifier, frame)
+          ? mycelium.MailboxSignal(p).sendIfWay(identifier, frame)
           : mycelium.MailboxOutbound(p).send(identifier, frame);
     } on mycelium.MailboxError catch (e) {
       _log.warn('mycelium:$typeName to $short — $e. Not sent.');
@@ -477,6 +477,8 @@ extension CleonaServiceMycelium on CleonaService {
           'sent');
       return null;
     }
+    // No delivery display: nothing waits for it, no state would ever change.
+    if (ephemeral) return a;
     return _myceliumOutboundNote(a, messageIdHex, typeName, short, frame);
   }
 
@@ -1454,6 +1456,11 @@ extension CleonaServiceMycelium on CleonaService {
       c.rememberFoundingAnchor(addr.ed25519Pk);
       _contacts[hex] = c;
       _saveContacts();
+      // S411 (run 6, gui-68 68.02): the waiting contact is new state the UI
+      // shows ("Wartet auf Verbindung"); the acceptance path below tells it,
+      // this one did not, so the desktop UI saw the contact only when some
+      // other event happened to refresh it. Local event only, no traffic.
+      onStateChanged?.call();
     }
     // ── NO CONTACT_REQUEST OF THE APP (S388-BAU-KONTAKT, B-1 = A) ────
     //

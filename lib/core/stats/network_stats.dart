@@ -250,6 +250,14 @@ class NetworkStats {
   /// [slotsEmitted], [slotsSkipped] and [storedCells] (S407-N2).
   final bool deliveryCounters;
 
+  /// §25.7: the answering neighbours, one row each — the same quantity as the
+  /// host's count, so the number and the list cannot disagree.
+  final List<NeighbourRow> neighbours;
+
+  /// `null` without a host: the section's aggregates are not shown (§25.2
+  /// rule 4).
+  final NeighbourAggregates? neighbourAggregates;
+
   const NetworkStats({
     this.uptime = Duration.zero,
     this.isRunning = false,
@@ -286,9 +294,14 @@ class NetworkStats {
     this.dbSizeBytes = 0,
     this.nodeGauges = false,
     this.deliveryCounters = false,
+    this.neighbours = const [],
+    this.neighbourAggregates,
   });
 
   Map<String, dynamic> toJson() => {
+        'neighbours': [for (final n in neighbours) n.toJson()],
+        if (neighbourAggregates != null)
+          'neighbourAggregates': neighbourAggregates!.toJson(),
         'uptimeSeconds': uptime.inSeconds,
         'isRunning': isRunning,
         'entryRecords': entryRecords,
@@ -389,8 +402,92 @@ class NetworkStats {
       // for these tiles either, so hiding them shows the truth.
       nodeGauges: json['nodeGauges'] as bool? ?? false,
       deliveryCounters: json['deliveryCounters'] as bool? ?? false,
+      neighbours: [
+        for (final n in json['neighbours'] as List<dynamic>? ?? const [])
+          NeighbourRow.fromJson(n as Map<String, dynamic>),
+      ],
+      neighbourAggregates: json['neighbourAggregates'] == null
+          ? null
+          : NeighbourAggregates.fromJson(
+              json['neighbourAggregates'] as Map<String, dynamic>),
     );
   }
+}
+
+/// One answering neighbour, as §25.7 lists it: its address families, whether
+/// it is fixed, when it last answered.
+///
+/// **No address, no node identifier, no contact** — §25.7 "must not be added",
+/// also not for a fixed neighbour that is a contact's device (§5.2).
+///
+class NeighbourRow {
+  /// `IPv4` / `IPv6`: the families it answered under in this run.
+  final List<String> families;
+  final bool fixed;
+  final DateTime lastConfirmed;
+
+  /// §25.7 "Found by": a name of mycelium's `NeighbourSource`, or `null` when
+  /// §25.7 lists no source for it (cover entry, packet source).
+  final String? foundBy;
+
+  const NeighbourRow({
+    required this.families,
+    required this.fixed,
+    required this.lastConfirmed,
+    this.foundBy,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'families': families,
+        'fixed': fixed,
+        'lastConfirmed': lastConfirmed.millisecondsSinceEpoch,
+        if (foundBy != null) 'foundBy': foundBy,
+      };
+
+  static NeighbourRow fromJson(Map<String, dynamic> json) => NeighbourRow(
+        families: [
+          for (final f in json['families'] as List<dynamic>? ?? const [])
+            f as String,
+        ],
+        fixed: json['fixed'] as bool? ?? false,
+        lastConfirmed: DateTime.fromMillisecondsSinceEpoch(
+            json['lastConfirmed'] as int? ?? 0),
+        foundBy: json['foundBy'] as String?,
+      );
+}
+
+/// The aggregates of §25.7, besides the count of answering neighbours.
+class NeighbourAggregates {
+  final int fixed;
+  final int openSet;
+  final bool keepsBoard;
+  final bool externalRecordsOn;
+  final bool ownRecordPublished;
+
+  const NeighbourAggregates({
+    required this.fixed,
+    required this.openSet,
+    required this.keepsBoard,
+    required this.externalRecordsOn,
+    required this.ownRecordPublished,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'fixed': fixed,
+        'openSet': openSet,
+        'keepsBoard': keepsBoard,
+        'externalRecordsOn': externalRecordsOn,
+        'ownRecordPublished': ownRecordPublished,
+      };
+
+  static NeighbourAggregates fromJson(Map<String, dynamic> json) =>
+      NeighbourAggregates(
+        fixed: json['fixed'] as int? ?? 0,
+        openSet: json['openSet'] as int? ?? 0,
+        keepsBoard: json['keepsBoard'] as bool? ?? false,
+        externalRecordsOn: json['externalRecordsOn'] as bool? ?? false,
+        ownRecordPublished: json['ownRecordPublished'] as bool? ?? false,
+      );
 }
 
 /// Collects the numbers of the network statistics.
@@ -569,6 +666,16 @@ class NetworkStatsCollector {
 
   void noteParkedLost(int lost) => _parkedLost = lost;
 
+  /// §25.7: a state of the node, set at every look. Empty without a host —
+  /// no last state here, a remembered neighbour is no answering one (§22.7.1).
+  List<NeighbourRow> _neighbours = const [];
+  NeighbourAggregates? _neighbourAggregates;
+
+  void noteNeighbours(List<NeighbourRow> rows, NeighbourAggregates? aggregates) {
+    _neighbours = rows;
+    _neighbourAggregates = aggregates;
+  }
+
   /// Periodic callback: nothing left to do. Historically this held
   /// `recordPeerCount` for the time series of the peer number. It
   /// fell on 01.09.2026 (S360) — the quantity itself ("how many peers
@@ -642,6 +749,8 @@ class NetworkStatsCollector {
       dbSizeBytes: _measureDbSize(profileDir),
       nodeGauges: _gauges != null,
       deliveryCounters: d != null,
+      neighbours: _neighbours,
+      neighbourAggregates: _neighbourAggregates,
     );
   }
 

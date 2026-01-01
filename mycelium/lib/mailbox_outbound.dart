@@ -54,15 +54,6 @@ extension MailboxOutbound on Mailbox {
   Outbound sendText(String contactIdentifier, String text) =>
       send(contactIdentifier, utf8.encode(text));
 
-  /// Sends [content] only while a way exists (§7.1: one of the three
-  /// addresses); otherwise nothing is sent, nothing rests, `null`. For what
-  /// is worth nothing later — a typing indicator would claim, hours on, that
-  /// someone types now (S408-LEBENSLAUF P18: decided here, not by the app).
-  Outbound? sendIfWay(String contactIdentifier, Uint8List content) =>
-      routesEmpty(routesToContact(contact(contactIdentifier)))
-          ? null
-          : send(contactIdentifier, content);
-
   /// Sends [content] to the contact with [contactIdentifier].
   ///
   /// [content] goes out unchanged — arbitrary bytes.

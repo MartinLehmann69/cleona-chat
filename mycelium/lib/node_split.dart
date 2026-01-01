@@ -19,6 +19,7 @@ import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/split.dart';
 import 'package:mycelium/trace.dart';
+import 'package:mycelium/who_question.dart';
 
 /// Builds [k]'s splitter above the cover switch — cover packets with
 /// content are branched off BEFORE the splitter (§5.5) — and attaches it to
@@ -29,6 +30,12 @@ import 'package:mycelium/trace.dart';
 Splitter nodeSplitter(Node k, Shell shell) {
   k.postBoxDeposit.beforeRequest = (n) => shell.renewIfSilent(n.$1, n.$2);
   k.outsideRoute.silence = k.silence; // §11.3a: the 0x40 declares a failed address
+  k.outsideRoute.onWho = k.who.receive; // §11.8, D-87
+  k.readiness.onFirstAnswer = k.who.ask; // §11.8.2: first answer of an address
+  // §11.8.6: an address first heard through a new handshake.
+  shell.onCalled = (a, p) {
+    if (k.neighbourhood.holding(a, p) == null) k.who.ask(a, p);
+  };
   // S405 (proposal D): the `TRACE step3` lines.
   k.codeRoute.recording = (p, out) {
     if (traceOn) k.report('TRACE step3 ${out ? "out" : "in"}: ${packetDescribe(p)}');

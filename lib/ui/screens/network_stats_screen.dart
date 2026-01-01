@@ -84,10 +84,9 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final colorScheme = Theme.of(context).colorScheme;
-    // `null` = the delivery layer has no direction-split number (mycelium,
-    // S405 A-2): the two tiles and the reachability line are left out —
-    // a 0 there would be a claim (§25.2 rule 4).
-    final syncPartnersOutbound = widget.service.syncPartnersOutbound;
+    // `null` = the delivery layer has no such number: the tile and the
+    // reachability line are left out — a 0 there would be a claim (§25.2
+    // rule 4).
     final syncPartnersInbound = widget.service.syncPartnersInbound;
 
     return ListView(
@@ -130,51 +129,30 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
                 ),
           ),
         ),
-        // ══ VARIANT B (owner decision 02.09.2026) ═══════════════
+        // §25.4 "Answering neighbours": the number `ready` hinges on, and the
+        // outbound half of E-41. One tile: under three names (variant B of
+        // 02.09.2026, whose "independent" number §22.7.1 has abolished) the
+        // same getter stood here twice since S405. It leads to its own list
+        // (§25.7), so the number and the list cannot disagree.
         //
-        // §25.4 demands the three numbers SEPARATELY, and all three stay.
-        // What changes is their WEIGHTING: the independent number
-        // stands large and first, the two direction-split ones smaller
-        // below.
-        //
-        // WHY THE INDEPENDENT ONE STANDS AT THE TOP. It is the only one that
-        // carries the readiness statement — `ready` depends on
-        // `Partition.independentCount` (>= 2, §22.7.1), not on a
-        // gross count. Three equally large numbers side by side suggested to the
-        // reader that the largest is the most important; that is exactly the
-        // confusion that §22.7.3 forbids ("no display element derives
-        // deliverability from a partner count").
-        //
-        // WHY THE INCOMING ONE STILL STAYS VISIBLE. It is the
-        // only one that tells a user behind CGNAT/DS-Lite whether they are
-        // reachable from outside at all (§25.4: "a precondition for
-        // inbound calls"). Pushing it into a submenu would take the information
-        // from exactly the group that needs it most urgently.
-        //
-        // THE COLOUR STILL BELONGS TO THE READINESS (§25.4: "the badge
-        // mirrors the readiness state 1:1") — therefore only the
-        // large tile carries `_readinessColor`, the two small ones none.
+        // THE COLOUR BELONGS TO THE READINESS (§25.4: "the badge mirrors the
+        // readiness state 1:1") — only this tile carries `_readinessColor`.
         _LeadStatTile(
           icon: Icons.call_split,
-          label: locale.get('stats_partners_independent_lead'),
+          label: locale.get('stats_answering_neighbours'),
           value: '${widget.service.independentSyncPartners}',
-          note: locale.get('stats_partners_independent_note'),
+          note: locale.get('stats_answering_neighbours_note'),
           color: _readinessColor(_readiness, colorScheme),
+          onTap: () => showConnectionSheet(context, widget.service),
         ),
-        // §25.4: the partner counts SEPARATED by direction — smaller, but
-        // fully visible.
-        if (syncPartnersOutbound != null)
-          _StatTile(
-            icon: Icons.north_east,
-            label: locale.get('stats_sync_partners_outbound'),
-            value: '$syncPartnersOutbound',
-            trailing: const Icon(Icons.chevron_right, size: 18),
-            onTap: () => showConnectionSheet(context, widget.service),
-          ),
+        // E-41: the inbound half, separate. It counts distinct open-network
+        // addresses that reached this node unasked (`board_proof.dart`), not
+        // neighbours — it tells a user behind CGNAT/DS-Lite whether anyone
+        // reaches them from outside.
         if (syncPartnersInbound != null)
           _StatTile(
             icon: Icons.south_west,
-            label: locale.get('stats_sync_partners_inbound'),
+            label: locale.get('stats_inbound_addresses'),
             value: '$syncPartnersInbound',
           ),
         // §25.4: what the incoming number MEANS — "states how much the
@@ -466,6 +444,46 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
           value: _formatBytes(_stats.dbSizeBytes),
         ),
 
+        // ── Section: neighbours (§25.7) ─────────────────────────────
+        //
+        // Without a host there is nothing to state (§25.2 rule 4).
+        if (_stats.neighbourAggregates case final aggregates?) ...[
+          const Divider(),
+          _SectionHeader(locale.get('settings_neighbours')),
+          _StatTile(
+            icon: Icons.push_pin,
+            label: locale.get('stats_fixed_neighbours'),
+            value: '${aggregates.fixed}',
+          ),
+          _StatTile(
+            icon: Icons.casino,
+            label: locale.get('stats_open_set'),
+            value: '${aggregates.openSet}',
+          ),
+          _StatTile(
+            icon: Icons.dashboard,
+            label: locale.get('stats_keeps_board'),
+            value: locale.get(
+                aggregates.keepsBoard ? 'invite_cell_yes' : 'invite_cell_no'),
+          ),
+          _StatTile(
+            icon: Icons.public,
+            label: locale.get('external_records_title'),
+            value: locale.get(aggregates.externalRecordsOn
+                ? 'datasaver_state_on'
+                : 'datasaver_state_off'),
+          ),
+          if (aggregates.externalRecordsOn)
+            _StatTile(
+              icon: Icons.publish,
+              label: locale.get('stats_own_record'),
+              value: locale.get(aggregates.ownRecordPublished
+                  ? 'invite_cell_yes'
+                  : 'invite_cell_no'),
+            ),
+          ..._stats.neighbours.map((n) => NeighbourRowTile(row: n)),
+        ],
+
         const SizedBox(height: 16),
       ],
     );
@@ -544,8 +562,6 @@ class _StatTile extends StatelessWidget {
   final String label;
   final String value;
   final Color? color;
-  final Widget? trailing;
-  final VoidCallback? onTap;
 
   /// A subordinate line under the label — for numbers whose meaning
   /// does NOT follow from the name.
@@ -561,8 +577,6 @@ class _StatTile extends StatelessWidget {
     required this.label,
     required this.value,
     this.color,
-    this.trailing,
-    this.onTap,
     this.note,
   });
 
@@ -573,12 +587,8 @@ class _StatTile extends StatelessWidget {
       color: color,
       fontFamily: 'monospace',
     );
-    // Problem 1 (S119): stat values without onTap are selectable (public
-    // IP etc.); tappable tiles (Aktive Peers → Connection-Sheet) keep Text
-    // so the tap gesture is not swallowed.
-    final valueWidget = onTap == null
-        ? SelectableText(value, style: valueStyle)
-        : Text(value, style: valueStyle);
+    // Problem 1 (S119): stat values are selectable (public IP etc.).
+    final valueWidget = SelectableText(value, style: valueStyle);
     return ListTile(
       dense: true,
       leading: Icon(icon, size: 20, color: color),
@@ -590,13 +600,7 @@ class _StatTile extends StatelessWidget {
                 fontSize: 11,
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               )),
-      trailing: trailing != null
-          ? Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [valueWidget, const SizedBox(width: 4), trailing!],
-            )
-          : valueWidget,
-      onTap: onTap,
+      trailing: valueWidget,
     );
   }
 }
@@ -622,12 +626,14 @@ class _LeadStatTile extends StatelessWidget {
   final String value;
   final String note;
   final Color? color;
+  final VoidCallback onTap;
 
   const _LeadStatTile({
     required this.icon,
     required this.label,
     required this.value,
     required this.note,
+    required this.onTap,
     this.color,
   });
 
@@ -635,38 +641,43 @@ class _LeadStatTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          Icon(icon, size: 28, color: color),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(label, style: text.titleSmall),
-                const SizedBox(height: 2),
-                Text(
-                  note,
-                  style: text.bodySmall?.copyWith(color: cs.onSurfaceVariant),
-                ),
-              ],
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Icon(icon, size: 28, color: color),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(label, style: text.titleSmall),
+                  const SizedBox(height: 2),
+                  Text(
+                    note,
+                    style: text.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                  ),
+                ],
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          // SelectableText as in [_StatTile]: the number should be copyable
-          // for a bug report (problem 1, S119).
-          SelectableText(
-            value,
-            style: text.headlineMedium?.copyWith(
-              fontWeight: FontWeight.bold,
-              fontFamily: 'monospace',
-              color: color,
+            const SizedBox(width: 12),
+            // Plain Text as in a tappable [_StatTile]: a SelectableText
+            // would swallow the tap.
+            Text(
+              value,
+              style: text.headlineMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+                fontFamily: 'monospace',
+                color: color,
+              ),
             ),
-          ),
-        ],
+            const SizedBox(width: 4),
+            const Icon(Icons.chevron_right, size: 18),
+          ],
+        ),
       ),
     );
   }

@@ -3,7 +3,7 @@ rem Cleona Chat: the inbound firewall rule of the daemon (v4_2 section 22,
 rem "Windows Desktop"). Runs elevated; started by the setup (once, after one
 rem consent), by the uninstaller, and by the app's "Allow in firewall".
 rem
-rem   cleona-firewall.cmd allow  "<full path of cleona-daemon.exe>"
+rem   cleona-firewall.cmd allow  "<full path of cleona-daemon.exe>" [beta]
 rem   cleona-firewall.cmd remove "<full path of cleona-daemon.exe>"
 rem
 rem Every inbound rule naming the program goes first: an allow rule from an
@@ -22,6 +22,8 @@ if "%EXE%"=="" exit /b 2
 if /I not "%ACTION%"=="allow" if /I not "%ACTION%"=="remove" exit /b 2
 netsh advfirewall firewall delete rule name=all dir=in program="%EXE%" >nul 2>&1
 if /I "%ACTION%"=="remove" exit /b 0
-netsh advfirewall firewall add rule name="Cleona Chat (UDP)" dir=in action=allow protocol=UDP program="%EXE%" profile=any enable=yes >nul || exit /b 3
-netsh advfirewall firewall add rule name="Cleona Chat (TCP)" dir=in action=allow protocol=TCP program="%EXE%" profile=any enable=yes >nul || exit /b 3
+set "RULE=Cleona Chat"
+if /I "%~3"=="beta" set "RULE=Cleona Beta"
+netsh advfirewall firewall add rule name="%RULE% (UDP)" dir=in action=allow protocol=UDP program="%EXE%" profile=any enable=yes >nul || exit /b 3
+netsh advfirewall firewall add rule name="%RULE% (TCP)" dir=in action=allow protocol=TCP program="%EXE%" profile=any enable=yes >nul || exit /b 3
 exit /b 0

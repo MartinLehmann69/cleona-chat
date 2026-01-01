@@ -54,6 +54,7 @@ import 'package:mycelium/host.dart';
 import 'package:mycelium/host_contact_seats.dart' show HostContactSeats;
 export 'package:mycelium/mailbox_in_transit.dart' show MailboxInTransit;
 export 'package:mycelium/mailbox_signal.dart' show MailboxSignal;
+import 'package:mycelium/mailbox_signal.dart' show MailboxSignal;
 
 /// Unknown identifier, or no known route to a contact.
 class MailboxError implements Exception {
@@ -119,6 +120,8 @@ class Mailbox {
     parkedAttach(this, a.directory, a.key); // cells awaiting a generation (D-40)
     firstContactOpen(a);
     historiesSettle(a); // old files taken over, ended peers' records gone
+    // Here, not at the app's attach: the host's start edge runs before that.
+    if (a.ephemeralOld case final old?) ephemeralForget(old);
     for (final g in _memory.rememberedInvitations) {
       node.invitationRestore(identity, firstContactInvitation(g));
     }

@@ -387,7 +387,7 @@ class IdentityContext {
   /// that need isolation (tests, multi-device scenarios) MUST pass an
   /// explicit `baseDir` — setting only `profileDir` does not isolate
   /// device keys or db.key.
-  static String _resolveBaseDir() => '${AppPaths.home}/.cleona';
+  static String _resolveBaseDir() => AppPaths.dataDir;
 
   // ── Shared startup sequence (S106 fix) ──────────────────────────────
   // Single source of truth for crypto init + IdentityContext creation.

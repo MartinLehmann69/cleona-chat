@@ -25,10 +25,13 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:mycelium/address.dart';
+import 'package:mycelium/card.dart';
 import 'package:mycelium/ladder.dart' show Target;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_first_contact_box.dart';
 import 'package:mycelium/node_post_box.dart';
+import 'package:mycelium/post_box_proof_of_work.dart' show sendingSeed;
 
 extension NodeStepFour on Node {
   /// The post box step of the ladder (`Ladder.inPostBox`). [ended] is asked
@@ -55,6 +58,27 @@ extension NodeStepFour on Node {
       return null;
     }
     // M3: under the day value
-    return stepFourForIdentifier(identifier, packet, ended: ended);
+    return stepFourForIdentifier(identifier, packet,
+        ended: ended, sending: target.sending);
   }
+
+  /// The [Target] of a sending to the contact [to] from the identity [from]:
+  /// [three] and [destination] say the addresses, [c] the code (§8.1).
+  /// [message] is its identifier when it waits for a receipt: only such a
+  /// message is sent again (§9.3), and step 4 needs its seed for that.
+  Target sendingTarget(
+          Routes? three,
+          CardAddress? destination,
+          ({Uint8List code, List<CardAddress> neighbours})? c,
+          Address to,
+          Address from,
+          Uint8List? message,
+          {required bool signal}) =>
+      Target.outDueTo(three,
+          lan: destination,
+          neighbours: c?.neighbours ?? const [],
+          code: c?.code,
+          identifier: to.identifier,
+          signal: signal,
+          sending: message == null ? null : sendingSeed(message, from, to));
 }

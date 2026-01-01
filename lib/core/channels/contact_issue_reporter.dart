@@ -63,12 +63,10 @@ class ContactIssueReporter {
       // of peer count) is a format question with external effect and
       // belongs to the owner — it is reported, not decided here.
       natType: 'unknown',
-      // `peerCount`, by contrast, gets a REAL V4.1 number: the session
-      // partners of the tagline (`cleona_service.dart`,
-      // `_sessionPartnerCount`). It answers the same question as
-      // `activePeerCount` did before — "with how many nodes is this
-      // device talking right now" — and, unlike that one, has a writer.
-      peerCount: _service.peerCount,
+      // `peerCount` stays the field name (the post format, read by 4.2.3);
+      // its value is the answering neighbours (§22.7.1, S411), no longer the
+      // sum of both directions that §28.7 rule 3 rejects.
+      peerCount: _service.independentSyncPartners,
       confirmedPeerCount: _service.confirmedPeerCount,
       hasPortMapping: _service.hasPortMapping,
       peerSeenInDht: peerSeenInDht,

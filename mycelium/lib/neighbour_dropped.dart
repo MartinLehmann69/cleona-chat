@@ -57,5 +57,8 @@ class DroppedAddresses {
 
   int get length => _at.length;
 
+  /// `address:port` -> when it was removed, oldest first — for diagnostics.
+  Iterable<MapEntry<String, DateTime>> get entries => _at.entries;
+
   static String _key(InternetAddress a, int port) => '${a.address}:$port';
 }

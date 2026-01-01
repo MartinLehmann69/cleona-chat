@@ -193,6 +193,10 @@ class Messages {
   /// before [onInbound]); the application sends it with [receiptSend].
   bool Function(Inbound)? receiptLater;
 
+  /// `false`: this copy gets no receipt — one went for this message at this
+  /// edge ([NodeReceipt.receiptWays], §9.2, S411).
+  bool Function(Uint8List identifier, Address sender)? receiptDue;
+
   final Map<String, Outbound> _open = {};
 
   Messages({
@@ -217,8 +221,9 @@ class Messages {
   /// With [kind] (a kind from `kinds.isPairNotice`) it is
   /// a pair notice: [content] goes out under this kind. An [identifier] still
   /// open is sent AGAIN (§9.3), sealed anew, on the [Outbound] its caller holds.
+  /// [once]: an ephemeral message stays open nowhere; a receipt finds none (§9.2).
   Outbound ship(Uint8List content, Address to, CardAddress? destination,
-      {Uint8List? identifier, int? kind}) {
+      {Uint8List? identifier, int? kind, bool once = false}) {
     if (kind != null && !kinds.isPairNotice(kind)) {
       throw MessageError('not a pair notification: $kind');
     }
@@ -232,7 +237,7 @@ class Messages {
       sender: me, pairTag: true, // §4.4.3: a pair that reads it gets the tag
     );
 
-    _open[_key(k)] = outbound;
+    if (!once) _open[_key(k)] = outbound;
     // §9.1 (V11, S403): `in transit` begins only once a way demonstrably
     // carried the packet or a post box took it — until then it rests.
     report?.call('message ${_short(k)} on the ladder (${envelope.length} B)');
@@ -281,7 +286,9 @@ class Messages {
     if (later) onHeld?.call(identifier, origin);
     onInbound(inbound);
     // Twin sync from an own device carries no acknowledgement (§9.2, D-37).
-    if (!later && !sender.sameIdentity(me.address)) {
+    if (!later &&
+        !sender.sameIdentity(me.address) &&
+        (receiptDue?.call(identifier, sender) ?? true)) {
       receiptSend(identifier, sender, origin);
     }
   }

@@ -20,9 +20,12 @@ library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:mycelium/card_address.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/shell.dart';
+import 'package:mycelium/who_question.dart';
 
 /// Addresses asked in this edge, at most (§20.2).
 const int kPathChecksAtMost = 64;
@@ -47,13 +50,18 @@ void nodeMoved(Node k, Shell shell, InternetAddress old, int oldPort,
   if (!shell.roamValidate(to, toPort, old, oldPort)) return;
   // Into the neighbour list only what was a neighbour (§11.8.6 "the
   // neighbour's set"); another link keeps just its new address.
+  // A request still out for [old]: it moved again before that answer came.
   final neighbour = k.neighbourhood.holding(old, oldPort) != null ||
-      k.readiness.dropped.removedAt(old, oldPort) != null;
+      k.readiness.dropped.removedAt(old, oldPort) != null ||
+      _thisEdge(k).containsKey('${old.address}:$oldPort');
   k.report('Roam: ${old.address}:$oldPort seen at ${to.address}:$toPort — '
       'path request');
   void end() => shell.roamEnd(to, toPort, old, oldPort);
   // Asked in this edge already without an answer: nothing is lent again.
-  if (!_pathCheck(k, to, toPort, adopt: neighbour, onFail: end)) end();
+  if (!_pathCheck(k, to, toPort,
+      adopt: neighbour, movedFrom: (old, oldPort), onFail: end)) {
+    end();
+  }
 }
 
 /// Whether [a]:[p] answers its one request of this edge (§11.8.6) — for
@@ -68,11 +76,31 @@ Future<bool> nodePathAnswered(Node k, InternetAddress a, int p) {
 
 /// `false` if [a]:[p] was asked in this edge already.
 bool _pathCheck(Node k, InternetAddress a, int p,
-    {bool adopt = true, void Function()? onFail}) {
+    {bool adopt = true,
+    (InternetAddress, int)? movedFrom,
+    void Function()? onFail}) {
   final asked = _thisEdge(k);
   if (asked.containsKey('${a.address}:$p')) return false;
-  unawaited(_request(k, asked, a, p, adopt: adopt, onFail: onFail));
+  unawaited(_request(k, asked, a, p,
+      adopt: adopt, movedFrom: movedFrom, onFail: onFail));
   return true;
+}
+
+/// §11.8: "a packet under its link arrives from the second and is confirmed
+/// there" — the address joins the neighbour of the old one, as [Readiness.
+/// nodeLearn] does. Stamp first: the newest address never gives way to the
+/// cap of addresses. Without the old address in the list it simply returns.
+void _moved(Node k, InternetAddress a, int p, InternetAddress old, int oldPort) {
+  final n = k.neighbourhood;
+  final oldIsListed = n.holding(old, oldPort) != null;
+  k.readiness.together(() {
+    k.readiness.returned(a, p);
+    if (!oldIsListed || n.holding(a, p) == null) return;
+    n.ownAddresses(a, p, [
+      CardAddress(Uint8List.fromList(a.rawAddress), p),
+      CardAddress(Uint8List.fromList(old.rawAddress), oldPort),
+    ]);
+  });
 }
 
 Map<String, Future<bool>> _thisEdge(Node k) {
@@ -85,8 +113,11 @@ Map<String, Future<bool>> _thisEdge(Node k) {
 
 Future<bool> _request(
     Node k, Map<String, Future<bool>> asked, InternetAddress a, int p,
-    {required bool adopt, void Function()? onFail}) {
+    {required bool adopt,
+    (InternetAddress, int)? movedFrom,
+    void Function()? onFail}) {
   final key = '${a.address}:$p';
+  if (adopt) k.who.ask(a, p); // beside the 0x40 (§11.8, D-87)
   late final Future<bool> f;
   f = k.outsideRoute.whatIsMyAddress(a, p).then((seen) {
     if (seen == null) {
@@ -95,7 +126,13 @@ Future<bool> _request(
       return false;
     }
     if (identical(asked[key], f)) asked.remove(key);
-    if (adopt) k.readiness.returned(a, p);
+    if (adopt) {
+      if (movedFrom case (final old, final oldPort)) {
+        _moved(k, a, p, old, oldPort);
+      } else {
+        k.readiness.returned(a, p);
+      }
+    }
     k.report('Roam: $key answered — confirmed (§11.8.6)');
     return true;
   });

@@ -226,7 +226,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // Typing indicator state
   final Set<String> _typingContacts = {};
-  List<PeerSummary> _peerSummaries = [];
 
   // Cached groups
   final Map<String, GroupInfo> _groups = {};
@@ -1160,13 +1159,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
     final groupCallData = state['currentGroupCall'] as Map<String, dynamic>?;
     _currentGroupCall = groupCallData != null ? GroupCallInfo.fromJson(groupCallData) : null;
-
-    final peers = state['peerSummaries'] as List<dynamic>?;
-    if (peers != null) {
-      _peerSummaries = peers
-          .map((p) => PeerSummary.fromJson(p as Map<String, dynamic>))
-          .toList();
-    }
 
     // §11/G-11: the start peer candidates of the NODE. If the key is
     // missing, the last state stays instead of jumping to empty — a
@@ -2941,9 +2933,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     });
   }
 
-  @override
-  List<PeerSummary> get peerSummaries => _peerSummaries;
-
   List<EntrySeedCandidate> _entrySeedCandidates = const [];
 
   /// §11/G-11 — passed through from the daemon's snapshot. The builder
@@ -3932,14 +3921,12 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   ///   - `debounced` (bool): true if the call was suppressed by the cooldown
   ///   - `remainingSeconds` (int): seconds until the next call is allowed
   ///     (only meaningful when `debounced == true`)
-  ///   - `peersFound` (int): number of currently active peers at call time
   Future<Map<String, dynamic>> manualReconnect() async {
     final resp = await _sendRequest('manual_reconnect');
-    if (!resp.success) return {'debounced': false, 'peersFound': 0};
+    if (!resp.success) return {'debounced': false};
     return {
       'debounced': resp.data['debounced'] as bool? ?? false,
       'remainingSeconds': resp.data['remainingSeconds'] as int? ?? 0,
-      'peersFound': resp.data['peersFound'] as int? ?? 0,
     };
   }
 

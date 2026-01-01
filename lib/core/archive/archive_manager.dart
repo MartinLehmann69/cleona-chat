@@ -453,7 +453,7 @@ class ArchiveManager {
   /// (§21.6: Linux, Windows)? Where not, the SSID list is not applied.
   bool get ssidReadable => ssidReadableHere;
 
-  /// Current Wi-Fi SSID — Linux (nmcli/iwgetid) and Windows (netsh) only.
+  /// Current Wi-Fi SSID — Linux (nmcli/iw/iwgetid) and Windows (netsh) only.
   Future<String?> getCurrentSSID() => readCurrentSsid();
 
   /// Subnets and gateway as this device sees them now.

@@ -3,6 +3,7 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:mycelium/address.dart';
 import 'package:mycelium/proof_of_work.dart';
 
 /// The proof of computation on the deposit (0x30) — S385, proposal holder,
@@ -45,6 +46,7 @@ const int kProofOfWorkLength = ProofOfWork.randomValueLength + 8;
 
 final Uint8List _kDeposit = utf8.encode('mycelium-deposit-2');
 final Uint8List _kDepositId = utf8.encode('mycelium-deposit-id-1');
+final Uint8List _kSendingSeed = utf8.encode('mycelium-sending-seed-1');
 
 /// The id of a 0x30, bound to the packet instead of rolled per call (S407
 /// B-18): `SHA-256("mycelium-deposit-id-1" ‖ day value ‖ content)[0:length]`.
@@ -55,6 +57,10 @@ final Uint8List _kDepositId = utf8.encode('mycelium-deposit-id-1');
 /// holder that had taken the first, unplaced deposit kept both, and the
 /// collector found the request twice. A holder of 4.2.3 reads the id as
 /// opaque bytes and deduplicates by it already; nothing on the wire changes.
+///
+/// A message is sealed anew at every sending, so for it [content] is its
+/// [sendingSeed], not its bytes (S411): one message stays one entry per day
+/// value (§8.2), and under another day value it is never the same id.
 Uint8List depositId(Uint8List value, Uint8List content, int length) =>
     Uint8List.fromList(SodiumFFI()
         .sha256((BytesBuilder()
@@ -63,6 +69,21 @@ Uint8List depositId(Uint8List value, Uint8List content, int length) =>
               ..add(content))
             .toBytes())
         .sublist(0, length));
+
+/// What stays the same while a message is sent again under the same keys:
+/// its identifier, the sender's signing keys and the recipient's whole
+/// address. An emergency key rotation of either side (§4.5.4, §9.3) changes
+/// the keys and with them the seed: the copy sealed anew becomes a new entry.
+/// The identifier travels only sealed, so a holder cannot connect the ids of
+/// one message under two day values.
+Uint8List sendingSeed(Uint8List message, Address from, Address to) =>
+    SodiumFFI().sha256((BytesBuilder()
+          ..add(_kSendingSeed)
+          ..add(message)
+          ..add(from.ed25519Pk)
+          ..add(from.mlDsaPk)
+          ..add(to.toBytes()))
+        .toBytes());
 
 Uint8List _code(Uint8List id, Uint8List value, Uint8List content) =>
     Uint8List.fromList(SodiumFFI()

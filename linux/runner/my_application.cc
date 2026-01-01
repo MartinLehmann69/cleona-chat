@@ -26,6 +26,23 @@ static gboolean on_window_delete(GtkWidget* widget, GdkEvent* event, gpointer da
   return TRUE; // Prevent destruction
 }
 
+// Whether this bundle is a live build (v4_2 §26.2). The channel is compiled
+// into the Dart side only; data/channel is written by the release build. Without
+// the file a build counts as beta, like the Dart default.
+static gboolean bundle_is_live() {
+  g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", NULL);
+  if (exe_path == NULL) return FALSE;
+  g_autofree gchar* exe_dir = g_path_get_dirname(exe_path);
+  g_autofree gchar* file = g_build_filename(exe_dir, "data", "channel", NULL);
+  g_autofree gchar* content = NULL;
+  if (!g_file_get_contents(file, &content, NULL, NULL)) return FALSE;
+  return g_strcmp0(g_strstrip(content), "live") == 0;
+}
+
+static const gchar* app_title() {
+  return bundle_is_live() ? "Cleona Chat" : "Cleona Beta";
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -35,9 +52,9 @@ static void my_application_activate(GApplication* application) {
     // Title may be missing after restart — always re-set it
     GtkWidget* titlebar = gtk_window_get_titlebar(self->main_window);
     if (titlebar != NULL && GTK_IS_HEADER_BAR(titlebar)) {
-      gtk_header_bar_set_title(GTK_HEADER_BAR(titlebar), "Cleona Chat");
+      gtk_header_bar_set_title(GTK_HEADER_BAR(titlebar), app_title());
     } else {
-      gtk_window_set_title(self->main_window, "Cleona Chat");
+      gtk_window_set_title(self->main_window, app_title());
     }
     gtk_window_present(self->main_window);
     return;
@@ -67,16 +84,17 @@ static void my_application_activate(GApplication* application) {
   if (use_header_bar) {
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "Cleona Chat");
+    gtk_header_bar_set_title(header_bar, app_title());
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
   } else {
-    gtk_window_set_title(window, "Cleona Chat");
+    gtk_window_set_title(window, app_title());
   }
 
   gtk_window_set_default_size(window, 1280, 720);
 
-  // Set window icon from bundled asset (prefer beta variant if present).
+  // Set window icon from bundled asset. Every bundle carries both icons, so
+  // the channel decides, not the presence of the file.
   // Also set the default icon name so the DE can find it via the icon theme
   // even without a .desktop match (e.g. WM_CLASS lookup fallback).
   gtk_window_set_default_icon_name("cleona");
@@ -86,7 +104,8 @@ static void my_application_activate(GApplication* application) {
       g_autofree gchar* exe_dir = g_path_get_dirname(exe_path);
       g_autofree gchar* beta_icon = g_build_filename(exe_dir, "data", "flutter_assets", "assets", "app_icon_beta.png", NULL);
       g_autofree gchar* std_icon = g_build_filename(exe_dir, "data", "flutter_assets", "assets", "app_icon.png", NULL);
-      const gchar* icon_path = g_file_test(beta_icon, G_FILE_TEST_EXISTS) ? beta_icon : std_icon;
+      const gchar* icon_path =
+          !bundle_is_live() && g_file_test(beta_icon, G_FILE_TEST_EXISTS) ? beta_icon : std_icon;
       GError* icon_error = NULL;
       GdkPixbuf* icon = gdk_pixbuf_new_from_file(icon_path, &icon_error);
       if (icon != NULL) {
@@ -173,9 +192,13 @@ static void my_application_init(MyApplication* self) {
 }
 
 MyApplication* my_application_new() {
-  g_set_prgname(APPLICATION_ID);
+  // The window class groups windows and finds the desktop entry: beta and live
+  // each have their own (`StartupWMClass`).
+  const gchar* application_id =
+      bundle_is_live() ? APPLICATION_ID : APPLICATION_ID ".beta";
+  g_set_prgname(application_id);
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
-                                     "application-id", APPLICATION_ID, "flags",
+                                     "application-id", application_id, "flags",
                                      G_APPLICATION_NON_UNIQUE, nullptr));
 }

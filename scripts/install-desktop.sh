@@ -48,14 +48,14 @@ done
 # created by the first writer of device state — in the GUI's setup that is
 # the creation of the first identity — and never by a reader, so it answers
 # the same question: "is there a set-up profile at all?"
-PROFILE_MARK="$HOME/.cleona/device.db"
+PROFILE_MARK="$HOME/.cleona-beta/device.db"
 
 # Desktop entry (opens GUI window)
 mkdir -p "$DESKTOP_DIR"
 cat > "$DESKTOP_DIR/cleona.desktop" << EOF
 [Desktop Entry]
 Type=Application
-Name=Cleona Chat
+Name=Cleona Beta
 Comment=Dezentraler P2P Messenger mit Post-Quantum-Verschluesselung
 Exec=$APP_DIR/cleona
 Icon=$ICON_SOURCE
@@ -63,7 +63,7 @@ Terminal=false
 Categories=Network;Chat;InstantMessaging;
 Keywords=chat;messenger;p2p;encryption;
 StartupNotify=true
-StartupWMClass=chat.cleona.cleona
+StartupWMClass=chat.cleona.cleona.beta
 EOF
 chmod +x "$DESKTOP_DIR/cleona.desktop"
 
@@ -106,7 +106,7 @@ if [ -n "$DAEMON_BIN" ] && [ -f "$PROFILE_MARK" ]; then
 Type=Application
 Name=Cleona Daemon
 Comment=Cleona Chat Daemon mit Tray Icon
-Exec=$DAEMON_BIN --base-dir $HOME/.cleona
+Exec=$DAEMON_BIN --base-dir $HOME/.cleona-beta
 Icon=$ICON_SOURCE
 Terminal=false
 X-GNOME-Autostart-enabled=true

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  S411 (run 6): MediaVault (lib/core/media/media_vault.dart, S362) serves
+  decrypted media to the platform media stack (MediaExtractor for voice
+  transcription, ExoPlayer for playback) over http://127.0.0.1:<port>/<token>/...
+  Since API 28 Android blocks cleartext HTTP by default, also to the loopback
+  ("Cleartext HTTP traffic to 127.0.0.1 not permitted"). Cleartext is
+  permitted for the loopback addresses only; every other destination keeps
+  the platform default (cleartext forbidden). The reader binds IPv4 loopback
+  only, so [::1] is not listed.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

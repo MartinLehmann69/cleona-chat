@@ -69,6 +69,31 @@ Join? joinOwn(List<Neighbour> list, InternetAddress from, int port,
   );
 }
 
+/// What the cap of addresses (`kAddressesPerNeighbour`) took from [before]:
+/// each address that [now] no longer knows, as a part of its neighbour. The
+/// list reports them as removed (S411): an address that leaves unreported
+/// would never be asked and, until S411, kept counting.
+List<Neighbour> gaveWay(List<Neighbour> before, List<Neighbour> now) => [
+      for (final n in before)
+        for (final a in n.addresses)
+          if (!now.any((x) => x.knows(a.asCardAddress))) n.copy(addresses: [a])
+    ];
+
+/// [n] with the addresses [keys], which named a node identifier that has
+/// restarted (§11.8.6 last paragraph): they count again only with their next
+/// answer. The stamp goes, so they stand on no board and in no address list
+/// (§11.8.1), and the next edge asks them (`Neighbourhood.stale`). The
+/// neighbour keeps them: only a failure removes.
+Neighbour withdrawn(Neighbour n, Iterable<String> keys) =>
+    !n.addresses.any((a) => keys.contains(a.key))
+        ? n
+        : n.copy(addresses: [
+            for (final a in n.addresses)
+              keys.contains(a.key)
+                  ? NeighbourAddress(a.address, a.port, kUnconfirmed)
+                  : a
+          ]);
+
 /// One neighbour after the wire gained or lost a socket (§11.1): [now] is
 /// what stays in use (`null` = no usable address is left: it waits, see
 /// [asleep]), [lost] the addresses that became names (`null` = none).
@@ -111,7 +136,7 @@ Neighbour? awake(Neighbour n, bool Function(InternetAddress a) speaks) {
 /// known under, with its stamp, no seat — the seat went on to an answering
 /// neighbour (§11.8.8 W7); [awake] takes it back into the list.
 Neighbour asleep(Neighbour n) =>
-    Neighbour.of([...n.addresses, ...n.names], id: n.id);
+    Neighbour.of([for (final a in [...n.addresses, ...n.names]) a.asleep], id: n.id);
 
 /// The acquaintances under a family this node has no socket for (§11.8.1,
 /// §11.8.5): not in the list, not counted, never used — held as [asleep]
@@ -182,15 +207,22 @@ List<Neighbour> forMemory(
       if (!list.any((n) => knowsAny(n, w))) w,
   ];
   while (out.length > atMost) {
-    var i = -1;
-    for (var j = 0; j < out.length; j++) {
-      if (out[j].seated) continue;
-      if (i < 0 || !out[j].last.isAfter(out[i].last)) i = j;
-    }
+    final i = oldestUnseated(out);
     if (i < 0) break; // at most four seated
     out.removeAt(i);
   }
   return out;
+}
+
+/// The neighbour of [l] whose newest stamp is oldest, among equal stamps the
+/// last of them, a seat never (§11.8.10); -1 if every one is seated.
+int oldestUnseated(List<Neighbour> l) {
+  var i = -1;
+  for (var j = 0; j < l.length; j++) {
+    if (l[j].seated) continue;
+    if (i < 0 || !l[j].last.isAfter(l[i].last)) i = j;
+  }
+  return i;
 }
 
 /// The remembered neighbours as the start takes them (§11.8.3 source 1):

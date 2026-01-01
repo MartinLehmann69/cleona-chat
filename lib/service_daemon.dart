@@ -4,6 +4,7 @@ import 'package:cleona/core/service/mycelium_seam.dart';
 import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/storage/device_state_legacy.dart';
 import 'package:cleona/core/update/data_port_http.dart';
+import 'package:cleona/core/util/for_each_still_present.dart';
 import 'package:cleona/core/util/host_interfaces.dart';
 import 'package:cleona/core/platform/process_hardening.dart';
 import 'package:mycelium/host.dart';
@@ -29,6 +30,7 @@ import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/tray/native_tray.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/profile_move.dart';
 import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
@@ -39,6 +41,7 @@ import 'package:cleona/core/platform/desktop_notifier.dart';
 import 'package:cleona/core/platform/windows_firewall.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/update_offer.dart';
+import 'package:cleona/core/update/user_copy.dart';
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 import 'package:cleona/core/contact/contact_seed.dart';
 
@@ -136,6 +139,7 @@ void main(List<String> args) {
 
     zoneLogBaseDir = config.baseDir;
     final log = CLogger.get('daemon', profileDir: config.baseDir);
+    if (ProfileMove.lastReport != null) log.info(ProfileMove.lastReport!);
     // Where a lab daemon finds its lab tone switch (`voice_lab_tone.dart`);
     // only this process kind sets it, so no other process has a lab tone.
     VoiceLabTone.deviceDir = config.baseDir;
@@ -244,7 +248,7 @@ void main(List<String> args) {
       // SIBLING of the profile dir so an E2E/profile wipe of ~/.cleona (which
       // deletes the inode-based cleona.lock and defeats Guard 0/1) does NOT
       // remove this lock.
-      final globalLockPath = '${AppPaths.home}/.cleona-daemon.lock';
+      final globalLockPath = AppPaths.daemonLockPath;
       final globalLock = File(globalLockPath);
       try {
         globalLock.parent.createSync(recursive: true);
@@ -982,6 +986,8 @@ class _MultiServiceDaemon {
       isNew: (a, b) => UpdateChecker(log: log).isNewer(a, b),
       report: log.info,
       expect: (svc, manifest) => svc.updateTargetExpect(manifest),
+      endedWithoutResult: (svc) =>
+          svc.onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0),
     );
 
     // Create and start a CleonaService for each identity
@@ -1742,9 +1748,8 @@ class _MultiServiceDaemon {
     if (_host != null) await hostStop(_host!); // lane 2 clocks, then the host
     _host = null;
 
-    for (final service in _services.values) {
-      await service.stop();
-    }
+    // Over a copy, like `_updateManifestAsk` (S411).
+    await forEachStillPresent(_services, (service) => service.stop());
     _services.clear();
     _contexts.clear();
 
@@ -2210,9 +2215,11 @@ class _MultiServiceDaemon {
   /// A moment after M1+ (S388). Only the service with an update carrier asks
   /// (`attachUpdateToService`); for the others the call is empty — no packet.
   Future<void> _updateManifestAsk({required String moment}) async {
-    for (final s in _services.values) {
-      await s.updateManifestAsk(moment: moment);
-    }
+    // Over a copy: an identity added or removed while one service is asked
+    // (`addIdentity`, `removeIdentity`) must not end the walk (S411: exit 99
+    // on the second identity, `for_each_still_present.dart`).
+    await forEachStillPresent(
+        _services, (s) => s.updateManifestAsk(moment: moment));
     // E-9 (package 10 = A, S389): the same retry as in `main.dart`,
     // at the same edges. No timer, no deadline (§1.2, working rule 5);
     // whether collecting happens is decided by `onManifest`.
@@ -2388,9 +2395,14 @@ Future<void> _restartSelfLinux(CLogger log) async {
   // run into nothing, and quietly, because `Process.start` is detached. The
   // arguments stay unchanged; only the path is updated, and that also only
   // if a file really lies there.
+  //
+  // A package installation updates into the per-user copy (§22.6): the bundle
+  // to restart from is then the copy, with its libraries instead of the ones
+  // the starter put on the inherited path.
+  final running = AppPaths.bundleDirOf(Platform.resolvedExecutable);
+  final bundle = UserCopy.preferredBundle(running);
   if (cmdParts.isNotEmpty) {
-    final fresh = AppPaths.daemonPathIn(
-        AppPaths.bundleDirOf(Platform.resolvedExecutable));
+    final fresh = AppPaths.daemonPathIn(bundle);
     if (File(fresh).existsSync()) {
       log.info('Restart via $fresh (was: ${cmdParts.first})');
       cmdParts[0] = fresh;
@@ -2400,7 +2412,9 @@ Future<void> _restartSelfLinux(CLogger log) async {
   await Process.start('/bin/bash', [
     '-c',
     'sleep 2 && exec $quotedCmd',
-  ], mode: ProcessStartMode.detached);
+  ],
+      environment: UserCopy.restartEnvironment(running, bundle),
+      mode: ProcessStartMode.detached);
 }
 
 Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void> Function() shutdownAll) async {
@@ -2550,7 +2564,15 @@ _DaemonConfig _parseArgs(List<String> args) {
   // S368: here stood a case distinction on `legacyProfile`, whose
   // BOTH arms set the same value — the branch never did anything other
   // than the rest.
-  baseDir ??= '${AppPaths.home}/.cleona';
+  //
+  // A daemon restarted by an update carries the command line of the previous
+  // version, whose window named the old directory. It counts as the default,
+  // and the profile moves here, before anything reads it (§21.4). Any other
+  // directory is the caller's own and stays.
+  if (baseDir == null || AppPaths.isDefaultBaseDir(baseDir)) {
+    ProfileMove.ensure();
+    baseDir = AppPaths.dataDir;
+  }
 
   return _DaemonConfig(
     baseDir: baseDir,

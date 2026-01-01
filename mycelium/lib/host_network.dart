@@ -26,8 +26,12 @@ import 'package:cleona/core/util/local_addresses.dart' show dialableFrom;
 import 'package:mycelium/address_entries.dart';
 import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/node.dart';
-import 'package:mycelium/node_call.dart' show NodeCall, neighbourAdd;
+import 'package:mycelium/node_call.dart' show NodeCall;
+import 'package:mycelium/neighbour_found_by.dart';
+import 'package:mycelium/neighbour_hints.dart';
+import 'package:mycelium/node_roam.dart' show kPathChecksAtMost;
 import 'package:mycelium/node_silence.dart';
+import 'package:mycelium/who_question.dart';
 import 'package:mycelium/board_node.dart';
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/keep_alive.dart';
@@ -50,18 +54,13 @@ import 'package:mycelium/trace_first_contact.dart' show seatsOf;
 /// One own address with its port (§17.3 candidates, [HostNetwork.ownLocal]).
 typedef OwnEndpoint = ({InternetAddress address, int port});
 
-/// An entry whose confirmation lies further back is stale
-/// (§11.8) and is not adopted from foreign lists.
-final int _staleMinutes = Neighbourhood.staleAfter.inMinutes;
-
 class HostNetwork {
   final Node _k;
   final OutsideSource _outside;
   final HostMemory _memory;
 
-  /// The host's edge "new neighbour" (save, re-dispatch, ask the new
-  /// ones, notify the app).
-  final void Function(List<(InternetAddress, int)> fresh) _newNeighbour;
+  /// The admission of learned addresses (§11.8.3).
+  final NeighbourHints hints;
 
   /// Sets the current pass of source 4 (`Host.outsideRun`).
   final void Function(Future<void> run) _run;
@@ -73,11 +72,6 @@ class HostNetwork {
 
   /// The router mapping and pinhole (§7.3); the host sets its switch.
   late final HostRouter router = HostRouter(() => _k.port, _granted, _report);
-
-  /// Source 3 (§11.8.3): the addresses carried in the invitation data this
-  /// node has read — kept in its contacts' records (the card's own addresses
-  /// and the fixed neighbours it named) — set by the host.
-  List<CardAddress> Function() invitationAddresses = () => const [];
 
   /// The keep-alive per address type (§8.1) — runs from the construction of the network.
   late final KeepAlive keepAlive = KeepAlive(_k);
@@ -101,11 +95,16 @@ class HostNetwork {
   String? _fixed;
   List<Neighbour> _fixedList = const [];
 
-  HostNetwork(this._k, this._outside, this._memory, this._newNeighbour,
-      this._run, this._report) {
+  HostNetwork(this._k, this._outside, this._memory,
+      void Function(List<(InternetAddress, int)> fresh) newNeighbour,
+      this._run, this._report)
+      : hints = NeighbourHints(_k, newNeighbour, _report) {
     final n = _k.neighbourhood;
     // §11.8 source 1 — immediately there and "usually enough".
     n.outMemory(_memory.rememberedNeighbours);
+    for (final x in [...n.all, ...n.waiting]) {
+      n.noteFoundBy(x, NeighbourSource.remembered);
+    }
     if (_memory.rememberedNeighbours.isNotEmpty) {
       _report?.call('${_memory.rememberedNeighbours.length} neighbour(s) taken over from '
           'the last run');
@@ -115,11 +114,12 @@ class HostNetwork {
     _k.coverStream
       ..targets = (() => [for (final x in n.openSet()) (x.address, x.port)])
       ..entries = _entries
-      ..onEntries = addressList;
+      ..onEntries = hints.addressList;
     _outside.answer = _k.answerAttach(
         confirmed: n.confirmed,
         mappingProven: () => mappingProven(),
-        onBoardAnswer: addressList);
+        onBoardAnswer: (l, a, p) =>
+            hints.addressList(l, a, p, source: NeighbourSource.board));
     _k.outsideRoute.onAnswerReceived =
         (a, p) => n.confirm(a, p, DateTime.now());
     // §11.8.4: every answer to a request of this node stamps the address it
@@ -226,7 +226,7 @@ class HostNetwork {
   /// says nothing about the new one, and without a request of its own a
   /// neighbour confirmed today stayed an acquaintance until some other
   /// packet happened to reach it (S407-LB-P8 C-9). Then, as at start,
-  /// source 3 ([invitationTry]): it adds only what the list does not hold,
+  /// source 3 ([NeighbourHints.invitationTry]): it adds only what the list does not hold,
   /// so no address is asked twice; the removal memory is already cleared
   /// (`Readiness.reset`), so a removed card address is tried again.
   void networkChanged() {
@@ -234,8 +234,11 @@ class HostNetwork {
     openCheck.networkChanged(); // first: the keep-alive looks at its result
     measure.networkChanged();
     rememberedTry();
-    invitationTry();
+    hints.invitationTry();
   }
+
+  /// §25.7: source 4 is on and a record of this node stands at the relays.
+  bool get ownRecordPublished => _outside.to && _outside.state.publishedAt(DateTime.now().millisecondsSinceEpoch ~/ 1000);
 
   /// What the cover stream takes along to [target] (§5.5): the own
   /// addresses (S394 V2, `own_entries.dart`) and the confirmed neighbours,
@@ -254,76 +257,14 @@ class HostNetwork {
             .toList());
   }
 
-  /// A received address list (cover §5.5, board §11.8a) from [from]:[port]:
-  /// its own addresses are joined into ONE neighbour if the packet came
-  /// from one of them (§11.8, V4) — otherwise they are hints like the rest.
-  /// A loopback entry is taken only from a sender on loopback ([entryFor]).
-  void addressList(AddressList l, InternetAddress from, int port) {
-    final own = [for (final e in l.own) e.address];
-    final r = _k.neighbourhood.ownAddresses(from, port, own);
-    if (own.isNotEmpty) {
-      _report?.call('Own addresses of ${from.address}:$port: ${own.join(', ')}'
-          ' — ${r.bound ? 'one neighbour${r.fresh ? ' (new)' : ''}' : 'not bound '
-              '(not sent from one of them) — taken as hints'}');
-    }
-    candidates([
-      for (final e in [if (!r.bound) ...l.own, ...l.neighbours])
-        if (entryFor(e.address, from)) e,
-    ], fresh: [if (r.fresh) (from, port)]);
-  }
-
-  /// Learned addresses (cover stream, board) — HINTS, not neighbours.
-  /// Admission happens only as long as the list lies below the optimum: a
-  /// hint never displaces an entry. Stale entries stay outside.
-  /// One edge, no matter how many are new; [fresh]: new ones the caller
-  /// already entered.
-  void candidates(List<AddressEntry> entries,
-      {List<(InternetAddress, int)> fresh = const []}) {
-    final n = _k.neighbourhood;
-    final added = [...fresh];
-    final now = DateTime.now();
-    for (final e in entries) {
-      if (n.count >= Neighbourhood.atMost) break;
-      if (e.ageMinutes >= _staleMinutes) continue;
-      final a = e.address;
-      // S406: the entry's age says when its sender last confirmed it; a
-      // removed address returns only with a confirmation after the removal.
-      if (neighbourAdd(_k, a.address, a.port,
-          confirmedAt: now.subtract(Duration(minutes: e.ageMinutes)))) {
-        added.add((InternetAddress.fromRawAddress(a.address), a.port));
-      }
-    }
-    if (added.isNotEmpty) _newNeighbour(added);
-  }
-
   /// Edge: a removal let the list fall below 32 (§11.8.2): sources 1–3,
   /// the board, the external records — stale entries, the invitation data
   /// (S407-LB-P8 C-10), the call, then board and external entries.
   void refill() {
     _report?.call('Neighbourhood below the optimum — refill round');
     staleTry();
-    invitationTry();
+    hints.invitationTry();
     _run(_outside.afterSources(_k.call()));
-  }
-
-  /// Source 3 in a round (§11.8.3): every invitation address the list does
-  /// not hold becomes a hint while the list is below 32, and a new one is
-  /// the edge "new neighbour" — which uses it. An address removed since the
-  /// last network change stays out: an invitation carries no time, so it says
-  /// nothing newer than the removal (§11.8.6); without that, a dead card
-  /// address would come back with every round its removal starts (D-9).
-  /// The one admission `neighbourAdd` holds that rule for every source
-  /// (S407-LB-P7, C-8); no second filter here.
-  void invitationTry() {
-    final n = _k.neighbourhood;
-    final added = <(InternetAddress, int)>[];
-    for (final c in invitationAddresses()) {
-      if (n.count >= Neighbourhood.atMost) break;
-      final a = InternetAddress.fromRawAddress(c.address);
-      if (n.holding(a, c.port) != null) continue;
-      if (neighbourAdd(_k, c.address, c.port)) added.add((a, c.port));
-    }
-    if (added.isNotEmpty) _newNeighbour(added);
   }
 
   /// Every stale entry is tried at an edge (§11.8) — with the address
@@ -331,8 +272,15 @@ class HostNetwork {
   /// an answer, the address declared failed by the transport (§11.3a,
   /// `silence.dart`), only with counter-evidence; nothing is counted here.
   void staleTry() {
+    var who = kPathChecksAtMost; // at most this many at one edge (D-87)
     for (final x in _k.neighbourhood.stale(DateTime.now())) {
-      unawaited(_k.outsideRoute.whatIsMyAddress(x.address, x.port));
+      final what = 'Stale address ${x.address.address}:${x.port}';
+      _report?.call('$what — asked (§11.8.5)');
+      if (who > 0 && _k.who.ask(x.address, x.port)) who--;
+      unawaited(_k.outsideRoute.whatIsMyAddress(x.address, x.port).then((seen) =>
+          _report?.call(seen == null
+              ? '$what — no answer (§11.3a decides)'
+              : '$what — answered, confirmed')));
     }
   }
 
@@ -342,9 +290,11 @@ class HostNetwork {
   /// its silence is the transport's (§11.3a). Only addresses of a family this
   /// node has a socket for (§11.1): one under a lost family waits, unused.
   void rememberedTry() {
+    var who = kPathChecksAtMost; // at most this many at one edge (D-87)
     for (final x in _k.neighbourhood.all) {
       for (final a in x.addresses) {
         if (!_k.speaks(a.address)) continue;
+        if (who > 0 && _k.who.ask(a.address, a.port)) who--;
         unawaited(_k.outsideRoute.whatIsMyAddress(a.address, a.port));
       }
     }

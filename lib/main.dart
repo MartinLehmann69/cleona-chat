@@ -63,6 +63,7 @@ import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/android_badge.dart';
 import 'package:cleona/core/platform/android_notification_texts.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/profile_move.dart';
 import 'package:cleona/core/platform/app_screenshot.dart';
 import 'package:cleona/core/platform/capture_exclusion.dart';
 import 'package:cleona/core/platform/process_hardening.dart';
@@ -80,6 +81,7 @@ import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/update/gui_update_start.dart';
 import 'package:cleona/core/update/update_offer.dart';
+import 'package:cleona/core/update/user_copy.dart';
 import 'package:cleona/core/sync/cover_stream.dart' show CoverSaver;
 import 'package:cleona/core/platform/apk_installer.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
@@ -205,6 +207,11 @@ void main() async {
   // redaction — first statement, before anything can call `debugPrint`.
   RedactedDebugPrint.install();
   WidgetsFlutterBinding.ensureInitialized();
+  // §21.4: before anything reads or creates the profile directory.
+  final profileMove = ProfileMove.ensure();
+  if (profileMove != ProfileMoveOutcome.nothing) {
+    debugPrint('[main] $profileMove: ${ProfileMove.lastReport}');
+  }
   // §23.10: the native side excluded the window from capture before the
   // first frame; only the test run's switch lifts it (capture_exclusion.dart).
   await CaptureExclusion.applyTestSwitch();
@@ -234,7 +241,7 @@ void main() async {
   // late first stamp after full boot.
   if (Platform.isAndroid) {
     try {
-      final dir = Directory('${AppPaths.home}/.cleona');
+      final dir = Directory(AppPaths.dataDir);
       if (!dir.existsSync()) dir.createSync(recursive: true);
       File('${dir.path}/.dart-heartbeat')
           .writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}');
@@ -463,7 +470,7 @@ void _logCrash(String source, Object error, StackTrace? stack) {
   final entry = LogRedaction.apply(
       '${DateTime.now().toIso8601String()} [$source] $error\n$stack\n\n');
   try {
-    final dir = Directory('${AppPaths.home}/.cleona');
+    final dir = Directory(AppPaths.dataDir);
     if (!dir.existsSync()) dir.createSync(recursive: true);
     File('${dir.path}/crash.log').writeAsStringSync(
       entry, mode: FileMode.append, flush: true);
@@ -503,15 +510,15 @@ void _guiUpdateLine(String msg) {
 
 /// Checks if another GUI instance is running. If so, write a trigger.
 bool _signalExistingInstance() {
-  final home = AppPaths.home;
-  final lockFile = File('$home/.cleona/gui.lock');
+  final dataDir = AppPaths.dataDir;
+  final lockFile = File('$dataDir/gui.lock');
   if (!lockFile.existsSync()) return false;
 
   try {
     final otherPid = int.parse(lockFile.readAsStringSync().trim());
     if (otherPid == pid) return false; // It's us
     if (_isGuiProcessAlive(otherPid)) {
-      File('$home/.cleona/gui.show').writeAsStringSync('$pid');
+      File('$dataDir/gui.show').writeAsStringSync('$pid');
       return true;
     }
   } catch (_) {}
@@ -545,10 +552,9 @@ bool _isWindowsProcessAlive(int p) {
 }
 
 void _writeGuiLock() {
-  final home = AppPaths.home;
-  final dir = Directory('$home/.cleona');
+  final dir = Directory(AppPaths.dataDir);
   if (!dir.existsSync()) dir.createSync(recursive: true);
-  File('$home/.cleona/gui.lock').writeAsStringSync('$pid');
+  File('${dir.path}/gui.lock').writeAsStringSync('$pid');
 }
 
 GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
@@ -1532,10 +1538,24 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     assemble: (svc, manifest) => svc.startInNetworkUpdate(manifest),
     install: _installInProcess,
     isNew: (a, b) => UpdateChecker().isNewer(a, b),
-    report: (m) => debugPrint('[update] $m'),
+    report: _updateOfferReport,
     fetchLocked: _updateFetchLocked,
     expect: (svc, manifest) => svc.updateTargetExpect(manifest),
+    endedWithoutResult: (svc) =>
+        svc.onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0),
   );
+
+  /// What the offer has to say goes into the log file of the identity (S411):
+  /// an aborted collection reported through `debugPrint` left no line on the
+  /// phone (`mycelium/berichte/S411-RCA-FELDTEST-4-2-4.md`, finding 1).
+  void _updateOfferReport(String msg) {
+    if (_inProcessServices.isEmpty) {
+      debugPrint('[update] $msg');
+      return;
+    }
+    CLogger.get('update', profileDir: _inProcessServices.values.first.profileDir)
+        .warn('[update] $msg');
+  }
 
   /// Metered connection, last read — `null`: not yet read. Read at the
   /// edges of `connectivity_plus` in [_startConnectivityMonitor], no tick.
@@ -1592,17 +1612,28 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   BinaryUpdateState get updateState => _updateState;
   double get updateProgress => _updateProgress;
-  bool get updateBannerDismissed => _updateBannerDismissed;
+  /// The hint about a failed update has its own session dismissal: a failure
+  /// can come back at every occasion, and a closed hint must not hide the
+  /// banner of an update that finishes later.
+  bool _updateFailedDismissed = false;
+  bool get updateBannerDismissed => _updateState == BinaryUpdateState.failed
+      ? _updateFailedDismissed
+      : _updateBannerDismissed;
   bool get updateApplyPending => _updateApplyPending;
   bool get updateNeedsInstallPermission => _updateNeedsInstallPermission;
 
   void dismissUpdateBanner() {
-    _updateBannerDismissed = true;
+    if (_updateState == BinaryUpdateState.failed) {
+      _updateFailedDismissed = true;
+    } else {
+      _updateBannerDismissed = true;
+    }
     notifyListeners();
   }
 
   void undismissUpdateBanner() {
     _updateBannerDismissed = false;
+    _updateFailedDismissed = false;
     notifyListeners();
   }
 
@@ -1956,8 +1987,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _checkShowTrigger() {
-    final home = AppPaths.home;
-    final triggerFile = File('$home/.cleona/gui.show');
+    final triggerFile = File('${AppPaths.dataDir}/gui.show');
     if (triggerFile.existsSync()) {
       triggerFile.deleteSync();
       WindowShow.show();
@@ -1966,10 +1996,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Daemon lifecycle ──────────────────────────────────────────────
 
-  String get _baseDir {
-    final home = AppPaths.home;
-    return '$home/.cleona';
-  }
+  String get _baseDir => AppPaths.dataDir;
 
   /// Check if a process with the given PID is alive.
   bool _isProcessAlive(int p) {
@@ -2046,9 +2073,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
               .split('\x00')
               .where((s) => s.isNotEmpty)
               .toList();
-          final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
+          // From the higher bundle: the per-user copy of a package
+          // installation (§22.6), or the AppImage file if the mount ends with
+          // this process.
+          final restart = UserCopy.windowRestart(cmdParts, AppPaths.bundleDir,
+              appImage: Platform.environment['APPIMAGE']);
+          final quotedCmd = restart.command.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
           await Process.start('/bin/bash', ['-c', 'sleep 3 && exec $quotedCmd'],
-              environment: env, mode: ProcessStartMode.detached);
+              environment: {...env, ...restart.environment},
+              mode: ProcessStartMode.detached);
         } else if (versionRestart && (Platform.isWindows || Platform.isMacOS)) {
           await Process.start(Platform.resolvedExecutable, const [],
               environment: env, mode: ProcessStartMode.detached);
@@ -2068,8 +2101,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         '${LogRedaction.apply(msg)}';
     debugPrint(line);
     try {
-      final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'] ?? '.';
-      File('$home/.cleona/gui-update.log').writeAsStringSync('$line\n', mode: FileMode.append);
+      File('${AppPaths.dataDir}/gui-update.log').writeAsStringSync('$line\n', mode: FileMode.append);
     } catch (_) {}
   }
 
@@ -2715,6 +2747,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         };
         ipcClient.onUpdateStateChanged = (state, progress) {
           _guiUpdateLog('state: ${_updateState.name} -> ${state.name} (progress=$progress)');
+          _updateApplyPending =
+              UpdateOffer.applyPendingAfter(state, _updateApplyPending);
           _updateState = state;
           _updateProgress = progress;
           notifyListeners();
@@ -2961,7 +2995,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       var needsSave = false;
       for (final id in identities) {
         if (!Directory(id.profileDir).existsSync()) {
-          final relative = id.profileDir.split('/.cleona/').last;
+          final relative = id.profileDir.split('/.cleona/').last; // data-dir-ok: mobile keeps the one name
           final rebased = '$_baseDir/$relative';
           if (Directory(rebased).existsSync()) {
             debugPrint('[main] Rebasing profileDir: ${id.profileDir} -> $rebased');
@@ -4719,8 +4753,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _connectivitySub?.cancel();
-    final home = AppPaths.home;
-    try { File('$home/.cleona/gui.lock').deleteSync(); } catch (_) {}
+    try { File('${AppPaths.dataDir}/gui.lock').deleteSync(); } catch (_) {}
     if (_ipcClient != null) {
       // Prevent onDaemonDied from firing during intentional GUI close
       _ipcClient!.onDaemonDied = null;

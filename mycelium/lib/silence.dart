@@ -146,6 +146,10 @@ class Silence {
   /// node's own bound took nothing (§20.2): the request ends without blame.
   /// [SendEnd.unconfirmed] means a transmission of several parts got neither
   /// end mark nor request (§11.3): that sending stayed without an answer.
+  ///
+  /// [evidence] `false`: a request an older 4.2 node does not answer (D-87,
+  /// `who_question.dart`) — its silence says nothing about the address: it
+  /// fails nothing and marks nothing as silent.
   Future<Answered> ask(
     Future<Object?> answer, {
     required InternetAddress to,
@@ -155,6 +159,7 @@ class Silence {
     bool others = true,
     bool Function()? cancelled,
     String what = 'request',
+    bool evidence = true,
   }) async {
     asked++;
     var done = false, withValue = false;
@@ -183,8 +188,8 @@ class Silence {
           // A handshake still running after one answer wait has had its
           // first flight unanswered: the address is silent now as well.
           final t = Timer(wait, () {
-            if (!inSilence) _quiet(k, 1);
-            inSilence = true;
+            if (evidence && !inSilence) _quiet(k, 1);
+            inSilence = evidence;
           });
           try {
             end = await send(a, p);
@@ -206,15 +211,15 @@ class Silence {
           }
           // This sending stayed without an answer (an unconfirmed
           // transmission had no end mark): the address is silent now.
-          if (!inSilence) _quiet(k, 1);
-          inSilence = true;
+          if (evidence && !inSilence) _quiet(k, 1);
+          inSilence = evidence;
         }
         if (done) return answeredAt(a, p);
         if (cancelled?.call() ?? false) return null;
       } finally {
         if (inSilence) _quiet(k, -1);
       }
-      if (!shellDeclared) failedAddress(a, p, what);
+      if (!shellDeclared && evidence) failedAddress(a, p, what);
     }
     return null;
   }

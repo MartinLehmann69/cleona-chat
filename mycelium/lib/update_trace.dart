@@ -39,6 +39,7 @@ const List<String> kUpdateTraceSteps = <String>[
   'task-out', // a piece request answered with a task
   'pieces-out', // pieces handed out (to whom, how many, first block)
   'no-pieces-out', // a piece request answered with "no pieces" (why)
+  'object-release', // an object of a former manifest no longer held
   // receiver
   'ask', // a moment asks for the manifest (which moment)
   'ask-holders', // the neighbours asked under the manifest value
@@ -56,6 +57,7 @@ const List<String> kUpdateTraceSteps = <String>[
   'holder-next', // the fetch path turns to the next holder (why)
   'object-complete', // the target object complete, SHA-256 matches
   'fetch-end', // the fetch path ended (object / without result)
+  'fetch-check', // a delta made into the binary by bspatch, or not
   'verify', // SHA-256 and signature: expected / actual
   'discard', // a state discarded (why)
   'collect-end', // the collection ended (state)
@@ -98,7 +100,10 @@ void updateTrace(String step,
     String? platform,
     String? reason}) {
   if (!traceOn) return;
-  assert(kUpdateTraceSteps.contains(step), 'unknown update trace step $step');
+  // No assert on the list here (S411): a diagnosis line must never stop the
+  // path it describes. On the debug APK of the beta channel that assert ended
+  // every delta update right after assembling. An unknown step is stopped
+  // before the commit by `scripts/check-update-trace-steps.sh`.
   traceNote(updateTraceLine(step,
       seq: seq,
       version: version,

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/file_sha256.dart';
 import 'package:cleona/core/log/clogger.dart';
@@ -14,6 +15,7 @@ import 'package:cleona/core/storage/device_store.dart';
 import 'package:cleona/core/update/update_binary_store.dart';
 import 'package:cleona/core/update/install_source.dart';
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/core/update/user_copy.dart';
 import 'package:mycelium/update_trace.dart';
 
 /// §26.6.1 — the state machine of an in-network update: checks a verified
@@ -419,7 +421,12 @@ class BinaryUpdateManager {
   static List<String> mirrorArgs(String from, String to) =>
       ['-a', '--delete', '--checksum', '$from/', '$to/'];
 
-  Future<bool> applyDesktopUpdate(String currentBinaryPath) async {
+  ///
+  /// A read-only bundle (package installation, §22.6) is not touched: the
+  /// update goes into the per-user copy ([UserCopy]), [userCopyDir] replaces
+  /// its place in a probe.
+  Future<bool> applyDesktopUpdate(String currentBinaryPath,
+      {String? userCopyDir}) async {
     final verifiedPath = _verifiedBinaryPathSync();
     if (verifiedPath == null) {
       _fail('applyDesktopUpdate: no verified binary available');
@@ -431,6 +438,9 @@ class BinaryUpdateManager {
       // The whole-bundle backup of the archive paths below — what a
       // rollback restores and what markUpdateHealthy deletes (S392-11).
       String? bundleBackup;
+      // The bundle the update was written into; differs from the running one
+      // on a package installation.
+      String? installedBundle;
       final bakFile = File(bakPath);
       if (bakFile.existsSync()) {
         try { bakFile.deleteSync(); } catch (_) {}
@@ -460,31 +470,50 @@ class BinaryUpdateManager {
         File(verifiedPath).copySync(zipDest.path);
 
         final batPath = '$_updateDir/update-apply.bat'.replaceAll('/', '\\');
-        final home = Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Cleona';
         File(batPath).writeAsStringSync(windowsApplyScript(
           appDir: appDir,
           bakDir: bakDir,
           zipPath: tmpZip,
           markerPath: '$_updateDir/update-pending.json',
-          pidFile: '$home\\.cleona\\cleona.pid',
+          pidFile: '${AppPaths.dataDir}\\cleona.pid',
           logPath: '$_updateDir/update-apply.log',
         ));
         _windowsUpdateBatPath = batPath;
         _log.info('Wrote update-apply.bat: $batPath');
       } else if (isGzip && Platform.isLinux) {
         // Linux tar.gz: full bundle replacement (daemon + GUI + libs + data).
-        final appDir = _bundleRootOf(currentBinaryPath);
+        // A bundle this user cannot write (package installation, §22.6) stays
+        // as it is; the update goes into the per-user copy. The backup always
+        // holds what RUNS — a rollback returns to it, wherever it came from.
+        final running = _bundleRootOf(currentBinaryPath);
+        final copyDir = userCopyDir ?? UserCopy.dir;
+        final appDir = UserCopy.installTarget(running, copy: copyDir);
+        final intoCopy = appDir == copyDir;
         final bakDir = '$appDir.update-bak';
         bundleBackup = bakDir;
+        installedBundle = appDir;
 
         try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
+        if (intoCopy) {
+          try {
+            Directory(appDir).parent.createSync(recursive: true);
+          } catch (e) {
+            _fail('User copy not writable: $e');
+            return false;
+          }
+        }
 
-        final cpBak = await Process.run('cp', ['-a', appDir, bakDir]);
+        final cpBak = await Process.run('cp', ['-a', running, bakDir]);
         if (cpBak.exitCode != 0) {
           _fail('Directory backup failed: ${cpBak.stderr}');
           return false;
         }
+        // A read-only source hands on its modes; the backup must be removable.
+        if (appDir != running) {
+          Process.runSync('chmod', ['-R', 'u+w', bakDir]);
+        }
         _log.info('Backed up app directory to $bakDir');
+        if (intoCopy) UserCopy.dropCompleteNote(appDir);
 
         final tmpDir = Directory('$_updateDir/extract-tmp');
         if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
@@ -527,6 +556,28 @@ class BinaryUpdateManager {
               Process.runSync('chmod', ['+x', bin.path]);
             }
           }
+          if (intoCopy) {
+            // The starter would pass over a copy of another channel or one it
+            // may not execute (`noexec`, a policy): say so here, while the
+            // running version is still untouched, instead of restarting into
+            // the old version as if the update had worked.
+            final channel = UserCopy.channelOf(appDir);
+            final refusal = channel != activeNetworkChannel.name
+                ? 'Update bundle has channel "$channel", '
+                    'this node is ${activeNetworkChannel.name}'
+                : UserCopy.canExecute('$appDir/cleona')
+                    ? null
+                    : 'User copy cannot be executed here: $appDir/cleona';
+            if (refusal != null) {
+              // The same way back as a failed rsync: this may be the copy the
+              // processes run from.
+              await Process.run('rsync', mirrorArgs(bakDir, appDir));
+              try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
+              _fail(refusal);
+              return false;
+            }
+            File('$appDir/${UserCopy.completeNote}').writeAsStringSync('');
+          }
           _log.info('Extracted full Linux bundle to $appDir');
         } finally {
           if (tmpDir.existsSync()) {
@@ -557,6 +608,7 @@ class BinaryUpdateManager {
         'appliedAt': DateTime.now().toIso8601String(),
         'previousBinary': bakPath,
         'bundleBackup': bundleBackup,
+        'installedBundle': installedBundle,
       });
       _log.info('Applied update v$_targetVersion — restart required');
       return true;
@@ -1023,11 +1075,13 @@ class BinaryUpdateManager {
 
     String? bakPath;
     String? bundleBackup;
+    String? installedBundle;
     if (markerFile.existsSync()) {
       try {
         final data = jsonDecode(markerFile.readAsStringSync()) as Map<String, dynamic>;
         bakPath = data['previousBinary'] as String?;
         bundleBackup = bundleBackupOf(data);
+        installedBundle = data['installedBundle'] as String?;
       } catch (_) {}
     }
 
@@ -1039,7 +1093,12 @@ class BinaryUpdateManager {
     // [mirrorArgs] (with `--checksum`, see there).
     if (Platform.isLinux && bundleBackup != null &&
         Directory(bundleBackup).existsSync()) {
-      final appDir = _bundleRootOf(currentBinaryPath);
+      // The bundle the update went into — a marker of 4.2.4 or older does not
+      // name it, and there it is the running one. The note comes back with
+      // the backup only if the copy itself ran; a copy restored from the
+      // package bundle is no candidate for the starter, and need not be.
+      final appDir = installedBundle ?? _bundleRootOf(currentBinaryPath);
+      UserCopy.dropCompleteNote(appDir);
       try {
         final r = Process.runSync('rsync', mirrorArgs(bundleBackup, appDir));
         if (r.exitCode != 0) return false;

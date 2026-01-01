@@ -37,9 +37,12 @@ import 'package:mycelium/shell_start.dart' show unpack;
 }
 
 /// The link (by its `shellWho` key) under whose receive key [p] opens, or
-/// `null`. [except]: the key the packet came from (already tried).
+/// `null`. [except]: the key the packet came from (already tried). A link lent
+/// to a moved counterpart stands under several keys: the newest one wins — the
+/// address it last moved to, not the first it was ever heard under, which may
+/// have been removed long ago (S411).
 String? roamOpen(Map<String, Link> links, Uint8List p, String except) {
-  for (final e in links.entries) {
+  for (final e in links.entries.toList().reversed) {
     if (e.key == except) continue;
     if (unpack(p, e.value.receiveKey) != null) return e.key;
   }

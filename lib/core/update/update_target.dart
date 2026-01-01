@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/update/delta/bspatch.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:mycelium/update_trace.dart';
 
 /// What a node collects for an update: the full binary or a delta
 /// (v4_2 §26.6.2 "A delta is simply a smaller object on the same path as the
@@ -152,19 +153,26 @@ Future<String?> updateBinaryFromObject(UpdateTarget target, String objectPath,
     case UpdateObjectKind.full:
       return objectPath;
     case UpdateObjectKind.delta:
-      if (basePath == null) return null;
       final out = '$objectPath.binary';
-      final ok = await Isolate.run(() async {
-        try {
-          await bspatchFile(
-              oldPath: basePath,
-              patch: File(objectPath).readAsBytesSync(),
-              outPath: out);
-          return true;
-        } on Object {
-          return false;
-        }
-      });
+      final ok = basePath != null &&
+          await Isolate.run(() async {
+            try {
+              await bspatchFile(
+                  oldPath: basePath,
+                  patch: File(objectPath).readAsBytesSync(),
+                  outPath: out);
+              return true;
+            } on Object {
+              return false;
+            }
+          });
+      updateTrace('fetch-check',
+          seq: target.seq,
+          version: target.version,
+          object: target.object,
+          platform: target.platform,
+          reason: 'delta v${target.fromVersion} -> v${target.version}: '
+              '${ok ? 'bspatch built the binary — its check follows' : 'bspatch did NOT build the binary (installed file missing or not the delta\'s base)'}');
       return ok ? out : null;
   }
 }

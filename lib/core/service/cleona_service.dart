@@ -149,6 +149,7 @@ import 'package:mycelium/invitation.dart' as mycelium
 import 'package:mycelium/first_contact.dart' as mycelium
     show ContactRequest, Introduction, IntroductionError;
 import 'package:mycelium/memory.dart' as mycelium show Contact;
+import 'package:mycelium/neighbour_found_by.dart' show NeighbourFoundBy;
 import 'package:mycelium/card.dart' as mycelium show Card;
 import 'package:mycelium/board_node.dart' show NodeAnswer;
 import 'package:mycelium/card_text.dart' as mycelium
@@ -7382,8 +7383,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// ([networkChangeEdge]) on the host this identity's mailbox hangs on: the
   /// host part once, every identity on the host as subscriber, the router
   /// mapping (§7.3) and the update moment — not only this one service
-  /// (S407-LB-P12, finding A-3). Not awaited, as before: the answer reports
-  /// the state at the press, the edge runs behind it. The operator lock
+  /// (S407-LB-P12, finding A-3). Not awaited, as before: the edge runs behind
+  /// the answer, which therefore claims no result. The operator lock
   /// against repeated presses stays where it was (`ipc_server.dart`).
   @override
   Future<Map<String, dynamic>> reconnect() async {
@@ -7393,7 +7394,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     } else {
       unawaited(networkChangeEdge(host, reason: 'reconnect', report: _log.info));
     }
-    return {'debounced': false, 'peersFound': peerCount};
+    return {'debounced': false};
   }
 
   /// SUBSCRIBER of the edge "network change" (v4_2 §11.8.2) — the
@@ -7437,7 +7438,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   FileEncryption? _fileEncCached;
   FileEncryption get _fileEnc {
     if (_fileEncCached != null) return _fileEncCached!;
-    final baseDir = '${AppPaths.home}/.cleona';
+    final baseDir = AppPaths.dataDir;
     // §3.7: derive per-identity FileEncryption key from master seed
     final seed = identity.masterSeed;
     final idx = identity.hdIndex;
@@ -9336,50 +9337,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     onStateChanged?.call();
   }
 
-  @override
-  List<PeerSummary> get peerSummaries {
-    // ── GAP G-11: V4.1 HAS NO ADDRESS LIST PER PARTNER ────────────
-    //
-    // This list was a projection of the V3 routing table: per peer
-    // several `PeerAddress` with type (private/public/IPv6), a
-    // `lastSeen`, a stability level, plus the distinction
-    // direct/via-relay. V4.1 keeps none of that: `V41Delivery` names
-    // partner counts (§25.4), not addresses — and that is intent, not
-    // incompleteness (§7: whoever knows the address set of a node can
-    // link).
-    //
-    // WHAT THIS COSTS, explicitly named instead of concealed:
-    //   * the connection overview in the UI stays empty;
-    //   * `getNetworkStats().reachablePeerCount` drops to 0 — which is why
-    //     [getNetworkStats] now reads the partner count directly;
-    //   * ContactSeeds no longer carried start peers, because
-    //     `ContactSeedBuilder` read exactly this list. **CLOSED on
-    //     10.09.2026 (S380):** the builder now reads the
-    //     entry pool (`V41Node.entries`, §11) via
-    //     [entrySeedCandidates]; the receiving side of the same bridge
-    //     already stood (`addPeersFromContactSeed` -> `personEntryHints`;
-    //     both removed in S399 P1 part C — no effect in 4.2, §11.8).
-    //     This list here stays empty and rightly so — it was never the
-    //     right source for that.
-    //
-    //     UNTIL S361 THIS SAID "that belongs to gap G-1". It does NOT
-    //     belong there: G-1 (the carrier of the first request) has been
-    //     closed since S360, and a seed WITHOUT start peers still triggers
-    //     first contact — it carries `ki` and `ep`, and that suffices for
-    //     the invitation line. What is missing without start peers is the
-    //     ENTRY into the network for a node that has no partner yet:
-    //     §11 entry records. That is a separate, open item and listed in
-    //     the gap book as G-1/rest
-    //     (`docs/v4-redesign/S361-lueckenbuch.md`).
-    //
-    // An empty list is the only honest answer here. Invented entries —
-    // say the own address as a "peer" — would wander into foreign
-    // ContactSeeds and send third parties into the void.
-    _log.debug('peerSummaries: empty — V4.1 keeps no peer address list '
-        '(gap G-11). Session partner: $_sessionPartnerCount');
-    return const <PeerSummary>[];
-  }
-
   /// Start-peer candidates for the ContactSeed (§11) — the sending side of
   /// the entry bridge, gap G-11.
   ///
@@ -9439,6 +9396,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         postBoxHeld: node.postBoxDeposit.held,
       );
     }
+    // §25.7: the answering neighbours as rows, read from the same readiness
+    // that yields the count (§22.7.1) — read only, no packet (§25.10).
+    final statsHost = myceliumMailbox?.host;
+    final hostNode = statsHost?.node;
+    statsCollector.noteNeighbours(hostNode == null
+        ? const []
+        : [
+            for (final n in hostNode.neighbourhood.all)
+              if (hostNode.readiness.answeringAddress(n) != null)
+                () {
+                  final answered = [
+                    for (final a in n.addresses)
+                      if (hostNode.readiness.responding.contains(a.key)) a
+                  ];
+                  return NeighbourRow(
+                    families: {
+                      for (final a in answered)
+                        a.address.type == InternetAddressType.IPv6
+                            ? 'IPv6'
+                            : 'IPv4'
+                    }.toList(),
+                    fixed: n.seated,
+                    lastConfirmed: answered
+                        .map((a) => a.last)
+                        .reduce((x, y) => x.isAfter(y) ? x : y),
+                    foundBy: hostNode.neighbourhood.foundBy(n)?.name,
+                  );
+                }(),
+          ],
+        statsHost == null
+            ? null
+            : NeighbourAggregates(
+                fixed: hostNode!.neighbourhood.fixedNeighbours.length,
+                openSet: hostNode.neighbourhood.openSet().length,
+                keepsBoard: hostNode.board?.reachableProven ?? false,
+                externalRecordsOn: statsHost.outsideSourceOn,
+                ownRecordPublished: statsHost.network.ownRecordPublished,
+              ));
     // S398-W4 (§21.3.3 item 4): the evictions of the 4.2 layer. The post
     // box holder sits behind the node's deposit without an outside reader,
     // hence its process total (one host per device); the bulk holder is
@@ -12273,6 +12268,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   static const kEphemeralTypes = <proto.MessageType>{
     proto.MessageType.MT_TYPING_INDICATOR,
   };
+
+  /// Whether [content] of a history entry is an application frame of a type
+  /// in [kEphemeralTypes]. What is no frame is not ours to judge: `false`.
+  static bool isEphemeralFrame(Uint8List content) {
+    try {
+      return kEphemeralTypes
+          .contains(proto.ApplicationFrame.fromBuffer(content).messageType);
+    } catch (_) {
+      return false;
+    }
+  }
 
   /// THE SEAM (v4_2 §22.5).
   ///
@@ -15194,7 +15200,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       // FORMERLY: remove the revoked addresses from the contact's
       // `PeerInfo`. There is no address list per contact any more
-      // (see [peerSummaries], gap G-11) — and thus nothing to trim either.
+      // (gap G-11) — and thus nothing to trim either.
       // The revocation takes effect via the device list above.
       _log.debug('DEVICE_REVOKED — displayName="${contact.displayName}"');
       _log.info('DEVICE_REVOKED: '

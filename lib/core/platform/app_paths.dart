@@ -1,14 +1,13 @@
 import 'dart:io';
 
-/// Central path resolution for Cleona data directory.
-/// On Linux/macOS: $HOME/.cleona
-/// On Windows: %USERPROFILE%\.cleona
+import 'package:cleona/core/config/network_channel.dart';
+
+/// Central path resolution for Cleona data directory (v4_2 §21.4).
+/// On Linux/macOS: $HOME/.cleona (live), $HOME/.cleona-beta (beta)
+/// On Windows: %USERPROFILE%\.cleona (live), %USERPROFILE%\.cleona-beta (beta)
 /// On Android: /data/data/`packageName`/files/.cleona (app-private)
+/// On iOS: `.cleona` in the app container
 ///
-/// macOS uses $HOME/.cleona (not Application Support) for consistency with
-/// the many direct `$home/.cleona` references across main.dart / service_daemon.dart /
-/// service_daemon.dart. A later refactor could adopt the Apple convention if
-/// all call sites are migrated to AppPaths.dataDir.
 /// Resolves the home directory under Windows — or fails loudly.
 ///
 /// ── THE FINDING THAT CHANGED THIS (13b, S370, 06.09.2026) ─────────
@@ -124,9 +123,58 @@ class AppPaths {
     _cachedDataDir = path;
   }
 
-  /// The .cleona data directory.
+  /// Name of the profile directory of [channel] on a desktop platform
+  /// (v4_2 §21.4). Android and iOS keep one name inside their app container.
+  static String dataDirNameFor(NetworkChannel channel) =>
+      channel == NetworkChannel.beta ? betaDataDirName : liveDataDirName;
+
+  static const String liveDataDirName = '.cleona';
+  static const String betaDataDirName = '.cleona-beta';
+
+  static bool get isDesktop =>
+      Platform.isLinux || Platform.isWindows || Platform.isMacOS;
+
+  /// Name of the profile directory of this build.
+  static String get dataDirName => isDesktop
+      ? dataDirNameFor(activeNetworkChannel)
+      : liveDataDirName;
+
+  /// The profile directory of this build.
   static String get dataDir =>
-      _cachedDataDir ?? '$home${Platform.pathSeparator}.cleona';
+      _cachedDataDir ?? '$home${Platform.pathSeparator}$dataDirName';
+
+  /// The machine-wide single-instance lock of this channel's daemon (§22.1).
+  /// A sibling of the profile directory, so a profile wipe leaves it alone.
+  static String get daemonLockPath =>
+      '$home${Platform.pathSeparator}$dataDirName-daemon.lock';
+
+  /// Whether a `--base-dir` names the directory this build uses by default,
+  /// or the one every version before §21.4 was told by its window and carries
+  /// through a restart on the command line.
+  static bool isDefaultBaseDir(String path, {String? homeDir}) {
+    String norm(String p) =>
+        p.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+    final h = norm(homeDir ?? home);
+    final given = norm(path);
+    return given == '$h/$liveDataDirName' || given == '$h/$dataDirName';
+  }
+
+  /// [path] as stored in a database, placed in the current profile directory.
+  ///
+  /// `Identity.profileDir` and `UiMessage.filePath` are absolute. Those written
+  /// before the beta profile moved (§21.4) name `<home>/.cleona/…`; the
+  /// directory left there is only a link and goes when a live build starts.
+  /// `MediaStore` finds its key through the path prefix, so a stored path has to
+  /// agree with the profile directory.
+  static String rebaseProfilePath(String path) {
+    if (_cachedDataDir != null || dataDirName == liveDataDirName) return path;
+    final sep = Platform.pathSeparator;
+    final old = '$home$sep$liveDataDirName$sep';
+    if (path.replaceAll('\\', sep).replaceAll('/', sep).startsWith(old)) {
+      return '$dataDir$sep${path.substring(old.length)}';
+    }
+    return path;
+  }
 
   /// Temp directory (platform-aware).
   static String get tempDir {

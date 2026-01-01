@@ -126,6 +126,13 @@ const int kTryFromHere = 0x49;
 /// same 16 B. 17 B.
 const int kOpen = 0x4A;
 
+// ── Who are you (who_question.dart, §11.8, D-87) ──────────────────────────
+/// Question: kind | random 16 B. 17 B.
+const int kWhoAreYou = 0x4B;
+/// Answer: kind | the same 16 B | node identifier 16 B. 33 B. A 4.2.3 node
+/// drops both kinds without an answer.
+const int kIAm = 0x4C;
+
 // ── Media (media.dart, bulk_piece.dart, §9.4) ────────────────────────
 const int kMediaAnnouncement = 0x50;
 /// Lane 3: one piece sealed under `HKDF(K_T, "bulk/seal")`, the answer to
@@ -258,6 +265,7 @@ const List<int> allKinds = [
   kAnswerQuestion, kAnswerAnswer,
   kEchoRequest, kEcho, kMoved,
   kIsMyFamilyOpen, kTryFromHere, kOpen,
+  kWhoAreYou, kIAm,
   kMediaAnnouncement, kMediaPiece,
   kBulkHold, kBulkHeld, kBulkCollect, kBulkNothingHere,
   kStreamAsk, kStreamAnswer, kStreamJoin, kStreamFrame, kStreamMissing,
@@ -298,6 +306,8 @@ bool isBoard(int s) =>
 bool isMappingProbe(int s) => s >= kEchoRequest && s <= kMoved;
 /// Subset of [isOutsideRoute] — the open check (§8.1).
 bool isOpenCheck(int s) => s >= kIsMyFamilyOpen && s <= kOpen;
+/// Subset of [isOutsideRoute] — "who are you" (§11.8, D-87).
+bool isWho(int s) => s == kWhoAreYou || s == kIAm;
 bool isMedia(int s) => s >= 0x50 && s <= 0x5F;
 /// Subset of [isMedia] — lane 2, the relayed stream (§17.6).
 bool isStream(int s) => s >= kStreamAsk && s <= kStreamMissing;

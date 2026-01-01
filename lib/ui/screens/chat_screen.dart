@@ -4479,6 +4479,29 @@ class _MessageBubbleState extends State<_MessageBubble> {
 
   // ── Link Preview Card ─────────────────────────────────────────────────
 
+  /// Height of the link preview image in logical pixels. Fixed, so the card
+  /// has its final height in the first frame, before the image is decoded.
+  static const double _linkPreviewThumbnailHeight = 150;
+
+  /// S411 (run 6): the base64 text the cached provider was made from, and
+  /// the provider itself. `MemoryImage` compares its bytes by identity, so
+  /// decoding the base64 again on every build produced a new image cache key
+  /// and a new asynchronous decode each time. The provider lives as long as
+  /// this bubble's state and is rebuilt only when the thumbnail text changes;
+  /// no global cache, so nothing to clean up when a message is deleted.
+  String? _linkPreviewThumbnailSource;
+  MemoryImage? _linkPreviewThumbnailImage;
+
+  MemoryImage? _linkPreviewThumbnail() {
+    final source = message.linkPreviewThumbnailBase64;
+    if (source != _linkPreviewThumbnailSource) {
+      _linkPreviewThumbnailSource = source;
+      final bytes = _safeBase64Decode(source);
+      _linkPreviewThumbnailImage = bytes == null ? null : MemoryImage(bytes);
+    }
+    return _linkPreviewThumbnailImage;
+  }
+
   Widget _buildLinkPreviewCard(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final url = message.linkPreviewUrl!;
@@ -4498,13 +4521,20 @@ class _MessageBubbleState extends State<_MessageBubble> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Thumbnail
-            if (_safeBase64Decode(message.linkPreviewThumbnailBase64) case final tb?)
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 150, maxWidth: double.infinity),
-                child: Image.memory(
-                  tb,
-                  width: double.infinity,
+            // S411 (run 6): fixed height and a stable image provider. With
+            // only a max height and a fresh byte array on every build, the
+            // image laid out at height 0 until each new asynchronous decode
+            // finished and then grew the bubble by up to 150 lp, after the
+            // jump to the bottom had already run, so the newest messages slid
+            // under the input row.
+            if (_linkPreviewThumbnail() case final thumb?)
+              SizedBox(
+                height: _linkPreviewThumbnailHeight,
+                width: double.infinity,
+                child: Image(
+                  image: thumb,
                   fit: BoxFit.cover,
+                  gaplessPlayback: true,
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
                 ),
               ),

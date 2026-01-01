@@ -278,7 +278,7 @@ class ContactIssueReport {
       ..writeln('Contact: $contactName ($contactIdShort)')
       ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
       ..writeln('NAT-Typ: $natType')
-      ..writeln('Peers: $peerCount ($confirmedPeerCount confirmed)')
+      ..writeln('Neighbours: $peerCount')
       ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
       ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
@@ -296,7 +296,7 @@ class ContactIssueReport {
       ..writeln('Contact: $contactName ($contactIdShort)')
       ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
       ..writeln('NAT-Typ: $natType')
-      ..writeln('Peers: $peerCount ($confirmedPeerCount confirmed)')
+      ..writeln('Neighbours: $peerCount')
       ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
       ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
@@ -392,7 +392,7 @@ class LogReport {
       ..writeln('Version: $appVersion')
       ..writeln('Plattform: $platform')
       ..writeln('Uptime: ${ContactIssueReport.formatDuration(uptimeSeconds)}')
-      ..writeln('Peers: $peerCount, routes: $routeCount')
+      ..writeln('Neighbours: $peerCount')
       ..writeln('NAT: $natType, UPnP: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('RAM: ${(memoryBytes / 1024 / 1024).toStringAsFixed(1)} MB');
     if (contactSummary != null && contactSummary!.isNotEmpty) {

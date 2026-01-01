@@ -10,8 +10,7 @@
 ///   nonce  12 B ‖ AEAD_{k_direction}( length u16 2 B ‖ payload ‖ zeros ) 1188 B
 /// ```
 ///
-/// Filling inside the seal may be zero; in the open handshake it may not
-/// (`shell_start.dart`).
+/// Filling inside the seal may be zero; in the handshake not (`shell_start.dart`).
 ///
 /// WHAT THIS COSTS: one handshake per neighbour (2400 B out, 1200 B back,
 /// one round trip; waiting packets lie here meanwhile); 30 B per packet;
@@ -20,9 +19,8 @@
 /// for more than 2 s, [renewIfSilent]) — never by cover. **No protection
 /// against replay** here; the layers above discard duplicates (§9.2).
 ///
-/// **Not WHO the neighbour is:** the handshake is anonymous
-/// (`shell_start.dart`); the envelope one level higher decides that. A
-/// neighbour that moves is found under its old link (`shell_roam.dart`).
+/// **Not WHO the neighbour is:** the handshake is anonymous; the envelope
+/// decides that. A moved neighbour is found under its old link (`shell_roam.dart`).
 library;
 
 import 'dart:async';
@@ -74,6 +72,7 @@ class Shell implements PacketRoute {
   Silent? onSilent; // §11.3a: a handshake and its repeats without an answer — the address failed (`shell_link.dart`)
   Silent? onHeard; // §11.8.6: a packet opened under this address's own link
   Moved? onMoved; // §11.8.6: opened under ANOTHER address's link (`shell_roam.dart`)
+  Silent? onCalled; // §11.8.6: a handshake from there set up a link here
   /// A move (`shell_roam.dart`): [to] borrows [old]'s link; `false` if none.
   bool roamValidate(InternetAddress to, int toPort, InternetAddress old, int oldPort) {
     final l = _links[shellWho(old, oldPort)], w = shellWho(to, toPort);
@@ -374,6 +373,7 @@ class Shell implements PacketRoute {
     _answered[w] = (a.uniformCaller, a.packet);
     _bottom.send(a.packet, from, fromPort);
     _setUp(w, a.key, caller: false, target: from, targetPort: fromPort);
+    onCalled?.call(from, fromPort);
   }
 
   void _setUp(String w, Uint8List linkKey,

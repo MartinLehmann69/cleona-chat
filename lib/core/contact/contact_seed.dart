@@ -531,11 +531,10 @@ abstract class ContactSeedDataSource {
   ///
   /// ── WHAT STOOD HERE AND WHY IT IS GONE (gap G-11) ─────────────
   ///
-  /// `List<PeerSummary> get peerSummaries` — the V3 peer address list.
-  /// It is empty on the V4.1 line, and on purpose, not out of
-  /// incompleteness: `CleonaService.peerSummaries` returns `const []`
-  /// and justifies that there at length (§7: whoever knows the address
-  /// set of a node can link). The builder thus read a list that never
+  /// `List<PeerSummary> get peerSummaries` — the V3 peer address list,
+  /// removed in S411. It was empty on the V4.1 line, and on purpose
+  /// (§7: whoever knows the address set of a node can link). The builder
+  /// thus read a list that never
   /// contained anything, and EVERY issued ContactSeed therefore did not
   /// carry `s=` at all.
   ///

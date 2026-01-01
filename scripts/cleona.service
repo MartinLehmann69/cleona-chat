@@ -21,7 +21,7 @@ Type=simple
 ;
 ; This file is on the publishing allowlist (`docs/PUBLISHING.md` §3.3), so
 ; the flat path would have been shipped to users.
-ExecStart=%h/cleona-app/bin/cleona-daemon --base-dir %h/.cleona --port 0 --name Cleona
+ExecStart=%h/cleona-app/bin/cleona-daemon --base-dir %h/.cleona-beta --port 0 --name Cleona
 Restart=on-failure
 RestartSec=5
 # Allow reading port from profile at runtime

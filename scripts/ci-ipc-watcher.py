@@ -11,7 +11,7 @@ Usage:
 """
 import socket, json, sys, time, signal, os
 
-SOCKET_PATH = os.path.expanduser('~/.cleona/cleona.sock')
+SOCKET_PATH = os.path.expanduser('~/.cleona-beta/cleona.sock')
 PID_FILE = '/tmp/ci-ipc-watcher.pid'
 POLL_INTERVAL = 3
 

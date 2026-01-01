@@ -342,6 +342,9 @@ extension Assignment on Node {
       } else if (kinds.isBoard(s)) {
         // Forwarded or collected: `von` is not the asker.
         if (!withoutReturnRoute) board?.receive(data, from, fromPort);
+      } else if (kinds.isWho(s)) {
+        // Forwarded or collected: `from` is not the asker, and no path is shown.
+        if (!withoutReturnRoute) outsideRoute.receive(data, from, fromPort);
       } else if (kinds.isOutsideRoute(s)) {
         outsideRoute.receive(data, from, fromPort);
       } else if (kinds.isMedia(s)) {

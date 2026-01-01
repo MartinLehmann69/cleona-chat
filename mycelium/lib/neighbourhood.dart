@@ -13,16 +13,14 @@ import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
 export 'package:mycelium/neighbour.dart';
 
 /// The neighbours that this node knows — cap, stamp, memory (V4.2 §11.8).
-/// A neighbour is a NODE with its addresses (`neighbour.dart`, S394 V4);
-/// 32 counts nodes. Each address carries its stamp, set only by [confirm]
-/// (an ANSWER under this address, W8); a hint is [unconfirmed].
+/// A neighbour is a NODE with its addresses (`neighbour.dart`); 32 counts
+/// nodes. Each address carries its stamp, set only by [confirm] (an ANSWER
+/// under this address); a hint is [unconfirmed].
 ///
 /// **Silence never removes** (§11.8.5): only a failed USE removes an address
-/// ([useFailed], via `Readiness.mute` with a counter proof, E2), the
-/// neighbour goes with its last — an edge: [onUnderTarget], at most once per
-/// [refillInterval], a round inside it DROPPED (§5.4; S392 finding 3). A
-/// lost family removes nothing, it [waiting]s (C-7). Used is only an address
-/// with a socket for it ([speaks], §11.1 V1); seats: `neighbourhood_seat.dart`.
+/// ([useFailed]), the neighbour goes with its last — an edge: [onUnderTarget],
+/// at most once per [refillInterval] (§5.4). A lost family removes nothing, it
+/// [waiting]s. Seats: `neighbourhood_seat.dart`.
 class Neighbourhood {
   /// The optimum (§11.8) and at the same time the cap — in NODES.
   static const int atMost = 32;
@@ -127,9 +125,8 @@ class Neighbourhood {
   Neighbour? recognise(CardAddress c) =>
       _list.where((n) => n.knows(c)).firstOrNull;
 
-  /// Admits a HINT (card, foreign call, external entry), [unconfirmed]; a
-  /// known address stays — a hint confirms nothing. `true` only if a NEW
-  /// neighbour arose and stays (the caller's edge). No socket, no entry (V1).
+  /// Admits a HINT, [unconfirmed]; a known address stays — a hint confirms
+  /// nothing. `true` only if a NEW neighbour arose and stays (the caller's edge).
   bool remember(InternetAddress address, int port) {
     if (!possible(address, port) || !speaks(address)) return false;
     if (_spot(address, port) >= 0) return false;
@@ -147,14 +144,15 @@ class Neighbourhood {
       final old = _list[i];
       n = old.copy(
           addresses: [
-            NeighbourAddress(address, port, now),
+            NeighbourAddress(address, port, now, answering: true),
             ...old.addresses.where((x) => !x.isAt(address, port)),
           ],
           fixed: old.fixed || (edge && fixedNeighbour == null));
       _list[i] = n;
       _sort();
     } else {
-      n = Neighbour(address, port, now, fixed: fixedNeighbour == null);
+      n = Neighbour.of([NeighbourAddress(address, port, now, answering: true)],
+          fixed: fixedNeighbour == null);
       if (!_admit(n)) return; // immediately fell over the cap
     }
     final f = edge ? fixedNeighbour : null; // V6: the seat moves at its edge
@@ -169,16 +167,20 @@ class Neighbourhood {
     if (edge) contactSeatsCheck(n.id); // ... and the contact seats too
     // The listeners get the part that was confirmed: this one address.
     final part = holding(address, port)!
-        .copy(addresses: [NeighbourAddress(address, port, now)]);
+        .copy(addresses: [NeighbourAddress(address, port, now, answering: true)]);
     for (final h in List.of(_confirmedListener)) {
       h(part);
     }
   }
 
-  /// A use of [address]:[port] has failed — a request that expected an
-  /// answer stayed without one. Removes THIS address and reports it; the
-  /// neighbour goes with its last address, and only that is an edge for
-  /// the refill. `true` if an address was removed.
+  /// [keys] named a node identifier that restarted: [withdrawn] (§11.8.6).
+  void withdraw(Iterable<String> keys) => _list
+    ..setAll(0, [for (final n in _list) withdrawn(n, keys)])
+    ..sort(_order);
+
+  /// A use of [address]:[port] has failed. Removes THIS address and reports
+  /// it; the neighbour goes with its last address, and only that is an edge
+  /// for the refill. `true` if an address was removed.
   bool useFailed(InternetAddress address, int port) {
     final i = _spot(address, port);
     if (i < 0) return false;
@@ -215,6 +217,7 @@ class Neighbourhood {
     _learned.putIfAbsent(j.whole.id, DateTime.now);
     _sort();
     _open.draw(_list, DateTime.now());
+    gaveWay(j.joined, _list).forEach(_report); // the cap of addresses
     for (final h in List.of(_joinedListener)) {
       h();
     }
@@ -225,6 +228,7 @@ class Neighbourhood {
   /// is removed (§11.8.5, C-7): without a usable address a neighbour
   /// [waiting]s; the lost part is reported (it answers no more). No refill.
   void socketsChanged() {
+    final before = List.of(_list);
     for (final r in refamily(_list, speaks)) {
       final i = _list.indexWhere((x) => x.id == r.old.id);
       if (r.now case final now?) {
@@ -238,16 +242,15 @@ class Neighbourhood {
       if (rejoin(_list, a)) _learned[a.id] = DateTime.now();
     }
     _sort();
+    gaveWay(before, [..._list, ..._waiting.all]).forEach(_report);
     _cap();
     if (fixedNeighbour == null) _moveUp();
     contactSeatsCheck();
     _open.draw(_list, DateTime.now());
   }
 
-
-  /// W7 "the next CONFIRMED one" (a reachable one first, V6): the emptied
-  /// seat goes HERE, ahead of [_report], so the edge
-  /// `HostNetwork.fixedCheck` carries it (`berichte/S392-FIX-FESTER-PLATZ.md`).
+  /// W7 "the next CONFIRMED one" (a reachable one first, V6): the emptied seat
+  /// goes HERE, ahead of [_report], so the edge `HostNetwork.fixedCheck` carries it.
   void _moveUp() {
     final answered = respondingNow;
     final to = answered == null
@@ -318,8 +321,14 @@ class Neighbourhood {
     _open.draw(_list, DateTime.now());
   }
 
-  /// Network change or stop (`Readiness.reset`): the open set is redrawn.
-  void runLimit() => _open.draw(_list, DateTime.now());
+  /// Network change or stop (`Readiness.reset`): nobody answers any more (the
+  /// stamps stay, they are the basis for "stale"); the open set is redrawn.
+  void runLimit() {
+    _list.setAll(0, [
+      for (final n in _list) n.copy(addresses: [for (final a in n.addresses) a.asleep])
+    ]);
+    _open.draw(_list, DateTime.now());
+  }
 
   void empty() { // only for probes: forget everything
     final old = List.of(_list);
@@ -351,17 +360,11 @@ class Neighbourhood {
     onUnderTarget?.call();
   }
 
-  /// Above [atMost] the neighbour with the OLDEST newest stamp gives way (a
-  /// new hint is not "fresher" than a confirmed one); among equal stamps the
-  /// one listed longest; the fixed one never (W7). First remove, then
-  /// report (S387: otherwise the loop ran forever).
+  /// Above [atMost] [oldestUnseated] gives way (a new hint is not "fresher"
+  /// than a confirmed one). First remove, then report (S387).
   void _cap() {
     while (_list.length > atMost) {
-      var i = -1;
-      for (var j = 0; j < _list.length; j++) {
-        if (_list[j].seated) continue;
-        if (i < 0 || !_list[j].last.isAfter(_list[i].last)) i = j;
-      }
+      final i = oldestUnseated(_list);
       if (i < 0) return; // at most four seated — cannot occur at 33
       _report(_list.removeAt(i));
     }
@@ -382,9 +385,10 @@ class Neighbourhood {
       List.of(_list)..sort((a, b) => b.last.compareTo(a.last));
 
   /// The seats in front ([seatOrder]), then by [_rank] descending.
-  void _sort() => _list.sort((a, b) => seatOrder(a) != seatOrder(b)
+  void _sort() => _list.sort(_order);
+  int _order(Neighbour a, Neighbour b) => seatOrder(a) != seatOrder(b)
       ? seatOrder(a).compareTo(seatOrder(b))
-      : _rank(b).compareTo(_rank(a)));
+      : _rank(b).compareTo(_rank(a));
 
   /// The rank in [all]: a confirmed neighbour's newest stamp, a never
   /// confirmed hint's LEARNING moment — so a collection asks a fresh hint
@@ -394,6 +398,3 @@ class Neighbourhood {
       ? (_learned[n.id] ?? unconfirmed)
       : n.last;
 }
-
-/// Smallest interval between two refill rounds (§11.8: „at most one per minute").
-const Duration kRefillInterval = Duration(minutes: 1);

@@ -22,6 +22,16 @@
 /// collected post, and at the edges of §9.3 the sender sends again what is
 /// neither acknowledged nor placed; the duplicate is acknowledged anew.
 ///
+/// **A stock of copies gets one receipt per edge** (§9.2 "exactly one packet",
+/// S411). A post box can hold many copies of one message: its sender seals it
+/// anew each time it sends it again (§9.3), and a holder keeps each. Field log
+/// 30.10.2026: four identifiers, 966 arrivals in four minutes, each answered
+/// with a sealed 7786 B receipt on steps 3 and 4 — the phone's queue took 16
+/// more minutes. Any receipt covers every copy, so within one collection edge
+/// (§8.2) the first answers them all; a copy at a later edge is answered again,
+/// as the sender that sent it again may have lost the first. Only collected
+/// post: a copy that came directly or under a code is a sending that waits.
+///
 /// Its own file for the line budget of `node.dart`.
 library;
 
@@ -39,16 +49,37 @@ import 'package:mycelium/node_helpers.dart' show hexFrom;
 /// falls out and then takes steps 1 and 3.
 const int kHeldWaysAtMost = 256;
 
+/// At most this many collected messages per edge are remembered as answered
+/// (§20.1: every buffer has a declared bound; a holder hands out 100 per value,
+/// 7 values, per identity). Set, not measured; the oldest falls out, and a
+/// further copy of it is answered once more.
+const int kAnsweredPerEdgeAtMost = 1024;
+
 typedef _Way = ({bool collected, bool underCode, CardAddress? origin});
 
 final Expando<Map<String, _Way>> _held = Expando('held-back receipt ways');
 final Expando<_Way> _replay = Expando('held-back receipt way being sent');
+final Expando<Set<String>> _answered = Expando('collected, answered at this edge');
 
 extension NodeReceipt on Node {
+  /// A collection edge of §8.2: copies from now on are answered again.
+  void receiptEdge() => _answered[this]?.clear();
+
   /// Wires [n] so that a held-back acknowledgement keeps the way its message
   /// came and takes it when the application sends it later.
   Messages receiptWays(Messages n) {
     final held = _held[this] ??= {};
+    final answered = _answered[this] ??= <String>{};
+    n.receiptDue = (identifier, sender) {
+      if (!feedingCollected) return true;
+      final key = '${hexFrom(n.me.address.identifier)}|'
+          '${hexFrom(sender.identifier)}|${hexFrom(identifier)}';
+      if (!answered.add(key)) return false;
+      while (answered.length > kAnsweredPerEdgeAtMost) {
+        answered.remove(answered.first);
+      }
+      return true;
+    };
     n.onHeld = (identifier, origin) {
       // The FIRST copy's way (§7.1: the same message comes by several steps;
       // the first to arrive came the fastest way). Measured S399 finding 9:

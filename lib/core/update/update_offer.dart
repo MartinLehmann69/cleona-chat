@@ -90,6 +90,12 @@ class UpdateOffer<Q extends Object> {
 
   final void Function(String)? report;
 
+  /// A collection ended and the last state it reported was still a running
+  /// one (see [onManifest]): the surfaces hear it through this. The offer's
+  /// own state is back on `idle` already; `updateState` of the app and the IPC
+  /// broadcast of the daemon know only what the service reports.
+  final void Function(Q source)? endedWithoutResult;
+
   /// `true` as long as fetching is blocked — data-saving mode on AND a
   /// metered connection ([updateFetchLockedFor]; v4_2 §24.4.2, §26.6.1
   /// "Data-saving mode suspends the fetch path over metered connections").
@@ -120,6 +126,7 @@ class UpdateOffer<Q extends Object> {
     this.report,
     this.fetchLocked,
     this.expect,
+    this.endedWithoutResult,
   });
 
   /// Whether a collection did not begin only because of a metered connection.
@@ -194,6 +201,13 @@ class UpdateOffer<Q extends Object> {
   /// Consent is given, the installation is running.
   bool get installedCurrently => _installed;
 
+  /// Whether the window still waits for the installation it asked the daemon
+  /// for. A failed installation ends the wait: without this the banner stayed
+  /// on "being installed", without a button, until the window was restarted
+  /// (measured S411: `Directory backup failed` on a package installation).
+  static bool applyPendingAfter(BinaryUpdateState state, bool pending) =>
+      pending && state != BinaryUpdateState.failed;
+
   /// Whether the banner is visible. One rule for every surface —
   /// daemon GUI and in-process read the same function.
   ///
@@ -207,14 +221,16 @@ class UpdateOffer<Q extends Object> {
     if (installedCurrently) return true;
     if (dismissed) return false;
     switch (state) {
+      // `failed` is the hint line (§25.2 rule 1: the user sees what the node
+      // does); the reason stays in the log.
       case BinaryUpdateState.ready:
+      case BinaryUpdateState.failed:
         return true;
       case BinaryUpdateState.idle:
       case BinaryUpdateState.checking:
       case BinaryUpdateState.downloading:
       case BinaryUpdateState.assembling:
       case BinaryUpdateState.verifying:
-      case BinaryUpdateState.failed:
         return false;
     }
   }
@@ -282,7 +298,24 @@ class UpdateOffer<Q extends Object> {
     unawaited(Future<void>.sync(() => assemble(q, target)).catchError((Object e) {
       report?.call('Update: collecting v${target.version} aborted: $e');
     }).whenComplete(() {
-      if (identical(_target, target)) _collects = false;
+      if (!identical(_target, target)) return;
+      _collects = false;
+      // A run that ended while its last report was a running state has no
+      // result (S411: a thrown collection stayed `downloading`, and no moment
+      // ever tried again). `ready` and `failed` are results and stay; `failed`
+      // is shown by the mandatory-update screen and collects again anyway.
+      switch (_state) {
+        case BinaryUpdateState.idle:
+        case BinaryUpdateState.ready:
+        case BinaryUpdateState.failed:
+          return;
+        case BinaryUpdateState.checking:
+        case BinaryUpdateState.downloading:
+        case BinaryUpdateState.assembling:
+        case BinaryUpdateState.verifying:
+          _state = BinaryUpdateState.idle;
+          endedWithoutResult?.call(q);
+      }
     }));
   }
 

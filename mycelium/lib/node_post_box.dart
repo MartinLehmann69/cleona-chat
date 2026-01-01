@@ -16,6 +16,7 @@ import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
 export 'package:mycelium/node_collect_queue.dart' show NodeCompartment;
 export 'package:mycelium/node_deposit.dart';
 import 'package:mycelium/node_first_contact_box.dart';
+import 'package:mycelium/node_receipt.dart' show NodeReceipt;
 import 'package:mycelium/own_line.dart' show ownLineAsk; // D-37, §14.7
 import 'package:mycelium/identity.dart' show Identity;
 import 'package:mycelium/parked.dart'; // D-40
@@ -102,7 +103,10 @@ extension NodePostBox on Node {
       report('collect: no neighbour known where something could be resting');
       return Future.value(0);
     }
-    if (edge) postBoxDeposit.collectEdge(); // §11.8: one use per holder and edge
+    if (edge) {
+      postBoxDeposit.collectEdge(); // §11.8: one use per holder and edge
+      receiptEdge(); // §9.2: a copy from now on is answered again
+    }
     // A copy: an identity that is deregistered meanwhile must not throw
     // the loop out of step. D-40: a held identity searches only, no own post.
     final asking = [

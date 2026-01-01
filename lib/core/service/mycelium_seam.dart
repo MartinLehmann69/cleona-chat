@@ -285,6 +285,8 @@ MailboxDetails mailboxDetailsFor(CleonaService service) => historyStoreGive(
       onJoinCompleted: service.takeMyceliumJoinCompleted,
       // §4.5.4 (E-A9): a fork mycelium's acceptance found — shown.
       onFork: (held, _) => service.takeMyceliumFork(identifierFrom(held)),
+      // §9.3, D-86: what an older version left in the history as a message.
+      ephemeralOld: CleonaService.isEphemeralFrame,
     ),
     DeliveryHistoryStore(() => service.store,
         log: CLogger.get('DeliveryHistory', profileDir: service.profileDir)));

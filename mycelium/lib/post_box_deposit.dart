@@ -182,13 +182,15 @@ class PostBoxDeposit {
   /// (a probe without flow) gives no end, and such a run ends only with the
   /// receipts. [reserve]: the candidates after [withWhom], in their order —
   /// a holder that ends without a receipt gives way to the next of them
-  /// while the run is not placed (§8.2, `post_box_place.dart`).
+  /// while the run is not placed (§8.2, `post_box_place.dart`). [sending]: a
+  /// message's [sendingSeed]; its deposit id hangs on this, not on the bytes.
   Future<(bool done, int acknowledged)> deposit({
     required Uint8List content,
     required Uint8List underValue,
     required List<Neighbour> withWhom,
     List<Neighbour> reserve = const [],
     bool Function()? ended,
+    Uint8List? sending,
   }) {
     if (underValue.length != kValueLength) {
       throw ArgumentError(
@@ -199,7 +201,8 @@ class PostBoxDeposit {
         underValue: underValue,
         withWhom: withWhom,
         reserve: reserve,
-        ended: ended);
+        ended: ended,
+        sending: sending);
   }
 
   /// Asks [withWhom] for everything under the values of [ask] (1–7; for

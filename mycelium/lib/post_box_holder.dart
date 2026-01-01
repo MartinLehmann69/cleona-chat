@@ -335,15 +335,16 @@ class PostBoxHolder {
           .toBytes(), from);
       return;
     }
-    final count = list.length; // <= kAtMostProValue (100), fits in 1 B
-    // Copy: a sent 0x33 can trigger a delete receipt (0x31)
-    // that mutates EXACTLY THIS list in the meantime.
-    for (final e in List.of(list)) {
+    // Copy: a 0x31 mutates the list. Gone is not handed out (S411); announced: came + left.
+    final copy = List.of(list);
+    bool held(_Entry x) => _idToValue.containsKey(_hex(x.id));
+    var came = 0;
+    for (final e in copy.where(held)) {
       final p = BytesBuilder()
         ..addByte(kinds.kHereItIs)
         ..add(value)
         ..add(e.id)
-        ..addByte(count)
+        ..addByte(came++ + copy.skipWhile((x) => !identical(x, e)).where(held).length)
         ..add(request)
         ..add(e.content);
       final sending = send(p.toBytes(), from);

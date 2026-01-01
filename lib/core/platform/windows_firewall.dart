@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cleona/core/config/network_channel.dart';
+
 /// The inbound firewall rule of the Windows daemon (v4_2 §22.x "Windows
 /// Desktop", owner 14.10.2026 A).
 ///
@@ -183,10 +185,14 @@ abstract final class WindowsFirewall {
     // setting a rule. /S makes the stripping of the outer pair explicit.
     final h = helper.replaceAll("'", "''");
     final e = exe.replaceAll("'", "''");
+    // The rule's name carries the channel (§26.2); the rule itself names the
+    // program, which already differs.
+    final channelArgument =
+        activeNetworkChannel == NetworkChannel.beta ? ' beta' : '';
     return '\$ErrorActionPreference = \'Stop\'\n'
         'try {\n'
         '  \$p = Start-Process -FilePath \'cmd.exe\' '
-        '-ArgumentList \'/d /s /c ""$h" allow "$e""\' '
+        '-ArgumentList \'/d /s /c ""$h" allow "$e"$channelArgument"\' '
         '-Verb RunAs -WindowStyle Hidden -Wait -PassThru\n'
         '  exit \$p.ExitCode\n'
         '} catch {\n'

@@ -13,7 +13,7 @@ Usage:
 """
 import socket, json, sys, os, urllib.parse, argparse
 
-SOCKET_PATH = os.path.expanduser('~/.cleona/cleona.sock')
+SOCKET_PATH = os.path.expanduser('~/.cleona-beta/cleona.sock')
 
 req_counter = 0
 

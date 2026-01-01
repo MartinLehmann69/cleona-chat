@@ -70,14 +70,15 @@ class Readiness {
   /// S394 diagnosis: which address confirmed a neighbour, and when.
   void Function(String)? report;
 
-  /// `adresse:port` of the neighbours confirmed in this run.
-  final Set<String> _responding = {};
-
-  /// `adresse:port` -> node identifier (hex) — only for neighbours in the list.
+  /// `address:port` -> node identifier (hex) — only for neighbours in the list.
   final Map<String, String> _node = {};
 
   /// Who learns of changes. One; whoever needs several distributes.
   OnReadiness? onChange;
+
+  /// An address answered for the first time since [reset] and has named no
+  /// node identifier yet (§11.8.2): `who_question.dart` asks it.
+  void Function(InternetAddress a, int port)? onFirstAnswer;
 
   Readiness(this._neighbourhood) {
     // The ONE yardstick for "answered in this run" (§22.7.1) lives here, so
@@ -85,31 +86,38 @@ class Readiness {
     // when a removal empties the fixed seat (W7, `_moveUp`). A remembered
     // stamp must not count there — it would fill the seat with a node that
     // never answered and block the next real one from taking it.
-    _neighbourhood.respondingNow =
-        (n) => n.addresses.any((a) => _responding.contains(a.key));
+    _neighbourhood.respondingNow = (n) => n.addresses.any((a) => a.answering);
     _neighbourhood.observe(
       // An address that leaves the list no longer responds (§22.7.1, „the
       // neighbour leaves the list of 32"; G5) — [gone] carries only the
       // addresses that left.
       removed: (gone) {
         final keys = [for (final a in gone.addresses) a.key];
-        _route(keys);
         keys.forEach(_node.remove);
         keys.forEach(_silent.remove);
+        keys.forEach(_said.remove);
+        _change(() {});
       },
       onConfirmed: (n) {
         final k = n.first.key; // [n] carries only the confirmed address
         _silent.remove(k); // it answers again: counter-evidence again
-        if (_responding.contains(k)) return;
-        report?.call('responding: $k confirmed');
-        _change(() => _responding.add(k));
+        final first = _said.add(k);
+        if (first) report?.call('responding: $k confirmed');
+        _change(() {});
+        if (first && !_node.containsKey(k)) onFirstAnswer?.call(n.address, n.port);
       },
       joined: () => _change(() {}), // two entries became ONE node
     );
   }
 
-  /// How many different NODES answer (B1, V4).
-  int get respondingCount => _responding.map(_who).toSet().length;
+  /// Addresses already reported as responding since [reset] (log only).
+  final Set<String> _said = {};
+
+  /// How many different NODES answer (B1, V4). Read from the list, the ONE
+  /// source: whatever counts stands in a neighbour (S411).
+  int get respondingCount => _neighbourhood.all
+      .where((n) => n.addresses.any((a) => a.answering))
+      .length;
 
   /// The count last reported — [_change] compares against it, so that a
   /// change made inside the neighbourhood (a join) is reported as well.
@@ -125,8 +133,7 @@ class Readiness {
   bool answeredRecently(Neighbour n,
       {Duration within = kLinkSilence, DateTime? now}) {
     final since = (now ?? DateTime.now()).subtract(within);
-    return n.addresses.any(
-        (a) => _responding.contains(a.key) && !a.last.isBefore(since));
+    return n.addresses.any((a) => a.answering && !a.last.isBefore(since));
   }
 
   /// The address of [n] that answered in THIS run, newest stamp first;
@@ -137,7 +144,7 @@ class Readiness {
   /// private one answered — an invitation waited nine hours.
   NeighbourAddress? answeringAddress(Neighbour n) {
     for (final a in n.addresses) {
-      if (_responding.contains(a.key)) return a;
+      if (a.answering) return a;
     }
     return null;
   }
@@ -145,16 +152,22 @@ class Readiness {
   /// [a]:[port] itself if it answered in this run or belongs to no known
   /// neighbour; otherwise the answering address of its node, if one exists.
   (InternetAddress, int) answeringFor(InternetAddress a, int port) {
-    if (_responding.contains('${a.address}:$port')) return (a, port);
     final n = _neighbourhood.holding(a, port);
     final live = n == null ? null : answeringAddress(n);
-    return live == null ? (a, port) : (live.address, live.port);
+    if (live == null || n!.addresses.any((x) => x.isAt(a, port) && x.answering)) {
+      return (a, port);
+    }
+    return (live.address, live.port);
   }
 
-  /// The responding neighbours as `adresse:port` — for diagnostics
+  /// The responding neighbours as `address:port` — for diagnostics
   /// (§22.7.4). Read only. A node under two addresses stands here
   /// twice; in [respondingCount] it is counted once.
-  Set<String> get responding => Set.unmodifiable(_responding);
+  Set<String> get responding => Set.unmodifiable({
+        for (final n in _neighbourhood.all)
+          for (final a in n.addresses)
+            if (a.answering) a.key
+      });
 
   ReadinessState get state {
     final n = respondingCount;
@@ -207,10 +220,13 @@ class Readiness {
     if (before == identifier) return;
     _change(() {
       if (before != null) {
-        _responding.removeAll([
+        final old = [
           for (final e in _node.entries)
             if (e.value == before && e.key != s) e.key
-        ]);
+        ];
+        old.forEach(_node.remove);
+        _said.removeAll(old);
+        _neighbourhood.withdraw(old);
       }
       _node[s] = identifier;
     });
@@ -246,6 +262,9 @@ class Readiness {
   bool knows(InternetAddress from, int port) =>
       _node.containsKey('${from.address}:$port');
 
+  /// The node identifier `address:port` [key] named in an answer, if any.
+  String? nodeNamedBy(String key) => _node[key];
+
   /// The node [address] belongs to: the smallest key of the ONE neighbour
   /// holding it — the list joins the addresses of a node, whether it named
   /// them as its own or named the same node identifier in answers
@@ -263,13 +282,10 @@ class Readiness {
   /// address of the other address type (IPv4/IPv6) — a dual-stack neighbour
   /// who can forward between IPv4 and IPv6 (§8.1). By node ([_who]).
   bool doubleStack(InternetAddress from, int port) {
-    final k = _who('${from.address}:$port');
-    final v6 = from.type == InternetAddressType.IPv6;
-    return _responding.any((s) => _isV6(s) != v6 && _who(s) == k);
+    final n = _neighbourhood.holding(from, port);
+    return n != null &&
+        n.addresses.any((a) => a.answering && a.address.type != from.type);
   }
-
-  static bool _isV6(String key) =>
-      key.lastIndexOf(':') != key.indexOf(':');
 
   /// [a]:[port] has failed (§11.3a): a packet that expected an answer and
   /// its repeats all stayed without one (`silence.dart` — the ONE place that
@@ -300,17 +316,17 @@ class Readiness {
     final node = _who(k);
     final silent = {...silentNow, ..._silent};
     final way = _way(a);
-    final counterProof = _responding
-        .where((s) => !silent.contains(s) && _wayOf(s) == way)
-        .map(_who)
-        .any((x) => x != node);
+    final counterProof = _neighbourhood.all.any((n) => n.addresses.any((x) =>
+        x.answering &&
+        !silent.contains(x.key) &&
+        _way(x.address) == way &&
+        _who(x.key) != node));
     if (!counterProof) {
       // Not declared failed — but silent all the same until it answers
       // again: no counter-evidence for the next one to fall silent.
       if (_neighbourhood.holding(a, p) != null) _silent.add(k);
       return false;
     }
-    _route([k]);
     if (_neighbourhood.useFailed(a, p)) {
       dropped.dropped(a, p, DateTime.now()); // S406: stays out (§11.8)
     }
@@ -322,17 +338,6 @@ class Readiness {
   /// the internet, IPv4 nothing about IPv6.
   static (bool, bool) _way(InternetAddress a) =>
       (a.type == InternetAddressType.IPv6, withinOwnSegment(a));
-
-  /// [_way] of the responding `address:port` [s] — the address as the list
-  /// holds it; `null` (no way) if the list no longer holds it.
-  (bool, bool)? _wayOf(String s) {
-    for (final n in _neighbourhood.all) {
-      for (final x in n.addresses) {
-        if (x.key == s) return _way(x.address);
-      }
-    }
-    return null;
-  }
 
   /// Whether [a]:[p] is flagged — removed, or silent without counter-
   /// evidence (§11.8.5). A packet from it under the shell triggers the one
@@ -349,6 +354,15 @@ class Readiness {
     _silent.remove(k);
     report?.call('responding: $k answered its path request — returns (§11.8.6)');
     _neighbourhood.confirm(a, p, DateTime.now());
+  }
+
+  /// [f] changes the count several times; reported once, at its end (a move).
+  void together(void Function() f) {
+    final tell = onChange;
+    onChange = null;
+    f();
+    onChange = tell;
+    _change(() {});
   }
 
   /// The addresses removed here, and when (`neighbour_dropped.dart`, S406):
@@ -371,12 +385,9 @@ class Readiness {
     resets++;
     dropped.clear(); // §11.8: after a network change remembered ones are retried
     _silent.clear();
-    _change(_responding.clear);
-    _neighbourhood.runLimit();
+    _said.clear();
+    _change(_neighbourhood.runLimit);
   }
-
-  void _route(List<String> key) =>
-      _change(() => _responding.removeAll(key));
 
   void _change(void Function() f) {
     f();

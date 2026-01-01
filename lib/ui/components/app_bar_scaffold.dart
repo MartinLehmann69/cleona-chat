@@ -245,8 +245,7 @@ class _GlobalUpdateBanner extends StatelessWidget {
     // not for a known manifest, not during collecting. Until
     // S387 it showed "Update available" + [Download] and on `ready`
     // "being installed", because `ready` back then already was the installation.
-    if (manifest == null ||
-        appState.service?.reducedMode == true ||
+    if (appState.service?.reducedMode == true ||
         !UpdateOffer.bannerVisible(
           state: state,
           dismissed: appState.updateBannerDismissed,
@@ -258,6 +257,11 @@ class _GlobalUpdateBanner extends StatelessWidget {
     final locale = AppLocale.read(context);
     final needsPermission = appState.updateNeedsInstallPermission;
     final cs = Theme.of(context).colorScheme;
+
+    if (state == BinaryUpdateState.failed && !pending) {
+      return _failedHint(appState, locale, cs);
+    }
+    if (manifest == null) return const SizedBox.shrink();
 
     if (needsPermission && state == BinaryUpdateState.ready) {
       return _permissionHint(appState, locale, cs);
@@ -272,12 +276,13 @@ class _GlobalUpdateBanner extends StatelessWidget {
           children: [
             Expanded(child: _content(pending, manifest, locale, cs)),
             if (!pending) ...[
-              IconButton(
-                icon: Icon(Icons.system_update_alt,
-                    size: 20, color: cs.onPrimaryContainer),
-                tooltip: _readyLabel(locale),
-                visualDensity: VisualDensity.compact,
+              TextButton(
                 onPressed: appState.applyUpdate,
+                child: Text(locale.get('update_install_button'),
+                    style: TextStyle(
+                        color: cs.onPrimaryContainer,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold)),
               ),
               IconButton(
                 icon: Icon(Icons.close, size: 18, color: cs.onPrimaryContainer),
@@ -296,6 +301,28 @@ class _GlobalUpdateBanner extends StatelessWidget {
   String _readyLabel(AppLocale locale) => Platform.isAndroid
       ? locale.get('update_ready_install')
       : locale.get('update_ready_restart');
+
+  /// The update failed: one line, closed per session. The reason is in the log.
+  Widget _failedHint(
+      CleonaAppState appState, AppLocale locale, ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: cs.errorContainer,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(locale.get('update_failed'),
+                style: TextStyle(color: cs.onErrorContainer, fontSize: 13)),
+          ),
+          IconButton(
+            icon: Icon(Icons.close, size: 18, color: cs.onErrorContainer),
+            visualDensity: VisualDensity.compact,
+            onPressed: appState.dismissUpdateBanner,
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _permissionHint(
       CleonaAppState appState, AppLocale locale, ColorScheme cs) {

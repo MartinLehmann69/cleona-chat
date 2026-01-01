@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
@@ -955,6 +956,9 @@ class GroupCallInfo {
 }
 
 /// UI-facing message representation.
+String? _rebasedFilePath(String? path) =>
+    path == null ? null : AppPaths.rebaseProfilePath(path);
+
 class UiMessage {
   String id;
   final String conversationId;
@@ -1424,7 +1428,7 @@ class UiMessage {
         failureDetail: json['failureDetail'] as String?,
         afterFile: json['afterFile'] as String?,
         postId: json['postId'] as String?,
-        filePath: json['filePath'] as String?,
+        filePath: _rebasedFilePath(json['filePath'] as String?),
         editedAt: json['editedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['editedAt'] as int)
             : null,
@@ -2504,55 +2508,6 @@ class JuryRequest {
 
 /// Jury vote result (matches JuryVote in moderation_config).
 enum JuryVoteResult { approve, reject, abstain }
-
-/// Peer information for UI/daemon display.
-class PeerSummary {
-  final String nodeIdHex;
-  final String address;
-  final int port;
-  final DateTime lastSeen;
-  /// All known addresses as "ip:port" strings (max 2: local + public).
-  final List<String> allAddresses;
-  /// Long-term address stability — drives ContactSeed peer selection.
-  final int stabilityTierIndex;
-  /// S119 B: true = confirmed bidirectional UDP contact (green dot);
-  /// false = reachable only via an alive relay route (amber dot).
-  final bool isDirect;
-
-  PeerSummary({
-    required this.nodeIdHex,
-    required this.address,
-    required this.port,
-    required this.lastSeen,
-    this.allAddresses = const [],
-    this.stabilityTierIndex = 2,
-    this.isDirect = true,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'nodeIdHex': nodeIdHex,
-        'address': address,
-        'port': port,
-        'lastSeen': lastSeen.millisecondsSinceEpoch,
-        'allAddresses': allAddresses,
-        if (stabilityTierIndex != 2) 'stabilityTierIndex': stabilityTierIndex,
-        'isDirect': isDirect,
-      };
-
-  static PeerSummary fromJson(Map<String, dynamic> json) => PeerSummary(
-        nodeIdHex: json['nodeIdHex'] as String,
-        address: json['address'] as String? ?? '',
-        port: json['port'] as int? ?? 0,
-        lastSeen: DateTime.fromMillisecondsSinceEpoch(
-            json['lastSeen'] as int? ?? 0),
-        allAddresses: (json['allAddresses'] as List<dynamic>?)
-                ?.map((e) => e as String)
-                .toList() ??
-            const [],
-        stabilityTierIndex: json['stabilityTierIndex'] as int? ?? 2,
-        isDirect: json['isDirect'] as bool? ?? true,
-      );
-}
 
 /// Contact information (public, used across IPC boundary).
 /// One authorized device of a CONTACT, as carried by the §14.5 path-2

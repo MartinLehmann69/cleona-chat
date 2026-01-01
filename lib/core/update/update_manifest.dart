@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
@@ -502,8 +503,32 @@ class UpdateChecker {
   // hence no per-identity profileDir available). The fallback uses
   // AppPaths.dataDir instead of a profileDir-less CLogger, otherwise the
   // startup branch (manifest signature check) is invisible in the field.
-  UpdateChecker({CLogger? log})
-      : _log = log ?? CLogger.get('UpdateChecker', profileDir: AppPaths.dataDir);
+  UpdateChecker({CLogger? log, NetworkChannel? channel})
+      : _log = log ?? CLogger.get('UpdateChecker', profileDir: AppPaths.dataDir),
+        _channel = channel ?? activeNetworkChannel;
+
+  /// The channel a manifest has to belong to ([urlFitsChannel]).
+  final NetworkChannel _channel;
+
+  /// Whether the signed [url] belongs to [channel] (F7).
+  ///
+  /// The signed payload has no channel field; the separation so far lay only
+  /// in where the manifest is held (`update_manifest_compartment.dart`). The
+  /// release tag is signed as part of the URL
+  /// (`.../releases/download/<tag>/`): a beta node requires `-beta` in it, a
+  /// live node its absence. Without a format change, so 4.2.3 reads on as
+  /// before.
+  static bool urlFitsChannel(String url, NetworkChannel channel) {
+    final segments = (Uri.tryParse(url)?.pathSegments ?? const <String>[])
+        .where((s) => s.isNotEmpty)
+        .toList();
+    final at = segments.indexOf('download');
+    final tag = at >= 0 && at + 1 < segments.length
+        ? segments[at + 1]
+        : (segments.isEmpty ? '' : segments.last);
+    final beta = tag.contains('-beta');
+    return channel == NetworkChannel.beta ? beta : !beta;
+  }
 
   /// Version and sequence number of the manifests already reported at INFO
   /// in this process ([verifyManifest]); oldest first, bounded — one channel
@@ -537,6 +562,12 @@ class UpdateChecker {
       if (!manifest.verify(pubKey, pubKeyPq)) {
         _log.warn('Update manifest hybrid signature verification FAILED '
             '(Ed25519 and/or ML-DSA-65)');
+        return null;
+      }
+
+      if (!urlFitsChannel(manifest.downloadUrl, _channel)) {
+        _log.warn('Update manifest refused: ${manifest.downloadUrl} does not '
+            'belong to channel ${_channel.name}');
         return null;
       }
 

@@ -52,6 +52,10 @@ class MailboxDetails {
   /// any case; this callback shows it (`mailbox_book.dart`).
   final void Function(Address held, Address claimed)? onFork;
 
+  /// Whether the content of an open own history entry is an ephemeral
+  /// message of an older 4.2 version — see [MailboxSignal.ephemeralForget].
+  final bool Function(Uint8List content)? ephemeralOld;
+
   const MailboxDetails(
     this.directory,
     this.key, {
@@ -64,6 +68,7 @@ class MailboxDetails {
     this.onReadMark,
     this.onJoinCompleted,
     this.onFork,
+    this.ephemeralOld,
   });
 }
 

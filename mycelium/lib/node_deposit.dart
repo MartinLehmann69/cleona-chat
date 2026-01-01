@@ -79,7 +79,8 @@ extension NodeDeposit on Node {
   /// receipts suffice). `null`: no day pubkey known — step 4
   /// is dropped for this sending, reported. Does not throw.
   Future<(bool done, int acknowledged)>? depositFor(
-      Address recipient, Uint8List content, {bool Function()? ended}) {
+      Address recipient, Uint8List content,
+      {bool Function()? ended, Uint8List? sending}) {
     final value = depositValueFor(recipient);
     if (value == null) {
       report('Post box step dropped: no daily pubkey for '
@@ -90,7 +91,7 @@ extension NodeDeposit on Node {
     // — never the recipient's own device (OP-19 part B).
     final f = _neighboursFrom[this]?.call(recipient);
     return depositNamed(content, value, f?.named ?? const [],
-        at: f?.at ?? const [], ended: ended);
+        at: f?.at ?? const [], ended: ended, sending: sending);
   }
 
   /// [depositFor] for step 4 of the ladder by the identifier. A line join's
@@ -99,13 +100,14 @@ extension NodeDeposit on Node {
   /// (§8.2: the second `0x31`) — the sender remembers it per message
   /// (`mailbox_outbound.dart`, §9.3); `null` if nothing was left.
   Future<bool>? stepFourForIdentifier(Uint8List identifier, Uint8List content,
-      {bool Function()? ended}) {
+      {bool Function()? ended, Uint8List? sending}) {
     final to = _contactFrom[this]?.call(identifier);
     if (to == null) {
       report('Post box step dropped: no contact for ${_short(identifier)}');
       return null;
     }
-    return depositFor(to, content, ended: ended)?.then((r) => r.$1);
+    return depositFor(to, content, ended: ended, sending: sending)
+        ?.then((r) => r.$1);
   }
 
   /// Deposits [content] under the 16-B value [underValue] (day value, manifest
@@ -114,12 +116,14 @@ extension NodeDeposit on Node {
   /// reported. [ended]: see `PostBoxDeposit.deposit`. Without [withWhom]
   /// the own neighbours by rank are the candidates: the first three are
   /// addressed, the others stand in for a holder that fails (§8.2). With
-  /// [withWhom], [reserve] names the candidates after them.
+  /// [withWhom], [reserve] names the candidates after them. [sending]: see
+  /// `PostBoxDeposit.deposit`.
   Future<(bool done, int acknowledged)> deposit(Uint8List content,
       Uint8List underValue,
       {List<Neighbour>? withWhom,
       List<Neighbour> reserve = const [],
-      bool Function()? ended}) {
+      bool Function()? ended,
+      Uint8List? sending}) {
     if (underValue.length != kValueLength) {
       report('deposit: ${underValue.length} B is not a daily value '
           '($kValueLength B) — not deposited');
@@ -138,7 +142,8 @@ extension NodeDeposit on Node {
             underValue: underValue,
             withWhom: to,
             reserve: rest,
-            ended: ended)
+            ended: ended,
+            sending: sending)
         .then((r) {
       report('deposit under ${_short(underValue)}: '
           '${r.$1 ? "placed" : "NOT placed"}, ${r.$2} receipt(s)');

@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/log/redacted_console.dart';
 import 'package:cleona/core/service/app_version.dart' show kAppLine;
@@ -704,6 +705,10 @@ class FirstStartWipe {
       file.writeAsStringSync(jsonEncode(<String, Object>{
         'format': markerFormat,
         'createdAt': DateTime.now().toIso8601String(),
+        // Tells a live profile in `.cleona` from a beta profile of a version
+        // before §21.4, which moves (`ProfileMove`). Older versions only ask
+        // whether the file exists.
+        'channel': activeNetworkChannel.name,
       }));
     } catch (e) {
       RedactedConsole.err('[FirstStartWipe] could not write marker: $e');

@@ -11,6 +11,7 @@ import 'dart:typed_data';
 
 import 'package:mycelium/invitation.dart' as inv;
 import 'package:mycelium/first_contact.dart';
+import 'package:mycelium/first_contact_direct_copy.dart';
 import 'package:mycelium/first_contact_pair.dart';
 import 'package:mycelium/first_contact_plea.dart';
 import 'package:mycelium/card.dart';
@@ -103,6 +104,9 @@ class Invitation {
   /// Whom this invitation has accepted — to assign a receipt (4).
   final List<Address> _accepted = [];
 
+  /// What a request's direct copy changes after another copy came first (§15.5).
+  final DirectCopy _direct = DirectCopy();
+
   bool get done => _done;
 
   /// All admissible acceptances are given out (single-use: one, open: `n`).
@@ -185,7 +189,7 @@ class Invitation {
     if (packet.isEmpty) throw FirstContactError('empty packet');
     switch (PacketKind.fromCode(packet[0])) {
       case PacketKind.bundlePlea:
-        _bundlePleaCame(packet, from, forwarded);
+        bundlePleaCame(packet, from, forwarded, me, send, report);
       case PacketKind.request:
         _requestCame(packet, from, collected);
       case PacketKind.receipt:
@@ -197,22 +201,6 @@ class Invitation {
       default:
         throw FirstContactError('unexpected kind ${packet[0]}');
     }
-  }
-
-  /// Packet (1): hand out the own bundle. It is public —
-  /// nothing is given away here that is not public anyway.
-  /// §15.5 "The way back for the bundle": directly when the request came
-  /// directly; under the reply code through the named neighbour when it came
-  /// through one — [from] is then the forwarder's address (S394-7).
-  void _bundlePleaCame(Uint8List packet, CardAddress from, bool forwarded) {
-    final r = bundlePleaRead(packet);
-    final bundle = bundleAnswerBuild(r.randomValue, me);
-    final back = r.replyCode != null && r.neighbour != null;
-    report?.call(!forwarded ? 'Bundle handed out directly' : back
-        ? 'Bundle handed out under the reply code'
-        : 'Bundle request through a neighbour without a way back — not answerable');
-    if (!forwarded) send(bundle, from);
-    if (forwarded && back) pairHook[me]?.underCodeSend(r.replyCode!, r.neighbour!, bundle);
   }
 
   void _requestCame(Uint8List packet, CardAddress from, bool collected) {
@@ -230,7 +218,11 @@ class Invitation {
         null) {
       return;
     }
-    if (!_retryStore.fresh(h.randomValue, now)) return;
+    if (!_retryStore.fresh(h.randomValue, now)) {
+      // A repeat, never unsealed; its DIRECT copy still shows an address (S411).
+      if (!collected) _direct.repeatCame(h.randomValue, from, send, report);
+      return;
+    }
 
     // Step 4: only now unseal — with the invitation's own keys (a request
     // from a `cleona:2:` line, R-b) while its record holds them, else with
@@ -243,6 +235,8 @@ class Invitation {
             ? null
             : _tryUnseal(sealed, invitationPostBox(me, kem))) ??
         Envelope.unseal(envelope: sealed, recipient: me);
+    _direct.opened(h.randomValue, sender);
+
     // Expiry PLUS grace period, revocation, consumption (`inv.Invitation.check`).
     // Revoked/expired stay silent immediately (§15.3), consumed only after
     // the recontact.
@@ -340,7 +334,7 @@ class Invitation {
     if (yes) {
       if (count) _entry.acceptedThroughUser();
       _accepted.add(a.who);
-      onAccepted?.call(a.who, a.collected ? null : a.origin);
+      onAccepted?.call(a.who, a.collected ? _direct.originOf(a.who) : a.origin);
     }
     _answer(a, yes);
   }
@@ -350,7 +344,7 @@ class Invitation {
   /// answer takes step 3 under the reply code through the neighbour the
   /// request names, and step 4 under the requester's day value.
   void _answer(ContactRequest a, bool yes) {
-    final sender = a.who, from = a.collected ? null : a.origin;
+    final sender = a.who, from = a.collected ? _direct.originOf(sender) : a.origin;
     final h = pairHook[me];
     final Uint8List answer;
     if (!yes) {
@@ -392,6 +386,7 @@ class Invitation {
           ? (from == null ? null : send(answer, from))
           : ladder(answer, from, sender);
     }
+    if (from == null) _direct.answeredWithout(sender, answer); // its direct copy
     if (a.neighbour != null && a.answerCode != null) {
       h?.underCodeSend(a.answerCode!, a.neighbour!, answer);
     }

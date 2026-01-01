@@ -320,8 +320,7 @@ class Node {
         packet,
         receipt
             ? receiptTarget(three, destination, c, target.identifier)
-            : Target.outDueTo(three, lan: destination, neighbours: c?.neighbours ?? const [],
-                code: c?.code, identifier: target.identifier, signal: _signalNow),
+            : sendingTarget(three, destination, c, target, from, identifier, signal: _signalNow),
         answered: identifier != null || waits, local: hostsOther(target, from)); // §11.3a; §4.5.1
     if (identifier != null) {
       _shipments[hexFrom(identifier)] = s;
@@ -348,16 +347,17 @@ class Node {
   /// Sends [content] to a contact — raw bytes (`message.dart`). [destination] may be `null`:
   /// §8.2 needs no address of the recipient. [under]: the identifier of a message sent again (§9.3).
   /// [signal]: a call signal — its [Target.signal] keeps it off step 4 (§17.2).
+  /// [once]: an ephemeral message (§9.3): steps 1 and 3, nothing waits, nothing stays.
   Outbound send(Uint8List content, Address to, CardAddress? destination,
-      {Identity? forField, int? kind, Uint8List? under, bool signal = false}) {
+      {Identity? forField, int? kind, Uint8List? under, bool signal = false, bool once = false}) {
     final asValue = forField ?? main;
     final identifier = under ?? roll(8);
-    _targetNow = to; _identifierNow = identifier; _signalNow = signal;
+    _targetNow = to; _identifierNow = once ? null : identifier; _signalNow = signal || once;
     try {
-      final out = asValue.messages.ship(content, to, destination, identifier: identifier, kind: kind);
+      final out = asValue.messages.ship(content, to, destination, identifier: identifier, kind: kind, once: once);
       // Remember the own message (a pair notice, [kind], has no
       // author): without that `edit` does not know that it is the own one.
-      if (kind == null) asValue.author[hexFrom(identifier)] = (who: asValue.postBox.address, at: DateTime.now());
+      if (kind == null && !once) asValue.author[hexFrom(identifier)] = (who: asValue.postBox.address, at: DateTime.now());
       return out;
     } finally {
       _targetNow = null; _identifierNow = null; _signalNow = false;

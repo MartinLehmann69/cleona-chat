@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/dpapi_ffi.dart';
@@ -436,7 +437,7 @@ class _LinuxSecretToolKeyring extends KeyringService {
       // reachable, secret-tool returns quickly with exit 1 (not found). If no
       // daemon is running (no display session), it hangs or errors.
       final probe = await Process.run(
-        'secret-tool', ['lookup', 'application', 'cleona', 'type', '_probe'],
+        'secret-tool', ['lookup', 'application', kKeyringApplication, 'type', '_probe'],
       ).timeout(const Duration(seconds: 3));
       return probe.exitCode == 0 || probe.exitCode == 1;
     } catch (_) {
@@ -471,7 +472,7 @@ class _LinuxSecretToolKeyring extends KeyringService {
     try {
       final result = Process.runSync(
         'secret-tool',
-        ['lookup', 'application', 'cleona', 'type', name],
+        ['lookup', 'application', kKeyringApplication, 'type', name],
         stdoutEncoding: utf8,
       );
       if (result.exitCode != 0) return null;
@@ -488,7 +489,7 @@ class _LinuxSecretToolKeyring extends KeyringService {
   bool delete(String name) {
     try {
       final result = Process.runSync(
-        'secret-tool', ['clear', 'application', 'cleona', 'type', name],
+        'secret-tool', ['clear', 'application', kKeyringApplication, 'type', name],
       );
       return result.exitCode == 0;
     } catch (e) {
@@ -1425,7 +1426,8 @@ class _MacOsKeychainKeyring extends KeyringService {
   @override
   bool get isHardwareProtected => true;
 
-  String _service(String name) => 'cleona_$name';
+  String _service(String name) =>
+      '${kKeyringApplication.replaceAll('-', '_')}_$name';
 
   @override
   bool store(String name, Uint8List data) {

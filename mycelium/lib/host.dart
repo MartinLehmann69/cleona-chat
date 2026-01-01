@@ -30,6 +30,7 @@ import 'package:mycelium/node_post_box.dart';
 import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node_call.dart';
 import 'package:mycelium/node_helpers.dart' show shortFrom, interfacesRead;
+import 'package:mycelium/own_former.dart' show ownFormerNote;
 import 'package:mycelium/media.dart';
 import 'package:mycelium/host_media.dart';
 import 'package:mycelium/durable_node.dart' show DurableNode;
@@ -46,6 +47,7 @@ import 'package:mycelium/host_codes.dart';
 import 'package:mycelium/host_contact_seats.dart';
 import 'package:mycelium/host_memory.dart';
 import 'package:mycelium/host_network.dart';
+import 'package:mycelium/neighbour_hints.dart' show HostNewNeighbour;
 
 class Host {
   final Node node;
@@ -166,7 +168,7 @@ class Host {
               ref?.mailboxFor(to) == null ? false : null,
           // EDGE: a new neighbour can be the route to a contact
           // for whom something is resting — AND it can itself hold something.
-          onNewNeighbours: (a, p) => ref?._newNeighbour([(a, p)]),
+          onNewNeighbours: (a, p) => ref?.newNeighbour([(a, p)]),
         );
       } on SocketException catch (e) {
         // The remembered port is held by a foreign program. Only
@@ -190,10 +192,13 @@ class Host {
     w._relaySet();
     w._outside = OutsideSource(started,
         to: wg.outsideSourceOn, roundsStart: roundsStart, records: own,
-        neighbourRemember: w.neighbourRemember, report: report);
-    w.network = HostNetwork(started, w._outside, wg, w._newNeighbour,
+        neighbourRemember: (ip, port, {confirmedAt}) => w.neighbourRemember(
+            ip, port,
+            confirmedAt: confirmedAt, source: NeighbourSource.externalRecords),
+        report: report);
+    w.network = HostNetwork(started, w._outside, wg, w.newNeighbour,
         (l) => w.outsideRun = l, report);
-    w.network.invitationAddresses = () => [ // §11.8.3 source 3
+    w.network.hints.invitationAddresses = () => [ // §11.8.3 source 3
           for (final p in w._mailboxes.values)
             for (final k in p.contacts) ...[...k.cardsAddresses, ...k.neighbours],
         ];
@@ -217,7 +222,7 @@ class Host {
     // Source 4 when the call series is through (§11.8) — it waits for no holder.
     w.outsideRun = w._outside.afterSources(w.node.callSeriesDone);
     w.network.staleTry(); // §11.8: source 1, once per edge
-    w.network.invitationTry(); // §11.8.2 start: source 3 as well
+    w.network.hints.invitationTry(); // §11.8.2 start: source 3 as well
     return w;
   }
 
@@ -273,10 +278,11 @@ class Host {
   /// Enters a neighbour that does not come from the call — invitation data on
   /// joining (§11.8 source 3, always), an external record (source 4, with
   /// [confirmedAt], S406 `neighbourAdd`). A new one is the edge of the call.
-  void neighbourRemember(List<int> ip, int port, {DateTime? confirmedAt}) {
-    final a = InternetAddress.fromRawAddress(Uint8List.fromList(ip));
-    if (neighbourAdd(node, ip, port, confirmedAt: confirmedAt)) _newNeighbour([(a, port)]);
-  }
+  void neighbourRemember(List<int> ip, int port,
+          {DateTime? confirmedAt,
+          NeighbourSource source = NeighbourSource.invitation}) =>
+      network.hints
+          .remember(ip, port, confirmedAt: confirmedAt, source: source);
 
   /// Remembers the relay list of a READ card (§11.9) — restart-proof,
   /// saved immediately, and from now on in the own card behind the
@@ -307,8 +313,7 @@ class Host {
 
   /// EDGE network change (§11.8, §8.2, §22.7.1) — called from outside when
   /// the platform reports a different connection, a new address or the
-  /// return from sleep. mycelium does not detect this by itself;
-  /// that would only be possible with a clock.
+  /// return from sleep; mycelium alone would need a clock for that.
   ///
   /// All evidence expires IMMEDIATELY (state `searching`), the interfaces
   /// are read anew, then ONE call series and ONE query of the remembered
@@ -316,6 +321,7 @@ class Host {
   /// again (§9.3, `mailbox_edge.dart`). None of it repeats, and the future
   /// does not wait for a holder (§8.2).
   Future<void> networkChanged() async {
+    ownFormerNote(node); // before the interfaces are read anew
     node.readiness.reset();
     for (final p in List.of(_mailboxes.values)) {
       p.atEdge(); // §9.3, §8.2 edge network change (S403 finding 2)
@@ -338,19 +344,6 @@ class Host {
       return;
     }
     p.inboundAccept(e);
-  }
-
-  void _newNeighbour(List<(InternetAddress, int)> fresh) {
-    // Remembering happens IMMEDIATELY, not only on stopping: a crash in between
-    // would otherwise cost exactly the source that makes the next start fast.
-    network.save();
-    for (final p in List.of(_mailboxes.values)) {
-      p.atEdge(); // §9.3, §8.2 edge new neighbour (W-2)
-    }
-    unawaited(node.collectFrom(fresh)); // §8.2: the new neighbour alone
-    // Triggered AFTER the own questions: whoever asks here (the manifest
-    // compartment, S388) follows them at a holder both ask.
-    onNewNeighbours?.call();
   }
 
   /// A find of the search call (call D): the identity [identifier] is reachable under [where].

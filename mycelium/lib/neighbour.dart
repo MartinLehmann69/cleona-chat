@@ -45,6 +45,9 @@ import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
 /// stamp gives way.
 const int kAddressesPerNeighbour = 4;
 
+/// Smallest interval between two refill rounds (§11.8: „at most one per minute").
+const Duration kRefillInterval = Duration(minutes: 1);
+
 /// The stamp of an address that has never been confirmed. In local time
 /// like every stamp read from memory — otherwise it would no longer be
 /// `==` to itself after the restart.
@@ -58,7 +61,12 @@ class NeighbourAddress {
   /// The confirmation stamp (`Neighbourhood.confirm`), or [kUnconfirmed].
   final DateTime last;
 
-  NeighbourAddress(this.address, this.port, this.last) {
+  /// It answered since this start or the last network change (§11.8.1) —
+  /// THE source of "responding" (`readiness.dart`). Not a comparison against
+  /// the clock: a clock set back would hide a real answer. Never on disk.
+  final bool answering;
+
+  NeighbourAddress(this.address, this.port, this.last, {this.answering = false}) {
     if (port < 1 || port > 0xFFFF) {
       throw ArgumentError('Port must be between 1 and 65535, was $port — '
           'port 0 means "not bound" and is not an address');
@@ -68,6 +76,10 @@ class NeighbourAddress {
           'was ${address.rawAddress.length} B');
     }
   }
+
+  /// The same address with its stamp, not counting until its next answer.
+  NeighbourAddress get asleep =>
+      answering ? NeighbourAddress(address, port, last) : this;
 
   /// `address:port`.
   String get key => '${address.address}:$port';
@@ -125,7 +137,7 @@ class Neighbour {
       int? id})
       : id = id ?? _next++,
         addresses = List.unmodifiable(_ordered(addresses)),
-        names = List.unmodifiable(_ordered(names)) {
+        names = List.unmodifiable(_ordered([for (final a in names) a.asleep])) {
     if (this.addresses.isEmpty) {
       throw ArgumentError('a neighbour has at least one address');
     }

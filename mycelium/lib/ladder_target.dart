@@ -53,6 +53,11 @@ class Target {
   /// a contact's signal as for one over a group pair (§4.3).
   final bool signal;
 
+  /// A message's [sendingSeed] (`post_box_proof_of_work.dart`): step 4 forms
+  /// its deposit id from this instead of the bytes, which are sealed anew at
+  /// every sending (§8.2, §9.3). `null`: the id hangs on the bytes.
+  final Uint8List? sending;
+
   /// Whether step 4 applies: a post box for a recipient who is off, never
   /// for a signal ([signal]) or a proven-reachable answer
   /// ([postBoxApplicable]).
@@ -76,7 +81,7 @@ class Target {
 
   const Target({this.lan, this.neighbour, this.code, this.identifier,
       this.postBoxApplicable = true, this.neighbours = const [], this.boxValue, this.public,
-      this.recipientOwn = const [], this.signal = false});
+      this.recipientOwn = const [], this.signal = false, this.sending});
 
   /// §7.2: "A send has no way when the recipient holds no address at all —
   /// none of their own, neither from the card nor observed, and no neighbour
@@ -104,7 +109,8 @@ class Target {
           bool postBoxApplicable = true,
           Uint8List? boxValue,
           List<CardAddress> recipientOwn = const [],
-          bool signal = false}) =>
+          bool signal = false,
+          Uint8List? sending}) =>
       Target(
         lan: lan ?? w?.lan,
         neighbour: neighbours.firstOrNull ?? neighbour ?? w?.neighbour,
@@ -116,6 +122,7 @@ class Target {
         public: w?.public,
         recipientOwn: recipientOwn,
         signal: signal,
+        sending: sending,
       );
 
   /// No step except the post box carries.

@@ -23,10 +23,11 @@
 //   `LinkProperties` / `sysctl` in native code); there the device captures
 //   the gateway as null and compares the subnet alone — it captures only
 //   what it can read, and compares the same way.
-// * SSID: Linux (nmcli, iwgetid) and Windows (netsh). macOS, Android and iOS
+// * SSID: Linux (nmcli, iw, iwgetid) and Windows (netsh). macOS, Android and iOS
 //   hand the name out only against a location permission; there the SSID
 //   list is neither offered nor applied.
 
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:cleona/core/platform/process_runner.dart';
@@ -124,15 +125,65 @@ String? parseWindowsDefaultGateway(String out) =>
         .firstMatch(out)
         ?.group(1);
 
-/// `nmcli -t -f active,ssid dev wifi` → `yes:HomeNet`
+/// `nmcli -t -f active,ssid dev wifi` → `yes:HomeNet`.
+///
+/// In terse tabular mode nmcli escapes `:` and `\` with `\` (nmcli(1),
+/// `--escape`, "If omitted, default is yes"; measured 02.11.2026:
+/// `nmcli -t -f NAME,TIMESTAMP-REAL con` → `… 16\:51\:13 CET`). The list it
+/// is compared with holds the name as the user typed it, so the escape is
+/// taken off here.
 String? parseNmcliSsid(String out) {
   for (final line in out.split('\n')) {
     if (line.startsWith('yes:')) {
-      final s = line.substring(4).trim();
+      final s = line
+          .substring(4)
+          .trim()
+          .replaceAllMapped(RegExp(r'\\(.)'), (m) => m.group(1)!);
       if (s.isNotEmpty) return s;
     }
   }
   return null;
+}
+
+/// `iw dev` → the name of the first connected station interface, where
+/// nmcli gives none (no NetworkManager). Ubuntu 26.04 has no `iwgetid` any
+/// more, `iw` asks the kernel and needs no running network service.
+///
+/// Output as printed by iw 6.17 `print_iface_handler` (interface.c:422-442):
+/// `\tInterface wlan0`, `\t\tssid <name>`, `\t\ttype managed`, in this order
+/// within a block. `type` tells a station from an access point (the own
+/// hotspot also has an `ssid`). The name is escaped byte by byte by
+/// `print_ssid_escaped` (util.c:225-238): every byte that is not printable
+/// ASCII, a backslash and a leading or trailing space become `\xHH`.
+String? parseIwDevSsid(String out) {
+  String? ssid;
+  for (final line in out.split('\n')) {
+    final t = line.trimLeft();
+    if (t.startsWith('Interface ')) {
+      ssid = null;
+    } else if (t.startsWith('ssid ')) {
+      ssid = _unescapeIwSsid(t.substring(5));
+    } else if (t == 'type managed' && ssid != null && ssid.isNotEmpty) {
+      return ssid;
+    }
+  }
+  return null;
+}
+
+String _unescapeIwSsid(String s) {
+  final bytes = <int>[];
+  for (var i = 0; i < s.length; i++) {
+    final hex = s.startsWith(r'\x', i) && i + 4 <= s.length
+        ? int.tryParse(s.substring(i + 2, i + 4), radix: 16)
+        : null;
+    if (hex != null) {
+      bytes.add(hex);
+      i += 3;
+    } else {
+      bytes.add(s.codeUnitAt(i));
+    }
+  }
+  return utf8.decode(bytes, allowMalformed: true);
 }
 
 /// `netsh wlan show interfaces` → `    SSID                   : HomeNet`.
@@ -199,6 +250,9 @@ Future<String?> readCurrentSsid() async {
       final o = await _tool('nmcli', ['-t', '-f', 'active,ssid', 'dev', 'wifi']);
       final s = o == null ? null : parseNmcliSsid(o);
       if (s != null) return s;
+      final oIw = await _tool('iw', ['dev']);
+      final sIw = oIw == null ? null : parseIwDevSsid(oIw);
+      if (sIw != null) return sIw;
       final o2 = await _tool('iwgetid', ['-r']);
       final s2 = o2?.trim();
       return s2 == null || s2.isEmpty ? null : s2;

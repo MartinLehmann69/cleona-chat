@@ -41,7 +41,7 @@ class CrashReporter {
 
     int peerCount = 0;
     try {
-      peerCount = _service.peerCount;
+      peerCount = _service.independentSyncPartners; // §22.7.1, S411
     } catch (_) {}
 
     int memBytes = 0;
@@ -100,7 +100,7 @@ class CrashReporter {
     const int routeCount = 0;
     const String natType = 'unknown';
     try {
-      peerCount = _service.peerCount;
+      peerCount = _service.independentSyncPartners; // §22.7.1, S411
       hasPortMapping = _service.hasPortMapping;
     } catch (_) {}
 

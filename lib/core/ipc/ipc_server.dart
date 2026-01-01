@@ -26,6 +26,7 @@ import 'package:cleona/core/calendar/sync/caldav_client.dart';
 import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/tray/tray_status.dart' show isTrayLanguage;
+import 'package:mycelium/neighbour_view.dart' show neighbourView;
 import 'package:cleona/core/media/link_preview_fetcher.dart' show LinkPreviewSettings;
 import 'package:cleona/core/channels/system_channel_hub.dart' show SystemChannelHub;
 import 'package:cleona/core/channels/system_channel_json.dart' show systemChannelServe;
@@ -2310,6 +2311,24 @@ class IpcServer {
           ));
           break;
 
+        case 'get_neighbours':
+          // Diagnostics and tests only (S411): addresses and node identifiers
+          // never reach the screen (§25.7).
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final node = service.myceliumMailbox?.host.node;
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: node == null
+                ? const {'neighbours': <Object>[], 'removed': <Object>[]}
+                : neighbourView(node),
+          ));
+          break;
+
         case 'nat_wizard_dismiss':
           // §27.9.1 item 5: persist the dismiss timestamp. durationSeconds=0
           // means "Nicht mehr zeigen" (forever), a positive value is a soft
@@ -2640,15 +2659,13 @@ class IpcServer {
               _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
                 'debounced': true,
                 'remainingSeconds': remaining,
-                'peersFound': 0,
               }));
               break;
             }
             _lastManualReconnect = now;
             // v4_2 §25.7: "reconnect" is the edge "network change" of
             // §11.8.2, through its one entry — for the whole host, with the
-            // router mapping (S407-LB-P12, finding A-3). The answer keeps
-            // its fields: an older GUI of the same installation reads them.
+            // router mapping (S407-LB-P12, finding A-3).
             _sendResponse(client, IpcResponse(id: req.id, success: true,
                 data: await service.reconnect()));
           }

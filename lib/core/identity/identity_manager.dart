@@ -120,7 +120,8 @@ class Identity {
   static Identity fromJson(Map<String, dynamic> json) => Identity(
         id: json['id'] as String,
         displayName: json['displayName'] as String? ?? json['display_name'] as String? ?? '',
-        profileDir: json['profileDir'] as String? ?? json['profile_dir'] as String? ?? '',
+        profileDir: AppPaths.rebaseProfilePath(
+            json['profileDir'] as String? ?? json['profile_dir'] as String? ?? ''),
         port: json['port'] as int,
         createdAt: DateTime.tryParse(json['createdAt'] as String? ?? json['created_at'] as String? ?? '') ?? DateTime.now(),
         nodeIdHex: json['nodeIdHex'] as String? ?? json['node_id_hex'] as String?,

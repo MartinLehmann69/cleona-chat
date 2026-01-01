@@ -2,16 +2,20 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/service/service_interface.dart';
-import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/stats/network_stats.dart';
+import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 
 /// Connection sheet — §25.7
 ///
-/// Opened when the user taps "Active Peers" (NetworkStatsScreen) or
-/// "Connected Peers" (SettingsScreen → Network section).
+/// Opened from the tile "answering neighbours" (NetworkStatsScreen) and the
+/// entry "neighbours" (SettingsScreen → Network section).
 ///
 /// Content:
-///   1. Live list of active peers
+///   1. the readiness state and the answering neighbours (§22.7.1), one row
+///      each: address families, fixed or not, last confirmed. Never an
+///      address, a node identifier or a contact (§25.7).
 ///   2. Debounced Reconnect button
 ///
 /// No manual address entry and no peer bundle: the sources of the first
@@ -40,27 +44,57 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
   bool _reconnecting = false;
   String? _reconnectResult; // displayed after reconnect finishes
 
-  // Peer list — refreshed on open, after reconnect, and reactively on
-  // every service state change (S119 B: no polling timer; the sheet chains
-  // into onStateChanged, which node.onPeersChanged already drives).
-  List<PeerSummary> _peers = [];
+  // Refreshed on open, reactively on every service state change — a readiness
+  // edge is one (`mycelium_seam.dart`, `readinessChanged`) — and at the 5-s
+  // cadence of §25, only while the sheet is open: a stamp moves without an
+  // edge, and "8 s ago" (§25.7) must not stand still. Local only, no packet
+  // (§25.10).
+  NetworkStats _stats = const NetworkStats();
+  String _readiness = kReadinessSearching;
+  bool _fetching = false;
+  bool _again = false;
+  Timer? _displayTimer;
   void Function()? _prevOnStateChanged;
 
   @override
   void initState() {
     super.initState();
-    _peers = widget.service.peerSummaries;
+    _refresh();
+    _displayTimer =
+        Timer.periodic(const Duration(seconds: 5), (_) => _refresh());
     _prevOnStateChanged = widget.service.onStateChanged;
     widget.service.onStateChanged = () {
       _prevOnStateChanged?.call();
-      if (mounted) {
-        setState(() => _peers = widget.service.peerSummaries);
-      }
+      _refresh();
     };
+  }
+
+  /// At most one request at a time: state changes come in bursts, and over
+  /// IPC each read is a round trip to the daemon.
+  Future<void> _refresh() async {
+    if (_fetching) {
+      _again = true;
+      return;
+    }
+    _fetching = true;
+    do {
+      _again = false;
+      final service = widget.service;
+      final stats = service is IpcClient
+          ? await service.fetchNetworkStats()
+          : service.getNetworkStats();
+      if (!mounted) return;
+      setState(() {
+        _stats = stats;
+        _readiness = service.readinessState;
+      });
+    } while (_again);
+    _fetching = false;
   }
 
   @override
   void dispose() {
+    _displayTimer?.cancel();
     widget.service.onStateChanged = _prevOnStateChanged;
     super.dispose();
   }
@@ -75,46 +109,27 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     });
     final locale = AppLocale.read(context);
     try {
-      final svc = widget.service;
       // §25.7: the edge "network change" (§11.8.2) through its one entry —
       // over IPC in the daemon, in process on the phone (S407-LB-P12).
-      final result = await svc.reconnect();
+      final result = await widget.service.reconnect();
 
       if (!mounted) return;
 
       final debounced = result['debounced'] as bool? ?? false;
       final remaining = result['remainingSeconds'] as int? ?? 0;
-      final found = result['peersFound'] as int? ?? 0;
 
-      if (debounced) {
-        final msg = locale.get('connection_sheet_reconnect_debounced')
-            .replaceAll('{s}', '$remaining');
-        setState(() => _reconnectResult = msg);
-      } else if (found > 0) {
-        final msg = locale.get('connection_sheet_reconnect_success')
-            .replaceAll('{n}', '$found');
-        setState(() {
-          _reconnectResult = msg;
-          _peers = svc.peerSummaries;
-        });
-      } else {
-        setState(() => _reconnectResult = locale.get('connection_sheet_reconnect_none'));
-      }
+      // The edge runs behind the answer: what it finds arrives as readiness
+      // edges and fills the list. This line claims no result (§25.2 rule 4).
+      setState(() => _reconnectResult = debounced
+          ? locale
+              .get('connection_sheet_reconnect_debounced')
+              .replaceAll('{s}', '$remaining')
+          : locale.get('connection_sheet_reconnect_started'));
     } catch (e) {
       if (mounted) setState(() => _reconnectResult = '$e');
     } finally {
       if (mounted) setState(() => _reconnecting = false);
     }
-  }
-
-  /// Compact relative age using international unit symbols (s/min/h/d) —
-  /// the surrounding label comes from i18n (`connection_sheet_last_seen`).
-  String _formatLastSeen(DateTime lastSeen) {
-    final d = DateTime.now().difference(lastSeen);
-    if (d.inSeconds < 60) return '${d.inSeconds} s';
-    if (d.inMinutes < 60) return '${d.inMinutes} min';
-    if (d.inHours < 24) return '${d.inHours} h';
-    return '${d.inDays} d';
   }
 
   // ── Build ────────────────────────────────────────────────────────────────
@@ -123,6 +138,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final colorScheme = Theme.of(context).colorScheme;
+    final neighbours = _stats.neighbours;
 
     return SafeArea(
       top: false,
@@ -170,45 +186,33 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
                 controller: scrollController,
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 children: [
-                  // ── Section 1: Active Peers ──────────────────────────
-                  _SectionHeader(locale.get('connection_sheet_active_peers')),
-                  if (_peers.isEmpty)
+                  // ── Section 1: readiness and answering neighbours ────
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: Text(
+                      switch (_readiness) {
+                        kReadinessReady => locale.get('readiness_ready'),
+                        kReadinessConnecting =>
+                          locale.get('readiness_connecting'),
+                        _ => locale.get('readiness_searching'),
+                      },
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  _SectionHeader(locale.tr('connection_sheet_answering', {
+                    'n': '${neighbours.length}',
+                    'max': '${Neighbourhood.atMost}',
+                  })),
+                  if (neighbours.isEmpty)
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Text(
-                        locale.get('connection_sheet_no_peers'),
+                        locale.get('connection_sheet_no_neighbours'),
                         style: TextStyle(color: colorScheme.onSurfaceVariant),
                       ),
                     )
                   else
-                    ..._peers.take(20).map((p) => ListTile(
-                      dense: true,
-                      // S119 B: green = direct (confirmed bidirectional
-                      // UDP), amber = reachable via relay route only.
-                      leading: Icon(Icons.circle, size: 10,
-                          color: p.isDirect ? Colors.green : Colors.amber),
-                      // Problem 1 (S119): peer ID + address selectable.
-                      title: SelectableText(
-                        '${p.nodeIdHex.substring(0, 16)}…',
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                      ),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (p.allAddresses.isNotEmpty)
-                            SelectableText(p.allAddresses.first,
-                                style: const TextStyle(fontSize: 11)),
-                          Text(
-                            locale.get('connection_sheet_last_seen').replaceAll(
-                                '{t}', _formatLastSeen(p.lastSeen)),
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
-                      ),
-                    )),
+                    ...neighbours.map((n) => NeighbourRowTile(row: n)),
 
                   const Divider(),
 
@@ -248,6 +252,54 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// One row of §25.7: address family, fixed, found by, last confirmed. Used by
+/// this sheet and by the section "Neighbours" of the statistics.
+class NeighbourRowTile extends StatelessWidget {
+  final NeighbourRow row;
+  const NeighbourRowTile({super.key, required this.row});
+
+  /// International unit symbols (s/min/h/d), the words around them are i18n.
+  static String _age(DateTime stamp) {
+    final d = DateTime.now().difference(stamp);
+    if (d.inSeconds < 60) return '${d.inSeconds < 0 ? 0 : d.inSeconds} s';
+    if (d.inMinutes < 60) return '${d.inMinutes} min';
+    if (d.inHours < 24) return '${d.inHours} h';
+    return '${d.inDays} d';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final source = switch (row.foundBy) {
+      'remembered' => locale.get('neighbour_source_remembered'),
+      'localSegment' => locale.get('neighbour_source_local_segment'),
+      'invitation' => locale.get('neighbour_source_invitation'),
+      'externalRecords' => locale.get('neighbour_source_external_records'),
+      'board' => locale.get('neighbour_source_board'),
+      _ => null,
+    };
+    return ListTile(
+      dense: true,
+      leading: Icon(row.fixed ? Icons.push_pin : Icons.hub, size: 16),
+      title: Text(row.fixed
+          ? '${row.families.join(' + ')} · '
+              '${locale.get('connection_sheet_neighbour_fixed')}'
+          : row.families.join(' + ')),
+      subtitle: Text(
+        [
+          if (source != null) locale.tr('neighbour_found_by', {'s': source}),
+          locale.tr(
+              'connection_sheet_last_confirmed', {'t': _age(row.lastConfirmed)}),
+        ].join('\n'),
+        style: TextStyle(
+          fontSize: 11,
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
         ),
       ),
     );

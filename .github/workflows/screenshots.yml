@@ -78,7 +78,7 @@ jobs:
             SodiumFFI();
             OqsFFI().init();
             final home = Platform.environment['HOME']!;
-            final baseDir = '$home/.cleona';
+            final baseDir = '$home/.cleona-beta';
             Directory(baseDir).createSync(recursive: true);
             // Do NOT init KeyringService — security CLI -T '' hangs without TTY
             final mgr = IdentityManager(baseDir: baseDir);
@@ -238,12 +238,12 @@ jobs:
         run: |
           DYLD_LIBRARY_PATH=/usr/local/lib dart --packages=.dart_tool/package_config.json /tmp/create_profile.dart
           echo "=== Profile ==="
-          ls -la "$HOME/.cleona/"
+          ls -la "$HOME/.cleona-beta/"
 
       - name: Populate keychain and finalize profile
         if: always()
         run: |
-          BASE="$HOME/.cleona"
+          BASE="$HOME/.cleona-beta"
 
           # Save a copy for iOS simulator (uses file-based keyring, not macOS keychain)
           cp -r "$BASE" "$BASE-ios-backup"
@@ -314,7 +314,7 @@ jobs:
           osascript -e 'tell application "System Events" to get name of every process whose visible is true' || true
 
           # Check if IPC socket exists (daemon started successfully)
-          ls -la "$HOME/.cleona/cleona.sock" 2>/dev/null || echo "WARNING: No IPC socket found"
+          ls -la "$HOME/.cleona-beta/cleona.sock" 2>/dev/null || echo "WARNING: No IPC socket found"
 
           # Grant screen recording permission via TCC database (avoids persistent dialog)
           echo "Granting screen recording permission..."
@@ -352,7 +352,7 @@ jobs:
           ipc_cmd() {
             python3 -c "
           import socket, json, time, sys
-          sock_path = '$HOME/.cleona/cleona.sock'
+          sock_path = '$HOME/.cleona-beta/cleona.sock'
           try:
             s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             s.settimeout(5)

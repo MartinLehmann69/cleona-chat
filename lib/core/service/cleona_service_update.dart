@@ -760,15 +760,6 @@ extension InNetworkUpdateOps on CleonaService {
                 platform: target.platform,
                 apkPath: CleonaService.apkPathResolver)
             : null);
-    if (target.kind == UpdateObjectKind.delta) {
-      updateTrace('fetch-check',
-          seq: target.seq,
-          version: target.version,
-          object: target.object,
-          platform: target.platform,
-          reason: 'delta v${target.fromVersion} -> v${target.version}: '
-              '${binary == null ? 'bspatch did NOT build the binary (installed file missing or not the delta\'s base)' : 'bspatch built the binary — its check follows'}');
-    }
     final ok = binary != null &&
         await updater.verifyFile(binary,
             platform: target.platform,
@@ -816,6 +807,16 @@ extension InNetworkUpdateOps on CleonaService {
     carrier?.objectTaken(target.object);
     _updateReady(target);
     return false;
+  }
+
+  /// [_objectComplete] for a target the caller chose: `scripts/update_delta_proof.dart`
+  /// walks the delta branch on a workstation, where [updateTargetFor] with the
+  /// process's own platform would never choose a delta ([kDeltaPlatforms]).
+  /// Skips no check: the manifest's hash and maintainer signature decide.
+  @visibleForTesting
+  Future<bool> objectCompleteForTest(UpdateTarget target, String objectPath) {
+    _updateTargetField[this] = target;
+    return _objectComplete(target.manifest, target, objectPath);
   }
 
   /// Checked and stored: `ready`, and an always-on node holds it for others.

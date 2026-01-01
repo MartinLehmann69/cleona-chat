@@ -299,7 +299,7 @@ class IosBackgroundFetch {
       // `final firstId = identities.first;` was dropped with S374 — the
       // port now comes from the DEVICE (§11), not from the first
       // identity, and that was the only reader here.
-      final baseDir = '${AppPaths.home}/.cleona';
+      final baseDir = AppPaths.dataDir;
 
       // ── THE MIGRATION HERE TOO (S362) ──────────────────────────
       //

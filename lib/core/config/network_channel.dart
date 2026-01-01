@@ -65,6 +65,14 @@ enum NetworkChannel {
 /// breaking that resolution order.
 String get kNetworkChannel => activeNetworkChannel.wireName;
 
+/// The `application` attribute of this channel's entries in the Linux keyring,
+/// and the prefix on macOS. Those keyrings belong to the user, not to a
+/// directory: with one name, setting up the other channel would overwrite this
+/// channel's master seed (§21.4, S411-PARALLEL). Beta keeps the name every
+/// released version wrote, so nothing moves, and a rollback reads what it wrote.
+String get kKeyringApplication =>
+    activeNetworkChannel == NetworkChannel.live ? 'cleona-live' : 'cleona';
+
 /// The active channel, determined at compile time via --dart-define.
 /// On Android: automatically inferred from package name suffix (.beta → beta).
 const String _channelStr =

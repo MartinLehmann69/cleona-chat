@@ -147,7 +147,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                _chip(cs, AppLocale.read(context).tr('issue_report_peers', {'count': '${report.peerCount}'})),
+                _chip(cs, AppLocale.read(context).tr('issue_report_neighbours', {'count': '${report.peerCount}'})),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -224,7 +224,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                _chip(cs, AppLocale.read(context).tr('issue_report_peers', {'count': '${report.peerCount}'})),
+                _chip(cs, AppLocale.read(context).tr('issue_report_neighbours', {'count': '${report.peerCount}'})),
                 _chip(cs, report.hasPortMapping ? 'UPnP' : AppLocale.read(context).get('upnp_none')),
                 Text(
                   timestamp,
@@ -281,9 +281,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
             const SizedBox(height: 6),
             Text(
               AppLocale.read(context).tr('issue_report_net_summary', {
-                'nat': report.natType,
-                'peers': '${report.peerCount}',
-                'routes': '${report.routeCount}',
+                'neighbours': '${report.peerCount}',
                 'uptime':
                     ContactIssueReport.formatDuration(report.uptimeSeconds),
               }),

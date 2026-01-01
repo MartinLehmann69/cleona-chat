@@ -4,6 +4,7 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:ffi/ffi.dart';
 
 /// Linux-only bindings for storing a keyring secret through libsecret WITHOUT
@@ -563,7 +564,7 @@ class LibsecretFfi {
     }
 
     final appKey = _cString('application');
-    final appValue = _cString('cleona');
+    final appValue = _cString(kKeyringApplication);
     final typeKey = _cString('type');
     final typeValue = _cString(name);
     final label = _cString('Cleona: $name');
