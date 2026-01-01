@@ -67,6 +67,10 @@ void main() async {
       File('${dir.path}/.dart-heartbeat')
           .writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}');
     } catch (_) {}
+    CleonaService.apkPathResolver = () async {
+      const channel = MethodChannel('chat.cleona/share');
+      return await channel.invokeMethod<String>('getApkSourcePath');
+    };
   }
 
   // iOS: resolve writable data container via path_provider BEFORE anything

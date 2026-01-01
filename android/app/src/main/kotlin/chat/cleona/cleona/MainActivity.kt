@@ -211,6 +211,14 @@ class MainActivity : FlutterActivity() {
                         result.error("APK_ERROR", e.message, null)
                     }
                 }
+                "getApkSourcePath" -> {
+                    try {
+                        val appInfo = packageManager.getApplicationInfo(packageName, 0)
+                        result.success(appInfo.sourceDir)
+                    } catch (e: Exception) {
+                        result.error("APK_ERROR", e.message, null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }

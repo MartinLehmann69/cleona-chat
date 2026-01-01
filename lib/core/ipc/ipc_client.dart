@@ -2740,6 +2740,28 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     };
   }
 
+  // ── Binary Seeding (§19.6.2) ─────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> seedBinary({
+    required String platform,
+    required String version,
+    required String filePath,
+    int? maxFragments,
+  }) async {
+    final resp = await _sendRequest('seed_binary', params: {
+      'platform': platform,
+      'version': version,
+      'filePath': filePath,
+      'maxFragments': ?maxFragments,
+    });
+    return resp.data;
+  }
+
+  Future<Map<String, dynamic>> getSeededPlatforms() async {
+    final resp = await _sendRequest('get_seeded_platforms');
+    return resp.data;
+  }
+
   @override
   Future<void> onNetworkChanged({bool triggerNodeReset = true}) async {
     // Network changes are handled by the daemon — IPC client is a no-op.

@@ -465,7 +465,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
   static const String kCurrentAppVersion = '3.1.127';
 
-  /// Backwards-compatible instance accessor.
+  static Future<String?> Function()? apkPathResolver;
+
   String get currentAppVersion => kCurrentAppVersion;
 
   // Recovery state
@@ -10528,6 +10529,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// The §19.6 binary seeder for this device, if wired (null on the
   /// non-first identity of a multi-identity daemon, or before startup).
   BinarySeeder? get binarySeeder => _binarySeeder;
+  BinaryFragmentStore? get binaryFragmentStore => _binaryFragmentStore;
 
   /// Self-seed: encode the currently-running binary into Reed-Solomon
   /// fragments so this node becomes a distribution source for its own
@@ -10538,48 +10540,49 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void _selfSeedCurrentBinary() {
     final platform = Platform.operatingSystem;
     final version = kCurrentAppVersion;
-    // Check if already seeded (idempotent).
     final existing = _binaryFragmentStore!.storedVersionsSync(platform);
     if (existing.contains(version)) {
       _log.debug('[update] Already seeded $platform/$version');
       return;
     }
-    final binaryPath = _resolveCurrentBinaryPath();
-    if (binaryPath == null) return;
-    final file = File(binaryPath);
-    if (!file.existsSync()) {
-      _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
-      return;
-    }
-    // Read + seed async (don't block startup).
-    file.readAsBytes().then((data) async {
-      final count = await _binarySeeder!.seed(
-        binary: data,
-        platform: platform,
-        version: version,
-        maxFragments: Platform.isAndroid ? 2 : 8,
-      );
-      if (count > 0) {
-        _log.info('[update] Self-seeded $count fragments for $platform/$version');
-        node.binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
-        _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
+    _resolveCurrentBinaryPath().then((binaryPath) {
+      if (binaryPath == null) return;
+      final file = File(binaryPath);
+      if (!file.existsSync()) {
+        _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
+        return;
       }
+      file.readAsBytes().then((data) async {
+        final count = await _binarySeeder!.seed(
+          binary: data,
+          platform: platform,
+          version: version,
+          maxFragments: Platform.isAndroid ? 2 : 8,
+        );
+        if (count > 0) {
+          _log.info('[update] Self-seeded $count fragments for $platform/$version');
+          node.binaryHasContentToShare = true;
+          _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+          _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
+        }
+      }).catchError((e) {
+        _log.warn('[update] Self-seed failed: $e');
+      });
     }).catchError((e) {
-      _log.warn('[update] Self-seed failed: $e');
+      _log.warn('[update] Self-seed path resolution failed: $e');
     });
   }
 
-  /// Resolves the on-disk path of the currently-running binary, for
-  /// [_selfSeedCurrentBinary]. Platform-dependent — desktop builds run the
-  /// executable directly, so [Platform.resolvedExecutable] is correct.
-  /// Android's running code is the APK itself, not a standalone
-  /// executable, and locating it requires the PackageManager (not yet
-  /// wired) — self-seeding is skipped there until that lands.
-  String? _resolveCurrentBinaryPath() {
+  Future<String?> _resolveCurrentBinaryPath() async {
     if (Platform.isAndroid) {
-      // Android APK path — resolved via app info, placeholder for now.
-      return null; // TODO: resolve via PackageManager
+      final resolver = CleonaService.apkPathResolver;
+      if (resolver == null) return null;
+      try {
+        return await resolver();
+      } catch (e) {
+        _log.debug('[update] Failed to resolve APK path: $e');
+        return null;
+      }
     }
     return Platform.resolvedExecutable;
   }

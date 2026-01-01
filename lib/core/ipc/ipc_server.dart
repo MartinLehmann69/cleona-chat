@@ -2642,6 +2642,74 @@ class IpcServer {
           ));
           break;
 
+        case 'seed_binary':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final seeder = service.binarySeeder;
+          if (seeder == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
+            break;
+          }
+          final seedPlatform = req.params['platform'] as String?;
+          final seedVersion = req.params['version'] as String?;
+          final seedFilePath = req.params['filePath'] as String?;
+          final seedMaxFragments = req.params['maxFragments'] as int?;
+          if (seedPlatform == null || seedVersion == null || seedFilePath == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: platform, version or filePath'));
+            break;
+          }
+          final seedFile = File(seedFilePath);
+          if (!seedFile.existsSync()) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'File not found: $seedFilePath'));
+            break;
+          }
+          final seedData = await seedFile.readAsBytes();
+          final seedCount = await seeder.seed(
+            binary: seedData,
+            platform: seedPlatform,
+            version: seedVersion,
+            maxFragments: seedMaxFragments,
+          );
+          service.node.binaryHasContentToShare = true;
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: seedCount > 0,
+            data: {
+              'fragmentCount': seedCount,
+              'platform': seedPlatform,
+              'version': seedVersion,
+              'hash': seeder.computeHash(seedData),
+            },
+            error: seedCount == 0 ? 'Seeding failed — 0 fragments stored' : null,
+          ));
+          break;
+
+        case 'get_seeded_platforms':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final store = service.binaryFragmentStore;
+          if (store == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
+            break;
+          }
+          final seededMap = <String, List<String>>{};
+          for (final platform in ['linux', 'windows', 'macos', 'android', 'ios']) {
+            final versions = store.storedVersionsSync(platform);
+            if (versions.isNotEmpty) {
+              seededMap[platform] = versions;
+            }
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'platforms': seededMap,
+          }));
+          break;
+
         case 'create_invite_link':
           final service = _resolveService(client, req);
           if (service == null) {
