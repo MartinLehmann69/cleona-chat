@@ -159,7 +159,17 @@ jobs:
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 
+      - name: List build outputs
+        if: always()
+        run: |
+          echo "=== Archive ==="
+          ls -la build/ios/archive/ 2>/dev/null || echo "no archive dir"
+          echo "=== IPA ==="
+          ls -la build/ios/ipa/ 2>/dev/null || echo "no ipa dir"
+          find build/ios -name "*.ipa" -o -name "*.xcarchive" 2>/dev/null
+
       - name: Upload to TestFlight
+        continue-on-error: true
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
@@ -171,24 +181,25 @@ jobs:
           mkdir -p ~/.appstoreconnect/private_keys
           cp "$KEY_PATH" ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
 
-          xcrun altool --upload-app \
-            --type ios \
-            --file build/ios/ipa/*.ipa \
-            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_ISSUER" \
-          || echo "altool upload failed — trying xcrun xcodebuild" && \
-          IPA=$(ls build/ios/ipa/*.ipa | head -1) && \
-          xcrun xcodebuild -exportArchive \
-            -archivePath build/ios/archive/Runner.xcarchive \
-            -exportOptionsPlist ios/ExportOptions.plist \
-            -exportPath build/ios/ipa/ \
-            -allowProvisioningUpdates 2>/dev/null || true
+          IPA=$(find build/ios -name "*.ipa" | head -1)
+          if [ -n "$IPA" ]; then
+            xcrun altool --upload-app \
+              --type ios \
+              --file "$IPA" \
+              --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+              --apiIssuer "$APP_STORE_CONNECT_ISSUER"
+          else
+            echo "No IPA found — skipping upload"
+          fi
 
       - name: Upload IPA artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cleona-ios-${{ steps.channel.outputs.channel }}
-          path: build/ios/ipa/*.ipa
+          path: |
+            build/ios/ipa/
+            build/ios/archive/Runner.xcarchive/Products/Applications/
           retention-days: 30
 
       - name: Cleanup keychain
