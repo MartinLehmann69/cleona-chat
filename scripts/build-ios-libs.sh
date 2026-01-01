@@ -451,18 +451,19 @@ for platform_tag in device simulator; do
     echo "  Merging ${#ALL_ARCHIVES[@]} archives for $platform_tag..."
     # Apple libtool -static merges multiple .a into one, resolving internal refs
     xcrun libtool -static -o "$MERGED" "${ALL_ARCHIVES[@]}"
-    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1))"
-    # Diagnose duplicates in merged archive
-    DUPS=$(xcrun nm -g "$MERGED" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l | tr -d ' ')
-    echo "  duplicate symbols in merge: $DUPS"
-    if [ "$DUPS" -gt 0 ]; then
-        echo "  first 10 duplicates:"
-        xcrun nm -g "$MERGED" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | head -10 | sed 's/^/    /'
-        echo "  per-archive symbol check:"
-        for a in "${ALL_ARCHIVES[@]}"; do
-            local_dups=$(xcrun nm -g "$a" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l | tr -d ' ')
-            [ "$local_dups" -gt 0 ] && echo "    $(basename "$a"): $local_dups internal duplicates"
-        done
+    PRE_SIZE=$(du -h "$MERGED" | cut -f1)
+    # Pre-link into a single .o to resolve duplicate symbols (C++ runtime
+    # stubs, rs_galois from liberasurecode, ggml internal duplicates).
+    # ld -r merges all objects, keeping one definition per symbol.
+    DEDUP_O="${MERGED%.a}.o"
+    if xcrun ld -r -force_load "$MERGED" -o "$DEDUP_O" -framework Accelerate -framework Metal -framework MetalKit 2>&1; then
+        xcrun ar rcs "${MERGED%.a}_dedup.a" "$DEDUP_O"
+        mv "${MERGED%.a}_dedup.a" "$MERGED"
+        rm -f "$DEDUP_O"
+        POST_SIZE=$(du -h "$MERGED" | cut -f1)
+        echo "  -> $MERGED ($PRE_SIZE -> $POST_SIZE after ld -r dedup)"
+    else
+        echo "  -> $MERGED ($PRE_SIZE) [ld -r failed, using raw merge]"
     fi
 done
 
