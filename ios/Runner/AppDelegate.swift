@@ -38,6 +38,12 @@ import Network
       KeyringHandler.register(with: keyringRegistrar)
     }
 
+    // 1:1 video calls: register AVFoundation camera capture handler
+    // (iOS counterpart to Android's CameraXHandler.kt).
+    if let cameraRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CameraHandler") {
+      CameraHandler.register(with: cameraRegistrar)
+    }
+
     // Set up the MethodChannel for background fetch communication with Dart.
     // The FlutterEngine is now available via the plugin registry's messenger.
     guard let messenger = engineBridge.pluginRegistry.registrar(forPlugin: "BackgroundFetchPlugin")?.messenger() else {

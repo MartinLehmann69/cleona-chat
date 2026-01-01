@@ -2,12 +2,33 @@
 /// Hides complex struct handling behind a simple opaque-pointer API.
 /// All libvpx structs are treated as opaque byte buffers with patched offsets.
 ///
-/// Build: gcc -shared -fPIC -O2 -o libcleona_vpx.so vpx_shim.c -ldl
+/// Build (Linux — dlopen()s the system libvpx.so at runtime):
+///   gcc -shared -fPIC -O2 -o libcleona_vpx.so vpx_shim.c -ldl
+///
+/// Build (Android — libvpx statically linked in, see
+/// scripts/build-android-libs.sh target "vpx"): compiled with
+/// -DCLEONA_VPX_STATIC_LINK and linked directly against a static
+/// libvpx.a, so the real libvpx symbols resolve at link time instead of
+/// via dlopen/dlsym. No separate libvpx.so ships in the APK.
+///
+/// Build (iOS — see scripts/build-ios-libs.sh: build_cleona_vpx): compiled
+/// as a static .a and merged with a statically-linked libvpx.a into
+/// libcleona_all.a — there is no libvpx.so to dlopen() on iOS. load_vpx()
+/// below resolves the already-linked libvpx symbols from the process image
+/// via dlsym(RTLD_DEFAULT, ...) instead, the same mechanism Dart's
+/// DynamicLibrary.process() uses for the shim's own cleona_vpx_* entry
+/// points. This requires the vpx_codec_*/vpx_img_* symbols to survive the
+/// linker's -exported_symbols_list (see ios/CleonaNative/
+/// cleona_exported_symbols.txt) — otherwise they are localized and
+/// invisible to dlsym() even though they're present in the binary.
 
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 #include <dlfcn.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 // ── Opaque types ────────────────────────────────────────────────────
 
@@ -61,8 +82,19 @@
 #define VPX_CODEC_OK       0
 #define VP8E_SET_CPUUSED       13
 #define VP8E_SET_NOISE_SENS    15
-#define MY_VPX_ENC_ABI    1
-#define MY_VPX_DEC_ABI    1
+// vpx_codec_{enc,dec}_init_ver() reject any abi_version that doesn't
+// exactly equal the library's compiled-in VPX_{ENCODER,DECODER}_ABI_VERSION
+// (see vpx_encoder.c/vpx_decoder.c: `if (ver != VPX_*_ABI_VERSION) res =
+// VPX_CODEC_ABI_MISMATCH`), so this can't be a placeholder. Computed from
+// vpx/vpx_encoder.h + vpx/vpx_decoder.h for libvpx 1.14.x:
+//   VPX_IMAGE_ABI_VERSION = 5
+//   VPX_CODEC_ABI_VERSION = 4 + VPX_IMAGE_ABI_VERSION           = 9
+//   VPX_DECODER_ABI_VERSION = 3 + VPX_CODEC_ABI_VERSION         = 12
+//   VPX_ENCODER_ABI_VERSION = 16 + VPX_CODEC_ABI_VERSION
+//                             + VPX_EXT_RATECTRL_ABI_VERSION(7)
+//                             + VPX_TPL_ABI_VERSION(2)          = 34
+#define MY_VPX_ENC_ABI    34
+#define MY_VPX_DEC_ABI    12
 
 // ── Function pointer types ──────────────────────────────────────────
 
@@ -101,8 +133,79 @@ static fn_img_alloc     f_img_alloc;
 static fn_img_free      f_img_free;
 static fn_control       f_control;
 
+#ifdef CLEONA_VPX_STATIC_LINK
+// Android: libvpx is statically linked into this .so at build time (see
+// scripts/build-android-libs.sh, target "vpx"), so the real functions are
+// resolved directly at link time -- no dlopen/dlsym, no libvpx.so in the
+// APK. The opaque-buffer/fixed-offset struct handling below this point is
+// untouched and shared with the Linux dlopen path (x86_64 Linux and
+// aarch64 Android are both LP64, so the field offsets are identical for
+// this struct set).
+//
+// We deliberately do NOT #include the public vpx/*.h headers here: they
+// define enum constants (VPX_CODEC_OK, VPX_IMG_FMT_I420, VPX_KF_AUTO, ...)
+// that collide with this file's own local #defines of the same names
+// above. Instead we declare just the extern symbols we need, with
+// primitive types matching the real headers' widths one-for-one (verified
+// against vpx/vpx_encoder.h + vpx/vpx_decoder.h + vpx/vp8cx.h +
+// vpx/vp8dx.h for the pinned libvpx version) so the calling convention at
+// the ABI level is identical to a real prototype -- only the nominal
+// struct-pointer types are widened to void*, which is safe since this
+// file only ever treats them as opaque pointers/byte buffers anyway.
+extern vpx_iface_ptr vpx_codec_vp8_cx(void);
+extern vpx_iface_ptr vpx_codec_vp8_dx(void);
+extern vpx_err vpx_codec_enc_config_default(vpx_iface_ptr iface, void *cfg,
+                                             unsigned int usage);
+extern vpx_err vpx_codec_enc_init_ver(void *ctx, vpx_iface_ptr iface,
+                                       void *cfg, long flags, int ver);
+extern vpx_err vpx_codec_encode(void *ctx, const void *img, int64_t pts,
+                                 unsigned long duration, unsigned long flags,
+                                 unsigned long deadline);
+extern const void *vpx_codec_get_cx_data(void *ctx, void **iter);
+extern vpx_err vpx_codec_dec_init_ver(void *ctx, vpx_iface_ptr iface,
+                                       void *cfg, long flags, int ver);
+extern vpx_err vpx_codec_decode(void *ctx, const uint8_t *data,
+                                 unsigned int data_sz, void *user_priv,
+                                 long deadline);
+extern void *vpx_codec_get_frame(void *ctx, void **iter);
+extern vpx_err vpx_codec_destroy(void *ctx);
+extern void *vpx_img_alloc(void *img, int fmt, unsigned int d_w,
+                            unsigned int d_h, unsigned int align);
+extern void vpx_img_free(void *img);
+extern vpx_err vpx_codec_control_(void *ctx, int ctrl_id, ...);
+
 static int load_vpx(void) {
   if (g_lib) return 0;
+
+  f_vp8_cx    = vpx_codec_vp8_cx;
+  f_vp8_dx    = vpx_codec_vp8_dx;
+  f_enc_cfg   = vpx_codec_enc_config_default;
+  f_enc_init  = vpx_codec_enc_init_ver;
+  f_encode    = vpx_codec_encode;
+  f_get_cx    = vpx_codec_get_cx_data;
+  f_dec_init  = vpx_codec_dec_init_ver;
+  f_decode    = vpx_codec_decode;
+  f_get_frame = vpx_codec_get_frame;
+  f_destroy   = vpx_codec_destroy;
+  f_img_alloc = vpx_img_alloc;
+  f_img_free  = vpx_img_free;
+  f_control   = vpx_codec_control_;
+
+  g_lib = (void *)1; // sentinel: "resolved", no real handle to dlclose()
+  return 0;
+}
+#else
+static int load_vpx(void) {
+  if (g_lib) return 0;
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+  // iOS (device + simulator): libvpx.a is statically linked into the app
+  // binary — there is no libvpx.so to dlopen(). Resolve symbols from the
+  // process' own global symbol table instead. RTLD_DEFAULT is truthy, so
+  // the "if (g_lib) return 0" memoization above still short-circuits on
+  // repeat calls.
+  g_lib = RTLD_DEFAULT;
+#else
   const char *names[] = {
     "libvpx.so.9", "libvpx.so.8", "libvpx.so.7", "libvpx.so",
     "/usr/lib/x86_64-linux-gnu/libvpx.so.9",
@@ -114,6 +217,7 @@ static int load_vpx(void) {
     if (g_lib) break;
   }
   if (!g_lib) return -1;
+#endif
 
   f_vp8_cx    = (fn_vp8_cx)dlsym(g_lib, "vpx_codec_vp8_cx");
   f_vp8_dx    = (fn_vp8_dx)dlsym(g_lib, "vpx_codec_vp8_dx");
@@ -132,10 +236,18 @@ static int load_vpx(void) {
   if (!f_vp8_cx || !f_enc_cfg || !f_enc_init || !f_encode || !f_get_cx ||
       !f_destroy || !f_vp8_dx || !f_dec_init || !f_decode || !f_get_frame ||
       !f_img_alloc || !f_img_free) {
-    dlclose(g_lib); g_lib = NULL; return -2;
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+    // g_lib is the RTLD_DEFAULT pseudo-handle on iOS, not a real dlopen()
+    // handle — dlclose() on it is undefined behavior.
+    g_lib = NULL;
+#else
+    dlclose(g_lib); g_lib = NULL;
+#endif
+    return -2;
   }
   return 0;
 }
+#endif
 
 // ── Helper: read/write uint32 at byte offset in buffer ──────────────
 

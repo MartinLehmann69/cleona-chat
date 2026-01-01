@@ -1072,6 +1072,9 @@ class PeerSummary {
   final List<String> allAddresses;
   /// Long-term address stability — drives ContactSeed peer selection.
   final int stabilityTierIndex;
+  /// S119 B: true = confirmed bidirectional UDP contact (green dot);
+  /// false = reachable only via an alive relay route (amber dot).
+  final bool isDirect;
 
   PeerSummary({
     required this.nodeIdHex,
@@ -1080,6 +1083,7 @@ class PeerSummary {
     required this.lastSeen,
     this.allAddresses = const [],
     this.stabilityTierIndex = 2,
+    this.isDirect = true,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1089,6 +1093,7 @@ class PeerSummary {
         'lastSeen': lastSeen.millisecondsSinceEpoch,
         'allAddresses': allAddresses,
         if (stabilityTierIndex != 2) 'stabilityTierIndex': stabilityTierIndex,
+        'isDirect': isDirect,
       };
 
   static PeerSummary fromJson(Map<String, dynamic> json) => PeerSummary(
@@ -1102,6 +1107,7 @@ class PeerSummary {
                 .toList() ??
             const [],
         stabilityTierIndex: json['stabilityTierIndex'] as int? ?? 2,
+        isDirect: json['isDirect'] as bool? ?? true,
       );
 }
 

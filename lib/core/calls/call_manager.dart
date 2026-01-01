@@ -37,6 +37,17 @@ class CallSession {
   int videoFramesSent = 0;
   int videoFramesReceived = 0;
 
+  /// The peer's concrete device that performed the call handshake —
+  /// captured from `senderDeviceId` on inbound CALL_INVITE (callee side)
+  /// or CALL_ANSWER (caller side). Dual use: (a) registered with
+  /// [CleonaNode.registerLiveMediaPeer] for this session's live-media PoW
+  /// exemption (§13.1.2 exemption #4) — stored here so teardown
+  /// unregisters exactly the device id this session added; (b) checked by
+  /// the receive-side live-media fast path (Architecture §10.3) so only
+  /// this exact device is trusted as plaintext-inner CALL_AUDIO/VIDEO
+  /// source for the duration of the call.
+  Uint8List? peerDeviceId;
+
   // ── Per-Call Route Cache (Architecture §10.4.1) ──────────────────
   // Caches the resolved peer for the duration of a call so audio frames
   // (~50/sec for 20ms PCM) don't repeat the routing-table lookup on every
@@ -50,6 +61,10 @@ class CallSession {
     cachedRoute = null;
     cachedRouteAt = null;
   }
+
+  /// Set once the receive-side live-media fast path has logged its
+  /// "active" line for this call — prevents per-frame log spam (~50/s).
+  bool liveMediaFastPathLogged = false;
 
   CallSession({
     required this.callId,
@@ -296,6 +311,7 @@ class CallManager {
     _cancelRingingTimeout();
     call.state = CallState.ended;
     _currentCall = null;
+    _unregisterLiveMediaPeer(call);
     _log.info('Call rejected (local teardown done): $reason');
 
     // Best-effort wire signal — failure does not undo the teardown.
@@ -336,6 +352,7 @@ class CallManager {
     call.state = CallState.ended;
     onCallEnded?.call(call);
     _currentCall = null;
+    _unregisterLiveMediaPeer(call);
     _log.info('Call ended (local teardown done)');
 
     // Best-effort signal to the remote side. Failures here do not undo
@@ -396,6 +413,14 @@ class CallManager {
     );
     _currentCall = session;
 
+    // Pin live media to the exact device that sent the invite (of the
+    // caller's authorized-device fan-out only the one that rang us is
+    // trusted as audio/video source, §10.3) and allowlist it for PoW-less
+    // frames (§13.1.2 exemption #4) — registering here (not only on
+    // accept) covers frames that beat the accept-path race.
+    session.peerDeviceId = senderDeviceId;
+    node.registerLiveMediaPeer(senderDeviceId);
+
     _startRingingTimeout();
 
     onIncomingCall?.call(session);
@@ -443,6 +468,13 @@ class CallManager {
       );
     }
 
+    // Pin live media to the answering device and allowlist it for PoW-less
+    // frames (§13.1.2 exemption #4, §10.3) — the caller learns the callee's
+    // concrete device id only now (CALL_INVITE fan-out went to every
+    // authorized device of the peer user; only one answers).
+    call.peerDeviceId = senderDeviceId;
+    node.registerLiveMediaPeer(senderDeviceId);
+
     _cancelRingingTimeout();
     call.state = CallState.inCall;
     onCallAccepted?.call(call);
@@ -463,6 +495,7 @@ class CallManager {
     call.state = CallState.ended;
     onCallRejected?.call(call, reject.reason);
     _currentCall = null;
+    _unregisterLiveMediaPeer(call);
     _log.info('V3 call rejected: ${reject.reason}');
   }
 
@@ -480,7 +513,19 @@ class CallManager {
     call.state = CallState.ended;
     onCallEnded?.call(call);
     _currentCall = null;
+    _unregisterLiveMediaPeer(call);
     _log.info('V3 call hung up by remote');
+  }
+
+  /// Unregister this session's live-media PoW allowlist entry (§13.1.2
+  /// exemption #4), if one was registered. No-op if the peer device was
+  /// never learned (e.g. outgoing call timed out before CALL_ANSWER).
+  void _unregisterLiveMediaPeer(CallSession call) {
+    final peerDeviceId = call.peerDeviceId;
+    if (peerDeviceId != null) {
+      node.unregisterLiveMediaPeer(peerDeviceId);
+      call.peerDeviceId = null;
+    }
   }
 
   /// V3 busy auto-reject — uses the wire-carried `senderDeviceId`

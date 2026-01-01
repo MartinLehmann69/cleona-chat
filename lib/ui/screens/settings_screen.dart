@@ -177,7 +177,8 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.fingerprint),
                 title: Text(locale.get('node_id_label')),
-                subtitle: Text(
+                // Problem 1 (S119): Node-ID natively selectable (long-press).
+                subtitle: SelectableText(
                   service.nodeIdHex,
                   style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
                 ),
@@ -192,7 +193,10 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.people),
                 title: Text(locale.get('connected_peers')),
-                subtitle: Text('${service.peerCount}'),
+                // S119 B (Problem 2): same source as the connection sheet
+                // and the stats counter — peerCount (= all known routing-
+                // table entries) showed a third, larger number.
+                subtitle: Text('${service.peerSummaries.length}'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showConnectionSheet(context, service),
               ),

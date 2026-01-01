@@ -406,6 +406,10 @@ const MessageTypeV3$json = {
     {'1': 'MTV3_FIRST_CR_DELIVER', '2': 224},
     {'1': 'MTV3_POLL_ANON_SUBMIT', '2': 225},
     {'1': 'MTV3_POLL_ANON_SUBMIT_ACK', '2': 226},
+    {'1': 'MTV3_SYSCHAN_DIGEST', '2': 230},
+    {'1': 'MTV3_SYSCHAN_SUMMARY', '2': 231},
+    {'1': 'MTV3_SYSCHAN_WANT', '2': 232},
+    {'1': 'MTV3_SYSCHAN_PUSH', '2': 233},
   ],
 };
 
@@ -476,7 +480,9 @@ final $typed_data.Uint8List messageTypeV3Descriptor = $convert.base64Decode(
     'Q0VfS0VNX1JFUVVFU1QQ3AESGgoVTVRWM19ERVZJQ0VfS0VNX09GRkVSEN0BEhgKE01UVjNfRk'
     'lSU1RfQ1JfU1RPUkUQ3gESHAoXTVRWM19GSVJTVF9DUl9TVE9SRV9BQ0sQ3wESGgoVTVRWM19G'
     'SVJTVF9DUl9ERUxJVkVSEOABEhoKFU1UVjNfUE9MTF9BTk9OX1NVQk1JVBDhARIeChlNVFYzX1'
-    'BPTExfQU5PTl9TVUJNSVRfQUNLEOIB');
+    'BPTExfQU5PTl9TVUJNSVRfQUNLEOIBEhgKE01UVjNfU1lTQ0hBTl9ESUdFU1QQ5gESGQoUTVRW'
+    'M19TWVNDSEFOX1NVTU1BUlkQ5wESFgoRTVRWM19TWVNDSEFOX1dBTlQQ6AESFgoRTVRWM19TWV'
+    'NDSEFOX1BVU0gQ6QE=');
 
 @$core.Deprecated('Use contentMetadataDescriptor instead')
 const ContentMetadata$json = {
@@ -3595,4 +3601,92 @@ final $typed_data.Uint8List deviceSetChangeProofDescriptor = $convert.base64Deco
     'ByZXZpb3VzRGV2aWNlQ291bnQSHwoLY2hhbmdlX2hhc2gYAiABKAxSCmNoYW5nZUhhc2gSOwoJ'
     'YXBwcm92YWxzGAMgAygLMh0uY2xlb25hLlJvdGF0aW9uQXBwcm92YWxUb2tlblIJYXBwcm92YW'
     'xz');
+
+@$core.Deprecated('Use systemChannelRecordDescriptor instead')
+const SystemChannelRecord$json = {
+  '1': 'SystemChannelRecord',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
+    {'1': 'record_id', '3': 2, '4': 1, '5': 12, '10': 'recordId'},
+    {'1': 'kind', '3': 3, '4': 1, '5': 13, '10': 'kind'},
+    {'1': 'author_user_id', '3': 4, '4': 1, '5': 12, '10': 'authorUserId'},
+    {'1': 'author_ed25519_pk', '3': 5, '4': 1, '5': 12, '10': 'authorEd25519Pk'},
+    {'1': 'author_ml_dsa_pk', '3': 6, '4': 1, '5': 12, '10': 'authorMlDsaPk'},
+    {'1': 'timestamp_ms', '3': 7, '4': 1, '5': 4, '10': 'timestampMs'},
+    {'1': 'text', '3': 8, '4': 1, '5': 9, '10': 'text'},
+    {'1': 'target_record_id', '3': 9, '4': 1, '5': 12, '10': 'targetRecordId'},
+    {'1': 'vote_option', '3': 10, '4': 1, '5': 13, '10': 'voteOption'},
+    {'1': 'sig_ed25519', '3': 11, '4': 1, '5': 12, '10': 'sigEd25519'},
+    {'1': 'sig_ml_dsa', '3': 12, '4': 1, '5': 12, '10': 'sigMlDsa'},
+  ],
+};
+
+/// Descriptor for `SystemChannelRecord`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List systemChannelRecordDescriptor = $convert.base64Decode(
+    'ChNTeXN0ZW1DaGFubmVsUmVjb3JkEh0KCmNoYW5uZWxfaWQYASABKAxSCWNoYW5uZWxJZBIbCg'
+    'lyZWNvcmRfaWQYAiABKAxSCHJlY29yZElkEhIKBGtpbmQYAyABKA1SBGtpbmQSJAoOYXV0aG9y'
+    'X3VzZXJfaWQYBCABKAxSDGF1dGhvclVzZXJJZBIqChFhdXRob3JfZWQyNTUxOV9waxgFIAEoDF'
+    'IPYXV0aG9yRWQyNTUxOVBrEicKEGF1dGhvcl9tbF9kc2FfcGsYBiABKAxSDWF1dGhvck1sRHNh'
+    'UGsSIQoMdGltZXN0YW1wX21zGAcgASgEUgt0aW1lc3RhbXBNcxISCgR0ZXh0GAggASgJUgR0ZX'
+    'h0EigKEHRhcmdldF9yZWNvcmRfaWQYCSABKAxSDnRhcmdldFJlY29yZElkEh8KC3ZvdGVfb3B0'
+    'aW9uGAogASgNUgp2b3RlT3B0aW9uEh8KC3NpZ19lZDI1NTE5GAsgASgMUgpzaWdFZDI1NTE5Eh'
+    'wKCnNpZ19tbF9kc2EYDCABKAxSCHNpZ01sRHNh');
+
+@$core.Deprecated('Use sysChanDigestDescriptor instead')
+const SysChanDigest$json = {
+  '1': 'SysChanDigest',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
+    {'1': 'record_count', '3': 2, '4': 1, '5': 13, '10': 'recordCount'},
+    {'1': 'set_hash', '3': 3, '4': 1, '5': 12, '10': 'setHash'},
+  ],
+};
+
+/// Descriptor for `SysChanDigest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sysChanDigestDescriptor = $convert.base64Decode(
+    'Cg1TeXNDaGFuRGlnZXN0Eh0KCmNoYW5uZWxfaWQYASABKAxSCWNoYW5uZWxJZBIhCgxyZWNvcm'
+    'RfY291bnQYAiABKA1SC3JlY29yZENvdW50EhkKCHNldF9oYXNoGAMgASgMUgdzZXRIYXNo');
+
+@$core.Deprecated('Use sysChanSummaryDescriptor instead')
+const SysChanSummary$json = {
+  '1': 'SysChanSummary',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
+    {'1': 'fingerprints', '3': 2, '4': 3, '5': 12, '10': 'fingerprints'},
+  ],
+};
+
+/// Descriptor for `SysChanSummary`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sysChanSummaryDescriptor = $convert.base64Decode(
+    'Cg5TeXNDaGFuU3VtbWFyeRIdCgpjaGFubmVsX2lkGAEgASgMUgljaGFubmVsSWQSIgoMZmluZ2'
+    'VycHJpbnRzGAIgAygMUgxmaW5nZXJwcmludHM=');
+
+@$core.Deprecated('Use sysChanWantDescriptor instead')
+const SysChanWant$json = {
+  '1': 'SysChanWant',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
+    {'1': 'fingerprints', '3': 2, '4': 3, '5': 12, '10': 'fingerprints'},
+  ],
+};
+
+/// Descriptor for `SysChanWant`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sysChanWantDescriptor = $convert.base64Decode(
+    'CgtTeXNDaGFuV2FudBIdCgpjaGFubmVsX2lkGAEgASgMUgljaGFubmVsSWQSIgoMZmluZ2VycH'
+    'JpbnRzGAIgAygMUgxmaW5nZXJwcmludHM=');
+
+@$core.Deprecated('Use sysChanPushDescriptor instead')
+const SysChanPush$json = {
+  '1': 'SysChanPush',
+  '2': [
+    {'1': 'channel_id', '3': 1, '4': 1, '5': 12, '10': 'channelId'},
+    {'1': 'records', '3': 2, '4': 3, '5': 12, '10': 'records'},
+    {'1': 'ttl', '3': 3, '4': 1, '5': 13, '10': 'ttl'},
+  ],
+};
+
+/// Descriptor for `SysChanPush`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List sysChanPushDescriptor = $convert.base64Decode(
+    'CgtTeXNDaGFuUHVzaBIdCgpjaGFubmVsX2lkGAEgASgMUgljaGFubmVsSWQSGAoHcmVjb3Jkcx'
+    'gCIAMoDFIHcmVjb3JkcxIQCgN0dGwYAyABKA1SA3R0bA==');
 

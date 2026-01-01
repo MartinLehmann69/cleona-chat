@@ -34,11 +34,29 @@ class _CallScreenState extends State<CallScreen> {
   ui.Image? _remoteVideoFrame;
   ui.Image? _localVideoFrame;
 
+  // Cached so dispose() can unregister without a context lookup (Provider
+  // reads are unreliable once the element starts unmounting).
+  CleonaAppState? _appStateRef;
+
   @override
   void initState() {
     super.initState();
     if (widget.callInfo.state == CallState.inCall) {
       _startDurationTimer();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final appState = context.read<CleonaAppState>();
+    if (!identical(_appStateRef, appState)) {
+      _appStateRef = appState;
+      // § F-B: only one CallScreen is ever active for a 1:1 call, so a
+      // direct callback registration (rather than a broadcast stream) is
+      // sufficient — see main.dart CleonaAppState.onRemoteVideoFrame docs.
+      appState.onRemoteVideoFrame = updateRemoteFrame;
+      appState.onLocalVideoFrame = updateLocalFrame;
     }
   }
 
@@ -53,6 +71,19 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   void dispose() {
+    final appState = _appStateRef;
+    if (appState != null) {
+      // Instance-method tear-offs compare equal (==) across separate
+      // tear-off expressions even though they aren't `identical` — only
+      // clear if we're still the registered screen (guards against a
+      // newer CallScreen having already taken over registration).
+      if (appState.onRemoteVideoFrame == updateRemoteFrame) {
+        appState.onRemoteVideoFrame = null;
+      }
+      if (appState.onLocalVideoFrame == updateLocalFrame) {
+        appState.onLocalVideoFrame = null;
+      }
+    }
     _durationTimer?.cancel();
     _remoteVideoFrame?.dispose();
     _localVideoFrame?.dispose();
@@ -387,14 +418,33 @@ class _CallScreenState extends State<CallScreen> {
     setState(() {
       _videoEnabled = !_videoEnabled;
     });
-    // TODO: Signal VideoEngine to mute/unmute video capture
+    final service = _appStateRef?.service;
+    if (service == null) {
+      debugPrint('[call] toggleVideo: no active service — no-op');
+      return;
+    }
+    // Pause/resume capture+send. No-op (with a debug log inside
+    // CallService) on platforms/calls without an active video engine —
+    // e.g. codec unavailable, or the call never negotiated video.
+    service.toggleVideoMute();
   }
 
   void _toggleCamera() {
-    setState(() {
-      _frontCamera = !_frontCamera;
+    final service = _appStateRef?.service;
+    if (service == null) {
+      debugPrint('[call] toggleCamera: no active service — no-op');
+      return;
+    }
+    // Android-only today (VideoCaptureAndroid.switchCamera). Returns false
+    // on platforms without a capture hook (Linux gray-frame isolate, iOS
+    // with no camera handler yet) — CallService logs why at debug level.
+    service.switchCamera().then((switched) {
+      if (switched && mounted) {
+        setState(() {
+          _frontCamera = !_frontCamera;
+        });
+      }
     });
-    // TODO: Signal VideoEngine to switch camera (front/back on mobile)
   }
 
   /// Called externally to update the remote video frame.

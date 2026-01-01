@@ -1,12 +1,48 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cleona/core/crypto/network_secret.dart';
+
 enum LogLevel { debug, info, warn, error }
+
+/// Per-directory sink state for segment rotation (S120 log retention).
+class _LogSinkState {
+  String date;
+  int segment;
+  int bytesInSegment;
+  DateTime lastCleanup;
+  _LogSinkState(this.date, this.segment, this.bytesInSegment, this.lastCleanup);
+}
 
 class CLogger {
   static final Map<String, CLogger> _instances = {};
   static final Map<String, StringBuffer> _buffers = {};
   static Timer? _flushTimer;
+
+  // -- Log retention (S120) --------------------------------------------------
+  // Two-dimensional retention: age cap AND total-size budget per logs/ dir.
+  // Guarantee: files of today and yesterday are exempt from the BUDGET rule
+  // (>=24h coverage), but a runaway day is bounded by the per-day segment cap
+  // (oldest segments of that day are dropped first, the newest edge — the
+  // most valuable evidence — survives). Segment 0 keeps the legacy name
+  // cleona_DATE.log; further segments are cleona_DATE.N.log.
+  // Values are channel-specific: beta keeps a week of DEBUG logs for field
+  // RCA, live keeps a lean 3 days. Static and overridable for tests.
+  static int retentionDays =
+      NetworkSecret.channel == NetworkChannel.live ? 3 : 7;
+  static int totalBudgetBytes = NetworkSecret.channel == NetworkChannel.live
+      ? 50 * 1024 * 1024
+      : 200 * 1024 * 1024;
+  static int segmentBytes = NetworkSecret.channel == NetworkChannel.live
+      ? 16 * 1024 * 1024
+      : 64 * 1024 * 1024;
+  static int maxSegmentsPerDay =
+      NetworkSecret.channel == NetworkChannel.live ? 3 : 4;
+
+  static const Duration _cleanupInterval = Duration(hours: 6);
+  static final Map<String, _LogSinkState> _sinkStates = {};
+  static final RegExp _logFileRe =
+      RegExp(r'^cleona_(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log$');
 
   /// Ring buffer of the most recent log lines (across all modules).
   /// Used by the crash reporter (§9.5) to attach log context to reports.
@@ -97,13 +133,7 @@ class CLogger {
       buffer.clear();
 
       try {
-        final logDir = Directory('$dir/logs');
-        if (!logDir.existsSync()) {
-          logDir.createSync(recursive: true);
-        }
-        final date = DateTime.now().toIso8601String().substring(0, 10);
-        final file = File('${logDir.path}/cleona_$date.log');
-        await file.writeAsString(content, mode: FileMode.append);
+        await _appendToSink(dir, content);
       } catch (_) {
         // Non-fatal: logging should never crash the app
       }
@@ -114,12 +144,131 @@ class CLogger {
       final content = _iosMirrorBuffer!.toString();
       _iosMirrorBuffer!.clear();
       try {
-        final logDir = Directory('$iosMirrorPath/logs');
-        if (!logDir.existsSync()) logDir.createSync(recursive: true);
-        final date = DateTime.now().toIso8601String().substring(0, 10);
-        final file = File('${logDir.path}/cleona_$date.log');
-        await file.writeAsString(content, mode: FileMode.append);
+        await _appendToSink(iosMirrorPath!, content);
       } catch (_) {}
+    }
+  }
+
+  /// Append to the current segment of `$baseDir/logs`, rotating segments and
+  /// running retention cleanup (at startup, day roll and every 6h).
+  static Future<void> _appendToSink(String baseDir, String content) async {
+    final logDir = Directory('$baseDir/logs');
+    if (!logDir.existsSync()) {
+      logDir.createSync(recursive: true);
+    }
+    final now = DateTime.now();
+    final date = now.toIso8601String().substring(0, 10);
+
+    var state = _sinkStates[baseDir];
+    if (state == null || state.date != date) {
+      state = _initSinkState(logDir, date, now);
+      _sinkStates[baseDir] = state;
+      _cleanup(logDir, now);
+    }
+
+    final file = File(_segmentPath(logDir, date, state.segment));
+    await file.writeAsString(content, mode: FileMode.append);
+    state.bytesInSegment += content.length;
+
+    if (state.bytesInSegment >= segmentBytes) {
+      state.segment++;
+      state.bytesInSegment = 0;
+      _enforceDayCap(logDir, date, state.segment);
+    }
+
+    if (now.difference(state.lastCleanup) > _cleanupInterval) {
+      state.lastCleanup = now;
+      _cleanup(logDir, now);
+    }
+  }
+
+  static String _segmentPath(Directory logDir, String date, int segment) =>
+      segment == 0
+          ? '${logDir.path}/cleona_$date.log'
+          : '${logDir.path}/cleona_$date.$segment.log';
+
+  /// Resume at the highest existing segment of [date] (restart-safe: appends
+  /// continue where the previous process stopped instead of resetting to 0).
+  static _LogSinkState _initSinkState(
+      Directory logDir, String date, DateTime now) {
+    var segment = 0;
+    var bytes = 0;
+    try {
+      for (final f in logDir.listSync().whereType<File>()) {
+        final m = _logFileRe.firstMatch(f.uri.pathSegments.last);
+        if (m == null || m.group(1) != date) continue;
+        final seg = int.parse(m.group(2) ?? '0');
+        if (seg >= segment) {
+          segment = seg;
+          bytes = f.lengthSync();
+        }
+      }
+    } catch (_) {}
+    return _LogSinkState(date, segment, bytes, now);
+  }
+
+  /// Per-day cap: after opening segment [newSegment], drop the oldest
+  /// segments of the same day beyond [maxSegmentsPerDay].
+  static void _enforceDayCap(Directory logDir, String date, int newSegment) {
+    try {
+      for (var seg = 0; seg <= newSegment - maxSegmentsPerDay; seg++) {
+        final f = File(_segmentPath(logDir, date, seg));
+        if (f.existsSync()) f.deleteSync();
+      }
+    } catch (_) {}
+  }
+
+  /// Age + budget cleanup. Oldest files go first; files of today and
+  /// yesterday are exempt from the budget rule (>=24h guarantee).
+  static void _cleanup(Directory logDir, DateTime now) {
+    try {
+      final today = now.toIso8601String().substring(0, 10);
+      final yesterday = now
+          .subtract(const Duration(days: 1))
+          .toIso8601String()
+          .substring(0, 10);
+      final cutoff = now
+          .subtract(Duration(days: retentionDays - 1))
+          .toIso8601String()
+          .substring(0, 10);
+
+      final entries = <({String date, int seg, File file, int size})>[];
+      for (final f in logDir.listSync().whereType<File>()) {
+        final m = _logFileRe.firstMatch(f.uri.pathSegments.last);
+        if (m == null) continue;
+        entries.add((
+          date: m.group(1)!,
+          seg: int.parse(m.group(2) ?? '0'),
+          file: f,
+          size: f.lengthSync(),
+        ));
+      }
+
+      // ISO dates compare lexicographically.
+      var total = 0;
+      final kept = <({String date, int seg, File file, int size})>[];
+      for (final e in entries) {
+        if (e.date.compareTo(cutoff) < 0) {
+          e.file.deleteSync();
+        } else {
+          kept.add(e);
+          total += e.size;
+        }
+      }
+      if (total <= totalBudgetBytes) return;
+
+      kept.sort((a, b) {
+        final d = a.date.compareTo(b.date);
+        return d != 0 ? d : a.seg.compareTo(b.seg);
+      });
+      for (final e in kept) {
+        if (total <= totalBudgetBytes) break;
+        if (e.date == today || e.date == yesterday) continue;
+        e.file.deleteSync();
+        total -= e.size;
+      }
+    } catch (_) {
+      // Non-fatal: retention must never take down logging.
     }
   }
 

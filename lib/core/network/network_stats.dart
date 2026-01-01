@@ -437,6 +437,9 @@ class NetworkStatsCollector {
     required bool isRunning,
     String? profileDir,
     int? confirmedPeerCount,
+    // S119 B (Problem 2): when provided, activePeerCount uses this value
+    // (= peerSummaries.length) so counter and connection-sheet list agree.
+    int? reachablePeerCount,
     // D5 (§13.1.3): collective-quota drop counters, passed in by the
     // service layer from RateLimiter.poolDroppedPackets /
     // CleonaNode.relayPoolDrops.
@@ -502,7 +505,7 @@ class NetworkStatsCollector {
         : UpnpRouterInfo.fromJson(routerInfoJson);
 
     return NetworkStats(
-      activePeerCount: activePeers.length,
+      activePeerCount: reachablePeerCount ?? activePeers.length,
       totalKnownPeers: allPeers.length,
       idPowVerifiedPeers: allPeers.where((p) => p.idPowVerified).length,
       idPowNoncePeers: allPeers

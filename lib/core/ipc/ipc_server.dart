@@ -1499,6 +1499,61 @@ class IpcServer {
           ));
           break;
 
+        case 'submit_feature_request':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final frTitle = req.params['title'] as String? ?? '';
+          final frBody = req.params['body'] as String? ?? '';
+          final frMsg = await service.submitFeatureRequest(frTitle, frBody);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: frMsg != null,
+            data: frMsg != null
+                ? {
+                    'messageId': frMsg.id,
+                    'channelIdHex': frMsg.conversationId,
+                    'text': frMsg.text,
+                  }
+                : {},
+            error: frMsg == null ? 'Submit failed' : null,
+          ));
+          break;
+
+        case 'vote_feature_request':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final voteRecId = req.params['recordIdHex'] as String?;
+          final voteOption = (req.params['option'] as num?)?.toInt();
+          if (voteRecId == null || voteOption == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex or option'));
+            break;
+          }
+          final voteOk = await service.voteFeatureRequest(voteRecId, voteOption);
+          _sendResponse(client, IpcResponse(id: req.id, success: voteOk,
+              error: voteOk ? null : 'Vote failed'));
+          break;
+
+        case 'feature_request_tally':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final tallyRecId = req.params['recordIdHex'] as String?;
+          if (tallyRecId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex'));
+            break;
+          }
+          final tally = await service.featureRequestTally(tallyRecId);
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: tally));
+          break;
+
         case 'leave_channel':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -2861,6 +2916,20 @@ class IpcServer {
             id: req.id,
             success: true,
             data: {'isSpeakerEnabled': service.isSpeakerEnabled},
+          ));
+          break;
+
+        case 'toggle_video_mute':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          service.toggleVideoMute();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {'isVideoMuted': service.isVideoMuted},
           ));
           break;
 

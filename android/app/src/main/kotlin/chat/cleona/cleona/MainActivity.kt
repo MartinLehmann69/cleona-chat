@@ -282,15 +282,27 @@ class MainActivity : FlutterActivity() {
         // Create message notification channel (separate from foreground service)
         createMessageNotificationChannel()
 
-        // Foreground Service starten
-        val serviceIntent = Intent(this, CleonaForegroundService::class.java)
-        startForegroundService(serviceIntent)
+        ensureForegroundService()
 
         // Bug #U16: cold-start via Share-Sheet — stash payload for Dart drain.
         // Activity-Property `intent` ist getIntent(), enthält das ACTION_SEND-
         // Payload. Vorher hier die lokale Service-Intent-Variable übergeben —
         // handleShareIntent verwarf sie wegen falscher Action.
         handleShareIntent(intent)
+    }
+
+    // §16.2 lifecycle invariant: the FGS must be (re)started whenever the
+    // Activity comes to the foreground and the service is not running —
+    // e.g. after the OS reclaimed it while the app was backgrounded. The
+    // singleton probe is same-process and free; no re-bind storm.
+    override fun onResume() {
+        super.onResume()
+        ensureForegroundService()
+    }
+
+    private fun ensureForegroundService() {
+        if (CleonaForegroundService.instance != null) return
+        startForegroundService(Intent(this, CleonaForegroundService::class.java))
     }
 
     // Warm-launch via Share-Sheet (singleTop reuses this activity).

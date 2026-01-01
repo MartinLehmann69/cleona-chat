@@ -33,6 +33,9 @@ import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:ui' show PlatformDispatcher;
+import 'dart:ui' as ui;
+import 'package:cleona/core/calls/video_engine.dart';
+import 'package:cleona/core/calls/video_capture_android.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
@@ -52,6 +55,19 @@ import 'package:path_provider/path_provider.dart' as pp;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // §16.2 (V3.1.117): stamp the Dart heartbeat as early as possible — before
+  // FFI/keyring init, which can be slow or crash. The Kotlin watchdog must
+  // see a fresh stamp from THIS run, not judge the app by a stale file or a
+  // late first stamp after full boot.
+  if (Platform.isAndroid) {
+    try {
+      final dir = Directory('${AppPaths.home}/.cleona');
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      File('${dir.path}/.dart-heartbeat')
+          .writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}');
+    } catch (_) {}
+  }
 
   // iOS: resolve writable data container via path_provider BEFORE anything
   // touches AppPaths.home. On iOS, HOME is '/tmp' (sandbox) and the bundle
@@ -184,15 +200,14 @@ void main() async {
     }
   } catch (_) {/* never crash startup on cache IO */}
 
-  runZonedGuarded(() {
-    runApp(CleonaApp(
-      hardBlocked: hardBlocked,
-      blockManifest: blockManifest,
-    ));
-  }, (error, stack) {
-    _logCrash('runZonedGuarded', error, stack);
-    CleonaAppState._instance?.handleCrash(error, stack);
-  });
+  // §16.2 (V3.1.117): no runZonedGuarded — runApp in a custom zone competes
+  // with the root-zone binding, and PlatformDispatcher.onError (above) is the
+  // single global sink for uncaught async errors (+ FlutterError.onError for
+  // framework errors).
+  runApp(CleonaApp(
+    hardBlocked: hardBlocked,
+    blockManifest: blockManifest,
+  ));
 }
 
 /// Reads the manifest cache written by [CleonaService._checkForUpdates].
@@ -440,6 +455,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _isInitialized = false;
   bool _hasProfile = false;
   String? _initError;
+
+  /// § F-B: 1:1 video call frame delivery. Registered by the active
+  /// [CallScreen] (didChangeDependencies/dispose) rather than routed through
+  /// [notifyListeners] — frames arrive at ~15-30fps and a full ChangeNotifier
+  /// rebuild of the whole widget tree per frame would be wasteful. Only
+  /// wired for in-process platforms (Android/iOS/macOS-no-daemon); Linux/
+  /// Windows run the daemon in a separate process with no frame-streaming
+  /// IPC (out of scope for this pass — see CleonaAppState._wireServiceCallbacks).
+  void Function(ui.Image image)? onRemoteVideoFrame;
+  void Function(ui.Image image)? onLocalVideoFrame;
 
   /// Non-null while a second (or later) identity is being created.
   /// Set before PQ keygen starts so the IdentityTabBar can show
@@ -1379,7 +1404,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
           // §8.1.1 rev3: Deferred Key Exchange (step 1b)
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
+          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER ||
+          // §9.5.7 (S119 D1): system-channel record gossip
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_WANT ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_PUSH;
       if (!isServiceRouted) return;
       final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
       final identities = node.identitiesForDevice(deviceIdBytes).toList();
@@ -1437,6 +1467,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
                 frame, senderDeviceId, from, port, snapshot);
             break;
           case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
+            // carries accepted=false when the storage peer rejected the
+            // store (recipient not its contact, budget, rate limit).
+            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId);
             break;
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
             service.handleIncomingPeerRetrieveInfra(
@@ -1452,6 +1486,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
             break;
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
             service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+            service.handleIncomingSysChanDigestInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+            service.handleIncomingSysChanSummaryInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+            service.handleIncomingSysChanWantInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
+            service.handleIncomingSysChanPushInfra(frame, senderDeviceId);
             break;
           default:
             break;
@@ -1489,9 +1535,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}'); } catch (_) {}
     }
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      final svc = _service;
-      if (svc == null || !svc.isRunning) return;
       final now = DateTime.now();
+      // §16.2 (V3.1.117): stamp unconditionally on every tick — the file
+      // attests that the Dart isolate is alive, not that a service is
+      // running. The former isRunning guard starved the Kotlin watchdog
+      // during degraded states and fed the kill loop (Problem 10).
+      if (Platform.isAndroid) {
+        try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${now.millisecondsSinceEpoch}'); } catch (_) {}
+      }
       final last = _heartbeatLastAt;
       _heartbeatLastAt = now;
       _heartbeatTick++;
@@ -1505,9 +1556,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Every 60s: an INFO-level beat marker so filtered log viewers
         // still see the app is alive.
         debugPrint('[heartbeat] $msg');
-        if (Platform.isAndroid) {
-          try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${now.millisecondsSinceEpoch}'); } catch (_) {}
-        }
       }
     });
   }
@@ -1681,6 +1729,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onGroupCallStarted = (_) => notifyListeners();
     service.onGroupCallEnded = (_) => notifyListeners();
 
+    // § F-B: 1:1 + group video engine factory. Only wired here — for
+    // in-process services (Android/iOS/macOS-no-daemon) — because it needs
+    // dart:ui (VideoEngine) and, on Android, package:flutter/services.dart
+    // (VideoCaptureAndroid MethodChannel), neither of which call_service.dart
+    // may import (it's part of the headless daemon's dependency graph via
+    // CleonaService — see service_daemon.dart / headless.dart). Linux/
+    // Windows run CleonaService inside the separate daemon process, which
+    // never calls _wireServiceCallbacks, so createVideoEngine stays null
+    // there — CallService already degrades to audio-only when it is.
+    service.createVideoEngine = (sharedSecret, onFrame) =>
+        _createVideoEngine(sharedSecret, onFrame);
+
     // Android: inject platform-specific callbacks
     if (Platform.isAndroid) {
       service.setPlatformAudioDecoder(_androidDecodeToWav);
@@ -1719,6 +1779,100 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         await channel.invokeMethod('vibrate', {'duration': durationMs});
       };
     }
+  }
+
+  /// § F-B: constructs the [VideoEngine] behind [CleonaService.createVideoEngine]
+  /// (used for both 1:1 and group calls — the factory signature is shared).
+  /// Capture strategy per platform:
+  /// - Android + iOS: no isolate. [VideoCaptureAndroid] (platform-neutral
+  ///   `chat.cleona/camera` MethodChannel — CameraXHandler.kt on Android,
+  ///   CameraHandler.swift on iOS; see the [VideoCaptureIOS] alias) feeds
+  ///   I420 frames into the engine via [VideoEngine.feedExternalFrame]
+  ///   on the main isolate.
+  /// - Linux/macOS (in-process fallback): the existing isolate-based V4L2
+  ///   capture stub (synthetic gray frames — not fixed in this pass).
+  /// Any VpxFFI/native-lib failure degrades to audio-only (VideoEngine.start
+  /// returns false; onFrame/onDecodedFrame simply never fire) — never crashes.
+  dynamic _createVideoEngine(
+      Uint8List sharedSecret, void Function(Uint8List) onFrame) {
+    final useIsolate = !(Platform.isAndroid || Platform.isIOS);
+    final engine = VideoEngine(
+      sharedSecret: sharedSecret,
+      useIsolateCapture: useIsolate,
+    );
+    engine.onVideoFrame = onFrame;
+    // Ownership: whichever CallScreen is currently registered via
+    // [onRemoteVideoFrame] owns disposal of the image it receives (it
+    // already disposes-before-replace and disposes-on-unmount — see
+    // call_screen.dart updateRemoteFrame/dispose). If no CallScreen is
+    // registered (race at call start, or the user navigated away without
+    // hanging up), dispose immediately here instead of leaking a GPU
+    // texture per decoded frame.
+    engine.onDecodedFrame = (image) {
+      final cb = onRemoteVideoFrame;
+      if (cb != null) {
+        cb(image);
+      } else {
+        image.dispose();
+      }
+    };
+
+    unawaited(engine.start().then((ok) {
+      if (!ok) {
+        debugPrint('[video] VideoEngine.start() failed (codec/native lib '
+            'unavailable) — this call continues audio-only');
+      }
+    }));
+
+    if (Platform.isAndroid || Platform.isIOS) {
+      // Same Dart wrapper for both: the `chat.cleona/camera` MethodChannel
+      // contract is identical (CameraXHandler.kt / CameraHandler.swift).
+      final cam = VideoCaptureAndroid();
+      cam.onFrame = (i420, w, h) {
+        engine.feedExternalFrame(i420, w, h);
+        _updateLocalVideoPreview(i420, w, h);
+      };
+      engine.onSwitchCameraRequested = () => cam.switchCamera();
+      engine.onCaptureStop = () {
+        unawaited(cam.stop());
+        cam.dispose();
+      };
+      unawaited(() async {
+        final granted = await cam.requestPermission();
+        if (!granted) {
+          debugPrint('[video] CAMERA permission denied — this call sends '
+              'no outgoing video (still receives/decodes the peer\'s)');
+          return;
+        }
+        final started = await cam.start(
+          width: engine.preset.width,
+          height: engine.preset.height,
+        );
+        if (!started) {
+          debugPrint('[video] Camera capture failed to start');
+        }
+      }());
+    }
+
+    return engine;
+  }
+
+  /// Converts a raw captured I420 frame (local preview, pre-encode) to a
+  /// [ui.Image] and forwards it to the active [CallScreen] via
+  /// [onLocalVideoFrame]. Mirrors [VideoEngine]'s own I420→RGBA conversion
+  /// (group video / remote decode) for consistency. Same single-owner
+  /// disposal contract as [_createVideoEngine]'s onDecodedFrame above.
+  void _updateLocalVideoPreview(Uint8List i420, int width, int height) {
+    final rgba = VideoEngine.i420ToRgba(i420, width, height);
+    ui.decodeImageFromPixels(rgba, width, height, ui.PixelFormat.rgba8888,
+        (ui.Image image) {
+      final cb = onLocalVideoFrame;
+      if (cb != null) {
+        cb(image);
+      } else {
+        image.dispose();
+      }
+    });
   }
 
   /// Decode audio to WAV via Android MediaCodec MethodChannel.

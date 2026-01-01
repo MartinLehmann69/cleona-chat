@@ -345,16 +345,24 @@ class PollCard extends StatelessWidget {
         {
           final chosen = await showModalBottomSheet<int>(
             context: context,
+            // Problem 9 (S119): mirror the datePoll pattern — without
+            // isScrollControlled + inset padding the sheet is squeezed
+            // against the bottom system bar.
+            isScrollControlled: true,
             builder: (ctx) => SafeArea(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  for (final opt in poll.options)
-                    ListTile(
-                      title: Text(opt.label),
-                      onTap: () => Navigator.pop(ctx, opt.optionId),
-                    ),
-                ],
+              child: Padding(
+                padding: EdgeInsets.only(
+                    bottom: MediaQuery.of(ctx).viewInsets.bottom),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final opt in poll.options)
+                      ListTile(
+                        title: Text(opt.label),
+                        onTap: () => Navigator.pop(ctx, opt.optionId),
+                      ),
+                  ],
+                ),
               ),
             ),
           );
@@ -374,30 +382,36 @@ class PollCard extends StatelessWidget {
           final max = poll.settings.maxChoices;
           await showModalBottomSheet(
             context: context,
+            // Problem 9 (S119): mirror the datePoll pattern.
+            isScrollControlled: true,
             builder: (ctx) => StatefulBuilder(builder: (c, setState) {
               return SafeArea(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    for (final opt in poll.options)
-                      CheckboxListTile(
-                        value: selected.contains(opt.optionId),
-                        title: Text(opt.label),
-                        onChanged: (v) => setState(() {
-                          if (v == true) {
-                            if (max == 0 || selected.length < max) {
-                              selected.add(opt.optionId);
+                child: Padding(
+                  padding: EdgeInsets.only(
+                      bottom: MediaQuery.of(ctx).viewInsets.bottom),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      for (final opt in poll.options)
+                        CheckboxListTile(
+                          value: selected.contains(opt.optionId),
+                          title: Text(opt.label),
+                          onChanged: (v) => setState(() {
+                            if (v == true) {
+                              if (max == 0 || selected.length < max) {
+                                selected.add(opt.optionId);
+                              }
+                            } else {
+                              selected.remove(opt.optionId);
                             }
-                          } else {
-                            selected.remove(opt.optionId);
-                          }
-                        }),
+                          }),
+                        ),
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        child: Text(locale.get('poll_vote')),
                       ),
-                    ElevatedButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: Text(locale.get('poll_vote')),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               );
             }),
@@ -467,25 +481,31 @@ class PollCard extends StatelessWidget {
           var value = poll.settings.scaleMin;
           final chosen = await showModalBottomSheet<int>(
             context: context,
+            // Problem 9 (S119): mirror the datePoll pattern.
+            isScrollControlled: true,
             builder: (ctx) => StatefulBuilder(builder: (c, setState) {
               return SafeArea(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Slider(
-                      min: poll.settings.scaleMin.toDouble(),
-                      max: poll.settings.scaleMax.toDouble(),
-                      divisions:
-                          poll.settings.scaleMax - poll.settings.scaleMin,
-                      value: value.toDouble(),
-                      label: '$value',
-                      onChanged: (v) => setState(() => value = v.round()),
-                    ),
-                    ElevatedButton(
-                      onPressed: () => Navigator.pop(ctx, value),
-                      child: Text(locale.get('poll_vote')),
-                    ),
-                  ],
+                child: Padding(
+                  padding: EdgeInsets.only(
+                      bottom: MediaQuery.of(ctx).viewInsets.bottom),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Slider(
+                        min: poll.settings.scaleMin.toDouble(),
+                        max: poll.settings.scaleMax.toDouble(),
+                        divisions:
+                            poll.settings.scaleMax - poll.settings.scaleMin,
+                        value: value.toDouble(),
+                        label: '$value',
+                        onChanged: (v) => setState(() => value = v.round()),
+                      ),
+                      ElevatedButton(
+                        onPressed: () => Navigator.pop(ctx, value),
+                        child: Text(locale.get('poll_vote')),
+                      ),
+                    ],
+                  ),
                 ),
               );
             }),

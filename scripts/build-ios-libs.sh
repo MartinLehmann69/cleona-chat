@@ -2,8 +2,8 @@
 ###############################################################################
 # build-ios-libs.sh — Build native libraries for iOS
 #
-# Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp
-# and libcleona_audio as STATIC libraries (.a) for iOS.
+# Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp,
+# libcleona_audio, libvpx and libcleona_vpx as STATIC libraries (.a) for iOS.
 #
 # iOS does not allow loading custom dynamic libraries — all native code must
 # be statically linked into the app binary. Flutter's dart:ffi then accesses
@@ -55,6 +55,7 @@ LIBZSTD_VERSION="1.5.6"
 LIBERASURECODE_VERSION="1.6.2"
 LIBOPUS_VERSION="1.5.2"
 WHISPER_VERSION="v1.7.1"
+LIBVPX_VERSION="1.14.0"
 
 NPROC="$(sysctl -n hw.ncpu)"
 
@@ -337,12 +338,102 @@ build_cleona_audio() {
     cd "$PROJECT_DIR"
 }
 
+build_libvpx() {
+    local platform="$1"
+    echo "── libvpx ($platform) ─────────────────────────────────────────"
+    setup_env "$platform"
+    local src="$BUILD_DIR/libvpx"
+    if [ ! -d "$src" ]; then
+        git clone --depth 1 --branch "v$LIBVPX_VERSION" \
+            https://github.com/webmproject/libvpx.git "$src"
+    fi
+    cd "$src"
+    make distclean 2>/dev/null || true
+
+    # libvpx does NOT use CMake/autotools-style --host=; it has its own
+    # configure with --target=<isa>-<os>-<cc>. The target string selects
+    # codec ISA features (NEON) AND — for the darwin/iphonesimulator
+    # cases — makes configure append its own -isysroot/-miphoneos-
+    # version-min flags on top of the CC/CFLAGS/LDFLAGS this script
+    # already exports via setup_env. Verified against libvpx's
+    # build/make/configure.sh (v1.14.0):
+    #
+    #   - Device (iphoneos): arm64-darwin-gcc
+    #     Listed in configure's all_platforms whitelist. Matches the
+    #     `arm*-darwin-*` case, which resolves the iphoneos SDK itself
+    #     via `xcrun --sdk iphoneos` (redundant with, but consistent
+    #     with, our own -isysroot).
+    #
+    #   - Simulator: arm64-iphonesimulator-gcc (with --force-toolchain)
+    #     NOT in configure's all_platforms whitelist — libvpx only
+    #     pre-registers x86/x86_64 iphonesimulator variants (predates
+    #     Apple Silicon simulators). --force-toolchain bypasses the
+    #     whitelist check (`is_in ... || enabled force_toolchain`);
+    #     the toolchain string still matches the `*-iphonesimulator-*`
+    #     case in configure.sh's target-parsing, which correctly
+    #     resolves the iphonesimulator SDK. Using arm64-darwin-gcc for
+    #     the simulator instead would be wrong: it hits the
+    #     `arm*-darwin-*` case, which appends an *iphoneos* -isysroot
+    #     AFTER ours, silently pointing the simulator build at the
+    #     wrong SDK (last -isysroot wins).
+    local vpx_target="arm64-darwin-gcc"
+    local force_flag=""
+    if [ "$platform" = "iphonesimulator" ]; then
+        vpx_target="arm64-iphonesimulator-gcc"
+        force_flag="--force-toolchain"
+    fi
+
+    # VP8-only: vpx_shim.c (native/vpx_shim.c) only calls vpx_codec_vp8_cx/
+    # vpx_codec_vp8_dx and the codec-agnostic vpx_codec_* / vpx_img_*
+    # entry points — no VP9 symbols are used. --disable-vp9 keeps the
+    # build lean. --disable-webm-io/--disable-libyuv are already the
+    # default (off); listed explicitly for documentation.
+    # shellcheck disable=SC2086
+    ./configure \
+        --target="$vpx_target" $force_flag \
+        --prefix="$INSTALL_DIR/vpx" \
+        --disable-examples \
+        --disable-tools \
+        --disable-docs \
+        --disable-unit-tests \
+        --disable-install-bins \
+        --disable-install-docs \
+        --disable-vp9 \
+        --enable-vp8 \
+        --enable-static \
+        --disable-shared \
+        --disable-webm-io \
+        --disable-libyuv
+    make -j"$NPROC"
+    make install
+    cd "$PROJECT_DIR"
+}
+
+build_cleona_vpx() {
+    local platform="$1"
+    echo "── libcleona_vpx ($platform) ────────────────────────────────────"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/vpx_shim.c"
+    mkdir -p "$INSTALL_DIR/cleona_vpx/lib"
+
+    # vpx_shim.c has no CMakeLists (unlike cleona_audio) — it is a single
+    # translation unit with no external headers beyond libc/dlfcn (it
+    # treats libvpx structs as opaque byte buffers rather than #include-ing
+    # vpx headers), so a direct clang -c + ar via the CC/AR this script
+    # already resolves in setup_env is simpler than adding build machinery.
+    # shellcheck disable=SC2086
+    "$CC" $CFLAGS -c "$src" -o "$BUILD_DIR/vpx_shim.o"
+    rm -f "$INSTALL_DIR/cleona_vpx/lib/libcleona_vpx.a"
+    "$AR" rcs "$INSTALL_DIR/cleona_vpx/lib/libcleona_vpx.a" "$BUILD_DIR/vpx_shim.o"
+    cd "$PROJECT_DIR"
+}
+
 # ── Build orchestrator ───────────────────────────────────────────────────────
 PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio vpx cleona_vpx)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -362,6 +453,8 @@ for platform in "${PLATFORMS[@]}"; do
             opus)          build_libopus "$platform" ;;
             whisper)       build_whisper "$platform" ;;
             cleona_audio)  build_cleona_audio "$platform" ;;
+            vpx)           build_libvpx "$platform" ;;
+            cleona_vpx)    build_cleona_vpx "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done
@@ -411,6 +504,8 @@ for t in "${WANTED[@]}"; do
             done
             ;;
         cleona_audio)  make_xcfw libcleona_audio cleona_audio libcleona_audio.a include ;;
+        vpx)           make_xcfw libvpx vpx libvpx.a include ;;
+        cleona_vpx)    make_xcfw libcleona_vpx cleona_vpx libcleona_vpx.a ;;
     esac
 done
 
@@ -440,7 +535,7 @@ for platform_tag in device simulator; do
     # that already contains their object files. Including all three causes
     # duplicate symbols when DEAD_CODE_STRIPPING is disabled.
     ALL_ARCHIVES=()
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib vpx/lib cleona_vpx/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             case "$(basename "$a")" in

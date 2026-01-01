@@ -582,6 +582,9 @@ class FirstContactRendezvousManager {
     _epochTimer?.cancel();
     _epochTimer = null;
     _debounceTimer?.cancel();
+    for (final provider in _providers) {
+      if (provider is NostrProvider) provider.dispose();
+    }
     _saveSessions();
   }
 }

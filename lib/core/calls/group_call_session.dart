@@ -55,6 +55,13 @@ class GroupCallSession {
   /// userId-hex) — lets reciprocation avoid re-announcing on every inbound key.
   final Set<String> announcedSendKeyTo = {};
 
+  /// §13.1.2 exemption #4: participant userId-hex -> device id registered
+  /// with [CleonaNode.registerLiveMediaPeer] for this session's live-media
+  /// PoW exemption. Tracked per-participant (not a flat `Set<Uint8List>`) so
+  /// GROUP_LEAVE/HANGUP can unregister exactly the departing participant's
+  /// device, and full teardown can unregister everyone still on it.
+  final Map<String, Uint8List> registeredLiveMediaDeviceIds = {};
+
   /// Overlay multicast tree for media relay.
   OverlayTree tree = OverlayTree(maxFanOut: 3);
   MediaRelay? relay;
@@ -75,6 +82,11 @@ class GroupCallSession {
 
   /// Monotonic video sequence number.
   int get nextVideoSeqNum => _videoSeqNum++;
+
+  /// Set once the receive-side live-media fast path (Architecture §10.3,
+  /// F-C) has logged its "active" line for this group call — prevents
+  /// per-frame log spam (audio alone runs at ~50 frames/sec).
+  bool liveMediaFastPathLogged = false;
 
   GroupCallSession({
     required this.callId,

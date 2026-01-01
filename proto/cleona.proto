@@ -1746,6 +1746,12 @@ enum MessageTypeV3 {
   // Anonymous Vote Re-Broadcaster (§11.4.8)
   MTV3_POLL_ANON_SUBMIT            = 225;
   MTV3_POLL_ANON_SUBMIT_ACK        = 226;
+
+  // §9.5.7 System-Channel record gossip (V3.1.117, S119 D1) — BOOT path
+  MTV3_SYSCHAN_DIGEST              = 230;
+  MTV3_SYSCHAN_SUMMARY             = 231;
+  MTV3_SYSCHAN_WANT                = 232;
+  MTV3_SYSCHAN_PUSH                = 233;
 }
 
 // ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────
@@ -1989,3 +1995,55 @@ message DeviceSetChangeProof {
   repeated RotationApprovalToken approvals = 3;
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// §9.5.7 System-Channel Records & Gossip (V3.1.117, S119 D1/D2/D3)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Self-contained, self-signed system-channel record. Distinct wire type
+// from CHANNEL_POST (D1-S1): system channels are ownerless and carry no
+// subscriber registry, so every record must be verifiable stand-alone via
+// the inline pubkeys (KEX-Gate context-proof, §8.2/§9.5.6).
+message SystemChannelRecord {
+  bytes  channel_id        = 1;   // 32B — compile-time system-channel constant (§9.5.1)
+  bytes  record_id         = 2;   // 16B UUID v4
+  uint32 kind              = 3;   // 0 = POST, 1 = VOTE, 2 = RETRACT (D2)
+  bytes  author_user_id    = 4;   // 32B UserID (founding binding, §9.5.7)
+  bytes  author_ed25519_pk = 5;   // inline founding Ed25519 PK
+  bytes  author_ml_dsa_pk  = 6;   // inline founding ML-DSA-65 PK
+  uint64 timestamp_ms      = 7;
+  string text              = 8;   // POST: content (JSON for structured reports)
+  // VOTE (§9.5.3 embedded FR poll — open records, tallied locally) and
+  // RETRACT (D2 tombstone) reference their target here:
+  bytes  target_record_id  = 9;
+  uint32 vote_option       = 10;  // VOTE: 0 = Ja, 1 = Nein, 2 = Egal
+  // Hybrid self-signature (H-2 pattern) over the canonical content
+  // (this message serialized with both sig fields empty):
+  bytes  sig_ed25519       = 11;
+  bytes  sig_ml_dsa        = 12;
+}
+
+// Hourly anti-entropy Digest → Summary → Want → Push (§9.5.7 D1-S2),
+// piggy-backed on the channel-index gossip slot. BOOT-path
+// InfrastructureFrames (§2.3.5): HMAC + inner record self-signature.
+message SysChanDigest {
+  bytes  channel_id   = 1;
+  uint32 record_count = 2;
+  bytes  set_hash     = 3;  // XOR over all record fingerprints (16B) — order-independent
+}
+
+message SysChanSummary {
+  bytes channel_id            = 1;
+  repeated bytes fingerprints = 2;  // sender's full fingerprint set (16B each)
+}
+
+message SysChanWant {
+  bytes channel_id            = 1;
+  repeated bytes fingerprints = 2;  // records the sender wants pushed
+}
+
+message SysChanPush {
+  bytes channel_id       = 1;
+  repeated bytes records = 2;  // serialized SystemChannelRecord blobs
+  uint32 ttl             = 3;  // eager new-record flood: forward with ttl-1, dedup by fingerprint
+}

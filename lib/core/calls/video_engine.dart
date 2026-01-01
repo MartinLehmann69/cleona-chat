@@ -231,6 +231,14 @@ class VideoEngine {
   final VideoPreset _preset;
   final String _cameraDevice;
 
+  /// When true (default), capture runs in a background isolate driving a
+  /// (currently stubbed) V4L2 camera — the desktop/Linux path. When false,
+  /// no isolate is spawned; the platform layer feeds already-captured I420
+  /// frames in via [feedExternalFrame] (e.g. Android CameraX MethodChannel).
+  /// In external mode encode and decode share the single [_decoder]
+  /// VpxFFI instance (full-duplex, one native codec pair per 1:1 call).
+  final bool useIsolateCapture;
+
   /// Called when an encrypted video frame is ready to send to the peer.
   void Function(Uint8List serializedVideoFrame)? onVideoFrame;
 
@@ -240,10 +248,27 @@ class VideoEngine {
   /// Called when a decoded I420 frame is available (for testing/alternative rendering).
   void Function(Uint8List i420Data, int width, int height)? onDecodedI420;
 
+  /// Receive-side: fired when we cannot decode the incoming stream (no
+  /// keyframe seen yet, or repeated decode failures) so the caller should
+  /// ask the peer for a fresh keyframe (§ sendKeyframeRequest).
+  void Function()? onKeyframeNeeded;
+
+  /// External-capture hooks (Android CameraX today). Wired by whatever
+  /// created this engine with [useIsolateCapture] == false. No-ops on
+  /// platforms without a capture integration (e.g. iOS today).
+  void Function()? onCaptureStop;
+  Future<bool> Function()? onSwitchCameraRequested;
+
+  bool _forceKeyframeExternal = false;
+  int _externalSeqNum = 0;
+  bool _hasSeenKeyframe = false;
+  int _consecutiveDecodeFailures = 0;
+
   VideoEngine({
     required this.sharedSecret,
     VideoPreset preset = VideoPreset.medium,
     String cameraDevice = '/dev/video0',
+    this.useIsolateCapture = true,
     CLogger? log,
   })  : _log = log ?? CLogger('VideoEngine'),
         _sodium = SodiumFFI(),
@@ -258,7 +283,10 @@ class VideoEngine {
   Future<bool> start() async {
     if (_running) return true;
 
-    // Create decoder for incoming frames
+    // Create the VP8 codec pair (encoder + decoder). If libvpx / the shim
+    // isn't available on this platform (e.g. Android/iOS today, where
+    // libcleona_vpx is not yet built into jniLibs/XCFrameworks), fail soft —
+    // the caller treats `false` as "continue the call audio-only".
     try {
       _decoder = VpxFFI(
         width: _preset.width,
@@ -267,8 +295,16 @@ class VideoEngine {
         fps: _preset.fps,
       );
     } catch (e) {
-      _log.error('Failed to create VP8 decoder: $e');
+      _log.warn('VP8 codec unavailable — video disabled, call continues audio-only: $e');
       return false;
+    }
+
+    if (!useIsolateCapture) {
+      // External capture mode: no isolate. Encode (via feedExternalFrame)
+      // and decode (via processReceivedFrame) both use `_decoder`.
+      _running = true;
+      _log.info('Video engine started (external capture, ${_preset.label})');
+      return true;
     }
 
     // Start capture isolate (two-stage handshake — see audio_engine.dart
@@ -361,6 +397,16 @@ class VideoEngine {
 
     try {
       final videoFrame = proto.VideoFrame.fromBuffer(serializedFrame);
+      final isKeyframe = (videoFrame.flags & 0x01) != 0;
+
+      // Mid-stream join: a P-frame arriving before we've ever seen a
+      // keyframe cannot be decoded meaningfully. Drop it and ask the
+      // sender for a fresh keyframe (rate-limited implicitly — we only
+      // fire once per "waiting for keyframe" episode, see below).
+      if (!_hasSeenKeyframe && !isKeyframe) {
+        onKeyframeNeeded?.call();
+        return;
+      }
 
       // Decrypt
       final Uint8List decrypted;
@@ -377,7 +423,13 @@ class VideoEngine {
 
       // Decode VP8 → I420
       final decoded = _decoder!.decode(decrypted);
-      if (decoded == null) return;
+      if (decoded == null) {
+        _registerDecodeFailure();
+        return;
+      }
+
+      _hasSeenKeyframe = true;
+      _consecutiveDecodeFailures = 0;
 
       // Notify I420 listener (for testing)
       onDecodedI420?.call(decoded.i420Data, decoded.width, decoded.height);
@@ -390,7 +442,65 @@ class VideoEngine {
         });
       }
     } catch (e) {
+      _registerDecodeFailure();
       _log.debug('Video frame processing error: $e');
+    }
+  }
+
+  /// After a few consecutive decode failures, assume the stream desynced
+  /// (e.g. a dropped keyframe) and ask the sender for a new one.
+  void _registerDecodeFailure() {
+    _consecutiveDecodeFailures++;
+    if (_consecutiveDecodeFailures >= 3) {
+      _consecutiveDecodeFailures = 0;
+      _hasSeenKeyframe = false;
+      onKeyframeNeeded?.call();
+    }
+  }
+
+  /// Feed an externally-captured I420 frame (e.g. Android CameraX via
+  /// MethodChannel, running on the main isolate) into the VP8 encoder +
+  /// AES-256-GCM encryption path. No-op in isolate-capture mode, while not
+  /// running, or while muted.
+  void feedExternalFrame(Uint8List i420Data, int width, int height) {
+    if (useIsolateCapture || !_running || _decoder == null || _muted) return;
+    try {
+      final forceKf = _forceKeyframeExternal;
+      _forceKeyframeExternal = false;
+      final encoded = _decoder!.encode(i420Data, forceKeyframe: forceKf);
+      if (encoded == null) return;
+
+      final nonce = _sodium.generateNonce();
+      final encrypted = _sodium.aesGcmEncrypt(encoded.data, sharedSecret, nonce);
+
+      final videoFrame = proto.VideoFrame()
+        ..sequenceNumber = _externalSeqNum++
+        ..flags = (encoded.isKeyframe ? 0x01 : 0)
+        ..width = width
+        ..height = height
+        ..nonce = nonce
+        ..encryptedData = encrypted
+        ..timestampMs = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
+
+      onVideoFrame?.call(videoFrame.writeToBuffer());
+    } catch (e) {
+      _log.debug('External frame encode failed: $e');
+    }
+  }
+
+  /// Ask the platform capture layer to switch cameras (Android front/back).
+  /// Returns false with a debug log on platforms without a capture hook.
+  Future<bool> switchCamera() async {
+    final hook = onSwitchCameraRequested;
+    if (hook == null) {
+      _log.debug('switchCamera: no capture hook on this platform — no-op');
+      return false;
+    }
+    try {
+      return await hook();
+    } catch (e) {
+      _log.warn('switchCamera failed: $e');
+      return false;
     }
   }
 
@@ -441,9 +551,14 @@ class VideoEngine {
     return rgba;
   }
 
-  /// Force next captured frame to be a keyframe.
+  /// Force next captured frame to be a keyframe (sender side — e.g. after
+  /// a peer's [MTV3_CALL_KEYFRAME_REQUEST]).
   void forceKeyframe() {
-    _captureCommandPort?.send(_CaptureCommand.forceKeyframe);
+    if (useIsolateCapture) {
+      _captureCommandPort?.send(_CaptureCommand.forceKeyframe);
+    } else {
+      _forceKeyframeExternal = true;
+    }
   }
 
   /// §10.2.1: switch the capture isolate to a rotated own send_key. Used by
@@ -452,17 +567,36 @@ class VideoEngine {
     _captureCommandPort?.send(Uint8List.fromList(newKey));
   }
 
-  /// Mute/unmute video capture (sends black frames when muted).
+  /// Mute/unmute video capture (sends black frames when muted in isolate
+  /// mode; simply stops encoding+sending in external-capture mode).
   set muted(bool value) {
     _muted = value;
-    _captureCommandPort
-        ?.send(value ? _CaptureCommand.mute : _CaptureCommand.unmute);
+    if (useIsolateCapture) {
+      _captureCommandPort
+          ?.send(value ? _CaptureCommand.mute : _CaptureCommand.unmute);
+    }
   }
 
   /// Stop video engine and release resources.
   void stop() {
     if (!_running && _captureIsolate == null) return;
     _running = false;
+
+    if (!useIsolateCapture) {
+      try {
+        onCaptureStop?.call();
+      } catch (e) {
+        _log.warn('onCaptureStop threw: $e');
+      }
+      try {
+        _decoder?.dispose();
+      } catch (e) {
+        _log.warn('VP8 codec dispose threw: $e');
+      }
+      _decoder = null;
+      _log.info('Video engine stopped');
+      return;
+    }
 
     _captureCommandPort?.send(_CaptureCommand.stop);
 

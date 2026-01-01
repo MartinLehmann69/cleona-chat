@@ -466,6 +466,10 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_FIRST_CR_DELIVER = MessageTypeV3._(224, _omitEnumNames ? '' : 'MTV3_FIRST_CR_DELIVER');
   static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT = MessageTypeV3._(225, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT');
   static const MessageTypeV3 MTV3_POLL_ANON_SUBMIT_ACK = MessageTypeV3._(226, _omitEnumNames ? '' : 'MTV3_POLL_ANON_SUBMIT_ACK');
+  static const MessageTypeV3 MTV3_SYSCHAN_DIGEST = MessageTypeV3._(230, _omitEnumNames ? '' : 'MTV3_SYSCHAN_DIGEST');
+  static const MessageTypeV3 MTV3_SYSCHAN_SUMMARY = MessageTypeV3._(231, _omitEnumNames ? '' : 'MTV3_SYSCHAN_SUMMARY');
+  static const MessageTypeV3 MTV3_SYSCHAN_WANT = MessageTypeV3._(232, _omitEnumNames ? '' : 'MTV3_SYSCHAN_WANT');
+  static const MessageTypeV3 MTV3_SYSCHAN_PUSH = MessageTypeV3._(233, _omitEnumNames ? '' : 'MTV3_SYSCHAN_PUSH');
 
   static const $core.List<MessageTypeV3> values = <MessageTypeV3> [
     MTV3_TEXT,
@@ -601,6 +605,10 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_FIRST_CR_DELIVER,
     MTV3_POLL_ANON_SUBMIT,
     MTV3_POLL_ANON_SUBMIT_ACK,
+    MTV3_SYSCHAN_DIGEST,
+    MTV3_SYSCHAN_SUMMARY,
+    MTV3_SYSCHAN_WANT,
+    MTV3_SYSCHAN_PUSH,
   ];
 
   static final $core.Map<$core.int, MessageTypeV3> _byValue = $pb.ProtobufEnum.initByValue(values);

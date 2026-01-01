@@ -430,17 +430,26 @@ class ChannelModerationService {
     _channelIndexGossipTimer = Timer.periodic(interval, (_) => doChannelIndexGossip());
   }
 
+  /// §9.5.7 (S119 D1): piggyback hook — cleona_service sends the system-
+  /// channel record digests to the same gossip targets, on the same slot
+  /// (no new timer, no new periodicity).
+  void Function(List<PeerInfo> targets)? onGossipTargets;
+
   /// Send channel index to up to 3 random connected peers.
   void doChannelIndexGossip() {
-    final entries = _ctx.channelIndex.allEntries;
-    if (entries.isEmpty) return;
-
     // Pick up to 3 random peers from routing table
     final allPeers = _ctx.node.routingTable.allPeers;
     if (allPeers.isEmpty) return;
 
     final shuffled = List<PeerInfo>.from(allPeers)..shuffle();
-    final targets = shuffled.take(3);
+    final targets = shuffled.take(3).toList();
+
+    // §9.5.7 anti-entropy piggyback — runs even when the channel index
+    // itself is empty (system-channel records exist independently).
+    onGossipTargets?.call(targets);
+
+    final entries = _ctx.channelIndex.allEntries;
+    if (entries.isEmpty) return;
 
     final exchangeMsg = proto.ChannelIndexExchange();
     for (final entry in entries) {

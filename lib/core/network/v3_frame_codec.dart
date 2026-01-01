@@ -863,6 +863,13 @@ bool isInfrastructureMessageTypeV3(proto.MessageTypeV3 type) {
     // §11.4.8: Anonymous Vote Re-Broadcaster — voter→R bundle + R→voter ACK
     case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
     case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
+    // §9.5.7 System-Channel record gossip (S119 D1) — anti-entropy over
+    // self-signed SystemChannelRecords; recipients are arbitrary routing-
+    // table peers (same rationale as CHANNEL_INDEX_EXCHANGE above).
+    case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
       return true;
     default:
       return false;
@@ -971,6 +978,15 @@ bool isBootstrapMessageTypeV3(proto.MessageTypeV3 type) {
     case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
     case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
     case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
+    // §9.5.7 System-Channel record gossip (S119 D1) — BOOT path per
+    // §2.3.5: routing-metadata anti-entropy to arbitrary peers, mirroring
+    // peer-list gossip. Authenticity = Closed-Network HMAC + the inner
+    // SystemChannelRecord's hybrid self-signature; confidentiality of
+    // "which records a peer holds" is consciously waived (§4.10).
+    case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+    case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
       // Sanity: every BOOT entry MUST also be in the §2.3.5 selector. If
       // these ever drift, the receiver-side `isInfrastructureMessageTypeV3`
       // gate in [decryptAndVerifyInfrastructure] would still admit BOOT

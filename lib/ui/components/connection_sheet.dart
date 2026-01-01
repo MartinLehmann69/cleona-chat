@@ -50,17 +50,28 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
   final _ipController = TextEditingController();
   final _portController = TextEditingController();
 
-  // Peer list — refreshed on open and after reconnect
+  // Peer list — refreshed on open, after reconnect, and reactively on
+  // every service state change (S119 B: no polling timer; the sheet chains
+  // into onStateChanged, which node.onPeersChanged already drives).
   List<PeerSummary> _peers = [];
+  void Function()? _prevOnStateChanged;
 
   @override
   void initState() {
     super.initState();
     _peers = widget.service.peerSummaries;
+    _prevOnStateChanged = widget.service.onStateChanged;
+    widget.service.onStateChanged = () {
+      _prevOnStateChanged?.call();
+      if (mounted) {
+        setState(() => _peers = widget.service.peerSummaries);
+      }
+    };
   }
 
   @override
   void dispose() {
+    widget.service.onStateChanged = _prevOnStateChanged;
     _importController.dispose();
     _ipController.dispose();
     _portController.dispose();
@@ -221,6 +232,16 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
     FocusScope.of(context).unfocus();
   }
 
+  /// Compact relative age using international unit symbols (s/min/h/d) —
+  /// the surrounding label comes from i18n (`connection_sheet_last_seen`).
+  String _formatLastSeen(DateTime lastSeen) {
+    final d = DateTime.now().difference(lastSeen);
+    if (d.inSeconds < 60) return '${d.inSeconds} s';
+    if (d.inMinutes < 60) return '${d.inMinutes} min';
+    if (d.inHours < 24) return '${d.inHours} h';
+    return '${d.inDays} d';
+  }
+
   // ── Build ────────────────────────────────────────────────────────────────
 
   @override
@@ -287,14 +308,31 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
                   else
                     ..._peers.take(20).map((p) => ListTile(
                       dense: true,
-                      leading: Icon(Icons.circle, size: 10, color: Colors.green),
-                      title: Text(
+                      // S119 B: green = direct (confirmed bidirectional
+                      // UDP), amber = reachable via relay route only.
+                      leading: Icon(Icons.circle, size: 10,
+                          color: p.isDirect ? Colors.green : Colors.amber),
+                      // Problem 1 (S119): peer ID + address selectable.
+                      title: SelectableText(
                         '${p.nodeIdHex.substring(0, 16)}…',
                         style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
                       ),
-                      subtitle: p.allAddresses.isNotEmpty
-                          ? Text(p.allAddresses.first, style: const TextStyle(fontSize: 11))
-                          : null,
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (p.allAddresses.isNotEmpty)
+                            SelectableText(p.allAddresses.first,
+                                style: const TextStyle(fontSize: 11)),
+                          Text(
+                            locale.get('connection_sheet_last_seen').replaceAll(
+                                '{t}', _formatLastSeen(p.lastSeen)),
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
+                      ),
                     )),
 
                   const Divider(),

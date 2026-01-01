@@ -1341,6 +1341,45 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
+  Future<UiMessage?> submitFeatureRequest(String title, String body) async {
+    final resp = await _sendRequest('submit_feature_request', params: {
+      'title': title,
+      'body': body,
+    });
+    if (resp.success) {
+      return UiMessage(
+        id: resp.data['messageId'] as String? ?? '',
+        conversationId: resp.data['channelIdHex'] as String? ?? '',
+        senderNodeIdHex: _nodeIdHex,
+        text: resp.data['text'] as String? ?? '',
+        timestamp: DateTime.now(),
+        type: UiMessageType.channelPost,
+        status: MessageStatus.sent,
+        isOutgoing: true,
+      );
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> voteFeatureRequest(String recordIdHex, int option) async {
+    final resp = await _sendRequest('vote_feature_request', params: {
+      'recordIdHex': recordIdHex,
+      'option': option,
+    });
+    return resp.success;
+  }
+
+  @override
+  Future<Map<String, int>> featureRequestTally(String recordIdHex) async {
+    final resp = await _sendRequest('feature_request_tally', params: {
+      'recordIdHex': recordIdHex,
+    });
+    if (!resp.success) return const {'ja': 0, 'nein': 0, 'egal': 0, 'net': 0, 'own': -1};
+    return (resp.data).map((k, v) => MapEntry(k, (v as num).toInt()));
+  }
+
+  @override
   Future<bool> leaveChannel(String channelIdHex) async {
     final resp = await _sendRequest('leave_channel', params: {
       'channelIdHex': channelIdHex,
@@ -1847,6 +1886,29 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         _isSpeakerEnabled = resp.data['isSpeakerEnabled'] as bool? ?? true;
       }
     });
+  }
+
+  @override
+  bool get isVideoMuted => _isVideoMuted;
+  bool _isVideoMuted = false;
+
+  @override
+  void toggleVideoMute() {
+    _sendRequest('toggle_video_mute').then((resp) {
+      if (resp.success) {
+        _isVideoMuted = resp.data['isVideoMuted'] as bool? ?? false;
+      }
+    });
+  }
+
+  @override
+  Future<bool> switchCamera() async {
+    // Desktop (Linux/Windows) has no camera capture integration — the
+    // daemon-side video engine either runs isolate-captured gray frames
+    // (Linux) or nothing at all. Rather than a round-trip that always
+    // answers false, short-circuit locally (CLAUDE.md §5: no unnecessary
+    // network traffic).
+    return false;
   }
 
   // Network statistics

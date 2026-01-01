@@ -2,8 +2,9 @@
 ###############################################################################
 # build-macos-libs.sh — Build native libraries for macOS
 #
-# Builds libsodium, liboqs, libzstd, liberasurecode, libopus and whisper.cpp
-# as dylibs for macOS (arm64, x86_64 or universal via lipo).
+# Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp
+# and libcleona_audio (miniaudio + vendored speexdsp) as dylibs for macOS
+# (arm64, x86_64 or universal via lipo).
 #
 # Run this on a macOS host (it cannot cross-compile from Linux — Apple's SDK
 # and codesign are required). The resulting dylibs are dropped into
@@ -284,6 +285,26 @@ build_vpx_shim() {
     rewrite_install_name "$out"
 }
 
+build_cleona_audio() {
+    echo "── libcleona_audio (miniaudio + vendored speexdsp) ──────────"
+    # CMakeLists handles Apple natively: miniaudio_impl.c compiles as OBJC,
+    # links AudioToolbox/CoreAudio/AVFoundation, vendored speexdsp is built
+    # STATIC and embedded (no separate speexdsp dylib in the bundle).
+    local src="$PROJECT_DIR/native/cleona_audio"
+    local build="$BUILD_DIR/cleona_audio"
+    rm -rf "$build" && mkdir -p "$build"
+    cmake -GNinja -S "$src" -B "$build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
+    ninja -C "$build"
+    # The Dart shim loads `cleona_audio.dylib` — WITHOUT `lib` prefix — from
+    # @executable_path/../Frameworks (see audio_engine_shim.dart, macOS
+    # candidates). Rename on copy so the bundle name matches the loader.
+    cp "$build/libcleona_audio.dylib" "$OUT_DIR/cleona_audio.dylib"
+    rewrite_install_name "$OUT_DIR/cleona_audio.dylib"
+}
+
 # ── Homebrew shortcut ────────────────────────────────────────────────────────
 use_homebrew_libs() {
     echo ">>> Using Homebrew-installed libs (symlinks into $OUT_DIR)"
@@ -343,7 +364,7 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
-    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx)
+    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_audio)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")
     fi
@@ -360,6 +381,7 @@ run_builds() {
             opus) build_libopus ;;
             whisper) build_whisper ;;
             vpx) build_vpx_shim ;;
+            cleona_audio) build_cleona_audio ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done

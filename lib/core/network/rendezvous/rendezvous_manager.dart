@@ -54,10 +54,16 @@ class ResolvedEndpoint {
   final List<EndpointAddress> addresses;
   final int seq;
 
+  /// Device that published the record (§4.11.11: lets the node map a later
+  /// PONG from this device back to the contact for the
+  /// contact-endpoint-confirmed outbox edge).
+  final String? deviceIdHex;
+
   const ResolvedEndpoint({
     required this.contactUserIdHex,
     required this.addresses,
     required this.seq,
+    this.deviceIdHex,
   });
 }
 
@@ -268,6 +274,9 @@ class RendezvousManager {
             contactUserIdHex: contact.userIdHex,
             addresses: endpoint.addresses,
             seq: endpoint.seq,
+            deviceIdHex: endpoint.deviceId
+                .map((b) => b.toRadixString(16).padLeft(2, '0'))
+                .join(),
           ));
           _log.info('Rendezvous resolved '
               '${contact.userIdHex.substring(0, 8)}…: '
@@ -287,5 +296,8 @@ class RendezvousManager {
     _disposed = true;
     _refreshTimer?.cancel();
     _debounceTimer?.cancel();
+    for (final provider in _providers) {
+      if (provider is NostrProvider) provider.dispose();
+    }
   }
 }

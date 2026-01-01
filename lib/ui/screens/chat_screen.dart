@@ -83,6 +83,27 @@ class _ChatScreenState extends State<ChatScreen> {
   // Edit mode state
   String? _editingMessageId;
 
+  /// §9.5.3 D3 (S119): cached Feature-Request vote tallies per record id.
+  final Map<String, Map<String, int>> _frTallies = {};
+  final Set<String> _frTallyLoading = {};
+
+  void _loadFrTally(String recordIdHex, ICleonaService service,
+      {bool force = false}) {
+    if (!force && _frTallyLoading.contains(recordIdHex)) return;
+    _frTallyLoading.add(recordIdHex);
+    service.featureRequestTally(recordIdHex).then((tally) {
+      if (!mounted) return;
+      final prev = _frTallies[recordIdHex];
+      if (prev == null || prev.toString() != tally.toString()) {
+        setState(() => _frTallies[recordIdHex] = tally);
+      } else {
+        _frTallies[recordIdHex] = tally;
+      }
+    }).catchError((_) {
+      _frTallyLoading.remove(recordIdHex);
+    });
+  }
+
   // Search state
   bool _isSearching = false;
   final _searchTextController = TextEditingController();
@@ -289,7 +310,19 @@ class _ChatScreenState extends State<ChatScreen> {
     final appState = context.watch<CleonaAppState>();
     final service = appState.service;
     final conv = service?.conversations[widget.conversationId];
-    final messages = conv?.messages ?? [];
+    List<UiMessage> messages = conv?.messages ?? [];
+    // §9.5.3 (S119 D3): the Feature-Request channel sorts by net votes
+    // (Ja − Nein, descending), ties broken newest-first — a local UI sort
+    // over the gossip-tallied vote records.
+    if (sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId)) {
+      messages = List<UiMessage>.from(messages)
+        ..sort((a, b) {
+          final netA = _frTallies[a.id]?['net'] ?? 0;
+          final netB = _frTallies[b.id]?['net'] ?? 0;
+          if (netA != netB) return netB.compareTo(netA);
+          return b.timestamp.compareTo(a.timestamp);
+        });
+    }
 
     // Focus-guard: snapshot whether the input field was focused BEFORE this
     // rebuild. Incoming events (delivery receipts, typing indicators, new
@@ -353,6 +386,11 @@ class _ChatScreenState extends State<ChatScreen> {
                         )
                       : ListView.builder(
                           controller: _scrollController,
+                          // iOS-Feldtest S121: die Tastatur war sonst nicht
+                          // einklappbar (kein System-Back wie auf Android) —
+                          // Wisch in der Liste schliesst sie jetzt.
+                          keyboardDismissBehavior:
+                              ScrollViewKeyboardDismissBehavior.onDrag,
                           padding: const EdgeInsets.all(8),
                           itemCount: messages.length,
                           itemBuilder: (context, index) {
@@ -361,6 +399,15 @@ class _ChatScreenState extends State<ChatScreen> {
                                 _currentSearchIndex >= 0 &&
                                 _currentSearchIndex < _searchMatchIndices.length &&
                                 _searchMatchIndices[_currentSearchIndex] == index;
+                            // §9.5.3 D3: lazily load the FR vote tally for
+                            // feature-request cards (async, cached).
+                            if (service != null &&
+                                sys_ch.SystemChannels.isFeatureReqChannel(
+                                    widget.conversationId) &&
+                                !_frTallies.containsKey(msg.id) &&
+                                msg.text.contains('"feature_request"')) {
+                              _loadFrTally(msg.id, service);
+                            }
                             return _MessageBubble(
                               message: msg,
                               isEditing: _editingMessageId == msg.id,
@@ -371,6 +418,15 @@ class _ChatScreenState extends State<ChatScreen> {
                               isSearchHighlight: isHighlighted,
                               isSystemChannel: sys_ch.SystemChannels.isSystemChannel(widget.conversationId),
                               browserOpenMode: service?.linkPreviewSettings.browserOpenMode ?? BrowserOpenMode.normal,
+                              frTally: _frTallies[msg.id],
+                              onFrVote: service == null
+                                  ? null
+                                  : (option) async {
+                                      await service.voteFeatureRequest(
+                                          msg.id, option);
+                                      _loadFrTally(msg.id, service,
+                                          force: true);
+                                    },
                             );
                           },
                         ),
@@ -725,9 +781,17 @@ class _ChatScreenState extends State<ChatScreen> {
             child: Text(locale.get('cancel')),
           ),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(ctx);
-              service.deleteMessage(widget.conversationId, msg.id);
+              // S119: deleteMessage can legitimately return false (e.g.
+              // unsupported conversation type) — a silent failure left the
+              // message standing with no feedback (Problem 5 UI half).
+              final ok = await service.deleteMessage(widget.conversationId, msg.id);
+              if (!ok && mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(locale.get('delete_message_failed'))),
+                );
+              }
             },
             child: Text(locale.get('delete')),
           ),
@@ -1513,18 +1577,33 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
               const SizedBox(height: 4),
+              // Problem 7 (S119): plain bullets — the former radio icons
+              // were indistinguishable from real vote controls.
               for (final key in ['feature_vote_yes', 'feature_vote_no', 'feature_vote_neutral'])
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Row(
                     children: [
-                      Icon(Icons.radio_button_unchecked, size: 16,
-                          color: Theme.of(ctx).colorScheme.outline),
+                      Text('•',
+                          style: TextStyle(
+                              color: Theme.of(ctx).colorScheme.outline)),
                       const SizedBox(width: 8),
                       Text(locale.get(key)),
                     ],
                   ),
                 ),
+              const SizedBox(height: 4),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  locale.get('feature_request_options_hint'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontStyle: FontStyle.italic,
+                    color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
@@ -1539,24 +1618,14 @@ class _ChatScreenState extends State<ChatScreen> {
               if (heading.isEmpty) return;
               Navigator.pop(ctx);
               try {
-                await service.createPoll(
-                  question: heading,
-                  description: descCtrl.text.trim(),
-                  pollType: PollType.singleChoice,
-                  options: [
-                    PollOption(optionId: 0, label: locale.get('feature_vote_yes')),
-                    PollOption(optionId: 1, label: locale.get('feature_vote_no')),
-                    PollOption(optionId: 2, label: locale.get('feature_vote_neutral')),
-                  ],
-                  settings: PollSettings(
-                    anonymous: false,
-                    allowVoteChange: true,
-                    showResultsBeforeClose: true,
-                  ),
-                  groupIdHex: widget.conversationId,
-                );
+                // §9.5.3 D3 (S119): SystemChannelRecord with embedded
+                // auto-poll + implicit "Ja" vote of the submitter — the
+                // old createPoll path fanned out over the always-empty
+                // members map and never left the local node (Problem 8).
+                await service.submitFeatureRequest(
+                    heading, descCtrl.text.trim());
               } catch (e) {
-                debugPrint('Feature request poll failed: $e');
+                debugPrint('Feature request submit failed: $e');
               }
             },
             child: Text(locale.get('feature_request_submit')),
@@ -2657,6 +2726,11 @@ class _MessageBubble extends StatefulWidget {
   final bool isSystemChannel;
   final BrowserOpenMode browserOpenMode;
 
+  /// §9.5.3 D3 (S119): FR vote tally (`ja`/`nein`/`egal`/`net`/`own`) and
+  /// vote callback for feature-request cards; null outside the FR channel.
+  final Map<String, int>? frTally;
+  final void Function(int option)? onFrVote;
+
   const _MessageBubble({
     required this.message,
     this.isEditing = false,
@@ -2667,6 +2741,8 @@ class _MessageBubble extends StatefulWidget {
     this.isSearchHighlight = false,
     this.isSystemChannel = false,
     this.browserOpenMode = BrowserOpenMode.normal,
+    this.frTally,
+    this.onFrVote,
   });
 
   @override
@@ -2832,13 +2908,22 @@ class _MessageBubbleState extends State<_MessageBubble> {
       );
     }
 
-    // System channel posts: render crash reports and duplicates as cards
+    // System channel posts: render crash reports and duplicates as cards.
+    // §9.5.7 D2 (S119): long-press opens the action sheet — its delete
+    // entry retracts own posts (author-signed RETRACT tombstone). The card
+    // renders its own Text widgets (no SelectableText), so there is no
+    // gesture collision with the A1 selectable-text work.
     if (isSystemChannel && !deleted && message.text.startsWith('{')) {
       final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
-      return SystemChannelPost(
-        text: message.text,
-        isOutgoing: isOutgoing,
-        timestamp: ts,
+      return GestureDetector(
+        onLongPress: _hasMenu ? () => _showMessageActions(context) : null,
+        child: SystemChannelPost(
+          text: message.text,
+          isOutgoing: isOutgoing,
+          timestamp: ts,
+          frTally: widget.frTally,
+          onVote: widget.onFrVote,
+        ),
       );
     }
 
@@ -3402,9 +3487,15 @@ class _MessageBubbleState extends State<_MessageBubble> {
       if (message.filePath != null && File(message.filePath!).existsSync()) {
         imageWidget = ClipRRect(
           borderRadius: BorderRadius.circular(8),
+          // iOS-Feldtest S121 (Flackern beim Scrollen): gaplessPlayback
+          // haelt das alte Frame waehrend des Re-Decodes; cacheWidth
+          // begrenzt den Decode auf Anzeigegroesse (200lp × 3dpr) statt
+          // das Vollbild bei jedem Rebuild neu zu dekodieren.
           child: Image.file(
             File(message.filePath!),
             width: 200,
+            cacheWidth: 600,
+            gaplessPlayback: true,
             fit: BoxFit.cover,
             errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 48),
           ),
@@ -3416,6 +3507,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
           child: Image.memory(
             tb,
             width: 200,
+            gaplessPlayback: true,
             fit: BoxFit.cover,
             errorBuilder: (_, _, _) => const Icon(Icons.image, size: 48),
           ),

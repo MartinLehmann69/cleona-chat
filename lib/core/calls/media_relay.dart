@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:cleona/core/calls/overlay_tree.dart';
+import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Per-call relay budget to prevent abuse.
 class RelayBudget {
@@ -86,11 +87,16 @@ class MediaRelay {
   final RelayBudget budget;
   final ChildHealthTracker healthTracker = ChildHealthTracker();
 
-  // Callback: send frame to a specific peer via unicast.
-  void Function(String targetNodeIdHex, Uint8List frame)? onSendUnicast;
+  // Callback: send frame to a specific peer via unicast. [type] is the
+  // wire MessageType of the relayed frame (CALL_GROUP_AUDIO vs
+  // CALL_GROUP_VIDEO) — the relay is content-agnostic, but the outgoing
+  // envelope must carry the original type or the receiver parses a video
+  // frame as GroupCallAudio (and vice versa).
+  void Function(String targetNodeIdHex, Uint8List frame,
+      proto.MessageTypeV3 type)? onSendUnicast;
 
   // Callback: send frame via LAN multicast (reaches all local members).
-  void Function(Uint8List frame)? onSendMulticast;
+  void Function(Uint8List frame, proto.MessageTypeV3 type)? onSendMulticast;
 
   // Callback: a child is detected as crashed.
   void Function(String crashedNodeIdHex)? onChildCrashed;
@@ -108,11 +114,13 @@ class MediaRelay {
 
   /// Forward a received media frame to all tree children.
   ///
-  /// Called when this node receives a CALL_AUDIO or CALL_VIDEO frame
-  /// from its parent (or from itself if this is the root/source).
+  /// Called when this node receives a CALL_GROUP_AUDIO or CALL_GROUP_VIDEO
+  /// frame from its parent (or from itself if this is the root/source).
+  /// [type] identifies which of the two it is and is passed through to the
+  /// send callbacks unchanged.
   ///
   /// Returns the number of targets the frame was forwarded to.
-  int forwardFrame(Uint8List frame) {
+  int forwardFrame(Uint8List frame, proto.MessageTypeV3 type) {
     final myNode = tree.nodeFor(ownNodeIdHex);
     if (myNode == null || myNode.childrenHex.isEmpty) return 0;
 
@@ -127,19 +135,19 @@ class MediaRelay {
     for (final childHex in myNode.childrenHex) {
       // Send to child directly — if the child is a LAN cluster head,
       // it will multicast to its own LAN members.
-      onSendUnicast?.call(childHex, frame);
+      onSendUnicast?.call(childHex, frame, type);
       sent++;
     }
 
     // If we are a LAN cluster head, multicast to local members
     if (myNode.isLanClusterHead && myNode.lanMemberHex.isNotEmpty) {
       if (onSendMulticast != null) {
-        onSendMulticast!(frame);
+        onSendMulticast!(frame, type);
         sent += myNode.lanMemberHex.length;
       } else {
         // Fallback: unicast to each LAN member
         for (final memberHex in myNode.lanMemberHex) {
-          onSendUnicast?.call(memberHex, frame);
+          onSendUnicast?.call(memberHex, frame, type);
           sent++;
         }
       }

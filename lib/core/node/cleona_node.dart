@@ -167,6 +167,27 @@ class CleonaNode {
   /// §4.11.9 Infrastructure Rendezvous: network entry-point resolution.
   InfraRendezvousManager? infraRendezvousManager;
 
+  // §4.11.11 Reactive Resolve Triggers (V3.1.117) — gating state.
+  // Edge-triggered only (retry-exhausted, network-change+8s,
+  // discovery-complete); no timers beyond the one-shot batch coalescer.
+  static const Duration _rvContactCooldown = Duration(minutes: 15);
+  static const Duration _rvBatchGate = Duration(seconds: 60);
+  static const Duration _rvBatchCoalesce = Duration(seconds: 2);
+  final Map<String, DateTime> _rvResolveCooldown = {}; // userIdHex → attempt
+  final Set<String> _rvPendingResolve = {};
+  DateTime? _rvLastBatchAt;
+  Timer? _rvBatchTimer;
+
+  /// deviceHex → contact userIdHex whose rendezvous-resolved addresses we
+  /// PINGed; a PONG from that device fires [onContactEndpointConfirmed].
+  final Map<String, String> _rvAwaitingConfirm = {};
+  final Map<String, DateTime> _rvAwaitingConfirmAt = {};
+
+  /// §5.1 third outbox edge (contact-endpoint-confirmed): fires when a
+  /// rendezvous-resolved contact device answers with bidirectional UDP
+  /// contact. Service layer chains this to its outbox flush.
+  void Function(String contactUserIdHex)? onContactEndpointConfirmed;
+
   // Plan §D2: lightweight signal so application-layer code (e.g. CallManager's
   // per-CallSession route cache) can invalidate stale routes when DV-Routing
   // surgically drops a path. Fires from the existing `ackTracker.onRouteDown`
@@ -262,6 +283,43 @@ class CleonaNode {
   /// Reset on network-change events (§4.9) so the cascade re-runs.
   bool _discoveryComplete = false;
   Timer? _discoveryCascadeTimer;
+
+  // §13.1.2 exemption #4: call-session-scoped live-media PoW allowlist.
+  // Live-media frames (CALL_AUDIO/VIDEO, CALL_GROUP_AUDIO/VIDEO, RTT ping/
+  // pong, tree updates) are built with `skipPoW: true` on the sender side
+  // (Architecture §10.3 / Appendix B.2 — a ~20ms PoW grind per 20ms audio
+  // frame is impossible at call framerates). The PoW gate cannot see the
+  // inner messageType before KEM-decap, so the exemption is scoped by
+  // sender device id instead: [CallManager]/[GroupCallManager] register the
+  // peer device(s) of an active call session here for the session's
+  // lifetime and unregister on every terminal call state. Hex-encoded
+  // lowercase device ids (matches `bytesToHex` used elsewhere for device
+  // ids). This does NOT weaken the outer device-sig, rate limiting or
+  // reputation layers — only the PoW check is bypassed, only for
+  // registered devices.
+  final Set<String> _liveMediaPeerDevices = {};
+
+  /// Register a peer device id as exempt from the ApplicationFrame PoW gate
+  /// for the duration of an active call (§13.1.2 exemption #4). Idempotent —
+  /// safe to call for a device id already registered (e.g. overlapping
+  /// 1:1 + group call sessions with the same peer).
+  void registerLiveMediaPeer(Uint8List deviceId) {
+    _liveMediaPeerDevices.add(bytesToHex(deviceId));
+  }
+
+  /// Unregister a peer device id previously registered via
+  /// [registerLiveMediaPeer]. Callers must unregister exactly the device ids
+  /// their own session registered (not blindly clear the whole set) so
+  /// overlapping sessions to the same peer don't clobber each other.
+  void unregisterLiveMediaPeer(Uint8List deviceId) {
+    _liveMediaPeerDevices.remove(bytesToHex(deviceId));
+  }
+
+  /// True if `deviceId` is currently exempt from the PoW gate as an active
+  /// call peer.
+  bool isLiveMediaPeer(Uint8List deviceId) {
+    return _liveMediaPeerDevices.contains(bytesToHex(deviceId));
+  }
 
   final Set<String> _dvPendingChanges = {};
   // §4.4: Per-neighbor hold-down — suppress DV updates to a neighbor for 10s
@@ -390,6 +448,21 @@ class CleonaNode {
   /// filtering must be performed explicitly by the consumer.
   Set<String> get confirmedPeerIds =>
       _confirmedPeers.keys.where(isPeerConfirmed).toSet();
+
+  /// S119 B (Problem 2): authoritative "reachable" set for UI counters and
+  /// peer lists — confirmed (bidirectional UDP within TTL) ∪ alive DV route.
+  /// Deliberately NOT [DvRouting.allDestinations]: `_routes` retains dead
+  /// and never-pruned routes for destinations without traffic, which
+  /// inflated the connection sheet with unreachable peers.
+  Set<String> get reachablePeerIds {
+    final set = confirmedPeerIds;
+    for (final destHex in dvRouting.allDestinations) {
+      if (!set.contains(destHex) && dvRouting.hasAliveRouteTo(destHex)) {
+        set.add(destHex);
+      }
+    }
+    return set;
+  }
 
   // DV-Routing: track when we last sent a route update to each neighbor.
   // Used for catch-up and welcome gate.
@@ -626,6 +699,10 @@ class CleonaNode {
       // handled internally (outbox fallback on L3 failure).
       onMessageRetryExhausted?.call(
           messageIdHex, serializedPacket, recipientUserId);
+      // §4.11.11 trigger 1: the Layer-3 edge marks the contact unreachable
+      // — batch a reactive rendezvous resolve for it.
+      requestContactResolve(
+          userIdHex: bytesToHex(recipientUserId), reason: 'retry-exhausted');
     };
 
     // onRetryNeeded (per-timeout intermediate retries) is intentionally
@@ -1169,41 +1246,13 @@ class CleonaNode {
       try {
         final futures = <Future>[];
 
-        // Path A: Contact-Rendezvous (§4.11.4)
+        // Path A: Contact-Rendezvous (§4.11.4) — shared helper, stamps the
+        // §4.11.11 per-contact cooldown so a reactive resolve right after
+        // the cascade does not double-query the providers.
         if (rendezvousManager != null) {
-          futures.add(() async {
-            final contacts = rendezvousManager!.contactsSnapshot;
-            final deviceIds = <String, List<String>>{};
-            for (final c in contacts) {
-              final userIdBytes = hexToBytes(c.userIdHex);
-              // Prefer cached manifest; fall back to live 2D-DHT lookup
-              // (§4.3) so fresh contacts can still be resolved.
-              final manifest = identityDhtHandler.getAuthManifest(userIdBytes);
-              if (manifest != null) {
-                deviceIds[c.userIdHex] = manifest.authorizedDeviceNodeIds
-                    .map(bytesToHex)
-                    .toList();
-              } else {
-                final resolved = await identityResolver.resolve(userIdBytes);
-                if (resolved.isNotEmpty) {
-                  deviceIds[c.userIdHex] = resolved
-                      .map((d) => bytesToHex(d.deviceNodeId))
-                      .toList();
-                }
-              }
-            }
-            final resolved = await rendezvousManager!
-                .resolveContacts(contacts, contactDeviceIds: deviceIds);
-            for (final ep in resolved) {
-              for (final addr in ep.addresses) {
-                _sendPing(addr.ip, addr.port);
-              }
-            }
-            if (resolved.isNotEmpty) {
-              _log.info('§4.11 Contact-RV: resolved '
-                  '${resolved.length} contact(s)');
-            }
-          }());
+          futures.add(_resolveContactRendezvousFor(
+              rendezvousManager!.contactsSnapshot,
+              reason: 'tier3b'));
         }
 
         // Path B: Infrastructure-Rendezvous (§4.11.9)
@@ -1276,6 +1325,9 @@ class CleonaNode {
       }
       _probeIpv6Inbound();
       onDiscoveryComplete?.call();
+      // §4.11.11 trigger 3: once per discovery cycle, re-resolve contacts
+      // that are still unreachable after the cascade finished.
+      requestContactResolve(reason: 'discovery-complete');
     });
   }
 
@@ -1490,6 +1542,7 @@ class CleonaNode {
       final ct = connectionTypeFromPriority(addr.priority);
       final isNewNeighbor = dvRouting.addDirectNeighbor(senderDeviceId, ct);
       _confirmedPeers[senderHex] = DateTime.now();
+      _notifyEndpointConfirmed(senderHex);
       if (!hasSessionConfirmedPeers) {
         hasSessionConfirmedPeers = true;
         _log.info('First session-confirmed peer: ${senderHex.substring(0, 8)}');
@@ -1790,10 +1843,17 @@ class CleonaNode {
     }
 
     // §13.1 PoW verification for ApplicationFrames.
-    // Exempt: LAN peers (private IP) and relay-delivered packets (0.0.0.0).
+    // Exempt: LAN peers (private IP), relay-delivered packets (0.0.0.0), and
+    // §13.1.2 exemption #4 — devices registered as an active call's
+    // live-media peer (sender used `skipPoW: true` for CALL_AUDIO/VIDEO
+    // etc., see [registerLiveMediaPeer]).
     final isRelayDelivered = from.address == '0.0.0.0';
     final isLanSource = !isRelayDelivered && PeerAddress.isPrivateIp(from.address);
-    if (!isRelayDelivered && !isLanSource) {
+    final isLiveMediaSource = !isRelayDelivered &&
+        !isLanSource &&
+        packet.senderDeviceId.isNotEmpty &&
+        isLiveMediaPeer(Uint8List.fromList(packet.senderDeviceId));
+    if (!isRelayDelivered && !isLanSource && !isLiveMediaSource) {
       if (!packet.hasPow() ||
           !ProofOfWork.verify(
               Uint8List.fromList(packet.payload), packet.pow)) {
@@ -1801,6 +1861,9 @@ class CleonaNode {
         return;
       }
     }
+    // No per-frame log on the isLiveMediaSource skip path — fires at call
+    // framerate (~50/s per direction); even debug-level logging here would
+    // still pay for string formatting + ring-buffer writes on every frame.
 
     onApplicationFramePayload?.call(packet, from, fromPort, snapshot);
   }
@@ -1935,6 +1998,7 @@ class CleonaNode {
       // never opens.
       if (from.address != '0.0.0.0') {
         _confirmedPeers[senderHexLocal] = DateTime.now();
+        _notifyEndpointConfirmed(senderHexLocal);
         if (!hasSessionConfirmedPeers) {
           hasSessionConfirmedPeers = true;
           _log.info('First session-confirmed peer (BOOT): '
@@ -3366,6 +3430,11 @@ class CleonaNode {
       // §11.4.8: Anonymous Vote Re-Broadcaster — voter→R bundle + R→voter ACK
       case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
       case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
+      // §9.5.7 System-Channel record gossip (S119 D1) — BOOT path
+      case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+      case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+      case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+      case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
         return true;
       default:
         return false;
@@ -4909,9 +4978,12 @@ class CleonaNode {
     // that didn't re-confirm since the network change. Establishes relay
     // routes before the user sends a message → Layer-2 cascade picks them up.
     // Reduces dependency on Bootstrap as sole rendezvous point.
+    // §4.11.11 trigger 2 piggy-backs here: re-resolve contacts that stayed
+    // unreachable under the new network context via external rendezvous.
     Future.delayed(const Duration(seconds: 8), () {
       if (!_running) return;
       _tryProactiveRendezvous();
+      requestContactResolve(reason: 'network-change');
     });
 
     // 10. §4.7 IPv6 Inbound Probe: if a global IPv6 is already known at the
@@ -4992,6 +5064,165 @@ class CleonaNode {
             'via ${relayHex.substring(0, 8)}');
       });
     }
+  }
+
+  // ── §4.11.11 Reactive Resolve Triggers (V3.1.117) ───────────────────
+
+  /// Requests a reactive rendezvous resolve for [userIdHex] (or ALL
+  /// currently unreachable contacts when null).
+  ///
+  /// Gating (§4.11.11): unreachable filter, 15 min per-contact cooldown,
+  /// 60 s batch gate. Edge-triggered by retry-exhausted, network-change+8s
+  /// and discovery-complete — never by a periodic timer.
+  void requestContactResolve({String? userIdHex, required String reason}) {
+    final rm = rendezvousManager;
+    if (rm == null || !_running) return;
+
+    final now = DateTime.now();
+    var added = 0;
+    for (final c in rm.contactsSnapshot) {
+      if (userIdHex != null && c.userIdHex != userIdHex) continue;
+      if (_isContactReachable(c.userIdHex)) continue;
+      final last = _rvResolveCooldown[c.userIdHex];
+      if (last != null && now.difference(last) < _rvContactCooldown) continue;
+      if (_rvPendingResolve.add(c.userIdHex)) added++;
+    }
+    if (added == 0) return;
+    if (_rvBatchTimer != null) {
+      _log.debug('§4.11.11 resolve[$reason]: $added contact(s) joined '
+          'pending batch');
+      return;
+    }
+
+    final lastBatch = _rvLastBatchAt;
+    final sinceLast =
+        lastBatch == null ? _rvBatchGate : now.difference(lastBatch);
+    final wait =
+        sinceLast >= _rvBatchGate ? _rvBatchCoalesce : _rvBatchGate - sinceLast;
+    _log.info('§4.11.11 resolve[$reason]: $added contact(s) queued, '
+        'batch in ${wait.inSeconds}s');
+    _rvBatchTimer = Timer(wait, _runRvResolveBatch);
+  }
+
+  void _runRvResolveBatch() {
+    _rvBatchTimer = null;
+    if (!_running) return;
+    _rvLastBatchAt = DateTime.now();
+
+    // Prune awaiting-confirm entries whose PONG never came (10 min).
+    _rvAwaitingConfirmAt.removeWhere((deviceHex, at) {
+      final stale =
+          DateTime.now().difference(at) > const Duration(minutes: 10);
+      if (stale) _rvAwaitingConfirm.remove(deviceHex);
+      return stale;
+    });
+
+    final rm = rendezvousManager;
+    if (rm == null) {
+      _rvPendingResolve.clear();
+      return;
+    }
+    final now = DateTime.now();
+    final contacts = <RendezvousContact>[];
+    for (final c in rm.contactsSnapshot) {
+      if (!_rvPendingResolve.contains(c.userIdHex)) continue;
+      // Re-check at fire time — the contact may have come back while the
+      // batch was pending.
+      if (_isContactReachable(c.userIdHex)) continue;
+      final last = _rvResolveCooldown[c.userIdHex];
+      if (last != null && now.difference(last) < _rvContactCooldown) continue;
+      contacts.add(c);
+    }
+    _rvPendingResolve.clear();
+    if (contacts.isEmpty) return;
+    unawaited(_resolveContactRendezvousFor(contacts, reason: 'reactive'));
+  }
+
+  /// A contact counts as reachable when ANY of its known devices is either
+  /// recently confirmed (bidirectional UDP) or has a *recently confirmed*
+  /// alive DV route.
+  ///
+  /// S121 field amendment: a bare `isAlive` route is NOT sufficient —
+  /// relay routes without traffic are never pruned and survive for days,
+  /// which suppressed the reactive Nostr resolve for genuinely offline
+  /// contacts (Ingo's dead WLAN device, Eierphone during iOS suspension).
+  /// The route must have been confirmed within the same TTL that governs
+  /// peer confirmation.
+  bool _isContactReachable(String userIdHex) {
+    final devices = routingTable.getAllPeersForUserId(hexToBytes(userIdHex));
+    final now = DateTime.now();
+    for (final d in devices) {
+      final devHex = bytesToHex(d.nodeId);
+      if (isPeerConfirmed(devHex)) return true;
+      if (dvRouting.routesTo(devHex).any((r) =>
+          r.isAlive &&
+          now.difference(r.lastConfirmed) <= _confirmedPeerTtl)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Shared Contact-Rendezvous resolve (§4.11.4): used by cascade Tier 3b
+  /// (all contacts) and the §4.11.11 reactive path (filtered subset).
+  /// Stamps the per-contact cooldown at attempt time and registers resolved
+  /// devices for the contact-endpoint-confirmed outbox edge (§5.1).
+  Future<void> _resolveContactRendezvousFor(List<RendezvousContact> contacts,
+      {required String reason}) async {
+    final rm = rendezvousManager;
+    if (rm == null || contacts.isEmpty) return;
+
+    final now = DateTime.now();
+    for (final c in contacts) {
+      _rvResolveCooldown[c.userIdHex] = now;
+    }
+
+    final deviceIds = <String, List<String>>{};
+    for (final c in contacts) {
+      final userIdBytes = hexToBytes(c.userIdHex);
+      // Prefer cached manifest; fall back to live 2D-DHT lookup (§4.3) so
+      // fresh contacts can still be resolved.
+      final manifest = identityDhtHandler.getAuthManifest(userIdBytes);
+      if (manifest != null) {
+        deviceIds[c.userIdHex] =
+            manifest.authorizedDeviceNodeIds.map(bytesToHex).toList();
+      } else {
+        final resolved = await identityResolver.resolve(userIdBytes);
+        if (resolved.isNotEmpty) {
+          deviceIds[c.userIdHex] =
+              resolved.map((d) => bytesToHex(d.deviceNodeId)).toList();
+        }
+      }
+    }
+
+    final resolved =
+        await rm.resolveContacts(contacts, contactDeviceIds: deviceIds);
+    for (final ep in resolved) {
+      final devHex = ep.deviceIdHex;
+      if (devHex != null) {
+        _rvAwaitingConfirm[devHex] = ep.contactUserIdHex;
+        _rvAwaitingConfirmAt[devHex] = DateTime.now();
+      }
+      for (final addr in ep.addresses) {
+        _sendPing(addr.ip, addr.port);
+      }
+    }
+    if (resolved.isNotEmpty) {
+      _log.info('§4.11 Contact-RV[$reason]: resolved '
+          '${resolved.length} contact(s)');
+    }
+  }
+
+  /// §5.1 third outbox edge: called from every peer-confirm site. If the
+  /// device belongs to a contact we rendezvous-resolved, notify the service
+  /// layer so the outbox can flush toward the now-reachable contact.
+  void _notifyEndpointConfirmed(String deviceHex) {
+    final userHex = _rvAwaitingConfirm.remove(deviceHex);
+    _rvAwaitingConfirmAt.remove(deviceHex);
+    if (userHex == null) return;
+    _log.info('§4.11.11 contact-endpoint-confirmed: '
+        '${userHex.substring(0, 8)} via device ${deviceHex.substring(0, 8)}');
+    onContactEndpointConfirmed?.call(userHex);
   }
 
   /// Probe non-primary local interfaces to find a working mobile path.
@@ -5701,6 +5932,7 @@ class CleonaNode {
     // Bidirectional reachability confirmed — mark as confirmed peer so
     // _sendV3ViaHop can stop after first successful send (no scatter-shot).
     _confirmedPeers[peerHex] = DateTime.now();
+    _notifyEndpointConfirmed(peerHex);
     if (!hasSessionConfirmedPeers) {
       hasSessionConfirmedPeers = true;
       _log.info('First session-confirmed peer: ${peerHex.substring(0, 8)}');
@@ -6142,6 +6374,9 @@ class CleonaNode {
     _isolatedNodeRetryTimer = null;
     _zeroPeerRecoveryTimer?.cancel();
     _zeroPeerRecoveryTimer = null;
+    _rvBatchTimer?.cancel();
+    _rvBatchTimer = null;
+    _rvPendingResolve.clear();
     _discoveryCascadeTimer?.cancel();
     _discoveryCascadeTimer = null;
     _discoveryComplete = false;

@@ -17154,6 +17154,487 @@ class DeviceSetChangeProof extends $pb.GeneratedMessage {
   $core.List<RotationApprovalToken> get approvals => $_getList(2);
 }
 
+/// Self-contained, self-signed system-channel record. Distinct wire type
+/// from CHANNEL_POST (D1-S1): system channels are ownerless and carry no
+/// subscriber registry, so every record must be verifiable stand-alone via
+/// the inline pubkeys (KEX-Gate context-proof, §8.2/§9.5.6).
+class SystemChannelRecord extends $pb.GeneratedMessage {
+  factory SystemChannelRecord({
+    $core.List<$core.int>? channelId,
+    $core.List<$core.int>? recordId,
+    $core.int? kind,
+    $core.List<$core.int>? authorUserId,
+    $core.List<$core.int>? authorEd25519Pk,
+    $core.List<$core.int>? authorMlDsaPk,
+    $fixnum.Int64? timestampMs,
+    $core.String? text,
+    $core.List<$core.int>? targetRecordId,
+    $core.int? voteOption,
+    $core.List<$core.int>? sigEd25519,
+    $core.List<$core.int>? sigMlDsa,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (recordId != null) {
+      $result.recordId = recordId;
+    }
+    if (kind != null) {
+      $result.kind = kind;
+    }
+    if (authorUserId != null) {
+      $result.authorUserId = authorUserId;
+    }
+    if (authorEd25519Pk != null) {
+      $result.authorEd25519Pk = authorEd25519Pk;
+    }
+    if (authorMlDsaPk != null) {
+      $result.authorMlDsaPk = authorMlDsaPk;
+    }
+    if (timestampMs != null) {
+      $result.timestampMs = timestampMs;
+    }
+    if (text != null) {
+      $result.text = text;
+    }
+    if (targetRecordId != null) {
+      $result.targetRecordId = targetRecordId;
+    }
+    if (voteOption != null) {
+      $result.voteOption = voteOption;
+    }
+    if (sigEd25519 != null) {
+      $result.sigEd25519 = sigEd25519;
+    }
+    if (sigMlDsa != null) {
+      $result.sigMlDsa = sigMlDsa;
+    }
+    return $result;
+  }
+  SystemChannelRecord._() : super();
+  factory SystemChannelRecord.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SystemChannelRecord.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SystemChannelRecord', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'recordId', $pb.PbFieldType.OY)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'kind', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'authorUserId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'authorEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'authorMlDsaPk', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'timestampMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOS(8, _omitFieldNames ? '' : 'text')
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'targetRecordId', $pb.PbFieldType.OY)
+    ..a<$core.int>(10, _omitFieldNames ? '' : 'voteOption', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'sigEd25519', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(12, _omitFieldNames ? '' : 'sigMlDsa', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SystemChannelRecord clone() => SystemChannelRecord()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SystemChannelRecord copyWith(void Function(SystemChannelRecord) updates) => super.copyWith((message) => updates(message as SystemChannelRecord)) as SystemChannelRecord;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SystemChannelRecord create() => SystemChannelRecord._();
+  SystemChannelRecord createEmptyInstance() => create();
+  static $pb.PbList<SystemChannelRecord> createRepeated() => $pb.PbList<SystemChannelRecord>();
+  @$core.pragma('dart2js:noInline')
+  static SystemChannelRecord getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SystemChannelRecord>(create);
+  static SystemChannelRecord? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get recordId => $_getN(1);
+  @$pb.TagNumber(2)
+  set recordId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasRecordId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecordId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get kind => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set kind($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasKind() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearKind() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get authorUserId => $_getN(3);
+  @$pb.TagNumber(4)
+  set authorUserId($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasAuthorUserId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAuthorUserId() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.int> get authorEd25519Pk => $_getN(4);
+  @$pb.TagNumber(5)
+  set authorEd25519Pk($core.List<$core.int> v) { $_setBytes(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasAuthorEd25519Pk() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearAuthorEd25519Pk() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get authorMlDsaPk => $_getN(5);
+  @$pb.TagNumber(6)
+  set authorMlDsaPk($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasAuthorMlDsaPk() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearAuthorMlDsaPk() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get timestampMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set timestampMs($fixnum.Int64 v) { $_setInt64(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasTimestampMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearTimestampMs() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.String get text => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set text($core.String v) { $_setString(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasText() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearText() => clearField(8);
+
+  /// VOTE (§9.5.3 embedded FR poll — open records, tallied locally) and
+  /// RETRACT (D2 tombstone) reference their target here:
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get targetRecordId => $_getN(8);
+  @$pb.TagNumber(9)
+  set targetRecordId($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasTargetRecordId() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearTargetRecordId() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.int get voteOption => $_getIZ(9);
+  @$pb.TagNumber(10)
+  set voteOption($core.int v) { $_setUnsignedInt32(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasVoteOption() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearVoteOption() => clearField(10);
+
+  /// Hybrid self-signature (H-2 pattern) over the canonical content
+  /// (this message serialized with both sig fields empty):
+  @$pb.TagNumber(11)
+  $core.List<$core.int> get sigEd25519 => $_getN(10);
+  @$pb.TagNumber(11)
+  set sigEd25519($core.List<$core.int> v) { $_setBytes(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasSigEd25519() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearSigEd25519() => clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.List<$core.int> get sigMlDsa => $_getN(11);
+  @$pb.TagNumber(12)
+  set sigMlDsa($core.List<$core.int> v) { $_setBytes(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasSigMlDsa() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearSigMlDsa() => clearField(12);
+}
+
+/// Hourly anti-entropy Digest → Summary → Want → Push (§9.5.7 D1-S2),
+/// piggy-backed on the channel-index gossip slot. BOOT-path
+/// InfrastructureFrames (§2.3.5): HMAC + inner record self-signature.
+class SysChanDigest extends $pb.GeneratedMessage {
+  factory SysChanDigest({
+    $core.List<$core.int>? channelId,
+    $core.int? recordCount,
+    $core.List<$core.int>? setHash,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (recordCount != null) {
+      $result.recordCount = recordCount;
+    }
+    if (setHash != null) {
+      $result.setHash = setHash;
+    }
+    return $result;
+  }
+  SysChanDigest._() : super();
+  factory SysChanDigest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SysChanDigest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SysChanDigest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'recordCount', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'setHash', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SysChanDigest clone() => SysChanDigest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SysChanDigest copyWith(void Function(SysChanDigest) updates) => super.copyWith((message) => updates(message as SysChanDigest)) as SysChanDigest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SysChanDigest create() => SysChanDigest._();
+  SysChanDigest createEmptyInstance() => create();
+  static $pb.PbList<SysChanDigest> createRepeated() => $pb.PbList<SysChanDigest>();
+  @$core.pragma('dart2js:noInline')
+  static SysChanDigest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SysChanDigest>(create);
+  static SysChanDigest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get recordCount => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set recordCount($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasRecordCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecordCount() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get setHash => $_getN(2);
+  @$pb.TagNumber(3)
+  set setHash($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSetHash() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSetHash() => clearField(3);
+}
+
+class SysChanSummary extends $pb.GeneratedMessage {
+  factory SysChanSummary({
+    $core.List<$core.int>? channelId,
+    $core.Iterable<$core.List<$core.int>>? fingerprints,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (fingerprints != null) {
+      $result.fingerprints.addAll(fingerprints);
+    }
+    return $result;
+  }
+  SysChanSummary._() : super();
+  factory SysChanSummary.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SysChanSummary.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SysChanSummary', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'fingerprints', $pb.PbFieldType.PY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SysChanSummary clone() => SysChanSummary()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SysChanSummary copyWith(void Function(SysChanSummary) updates) => super.copyWith((message) => updates(message as SysChanSummary)) as SysChanSummary;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SysChanSummary create() => SysChanSummary._();
+  SysChanSummary createEmptyInstance() => create();
+  static $pb.PbList<SysChanSummary> createRepeated() => $pb.PbList<SysChanSummary>();
+  @$core.pragma('dart2js:noInline')
+  static SysChanSummary getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SysChanSummary>(create);
+  static SysChanSummary? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.List<$core.int>> get fingerprints => $_getList(1);
+}
+
+class SysChanWant extends $pb.GeneratedMessage {
+  factory SysChanWant({
+    $core.List<$core.int>? channelId,
+    $core.Iterable<$core.List<$core.int>>? fingerprints,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (fingerprints != null) {
+      $result.fingerprints.addAll(fingerprints);
+    }
+    return $result;
+  }
+  SysChanWant._() : super();
+  factory SysChanWant.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SysChanWant.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SysChanWant', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'fingerprints', $pb.PbFieldType.PY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SysChanWant clone() => SysChanWant()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SysChanWant copyWith(void Function(SysChanWant) updates) => super.copyWith((message) => updates(message as SysChanWant)) as SysChanWant;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SysChanWant create() => SysChanWant._();
+  SysChanWant createEmptyInstance() => create();
+  static $pb.PbList<SysChanWant> createRepeated() => $pb.PbList<SysChanWant>();
+  @$core.pragma('dart2js:noInline')
+  static SysChanWant getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SysChanWant>(create);
+  static SysChanWant? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.List<$core.int>> get fingerprints => $_getList(1);
+}
+
+class SysChanPush extends $pb.GeneratedMessage {
+  factory SysChanPush({
+    $core.List<$core.int>? channelId,
+    $core.Iterable<$core.List<$core.int>>? records,
+    $core.int? ttl,
+  }) {
+    final $result = create();
+    if (channelId != null) {
+      $result.channelId = channelId;
+    }
+    if (records != null) {
+      $result.records.addAll(records);
+    }
+    if (ttl != null) {
+      $result.ttl = ttl;
+    }
+    return $result;
+  }
+  SysChanPush._() : super();
+  factory SysChanPush.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory SysChanPush.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'SysChanPush', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'channelId', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'records', $pb.PbFieldType.PY)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'ttl', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  SysChanPush clone() => SysChanPush()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  SysChanPush copyWith(void Function(SysChanPush) updates) => super.copyWith((message) => updates(message as SysChanPush)) as SysChanPush;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static SysChanPush create() => SysChanPush._();
+  SysChanPush createEmptyInstance() => create();
+  static $pb.PbList<SysChanPush> createRepeated() => $pb.PbList<SysChanPush>();
+  @$core.pragma('dart2js:noInline')
+  static SysChanPush getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<SysChanPush>(create);
+  static SysChanPush? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get channelId => $_getN(0);
+  @$pb.TagNumber(1)
+  set channelId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasChannelId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearChannelId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.List<$core.int>> get records => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.int get ttl => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set ttl($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTtl() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTtl() => clearField(3);
+}
+
 
 const _omitFieldNames = $core.bool.fromEnvironment('protobuf.omit_field_names');
 const _omitMessageNames = $core.bool.fromEnvironment('protobuf.omit_message_names');

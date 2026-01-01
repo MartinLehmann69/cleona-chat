@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:4f7b4677b4a2, 2026-07-02). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:d14d1b5e7143, 2026-07-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -325,6 +325,7 @@ message InfrastructureFrame {
 | Identity-Layer Infrastructure (Welle 6) | RESTORE_BROADCAST, KEY_ROTATION_BROADCAST (Emergency-variant only — when both `oldSignatureEd25519` and `newSignatureEd25519` are set in the body) | KEM |
 | Deferred Key Exchange (rev3) | DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER | **BOOT** |
 | First-CR-Mailbox (rev3) | FIRST_CR_STORE, FIRST_CR_STORE_ACK, FIRST_CR_DELIVER | **BOOT** |
+| System-Channel record gossip (§9.5.7) | SYSCHAN_DIGEST, SYSCHAN_SUMMARY, SYSCHAN_WANT, SYSCHAN_PUSH | **BOOT** |
 
 **BOOT-path requirements** (mandatory for every BOOT-row above):
 
@@ -375,7 +376,7 @@ Application content (e.g. TextMessage)
   [9] Device-Sign NetworkPacket   (Ed25519 always; ML-DSA-65 if Application, skip if Infrastructure)
           │   → fills deviceEd25519Sig + (optional) deviceMlDsaSig
           ▼
-  [10] Compute PoW                (skip if recipient is LAN-peer or Infrastructure-Frame)
+  [10] Compute PoW                (skip if recipient is LAN-peer, Infrastructure-Frame, or live-media frame — §10.3/§13.1.2 #4)
           │   → fills pow
           ▼
   [11] Compute HMAC               (HMAC-SHA256-128 over (frame_bytes - networkTag-field))
@@ -421,7 +422,7 @@ UDP-Packet bytes
           │     therefore verify under unchanged Device-Pubkeys even when
           │     the underlying User-Identity is being rotated.
           ▼
-  [5] Verify PoW                  (skip if Infrastructure-Frame, or if from LAN/relay)
+  [5] Verify PoW                  (skip if Infrastructure-Frame, if from LAN/relay, or if senderDeviceId is on the live-media allowlist of an active call — §13.1.2 #4)
           │
           ▼
   [6] Routing Decision
@@ -2360,6 +2361,21 @@ fc_nostr_sk   = HKDF-SHA-256(ikm=r, salt="cleona-nostr-fc-v1",   info=hex(own_de
 
 **Scope.** Like all of §4.11: pure `lookupTag → encryptedEndpoint` directory. No message traffic, no CR content over the substrate.
 
+#### 4.11.11 Reactive Resolve Triggers (V3.1.117)
+
+Once initial discovery has completed, a node must re-resolve contacts that became unreachable *later* — not only at first discovery. §4.11.4/§4.11.9 describe *how* a record is resolved; this subsection specifies *when* `resolveUnreachableContacts` is invoked reactively. Three edge-triggered events (no timers):
+
+1. **`onRetryExhausted`** — when `sendToDevice` exhausts the full DV cascade for a contact without a `DELIVERY_RECEIPT` (§5.10.3, the Layer-3 edge). The contact is marked unreachable; the resolve is batched.
+2. **`onNetworkChanged` + 8 s** — piggy-backed onto `_tryProactiveRendezvous`, so a network re-join immediately re-resolves contacts that were unreachable under the old network context.
+3. **`onDiscoveryComplete`** — once at the end of every discovery cycle.
+
+**Gating (amplification protection):**
+- **Unreachable filter:** only contacts currently flagged unreachable are resolved (no re-resolve of healthy contacts).
+- **15 min cooldown per contact:** a contact resolved <15 min ago is not re-resolved (rate-limit against Nostr provider load + epoch-rotation cost).
+- **60 s batch gate:** resolve requests within a 60 s window are coalesced into a single provider query batch (Nostr resolve collect-window 1.5–2 s at highest seq, §4.11.6).
+
+The Tier 3b external rendezvous is **not** decoupled from the cascade (rejected alternative): resolve runs inside the existing discovery/edge plumbing so it inherits the same edge-trigger discipline as §5.1 (no timer-based retry). Fragment-NACK (CFNK) is orthogonal and analysed separately.
+
 ---
 ## 5. Message Delivery
 
@@ -2403,7 +2419,7 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
 
 **Sender-side retries no longer exist.** Once all Layer-2 routes are exhausted and Layer-3 (S&F + Mailbox) has been triggered, the sender has done its duty. The receiver will pull the message from its mailbox on next coming-online. The outbox (see below) provides **crash-safety** rather than retry semantics: every ACK-worthy message is persisted at send time and removed when the corresponding `DELIVERY_RECEIPT` arrives. If the daemon is killed between Layer-2 dispatch and Layer-3 placement — or between Layer-2 dispatch and receipt of the `DELIVERY_RECEIPT` — the outbox entry survives and the full cascade is re-attempted once on the next `onNetworkChanged` edge. This is distinct from v2.2's `MessageQueue`, which retried against reachable network on a timer.
 
-**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged`/first-peer-confirmed edge), the outbox is flushed: each entry re-attempts the **full cascade** (Layer 1+2 first — the recipient may now be online — then Layer 3 on Layer-2 failure). On success (direct delivery OR Layer-3 placement), the entry is cleared; on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
+**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed: each entry re-attempts the **full cascade** (Layer 1+2 first — the recipient may now be online — then Layer 3 on Layer-2 failure). On success (direct delivery OR Layer-3 placement), the entry is cleared; on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
 
 **Cascade latency budget.** Layer 2 attempts routes sequentially — each route waits for `DELIVERY_RECEIPT` or ACK timeout (`max(2 × RTT × hopCount, 8s)`, capped 30s) before trying the next. With up to 3 alive routes per device, the worst-case Layer-2 latency per device is ~30s (typical: 8–16s). Layer 3 begins only after Layer 2 is exhausted for ALL resolved devices. For latency-sensitive sends (call setup), `sendToUser` accepts `requireOnline=true` — Layer 3 is skipped entirely and the call returns `false` immediately on Layer-2 failure. **Speculative Layer-3 placement is intentionally omitted.** Placing erasure fragments while Layer 2 is still running would waste storage bandwidth for messages that may yet be delivered directly. The sequential model trades worst-case placement latency (~30s) for storage efficiency — fragments are placed only on confirmed send failure. This is acceptable because the delay affects only the *placement* timing, not the *delivery* timing to the receiver.
 
@@ -2504,7 +2520,8 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 
 **Sender-side peer selection** (`_findMutualPeerDeviceIds`):
 - **Phase 1**: Iterate own accepted contacts (excluding the recipient), filter for alive DV routes, rank by number of alive routes, pick top 3.
-- **Phase 2 (fallback)**: If Phase 1 yields zero candidates, fall back to confirmed routing-table peers (e.g. Bootstrap) — any reachable peer can serve as S&F relay because the receiver polls ALL confirmed peers on startup.
+- **Phase 1 ranking (V3.1.117 field amendment)**: candidates that are *confirmed* (bidirectional UDP contact within the confirmation TTL) rank strictly above candidates that merely have alive DV routes — relay routes without traffic are never pruned and can point at devices that have been offline for days (2026-07-03 field evidence: an S&F copy was placed on a days-dead contact device).
+- **Phase 2 (fallback)**: If Phase 1 yields zero candidates, fall back to confirmed routing-table peers (e.g. Bootstrap) — any reachable peer can serve as S&F relay because the receiver polls ALL confirmed peers on startup. **Infrastructure exception (F4, V3.1.117):** headless/bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). Without this exception Phase 2 was undeliverable: a spec-compliant bootstrap rejected every Phase-2 store, which went unnoticed for as long as the sender ignored the ACKs. This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
 - **Observability**: if the total number of selected peers (Phase 1 + Phase 2) is less than 3, the sender logs a warning (`S&F: only N/3 mutual peers — offline delivery fragile`). In small networks where only one or two relay peers are available, S&F redundancy is reduced and delivery depends on those peers remaining online until the recipient polls. The warning aids operational diagnosis without altering the placement logic.
 
 **Storage-peer validation (receiver-side):** On receiving a `PEER_STORE` infrastructure message, the storage peer validates:
@@ -2516,7 +2533,9 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 5. Per-sender rate limit: max 10 stores per hour
 6. Dedup via `SHA-256(wrappedEnvelope)`
 
-Criterion 3 transforms "mutual" from a sender-side heuristic into a **receiver-enforced property**: only peers that are genuinely contacts of both sender and recipient will accept a store. No contact-list exchange is needed — the check is a local lookup in the storage peer's own contact DB. Stores for unknown recipients are silently rejected; the sender detects this via a missing `PEER_STORE_ACK` and can try the next candidate. This is consistent with the First-CR-Mailbox (§5.5b), which already validates `recipient_device_id is in the SeedPeer's routing table`.
+Criterion 3 transforms "mutual" from a sender-side heuristic into a **receiver-enforced property**: only peers that are genuinely contacts of both sender and recipient will accept a store. No contact-list exchange is needed — the check is a local lookup in the storage peer's own contact DB. Stores for unknown recipients are rejected with `PEER_STORE_ACK{accepted:false}`; the sender detects this (or a missing ACK) and tries the next candidate. This is consistent with the First-CR-Mailbox (§5.5b), which already validates `recipient_device_id is in the SeedPeer's routing table`. **Exception:** infrastructure nodes (headless/bootstrap, `acceptAnyPeerStore`) skip criterion 3 and accept within budgets — see the Phase-2 infrastructure exception above.
+
+**ACK-verified placement (F1, V3.1.117):** the sender assigns a distinct `store_id` per candidate, waits up to 8 s for each `PEER_STORE_ACK`, counts only `accepted:true`, and draws replacement candidates in waves (pool 3×3) until 3 confirmed copies exist or the pool is exhausted. Placement counts as successful from ≥1 confirmed copy; anything less than 3 logs an "offline delivery fragile" warning. Pre-F1 the store was fire-and-forget and "success" meant "attempted" — rejected or lost stores were indistinguishable from placed ones (2026-07-03 field evidence: all three copies of a message were rejected/lost while the sender reported `queuedOffline`).
 
 **S&F storage**:
 - Same inner frame (`ApplicationFrame`) as the original send target
@@ -3183,7 +3202,7 @@ Once Multi-Device is active, application-state changes (new contacts, conversati
 | 1 | CONTACT_DELETED | contact deleted |
 | 2 | MESSAGE_SENT | message sent on one device → mirror so the other devices see it locally |
 | 3 | MESSAGE_EDITED | edit within the per-chat editing window (default 60 min, see §14.6) |
-| 4 | MESSAGE_DELETED | delete within the per-chat editing window (default 60 min, see §14.6) |
+| 4 | MESSAGE_DELETED | delete is **unbounded** — the author may delete their own message at any time (no time window); the receiver admits the delete as long as the sender is the original author (§14.6). Only `MESSAGE_EDITED` is window-bound. |
 | 5 | TWIN_READ_RECEIPT | own read on one device → other devices also mark read |
 | 6 | GROUP_CREATED | own device created/joined a new group *(receive-side wired; sender-side wiring pending)* |
 | 7 | PROFILE_CHANGED | own profile picture / display name changed *(receive-side wired; sender-side wiring pending — `_emitProfileChange()` hook missing)* |
@@ -3652,7 +3671,7 @@ The **KEX Gate** (Key-Exchange Gate) is Cleona's primary protection against unso
 - `RESTORE_BROADCAST` (restore of a known contact with new keys)
 - `TWIN_SYNC` (intra-identity, from own UserID)
 
-**Context-proof exception**: a frame from a sender who is **not** in the personal contact store is still admitted if it carries a verifiable **context proof** in place of a contact relationship — i.e. proven channel/group membership, or a moderation context (a valid channel subscription, or the verifiable juror-selection ticket; the exact moderation admission-ticket is defined with the jury-selection mechanism in §9.3). This is why channel/group messages, jury announcements, vote requests, report deliveries, and System-Channel posts (§9.5) pass the gate even though the sender is not a personal contact. It is a **narrow** exception: the proof is verified at the protocol entry point, and a sender presenting neither a valid context proof nor a contact entry is still silently dropped.
+**Context-proof exception**: a frame from a sender who is **not** in the personal contact store is still admitted if it carries a verifiable **context proof** in place of a contact relationship — i.e. proven channel/group membership, a moderation context (a valid channel subscription, or the verifiable juror-selection ticket; the exact moderation admission-ticket is defined with the jury-selection mechanism in §9.3), or — for System Channels (§9.5) — a self-signed `SystemChannelRecord` (§9.5.7) whose inline-pubkey signature verifies and whose `channel_id` is one of the compile-time system-channel constants (§9.5.1). This is why channel/group messages, jury announcements, vote requests, report deliveries, and System-Channel posts (§9.5) pass the gate even though the sender is not a personal contact. It is a **narrow** exception: the proof is verified at the protocol entry point, and a sender presenting neither a valid context proof nor a contact entry is still silently dropped.
 
 **Anti-spam layers** (multi-stage, see also §13.1):
 - Layer 1: KEX Gate (no known sender → drop)
@@ -4200,6 +4219,8 @@ The poll uses the existing §11.3 infrastructure. No additional protocol message
 
 **Manual posting without poll:** Not supported. Every post in this channel gets an auto-poll. This keeps the channel focused and sortable.
 
+**Programmatic submission API (D3, V3.1.117):** `submitFeatureRequest(title, body)` posts a `SystemChannelRecord` (§9.5.7) with an embedded auto-poll whose default vote is "Ja" (Auto-Ja embedded) — the submitter implicitly supports their own request. Receiver-side rate limit: 3 FR posts/day per node (enforced on receive, not on send — a sender cannot spam a receiver's storage beyond the receiver's daily cap; the §9.5.5 storage cap + eviction is the backstop). Sorting is `net_votes = Ja − Nein` (unchanged formula, applied consistently across the embedded-poll path and the manual-post path).
+
 #### 9.5.4 Crash Popup UX
 
 Three popup variants, shown as a modal dialog over the current screen:
@@ -4280,9 +4301,41 @@ Both system channels are public channels and subject to the full moderation pipe
 - **Bad Badge** applies to both channels (§9.3.2).
 - **CSAM procedure** applies (§9.3.3) — though extremely unlikely given the channels' purpose.
 - **Anti-Sybil** (§9.4) protects against vote manipulation on feature requests and fake crash reports.
-- **KEX Gate** (§8.2) applies via the **context-proof exception**: System-Channel posts are admitted on proof of channel membership (not personal-contact status); a post from a sender with neither channel membership nor a contact entry is silently dropped.
+- **KEX Gate** (§8.2) applies via the **context-proof exception**: System-Channel posts are admitted on a self-signed `SystemChannelRecord` (§9.5.7) whose inline-pubkey signature verifies and whose `channel_id` is one of the compile-time system-channel constants (§9.5.1) — not on personal-contact status and not on a subscriber-registry membership (system channels carry no subscriber registry by design, §9.5.7). A post whose inline-pubkey signature does not verify, or whose `channel_id` is not a known system-channel constant, is silently dropped.
 
 No special moderation rules are needed. The existing infrastructure covers all abuse scenarios.
+
+#### 9.5.7 SystemChannelRecord-Gossip, Anti-Entropy & RETRACT (V3.1.117)
+
+System channels are ownerless (zero-hash owner, §9.5.1) and intentionally carry no subscriber registry — a fresh or long-offline node must still receive every system-channel post without depending on a fan-out owner. Normal channels rely on the owner's per-recipient `sendToUser` fan-out (§9.2); system channels have neither owner nor subscriber list, so a dedicated gossip-based distribution is required.
+
+**Record model (D1):**
+- `SystemChannelRecord` is a **new wire type** (D1-S1), distinct from `CHANNEL_POST`. It is a self-contained, self-signed record carrying the post content plus the author's inline pubkeys.
+- **Self-signed (hybrid, pattern H-2):** the record carries both an Ed25519 and an ML-DSA-65 signature over its canonical content, plus the author's inline Ed25519 and ML-DSA-65 pubkeys. A receiver that has never seen the author verifies the signature from the inline pubkeys alone — no prior Contact lookup or KEX round-trip is required (this is the KEX-Gate context-proof criterion, §8.2 / §9.5.6).
+- **UserID-Founding-Binding:** the record binds the author `UserID` to its founding key set. Later key rotations chain through the AuthManifest rotation chain (§4.3); the founding binding is the trust anchor for unknown-author admission, mirroring the D1 trust-anchor pattern.
+- **`channel_id`:** one of the two compile-time system-channel constants (§9.5.1). A record whose `channel_id` is not a known system-channel constant is silently dropped at admission (§8.2).
+
+**Anti-Entropy (D1-S2 — InfrastructureFrame gossip transport):**
+
+The four gossip messages `SYSCHAN_DIGEST`, `SYSCHAN_SUMMARY`, `SYSCHAN_WANT`, `SYSCHAN_PUSH` are **InfrastructureFrame** messages (added to the §2.3.5 selector list, BOOT path — mirroring peer-list gossip, §2.3.5). They are routing-metadata anti-entropy, not user content; the Closed-Network HMAC plus the inner record's self-signature provide authenticity. Insider visibility of "which system-channel records a peer holds" is by design (same rationale as all BOOT-path routing metadata, §4.10 threat-model addendum).
+
+- **Cadence:** piggy-backed on the existing hourly channel-index gossip slot (§9.2 channel-index gossip) — no new timer, no new periodicity.
+- **Flow:** Digest → Summary → Want → Push. A peer advertises a digest of its local record set; the counterpart returns a summary of what it lacks; the first peer issues Want for the missing records; the second responds with Push carrying the self-signed `SystemChannelRecord` blobs.
+- **Initial sync:** a freshly-subscribing node requests the full record set once (edge-triggered on subscribe), then participates in the hourly anti-entropy.
+- **No subscriber registry:** the anti-entropy set is the full local record set per system channel; a peer compares digests and pulls what it lacks. The 25 MB storage cap (§9.5.5) bounds the set.
+- **Push budget:** `k` adaptive (rate-limited per relay, §4.11-style backoff), TTL 5, dedup by record fingerprint — no per-event connection (the Nostr provider reuses a single WebSocket per relay/cycle, §4.11.6 / C2).
+
+**Feature-Request channel integration:**
+- The FR auto-poll is **embedded** in the `SystemChannelRecord` (no separate `POLL_CREATE` round-trip). Votes are open records tallied locally — no snapshot fan-out (the §24.3.2 channel-poll pattern inverted for an ownerless channel).
+
+**RETRACT Tombstone (D2):**
+- **Author-only:** the retract signer must match the `SystemChannelRecord` author (same inline-pubkey signature path).
+- **Persisted as a tombstone** (not an in-place delete), so a late-joining node sees "this was retracted by author" and does not resurrect the post via anti-entropy.
+- **GC rule:** the tombstone plus the record's fingerprint metadata are retained past the tombstone itself, so the `+1` dedup counter (§9.5.2) for the same fingerprint is not re-incremented by a re-surfaced original.
+- **No time window:** an author may retract their own system-channel post at any time — consistent with the general unbounded-deletion model (§14.6: deletion is unbounded for all chats). System-channel retraction needs no special time-window exception; only the tombstone mechanism is added (to survive anti-entropy).
+- **UX:** long-press → retract sheet on a `SystemChannelPost`. Gesture collision with the A1 SelectionArea/SelectableText work is resolved in the implementation.
+
+**Spam posture (unchanged):** admission is the §8.2 context-proof (self-signed record + known `channel_id`); the per-identity cost is the existing admission PoW (§13.1.2, already required for network roles since V3.1.90, enforced via the D5 collective quota, §13.1.8) plus the receiver-side rate limits (§9.5.5: 3 posts/day FR, 10/day Bug-Log) and jury moderation (§9.3). No new admission-PoW gate is added at the KEX-Gate layer — message delivery remains ungated by admission, per the §13.1.2 Phase-2 principle.
 
 ---
 
@@ -4411,6 +4464,8 @@ Each participant uploads at most **2–3 streams** regardless of total group siz
 - **Outer NetworkPacket:** Ed25519 device signature only (no hybrid Ed25519 + ML-DSA), since outer packet-level auth is a single-hop spoofing defence and the underlying call key already covers end-to-end authenticity. See §2.4 + §4.10 for the general packet-auth model.
 
 The optimisation only removes the redundant outer post-quantum signature on per-frame traffic; it does not weaken the cryptographic envelope around the call as a whole.
+
+**Receiver-side PoW handling:** Live-media frames carry `pow=0`. The receiver cannot classify them by messageType before KEM decap, so acceptance is bound to the call session: on call establishment both endpoints register the peer's device ID(s) in the PoW live-media allowlist (§13.1.2 exemption #4); teardown unregisters. Frames from non-allowlisted, non-LAN, non-relay sources without valid PoW are dropped before decryption — exactly as ordinary application traffic.
 
 ### 10.4 Cross-Platform Audio Stack
 
@@ -5719,6 +5774,15 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 
 **Reconsideration triggers:** This decision should be revisited only if (1) Android adds a peer-to-peer wake API that does not require a third party, or (2) the user-stated "no third party" constraint is relaxed. Neither is on any visible roadmap.
 
+**Basic decision B2 — two-process model on Android (REJECTED, S120, 2026-07-03):** The current in-process architecture (§16.2) runs all networking inside the single Flutter-Activity-plus-FGS process. B2 asked whether the headless engine (`CleonaService` networking core, today the `cleona-headless` binary on Linux, §15.2) should instead run in a *separate process* owned by the Foreground Service, decoupled from the Activity lifecycle. S119 deferred this, gated on memory profiling. **S120 performed that profiling (Pixel 8 Pro, v3.1.116-beta, 7h40m-old process, background, FGS active, no kill-loop) and the two-process model is rejected on the evidence:**
+
+- Steady-state background PSS was 676 MB — the S119 hypothesis that the earlier ~816 MB reading was kill-loop-inflated is refuted; high usage *is* steady state on the debug beta build.
+- The UI contributes only ~20-30 MB (foreground PSS 694 MB vs 676 MB background; Graphics 60→80 MB). >95% of memory is engine-side and would live in the FGS process under any split — a second process saves nothing and *adds* a second engine, an Android-only IPC layer, and lifecycle complexity.
+- The dominant consumers are process-model-independent: (1) a never-used resident whisper.cpp context in the main isolate — the full ggml-base model (144 MB, fully resident) plus ~560 MB VSS of untouched KV/compute buffers, loaded eagerly at service start although every actual transcription loads and frees its own context in a worker isolate (fixed in V3.1.117: main isolate only probes library + model-file presence); (2) debug-build overhead in the beta flavor (~80 MB `kernel_blob.bin` + JIT code + a larger JIT Dart heap) absent from release builds.
+- The Problem-10 restarts were watchdog self-kills and FGS-timeout crashes (§16.2), not memory (LMK) kills.
+
+Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB. **What survives of B2:** only the *single-process* service-owned-engine variant (the FGS boots a headless Dart engine after a START_STICKY resurrection so delivery resumes without user interaction) remains a candidate — as a delivery fix for the resurrection gap, not a memory fix. It is considered only if post-Block-E field testing shows genuine process kills with dead resurrections are frequent enough to cost real delivery.
+
 **Abgrenzung BGTaskScheduler (iOS):** Die in §12.5 beschriebene iOS Background App Refresh via `BGAppRefreshTask` ist **kein** Push-Wakeup und faellt nicht unter diese Ablehnung. BGTaskScheduler ist ein OS-gesteuerter Pull-Mechanismus: das Betriebssystem weckt die App periodisch auf, die App verbindet sich aktiv mit dem P2P-Netz und holt wartende Nachrichten ab. Kein Drittanbieter-Server, kein APNs, kein Firebase. Die Einschraenkungen (OS-kontrolliertes Timing, begrenzte Ausfuehrungszeit) sind akzeptiert — sie sind der Preis fuer Hintergrund-Zustellung ohne zentrale Infrastruktur.
 
 ### 12.5 Platform-Specific Background Behavior
@@ -5795,7 +5859,7 @@ PoW Parameters:
 
 **Pre-Hash Rationale (V3.1.92):** The previous formula `SHA-256(data || nonce)` iterated over the full KEM-encrypted payload on every hash attempt — O(payload_size × 2^d). For a 131 KB inline image (137 KB after KEM encrypt), this produced ~136 GB of SHA-256 throughput (~66 s on ARM64), which caused Android to kill the PoW isolate (silent message loss). Pre-hashing reduces the per-iteration input to a fixed 40 bytes (32-byte digest + 8-byte nonce), making PoW time O(2^d) independent of payload size. Measured improvement: 131 KB payload from 66 000 ms to 17 ms (3 800×). Verify accepts both formats for backward compatibility with S&F-cached messages.
 
-**PoW Exemptions:** Three categories of packets are exempt:
+**PoW Exemptions:** Four categories of packets are exempt:
 
 1. **LAN peers** (private IP: 10.x, 172.16-31.x, 192.168.x): Packets between peers on the same local network skip PoW. Authenticity is still established by the outer device-signature and inner Per-Message KEM + user-signature (see §2.4 Layered Encryption Pipeline). Detection uses `_isPrivateIp()` on both sides.
 
@@ -5803,7 +5867,9 @@ PoW Parameters:
 
 3. **Relay-bound packets**: When the routing layer reports `directBlocked` or no reachable active targets exist, PoW is skipped. Relay-delivered packets (from=0.0.0.0) are exempt from PoW verification on the receiver — the relay's own outer device-signature carries the wire-level authenticity.
 
-Only **chat content messages** (TEXT, IMAGE, FILE, VOICE, CALL_*) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW.
+4. **Live-media frames (call-session-scoped):** CALL_AUDIO (76), CALL_VIDEO (77), CALL_GROUP_AUDIO (78), CALL_GROUP_VIDEO (79) carry `pow=0` (§10.3, Appendix B.2) — at 50 frames/s per direction, a ~20 ms PoW grind per 20 ms frame is physically impossible. Since PoW verification is a pre-decrypt gate and the inner messageType is not visible before KEM decap, the receiver scopes the exemption by **sender device ID**: for the lifetime of an active call session, the peer's device ID (1:1: the device that sent CALL_ANSWER / CALL_INVITE; group: all participant devices) is registered in a **live-media allowlist**; ApplicationFrames whose outer `senderDeviceId` is allowlisted skip PoW verification. The entry is removed at call teardown (hangup, reject, timeout — teardown always runs locally, so entries cannot leak). DoS posture: the exemption is reachable only *after* a fully dual-signed (Ed25519 + ML-DSA) call handshake, is bounded to the ≤N devices of one active call, and removes only the PoW layer — outer device-signature verification, rate limiting (Layer 2), and reputation (Layer 3) remain fully active. An allowlisted peer could send non-media traffic PoW-free for the call's duration; this is accepted (the peer is an authenticated contact mid-call, and Layer-2 budgets bind).
+
+Only **chat content messages** (TEXT, IMAGE, FILE, VOICE), **call signaling** (CALL_INVITE, CALL_ANSWER, CALL_REJECT, CALL_HANGUP, CALL_REJOIN) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW. **Live-media frames (76–79) never carry PoW** — neither on LAN nor WAN paths.
 
 **Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. Pre-hashing (§13.1.2) ensures iteration time is constant regardless of payload size — no risk of Android background-killing the isolate during long PoW grinds. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
 
@@ -6072,6 +6138,8 @@ Enforcement is dual-sided with asymmetric defaults for mixed-version safety:
 - **Receiver-side (enforcement):** Recipients reject edit messages that arrive more than 60 minutes after the original message timestamp (`_receiverEditToleranceMs`). This generous tolerance ensures edits from older app versions (which used 60 min sender-side) are still accepted during rollout.
 
 The asymmetry is intentional: tightening the sender-side window improves UX (edits feel more "in the moment") while the wider receiver tolerance prevents silent edit rejection on mixed-version networks. The per-chat `edit_window_ms` override (§14.7) replaces both values when set.
+
+**Deletion is unbounded (V3.1.117 doc correction):** an author may delete their own message at any time — there is no delete window. Sender UI (`_canDelete`) and receiver (`_handleDeleteV3`) check authorship only, not age; neither references `edit_window_ms` or any tolerance. Only **editing** is window-bound. This corrects an earlier doc statement that coupled `MESSAGE_DELETED` to the per-chat editing window (§8.1); the implementation never enforced a delete window.
 
 ### 14.7 Per-Chat Configuration Protocol
 
@@ -6632,6 +6700,13 @@ Cleona follows a strict minimum-permissions approach. No permission is requested
 
 **Foreground service (canonical background-delivery path):** `CleonaForegroundService` boots as type `dataSync` and keeps the UDP socket alive for incoming message and call delivery. This is the **only** mechanism Cleona uses for background delivery on Android — push wake-up via FCM, UnifiedPush, WebPush or per-peer rotation has been architecturally evaluated and rejected (see §12.4 / ADR "Push Wake-Up Rejected"). During an active voice/video call the service is runtime-promoted to `dataSync|microphone` via the 3-arg `startForeground()` overload, after `RECORD_AUDIO` has been granted; it is demoted back to `dataSync` when the call ends. The manifest declares `foregroundServiceType="dataSync|microphone"` so the runtime promotion is permitted; calling `startForeground()` with the 2-arg overload at boot would implicitly inherit the `microphone` type and crash on freshly installed apps that have never granted `RECORD_AUDIO`. The persistent notification shows live connection status, e.g. "Connected — X peers", "Mobile — X peers", "Searching for peers…", or "Offline — no network" (actual strings come from i18n in 33 languages — see §17). Updated dynamically via MethodChannel (`updateServiceNotification`) on every state change, with dedup to avoid redundant updates. Channel importance: `IMPORTANCE_LOW` (no sound, no vibration, no badge).
 
+**Lifecycle invariants (Problem-10 hardening, V3.1.117):**
+- `startForeground` is idempotent in `onStartCommand` (re-issued on every entry; no "already running" short-circuit that could skip a needed re-promotion after an OS kill).
+- `onStartCommand` never swallows an exception and falls through to `stopSelf`: a caught error is reported via `PlatformDispatcher.onError` and the service continues under a degraded "pausiert" notification rather than terminating. The watchdog-kill path is removed — a service killing itself from inside its own lifecycle recreates the OS-restart loop.
+- Heartbeat: the heartbeat file is deleted at service start (not guarded by an `isRunning` check) and stamped early; a stale heartbeat from a crashed previous instance must not suppress a fresh start.
+- `MainActivity.ensureForegroundService` runs in `onCreate` + `onResume`, but only when the service is not already running (cheap probe, no re-bind storm).
+- `runZonedGuarded` is removed from the service path; `PlatformDispatcher.onError` is the single global error sink (defence-in-depth via the existing `FlutterError.onError` + `PlatformDispatcher.onError` pair, §9.5.2).
+
 ### 16.3 iOS Permission Model
 
 | Permission Key | When Requested | Usage Description |
@@ -7058,7 +7133,7 @@ Auf Linux, Android, Windows und macOS laedt Cleona seine nativen Bibliotheken (l
 **iOS verbietet das.** Apple erlaubt in App-Bundles keine eigenen `.dylib`-Dateien. Aller nativer Code muss statisch in das Runner-Binary (die ausfuehrbare Datei der App) gelinkt werden. Darts `DynamicLibrary.process()` sucht die Funktionen dann mit `dlsym(RTLD_DEFAULT, "funktionsname")` in der Symboltabelle des eigenen Prozesses.
 
 Daraus folgt eine Kette von Problemen die auf keiner anderen Plattform auftreten:
-1. Alle sieben Bibliotheken muessen in EIN Binary
+1. Alle neun Bibliotheken muessen in EIN Binary
 2. Dabei entstehen doppelte Symbole (gleicher Funktionsname in mehreren Bibliotheken)
 3. Der Linker muss diese Duplikate aufloesen ohne Fehler
 4. Die Symbole muessen nach dem Linken fuer `dlsym()` sichtbar bleiben
@@ -7066,7 +7141,7 @@ Daraus folgt eine Kette von Problemen die auf keiner anderen Plattform auftreten
 
 #### Schritt 1: Native Bibliotheken kompilieren
 
-Das Script `scripts/build-ios-libs.sh` kompiliert alle sieben Bibliotheken als statische Archive (`.a`-Dateien) fuer iOS arm64. Es laeuft auf macOS (braucht Xcode mit iOS SDK) und wird im CI auf einem GitHub Actions `macos-14` Runner ausgefuehrt.
+Das Script `scripts/build-ios-libs.sh` kompiliert alle neun Bibliotheken (libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp, libcleona_audio, libvpx, libcleona_vpx) als statische Archive (`.a`-Dateien) fuer iOS arm64. Es laeuft auf macOS (braucht Xcode mit iOS SDK) und wird im CI auf einem GitHub Actions `macos-14` Runner ausgefuehrt.
 
 Jede Bibliothek wird fuer zwei Zielplattformen gebaut: `arm64-iphoneos` (echtes Geraet) und `arm64-iphonesimulator`. Die Ergebnisse werden als XCFrameworks verpackt (`xcodebuild -create-xcframework`).
 

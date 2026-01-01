@@ -35,8 +35,14 @@ RandomAccessFile? _machineGlobalLockRaf;
 /// Cleona service daemon — runs independently of the GUI.
 /// One daemon, one port, one node — all identities active simultaneously.
 void main(List<String> args) {
+  // Captured for the zone error handler: CLogger.get without profileDir
+  // buffers NOTHING (key `daemon:null`, no file sink) — an uncaught error
+  // logged that way is lost when the GUI drains the daemon's stderr
+  // (S122: exit(99) left zero trace in any log).
+  String? zoneLogBaseDir;
   runZonedGuarded(() async {
     final config = _parseArgs(args);
+    zoneLogBaseDir = config.baseDir;
     final log = CLogger.get('daemon', profileDir: config.baseDir);
 
     log.info('Starting Cleona daemon...');
@@ -284,9 +290,18 @@ void main(List<String> args) {
     final msg = 'UNHANDLED ASYNC ERROR: $error\nStack:\n$stack';
     try { stderr.writeln(msg); } catch (_) {}
     try {
-      final log = CLogger.get('daemon');
+      final log = CLogger.get('daemon', profileDir: zoneLogBaseDir);
       log.error(msg);
       await CLogger.flushAll();
+    } catch (_) {}
+    // Sync fallback sink — survives even if CLogger's buffer/flush path is
+    // the thing that broke: append directly next to the regular logs.
+    try {
+      if (zoneLogBaseDir != null) {
+        File('$zoneLogBaseDir/daemon-crash.log').writeAsStringSync(
+            '${DateTime.now().toIso8601String()} $msg\n',
+            mode: FileMode.append, flush: true);
+      }
     } catch (_) {}
     final isSurvivable = error is TimeoutException ||
         error is SocketException ||
@@ -506,7 +521,12 @@ class _MultiServiceDaemon {
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER ||
           // §11.4.8: Anonymous Vote Re-Broadcaster
           mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT ||
-          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK;
+          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK ||
+          // §9.5.7 (S119 D1): system-channel record gossip
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_WANT ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_PUSH;
       if (!isServiceRouted) {
         log.debug('V3 INFRA hook drop: messageType=${mt.name} '
             'has no service-side handler');
@@ -576,6 +596,10 @@ class _MultiServiceDaemon {
                 frame, senderDeviceId, from, port, snapshot);
             break;
           case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
+            // carries accepted=false when the storage peer rejected the
+            // store (recipient not its contact, budget, rate limit).
+            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId);
             break;
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
             service.handleIncomingPeerRetrieveInfra(
@@ -591,6 +615,18 @@ class _MultiServiceDaemon {
             break;
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
             service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+            service.handleIncomingSysChanDigestInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+            service.handleIncomingSysChanSummaryInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+            service.handleIncomingSysChanWantInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
+            service.handleIncomingSysChanPushInfra(frame, senderDeviceId);
             break;
           case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
             service.handleIncomingPollAnonSubmit(

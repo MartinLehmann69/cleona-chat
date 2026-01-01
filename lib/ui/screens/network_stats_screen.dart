@@ -324,14 +324,17 @@ class _StatTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final valueWidget = Text(
-      value,
-      style: TextStyle(
-        fontWeight: FontWeight.bold,
-        color: color,
-        fontFamily: 'monospace',
-      ),
+    final valueStyle = TextStyle(
+      fontWeight: FontWeight.bold,
+      color: color,
+      fontFamily: 'monospace',
     );
+    // Problem 1 (S119): stat values without onTap are selectable (public
+    // IP etc.); tappable tiles (Aktive Peers → Connection-Sheet) keep Text
+    // so the tap gesture is not swallowed.
+    final valueWidget = onTap == null
+        ? SelectableText(value, style: valueStyle)
+        : Text(value, style: valueStyle);
     return ListTile(
       dense: true,
       leading: Icon(icon, size: 20, color: color),

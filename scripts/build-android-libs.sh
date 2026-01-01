@@ -2,8 +2,9 @@
 ###############################################################################
 # build-android-libs.sh — Cross-compile native libs for Android
 #
-# Baut libsodium, liboqs, libzstd und whisper.cpp (inkl. libggml)
-# mit 16KB Page-Alignment (Android 15+).
+# Baut libsodium, liboqs, libzstd, whisper.cpp (inkl. libggml) und den
+# libcleona_vpx-Shim (libvpx statisch eingebunden, nur VP8) mit 16KB
+# Page-Alignment (Android 15+).
 # Ergebnis landet in android/app/src/main/jniLibs/<ABI>/
 #
 # Voraussetzungen: Android NDK (28.x), git, cmake, ninja-build, autoconf,
@@ -15,6 +16,7 @@
 #   ./scripts/build-android-libs.sh --arch all             # Beide Architekturen
 #   ./scripts/build-android-libs.sh --arch x86_64 sodium   # Nur libsodium x86_64
 #   ./scripts/build-android-libs.sh whisper                # Nur whisper.cpp arm64
+#   ./scripts/build-android-libs.sh vpx                    # Nur libcleona_vpx arm64
 ###############################################################################
 set -euo pipefail
 
@@ -46,6 +48,12 @@ PAGE_SIZE_FLAG="-Wl,-z,max-page-size=16384"
 # in sync with Dart FFI (whisper_ffi.dart hardcoded offsets).
 WHISPER_VERSION="v1.7.1"
 
+# Pin libvpx version — offsets in native/vpx_shim.c (opaque-buffer field
+# offsets + ABI version constants) are only valid for this exact minor
+# version; bump both together after re-validating offsets/ABI numbers
+# against the new vpx/vpx_encoder.h + vpx/vpx_decoder.h.
+LIBVPX_VERSION="v1.14.1"
+
 setup_arch() {
     local arch="$1"
     case "$arch" in
@@ -54,19 +62,21 @@ setup_arch() {
             CXX="$TOOLCHAIN/bin/aarch64-linux-android${API_LEVEL}-clang++"
             CONFIGURE_HOST="aarch64-linux-android"
             CMAKE_ABI="arm64-v8a"
+            VPX_TARGET="arm64-android-gcc"
             ;;
         x86_64)
             CC="$TOOLCHAIN/bin/x86_64-linux-android${API_LEVEL}-clang"
             CXX="$TOOLCHAIN/bin/x86_64-linux-android${API_LEVEL}-clang++"
             CONFIGURE_HOST="x86_64-linux-android"
             CMAKE_ABI="x86_64"
+            VPX_TARGET="x86_64-android-gcc"
             ;;
         *) echo "Unbekannte Architektur: $arch (arm64-v8a oder x86_64)"; exit 1 ;;
     esac
     JNILIBS="$PROJECT_DIR/android/app/src/main/jniLibs/$arch"
     BUILD_DIR="/tmp/android-libs-build-$arch"
     mkdir -p "$BUILD_DIR" "$JNILIBS"
-    export CC CXX CONFIGURE_HOST CMAKE_ABI JNILIBS BUILD_DIR
+    export CC CXX CONFIGURE_HOST CMAKE_ABI VPX_TARGET JNILIBS BUILD_DIR
 }
 
 # Default setup (may be overridden by 'all' loop)
@@ -286,6 +296,88 @@ build_libzstd() {
     echo "  → $JNILIBS/libzstd.so ($(du -h "$JNILIBS/libzstd.so" | cut -f1))"
 }
 
+build_libvpx() {
+    echo "=== libvpx bauen (nur VP8, statisch) ==="
+    local SRC="$BUILD_DIR/libvpx"
+
+    if [ -d "$SRC" ]; then
+        local cached_tag
+        cached_tag=$(git -C "$SRC" describe --tags --exact-match 2>/dev/null || echo "unknown")
+        if [ "$cached_tag" != "$LIBVPX_VERSION" ]; then
+            echo "  Cached libvpx is $cached_tag, need $LIBVPX_VERSION — re-cloning"
+            rm -rf "$SRC"
+        fi
+    fi
+    if [ ! -d "$SRC" ]; then
+        echo "  Klone libvpx ($LIBVPX_VERSION)..."
+        git clone --depth 1 --branch "$LIBVPX_VERSION" https://github.com/webmproject/libvpx.git "$SRC"
+    fi
+
+    local BUILD="$SRC/build-android-$CMAKE_ABI"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    # native/vpx_shim.c only calls vpx_codec_vp8_{cx,dx} — VP9 stays
+    # disabled to shrink the static lib and drop unused attack surface.
+    # examples/tools/docs/unit-tests off: this is a library-only build.
+    # --enable-static --disable-shared: libvpx.a gets linked statically
+    # into libcleona_vpx.so below, so no separate libvpx.so ships in the
+    # APK (see build_libcleona_vpx).
+    local X86_ASM_FLAGS=()
+    if [ "$CMAKE_ABI" = "x86_64" ]; then
+        # libvpx's x86 SIMD paths are hand-written .asm (yasm/nasm syntax,
+        # not clang's integrated assembler) and yasm/nasm aren't part of
+        # the NDK toolchain or a build prerequisite of this script. Rather
+        # than adding a yasm/nasm dependency for the emulator-only x86_64
+        # target, disable x86 SIMD and fall back to the portable C code
+        # paths (ARM64 devices, the release target, are unaffected — NEON
+        # is handled by clang's integrated assembler, no yasm needed).
+        X86_ASM_FLAGS=(--disable-mmx --disable-sse --disable-sse2 \
+            --disable-sse3 --disable-ssse3 --disable-sse4_1 \
+            --disable-avx --disable-avx2 --disable-avx512)
+    fi
+
+    CC="$CC" CXX="$CXX" AR="$AR" AS="$CC" LD="$CC" RANLIB="$RANLIB" \
+    STRIP="$STRIP" \
+    "$SRC/configure" --target="$VPX_TARGET" \
+        --disable-examples --disable-tools --disable-docs --disable-unit-tests \
+        --enable-vp8 --disable-vp9 --enable-pic \
+        --enable-static --disable-shared \
+        --disable-webm-io --disable-libyuv \
+        --extra-cflags="-fPIC" \
+        "${X86_ASM_FLAGS[@]}"
+
+    make -j"$(nproc)"
+
+    echo "  → $BUILD/libvpx.a ($(du -h libvpx.a | cut -f1)) [$CMAKE_ABI]"
+}
+
+build_libcleona_vpx() {
+    echo "=== libcleona_vpx bauen (VP8-Shim, libvpx statisch eingebunden) ==="
+    build_libvpx
+
+    local VPX_SRC="$BUILD_DIR/libvpx"
+    local VPX_BUILD="$VPX_SRC/build-android-$CMAKE_ABI"
+    local SHIM_SRC="$PROJECT_DIR/native/vpx_shim.c"
+
+    # -DCLEONA_VPX_STATIC_LINK: vpx_shim.c resolves the real libvpx
+    # functions directly at link time instead of via dlopen/dlsym (that
+    # path is Linux-only, where the shim dlopen()s the system libvpx.so).
+    # libvpx.a is linked in directly so the shim + codec end up in one
+    # single .so — no separate libvpx.so lands in jniLibs/.
+    "$CC" -shared -fPIC -O2 \
+        -DCLEONA_VPX_STATIC_LINK \
+        -o "$JNILIBS/libcleona_vpx.so" \
+        "$SHIM_SRC" \
+        "$VPX_BUILD/libvpx.a" \
+        "$PAGE_SIZE_FLAG"
+
+    "$STRIP" "$JNILIBS/libcleona_vpx.so"
+    verify_alignment "$JNILIBS/libcleona_vpx.so"
+    echo "  → $JNILIBS/libcleona_vpx.so ($(du -h "$JNILIBS/libcleona_vpx.so" | cut -f1))"
+}
+
 # --- Main ---
 TARGET="${1:-all}"
 
@@ -296,6 +388,7 @@ build_target() {
         zstd)          build_libzstd ;;
         whisper)       build_libwhisper ;;
         cleona_audio)  build_libcleona_audio ;;
+        vpx)           build_libcleona_vpx ;;
         all)
             build_libsodium
             echo ""
@@ -305,10 +398,12 @@ build_target() {
             echo ""
             build_libcleona_audio
             echo ""
+            build_libcleona_vpx
+            echo ""
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|all]"
+            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|vpx|all]"
             exit 1
             ;;
     esac

@@ -67,6 +67,7 @@ import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/services/key_change_policy.dart';
 import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
+import 'package:cleona/core/channels/system_channel_records.dart';
 import 'package:cleona/core/channels/contact_issue_reporter.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
 import 'package:cleona/core/network/rendezvous/first_contact_rendezvous_manager.dart';
@@ -96,6 +97,18 @@ enum AppFrameDispatchOutcome {
   /// parse error). No retry — drop is final.
   droppedAfterDecap,
 }
+
+/// MessageTypes eligible for the live-media receive fast path (Architecture
+/// §10.3 / Appendix B.2, F-C amendment) — the strict allow-list a plaintext
+/// ApplicationFrameV3 inner must fall into before
+/// [CleonaService._tryLiveMediaFastPath] will dispatch it. Everything else
+/// MUST go through the normal per-recipient-KEM + user-sig inner path.
+const Set<proto.MessageTypeV3> _liveMediaFastPathTypes = {
+  proto.MessageTypeV3.MTV3_CALL_AUDIO,
+  proto.MessageTypeV3.MTV3_CALL_VIDEO,
+  proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
+  proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO,
+};
 
 /// Central orchestrator: wires node, contacts, messaging, and manages state.
 /// Now takes a shared CleonaNode + IdentityContext instead of creating its own node.
@@ -403,7 +416,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.116';
+  static const String kCurrentAppVersion = '3.1.119';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -446,6 +459,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Structure: messageIdHex → _OutboxEntry
   final Map<String, _OutboxEntry> _outbox = {};
   bool _outboxLoaded = false;
+
+  // §5.1 F3′ (fourth outbox edge): last user-scoped flush attempt per sender.
+  // Gates the verified-inbound edge so a chatty sender cannot re-trigger a
+  // still-failing flush on every frame. NOT a timer — consulted only when an
+  // inbound frame arrives while entries for that sender are parked.
+  final Map<String, DateTime> _outboxInboundFlushAt = {};
+  static const Duration _outboxInboundFlushGate = Duration(seconds: 60);
 
   // §5.8 extension: pending membership update resends.
   // When _broadcastGroupUpdate / _broadcastChannelUpdate fails for a member
@@ -667,6 +687,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // FULL set. (Running this before the load destroyed all chats — see note
     // next to _loadChannels above.)
     _seedSystemChannels();
+    // §9.5.7 (S119 D1): load the gossip record set for the system channels.
+    _loadSysChanRecords();
 
     // After load: surface the persisted unreadCount to the system badge so
     // the Launcher-Badge matches the on-disk truth right after daemon-start.
@@ -736,6 +758,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkMessageExpiry());
 
     // Channel index gossip + moderation timers (delegated to sub-service)
+    // §9.5.7: system-channel record digests piggyback on the same slot.
+    _moderation.onGossipTargets = sendSysChanDigests;
     _moderation.startChannelIndexGossip(const Duration(minutes: 5));
     _channelIndex.prune();
     _moderation.startModerationTimer();
@@ -761,6 +785,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // §5.1 Layer 3: offline cascade when all DV routes are exhausted.
     node.onMessageRetryExhausted = _handleRetryExhausted;
+
+    // §4.11.11 / §5.1: contact-endpoint-confirmed is the third outbox edge
+    // (besides onNetworkChanged and first-peer-confirmed). A rendezvous-
+    // resolved contact device just answered — parked messages toward it can
+    // now complete the cascade. Chained (multi-identity: one node, N
+    // services — every service must flush its own outbox).
+    final prevEndpointConfirmed = node.onContactEndpointConfirmed;
+    node.onContactEndpointConfirmed = (contactUserIdHex) {
+      prevEndpointConfirmed?.call(contactUserIdHex);
+      unawaited(_flushOutbox());
+    };
 
     // Track end-to-end reachability per contact (used to stop CR-Response retry).
     // AckTracker callback provides the deviceNodeId of the recipient (Phase 2
@@ -1986,6 +2021,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // (republish records + re-arm owner polls). No-op without sessions.
     _fcRendezvous?.resumeSessions();
 
+    // §9.5.7 (S119 D1): edge-triggered initial anti-entropy sync — a fresh
+    // or long-offline node pulls the system-channel record sets once; the
+    // hourly digest piggyback keeps it converged afterwards.
+    final syncPeers = List<PeerInfo>.from(node.routingTable.allPeers)
+      ..shuffle();
+    sendSysChanDigests(syncPeers.take(_sysChanFanout));
+
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = Timer(const Duration(seconds: 15), () {
       _postDiscoverySecondSweep = null;
@@ -2309,6 +2351,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Already deleted
     if (original.isDeleted) return false;
+
+    // §9.5.7 D2 (S119): system-channel posts are deleted via an author-
+    // signed RETRACT tombstone that gossips with the record set (a plain
+    // MTV3_DELETE could never reach "all subscribers" — there is no
+    // member list). Deletion is unbounded (§14.6 — no time window).
+    if (SystemChannels.isSystemChannel(conversationId)) {
+      final stored = await _publishSystemChannelRecord(
+        channelIdHex: conversationId,
+        kind: SysChanKind.retract,
+        targetRecordId: Uint8List.fromList(hexToBytes(messageId)),
+      );
+      if (stored == null) return false;
+      // _applySysChanRetract (inside publish) marked the bridged message;
+      // legacy pre-D1 local posts share the id and are covered too.
+      if (!original.isDeleted) {
+        original.text = '';
+        original.isDeleted = true;
+        _saveConversations();
+      }
+      onStateChanged?.call();
+      _log.info('System-channel post retracted: $messageId');
+      return true;
+    }
 
     // Build delete payload (V3 wraps via sendToUser).
     final deleteMsg = proto.MessageDelete()
@@ -2693,11 +2758,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       recipientUserNodeId: recipientUserId,
     );
 
-    // §5.5: S&F copy on mutual peers
-    final safOk = _storeSafOnContactPeers(
+    // §5.5: S&F copy on mutual peers (S121 F1: ACK-verified placement)
+    final safOk = await _storeSafOnContactPeers(
       recipientUserId: recipientUserId,
       wrappedEnvelope: serializedPacket,
-      storeId: SodiumFFI().randomBytes(16),
     );
 
     if (erasureOk || safOk) {
@@ -2718,37 +2782,110 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// §5.5: Store a complete message copy on up to 3 mutual peers.
-  /// Returns true if at least one mutual peer was reachable.
-  bool _storeSafOnContactPeers({
+  /// §5.5 F4(a) (S121): infrastructure-node S&F policy — when true, this
+  /// node stores PEER_STORE messages for ANY recipient (within budgets),
+  /// not only for its own accepted contacts. Set by headless/bootstrap
+  /// runners; GUI daemons and mobile devices keep contact-only storage.
+  bool acceptAnyPeerStore = false;
+
+  /// §5.5 (S121 F1): pending PEER_STORE ACKs keyed by storeIdHex. The
+  /// storage peer answers every store with `PEER_STORE_ACK{accepted}` —
+  /// accepted=false when the recipient is not ITS accepted contact
+  /// (receiver-enforced mutuality, §5.5 criterion 3).
+  final Map<String, Completer<bool>> _pendingPeerStoreAcks = {};
+
+  /// Per-store ACK wait. 8 s covers relay paths (min relay ACK budget §2).
+  static const Duration _peerStoreAckTimeout = Duration(seconds: 8);
+
+  /// §5.5 target redundancy: confirmed copies we aim for per message.
+  static const int _safTargetCopies = 3;
+
+  /// Routed from the InfraFrame dispatchers (was silently dropped before
+  /// S121 F1 — the sender could never distinguish accepted from rejected
+  /// or lost stores).
+  void handleIncomingPeerStoreAckInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final ack = proto.PeerStoreAck.fromBuffer(frame.payload);
+      final storeIdHex = bytesToHex(Uint8List.fromList(ack.storeId));
+      final pending = _pendingPeerStoreAcks.remove(storeIdHex);
+      if (pending != null && !pending.isCompleted) {
+        pending.complete(ack.accepted);
+      }
+    } catch (_) {/* malformed ACK — ignore */}
+  }
+
+  /// §5.5: Store a complete message copy on mutual peers with ACK-verified
+  /// placement (S121 F1). Spec: "the sender detects [a rejected store] via
+  /// a missing PEER_STORE_ACK and can try the next candidate."
+  ///
+  /// Sends in waves toward [_safTargetCopies] confirmed copies, drawing
+  /// fresh candidates per wave until the pool is dry. Success = at least
+  /// one storage peer ACCEPTED. Pre-F1 this was fire-and-forget and
+  /// returned true for merely attempting — the cascade then reported
+  /// queuedOffline although every store had been rejected or lost
+  /// (field evidence 2026-07-03, Martin→Eierphone).
+  Future<bool> _storeSafOnContactPeers({
     required Uint8List recipientUserId,
     required Uint8List wrappedEnvelope,
-    required Uint8List storeId,
-  }) {
-    final mutuals = _findContactPeerDeviceIds(recipientUserId, limit: 3);
-    if (mutuals.isEmpty) {
+  }) async {
+    // Draw a deep candidate pool (3 waves worth) so rejected stores can
+    // fall through to the next candidates per spec.
+    final pool = _findContactPeerDeviceIds(recipientUserId,
+        limit: _safTargetCopies * 3);
+    if (pool.isEmpty) {
       _log.debug('S&F: no mutual peers for ${_hexShort(recipientUserId)}');
       return false;
     }
-    final peerStore = proto.PeerStore()
-      ..recipientNodeId = recipientUserId
-      ..wrappedEnvelope = wrappedEnvelope
-      ..storeId = storeId
-      ..ttlMs = Int64(PeerMessageStore.defaultTtlMs);
-    final payload = Uint8List.fromList(peerStore.writeToBuffer());
-    for (final mutualDeviceId in mutuals) {
-      node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_PEER_STORE,
-        innerPayload: payload,
-        recipientDeviceId: mutualDeviceId,
-      );
+
+    var accepted = 0;
+    var attempted = 0;
+    var cursor = 0;
+    while (accepted < _safTargetCopies && cursor < pool.length) {
+      final need = _safTargetCopies - accepted;
+      final wave = pool.skip(cursor).take(need).toList();
+      cursor += wave.length;
+
+      final waits = <Future<bool>>[];
+      for (final deviceId in wave) {
+        final sid = SodiumFFI().randomBytes(16);
+        final sidHex = bytesToHex(sid);
+        final peerStore = proto.PeerStore()
+          ..recipientNodeId = recipientUserId
+          ..wrappedEnvelope = wrappedEnvelope
+          ..storeId = sid
+          ..ttlMs = Int64(PeerMessageStore.defaultTtlMs);
+        final completer = Completer<bool>();
+        _pendingPeerStoreAcks[sidHex] = completer;
+        attempted++;
+        unawaited(node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_PEER_STORE,
+          innerPayload: Uint8List.fromList(peerStore.writeToBuffer()),
+          recipientDeviceId: deviceId,
+        ));
+        waits.add(completer.future.timeout(_peerStoreAckTimeout,
+            onTimeout: () {
+          _pendingPeerStoreAcks.remove(sidHex);
+          return false;
+        }));
+      }
+      final results = await Future.wait(waits);
+      accepted += results.where((ok) => ok).length;
     }
-    if (mutuals.length < 3) {
-      _log.warn('S&F: only ${mutuals.length}/3 mutual peers for '
-          '${_hexShort(recipientUserId)} — offline delivery fragile');
+
+    if (accepted == 0) {
+      _log.warn('S&F: 0/$attempted stores ACCEPTED for '
+          '${_hexShort(recipientUserId)} — placement failed');
+      return false;
     }
-    _log.info('S&F: stored on ${mutuals.length} mutual peers '
-        'for ${_hexShort(recipientUserId)}');
+    if (accepted < _safTargetCopies) {
+      _log.warn('S&F: only $accepted/$_safTargetCopies confirmed stores for '
+          '${_hexShort(recipientUserId)} ($attempted attempted) — '
+          'offline delivery fragile');
+    } else {
+      _log.info('S&F: $accepted confirmed stores for '
+          '${_hexShort(recipientUserId)} ($attempted attempted)');
+    }
     return true;
   }
 
@@ -2762,7 +2899,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final candidates = <(Uint8List, int)>[];
     final seen = <String>{};
 
-    // Phase 1: accepted contacts with alive routes (high confidence mutual).
+    // Phase 1: accepted contacts (high confidence mutual). S121 F2: rank
+    // confirmed peers (bidirectional UDP within TTL) far above merely
+    // alive-routed ones — stale relay routes are never pruned without
+    // traffic, so `isAlive` alone selected devices that had been offline
+    // for days (field evidence 2026-07-03: S&F copy on a 6-days-dead
+    // device; the §5.5 receiver-pull then never finds the message).
     for (final entry in _contacts.entries) {
       if (entry.key == recipientHex) continue;
       final c = entry.value;
@@ -2772,10 +2914,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final devBytes = hexToBytes(devHex);
         final peer = node.routingTable.getPeer(devBytes);
         if (peer == null) continue;
+        final confirmed = node.isPeerConfirmed(devHex);
         final routes = node.dvRouting.routesTo(devHex);
         final aliveCount = routes.where((r) => r.isAlive).length;
-        if (aliveCount > 0) {
-          candidates.add((devBytes, aliveCount));
+        if (confirmed || aliveCount > 0) {
+          candidates.add((devBytes, (confirmed ? 1000 : 0) + aliveCount));
           seen.add(devHex);
           break;
         }
@@ -4955,6 +5098,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final channel = _channels[channelIdHex];
     if (channel == null) return null;
 
+    // §9.5.7 (S119 D1): system channels are ownerless and have no member
+    // fan-out — posts travel as self-signed SystemChannelRecords via the
+    // SYSCHAN gossip. The old CHANNEL_POST path fanned out over the always-
+    // empty members map (Problem 4/6: posts never left the local node).
+    if (SystemChannels.isSystemChannel(channelIdHex)) {
+      final stored = await _publishSystemChannelRecord(
+          channelIdHex: channelIdHex, kind: SysChanKind.post, text: text);
+      if (stored == null) return null;
+      node.statsCollector.addMessageSent();
+      final conv = conversations[channelIdHex];
+      final recordIdHex =
+          bytesToHex(Uint8List.fromList(stored.record.recordId));
+      for (final m in conv?.messages ?? const <UiMessage>[]) {
+        if (m.id == recordIdHex) return m;
+      }
+      return null;
+    }
+
     // Only owner/admin can post
     if (!_hasChannelPermission(channel, 'post')) {
       _log.warn('No permission to post in channel');
@@ -5706,6 +5867,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   bool get isSpeakerEnabled => _calls.isSpeakerEnabled;
   @override
   void toggleSpeaker() => _calls.toggleSpeaker();
+  @override
+  bool get isVideoMuted => _calls.isVideoMuted;
+  @override
+  void toggleVideoMute() => _calls.toggleVideoMute();
+  @override
+  Future<bool> switchCamera() => _calls.switchCamera();
 
   @override
   void Function(GroupCallInfo info)? onIncomingGroupCall;
@@ -5948,19 +6115,52 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         '(total: ${_outbox.length})');
   }
 
+  /// §5.1 F3′ (fourth outbox edge): verified inbound from [senderUserHex]
+  /// while entries for that user are parked → user-scoped flush. Gated per
+  /// sender (60 s) so a still-failing flush is not re-triggered per frame;
+  /// after a successful flush the entries are gone and this is a no-op.
+  void _maybeFlushOutboxForSender(String senderUserHex) {
+    if (!_outbox.values.any((e) => e.recipientUserIdHex == senderUserHex)) {
+      return;
+    }
+    final last = _outboxInboundFlushAt[senderUserHex];
+    if (last != null &&
+        DateTime.now().difference(last) < _outboxInboundFlushGate) {
+      return;
+    }
+    _outboxInboundFlushAt[senderUserHex] = DateTime.now();
+    _log.info('Outbox: F3-edge — verified inbound from '
+        '${senderUserHex.substring(0, 8)} with parked entries → flush');
+    unawaited(_flushOutbox(onlyUserIdHex: senderUserHex));
+  }
+
   /// §5.1 One-shot outbox flush (full cascade: L1→L2→L3).
   ///
-  /// Called ONLY from onNetworkChanged — NOT from any timer.  For each parked
-  /// entry we first attempt direct delivery (L1 identity-resolve + L2
-  /// sendToDevice — the recipient may now be online), then fall back to L3
-  /// (Erasure + S&F) on L2 failure.  On success the entry is removed and the
-  /// message status is upgraded.  On continued failure (still zero peers) the
-  /// entry is retained for the next network-change edge.
-  Future<void> _flushOutbox() async {
+  /// Called ONLY from the §5.1 edges (network-change, first-peer,
+  /// contact-endpoint-confirmed, F3′ verified-inbound) — NOT from any timer.
+  /// For each parked entry we first attempt direct delivery (L1
+  /// identity-resolve + L2 sendToDevice — the recipient may now be online),
+  /// then fall back to L3 (Erasure + S&F) on L2 failure.  On success the
+  /// entry is removed and the message status is upgraded.  On continued
+  /// failure (still zero peers) the entry is retained for the next edge.
+  /// With [onlyUserIdHex] (F3′) the flush is scoped to that recipient.
+  Future<void> _flushOutbox({String? onlyUserIdHex}) async {
     if (_outbox.isEmpty) return;
-    _log.info('Outbox flush: ${_outbox.length} entries on network-change edge');
+    _log.info('Outbox flush: ${_outbox.length} entries on '
+        '${onlyUserIdHex == null ? "network-change edge" : "F3-edge for ${onlyUserIdHex.substring(0, 8)}"}');
     final toRemove = <String>[];
-    for (final entry in _outbox.values) {
+    // Snapshot: a DELIVERY_RECEIPT for a just-flushed entry mutates _outbox
+    // (_handleDeliveryReceiptV3 → remove) while this loop is suspended at an
+    // await — iterating the live map throws ConcurrentModificationError
+    // (killed the daemon in the S122 gui-11 run: receipt for entry 1 arrived
+    // before entry 2 was processed).
+    for (final entry in _outbox.values.toList()) {
+      if (onlyUserIdHex != null &&
+          entry.recipientUserIdHex != onlyUserIdHex) {
+        continue;
+      }
+      // Removed meanwhile (receipt arrived) → already delivered, skip.
+      if (!_outbox.containsKey(entry.messageIdHex)) continue;
       try {
         final recipientUserId = hexToBytes(entry.recipientUserIdHex);
         final canonicalBytes = base64Decode(entry.canonicalPacketB64);
@@ -6005,10 +6205,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientUserEd25519Pk: recipientEd25519Pk,
           recipientUserNodeId: recipientUserId,
         );
-        final safOk = _storeSafOnContactPeers(
+        final safOk = await _storeSafOnContactPeers(
           recipientUserId: recipientUserId,
           wrappedEnvelope: canonicalBytes,
-          storeId: SodiumFFI().randomBytes(16),
         );
 
         if (erasureOk || safOk) {
@@ -6030,7 +6229,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     for (final id in toRemove) {
       _outbox.remove(id);
     }
-    if (toRemove.isNotEmpty) _saveOutbox();
+    if (toRemove.isNotEmpty) {
+      _saveOutbox();
+      // F3′ gate cleanup: drop per-sender timestamps for users that no
+      // longer have parked entries (keeps the gate map bounded).
+      _outboxInboundFlushAt.removeWhere((user, _) =>
+          !_outbox.values.any((e) => e.recipientUserIdHex == user));
+    }
   }
 
   // ── §5.8 extension: pending membership update resends ────────────
@@ -6530,6 +6735,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       SystemChannels.maxChannelStorageBytes,
       oldestFirst: false,
     );
+    // §9.5.7: keep the gossip record store under the same 25 MB cap
+    // (strategies match §9.5.5: bug log oldest-first, FR fewest-net-votes).
+    var evicted = 0;
+    evicted += _sysChanStore.evictToLimit(SystemChannels.bugLogChannelIdHex);
+    evicted +=
+        _sysChanStore.evictToLimit(SystemChannels.featureReqChannelIdHex);
+    if (evicted > 0) _saveSysChanRecords();
   }
 
   void _evictChannel(String channelIdHex, int maxBytes,
@@ -6585,6 +6797,423 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     } catch (_) {}
     return 0;
+  }
+
+  // ── §9.5.7 System-Channel Records & Gossip (S119 D1/D2/D3) ─────────
+
+  /// Local record set for the ownerless system channels. Gossip-converged
+  /// (SYSCHAN_DIGEST/SUMMARY/WANT/PUSH, BOOT-path InfrastructureFrames).
+  late final SystemChannelRecordStore _sysChanStore =
+      SystemChannelRecordStore(profileDir: profileDir);
+  Timer? _sysChanSaveDebounce;
+  bool _sysChanLoaded = false;
+
+  /// §9.5.7 push budget: eager-flood TTL for freshly created/learned records.
+  static const int _sysChanPushTtl = 5;
+
+  /// k adaptive: eager pushes and anti-entropy digests go to at most this
+  /// many random peers per event.
+  static const int _sysChanFanout = 3;
+
+  /// SUMMARY cap: beyond this the newest fingerprints win; the tail
+  /// converges over subsequent hourly rounds (bounded message size).
+  static const int _sysChanSummaryCap = 4000;
+
+  /// PUSH batching: keep each SysChanPush under this many payload bytes so
+  /// the app-level UDP fragmenter (§2.4) never sees an oversized frame.
+  static const int _sysChanPushBatchBytes = 100 * 1024;
+
+  void _loadSysChanRecords() {
+    if (_sysChanLoaded) return;
+    _sysChanLoaded = true;
+    try {
+      final json = _fileEnc.readJsonFile('$profileDir/syschan_records.json');
+      if (json != null) {
+        _sysChanStore.loadFromJson(json);
+        // Re-bridge stored POSTs into the conversation (idempotent) so the
+        // UI list survives a conversations/records divergence.
+        for (final chHex in [
+          SystemChannels.bugLogChannelIdHex,
+          SystemChannels.featureReqChannelIdHex,
+        ]) {
+          for (final r in _sysChanStore.allRecords(chHex)) {
+            if (r.record.kind == SysChanKind.post) _bridgeSysChanPost(r);
+          }
+        }
+      }
+    } catch (e) {
+      _log.warn('syschan: load failed: $e');
+    }
+  }
+
+  void _saveSysChanRecords() {
+    _sysChanSaveDebounce?.cancel();
+    _sysChanSaveDebounce = Timer(const Duration(seconds: 2), () {
+      try {
+        _fileEnc.writeJsonFile(
+            '$profileDir/syschan_records.json', _sysChanStore.toJson());
+      } catch (e) {
+        _log.warn('syschan: save failed: $e');
+      }
+    });
+  }
+
+  /// Create, sign, store, UI-bridge and eager-push a system-channel record.
+  /// Returns null when the store's own admission rejected it (e.g. foreign
+  /// retract target).
+  Future<StoredSysChanRecord?> _publishSystemChannelRecord({
+    required String channelIdHex,
+    required int kind,
+    String text = '',
+    Uint8List? targetRecordId,
+    int voteOption = 0,
+  }) async {
+    if (!SystemChannels.isSystemChannel(channelIdHex)) return null;
+    final record = SystemChannelRecordStore.buildSigned(
+      channelId: Uint8List.fromList(hexToBytes(channelIdHex)),
+      kind: kind,
+      // Founding binding (§9.5.7): computeUserId(inline pk) == userId. On
+      // linked devices the delegated sub-key would break the binding —
+      // records are signed with the identity's user keys.
+      authorUserId: identity.userId,
+      ed25519Pk: identity.ed25519PublicKey,
+      ed25519Sk: identity.ed25519SecretKey,
+      mlDsaPk: identity.mlDsaPublicKey,
+      mlDsaSk: identity.mlDsaSecretKey,
+      text: text,
+      targetRecordId: targetRecordId,
+      voteOption: voteOption,
+    );
+    final bytes = record.writeToBuffer();
+    final admission = _sysChanStore.tryAdmit(bytes, parsed: record);
+    if (admission == SysChanAdmission.rejected) return null;
+    final stored = StoredSysChanRecord(
+        record: record,
+        bytes: bytes,
+        fingerprintHex: SystemChannelRecordStore.fingerprintHexOf(bytes));
+
+    switch (kind) {
+      case SysChanKind.post:
+        _bridgeSysChanPost(stored);
+      case SysChanKind.retract:
+        _applySysChanRetract(
+            channelIdHex, bytesToHex(Uint8List.fromList(record.targetRecordId)));
+    }
+    _saveSysChanRecords();
+    _sysChanEagerPush(channelIdHex, [stored], ttl: _sysChanPushTtl);
+    onStateChanged?.call();
+    return stored;
+  }
+
+  /// Materializes an admitted POST record as a conversation message so the
+  /// existing channel UI (SystemChannelPost cards, eviction, dedup scans)
+  /// keeps working. Idempotent per record id.
+  UiMessage? _bridgeSysChanPost(StoredSysChanRecord stored) {
+    final channelIdHex = bytesToHex(Uint8List.fromList(stored.record.channelId));
+    final conv = conversations[channelIdHex];
+    if (conv == null) return null;
+    final recordIdHex = bytesToHex(Uint8List.fromList(stored.record.recordId));
+    for (final m in conv.messages) {
+      if (m.id == recordIdHex) return m;
+    }
+    final authorHex = bytesToHex(Uint8List.fromList(stored.record.authorUserId));
+    final isOwn = authorHex == identity.userIdHex;
+    final msg = UiMessage(
+      id: recordIdHex,
+      conversationId: channelIdHex,
+      senderNodeIdHex: authorHex,
+      text: stored.record.text,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(
+          stored.record.timestampMs.toInt()),
+      type: UiMessageType.channelPost,
+      status: isOwn ? MessageStatus.sent : MessageStatus.delivered,
+      isOutgoing: isOwn,
+    );
+    _addMessageToConversation(channelIdHex, msg, isChannel: true);
+    return msg;
+  }
+
+  /// D2: marks the bridged conversation message of a retracted record as
+  /// deleted (tombstone effect in the UI).
+  void _applySysChanRetract(String channelIdHex, String targetRecordIdHex) {
+    final conv = conversations[channelIdHex];
+    if (conv == null) return;
+    for (final m in conv.messages) {
+      if (m.id == targetRecordIdHex && !m.isDeleted) {
+        m.text = '';
+        m.isDeleted = true;
+        _saveConversations();
+        break;
+      }
+    }
+  }
+
+  void _sysChanPushTo(Uint8List recipientDeviceId, String channelIdHex,
+      List<StoredSysChanRecord> records, {required int ttl}) {
+    if (records.isEmpty) return;
+    var batch = proto.SysChanPush()
+      ..channelId = hexToBytes(channelIdHex)
+      ..ttl = ttl;
+    var batchBytes = 0;
+    void flush() {
+      if (batch.records.isEmpty) return;
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_SYSCHAN_PUSH,
+        innerPayload: Uint8List.fromList(batch.writeToBuffer()),
+        recipientDeviceId: recipientDeviceId,
+      ));
+      batch = proto.SysChanPush()
+        ..channelId = hexToBytes(channelIdHex)
+        ..ttl = ttl;
+      batchBytes = 0;
+    }
+
+    for (final r in records) {
+      if (batchBytes + r.bytes.length > _sysChanPushBatchBytes &&
+          batch.records.isNotEmpty) {
+        flush();
+      }
+      batch.records.add(r.bytes);
+      batchBytes += r.bytes.length;
+    }
+    flush();
+  }
+
+  /// Eager new-record flood (§9.5.7 push budget): k random peers, TTL
+  /// decremented per hop, fingerprint dedup at every receiver.
+  void _sysChanEagerPush(
+      String channelIdHex, List<StoredSysChanRecord> records,
+      {required int ttl, String? excludeDeviceHex}) {
+    if (records.isEmpty || ttl <= 0) return;
+    final peers = List<PeerInfo>.from(node.routingTable.allPeers)
+      ..removeWhere((p) =>
+          p.nodeIdHex == excludeDeviceHex ||
+          p.nodeIdHex == identity.nodeIdHex)
+      ..shuffle();
+    for (final peer in peers.take(_sysChanFanout)) {
+      _sysChanPushTo(Uint8List.fromList(peer.nodeId), channelIdHex, records,
+          ttl: ttl);
+    }
+  }
+
+  /// Hourly anti-entropy digest (piggy-backed on the channel-index gossip
+  /// slot) + edge-triggered initial sync after discovery-complete.
+  void sendSysChanDigests(Iterable<PeerInfo> targets) {
+    final targetList = targets.toList();
+    if (targetList.isEmpty) return;
+    for (final chHex in [
+      SystemChannels.bugLogChannelIdHex,
+      SystemChannels.featureReqChannelIdHex,
+    ]) {
+      final digest = proto.SysChanDigest()
+        ..channelId = hexToBytes(chHex)
+        ..recordCount = _sysChanStore.recordCount(chHex)
+        ..setHash = _sysChanStore.setHash(chHex);
+      final payload = Uint8List.fromList(digest.writeToBuffer());
+      for (final peer in targetList) {
+        unawaited(node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST,
+          innerPayload: payload,
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
+        ));
+      }
+    }
+  }
+
+  /// DIGEST: peer advertises its record set. On mismatch, reply with our
+  /// fingerprint SUMMARY so the peer can WANT/PUSH the difference.
+  void handleIncomingSysChanDigestInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final digest = proto.SysChanDigest.fromBuffer(frame.payload);
+      final chHex = bytesToHex(Uint8List.fromList(digest.channelId));
+      if (!SystemChannels.isSystemChannel(chHex)) return;
+      final localHash = bytesToHex(_sysChanStore.setHash(chHex));
+      final remoteHash =
+          bytesToHex(Uint8List.fromList(digest.setHash));
+      if (localHash == remoteHash) return; // converged
+      final summary = proto.SysChanSummary()..channelId = digest.channelId;
+      final fps = _sysChanStore.storedFingerprints(chHex);
+      for (final fp in fps.take(_sysChanSummaryCap)) {
+        summary.fingerprints.add(hexToBytes(fp));
+      }
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY,
+        innerPayload: Uint8List.fromList(summary.writeToBuffer()),
+        recipientDeviceId: senderDeviceId,
+      ));
+    } catch (e) {
+      _log.debug('syschan: digest handling failed: $e');
+    }
+  }
+
+  /// SUMMARY: peer's fingerprint set. WANT what we lack, PUSH what it
+  /// lacks (ttl 0 — anti-entropy transfers do not re-flood).
+  void handleIncomingSysChanSummaryInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final summary = proto.SysChanSummary.fromBuffer(frame.payload);
+      final chHex = bytesToHex(Uint8List.fromList(summary.channelId));
+      if (!SystemChannels.isSystemChannel(chHex)) return;
+      final theirs = summary.fingerprints
+          .map((f) => Uint8List.fromList(f))
+          .toList();
+
+      final missing = _sysChanStore.missingFingerprints(chHex, theirs);
+      if (missing.isNotEmpty) {
+        final want = proto.SysChanWant()..channelId = summary.channelId;
+        want.fingerprints.addAll(missing);
+        unawaited(node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_SYSCHAN_WANT,
+          innerPayload: Uint8List.fromList(want.writeToBuffer()),
+          recipientDeviceId: senderDeviceId,
+        ));
+      }
+
+      final extra = _sysChanStore.extraRecords(chHex, theirs);
+      if (extra.isNotEmpty) {
+        _sysChanPushTo(senderDeviceId, chHex, extra, ttl: 0);
+      }
+    } catch (e) {
+      _log.debug('syschan: summary handling failed: $e');
+    }
+  }
+
+  void handleIncomingSysChanWantInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final want = proto.SysChanWant.fromBuffer(frame.payload);
+      final chHex = bytesToHex(Uint8List.fromList(want.channelId));
+      if (!SystemChannels.isSystemChannel(chHex)) return;
+      final records = _sysChanStore.recordsForFingerprints(
+          chHex, want.fingerprints.map((f) => Uint8List.fromList(f)).toList());
+      if (records.isNotEmpty) {
+        _sysChanPushTo(senderDeviceId, chHex, records, ttl: 0);
+      }
+    } catch (e) {
+      _log.debug('syschan: want handling failed: $e');
+    }
+  }
+
+  /// PUSH: admit each record (§8.2 context-proof happens inside tryAdmit:
+  /// hybrid self-signature + founding binding + known channel_id), bridge
+  /// UI effects, forward fresh records while TTL remains.
+  void handleIncomingSysChanPushInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final push = proto.SysChanPush.fromBuffer(frame.payload);
+      final chHex = bytesToHex(Uint8List.fromList(push.channelId));
+      if (!SystemChannels.isSystemChannel(chHex)) return;
+
+      final fresh = <StoredSysChanRecord>[];
+      var votesChanged = false;
+      for (final blob in push.records.take(500)) {
+        final bytes = Uint8List.fromList(blob);
+        if (bytes.length > SystemChannels.maxManualPostBytes) continue;
+        proto.SystemChannelRecord record;
+        try {
+          record = proto.SystemChannelRecord.fromBuffer(bytes);
+        } catch (_) {
+          continue;
+        }
+        final admission = _sysChanStore.tryAdmit(bytes, parsed: record);
+        if (admission == SysChanAdmission.duplicate ||
+            admission == SysChanAdmission.rejected) {
+          continue;
+        }
+        final stored = StoredSysChanRecord(
+            record: record,
+            bytes: bytes,
+            fingerprintHex: SystemChannelRecordStore.fingerprintHexOf(bytes));
+        fresh.add(stored);
+        switch (admission) {
+          case SysChanAdmission.postAdmitted:
+            _bridgeSysChanPost(stored);
+          case SysChanAdmission.retractAdmitted:
+            _applySysChanRetract(chHex,
+                bytesToHex(Uint8List.fromList(record.targetRecordId)));
+          case SysChanAdmission.voteAdmitted:
+            votesChanged = true;
+          default:
+            break;
+        }
+      }
+
+      if (fresh.isEmpty) return;
+      _sysChanStore.evictToLimit(chHex);
+      _saveSysChanRecords();
+      if (votesChanged) onStateChanged?.call();
+      final ttl = push.ttl;
+      if (ttl > 1) {
+        _sysChanEagerPush(chHex, fresh,
+            ttl: ttl - 1, excludeDeviceHex: bytesToHex(senderDeviceId));
+      }
+    } catch (e) {
+      _log.debug('syschan: push handling failed: $e');
+    }
+  }
+
+  /// D3 (§9.5.3): programmatic Feature-Request submission. Posts a
+  /// SystemChannelRecord with an embedded auto-poll (the FR JSON) and the
+  /// submitter's implicit "Ja" vote (Auto-Ja embedded).
+  @override
+  Future<UiMessage?> submitFeatureRequest(String title, String body) async {
+    if (_reducedMode) {
+      _log.warn('submitFeatureRequest blocked: reducedMode active');
+      return null;
+    }
+    if (title.trim().isEmpty) return null;
+    final text = jsonEncode({
+      'type': 'feature_request',
+      'title': title.trim(),
+      'body': body.trim(),
+    });
+    final stored = await _publishSystemChannelRecord(
+      channelIdHex: SystemChannels.featureReqChannelIdHex,
+      kind: SysChanKind.post,
+      text: text,
+    );
+    if (stored == null) return null;
+    final recordIdHex = bytesToHex(Uint8List.fromList(stored.record.recordId));
+    // Auto-Ja embedded: the submitter implicitly supports their request.
+    await voteFeatureRequest(recordIdHex, SysChanVote.ja);
+    final conv = conversations[SystemChannels.featureReqChannelIdHex];
+    for (final m in conv?.messages ?? const <UiMessage>[]) {
+      if (m.id == recordIdHex) return m;
+    }
+    return null;
+  }
+
+  /// D3 (§9.5.3): open vote record on a Feature-Request post. LWW per
+  /// author — voting again changes the vote.
+  @override
+  Future<bool> voteFeatureRequest(String recordIdHex, int option) async {
+    if (_reducedMode) return false;
+    if (option < SysChanVote.ja || option > SysChanVote.egal) return false;
+    final stored = await _publishSystemChannelRecord(
+      channelIdHex: SystemChannels.featureReqChannelIdHex,
+      kind: SysChanKind.vote,
+      targetRecordId: Uint8List.fromList(hexToBytes(recordIdHex)),
+      voteOption: option,
+    );
+    return stored != null;
+  }
+
+  /// D3 (§9.5.3): local tally over the open vote records. Keys: `ja`,
+  /// `nein`, `egal`, `net`, `own` (-1 when the caller has not voted).
+  @override
+  Future<Map<String, int>> featureRequestTally(String recordIdHex) async {
+    final chHex = SystemChannels.featureReqChannelIdHex;
+    final tally = _sysChanStore.tallyFor(chHex, recordIdHex);
+    final own =
+        _sysChanStore.ownVote(chHex, recordIdHex, identity.userIdHex) ?? -1;
+    return {
+      'ja': tally.ja,
+      'nein': tally.nein,
+      'egal': tally.egal,
+      'net': tally.net,
+      'own': own,
+    };
   }
 
   // ── Migration: deviceNodeId → userIdHex (V3.1.44) ─────────────────
@@ -7001,10 +7630,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   List<PeerSummary> get peerSummaries {
+    // S119 B: reachable = confirmed ∪ alive DV route (NOT allDestinations —
+    // that set contains dead routes and inflated the list, Problem 2).
     final confirmed = node.confirmedPeerIds;
-    final dvReachable = node.dvRouting.allDestinations;
+    final reachable = node.reachablePeerIds;
     return node.routingTable.allPeers
-        .where((p) => confirmed.contains(p.nodeIdHex) || dvReachable.contains(p.nodeIdHex))
+        .where((p) => reachable.contains(p.nodeIdHex))
         .where((p) => p.publicIp.isNotEmpty || p.localIp.isNotEmpty || p.addresses.isNotEmpty)
         .map((p) {
       // Collect addresses: local + public IPv4 + IPv6 global (§27)
@@ -7049,6 +7680,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         lastSeen: p.lastSeen,
         allAddresses: addrs,
         stabilityTierIndex: p.stabilityTier.index,
+        // S119 B: direct = confirmed bidirectional UDP; otherwise the peer
+        // is only reachable via an alive relay route (amber in the sheet).
+        isDirect: confirmed.contains(p.nodeIdHex),
       );
     }).toList();
   }
@@ -7128,6 +7762,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       rttMap: node.dhtRpc.rttMap,
       isRunning: isRunning,
       profileDir: profileDir,
+      // S119 B (Problem 2): "Aktive Peers" counter must equal the
+      // connection-sheet list — both come from peerSummaries now.
+      reachablePeerCount: peerSummaries.length,
       // D5 (§13.1.3): collective-quota observability.
       poolDropsRate: node.rateLimiter.poolDroppedPackets,
       poolDropsRelay: node.relayPoolDrops,
@@ -9212,6 +9849,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _polls.dispose();
     _systemChannelEvictionTimer?.cancel();
     _systemChannelEvictionTimer = null;
+    _sysChanSaveDebounce?.cancel();
+    _sysChanSaveDebounce = null;
     _updateCheckTimer?.cancel();
     _updateCheckTimer = null;
     _delegationRenewalTimer?.cancel();
@@ -9538,10 +10177,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
-      final safOk = _storeSafOnContactPeers(
+      final safOk = await _storeSafOnContactPeers(
         recipientUserId: recipientUserId,
         wrappedEnvelope: canonicalBytes,
-        storeId: SodiumFFI().randomBytes(16),
       );
       // §5.8: report L3 placement outcome to caller via optional output param.
       final l3Placed = erasureOk || safOk;
@@ -9706,11 +10344,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
-      _storeSafOnContactPeers(
+      unawaited(_storeSafOnContactPeers(
         recipientUserId: recipientUserId,
         wrappedEnvelope: canonicalBytes,
-        storeId: SodiumFFI().randomBytes(16),
-      );
+      ));
     }
 
     return dispatched > 0;
@@ -10048,10 +10685,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // §5.5 receiver-side validation: only store for recipients that are
       // our accepted contacts.  This enforces "contact peer" at the storage
       // node rather than relying on sender-side heuristics.
+      // S121 F4(a): infrastructure nodes (headless/bootstrap) accept stores
+      // for ANY recipient within the existing budgets (30/recipient,
+      // sender rate limit) — they have no contacts by design, and they are
+      // the peers every device confirms and polls at coming-online. This
+      // makes the §5.5 Phase-2 fallback actually deliverable (pre-F4 a
+      // spec-compliant bootstrap rejected every Phase-2 store) and mirrors
+      // the §5.5b First-CR-Mailbox precedent.
       final recipientHex = bytesToHex(recipientUserId);
       final isOurContact = _contacts.values.any((c) =>
           bytesToHex(c.nodeId) == recipientHex && c.status == 'accepted');
-      if (!isOurContact) {
+      if (!isOurContact && !acceptAnyPeerStore) {
         final ack = proto.PeerStoreAck()
           ..storeId = store.storeId
           ..accepted = false;
@@ -10201,6 +10845,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     int sourcePort,
     SenderIdentitySnapshot snapshot,
   ) async {
+    // Live-media receive fast path (Architecture §10.3 / Appendix B.2,
+    // F-C amendment): CALL_AUDIO/VIDEO/GROUP_AUDIO/GROUP_VIDEO frames sent
+    // by a device this identity already trusts as an active call's peer
+    // (or a group-call participant) carry a PLAIN inner — no per-recipient
+    // KEM, no user-sig — because the payload is already AES-GCM-
+    // authenticated under the call/send key. Try that cheap path first;
+    // ANY parse/validation failure falls through silently to the normal
+    // KEM-decap path below (rolling-upgrade compat: older builds still
+    // send KEM-wrapped live-media frames, and this identity may simply
+    // not be the one hosting the call).
+    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+    if (_calls.isLiveMediaSender(senderDeviceId)) {
+      final fastOutcome = await _tryLiveMediaFastPath(
+        packet: packet,
+        senderDeviceId: senderDeviceId,
+        sourceAddr: sourceAddr,
+        sourcePort: sourcePort,
+        snapshot: snapshot,
+      );
+      if (fastOutcome != null) return fastOutcome;
+    }
+
     final result = V3FrameCodec.decryptAndVerifyInner(
       innerPayload: Uint8List.fromList(packet.payload),
       ourUserX25519Sk: identity.x25519SecretKey,
@@ -10272,7 +10938,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return AppFrameDispatchOutcome.droppedAfterDecap;
     }
 
-    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
     await handleApplicationFrame(
       frame: frame,
       senderDeviceId: senderDeviceId,
@@ -10280,6 +10945,51 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       sourcePort: sourcePort,
       snapshot: snapshot.withSenderUserId(
           Uint8List.fromList(frame.senderUserId)),
+    );
+    return AppFrameDispatchOutcome.delivered;
+  }
+
+  /// Live-media fast-path admission check (Architecture §10.3 / Appendix
+  /// B.2, F-C amendment). Called from [handleIncomingApplicationPacket]
+  /// only after [CallService.isLiveMediaSender] has cheaply confirmed
+  /// `senderDeviceId` belongs to an active call's peer / participant.
+  ///
+  /// Tries to parse [packet]'s payload directly as a PLAIN
+  /// [proto.ApplicationFrameV3] (no KEM, no zstd — the live-media sender
+  /// side skips both, see [CallService.sendLiveMediaFrame]). Returns the
+  /// dispatch outcome on acceptance, or `null` on ANY validation failure
+  /// so the caller falls through to the normal KEM-decap path unchanged
+  /// (rolling-upgrade compatibility with builds that still send
+  /// KEM-wrapped live-media frames).
+  Future<AppFrameDispatchOutcome?> _tryLiveMediaFastPath({
+    required proto.NetworkPacketV3 packet,
+    required Uint8List senderDeviceId,
+    required InternetAddress sourceAddr,
+    required int sourcePort,
+    required SenderIdentitySnapshot snapshot,
+  }) async {
+    final proto.ApplicationFrameV3 frame;
+    try {
+      frame = proto.ApplicationFrameV3.fromBuffer(packet.payload);
+    } catch (_) {
+      return null;
+    }
+
+    if (!_liveMediaFastPathTypes.contains(frame.messageType)) return null;
+
+    final recipient = Uint8List.fromList(frame.recipientUserId);
+    if (!_constantTimeEq(recipient, identity.userId)) return null;
+
+    final senderUserId = Uint8List.fromList(frame.senderUserId);
+    if (!_calls.isKnownCallPeerUserId(senderUserId)) return null;
+
+    _calls.logLiveMediaFastPathOnce(senderDeviceId);
+    await handleApplicationFrame(
+      frame: frame,
+      senderDeviceId: senderDeviceId,
+      sourceAddr: sourceAddr,
+      sourcePort: sourcePort,
+      snapshot: snapshot.withSenderUserId(senderUserId),
     );
     return AppFrameDispatchOutcome.delivered;
   }
@@ -10330,6 +11040,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _saveContacts();
       }
     }
+
+    // §5.1 F3′ (fourth outbox edge): this frame is fully verified, so the
+    // sender is provably back online. If we hold parked outbox entries FOR
+    // this user, flush them user-scoped now — the recipient reappearing is
+    // the one case the sender-side edges (network-change, first-peer,
+    // endpoint-confirmed) cannot see.
+    _maybeFlushOutboxForSender(senderUserHex);
 
     switch (frame.messageType) {
       // Messaging — Cluster C2

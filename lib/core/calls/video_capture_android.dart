@@ -1,13 +1,20 @@
-/// Android camera capture via CameraX Platform Channel.
+/// Camera capture via the shared `chat.cleona/camera` Platform Channel.
 ///
-/// Uses the native CameraX API (Kotlin) to capture YUV frames,
-/// converts them to I420, and delivers them to the VideoEngine.
-/// Communicates with CameraXHandler.kt via MethodChannel.
+/// Despite the class name, this wrapper is platform-neutral: it only
+/// speaks the MethodChannel contract (isAvailable/requestPermission/
+/// startCapture/stopCapture/switchCamera + the "onFrame" callback with
+/// I420 bytes + width/height), not any Android-specific API. On Android
+/// the channel is served by CameraXHandler.kt (CameraX); on iOS it is
+/// served by CameraHandler.swift (AVFoundation) — both native handlers
+/// implement byte-for-byte the same channel name, methods, and frame
+/// payload shape, so this one class works unmodified on either platform.
+/// See [VideoCaptureIOS] below for an iOS-flavored alias.
 library;
 
 import 'package:flutter/services.dart';
 
-/// Android camera capture controller.
+/// Camera capture controller (Android: CameraX, iOS: AVFoundation — see
+/// library doc comment above for why one class covers both platforms).
 ///
 /// Usage:
 /// ```dart
@@ -108,3 +115,14 @@ class VideoCaptureAndroid {
     _channel.setMethodCallHandler(null);
   }
 }
+
+/// iOS-flavored alias for [VideoCaptureAndroid].
+///
+/// Deliberately a `typedef`, not a copy: both platforms share the same
+/// `chat.cleona/camera` MethodChannel contract (see CameraXHandler.kt on
+/// Android and CameraHandler.swift on iOS), so duplicating the class would
+/// just be two implementations to keep in sync for zero behavioral
+/// difference. Call sites that want the platform-appropriate name (e.g.
+/// an `if (Platform.isIOS) VideoCaptureIOS() else VideoCaptureAndroid()`
+/// factory) can use this without depending on the Android-specific name.
+typedef VideoCaptureIOS = VideoCaptureAndroid;

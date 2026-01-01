@@ -118,6 +118,12 @@ void main(List<String> args) {
       displayName: config.name,
     );
 
+    // §5.5 F4(a) (S121): headless/bootstrap nodes are infrastructure —
+    // they accept S&F stores for any recipient within budgets, so the
+    // §5.5 Phase-2 fallback (store on well-connected peers) is actually
+    // deliverable. User-facing daemons/devices stay contact-only.
+    service.acceptAnyPeerStore = true;
+
     service.onNewMessage = (convId, msg) {
       log.info('MSG [${msg.senderNodeIdHex.substring(0, 8)}]: ${msg.text}');
     };
@@ -190,7 +196,12 @@ void main(List<String> args) {
           mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
           // §8.1.1 rev3: Deferred Key Exchange (step 1b)
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
+          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER ||
+          // §9.5.7 (S119 D1): system-channel record gossip
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_WANT ||
+          mt == proto.MessageTypeV3.MTV3_SYSCHAN_PUSH;
       if (!isServiceRouted) return;
       final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
       final identities = node.identitiesForDevice(deviceIdBytes).toList();
@@ -246,6 +257,10 @@ void main(List<String> args) {
                 frame, senderDeviceId, from, port, snapshot);
             break;
           case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
+            // carries accepted=false when the storage peer rejected the
+            // store (recipient not its contact, budget, rate limit).
+            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId);
             break;
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
             service.handleIncomingPeerRetrieveInfra(
@@ -261,6 +276,18 @@ void main(List<String> args) {
             break;
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
             service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
+            service.handleIncomingSysChanDigestInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
+            service.handleIncomingSysChanSummaryInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
+            service.handleIncomingSysChanWantInfra(frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
+            service.handleIncomingSysChanPushInfra(frame, senderDeviceId);
             break;
           default:
             break;

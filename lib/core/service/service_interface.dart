@@ -104,6 +104,19 @@ abstract class ICleonaService {
     String? pictureBase64,
   });
   Future<UiMessage?> sendChannelPost(String channelIdHex, String text);
+
+  /// §9.5.3 D3 (S119): Feature-Request submission — SystemChannelRecord
+  /// with embedded auto-poll + implicit "Ja" vote of the submitter.
+  Future<UiMessage?> submitFeatureRequest(String title, String body);
+
+  /// §9.5.3 D3: open vote record on an FR post (0=Ja, 1=Nein, 2=Egal).
+  /// LWW per author — voting again changes the vote.
+  Future<bool> voteFeatureRequest(String recordIdHex, int option);
+
+  /// §9.5.3 D3: local tally over the open vote records. Keys: `ja`,
+  /// `nein`, `egal`, `net`, `own` (-1 when the caller has not voted).
+  Future<Map<String, int>> featureRequestTally(String recordIdHex);
+
   Future<bool> leaveChannel(String channelIdHex);
   Future<bool> inviteToChannel(String channelIdHex, String memberNodeIdHex);
   Future<bool> removeFromChannel(String channelIdHex, String memberNodeIdHex);
@@ -219,6 +232,13 @@ abstract class ICleonaService {
   void toggleMute();
   bool get isSpeakerEnabled;
   void toggleSpeaker();
+
+  // 1:1 video call actions (§ F-B). Pause/resume is functional wherever a
+  // video engine is running (including Linux's gray-frame isolate capture);
+  // switchCamera is Android-only today and returns false elsewhere.
+  bool get isVideoMuted;
+  void toggleVideoMute();
+  Future<bool> switchCamera();
 
   // Recovery
   void Function(int phase, int contactsRestored, int messagesRestored)? onRestoreProgress;

@@ -95,22 +95,27 @@ class VoiceTranscriptionService {
 
   // -- Lifecycle -----------------------------------------------------------
 
-  /// Start service: load model, start cleanup timer.
+  /// Start service: probe whisper availability, start cleanup timer.
+  ///
+  /// The model itself is NEVER loaded in the main isolate: transcription
+  /// runs in a per-job worker isolate (_transcribeFile) that loads and
+  /// frees its own context. A resident main-isolate context would pin the
+  /// full model (~144 MB for ggml-base) plus untouched compute buffers in
+  /// memory for the process lifetime without ever transcribing.
   Future<void> start() async {
     if (_running) return;
     _running = true;
 
     await _loadTranscriptions();
 
-    // Load Whisper model (if available).
+    // Probe whisper.cpp library + model file presence (no model load).
     try {
       _whisper = WhisperFFI();
       _log.info('whisper.cpp library loaded successfully');
       final modelFile = WhisperFFI.modelPath(config.modelSize);
       if (File(modelFile).existsSync()) {
-        _whisper!.loadModel(modelFile);
         _modelLoaded = true;
-        _log.info('Whisper model loaded: $modelFile');
+        _log.info('Whisper model available: $modelFile');
       } else {
         _log.info('Whisper model not found: $modelFile (download via Settings)');
       }
@@ -141,7 +146,8 @@ class VoiceTranscriptionService {
     await _saveTranscriptions();
   }
 
-  /// Whether the Whisper model is loaded.
+  /// Whether the Whisper model file is available for transcription
+  /// (library loadable + model file present; loaded per-job in a worker).
   bool get isModelLoaded => _modelLoaded;
 
   /// Whether the service is running.
@@ -445,15 +451,11 @@ class VoiceTranscriptionService {
       onDownloadStatusChanged?.call(_downloadStatus);
       onDownloadProgress?.call(1.0);
 
-      // Try to load the freshly downloaded model
+      // Mark the freshly downloaded model as available (loaded per-job in
+      // the worker isolate, never resident in the main isolate).
       if (_whisper != null && !_modelLoaded) {
-        try {
-          _whisper!.loadModel(targetPath);
-          _modelLoaded = true;
-          _log.info('Whisper model loaded successfully: $targetPath');
-        } catch (e) {
-          _log.warn('Whisper model load failed after download: $e');
-        }
+        _modelLoaded = true;
+        _log.info('Whisper model available: $targetPath');
       }
 
       return true;

@@ -185,6 +185,9 @@ class InfraRendezvousManager {
     _disposed = true;
     _refreshTimer?.cancel();
     _debounceTimer?.cancel();
+    for (final provider in _providers) {
+      if (provider is NostrProvider) provider.dispose();
+    }
   }
 }
 

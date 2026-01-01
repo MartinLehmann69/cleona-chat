@@ -162,7 +162,7 @@ jobs:
           ls -lh ios/CleonaNative/libcleona_all_device.a
           ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
           echo "=== Key FFI symbols in archive ==="
-          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create' | head -10
+          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create|cleona_vpx_encoder_create' | head -10
           echo "=== Pods xcconfig check ==="
           grep -r "EXPORTED_SYMBOLS_FILE\|exported_symbols\|DEAD_CODE" ios/Pods/Target\ Support\ Files/Pods-Runner/ 2>/dev/null | head -5
           echo "=== Runner pbxproj EXPORTED_SYMBOLS ==="
@@ -241,7 +241,7 @@ jobs:
           if [ -n "$RUNNER" ]; then
             echo "Binary: $RUNNER ($(ls -lh "$RUNNER" | awk '{print $5}'))"
             echo "=== Exported symbols (nm -gU): FFI entry points ==="
-            nm -gU "$RUNNER" 2>/dev/null | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create' | head -10
+            nm -gU "$RUNNER" 2>/dev/null | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create|cleona_vpx_encoder_create' | head -10
             echo "=== Total exported symbol count ==="
             nm -gU "$RUNNER" 2>/dev/null | wc -l
             echo "=== STRIP_STYLE in build settings ==="
@@ -380,6 +380,14 @@ jobs:
           for f in build/macos-libs/arm64/*.dylib; do
             cp "$f" "$FRAMEWORKS/"
           done
+
+          # Deploy gate: call audio needs the miniaudio/speexdsp shim in the
+          # bundle (audio_engine_shim.dart loads it from Contents/Frameworks).
+          # Fail the build instead of shipping a silently audio-less app.
+          if [ ! -f "$FRAMEWORKS/cleona_audio.dylib" ]; then
+            echo "::error::cleona_audio.dylib missing from Contents/Frameworks — calls would have no audio"
+            exit 1
+          fi
 
           cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
           chmod +x "$MACOS_BIN/cleona-daemon"

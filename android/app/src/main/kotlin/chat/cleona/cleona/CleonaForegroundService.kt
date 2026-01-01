@@ -12,7 +12,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.Process
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -81,35 +80,61 @@ class CleonaForegroundService : Service() {
         }
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        instance = this
-        createNotificationChannel()
-        watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_GRACE_MS)
-        // Boot as SPECIAL_USE (no time limit, API 34+) or DATA_SYNC (pre-34).
-        // _promoteForCall() upgrades to MICROPHONE on demand.
-        // try/catch: defence-in-depth against ForegroundServiceStartNotAllowedException
-        // crash loops (Android can reject startForeground for exhausted quotas).
+    // §16.2 lifecycle invariants (V3.1.117): the foreground-service type the
+    // service should currently run under. _promoteForCall/_demoteAfterCall
+    // toggle the MICROPHONE bit; onStartCommand re-issues startForeground
+    // with this field so a promotion survives an OS restart of the service.
+    @Volatile
+    private var desiredType: Int = 0
+
+    // True while the watchdog has replaced the notification with the
+    // degraded "pausiert" text; cleared when a fresh heartbeat is seen.
+    private var pausedNotificationShown = false
+
+    private fun baseServiceType(): Int = when {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        else -> 0
+    }
+
+    // Idempotent startForeground with the current desiredType. Never lets a
+    // failure terminate the service: a rejected typed call falls back to the
+    // untyped 2-arg form; a total failure is logged and the service keeps
+    // running (the OS decides its fate — a service must not kill itself from
+    // inside its own lifecycle, that recreates the restart loop).
+    private fun startForegroundWithDesiredType() {
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && desiredType != 0) {
+                startForeground(NOTIFICATION_ID, createNotification(), desiredType)
             } else {
                 startForeground(NOTIFICATION_ID, createNotification())
             }
         } catch (e: Exception) {
-            Log.e(TAG, "startForeground failed: ${e.message} — falling back to untyped")
-            try { startForeground(NOTIFICATION_ID, createNotification()) } catch (_: Exception) {}
+            Log.e(TAG, "startForeground(type=$desiredType) failed: ${e.message} — falling back to untyped")
+            try {
+                startForeground(NOTIFICATION_ID, createNotification())
+            } catch (e2: Exception) {
+                Log.e(TAG, "untyped startForeground failed: ${e2.message} — continuing without promotion")
+            }
         }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+        createNotificationChannel()
+        // Fresh service start: a stale heartbeat file from a crashed previous
+        // instance must not feed the watchdog before Dart stamps again.
+        try {
+            File(applicationContext.filesDir, ".cleona/.dart-heartbeat").delete()
+        } catch (_: Exception) {}
+        watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_GRACE_MS)
+        // Boot as SPECIAL_USE (no time limit, API 34+) or DATA_SYNC (pre-34).
+        // _promoteForCall() upgrades to MICROPHONE on demand.
+        desiredType = baseServiceType()
+        startForegroundWithDesiredType()
     }
 
     override fun onDestroy() {
@@ -119,6 +144,11 @@ class CleonaForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // §16.2: re-issue startForeground on every entry — no "already
+        // running" short-circuit. After an OS kill + START_STICKY restart
+        // this is the path that restores the foreground promotion.
+        if (desiredType == 0) desiredType = baseServiceType()
+        startForegroundWithDesiredType()
         return START_STICKY
     }
 
@@ -130,45 +160,22 @@ class CleonaForegroundService : Service() {
     // honored — but minSdk in app/build.gradle.kts is high enough that
     // this branch is informational.
     private fun _promoteForCall() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                           ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                startForeground(NOTIFICATION_ID, createNotification(), type)
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                           ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                startForeground(NOTIFICATION_ID, createNotification(), type)
-            } else {
-                startForeground(NOTIFICATION_ID, createNotification())
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "promoteForCall failed: ${e.message}")
-        }
+        desiredType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            baseServiceType() or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else 0
+        startForegroundWithDesiredType()
     }
 
     private fun _demoteAfterCall() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    createNotification(),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, createNotification())
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "demoteAfterCall failed: ${e.message}")
-        }
+        desiredType = baseServiceType()
+        startForegroundWithDesiredType()
     }
 
+    // §16.2: the watchdog never kills the process — a service killing itself
+    // from inside its own lifecycle recreates the OS-restart loop (Problem 10).
+    // A stale Dart heartbeat degrades the notification to "pausiert" so the
+    // user sees delivery has stopped; a fresh heartbeat restores it (Dart
+    // overwrites with live status via updateServiceNotification anyway).
     private fun checkDartHeartbeat() {
         try {
             val heartbeatFile = File(applicationContext.filesDir, ".cleona/.dart-heartbeat")
@@ -176,8 +183,22 @@ class CleonaForegroundService : Service() {
             val epochMs = heartbeatFile.readText().trim().toLongOrNull() ?: return
             val staleMs = System.currentTimeMillis() - epochMs
             if (staleMs > HEARTBEAT_STALE_MS) {
-                Log.e(TAG, "Dart heartbeat stale by ${staleMs / 1000}s — killing process for START_STICKY restart")
-                Process.killProcess(Process.myPid())
+                if (!pausedNotificationShown) {
+                    Log.e(TAG, "Dart heartbeat stale by ${staleMs / 1000}s — showing paused notification")
+                    pausedNotificationShown = true
+                    updateNotification(
+                        applicationContext,
+                        "Cleona Chat",
+                        "Pausiert — App öffnen, um fortzusetzen"
+                    )
+                }
+            } else if (pausedNotificationShown) {
+                // Recovered: restore the base notification. Dart's dedup
+                // (_lastNotificationText) may suppress its next update, so
+                // Kotlin must undo its own degradation.
+                pausedNotificationShown = false
+                val manager = getSystemService(NotificationManager::class.java)
+                manager.notify(NOTIFICATION_ID, createNotification())
             }
         } catch (e: Exception) {
             Log.w(TAG, "Heartbeat check failed: ${e.message}")

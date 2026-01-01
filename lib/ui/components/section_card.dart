@@ -109,13 +109,23 @@ class SectionRow {
             trailing!
           else if (value != null)
             Flexible(
-              child: Text(
-                value!,
-                style: tokens.typography.mono.copyWith(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-                ),
-                textAlign: TextAlign.end,
-              ),
+              // Problem 1 (S119): values on rows without onTap must be
+              // natively selectable (long-press) — IPs, IDs, versions.
+              child: onTap == null
+                  ? SelectableText(
+                      value!,
+                      style: tokens.typography.mono.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                      textAlign: TextAlign.end,
+                    )
+                  : Text(
+                      value!,
+                      style: tokens.typography.mono.copyWith(
+                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                      ),
+                      textAlign: TextAlign.end,
+                    ),
             ),
         ],
       ),

@@ -83,6 +83,17 @@ _whisper_full_default_params*
 # libcleona_audio
 _cleona_audio_*
 
+# libvpx — the shim (native/vpx_shim.c) is statically linked against
+# libvpx.a on iOS and resolves the codec entry points itself at runtime via
+# dlsym(RTLD_DEFAULT, ...) (there is no libvpx.so to dlopen() there — see
+# load_vpx()'s TARGET_OS_IPHONE branch). These symbols are never referenced
+# from Dart directly (scripts/check_ios_exports.sh only scans lib/**/*.dart
+# for lookupFunction/.lookup< call sites, so it will not flag these as
+# missing) — without this entry they would be localized by
+# EXPORTED_SYMBOLS_FILE and invisible to the shim's own dlsym() call.
+_vpx_codec_*
+_vpx_img_*
+
 # libvpx shim
 _cleona_vpx_*
 

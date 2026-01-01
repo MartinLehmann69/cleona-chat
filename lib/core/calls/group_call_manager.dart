@@ -228,6 +228,7 @@ class GroupCallManager {
     participant.state = ParticipantState.left;
     onParticipantChanged?.call(nodeIdHex, ParticipantState.left);
     _participantRouteCache.remove(nodeIdHex);
+    _unregisterLiveMediaDevice(session, nodeIdHex);
     _log.info('Participant left: ${nodeIdHex.substring(0, 8)}');
 
     // Rebuild tree (member left) — initiator only.
@@ -270,12 +271,13 @@ class GroupCallManager {
     // Send to tree children via MediaRelay (which calls _onSendUnicast /
     // _onSendMulticast — both end up at sendToDevice for live media).
     if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(payload));
+      session.relay!.forwardFrame(Uint8List.fromList(payload),
+          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO);
     } else {
       // Fallback: direct send to all joined participants
       for (final pId in session.joinedParticipantIds) {
         if (pId == identity.userIdHex) continue;
-        _sendLiveMediaToParticipant(
+        _sendGroupLiveMediaFrame(
           pId,
           proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
           payload,
@@ -303,11 +305,12 @@ class GroupCallManager {
 
     // Send to tree children via MediaRelay
     if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(payload));
+      session.relay!.forwardFrame(Uint8List.fromList(payload),
+          proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO);
     } else {
       for (final pId in session.joinedParticipantIds) {
         if (pId == identity.userIdHex) continue;
-        _sendLiveMediaToParticipant(
+        _sendGroupLiveMediaFrame(
           pId,
           proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO,
           payload,
@@ -355,6 +358,8 @@ class GroupCallManager {
     _treeRebuildDebounce?.cancel();
     _treeRebuildDebounce = null;
     _currentGroupCall?.relay?.clear();
+    final session = _currentGroupCall;
+    if (session != null) _unregisterAllLiveMediaDevices(session);
     _currentGroupCall = null;
     _participantRouteCache.clear();
   }
@@ -395,23 +400,15 @@ class GroupCallManager {
       tree: session.tree,
       ownNodeIdHex: identity.userIdHex,
     );
-    session.relay!.onSendUnicast = (targetHex, frame) {
-      _sendLiveMediaToParticipant(
-        targetHex,
-        proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
-        frame,
-      );
+    session.relay!.onSendUnicast = (targetHex, frame, type) {
+      _sendGroupLiveMediaFrame(targetHex, type, frame);
     };
-    session.relay!.onSendMulticast = (frame) {
+    session.relay!.onSendMulticast = (frame, type) {
       // LAN multicast — not implemented in this MVP, use unicast fallback.
       // Each child gets a sendToDevice via the per-call cached route.
       final children = session.tree.childrenOf(identity.userIdHex);
       for (final child in children) {
-        _sendLiveMediaToParticipant(
-          child,
-          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
-          frame,
-        );
+        _sendGroupLiveMediaFrame(child, type, frame);
       }
     };
     session.relay!.onChildCrashed = (crashedHex) {
@@ -665,6 +662,7 @@ class GroupCallManager {
     participant.state = ParticipantState.joined;
     participant.joinedAt = DateTime.now();
     onParticipantChanged?.call(senderHex, ParticipantState.joined);
+    _registerLiveMediaDevice(session, senderHex, senderDeviceId);
 
     _log.info('Participant joined V3: ${senderHex.substring(0, 8)} '
         '(device=${bytesToHex(senderDeviceId).substring(0, 8)})');
@@ -782,6 +780,7 @@ class GroupCallManager {
     participant.state = ParticipantState.joined;
     participant.joinedAt = DateTime.now();
     onParticipantChanged?.call(senderHex, ParticipantState.joined);
+    _registerLiveMediaDevice(session, senderHex, senderDeviceId);
     _log.info('Participant rejoined V3: ${senderHex.substring(0, 8)} '
         '(device=${bytesToHex(senderDeviceId).substring(0, 8)}, no global rotation)');
 
@@ -947,6 +946,15 @@ class GroupCallManager {
     if (!session.participants.containsKey(authedHex)) return;
     if (ann.sendKey.length != 32) return;
 
+    // §13.1.2 exemption #4: the sender-key mesh handshake is how a
+    // participant learns another participant's concrete device id when
+    // they aren't the initiator (who learns it via CALL_ANSWER) — e.g. an
+    // invitee learns the initiator's device id here, once the initiator
+    // reciprocates its key. Register regardless of key-version freshness
+    // below (an id can be learned even if this particular key round is
+    // stale).
+    _registerLiveMediaDevice(session, authedHex, senderDeviceId);
+
     final existing = session.peerSendKeys[authedHex];
     if (existing != null && ann.keyVersion <= existing.version) return;
 
@@ -980,7 +988,8 @@ class GroupCallManager {
     session.totalFramesReceived++;
 
     if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(frame.payload));
+      session.relay!.forwardFrame(Uint8List.fromList(frame.payload),
+          proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO);
     }
   }
 
@@ -997,7 +1006,8 @@ class GroupCallManager {
     session.videoFramesReceived++;
 
     if (session.relay != null) {
-      session.relay!.forwardFrame(Uint8List.fromList(frame.payload));
+      session.relay!.forwardFrame(Uint8List.fromList(frame.payload),
+          proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO);
     }
   }
 
@@ -1044,6 +1054,111 @@ class GroupCallManager {
   }
 
   // ── Helpers ─────────────────────────────────────────────────────────
+
+  /// §13.1.2 exemption #4: register `deviceId` as `participantHex`'s
+  /// live-media PoW-exempt device for this session. Idempotent — if the
+  /// participant re-announces the same device id (e.g. reciprocated
+  /// sender-key), this just overwrites the map entry with the same value.
+  /// If the participant's device id *changed* (multi-device switch during
+  /// a call), unregisters the stale id first so the allowlist doesn't leak
+  /// an entry for a device no longer part of the call.
+  void _registerLiveMediaDevice(
+      GroupCallSession session, String participantHex, Uint8List deviceId) {
+    final previous = session.registeredLiveMediaDeviceIds[participantHex];
+    if (previous != null && !_bytesEqual(previous, deviceId)) {
+      node.unregisterLiveMediaPeer(previous);
+    }
+    session.registeredLiveMediaDeviceIds[participantHex] = deviceId;
+    node.registerLiveMediaPeer(deviceId);
+  }
+
+  /// Unregister the device id registered for `participantHex` (GROUP_LEAVE
+  /// / CALL_HANGUP / drop-below-2-participants path via [_participantLeft]).
+  void _unregisterLiveMediaDevice(
+      GroupCallSession session, String participantHex) {
+    final deviceId = session.registeredLiveMediaDeviceIds.remove(participantHex);
+    if (deviceId != null) {
+      node.unregisterLiveMediaPeer(deviceId);
+    }
+  }
+
+  /// Unregister every device id still registered for `session` — local call
+  /// teardown ([_cleanup]) must not leak allowlist entries for a call that
+  /// no longer exists.
+  void _unregisterAllLiveMediaDevices(GroupCallSession session) {
+    for (final deviceId in session.registeredLiveMediaDeviceIds.values) {
+      node.unregisterLiveMediaPeer(deviceId);
+    }
+    session.registeredLiveMediaDeviceIds.clear();
+  }
+
+  bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Send a CALL_GROUP_AUDIO/VIDEO frame to a participant identified by
+  /// their userIdHex, with a PLAIN inner (no per-recipient KEM, no user
+  /// sig) — Architecture §10.3 / Appendix B.2, F-C amendment.
+  ///
+  /// Unlike [_sendLiveMediaToParticipant] (still used for CALL_RTT_PING
+  /// and CALL_TREE_UPDATE, whose payloads carry unprotected plaintext
+  /// data), the [payload] here is always a serialized `GroupCallAudio` /
+  /// `GroupCallVideo` proto whose `encrypted_audio` / `video_frame_data`
+  /// field is already AES-256-GCM-encrypted under the sender's secret
+  /// `send_key` (§10.2.1). Wrapping that again in a KEM + ML-DSA inner
+  /// sig is pure overhead with zero additional confidentiality — the
+  /// send_key already authenticates + hides the media content; only the
+  /// outer Device-Sig (Ed25519-only, no PoW) is needed for routing-layer
+  /// authenticity.
+  ///
+  /// Resolves the participant's device via the routing table (cached
+  /// per-session in [_participantRouteCache] — Architecture §10.4.1) and
+  /// dispatches via `node.sendToDevice`.
+  void _sendGroupLiveMediaFrame(
+    String participantHex,
+    proto.MessageTypeV3 type,
+    Uint8List payload,
+  ) {
+    final peerUserId = hexToBytes(participantHex);
+    PeerInfo? peer = _participantRouteCache[participantHex];
+    if (peer == null) {
+      peer = node.routingTable.getPeer(peerUserId) ??
+          node.routingTable.getPeerByUserId(peerUserId);
+      if (peer != null) {
+        _participantRouteCache[participantHex] = peer;
+      }
+    }
+    if (peer == null) {
+      _log.debug('live-media fast path: no peer route for '
+          '${participantHex.substring(0, 8)} — drop');
+      return;
+    }
+
+    final inner = proto.ApplicationFrameV3()
+      ..version = 1
+      ..recipientUserId = peerUserId
+      ..senderUserId = identity.userId
+      ..messageType = type
+      ..messageId = SodiumFFI().randomBytes(16)
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..payload = payload;
+
+    final outer = V3FrameCodec.buildOuter(
+      nextHopDeviceId: peer.nodeId,
+      senderDeviceId: node.primaryIdentity.deviceNodeId,
+      deviceKeys: node.deviceKeyPair,
+      innerPayload: inner.writeToBuffer(),
+      payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
+      applicationFlavor: false,
+      skipPoW: true,
+    );
+    // ignore: discarded_futures
+    node.sendToDevice(outer, peer.nodeId);
+  }
 
   /// Send a live-media (or per-call ephemeral) frame to a participant
   /// identified by their userIdHex. Resolves the participant's device

@@ -188,7 +188,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             ),
           ),
           const SizedBox(height: 8),
-          Text(
+          // Problem 1 (S119): Node-ID natively selectable (long-press).
+          SelectableText(
             'Node-ID: ${idNodeIdHex.substring(0, 16)}...',
             style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
           ),
