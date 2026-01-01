@@ -17,7 +17,7 @@ Pod::Spec.new do |s|
   s.license      = { :type => 'Proprietary' }
   s.author       = 'Cleona Dev'
   s.source       = { :path => '.' }
-  s.platform     = :ios, '13.0'
+  s.platform     = :ios, '15.5'
   s.static_framework = true
 
   frameworks_dir = File.join(__dir__, 'Frameworks')
