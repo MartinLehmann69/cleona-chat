@@ -9761,6 +9761,11 @@ class CleonaService implements ICleonaService {
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
+      _storeSafOnMutualPeers(
+        recipientUserId: recipientUserId,
+        wrappedEnvelope: canonicalBytes,
+        storeId: SodiumFFI().randomBytes(16),
+      );
     }
 
     return dispatched > 0;
