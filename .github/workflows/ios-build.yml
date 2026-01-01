@@ -113,26 +113,29 @@ jobs:
         run: |
           # dart:ffi uses DynamicLibrary.process() which needs symbols in the
           # Runner binary. CocoaPods vendored_frameworks does not reliably link
-          # static .a XCFrameworks. We inject -force_load flags into the Xcode
-          # project build settings (not xcconfigs — flutter build ipa overwrites those).
+          # static .a XCFrameworks. We inject -force_load into the Runner target
+          # buildSettings in project.pbxproj — this is the ONLY place that
+          # survives flutter build ipa (xcconfigs get regenerated).
           FWDIR="$(pwd)/ios/CleonaNative/Frameworks"
           FLAGS=""
           for lib in libsodium liboqs libzstd libopus libwhisper libggml; do
             A="$FWDIR/$lib.xcframework/ios-arm64/$lib.a"
             if [ -f "$A" ]; then
               FLAGS="$FLAGS -force_load $A"
-              echo "  + $lib ($A)"
+              echo "  + $lib"
             fi
           done
           if [ -n "$FLAGS" ]; then
-            # Inject into Runner.xcodeproj build settings via PlistBuddy
             PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-            # Append to ALL OTHER_LDFLAGS entries in the project file
-            sed -i '' "s|OTHER_LDFLAGS = \"|OTHER_LDFLAGS = \"$FLAGS |g" "$PBXPROJ" 2>/dev/null || true
-            # If no OTHER_LDFLAGS exists, add via xcconfig fallback
-            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> ios/Flutter/Release.xcconfig
-            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> ios/Flutter/Debug.xcconfig
-            echo "Injected force_load for 6 FFI libraries"
+            # Insert OTHER_LDFLAGS into Runner target's Release and Debug
+            # buildSettings (after VERSIONING_SYSTEM line which is the last
+            # setting in each Runner config block).
+            sed -i '' "/PRODUCT_BUNDLE_IDENTIFIER = chat.cleona.cleona;/{
+              N
+              s|PRODUCT_NAME|OTHER_LDFLAGS = (\n\t\t\t\t\t\"\$(inherited)\",\n\t\t\t\t\t\"$FLAGS\",\n\t\t\t\t);\n\t\t\t\tPRODUCT_NAME|
+            }" "$PBXPROJ"
+            echo "Injected OTHER_LDFLAGS into project.pbxproj"
+            grep -c 'force_load' "$PBXPROJ"
           fi
 
       - name: Install distribution certificate
