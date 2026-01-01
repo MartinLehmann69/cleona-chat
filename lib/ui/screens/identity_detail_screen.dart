@@ -367,68 +367,92 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
   Widget _buildSkinSection(BuildContext context, CleonaAppState appState) {
     final locale = AppLocale.read(context);
     final currentSkinId = _identity.skinId ?? 'teal';
+    final showCrimsonBanner = IdentityManager().crimsonMigrationShouldShow;
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Wrap(
-        spacing: 12,
-        runSpacing: 12,
-        children: Skins.all.map((skin) {
-          final isSelected = skin.id == currentSkinId;
-          return InkWell(
-            borderRadius: BorderRadius.circular(12),
-            onTap: () {
-              IdentityManager().setSkinId(_identity.id, skin.id);
-              appState.refresh();
-              setState(() {
-                _identity = IdentityManager().getActiveIdentity() ?? _identity;
-              });
-            },
-            child: Container(
-              width: 90,
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: isSelected ? skin.seedColor : Colors.transparent,
-                  width: isSelected ? 2.5 : 1,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (showCrimsonBanner)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: MaterialBanner(
+              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+              content: Text(locale.get('crimson_migrated_to_fire')),
+              backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    IdentityManager().dismissCrimsonBanner();
+                    setState(() {});
+                  },
+                  child: Text(locale.get('got_it')),
                 ),
-                color: isSelected ? skin.seedColor.withValues(alpha: 0.1) : null,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 32,
-                    height: 32,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: skin.seedColor,
-                      border: skin.id == 'contrast'
-                          ? Border.all(color: Theme.of(context).colorScheme.outline, width: 1)
-                          : null,
-                    ),
-                    child: isSelected
-                        ? const Icon(Icons.check, color: Colors.white, size: 18)
-                        : null,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    locale.get('skin_${skin.id}'),
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                    ),
-                    textAlign: TextAlign.center,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
+              ],
             ),
-          );
-        }).toList(),
-      ),
+          ),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: Skins.all.map((skin) {
+              final isSelected = skin.id == currentSkinId;
+              return InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () {
+                  IdentityManager().setSkinId(_identity.id, skin.id);
+                  appState.refresh();
+                  setState(() {
+                    _identity = IdentityManager().getActiveIdentity() ?? _identity;
+                  });
+                },
+                child: Container(
+                  width: 90,
+                  padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 4),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isSelected ? skin.seedColor : Colors.transparent,
+                      width: isSelected ? 2.5 : 1,
+                    ),
+                    color: isSelected ? skin.seedColor.withValues(alpha: 0.1) : null,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: skin.seedColor,
+                          border: skin.id == 'contrast'
+                              ? Border.all(color: Theme.of(context).colorScheme.outline, width: 1)
+                              : null,
+                        ),
+                        child: isSelected
+                            ? const Icon(Icons.check, color: Colors.white, size: 18)
+                            : null,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        locale.get('skin_${skin.id}'),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        ),
+                        textAlign: TextAlign.center,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
     );
   }
 

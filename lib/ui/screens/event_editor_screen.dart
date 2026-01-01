@@ -4,6 +4,7 @@ import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/theme/skins.dart';
 
 /// Event creation/editing screen.
@@ -79,21 +80,24 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     final colorScheme = Theme.of(context).colorScheme;
     final service = appState.service;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.isNew ? locale.get('calendar_new_event') : locale.get('calendar_edit_event')),
-        actions: [
-          if (!widget.isNew)
-            IconButton(
-              icon: const Icon(Icons.delete),
-              onPressed: () => _deleteEvent(context),
-            ),
-          TextButton(
-            onPressed: () => _saveEvent(context),
-            child: Text(locale.get('save'), style: const TextStyle(fontWeight: FontWeight.bold)),
-          ),
-        ],
+    return AppBarScaffold(
+      title: widget.isNew ? locale.get('calendar_new_event') : locale.get('calendar_edit_event'),
+      opaqueBody: true,
+      leading: IconButton(
+        icon: const Icon(Icons.arrow_back),
+        onPressed: () => Navigator.pop(context),
       ),
+      actions: [
+        if (!widget.isNew)
+          IconButton(
+            icon: const Icon(Icons.delete),
+            onPressed: () => _deleteEvent(context),
+          ),
+        TextButton(
+          onPressed: () => _saveEvent(context),
+          child: Text(locale.get('save'), style: const TextStyle(fontWeight: FontWeight.bold)),
+        ),
+      ],
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [

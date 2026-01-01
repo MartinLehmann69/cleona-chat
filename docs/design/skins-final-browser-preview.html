@@ -1,0 +1,328 @@
+<style>
+  body { background: #0a0a0a !important; }
+  .page-wrap { background: #0a0a0a; padding: 8px 0; }
+  h2, h3 { color: #fff !important; }
+  .subtitle { color: #aaa !important; }
+
+  .sk-stack { display: flex; flex-direction: column; gap: 18px; margin-top: 20px; }
+  .photo-skin { background: #1a1a1a; border-radius: 18px; overflow: hidden; border: 1px solid rgba(255,255,255,0.08); box-shadow: 0 12px 40px rgba(0,0,0,0.5); cursor: pointer; position: relative; }
+  .photo-skin.final { border-color: rgba(46,125,50,0.6); }
+  .photo-skin.final::after {
+    content: 'FINAL';
+    position: absolute; top: 14px; right: 14px;
+    background: #2e7d32; color: #fff;
+    padding: 4px 12px; border-radius: 4px;
+    font-size: 10px; font-weight: 900; letter-spacing: 0.15em;
+    z-index: 20;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.4);
+  }
+  .photo-skin.fresh::after {
+    content: 'NEU';
+    position: absolute; top: 14px; right: 14px;
+    background: #e65100; color: #fff;
+    padding: 4px 12px; border-radius: 4px;
+    font-size: 10px; font-weight: 900; letter-spacing: 0.15em;
+    z-index: 20;
+  }
+  .photo-skin .preview-row { display: grid; grid-template-columns: 1.3fr 1fr; min-height: 430px; }
+
+  .phone-mock { height: 430px; overflow: hidden; position: relative; font-family: "Inter", system-ui, sans-serif; color: #fff; }
+  .bg-layer { position: absolute; inset: 0; background-size: cover; background-position: center; }
+  .bg-scrim { position: absolute; inset: 0; z-index: 2; }
+  .content { position: relative; z-index: 4; padding: 22px 20px; height: 100%; display: flex; flex-direction: column; }
+
+  .mock-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+  .mock-brand { font-size: 10px; letter-spacing: 0.35em; font-weight: 900; opacity: 0.9; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+  .mock-peers { font-size: 10px; font-family: "SF Mono", Menlo, monospace; opacity: 0.9; display: flex; gap: 6px; align-items: center; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+  .mock-peers .dot { width:6px;height:6px;border-radius:50%;background:#4ade80;box-shadow:0 0 8px #4ade80; }
+
+  .mock-id { display: flex; gap: 14px; align-items: center; margin-bottom: 20px; }
+  .mock-av { width: 58px; height: 58px; border-radius: 14px; border: 2px solid rgba(255,255,255,0.5); position: relative; flex-shrink: 0; overflow: hidden; background-size: cover; background-position: center; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+  .mock-av::after { content:''; position:absolute; bottom:-2px; right:-2px; width:14px; height:14px; border-radius:50%; background:#4ade80; border: 3px solid rgba(0,0,0,0.7); z-index: 5; }
+  .mock-name { font-weight: 900; font-size: 23px; letter-spacing: -0.02em; line-height: 1.1; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+  .mock-meta { font-size: 11px; opacity: 0.9; margin-top: 3px; font-family: "SF Mono", Menlo, monospace; text-shadow: 0 1px 3px rgba(0,0,0,0.5); }
+
+  .mock-cards { display: flex; flex-direction: column; gap: 9px; }
+  .mock-card { background: rgba(0,0,0,0.5); backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; padding: 11px 13px; display: flex; gap: 11px; align-items: center; }
+  .mock-card .ca { width: 36px; height: 36px; border-radius: 9px; flex-shrink: 0; border: 1px solid rgba(255,255,255,0.3); overflow: hidden; background-size: cover; background-position: center; }
+  .mock-card .cb { flex: 1; }
+  .mock-card .cn { font-weight: 800; font-size: 13px; }
+  .mock-card .cp { font-size: 11px; opacity: 0.8; margin-top: 2px; }
+  .mock-card .ct { font-size: 10px; font-family: "SF Mono", Menlo, monospace; opacity: 0.78; }
+
+  .mock-fab {
+    position: absolute; bottom: 20px; right: 20px;
+    width: 60px; height: 60px;
+    border-radius: 16px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    overflow: hidden; z-index: 10;
+    border: 2px solid rgba(255,255,255,0.4);
+    background-size: cover; background-position: center;
+  }
+  .mock-fab::before { content:''; position:absolute; inset:0; background: rgba(0,0,0,0.25); z-index: 1; }
+  .mock-fab .plus {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 36px; font-weight: 300; color: #fff;
+    text-shadow: 0 2px 12px rgba(0,0,0,0.8);
+    z-index: 3; line-height: 1;
+  }
+
+  .info-panel { padding: 24px 28px; display: flex; flex-direction: column; gap: 10px; justify-content: center; color: #e0e0e0; }
+  .info-panel h3 { margin: 0; font-size: 19px; font-weight: 900; letter-spacing: -0.02em; }
+  .info-panel .kind { font-size: 10px; letter-spacing: 0.25em; color: #64748b; font-weight: 900; text-transform: uppercase; }
+  .info-panel p { margin: 0; font-size: 12px; line-height: 1.55; opacity: 0.85; }
+  .info-panel code { background: rgba(255,255,255,0.08); padding: 1px 5px; border-radius: 3px; font-size: 10px; color: #80cbc4; word-break: break-all; }
+
+  /* 01 TEAL — minimalist, CSS, 4px FAB (original top version) */
+  .teal .bg-layer { background: radial-gradient(ellipse 60% 40% at 30% 30%, rgba(178,223,219,0.35) 0%, transparent 50%), radial-gradient(ellipse 50% 35% at 75% 75%, rgba(128,203,196,0.25) 0%, transparent 55%), linear-gradient(135deg, #fafefd 0%, #e0f2f1 50%, #f5fdfc 100%); }
+  .teal .bg-layer::before { content:''; position:absolute; inset:0; background-image: linear-gradient(rgba(0,137,123,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(0,137,123,0.04) 1px, transparent 1px); background-size: 24px 24px; }
+
+  /* 08 SLATE — CSS */
+  .slate .bg-layer { background: linear-gradient(180deg, #0f1419 0%, #151c22 50%, #0c1115 100%); }
+  .slate .bg-layer::before { content:''; position:absolute; inset:0; background-image: radial-gradient(rgba(0,229,255,0.25) 1px, transparent 1.5px); background-size: 18px 18px; }
+  .slate .bg-layer::after { content:''; position:absolute; inset:0; background-image: repeating-linear-gradient(0deg, transparent 0, transparent 3px, rgba(105,240,174,0.04) 3px, rgba(105,240,174,0.04) 4px); }
+
+  /* 10 CONTRAST — B/W/Y */
+  .contrast .bg-layer { background: #fff; }
+  .contrast .mock-fab::before { background: transparent; }
+</style>
+
+<div class="page-wrap">
+
+<h2 style="text-align:center;">FINAL — 10 Skins, FINAL-markiert wo fertig</h2>
+<p class="subtitle" style="text-align:center;">05/06/09 jetzt aus <strong>Wikimedia Commons</strong> (Bilder nach Inhalt benannt, garantiert on-theme). 07 mit Deinem gewählten Foto A.</p>
+
+<div class="sk-stack">
+
+  <!-- 01 TEAL — FINAL (top version restored) -->
+  <div class="photo-skin teal final" data-choice="01" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand" style="color:#004d40; text-shadow:none;">CLEONA · TEAL</div><div class="mock-peers" style="color:#004d40; text-shadow:none;"><div class="dot"></div>4 PEERS</div></div>
+          <div class="mock-id"><div class="mock-av" style="background:linear-gradient(135deg,#00897B,#004d40);"></div><div><div class="mock-name" style="color:#0a0a0a; text-shadow:none;">Alice</div><div class="mock-meta" style="color:#00695c; text-shadow:none;">● online · minimalist</div></div></div>
+          <div class="mock-cards">
+            <div class="mock-card" style="background:rgba(255,255,255,0.8); border-color:rgba(0,137,123,0.2);"><div class="ca" style="background:linear-gradient(135deg,#00897B,#00695c);"></div><div class="cb"><div class="cn" style="color:#0a0a0a;">Bob</div><div class="cp" style="color:#455a64;">Bis später!</div></div><div class="ct" style="color:#00695c;">14:32</div></div>
+            <div class="mock-card" style="background:rgba(255,255,255,0.8); border-color:rgba(0,137,123,0.2);"><div class="ca" style="background:linear-gradient(135deg,#00897B,#00695c);"></div><div class="cb"><div class="cn" style="color:#0a0a0a;">Team Cleona</div><div class="cp" style="color:#455a64;">Review bitte</div></div><div class="ct" style="color:#00695c;">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background:#00897B; border-radius: 4px; width:56px; height:56px; border: none; box-shadow: 0 6px 18px rgba(0,137,123,0.35), 0 2px 4px rgba(0,0,0,0.1);"><div class="plus" style="font-weight:300; font-size:30px; text-shadow:none; color:#fff;">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">01 — TEAL</div><h3>Clean Minimalist</h3><p>FAB jetzt teal (<code>#00897B</code>) statt schwarz — passt zum Skin-Accent.</p></div>
+    </div>
+  </div>
+
+  <!-- 02 OCEAN — FINAL -->
+  <div class="photo-skin ocean final" data-choice="02" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer" style="background-image: url('https://images.unsplash.com/photo-1505142468610-359e7d316be0?w=1200&q=80&auto=format');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(5,20,45,0.55) 0%, rgba(5,20,45,0.15) 40%, rgba(5,20,45,0.78) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · OCEAN</div><div class="mock-peers"><div class="dot"></div>2 HOPS</div></div>
+          <div class="mock-id"><div class="mock-av" style="background-image: url('https://images.unsplash.com/photo-1505142468610-359e7d316be0?w=200&q=70');"></div><div><div class="mock-name">Alice</div><div class="mock-meta">● online · verifiziert</div></div></div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1511497584788-876760111969?w=120&q=70');"></div><div class="cb"><div class="cn">Bob</div><div class="cp">Bis später!</div></div><div class="ct">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1518837695005-2083093ee35b?w=120&q=70');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp">Review bitte</div></div><div class="ct">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://images.unsplash.com/photo-1439405326854-014607f694d7?w=200&q=70');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">02 — OCEAN</div><h3>Deep Current</h3></div>
+    </div>
+  </div>
+
+  <!-- 03 SUNSET — FINAL -->
+  <div class="photo-skin sunset final" data-choice="03" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer" style="background-image: url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=1200&q=80&auto=format');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(40,10,80,0.35) 0%, transparent 40%, rgba(60,20,0,0.55) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · SUNSET</div><div class="mock-peers"><div class="dot"></div>GOLDEN HOUR</div></div>
+          <div class="mock-id"><div class="mock-av" style="background-image: url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=200&q=70&auto=format');"></div><div><div class="mock-name">Alice</div><div class="mock-meta">warm · evening</div></div></div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=120&q=70&auto=format');"></div><div class="cb"><div class="cn">Bob</div><div class="cp">Bis später!</div></div><div class="ct">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=120&q=70&auto=format');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp">Review bitte</div></div><div class="ct">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://images.unsplash.com/photo-1506905925346-21bda4d32df4?w=200&q=70&auto=format');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">03 — SUNSET</div><h3>Golden Hour</h3></div>
+    </div>
+  </div>
+
+  <!-- 04 FOREST — FINAL -->
+  <div class="photo-skin forest final" data-choice="04" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer" style="background-image: url('https://images.unsplash.com/photo-1448375240586-882707db888b?w=1200&q=80&auto=format');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(0,20,0,0.3) 0%, transparent 35%, rgba(0,20,0,0.7) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · FOREST</div><div class="mock-peers"><div class="dot"></div>3 HOPS</div></div>
+          <div class="mock-id"><div class="mock-av" style="background-image: url('https://images.unsplash.com/photo-1448375240586-882707db888b?w=200&q=70');"></div><div><div class="mock-name">Alice</div><div class="mock-meta">canopy · 20km heute</div></div></div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1448375240586-882707db888b?w=120&q=70');"></div><div class="cb"><div class="cn">Bob</div><div class="cp">Bis später!</div></div><div class="ct">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1448375240586-882707db888b?w=120&q=70');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp">Review bitte</div></div><div class="ct">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://images.unsplash.com/photo-1448375240586-882707db888b?w=200&q=70');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">04 — FOREST</div><h3>Deep Woods</h3></div>
+    </div>
+  </div>
+
+  <!-- 05 AMETHYST — FINAL (Wikimedia: Amethyst_016.jpg, user-picked) -->
+  <div class="photo-skin amethyst final" data-choice="05" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <!-- Wikimedia: File:Amethyst_016.jpg (user choice) -->
+        <div class="bg-layer" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/2/2e/Amethyst_016.jpg');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(30,0,60,0.35) 0%, transparent 35%, rgba(30,0,60,0.55) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · AMETHYST</div><div class="mock-peers"><div class="dot"></div>4 PEERS</div></div>
+          <div class="mock-id">
+            <div class="mock-av" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Amethyst_016.jpg/250px-Amethyst_016.jpg');"></div>
+            <div><div class="mock-name">Alice</div><div class="mock-meta">crystalline · luxe</div></div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Amethyst_016.jpg/250px-Amethyst_016.jpg');"></div><div class="cb"><div class="cn">Bob</div><div class="cp">Bis später!</div></div><div class="ct">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Amethyst_016.jpg/250px-Amethyst_016.jpg');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp">Review bitte</div></div><div class="ct">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/2e/Amethyst_016.jpg/250px-Amethyst_016.jpg');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">05 — AMETHYST</div><h3>Crystal Luxe</h3><p>Dein gewähltes Foto: <code>Amethyst_016.jpg</code>.</p></div>
+    </div>
+  </div>
+
+  <!-- 06 FIRE — FRESH (Wikimedia) -->
+  <div class="photo-skin fire fresh" data-choice="06" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <!-- Wikimedia: "Midsummer bonfire closeup.jpg" -->
+        <div class="bg-layer" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Midsummer_bonfire_closeup.jpg/960px-Midsummer_bonfire_closeup.jpg');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(30,0,0,0.3) 0%, transparent 40%, rgba(30,0,0,0.4) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · FIRE</div><div class="mock-peers"><div class="dot" style="background:#ffab00; box-shadow:0 0 8px #ffab00;"></div>BURNING</div></div>
+          <div class="mock-id">
+            <div class="mock-av" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/8/8a/Midsummer_bonfire_closeup.jpg/200px-Midsummer_bonfire_closeup.jpg');"></div>
+            <div><div class="mock-name">Alice</div><div class="mock-meta">warm · intense</div></div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/5/5c/Campfire_and_sparks_in_Anttoora_1.jpg/200px-Campfire_and_sparks_in_Anttoora_1.jpg');"></div><div class="cb"><div class="cn">Bob</div><div class="cp" style="color:#ffe0b2;">Bis später!</div></div><div class="ct" style="color:#ffab00;">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/3/36/Large_bonfire.jpg');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp" style="color:#ffe0b2;">Review bitte</div></div><div class="ct" style="color:#ffab00;">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/FIRE_01.JPG/200px-FIRE_01.JPG');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">06 — FIRE</div><h3>Fire / Flames</h3><p>Aus Wikimedia: <code>Midsummer_bonfire_closeup.jpg</code> — Lagerfeuer-Nahaufnahme. FAB: <code>FIRE_01.JPG</code>.</p></div>
+    </div>
+  </div>
+
+  <!-- 07 STORM — FINAL (user-picked A) -->
+  <div class="photo-skin storm final" data-choice="07" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <!-- User-picked: photo-1429552077091-836152271555 -->
+        <div class="bg-layer" style="background-image: url('https://images.unsplash.com/photo-1429552077091-836152271555?w=1200&q=80&auto=format');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(5,10,25,0.35) 0%, transparent 35%, rgba(5,10,25,0.6) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · STORM</div><div class="mock-peers"><div class="dot" style="background:#64b5f6; box-shadow:0 0 8px #64b5f6;"></div>CHARGED</div></div>
+          <div class="mock-id"><div class="mock-av" style="background-image: url('https://images.unsplash.com/photo-1429552077091-836152271555?w=200&q=70');"></div><div><div class="mock-name">Alice</div><div class="mock-meta" style="color:#bbdefb;">electric · cool</div></div></div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1429552077091-836152271555?w=120&q=70');"></div><div class="cb"><div class="cn">Bob</div><div class="cp" style="color:#bbdefb;">Bis später!</div></div><div class="ct" style="color:#64b5f6;">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://images.unsplash.com/photo-1429552077091-836152271555?w=120&q=70');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp" style="color:#bbdefb;">Review bitte</div></div><div class="ct" style="color:#64b5f6;">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://images.unsplash.com/photo-1429552077091-836152271555?w=200&q=70');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">07 — STORM</div><h3>Storm / Electric</h3><p>Dein gewähltes Foto A.</p></div>
+    </div>
+  </div>
+
+  <!-- 08 SLATE — FINAL -->
+  <div class="photo-skin slate final" data-choice="08" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand" style="color:#00E5FF; font-family:'SF Mono',Menlo,monospace; letter-spacing:0.15em;">CLEONA_SLATE</div><div class="mock-peers" style="color:#69F0AE;"><div class="dot" style="background:#69F0AE; box-shadow:0 0 8px #69F0AE;"></div>pid:4829</div></div>
+          <div class="mock-id">
+            <div class="mock-av" style="background:#0f1419; border-color:#00E5FF; display:flex; align-items:center; justify-content:center; font-family:'SF Mono',Menlo,monospace; font-weight:900; color:#00E5FF; font-size:20px;">[A]</div>
+            <div><div class="mock-name" style="font-family:'SF Mono',Menlo,monospace; color:#69F0AE; font-size:18px;">&gt; alice_</div><div class="mock-meta" style="color:#78909C;">node:active · 4 peers</div></div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card" style="background:#1e272e; border-color:#263238;"><div class="ca" style="background:#0f1419; border-color:#00E5FF; display:flex; align-items:center; justify-content:center; font-family:'SF Mono',Menlo,monospace; font-weight:900; color:#69F0AE; font-size:10px;">[B]</div><div class="cb"><div class="cn" style="font-family:'SF Mono',Menlo,monospace; color:#00E5FF;">bob@node2</div><div class="cp" style="font-family:'SF Mono',Menlo,monospace; color:#78909C;">bis_spaeter</div></div><div class="ct" style="color:#69F0AE;">14:32</div></div>
+            <div class="mock-card" style="background:#1e272e; border-color:#263238;"><div class="ca" style="background:#0f1419; border-color:#00E5FF; display:flex; align-items:center; justify-content:center; font-family:'SF Mono',Menlo,monospace; font-weight:900; color:#00E5FF; font-size:10px;">[T]</div><div class="cb"><div class="cn" style="font-family:'SF Mono',Menlo,monospace; color:#00E5FF;">team@dht</div><div class="cp" style="font-family:'SF Mono',Menlo,monospace; color:#78909C;">review_pending</div></div><div class="ct" style="color:#69F0AE;">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background:#0f1419; border: 2px solid #00E5FF; box-shadow: 0 0 20px rgba(0,229,255,0.4), 0 8px 24px rgba(0,0,0,0.5); border-radius: 4px;"><div class="plus" style="color:#00E5FF; text-shadow:0 0 12px rgba(0,229,255,0.8); font-family:'SF Mono',Menlo,monospace; font-weight:900; font-size:26px;">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">08 — SLATE</div><h3>Terminal</h3></div>
+    </div>
+  </div>
+
+  <!-- 09 GOLD — FRESH (Wikimedia: Gold bullion bars!) -->
+  <div class="photo-skin gold fresh" data-choice="09" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <!-- Wikimedia: "Gold bullion bars.jpg" -->
+        <div class="bg-layer" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/a/af/Gold_bullion_bars.jpg/960px-Gold_bullion_bars.jpg');"></div>
+        <div class="bg-scrim" style="background: linear-gradient(180deg, rgba(40,25,0,0.4) 0%, transparent 30%, rgba(40,25,0,0.45) 100%);"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand">CLEONA · GOLD</div><div class="mock-peers"><div class="dot"></div>3 PEERS</div></div>
+          <div class="mock-id">
+            <div class="mock-av" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/a/af/Gold_bullion_bars.jpg/200px-Gold_bullion_bars.jpg');"></div>
+            <div><div class="mock-name">Alice</div><div class="mock-meta">gilded · royal</div></div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/6/63/Gold_Bar_Brinks.jpg/200px-Gold_Bar_Brinks.jpg');"></div><div class="cb"><div class="cn">Bob</div><div class="cp">Bis später!</div></div><div class="ct">14:32</div></div>
+            <div class="mock-card"><div class="ca" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/b/be/Gold_bar_of_Banque_de_France.jpg/200px-Gold_bar_of_Banque_de_France.jpg');"></div><div class="cb"><div class="cn">Team Cleona</div><div class="cp">Review bitte</div></div><div class="ct">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background-image: url('https://upload.wikimedia.org/wikipedia/commons/thumb/3/33/Bullion_Gold_bar_at_Swiss_Money_Museum_%28Ank_Kumar%2C_Infosys%29.jpg/200px-Bullion_Gold_bar_at_Swiss_Money_Museum_%28Ank_Kumar%2C_Infosys%29.jpg');"><div class="plus">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">09 — GOLD</div><h3>Gilded — Goldbarren echt</h3><p>Aus Wikimedia: <code>Gold_bullion_bars.jpg</code> im Hero, verschiedene Bar-Fotos in Cards + FAB. Jetzt echte Barren.</p></div>
+    </div>
+  </div>
+
+  <!-- 10 CONTRAST — FINAL (entkernt) -->
+  <div class="photo-skin contrast final" data-choice="10" onclick="toggleSelect(this)">
+    <div class="preview-row">
+      <div class="phone-mock">
+        <div class="bg-layer"></div>
+        <div class="content">
+          <div class="mock-top"><div class="mock-brand" style="color:#000; font-weight:900; background:#FFEB3B; padding:3px 8px; text-shadow:none;">CLEONA · CONTRAST</div><div class="mock-peers" style="color:#000; background:#fff; border:2px solid #000; padding:3px 8px; font-weight:900; text-shadow:none;"><div class="dot" style="background:#000; box-shadow:none;"></div>WCAG AAA</div></div>
+          <div class="mock-id">
+            <div class="mock-av" style="background:#000; border:3px solid #000; border-radius:0; display:flex; align-items:center; justify-content:center; font-weight:900; color:#FFEB3B; font-size:30px;">A</div>
+            <div style="margin-top:8px;"><div class="mock-name" style="color:#000; font-weight:900; text-transform:uppercase; text-shadow:none;">ALICE</div><div class="mock-meta" style="color:#000; font-weight:800; margin-top:4px; letter-spacing:0.08em; text-shadow:none;">ONLINE · VERIFIED</div></div>
+          </div>
+          <div class="mock-cards">
+            <div class="mock-card" style="background:#fff; border:2.5px solid #000; border-radius:0; box-shadow:4px 4px 0 #000; backdrop-filter:none;"><div class="ca" style="background:#000; border:2.5px solid #000; border-radius:0; display:flex; align-items:center; justify-content:center; font-weight:900; color:#FFEB3B; font-size:18px;">B</div><div class="cb"><div class="cn" style="color:#000; text-transform:uppercase; font-weight:900;">BOB</div><div class="cp" style="color:#000; font-weight:700;">Bis später</div></div><div class="ct" style="background:#000; color:#fff; padding:3px 7px; font-weight:900;">14:32</div></div>
+            <div class="mock-card" style="background:#fff; border:2.5px solid #000; border-radius:0; box-shadow:4px 4px 0 #000; backdrop-filter:none;"><div class="ca" style="background:#FFEB3B; border:2.5px solid #000; border-radius:0; display:flex; align-items:center; justify-content:center; font-weight:900; color:#000; font-size:18px;">T</div><div class="cb"><div class="cn" style="color:#000; text-transform:uppercase; font-weight:900;">TEAM</div><div class="cp" style="color:#000; font-weight:700;">Review bitte</div></div><div class="ct" style="background:#000; color:#fff; padding:3px 7px; font-weight:900;">11:45</div></div>
+          </div>
+        </div>
+        <div class="mock-fab" style="background:#FFEB3B; border: 3px solid #000; border-radius: 0; box-shadow: 5px 5px 0 #000; width:64px; height:64px;"><div class="plus" style="color:#000; text-shadow:none; font-weight:900; font-size:36px;">+</div></div>
+      </div>
+      <div class="info-panel"><div class="kind">10 — CONTRAST</div><h3>Maximum Clarity</h3></div>
+    </div>
+  </div>
+
+</div>
+
+<h3 style="margin-top:32px; text-align:center;">Sind 05, 06, 09 jetzt auf Thema?</h3>
+<div class="options">
+  <div class="option" data-choice="all-done" onclick="toggleSelect(this)">
+    <div class="letter">✓</div>
+    <div class="content"><h3>Alle 10 fertig — Spec schreiben</h3><p>Asset-Briefs in die Spec, Bundle-Plan, dann Implementation</p></div>
+  </div>
+  <div class="option" data-choice="still-broken" onclick="toggleSelect(this)">
+    <div class="letter">⚠</div>
+    <div class="content"><h3>Einer noch daneben</h3><p>Sag welcher — ich iteriere gezielt</p></div>
+  </div>
+</div>
+
+</div>

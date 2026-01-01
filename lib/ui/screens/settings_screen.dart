@@ -19,6 +19,9 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/ui/screens/device_management_screen.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/form_group.dart';
+import 'package:cleona/ui/components/section_card.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -103,164 +106,214 @@ class SettingsScreen extends StatelessWidget {
     final appState = context.watch<CleonaAppState>();
     final locale = AppLocale.read(context);
 
-    return ListView(
-      children: [
-        const SizedBox(height: 8),
+    return AppBarScaffold(
+      title: locale.get('settings'),
+      opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
+      body: ListView(
+        children: [
+          const SizedBox(height: 8),
 
-        // ── Netzwerk ──────────────────────────────────────────────
-        _SectionHeader(locale.get('section_network')),
-        ListTile(
-          leading: const Icon(Icons.fingerprint),
-          title: Text(locale.get('node_id_label')),
-          subtitle: Text(
-            service.nodeIdHex,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
-          ),
-        ),
-        ListTile(
-          leading: const Icon(Icons.settings_ethernet),
-          title: _titleWithHelp(context, 'port_label', 'port_help'),
-          subtitle: Text('${service.port}'),
-          trailing: const Icon(Icons.edit),
-          onTap: () => _showPortDialog(context),
-        ),
-        ListTile(
-          leading: const Icon(Icons.people),
-          title: Text(locale.get('connected_peers')),
-          subtitle: Text('${service.peerCount}'),
-        ),
-        ListTile(
-          leading: const Icon(Icons.storage),
-          title: Text(locale.get('stored_fragments')),
-          subtitle: Text('${service.fragmentCount}'),
-        ),
-
-        const Divider(),
-        _SectionHeader(locale.get('section_appearance')),
-        ListTile(
-          leading: const Icon(Icons.brightness_6),
-          title: Text(locale.get('design_label')),
-          trailing: SegmentedButton<ThemeMode>(
-            segments: const [
-              ButtonSegment(value: ThemeMode.light, icon: Icon(Icons.light_mode)),
-              ButtonSegment(value: ThemeMode.system, icon: Icon(Icons.settings_suggest)),
-              ButtonSegment(value: ThemeMode.dark, icon: Icon(Icons.dark_mode)),
+          FormGroup(
+            title: locale.get('section_network'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.fingerprint),
+                title: Text(locale.get('node_id_label')),
+                subtitle: Text(
+                  service.nodeIdHex,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 10),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.settings_ethernet),
+                title: _titleWithHelp(context, 'port_label', 'port_help'),
+                subtitle: Text('${service.port}'),
+                trailing: const Icon(Icons.edit),
+                onTap: () => _showPortDialog(context),
+              ),
+              ListTile(
+                leading: const Icon(Icons.people),
+                title: Text(locale.get('connected_peers')),
+                subtitle: Text('${service.peerCount}'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.storage),
+                title: Text(locale.get('stored_fragments')),
+                subtitle: Text('${service.fragmentCount}'),
+              ),
             ],
-            selected: {appState.themeMode},
-            onSelectionChanged: (set) => appState.setThemeMode(set.first),
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_backup')),
-        ListTile(
-          leading: const Icon(Icons.key),
-          title: _titleWithHelp(context, 'show_recovery_phrase', 'show_recovery_phrase_help'),
-          subtitle: Text(locale.get('recovery_phrase_subtitle')),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => _showSeedPhrase(context),
-        ),
-
-        const Divider(),
-        _SectionHeader(locale.get('guardian_social_recovery')),
-        _GuardianSetupTile(service: service),
-
-        const Divider(),
-        _SectionHeader(locale.get('section_devices')),
-        ListTile(
-          leading: const Icon(Icons.devices),
-          title: _titleWithHelp(context, 'device_management_title', 'device_management_help'),
-          subtitle: Text(locale.get('device_management_subtitle')),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => DeviceManagementScreen(service: service)),
+          FormGroup(
+            title: locale.get('section_appearance'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.brightness_6),
+                title: Text(locale.get('design_label')),
+                trailing: SegmentedButton<ThemeMode>(
+                  segments: const [
+                    ButtonSegment(value: ThemeMode.light, icon: Icon(Icons.light_mode)),
+                    ButtonSegment(value: ThemeMode.system, icon: Icon(Icons.settings_suggest)),
+                    ButtonSegment(value: ThemeMode.dark, icon: Icon(Icons.dark_mode)),
+                  ],
+                  selected: {appState.themeMode},
+                  onSelectionChanged: (set) => appState.setThemeMode(set.first),
+                ),
+              ),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_media')),
-        ListTile(
-          leading: const Icon(Icons.download),
-          title: _titleWithHelp(context, 'media_settings_title', 'media_settings_help'),
-          subtitle: Text(locale.get('media_settings_subtitle')),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => MediaSettingsScreen(service: service)),
+          FormGroup(
+            title: locale.get('section_backup'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.key),
+                title: _titleWithHelp(context, 'show_recovery_phrase', 'show_recovery_phrase_help'),
+                subtitle: Text(locale.get('recovery_phrase_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showSeedPhrase(context),
+              ),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('notification_settings_title')),
-        ListTile(
-          leading: const Icon(Icons.notifications_outlined),
-          title: _titleWithHelp(context, 'notification_settings_title', 'notification_settings_help'),
-          subtitle: Text(locale.get('notification_settings_subtitle')),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => NotificationSettingsScreen(service: service)),
+          FormGroup(
+            title: locale.get('guardian_social_recovery'),
+            dividers: false,
+            children: [
+              _GuardianSetupTile(service: service),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_archive')),
-        ListTile(
-          leading: const Icon(Icons.archive_outlined),
-          title: _titleWithHelp(context, 'archive_settings_title', 'archive_settings_help'),
-          subtitle: Text('SMB / SFTP / FTPS / HTTP'),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => ArchiveSettingsScreen(service: service)),
+          FormGroup(
+            title: locale.get('section_devices'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.devices),
+                title: _titleWithHelp(context, 'device_management_title', 'device_management_help'),
+                subtitle: Text(locale.get('device_management_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => DeviceManagementScreen(service: service)),
+                ),
+              ),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_transcription')),
-        ListTile(
-          leading: const Icon(Icons.record_voice_over_outlined),
-          title: _titleWithHelp(context, 'transcription_settings_title', 'transcription_settings_help'),
-          subtitle: Text(locale.get('whisper_engine')),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => TranscriptionSettingsScreen(service: service)),
+          FormGroup(
+            title: locale.get('section_media'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.download),
+                title: _titleWithHelp(context, 'media_settings_title', 'media_settings_help'),
+                subtitle: Text(locale.get('media_settings_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => MediaSettingsScreen(service: service)),
+                ),
+              ),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_donate')),
-        ListTile(
-          leading: const Icon(Icons.favorite, color: Colors.red),
-          title: Text(locale.get('donate_title')),
-          subtitle: Text(locale.get('donate_banner_text'), maxLines: 2, overflow: TextOverflow.ellipsis),
-          trailing: const Icon(Icons.chevron_right),
-          onTap: () => Navigator.push(
-            context,
-            MaterialPageRoute(builder: (_) => const DonationScreen()),
+          FormGroup(
+            title: locale.get('notification_settings_title'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.notifications_outlined),
+                title: _titleWithHelp(context, 'notification_settings_title', 'notification_settings_help'),
+                subtitle: Text(locale.get('notification_settings_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => NotificationSettingsScreen(service: service)),
+                ),
+              ),
+            ],
           ),
-        ),
 
-        const Divider(),
-        _SectionHeader(locale.get('section_info')),
-        ListTile(
-          leading: const Icon(Icons.info_outline),
-          title: Text(locale.get('version_label')),
-          subtitle: const Text('1.0.0 (Architecture v2.0)'),
-        ),
-        ListTile(
-          leading: const Icon(Icons.shield),
-          title: _titleWithHelp(context, 'encryption_label', 'encryption_help'),
-          subtitle: const Text('Per-Message KEM: X25519 + ML-KEM-768\nSignaturen: Ed25519 + ML-DSA-65'),
-        ),
-        ListTile(
-          leading: const Icon(Icons.tag),
-          title: _titleWithHelp(context, 'network_tag_label', 'network_tag_help'),
-          subtitle: Text(NetworkSecret.channel.name),
-        ),
-      ],
+          FormGroup(
+            title: locale.get('section_archive'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.archive_outlined),
+                title: _titleWithHelp(context, 'archive_settings_title', 'archive_settings_help'),
+                subtitle: const Text('SMB / SFTP / FTPS / HTTP'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => ArchiveSettingsScreen(service: service)),
+                ),
+              ),
+            ],
+          ),
+
+          FormGroup(
+            title: locale.get('section_transcription'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.record_voice_over_outlined),
+                title: _titleWithHelp(context, 'transcription_settings_title', 'transcription_settings_help'),
+                subtitle: Text(locale.get('whisper_engine')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => TranscriptionSettingsScreen(service: service)),
+                ),
+              ),
+            ],
+          ),
+
+          FormGroup(
+            title: locale.get('section_donate'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.favorite, color: Colors.red),
+                title: Text(locale.get('donate_title')),
+                subtitle: Text(locale.get('donate_banner_text'), maxLines: 2, overflow: TextOverflow.ellipsis),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const DonationScreen()),
+                ),
+              ),
+            ],
+          ),
+
+          SectionCard(
+            title: locale.get('section_info'),
+            children: [
+              SectionRow(
+                label: locale.get('version_label'),
+                value: '1.0.0 (Architecture v2.0)',
+              ),
+              SectionRow(
+                label: locale.get('encryption_label'),
+                value: 'X25519 + ML-KEM-768 / Ed25519 + ML-DSA-65',
+              ),
+              SectionRow(
+                label: locale.get('network_tag_label'),
+                value: NetworkSecret.channel.name,
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
     );
   }
 
@@ -631,43 +684,50 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final protocolName = _config.defaultProtocol.name.toUpperCase();
-    return Scaffold(
-      appBar: AppBar(title: Text(locale.get('archive_settings_title'))),
-      body: SafeArea(
-        child: ListView(
-          children: [
-            const SizedBox(height: 8),
-            // Enabled toggle
-            SwitchListTile(
-              secondary: const Icon(Icons.archive),
-              title: Text(locale.get('archive_enabled')),
-              value: _config.enabledByDefault,
-              onChanged: (v) => _updateConfig((_) => _copyConfig(enabledByDefault: v)),
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('archive_protocol')),
-            ListTile(
-              leading: const Icon(Icons.lan),
-              title: Text(locale.get('archive_protocol')),
-              subtitle: Text(protocolName),
-              trailing: DropdownButton<ArchiveProtocol>(
-                value: _config.defaultProtocol,
-                items: ArchiveProtocol.values.map((p) =>
-                  DropdownMenuItem(value: p, child: Text(p.name.toUpperCase()))
-                ).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    _updateConfig((_) => _copyConfig(defaultProtocol: v));
-                  }
-                },
+    return AppBarScaffold(
+      title: locale.get('archive_settings_title'),
+      opaqueBody: true,
+      body: ListView(
+        children: [
+          const SizedBox(height: 8),
+          FormGroup(
+            title: locale.get('archive_settings_title'),
+            children: [
+              SwitchListTile(
+                secondary: const Icon(Icons.archive),
+                title: Text(locale.get('archive_enabled')),
+                value: _config.enabledByDefault,
+                onChanged: (v) => _updateConfig((_) => _copyConfig(enabledByDefault: v)),
               ),
-            ),
-            const Divider(),
-            // -- Connection settings --
-            _SectionHeader(locale.get('archive_connection')),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+            ],
+          ),
+          FormGroup(
+            title: locale.get('archive_protocol'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.lan),
+                title: Text(locale.get('archive_protocol')),
+                subtitle: Text(protocolName),
+                trailing: DropdownButton<ArchiveProtocol>(
+                  value: _config.defaultProtocol,
+                  items: ArchiveProtocol.values.map((p) =>
+                    DropdownMenuItem(value: p, child: Text(p.name.toUpperCase()))
+                  ).toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      _updateConfig((_) => _copyConfig(defaultProtocol: v));
+                    }
+                  },
+                ),
+              ),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('archive_connection'),
+            padRows: true,
+            dividers: false,
+            children: [
+              TextField(
                 controller: _hostController,
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.dns),
@@ -676,11 +736,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                 ),
                 onSubmitted: (v) => _updateConfig((_) => _copyConfig(archiveHost: v.trim())),
               ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+              TextField(
                 controller: _pathController,
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.folder),
@@ -689,11 +746,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                 ),
                 onSubmitted: (v) => _updateConfig((_) => _copyConfig(archivePath: v.trim())),
               ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+              TextField(
                 controller: _usernameController,
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.person),
@@ -706,11 +760,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                       : _copyConfig(archiveUsername: val));
                 },
               ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+              TextField(
                 controller: _passwordController,
                 obscureText: true,
                 decoration: InputDecoration(
@@ -724,11 +775,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                       : _copyConfig(archivePassword: val));
                 },
               ),
-            ),
-            const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+              TextField(
                 controller: _portController,
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(
@@ -743,11 +791,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                       : _copyConfig(archivePort: port));
                 },
               ),
-            ),
-            const SizedBox(height: 12),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
+              const SizedBox(height: 12),
+              Row(
                 children: [
                   ElevatedButton.icon(
                     onPressed: _config.archiveHost.isEmpty ? null : _testConnection,
@@ -774,12 +819,15 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                     ),
                 ],
               ),
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('archive_ssid')),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('archive_ssid'),
+            padRows: true,
+            dividers: false,
+            children: [
+              TextField(
                 controller: _ssidController,
                 decoration: InputDecoration(
                   prefixIcon: const Icon(Icons.wifi),
@@ -791,12 +839,15 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                   _updateConfig((_) => _copyConfig(allowedSSIDs: ssids));
                 },
               ),
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('archive_budget')),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: TextField(
+              const SizedBox(height: 8),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('archive_budget'),
+            padRows: true,
+            dividers: false,
+            children: [
+              TextField(
                 controller: _budgetController,
                 keyboardType: TextInputType.number,
                 decoration: InputDecoration(
@@ -811,61 +862,65 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
                   }
                 },
               ),
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('archive_tier_settings')),
-            if (_tierError != null)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(_tierError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
-              ),
-            ListTile(
-              leading: const Icon(Icons.photo_size_select_large),
-              title: Text(locale.get('archive_tier1')),
-              subtitle: SizedBox(
-                width: 80,
-                child: TextField(
-                  controller: _tier1Controller,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
-                  onSubmitted: (_) => _applyTierBoundaries(),
-                  onEditingComplete: _applyTierBoundaries,
+              const SizedBox(height: 8),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('archive_tier_settings'),
+            children: [
+              if (_tierError != null)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  child: Text(_tierError!, style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12)),
+                ),
+              ListTile(
+                leading: const Icon(Icons.photo_size_select_large),
+                title: Text(locale.get('archive_tier1')),
+                subtitle: SizedBox(
+                  width: 80,
+                  child: TextField(
+                    controller: _tier1Controller,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
+                    onSubmitted: (_) => _applyTierBoundaries(),
+                    onEditingComplete: _applyTierBoundaries,
+                  ),
                 ),
               ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_size_select_small),
-              title: Text(locale.get('archive_tier2')),
-              subtitle: SizedBox(
-                width: 80,
-                child: TextField(
-                  controller: _tier2Controller,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
-                  onSubmitted: (_) => _applyTierBoundaries(),
-                  onEditingComplete: _applyTierBoundaries,
+              ListTile(
+                leading: const Icon(Icons.photo_size_select_small),
+                title: Text(locale.get('archive_tier2')),
+                subtitle: SizedBox(
+                  width: 80,
+                  child: TextField(
+                    controller: _tier2Controller,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
+                    onSubmitted: (_) => _applyTierBoundaries(),
+                    onEditingComplete: _applyTierBoundaries,
+                  ),
                 ),
               ),
-            ),
-            ListTile(
-              leading: const Icon(Icons.link),
-              title: Text(locale.get('archive_tier3')),
-              subtitle: SizedBox(
-                width: 80,
-                child: TextField(
-                  controller: _tier3Controller,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-                  decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
-                  onSubmitted: (_) => _applyTierBoundaries(),
-                  onEditingComplete: _applyTierBoundaries,
+              ListTile(
+                leading: const Icon(Icons.link),
+                title: Text(locale.get('archive_tier3')),
+                subtitle: SizedBox(
+                  width: 80,
+                  child: TextField(
+                    controller: _tier3Controller,
+                    keyboardType: TextInputType.number,
+                    inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+                    decoration: InputDecoration(suffixText: locale.get('days'), isDense: true),
+                    onSubmitted: (_) => _applyTierBoundaries(),
+                    onEditingComplete: _applyTierBoundaries,
+                  ),
                 ),
               ),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -977,95 +1032,100 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     final modelExists = _isModelDownloaded(selectedSize);
     final whisperAvailable = _transcriptionService?.isWhisperAvailable ?? false;
 
-    return Scaffold(
-      appBar: AppBar(title: Text(locale.get('transcription_settings_title'))),
-      body: SafeArea(
-        child: ListView(
-          children: [
-            const SizedBox(height: 8),
-
-            // Status
-            _SectionHeader(locale.get('whisper_status')),
-            ListTile(
-              leading: Icon(
-                whisperAvailable && modelExists ? Icons.check_circle : Icons.warning,
-                color: whisperAvailable && modelExists ? Colors.green : Colors.orange,
+    return AppBarScaffold(
+      title: locale.get('transcription_settings_title'),
+      opaqueBody: true,
+      body: ListView(
+        children: [
+          const SizedBox(height: 8),
+          FormGroup(
+            title: locale.get('whisper_status'),
+            children: [
+              ListTile(
+                leading: Icon(
+                  whisperAvailable && modelExists ? Icons.check_circle : Icons.warning,
+                  color: whisperAvailable && modelExists ? Colors.green : Colors.orange,
+                ),
+                title: Text(whisperAvailable && modelExists
+                    ? locale.get('transcription_ready')
+                    : locale.get('transcription_not_ready')),
+                subtitle: Text(whisperAvailable
+                    ? (modelExists ? locale.get('transcription_model_loaded') : locale.get('transcription_model_missing'))
+                    : locale.get('transcription_library_missing')),
               ),
-              title: Text(whisperAvailable && modelExists
-                  ? locale.get('transcription_ready')
-                  : locale.get('transcription_not_ready')),
-              subtitle: Text(whisperAvailable
-                  ? (modelExists ? locale.get('transcription_model_loaded') : locale.get('transcription_model_missing'))
-                  : locale.get('transcription_library_missing')),
-            ),
-
-            const Divider(),
-            _SectionHeader(locale.get('transcription_language')),
-            ListTile(
-              leading: const Icon(Icons.language),
-              title: Text(locale.get('transcription_language')),
-              subtitle: Text(_selectedLanguage == 'auto'
-                  ? locale.get('transcription_language_auto')
-                  : _selectedLanguage.toUpperCase()),
-              trailing: DropdownButton<String>(
-                value: _selectedLanguage,
-                items: ['auto', 'de', 'en', 'es', 'hu', 'sv'].map((l) =>
-                  DropdownMenuItem(value: l, child: Text(l == 'auto' ? locale.get('language_auto') : l.toUpperCase()))
-                ).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() => _selectedLanguage = v);
-                    _saveTranscriptionConfig();
-                  }
-                },
+            ],
+          ),
+          FormGroup(
+            title: locale.get('transcription_language'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.language),
+                title: Text(locale.get('transcription_language')),
+                subtitle: Text(_selectedLanguage == 'auto'
+                    ? locale.get('transcription_language_auto')
+                    : _selectedLanguage.toUpperCase()),
+                trailing: DropdownButton<String>(
+                  value: _selectedLanguage,
+                  items: ['auto', 'de', 'en', 'es', 'hu', 'sv'].map((l) =>
+                    DropdownMenuItem(value: l, child: Text(l == 'auto' ? locale.get('language_auto') : l.toUpperCase()))
+                  ).toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setState(() => _selectedLanguage = v);
+                      _saveTranscriptionConfig();
+                    }
+                  },
+                ),
               ),
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('transcription_retention')),
-            ListTile(
-              leading: const Icon(Icons.timer),
-              title: Text(locale.get('transcription_retention')),
-              subtitle: Text('$_retentionDays ${locale.get("days")}'),
-              trailing: DropdownButton<int>(
-                value: _retentionDays,
-                items: [7, 14, 30, 60, 90].map((d) =>
-                  DropdownMenuItem(value: d, child: Text('$d ${locale.get("days")}'))
-                ).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() => _retentionDays = v);
-                    _saveTranscriptionConfig();
-                  }
-                },
+            ],
+          ),
+          FormGroup(
+            title: locale.get('transcription_retention'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.timer),
+                title: Text(locale.get('transcription_retention')),
+                subtitle: Text('$_retentionDays ${locale.get("days")}'),
+                trailing: DropdownButton<int>(
+                  value: _retentionDays,
+                  items: [7, 14, 30, 60, 90].map((d) =>
+                    DropdownMenuItem(value: d, child: Text('$d ${locale.get("days")}'))
+                  ).toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setState(() => _retentionDays = v);
+                      _saveTranscriptionConfig();
+                    }
+                  },
+                ),
               ),
-            ),
-            const Divider(),
-
-            // Model Selection + Download
-            _SectionHeader(locale.get('transcription_model')),
-            for (final size in ['tiny', 'base', 'small'])
-              RadioListTile<String>(
-                value: size,
-                groupValue: _selectedModel,
-                title: Text(_modelLabel(size, locale)),
-                subtitle: _isModelDownloaded(_sizeFromString(size))
-                    ? Text(locale.get('whisper_downloaded'), style: const TextStyle(color: Colors.green))
-                    : null,
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() => _selectedModel = v);
-                    _saveTranscriptionConfig();
-                  }
-                },
+            ],
+          ),
+          FormGroup(
+            title: locale.get('transcription_model'),
+            children: [
+              for (final size in ['tiny', 'base', 'small'])
+                RadioListTile<String>(
+                  value: size,
+                  groupValue: _selectedModel,
+                  title: Text(_modelLabel(size, locale)),
+                  subtitle: _isModelDownloaded(_sizeFromString(size))
+                      ? Text(locale.get('whisper_downloaded'), style: const TextStyle(color: Colors.green))
+                      : null,
+                  onChanged: (v) {
+                    if (v != null) {
+                      setState(() => _selectedModel = v);
+                      _saveTranscriptionConfig();
+                    }
+                  },
+                ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: _buildDownloadWidget(modelExists, locale),
               ),
-
-            // Download button / progress
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: _buildDownloadWidget(modelExists, locale),
-            ),
-          ],
-        ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1119,86 +1179,91 @@ class _MediaSettingsScreenState extends State<MediaSettingsScreen> {
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
-    return Scaffold(
-      appBar: AppBar(title: Text(locale.get('media_settings_title'))),
-      body: SafeArea(
-        child: ListView(
-          children: [
-            const SizedBox(height: 8),
-            _SectionHeader(locale.get('media_auto_download')),
-            _ThresholdTile(
-              icon: Icons.image,
-              label: locale.get('media_images'),
-              value: _settings.maxAutoDownloadImage,
-              onChanged: (v) { setState(() => _settings.maxAutoDownloadImage = v); _save(); },
-            ),
-            _ThresholdTile(
-              icon: Icons.videocam,
-              label: locale.get('media_videos'),
-              value: _settings.maxAutoDownloadVideo,
-              onChanged: (v) { setState(() => _settings.maxAutoDownloadVideo = v); _save(); },
-            ),
-            _ThresholdTile(
-              icon: Icons.insert_drive_file,
-              label: locale.get('media_files'),
-              value: _settings.maxAutoDownloadFile,
-              onChanged: (v) { setState(() => _settings.maxAutoDownloadFile = v); _save(); },
-            ),
-            _ThresholdTile(
-              icon: Icons.mic,
-              label: locale.get('media_voice'),
-              value: _settings.maxAutoDownloadVoice,
-              onChanged: (v) { setState(() => _settings.maxAutoDownloadVoice = v); _save(); },
-            ),
-            const Divider(),
-            SwitchListTile(
-              secondary: const Icon(Icons.cell_tower),
-              title: Text(locale.get('media_mobile_download')),
-              subtitle: Text(locale.get('media_mobile_download_sub')),
-              value: _settings.autoDownloadOnMobile,
-              onChanged: (v) { setState(() => _settings.autoDownloadOnMobile = v); _save(); },
-            ),
-            const Divider(),
-            _SectionHeader(locale.get('media_download_dir')),
-            ListTile(
-              leading: const Icon(Icons.folder),
-              title: Text(locale.get('media_download_dir')),
-              subtitle: Text(_settings.downloadDirectory ?? locale.get('media_download_dir_default')),
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_settings.downloadDirectory != null)
-                    IconButton(
-                      icon: const Icon(Icons.clear),
-                      onPressed: () { setState(() => _settings.downloadDirectory = null); _save(); },
-                    ),
-                  const Icon(Icons.chevron_right),
-                ],
+    return AppBarScaffold(
+      title: locale.get('media_settings_title'),
+      opaqueBody: true,
+      body: ListView(
+        children: [
+          const SizedBox(height: 8),
+          FormGroup(
+            title: locale.get('media_auto_download'),
+            children: [
+              _ThresholdTile(
+                icon: Icons.image,
+                label: locale.get('media_images'),
+                value: _settings.maxAutoDownloadImage,
+                onChanged: (v) { setState(() => _settings.maxAutoDownloadImage = v); _save(); },
               ),
-              onTap: () async {
-                final controller = TextEditingController(text: _settings.downloadDirectory ?? '');
-                final result = await showDialog<String>(
-                  context: context,
-                  builder: (ctx) => AlertDialog(
-                    title: Text(locale.get('media_download_dir')),
-                    content: TextField(
-                      controller: controller,
-                      decoration: InputDecoration(hintText: locale.get('media_download_dir_default')),
+              _ThresholdTile(
+                icon: Icons.videocam,
+                label: locale.get('media_videos'),
+                value: _settings.maxAutoDownloadVideo,
+                onChanged: (v) { setState(() => _settings.maxAutoDownloadVideo = v); _save(); },
+              ),
+              _ThresholdTile(
+                icon: Icons.insert_drive_file,
+                label: locale.get('media_files'),
+                value: _settings.maxAutoDownloadFile,
+                onChanged: (v) { setState(() => _settings.maxAutoDownloadFile = v); _save(); },
+              ),
+              _ThresholdTile(
+                icon: Icons.mic,
+                label: locale.get('media_voice'),
+                value: _settings.maxAutoDownloadVoice,
+                onChanged: (v) { setState(() => _settings.maxAutoDownloadVoice = v); _save(); },
+              ),
+              SwitchListTile(
+                secondary: const Icon(Icons.cell_tower),
+                title: Text(locale.get('media_mobile_download')),
+                subtitle: Text(locale.get('media_mobile_download_sub')),
+                value: _settings.autoDownloadOnMobile,
+                onChanged: (v) { setState(() => _settings.autoDownloadOnMobile = v); _save(); },
+              ),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('media_download_dir'),
+            children: [
+              ListTile(
+                leading: const Icon(Icons.folder),
+                title: Text(locale.get('media_download_dir')),
+                subtitle: Text(_settings.downloadDirectory ?? locale.get('media_download_dir_default')),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_settings.downloadDirectory != null)
+                      IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () { setState(() => _settings.downloadDirectory = null); _save(); },
+                      ),
+                    const Icon(Icons.chevron_right),
+                  ],
+                ),
+                onTap: () async {
+                  final controller = TextEditingController(text: _settings.downloadDirectory ?? '');
+                  final result = await showDialog<String>(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      title: Text(locale.get('media_download_dir')),
+                      content: TextField(
+                        controller: controller,
+                        decoration: InputDecoration(hintText: locale.get('media_download_dir_default')),
+                      ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
+                        TextButton(onPressed: () => Navigator.pop(ctx, controller.text), child: Text(locale.get('ok'))),
+                      ],
                     ),
-                    actions: [
-                      TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
-                      TextButton(onPressed: () => Navigator.pop(ctx, controller.text), child: Text(locale.get('ok'))),
-                    ],
-                  ),
-                );
-                if (result != null) {
-                  setState(() => _settings.downloadDirectory = result.isEmpty ? null : result);
-                  _save();
-                }
-              },
-            ),
-          ],
-        ),
+                  );
+                  if (result != null) {
+                    setState(() => _settings.downloadDirectory = result.isEmpty ? null : result);
+                    _save();
+                  }
+                },
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
@@ -1228,24 +1293,6 @@ class _ThresholdTile extends StatelessWidget {
         value: _options.contains(value) ? value : _options.last,
         items: _options.map((v) => DropdownMenuItem(value: v, child: Text(_formatSize(v)))).toList(),
         onChanged: (v) { if (v != null) onChanged(v); },
-      ),
-    );
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  final String title;
-  const _SectionHeader(this.title);
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-      child: Text(
-        title,
-        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-              color: Theme.of(context).colorScheme.primary,
-            ),
       ),
     );
   }
@@ -1355,78 +1402,71 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
     final locale = AppLocale.read(context);
     final isAndroid = Theme.of(context).platform == TargetPlatform.android;
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(locale.get('notification_settings_title')),
-      ),
-      body: SafeArea(
-        child: ListView(
-          children: [
-            SwitchListTile(
-              secondary: const Icon(Icons.volume_up),
-              title: Text(locale.get('notification_sound_enabled')),
-              value: _settings.soundEnabled,
-              onChanged: (v) {
-                _settings.soundEnabled = v;
-                _save();
-              },
-            ),
-            if (isAndroid)
+    return AppBarScaffold(
+      title: locale.get('notification_settings_title'),
+      opaqueBody: true,
+      body: ListView(
+        children: [
+          const SizedBox(height: 8),
+          FormGroup(
+            title: locale.get('notification_settings_title'),
+            children: [
               SwitchListTile(
-                secondary: const Icon(Icons.vibration),
-                title: Text(locale.get('notification_vibration')),
-                value: _settings.vibrationEnabled,
+                secondary: const Icon(Icons.volume_up),
+                title: Text(locale.get('notification_sound_enabled')),
+                value: _settings.soundEnabled,
                 onChanged: (v) {
-                  _settings.vibrationEnabled = v;
+                  _settings.soundEnabled = v;
                   _save();
                 },
               ),
-            SwitchListTile(
-              secondary: const Icon(Icons.chat_bubble_outline),
-              title: Text(locale.get('notification_message_sound')),
-              value: _settings.messageSoundEnabled,
-              onChanged: _settings.soundEnabled
-                  ? (v) {
-                      _settings.messageSoundEnabled = v;
-                      _save();
-                    }
-                  : null,
-            ),
-            const Divider(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text(
-                locale.get('notification_ringtone_section'),
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
+              if (isAndroid)
+                SwitchListTile(
+                  secondary: const Icon(Icons.vibration),
+                  title: Text(locale.get('notification_vibration')),
+                  value: _settings.vibrationEnabled,
+                  onChanged: (v) {
+                    _settings.vibrationEnabled = v;
+                    _save();
+                  },
+                ),
+              SwitchListTile(
+                secondary: const Icon(Icons.chat_bubble_outline),
+                title: Text(locale.get('notification_message_sound')),
+                value: _settings.messageSoundEnabled,
+                onChanged: _settings.soundEnabled
+                    ? (v) {
+                        _settings.messageSoundEnabled = v;
+                        _save();
+                      }
+                    : null,
               ),
-            ),
-            ...Ringtone.values.map((rt) => RadioListTile<Ringtone>(
-                  title: Text(rt.displayName),
-                  value: rt,
-                  groupValue: _settings.callRingtone,
-                  onChanged: _settings.soundEnabled
-                      ? (v) {
-                          _settings.callRingtone = v!;
-                          _save();
-                          widget.service.notificationSound.previewRingtone(v);
-                        }
-                      : null,
-                )),
-            const Divider(),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text(
-                locale.get('notification_volume'),
-                style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
+            ],
+          ),
+          FormGroup(
+            title: locale.get('notification_ringtone_section'),
+            children: [
+              ...Ringtone.values.map((rt) => RadioListTile<Ringtone>(
+                    title: Text(rt.displayName),
+                    value: rt,
+                    groupValue: _settings.callRingtone,
+                    onChanged: _settings.soundEnabled
+                        ? (v) {
+                            _settings.callRingtone = v!;
+                            _save();
+                            widget.service.notificationSound.previewRingtone(v);
+                          }
+                        : null,
+                  )),
+            ],
+          ),
+          FormGroup(
+            title: locale.get('notification_volume'),
+            padRows: true,
+            dividers: false,
+            children: [
+              const SizedBox(height: 8),
+              Row(
                 children: [
                   const Icon(Icons.volume_mute, size: 20),
                   Expanded(
@@ -1447,10 +1487,11 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
                   const Icon(Icons.volume_up, size: 20),
                 ],
               ),
-            ),
-            const SizedBox(height: 24),
-          ],
-        ),
+              const SizedBox(height: 8),
+            ],
+          ),
+          const SizedBox(height: 16),
+        ],
       ),
     );
   }

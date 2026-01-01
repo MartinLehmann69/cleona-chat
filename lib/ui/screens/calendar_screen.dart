@@ -12,6 +12,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/screens/calendar_sync_screen.dart';
 import 'package:cleona/ui/screens/event_editor_screen.dart';
 
@@ -72,70 +73,71 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final windowEnd = _windowEnd.millisecondsSinceEpoch;
     allOccurrences.addAll(service.calendarManager.getEventsInRange(windowStart, windowEnd));
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(locale.get('calendar')),
-        actions: [
-          // View switcher
-          PopupMenuButton<CalendarView>(
-            icon: Icon(_viewIcon),
-            onSelected: (view) => setState(() => _currentView = view),
-            itemBuilder: (_) => [
-              PopupMenuItem(value: CalendarView.day, child: Text(locale.get('calendar_day'))),
-              PopupMenuItem(value: CalendarView.week, child: Text(locale.get('calendar_week'))),
-              PopupMenuItem(value: CalendarView.month, child: Text(locale.get('calendar_month'))),
-              PopupMenuItem(value: CalendarView.year, child: Text(locale.get('calendar_year'))),
-              PopupMenuItem(value: CalendarView.tasks, child: Text(locale.get('calendar_tasks'))),
-            ],
-          ),
-          // More actions: import, export, print, sync
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert),
-            onSelected: (action) {
-              switch (action) {
-                case 'import':
-                  _importIcs(context, service);
-                case 'export':
-                  _exportIcs(context, service);
-                case 'print':
-                  _printCalendar(context, service, allOccurrences);
-                case 'sync':
-                  Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) => CalendarSyncScreen(service: service),
-                    ),
-                  );
-              }
-            },
-            itemBuilder: (_) => [
-              PopupMenuItem(value: 'import', child: Row(children: [
-                const Icon(Icons.file_upload, size: 20), const SizedBox(width: 8),
-                Text(locale.get('calendar_import')),
-              ])),
-              PopupMenuItem(value: 'export', child: Row(children: [
-                const Icon(Icons.file_download, size: 20), const SizedBox(width: 8),
-                Text(locale.get('calendar_export')),
-              ])),
-              PopupMenuItem(value: 'print', child: Row(children: [
-                const Icon(Icons.print, size: 20), const SizedBox(width: 8),
-                Text(locale.get('calendar_print')),
-              ])),
-              PopupMenuItem(value: 'sync', child: Row(children: [
-                const Icon(Icons.event_repeat, size: 20), const SizedBox(width: 8),
-                Text(locale.get('calendar_sync_title')),
-              ])),
-            ],
-          ),
-          // Today button
-          IconButton(
-            icon: const Icon(Icons.today),
-            onPressed: () => setState(() => _selectedDate = DateTime.now()),
-          ),
-        ],
-      ),
+    return AppBarScaffold(
+      title: _appBarTitle(locale),
+      subtitle: _appBarSubtitle(locale),
+      opaqueBody: true,
+      leading: const BackButton(),
+      actions: [
+        // View switcher
+        PopupMenuButton<CalendarView>(
+          icon: Icon(_viewIcon),
+          onSelected: (view) => setState(() => _currentView = view),
+          itemBuilder: (_) => [
+            PopupMenuItem(value: CalendarView.day, child: Text(locale.get('calendar_day'))),
+            PopupMenuItem(value: CalendarView.week, child: Text(locale.get('calendar_week'))),
+            PopupMenuItem(value: CalendarView.month, child: Text(locale.get('calendar_month'))),
+            PopupMenuItem(value: CalendarView.year, child: Text(locale.get('calendar_year'))),
+            PopupMenuItem(value: CalendarView.tasks, child: Text(locale.get('calendar_tasks'))),
+          ],
+        ),
+        // More actions: import, export, print, sync
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert),
+          onSelected: (action) {
+            switch (action) {
+              case 'import':
+                _importIcs(context, service);
+              case 'export':
+                _exportIcs(context, service);
+              case 'print':
+                _printCalendar(context, service, allOccurrences);
+              case 'sync':
+                Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => CalendarSyncScreen(service: service),
+                  ),
+                );
+            }
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(value: 'import', child: Row(children: [
+              const Icon(Icons.file_upload, size: 20), const SizedBox(width: 8),
+              Text(locale.get('calendar_import')),
+            ])),
+            PopupMenuItem(value: 'export', child: Row(children: [
+              const Icon(Icons.file_download, size: 20), const SizedBox(width: 8),
+              Text(locale.get('calendar_export')),
+            ])),
+            PopupMenuItem(value: 'print', child: Row(children: [
+              const Icon(Icons.print, size: 20), const SizedBox(width: 8),
+              Text(locale.get('calendar_print')),
+            ])),
+            PopupMenuItem(value: 'sync', child: Row(children: [
+              const Icon(Icons.event_repeat, size: 20), const SizedBox(width: 8),
+              Text(locale.get('calendar_sync_title')),
+            ])),
+          ],
+        ),
+        // Today button
+        IconButton(
+          icon: const Icon(Icons.today),
+          onPressed: () => setState(() => _selectedDate = DateTime.now()),
+        ),
+      ],
       body: Column(
         children: [
-          // Navigation header
+          // Navigation header (date prev/next chevrons)
           _buildNavigationHeader(locale, colorScheme),
           // Calendar view
           Expanded(
@@ -205,6 +207,32 @@ class _CalendarScreenState extends State<CalendarScreen> {
         CalendarView.year => Icons.calendar_today,
         CalendarView.tasks => Icons.checklist,
       };
+
+  /// Dynamic AppBar title: month+year for day/week/month, year for year view,
+  /// empty string for tasks (subtitle carries the meaning there).
+  String _appBarTitle(AppLocale locale) {
+    switch (_currentView) {
+      case CalendarView.day:
+      case CalendarView.week:
+      case CalendarView.month:
+        return '${_monthName(_selectedDate.month, locale)} ${_selectedDate.year}';
+      case CalendarView.year:
+        return '${_selectedDate.year}';
+      case CalendarView.tasks:
+        return locale.get('calendar');
+    }
+  }
+
+  /// Subtitle is the current view name, localized.
+  String _appBarSubtitle(AppLocale locale) {
+    return switch (_currentView) {
+      CalendarView.day => locale.get('calendar_day'),
+      CalendarView.week => locale.get('calendar_week'),
+      CalendarView.month => locale.get('calendar_month'),
+      CalendarView.year => locale.get('calendar_year'),
+      CalendarView.tasks => locale.get('calendar_tasks'),
+    };
+  }
 
   DateTime get _windowStart {
     switch (_currentView) {

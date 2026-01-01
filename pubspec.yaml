@@ -88,3 +88,10 @@ flutter:
     - assets/conn_weak.png
     - assets/conn_skeleton.png
     - assets/nat_wizard/router_db.json
+    - assets/skins/ocean/
+    - assets/skins/sunset/
+    - assets/skins/forest/
+    - assets/skins/amethyst/
+    - assets/skins/fire/
+    - assets/skins/storm/
+    - assets/skins/gold/

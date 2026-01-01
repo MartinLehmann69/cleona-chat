@@ -14,7 +14,10 @@ import 'package:cleona/ui/components/language_selector.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:cleona/ui/theme/skins.dart';
-import 'package:cleona/ui/theme/skin_painter.dart' show SkinAddButton, SkinFab;
+import 'package:cleona/ui/theme/character_profile.dart';
+import 'package:cleona/ui/theme/theme_access.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/chat_list_tile.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
 import 'package:cleona/ui/screens/nfc_exchange_screen.dart';
@@ -27,6 +30,7 @@ import 'package:cleona/core/network/nfc_platform_bridge.dart' show isNfcAvailabl
 import 'package:cleona/core/network/contact_seed.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:cleona/ui/components/skin_fab.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -172,7 +176,30 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     }
 
     final locale = AppLocale.of(context);
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final character = theme.character;
+    final isPhotoMode = character.surfaceRenderMode == SurfaceRenderMode.photo;
+    final isSlateMode = character.surfaceRenderMode == SurfaceRenderMode.cssSlate;
+    final needsOverlay = isPhotoMode || isSlateMode;
+
+    // Multi-layer drop shadow for text that sits over the photo surface.
+    final overlayShadows = <Shadow>[
+      const Shadow(color: Color(0xE6000000), blurRadius: 2, offset: Offset(0, 1)),
+      const Shadow(color: Color(0x99000000), blurRadius: 8, offset: Offset(0, 2)),
+    ];
+
+    final tabLabelStyle = TextStyle(
+      fontSize: 12,
+      fontWeight: FontWeight.w600,
+      color: needsOverlay ? Colors.white : null,
+      shadows: isPhotoMode ? overlayShadows : null,
+    );
+    final tabUnselectedStyle = TextStyle(
+      fontSize: 12,
+      color: needsOverlay ? Colors.white.withValues(alpha: 0.7) : null,
+      shadows: isPhotoMode ? overlayShadows : null,
+    );
 
     // Sort: unread first, then by lastActivity DESC
     List<Conversation> sortUnreadFirst(List<Conversation> list) {
@@ -210,124 +237,118 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final groupUnread = groupConvs.fold<int>(0, (s, c) => s + c.unreadCount);
     final channelUnread = channelConvs.fold<int>(0, (s, c) => s + c.unreadCount);
 
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Cleona — ${service.displayName}'),
-        actions: [
-          // Language selector
-          const LanguageSelector(),
-          // Connection status icon (WiFi/Mobile/Offline)
-          _ConnectionStatusIcon(appState: appState),
-          // Network Stats — combined health indicator + peer count, opens stats page
-          IconButton(
-            icon: Badge(
-              label: Text('${service.peerCount}'),
-              backgroundColor: service.peerCount >= 10
-                  ? Colors.green
-                  : service.peerCount >= 3
-                      ? Colors.orange
-                      : colorScheme.error,
-              textColor: Colors.white,
-              child: const Icon(Icons.bar_chart),
-            ),
-            tooltip: AppLocale.read(context).get('stats_title'),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => MultiProvider(
-                providers: [
-                  ChangeNotifierProvider.value(value: appState),
-                  ChangeNotifierProvider.value(value: AppLocale.read(context)),
-                ],
-                child: Scaffold(
-                  appBar: AppBar(title: Text(AppLocale.read(context).get('stats_title'))),
-                  body: SafeArea(top: false, child: NetworkStatsScreen(service: service)),
-                ),
-              )),
-            ),
+    return AppBarScaffold(
+      title: 'Cleona',
+      subtitle: service.displayName,
+      actions: [
+        // Language selector
+        const LanguageSelector(),
+        // Connection status icon (WiFi/Mobile/Offline)
+        _ConnectionStatusIcon(appState: appState),
+        // Network Stats — combined health indicator + peer count, opens stats page
+        IconButton(
+          icon: Badge(
+            label: Text('${service.peerCount}'),
+            backgroundColor: service.peerCount >= 10
+                ? Colors.green
+                : service.peerCount >= 3
+                    ? Colors.orange
+                    : colorScheme.error,
+            textColor: Colors.white,
+            child: const Icon(Icons.bar_chart),
           ),
-          // Calendar (§23)
-          IconButton(
-            icon: const Icon(Icons.calendar_month),
-            tooltip: locale.get('calendar'),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => MultiProvider(
-                providers: [
-                  ChangeNotifierProvider.value(value: appState),
-                  ChangeNotifierProvider.value(value: AppLocale.read(context)),
-                ],
-                child: const CalendarScreen(),
-              )),
-            ),
-          ),
-          // Settings
-          IconButton(
-            icon: const Icon(Icons.settings),
-            tooltip: locale.get('settings'),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => MultiProvider(
-                providers: [
-                  ChangeNotifierProvider.value(value: appState),
-                  ChangeNotifierProvider.value(value: AppLocale.read(context)),
-                ],
-                child: Scaffold(
-                  appBar: AppBar(title: Text(locale.get('settings'))),
-                  body: SafeArea(top: false, child: SettingsScreen(service: service)),
-                ),
-              )),
-            ),
-          ),
-        ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(80),
-          child: Column(
-            children: [
-              // Identity tabs
-              SizedBox(
-                height: 36,
-                child: _IdentityTabBar(appState: appState),
+          tooltip: AppLocale.read(context).get('stats_title'),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => MultiProvider(
+              providers: [
+                ChangeNotifierProvider.value(value: appState),
+                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+              ],
+              child: Scaffold(
+                appBar: AppBar(title: Text(AppLocale.read(context).get('stats_title'))),
+                body: SafeArea(top: false, child: NetworkStatsScreen(service: service)),
               ),
-              // Category tabs
-              TabBar(
-                controller: _tabController,
-                isScrollable: true,
-                tabAlignment: TabAlignment.start,
-                labelPadding: const EdgeInsets.symmetric(horizontal: 6),
-                labelStyle: const TextStyle(fontSize: 12),
-                unselectedLabelStyle: const TextStyle(fontSize: 12),
-                tabs: [
-                  _tabWithBadge(locale.get('tab_recent'), totalUnread),
-                  Tab(text: locale.get('tab_favorites')),
-                  _tabWithBadge(locale.get('tab_chats'), dmUnread),
-                  _tabWithBadge(locale.get('tab_groups'), groupUnread),
-                  _tabWithBadge(locale.get('tab_channels'), channelUnread),
-                  _tabWithBadge(locale.get('tab_inbox'), pendingCount),
-                ],
-              ),
-            ],
+            )),
           ),
         ),
-      ),
-      body: SafeArea(
-        top: false,
-        child: TabBarView(
-        controller: _tabController,
+        // Calendar (§23)
+        IconButton(
+          icon: const Icon(Icons.calendar_month),
+          tooltip: locale.get('calendar'),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => MultiProvider(
+              providers: [
+                ChangeNotifierProvider.value(value: appState),
+                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+              ],
+              child: const CalendarScreen(),
+            )),
+          ),
+        ),
+        // Settings
+        IconButton(
+          icon: const Icon(Icons.settings),
+          tooltip: locale.get('settings'),
+          onPressed: () => Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => MultiProvider(
+              providers: [
+                ChangeNotifierProvider.value(value: appState),
+                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+              ],
+              child: SettingsScreen(service: service),
+            )),
+          ),
+        ),
+      ],
+      body: Column(
         children: [
-          // Recent: all conversations (with donation banner)
-          _ConversationListView(conversations: allConvs, service: service, emptyKey: 'no_chats', showDonationBanner: true),
-          // Favorites: conversations marked as favorite
-          _ConversationListView(conversations: favConvs, service: service, emptyKey: 'no_favorites'),
-          // Contacts: all accepted 1:1 contacts (with or without conversation)
-          _ConversationListView(conversations: kontakteList, service: service, emptyKey: 'no_direct_chats'),
-          // Groups: only groups
-          _ConversationListView(conversations: groupConvs, service: service, emptyKey: 'no_groups'),
-          // Channels: sub-tabs (Subscribed | My Channels | Search)
-          _ChannelTabView(channelConvs: channelConvs, service: service),
-          // Inbox: pending requests
-          _InboxView(service: service),
+          // Identity tabs
+          SizedBox(
+            height: 36,
+            child: _IdentityTabBar(appState: appState),
+          ),
+          // Category tabs
+          TabBar(
+            controller: _tabController,
+            isScrollable: true,
+            tabAlignment: TabAlignment.start,
+            labelPadding: const EdgeInsets.symmetric(horizontal: 6),
+            labelStyle: tabLabelStyle,
+            unselectedLabelStyle: tabUnselectedStyle,
+            labelColor: tabLabelStyle.color,
+            unselectedLabelColor: tabUnselectedStyle.color,
+            tabs: [
+              _tabWithBadge(locale.get('tab_recent'), totalUnread),
+              Tab(text: locale.get('tab_favorites')),
+              _tabWithBadge(locale.get('tab_chats'), dmUnread),
+              _tabWithBadge(locale.get('tab_groups'), groupUnread),
+              _tabWithBadge(locale.get('tab_channels'), channelUnread),
+              _tabWithBadge(locale.get('tab_inbox'), pendingCount),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
+              children: [
+                // Recent: all conversations (with donation banner)
+                _ConversationListView(conversations: allConvs, service: service, emptyKey: 'no_chats', showDonationBanner: true),
+                // Favorites: conversations marked as favorite
+                _ConversationListView(conversations: favConvs, service: service, emptyKey: 'no_favorites'),
+                // Chats: all accepted 1:1 contacts (with or without conversation)
+                _ConversationListView(conversations: kontakteList, service: service, emptyKey: 'no_direct_chats'),
+                // Groups: only groups
+                _ConversationListView(conversations: groupConvs, service: service, emptyKey: 'no_groups'),
+                // Channels: sub-tabs (Subscribed | My Channels | Search)
+                _ChannelTabView(channelConvs: channelConvs, service: service),
+                // Inbox: pending requests
+                _InboxView(service: service),
+              ],
+            ),
+          ),
         ],
-      ),
       ),
       floatingActionButton: _buildFab(context, service),
     );
@@ -347,37 +368,27 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget? _buildFab(BuildContext context, ICleonaService service) {
-    final locale = AppLocale.read(context);
     final skin = Skins.byId(IdentityManager().getActiveIdentity()?.skinId);
 
     switch (_tabController.index) {
       case 0: // Recent — add contact
       case 2: // Contacts — add contact
         return SkinFab(
-          skinId: skin.id,
-          color: Theme.of(context).colorScheme.primary,
-          onColor: Theme.of(context).colorScheme.onPrimary,
-          onTap: () => _showAddContactDialog(context),
-          tooltip: locale.get('add_contact'),
-          icon: Icons.add,
+          onPressed: () => _showAddContactDialog(context),
+          icon: skin.addContactIcon,
+          heroTag: 'fab_contact',
         );
       case 3: // Groups — new group
         return SkinFab(
-          skinId: skin.id,
-          color: Theme.of(context).colorScheme.primary,
-          onColor: Theme.of(context).colorScheme.onPrimary,
-          onTap: () => _showCreateGroupDialog(context, service),
-          tooltip: locale.get('create_group'),
-          icon: Icons.add,
+          onPressed: () => _showCreateGroupDialog(context, service),
+          icon: skin.addGroupIcon,
+          heroTag: 'fab_group',
         );
       case 4: // Channels — new channel
         return SkinFab(
-          skinId: skin.id,
-          color: Theme.of(context).colorScheme.primary,
-          onColor: Theme.of(context).colorScheme.onPrimary,
-          onTap: () => _showCreateChannelDialog(context, service),
-          tooltip: locale.get('create_channel'),
-          icon: Icons.add,
+          onPressed: () => _showCreateChannelDialog(context, service),
+          icon: skin.addChannelIcon,
+          heroTag: 'fab_channel',
         );
       default:
         return null;
@@ -788,16 +799,34 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
 
     return Column(
       children: [
-        TabBar(
-          controller: _subTabController,
-          labelStyle: const TextStyle(fontSize: 11),
-          unselectedLabelStyle: const TextStyle(fontSize: 11),
-          tabs: [
-            Tab(text: locale.get('channel_tab_subscribed')),
-            Tab(text: locale.get('channel_tab_owned')),
-            Tab(text: locale.get('channel_tab_search')),
-          ],
-        ),
+        Builder(builder: (ctx) {
+          final character = Theme.of(ctx).character;
+          final isPhoto = character.surfaceRenderMode == SurfaceRenderMode.photo;
+          final isSlate = character.surfaceRenderMode == SurfaceRenderMode.cssSlate;
+          final needsOverlay = isPhoto || isSlate;
+          final shadows = isPhoto
+              ? const <Shadow>[
+                  Shadow(color: Color(0xE6000000), blurRadius: 2, offset: Offset(0, 1)),
+                  Shadow(color: Color(0x99000000), blurRadius: 6, offset: Offset(0, 2)),
+                ]
+              : null;
+          final labelColor = needsOverlay ? Colors.white : null;
+          final unselectedColor = needsOverlay
+              ? Colors.white.withValues(alpha: 0.7)
+              : null;
+          return TabBar(
+            controller: _subTabController,
+            labelStyle: TextStyle(fontSize: 11, color: labelColor, shadows: shadows),
+            unselectedLabelStyle: TextStyle(fontSize: 11, color: unselectedColor, shadows: shadows),
+            labelColor: labelColor,
+            unselectedLabelColor: unselectedColor,
+            tabs: [
+              Tab(text: locale.get('channel_tab_subscribed')),
+              Tab(text: locale.get('channel_tab_owned')),
+              Tab(text: locale.get('channel_tab_search')),
+            ],
+          );
+        }),
         Expanded(
           child: TabBarView(
             controller: _subTabController,
@@ -1104,140 +1133,125 @@ class _ConversationListViewState extends State<_ConversationListView> {
         final lastMsg = conv.messages.isNotEmpty ? conv.messages.last : null;
         final colorScheme = Theme.of(context).colorScheme;
 
-        return ListTile(
-          leading: _avatar(context, conv),
-          title: Row(
-            children: [
-              if (conv.isFavorite)
-                Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Icon(Icons.star, size: 14, color: Colors.amber),
-                ),
-              Expanded(
-                child: Text(
-                  conv.displayName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: conv.unreadCount > 0
-                      ? const TextStyle(fontWeight: FontWeight.bold)
-                      : null,
-                ),
-              ),
-            ],
-          ),
-          subtitle: lastMsg != null
-              ? Text(
-                  _lastMessagePreview(context, lastMsg),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontStyle: lastMsg.isDeleted ? FontStyle.italic : null,
-                    color: colorScheme.onSurfaceVariant,
-                  ),
-                )
-              : null,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  if (lastMsg != null)
-                    Text(
-                      _formatTime(lastMsg.timestamp),
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: conv.unreadCount > 0 ? colorScheme.primary : colorScheme.outline,
-                          ),
-                    ),
-                  if (conv.unreadCount > 0) ...[
-                    const SizedBox(height: 4),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: colorScheme.primary,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        '${conv.unreadCount}',
-                        style: TextStyle(color: colorScheme.onPrimary, fontSize: 11, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              PopupMenuButton<String>(
-                  iconSize: 20,
-                  padding: EdgeInsets.zero,
-                  onSelected: (action) {
-                    if (action == 'favorite') {
-                      widget.service.toggleFavorite(conv.id);
-                    } else if (action == 'rename_contact') {
-                      final contact = widget.service.getContact(conv.id);
-                      if (contact != null) {
-                        _showRenameContactDialogFromConv(context, widget.service, contact);
-                      }
-                    } else if (action == 'delete_contact') {
-                      _showDeleteContactDialog(context, conv, colorScheme);
-                    } else if (action == 'leave') {
-                      if (conv.isGroup) {
-                        _showLeaveGroupDialog(context, conv, colorScheme);
-                      } else if (conv.isChannel) {
-                        _showLeaveChannelDialog(context, conv, colorScheme);
-                      }
-                    } else if (action == 'info') {
-                      if (conv.isGroup) {
-                        _showGroupInfoDialog(context, conv.id, widget.service);
-                      } else if (conv.isChannel) {
-                        _showChannelInfoDialog(context, conv.id, widget.service);
-                      }
-                    }
-                  },
-                  itemBuilder: (_) {
-                    final locale = AppLocale.read(context);
-                    return [
-                      // Favorite toggle — for all types
-                      PopupMenuItem(value: 'favorite', child: Row(children: [
-                        Icon(conv.isFavorite ? Icons.star : Icons.star_border, size: 18, color: conv.isFavorite ? Colors.amber : null),
-                        const SizedBox(width: 8),
-                        Text(conv.isFavorite ? locale.get('remove_from_favorites') : locale.get('add_to_favorites')),
-                      ])),
-                      // Type-specific entries
-                      if (conv.isGroup) ...[
-                        PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('group_info'))])),
-                        PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
-                      ],
-                      if (conv.isChannel) ...[
-                        PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
-                        PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
-                      ],
-                      if (!conv.isGroup && !conv.isChannel) ...[
-                        PopupMenuItem(value: 'rename_contact', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('rename_contact'))])),
-                        PopupMenuItem(value: 'delete_contact', child: Row(children: [const Icon(Icons.person_remove, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('delete_contact'), style: const TextStyle(color: Colors.red))])),
-                      ],
-                    ];
-                  },
-                ),
-            ],
-          ),
-          onTap: () {
-            conv.unreadCount = 0;
-            final appState = context.read<CleonaAppState>();
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => ChangeNotifierProvider.value(
-                  value: appState,
-                  child: ChatScreen(
-                    conversationId: conv.id,
-                    displayName: conv.displayName,
-                    isGroup: conv.isGroup,
-                    isChannel: conv.isChannel,
-                  ),
-                ),
-              ),
-            );
+        // Build avatar widget for ChatListTile.avatarOverride
+        final avatarWidget = _avatar(context, conv);
+
+        // Build context-menu trailing widget
+        final contextMenu = PopupMenuButton<String>(
+          iconSize: 20,
+          padding: EdgeInsets.zero,
+          onSelected: (action) {
+            if (action == 'favorite') {
+              widget.service.toggleFavorite(conv.id);
+            } else if (action == 'rename_contact') {
+              final contact = widget.service.getContact(conv.id);
+              if (contact != null) {
+                _showRenameContactDialogFromConv(context, widget.service, contact);
+              }
+            } else if (action == 'delete_contact') {
+              _showDeleteContactDialog(context, conv, colorScheme);
+            } else if (action == 'leave') {
+              if (conv.isGroup) {
+                _showLeaveGroupDialog(context, conv, colorScheme);
+              } else if (conv.isChannel) {
+                _showLeaveChannelDialog(context, conv, colorScheme);
+              }
+            } else if (action == 'info') {
+              if (conv.isGroup) {
+                _showGroupInfoDialog(context, conv.id, widget.service);
+              } else if (conv.isChannel) {
+                _showChannelInfoDialog(context, conv.id, widget.service);
+              }
+            }
           },
+          itemBuilder: (_) {
+            final locale = AppLocale.read(context);
+            return [
+              // Favorite toggle — for all types
+              PopupMenuItem(value: 'favorite', child: Row(children: [
+                Icon(conv.isFavorite ? Icons.star : Icons.star_border, size: 18, color: conv.isFavorite ? Colors.amber : null),
+                const SizedBox(width: 8),
+                Text(conv.isFavorite ? locale.get('remove_from_favorites') : locale.get('add_to_favorites')),
+              ])),
+              // Type-specific entries
+              if (conv.isGroup) ...[
+                PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('group_info'))])),
+                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+              ],
+              if (conv.isChannel) ...[
+                PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
+                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+              ],
+              if (!conv.isGroup && !conv.isChannel) ...[
+                PopupMenuItem(value: 'rename_contact', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('rename_contact'))])),
+                PopupMenuItem(value: 'delete_contact', child: Row(children: [const Icon(Icons.person_remove, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('delete_contact'), style: const TextStyle(color: Colors.red))])),
+              ],
+            ];
+          },
+        );
+
+        // Build preview text: prefix deleted/media/text
+        final previewText = lastMsg != null
+            ? _lastMessagePreview(context, lastMsg)
+            : '';
+
+        // Build timestamp string from last message or last activity
+        final timestampStr = lastMsg != null
+            ? _formatTime(lastMsg.timestamp)
+            : _formatTime(conv.lastActivity);
+
+        // Favourite star prefix baked into name for ChatListTile
+        final displayName = conv.isFavorite
+            ? '★ ${conv.displayName}'
+            : conv.displayName;
+
+        // ChatListTile has no trailing slot — overlay the context-menu button
+        // via a Stack so the long-press popup is still reachable.
+        return Stack(
+          children: [
+            ChatListTile(
+              // isPeerOnline: Conversation has no online-presence field.
+              // The routing layer tracks ackConfirmed per-node but does not
+              // expose it at conversation level. Defaulting to false is safe —
+              // Task 21 (contacts_screen) can add presence once the service
+              // interface exposes it.
+              isOnline: false,
+              name: displayName,
+              preview: previewText,
+              timestamp: timestampStr,
+              unreadCount: conv.unreadCount,
+              avatarOverride: avatarWidget,
+              onTap: () {
+                conv.unreadCount = 0;
+                final appState = context.read<CleonaAppState>();
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ChangeNotifierProvider.value(
+                      value: appState,
+                      child: ChatScreen(
+                        conversationId: conv.id,
+                        displayName: conv.displayName,
+                        isGroup: conv.isGroup,
+                        isChannel: conv.isChannel,
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            // Context-menu overlay — positioned at trailing edge so it doesn't
+            // occlude the unread badge (badge is inside ChatListTile content row).
+            Positioned(
+              top: 0,
+              right: 0,
+              bottom: 0,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: contextMenu,
+              ),
+            ),
+          ],
         );
       },
     ),
@@ -1735,7 +1749,22 @@ class _InboxView extends StatelessWidget {
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final pending = service.pendingContacts;
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final character = theme.character;
+    final isPhoto = character.surfaceRenderMode == SurfaceRenderMode.photo;
+    final isSlate = character.surfaceRenderMode == SurfaceRenderMode.cssSlate;
+    final needsOverlay = isPhoto || isSlate;
+    final overlayShadows = isPhoto
+        ? const <Shadow>[
+            Shadow(color: Color(0xE6000000), blurRadius: 2, offset: Offset(0, 1)),
+            Shadow(color: Color(0x99000000), blurRadius: 6, offset: Offset(0, 2)),
+          ]
+        : null;
+    final titleColor = needsOverlay ? Colors.white : null;
+    final subtitleColor = needsOverlay
+        ? Colors.white.withValues(alpha: 0.7)
+        : null;
 
     if (pending.isEmpty) {
       return _EmptyState(
@@ -1751,8 +1780,10 @@ class _InboxView extends StatelessWidget {
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
           child: Text(
             locale.tr('contact_requests_count', {'count': '${pending.length}'}),
-            style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                  color: colorScheme.primary,
+            style: theme.textTheme.titleSmall?.copyWith(
+                  color: needsOverlay ? Colors.white : colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                  shadows: overlayShadows,
                 ),
           ),
         ),
@@ -1763,9 +1794,23 @@ class _InboxView extends StatelessWidget {
                       backgroundColor: Colors.orange.shade100,
                       child: const Icon(Icons.person_add, color: Colors.orange),
                     ),
-              title: Text(c.displayName, style: const TextStyle(fontWeight: FontWeight.w500)),
-              subtitle: Text(c.nodeIdHex.substring(0, 16),
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 11)),
+              title: Text(
+                c.displayName,
+                style: TextStyle(
+                  fontWeight: FontWeight.w500,
+                  color: titleColor,
+                  shadows: overlayShadows,
+                ),
+              ),
+              subtitle: Text(
+                c.nodeIdHex.substring(0, 16),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 11,
+                  color: subtitleColor,
+                  shadows: overlayShadows,
+                ),
+              ),
               trailing: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
@@ -1863,15 +1908,15 @@ class _IdentityTabBar extends StatelessWidget {
             },
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: SkinAddButton(
-            skinId: Skins.byId(IdentityManager().getActiveIdentity()?.skinId).id,
+        IconButton(
+          onPressed: () => _showCreateDialog(context),
+          icon: Icon(
+            Skins.byId(IdentityManager().getActiveIdentity()?.skinId).addIdentityIcon,
             color: Skins.byId(IdentityManager().getActiveIdentity()?.skinId)
                 .effectiveColor(Theme.of(context).brightness),
-            onTap: () => _showCreateDialog(context),
-            size: 28,
           ),
+          iconSize: 28,
+          padding: const EdgeInsets.only(right: 8),
         ),
       ],
     );
@@ -1944,7 +1989,27 @@ class _IdentityTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final character = theme.character;
+    final isPhotoMode = character.surfaceRenderMode == SurfaceRenderMode.photo;
+    final isSlateMode = character.surfaceRenderMode == SurfaceRenderMode.cssSlate;
+    final overlayShadows = isPhotoMode
+        ? const <Shadow>[
+            Shadow(color: Color(0xE6000000), blurRadius: 2, offset: Offset(0, 1)),
+            Shadow(color: Color(0x99000000), blurRadius: 6, offset: Offset(0, 2)),
+          ]
+        : null;
+
+    // Active: show a semi-transparent chip background so the active tab stands
+    // out against photos. Inactive: no chip bg so the photo shines through.
+    final activeChipColor = isPhotoMode
+        ? Colors.black.withValues(alpha: 0.45)
+        : colorScheme.surface;
+    final inactiveTextColor = (isPhotoMode || isSlateMode)
+        ? Colors.white.withValues(alpha: 0.85)
+        : colorScheme.onSurfaceVariant;
+    final activeTextColor = isPhotoMode ? Colors.white : skinColor;
 
     return InkWell(
         onTap: onTap,
@@ -1953,7 +2018,7 @@ class _IdentityTab extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
           decoration: BoxDecoration(
             borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
-            color: isActive ? colorScheme.surface : Colors.transparent,
+            color: isActive ? activeChipColor : Colors.transparent,
             border: isActive
                 ? Border.all(color: skinColor, width: 1.5)
                 : Border.all(color: Colors.transparent),
@@ -1974,9 +2039,10 @@ class _IdentityTab extends StatelessWidget {
               Text(
                 name,
                 style: TextStyle(
-                  color: isActive ? skinColor : colorScheme.onSurfaceVariant,
+                  color: isActive ? activeTextColor : inactiveTextColor,
                   fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
                   fontSize: 12,
+                  shadows: overlayShadows,
                 ),
               ),
               if (unreadCount > 0) ...[

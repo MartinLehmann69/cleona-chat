@@ -20,7 +20,8 @@ import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
-import 'package:cleona/ui/theme/skin_painter.dart' show SkinBackgroundPainter, SkinWatermarkPainter;
+import 'package:cleona/ui/components/message_bubble.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/media/clipboard_helper.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
@@ -150,39 +151,30 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  Widget _buildSubtitle(BuildContext context, ICleonaService? service) {
+  /// Returns the subtitle as a plain [String] for use with [AppBarScaffold].
+  String? _buildSubtitleText(BuildContext context, ICleonaService? service) {
     final locale = AppLocale.read(context);
-    // Check typing state via IpcClient
     if (!widget.isGroup && !widget.isChannel && service is IpcClient) {
       if (service.isContactTyping(widget.conversationId)) {
-        return Text(
-          locale.get('typing'),
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.primary,
-                fontStyle: FontStyle.italic,
-              ),
-        );
+        // Typing indicator — AppBarScaffold shows it as static text.
+        // Search mode has no subtitle — the AppBar title is fully consumed by the search TextField.
+        return locale.get('typing');
       }
     }
-
-    String subtitle;
     if (widget.isChannel) {
       final channel = service?.channels[widget.conversationId];
-      subtitle = channel != null ? locale.tr('subscribers_count', {'count': '${channel.members.length}'}) : locale.get('leave');
+      if (channel != null) {
+        return locale.tr('subscribers_count', {'count': '${channel.members.length}'});
+      }
     } else if (widget.isGroup) {
       final group = service?.groups[widget.conversationId];
-      subtitle = group != null ? locale.tr('members_count', {'count': '${group.members.length}'}) : locale.get('leave');
+      if (group != null) {
+        return locale.tr('members_count', {'count': '${group.members.length}'});
+      }
     } else {
-      subtitle = widget.conversationId.substring(0, 16);
+      return widget.conversationId.substring(0, 16);
     }
-
-    return Text(
-      subtitle,
-      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            fontFamily: (widget.isGroup || widget.isChannel) ? null : 'monospace',
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
-    );
+    return null;
   }
 
   void _updateSearchResults(List<UiMessage> messages) {
@@ -259,192 +251,199 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: _isSearching
-            ? Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _searchTextController,
-                      autofocus: true,
-                      style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
-                      decoration: InputDecoration(
-                        hintText: locale.get('search_messages'),
-                        border: InputBorder.none,
-                        isDense: true,
-                      ),
-                      onChanged: (v) {
-                        setState(() => _chatSearchQuery = v.trim());
-                        _updateSearchResults(messages);
-                      },
-                    ),
-                  ),
-                  if (_searchMatchIndices.isNotEmpty)
-                    Text(
-                      locale.tr('search_result_count', {
-                        'current': '${_currentSearchIndex + 1}',
-                        'total': '${_searchMatchIndices.length}',
-                      }),
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  IconButton(
-                    icon: const Icon(Icons.keyboard_arrow_up, size: 20),
-                    onPressed: () => _navigateSearchResult(-1, messages),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.keyboard_arrow_down, size: 20),
-                    onPressed: () => _navigateSearchResult(1, messages),
-                  ),
-                ],
-              )
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(widget.displayName),
-                  _buildSubtitle(context, service),
-                ],
-              ),
-        leading: _isSearching
-            ? IconButton(
-                icon: const Icon(Icons.arrow_back),
-                onPressed: () => setState(() {
-                  _isSearching = false;
-                  _searchTextController.clear();
-                  _chatSearchQuery = '';
-                  _searchMatchIndices = [];
-                  _currentSearchIndex = -1;
-                }),
-              )
-            : null,
-        actions: _isSearching
-            ? []
-            : [
-                IconButton(
-                  icon: const Icon(Icons.search),
-                  tooltip: locale.get('search_messages'),
-                  onPressed: () => setState(() => _isSearching = true),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.tune),
-                  tooltip: locale.get('chat_settings'),
-                  onPressed: () => _showChatSettings(context, service),
-                ),
-                if (!widget.isGroup && !widget.isChannel)
-                  IconButton(
-                    icon: const Icon(Icons.call),
-                    tooltip: locale.get('call_tooltip'),
-                    onPressed: () => _startCall(context, appState),
-                  ),
-                if (widget.isGroup) ...[
-                  IconButton(
-                    icon: const Icon(Icons.call),
-                    tooltip: 'Gruppenanruf',
-                    onPressed: () => _startGroupCall(context, appState),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.poll),
-                    tooltip: locale.get('poll_create'),
-                    onPressed: () => _openPollEditor(context),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.info_outline),
-                    tooltip: locale.get('group_info'),
-                    onPressed: () => _showGroupInfo(context, service),
-                  ),
-                ],
-                if (widget.isChannel) ...[
-                  IconButton(
-                    icon: const Icon(Icons.poll),
-                    tooltip: locale.get('poll_create'),
-                    onPressed: () => _openPollEditor(context),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.info_outline),
-                    tooltip: locale.get('channel_info'),
-                    onPressed: () => _showChannelInfo(context, service),
-                  ),
-                ],
-              ],
-      ),
-      body: SafeArea(
-        top: false, // AppBar handles top
-        child: DropTarget(
-          onDragDone: (details) async {
-            for (final file in details.files) {
-              final path = file.path;
-              if (service != null) {
-                await service.sendMediaMessage(widget.conversationId, path);
-              }
-            }
-            _scrollToBottomAfterBuild();
-          },
-          onDragEntered: (_) => setState(() => _isDragging = true),
-          onDragExited: (_) => setState(() => _isDragging = false),
-          child: Stack(
+    // Body content shared between normal and search scaffold variants.
+    final chatBody = DropTarget(
+      onDragDone: (details) async {
+        for (final file in details.files) {
+          final path = file.path;
+          if (service != null) {
+            await service.sendMediaMessage(widget.conversationId, path);
+          }
+        }
+        _scrollToBottomAfterBuild();
+      },
+      onDragEntered: (_) => setState(() => _isDragging = true),
+      onDragExited: (_) => setState(() => _isDragging = false),
+      child: Stack(
+        children: [
+          Column(
             children: [
-              Column(
-                children: [
-                  // Pending DM config proposal banner (show when PEER proposed, not when WE proposed)
-                  if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
-                    _buildConfigProposalBanner(context, conv!, service),
-                  Expanded(
-                    child: _ChatBackground(
-                      child: messages.isEmpty
-                          ? Center(
-                              child: Text(
-                                locale.get('no_messages_yet'),
-                                style: TextStyle(color: Theme.of(context).colorScheme.outline),
-                              ),
-                            )
-                          : ListView.builder(
-                              controller: _scrollController,
-                              padding: const EdgeInsets.all(8),
-                              itemCount: messages.length,
-                              itemBuilder: (context, index) {
-                                final msg = messages[index];
-                                final isHighlighted = _isSearching &&
-                                    _currentSearchIndex >= 0 &&
-                                    _currentSearchIndex < _searchMatchIndices.length &&
-                                    _searchMatchIndices[_currentSearchIndex] == index;
-                                return _MessageBubble(
-                                  message: msg,
-                                  isEditing: _editingMessageId == msg.id,
-                                  isGroup: widget.isGroup || widget.isChannel,
-                                  senderDisplayName: _getSenderName(msg, service),
-                                  chatConfig: conv?.config,
-                                  onMessageAction: (action, m) => _handleMessageAction(action, m, service),
-                                  isSearchHighlight: isHighlighted,
-                                );
-                              },
-                            ),
-                    ),
-                  ),
-                  _buildInputArea(context, service),
-                ],
-              ),
-              if (_isDragging)
-                Positioned.fill(
-                  child: Container(
-                    color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
-                    child: Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.file_upload, size: 64, color: Theme.of(context).colorScheme.primary),
-                          const SizedBox(height: 8),
-                          Text(locale.get('drop_files_here'),
-                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
-                              color: Theme.of(context).colorScheme.primary)),
-                        ],
-                      ),
-                    ),
-                  ),
+              // Pending DM config proposal banner (show when PEER proposed, not when WE proposed)
+              if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
+                _buildConfigProposalBanner(context, conv!, service),
+              Expanded(
+                child: _ChatBackground(
+                  child: messages.isEmpty
+                      ? Center(
+                          child: Text(
+                            locale.get('no_messages_yet'),
+                            style: TextStyle(color: Theme.of(context).colorScheme.outline),
+                          ),
+                        )
+                      : ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.all(8),
+                          itemCount: messages.length,
+                          itemBuilder: (context, index) {
+                            final msg = messages[index];
+                            final isHighlighted = _isSearching &&
+                                _currentSearchIndex >= 0 &&
+                                _currentSearchIndex < _searchMatchIndices.length &&
+                                _searchMatchIndices[_currentSearchIndex] == index;
+                            return _MessageBubble(
+                              message: msg,
+                              isEditing: _editingMessageId == msg.id,
+                              isGroup: widget.isGroup || widget.isChannel,
+                              senderDisplayName: _getSenderName(msg, service),
+                              chatConfig: conv?.config,
+                              onMessageAction: (action, m) => _handleMessageAction(action, m, service),
+                              isSearchHighlight: isHighlighted,
+                            );
+                          },
+                        ),
                 ),
+              ),
+              _buildInputArea(context, service),
             ],
           ),
-        ),
+          if (_isDragging)
+            Positioned.fill(
+              child: Container(
+                color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.1),
+                child: Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.file_upload, size: 64, color: Theme.of(context).colorScheme.primary),
+                      const SizedBox(height: 8),
+                      Text(locale.get('drop_files_here'),
+                        style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold,
+                          color: Theme.of(context).colorScheme.primary)),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
+    );
+
+    // Search mode: keep standard Scaffold+AppBar because the title area becomes
+    // a full text-field widget, which AppBarScaffold (String-only title) does not
+    // support. Body gets SafeArea(top:false) since the AppBar already covers top.
+    if (_isSearching) {
+      return Scaffold(
+        appBar: AppBar(
+          title: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _searchTextController,
+                  autofocus: true,
+                  style: TextStyle(color: Theme.of(context).colorScheme.onSurface),
+                  decoration: InputDecoration(
+                    hintText: locale.get('search_messages'),
+                    border: InputBorder.none,
+                    isDense: true,
+                  ),
+                  onChanged: (v) {
+                    setState(() => _chatSearchQuery = v.trim());
+                    _updateSearchResults(messages);
+                  },
+                ),
+              ),
+              if (_searchMatchIndices.isNotEmpty)
+                Text(
+                  locale.tr('search_result_count', {
+                    'current': '${_currentSearchIndex + 1}',
+                    'total': '${_searchMatchIndices.length}',
+                  }),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              IconButton(
+                icon: const Icon(Icons.keyboard_arrow_up, size: 20),
+                onPressed: () => _navigateSearchResult(-1, messages),
+              ),
+              IconButton(
+                icon: const Icon(Icons.keyboard_arrow_down, size: 20),
+                onPressed: () => _navigateSearchResult(1, messages),
+              ),
+            ],
+          ),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => setState(() {
+              _isSearching = false;
+              _searchTextController.clear();
+              _chatSearchQuery = '';
+              _searchMatchIndices = [];
+              _currentSearchIndex = -1;
+            }),
+          ),
+          actions: const [],
+        ),
+        body: SafeArea(
+          top: false, // AppBar handles top
+          child: chatBody,
+        ),
+      );
+    }
+
+    // Normal mode: AppBarScaffold provides the skin-aware hero header.
+    final actions = [
+      IconButton(
+        icon: const Icon(Icons.search),
+        tooltip: locale.get('search_messages'),
+        onPressed: () => setState(() => _isSearching = true),
+      ),
+      IconButton(
+        icon: const Icon(Icons.tune),
+        tooltip: locale.get('chat_settings'),
+        onPressed: () => _showChatSettings(context, service),
+      ),
+      if (!widget.isGroup && !widget.isChannel)
+        IconButton(
+          icon: const Icon(Icons.call),
+          tooltip: locale.get('call_tooltip'),
+          onPressed: () => _startCall(context, appState),
+        ),
+      if (widget.isGroup) ...[
+        IconButton(
+          icon: const Icon(Icons.call),
+          tooltip: 'Gruppenanruf',
+          onPressed: () => _startGroupCall(context, appState),
+        ),
+        IconButton(
+          icon: const Icon(Icons.poll),
+          tooltip: locale.get('poll_create'),
+          onPressed: () => _openPollEditor(context),
+        ),
+        IconButton(
+          icon: const Icon(Icons.info_outline),
+          tooltip: locale.get('group_info'),
+          onPressed: () => _showGroupInfo(context, service),
+        ),
+      ],
+      if (widget.isChannel) ...[
+        IconButton(
+          icon: const Icon(Icons.poll),
+          tooltip: locale.get('poll_create'),
+          onPressed: () => _openPollEditor(context),
+        ),
+        IconButton(
+          icon: const Icon(Icons.info_outline),
+          tooltip: locale.get('channel_info'),
+          onPressed: () => _showChannelInfo(context, service),
+        ),
+      ],
+    ];
+
+    return AppBarScaffold(
+      title: widget.displayName,
+      subtitle: _buildSubtitleText(context, service),
+      leading: const BackButton(),
+      actions: actions,
+      body: chatBody,
     );
   }
 
@@ -2127,6 +2126,74 @@ class _MessageBubble extends StatelessWidget {
 
   bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact;
 
+  /// Shows the full action menu (reply / react / copy / save / forward / edit / delete)
+  /// as a modal bottom sheet. Called from long-press on the MessageBubble path so that
+  /// simple-text messages expose the same actions as the inline 3-dot PopupMenuButton.
+  void _showMessageActions(BuildContext context) {
+    if (!_hasMenu) return;
+    final locale = AppLocale.read(context);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              if (_canReply)
+                ListTile(
+                  leading: const Icon(Icons.reply),
+                  title: Text(locale.get('reply')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('reply', message); },
+                ),
+              if (_canReact)
+                ListTile(
+                  leading: const Icon(Icons.add_reaction_outlined),
+                  title: Text(locale.get('react')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('react', message); },
+                ),
+              if (_canCopyText)
+                ListTile(
+                  leading: const Icon(Icons.copy),
+                  title: Text(locale.get('copy_text')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('copy_text', message); },
+                ),
+              if (_canSaveMedia)
+                ListTile(
+                  leading: const Icon(Icons.save_alt),
+                  title: Text(locale.get('save_file')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('save_media', message); },
+                ),
+              if (_canSaveMedia)
+                ListTile(
+                  leading: const Icon(Icons.copy_all),
+                  title: Text(locale.get('copy_to_clipboard')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('copy_media', message); },
+                ),
+              if (_canForward)
+                ListTile(
+                  leading: const Icon(Icons.forward),
+                  title: Text(locale.get('forward')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('forward', message); },
+                ),
+              if (_canEdit)
+                ListTile(
+                  leading: const Icon(Icons.edit),
+                  title: Text(locale.get('edit')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('edit', message); },
+                ),
+              if (_canDelete)
+                ListTile(
+                  leading: const Icon(Icons.delete),
+                  title: Text(locale.get('delete')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('delete', message); },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   static Skin _getActiveSkin() {
     final activeId = IdentityManager().getActiveIdentity();
     return Skins.byId(activeId?.skinId);
@@ -2157,6 +2224,35 @@ class _MessageBubble extends StatelessWidget {
             ),
           ),
         ),
+      );
+    }
+
+    // Simple plain-text messages: delegate to the design-system MessageBubble.
+    // Complex message types (media, polls, deleted, link preview, forwarded,
+    // search-highlight, edit mode, group sender label) retain the inline
+    // implementation below because MessageBubble only handles plain text.
+    final isSimpleText = !deleted &&
+        !message.isMedia &&
+        message.pollId == null &&
+        !message.hasLinkPreview &&
+        message.forwardedFrom == null &&
+        !isEditing &&
+        !isSearchHighlight &&
+        !(isGroup && !isOutgoing && senderDisplayName.isNotEmpty);
+    if (isSimpleText) {
+      final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
+      final String? ticks = isOutgoing ? _statusTicksFor(message.status) : null;
+      return MessageBubble(
+        text: message.text,
+        isOwn: isOutgoing,
+        timestamp: ts,
+        statusTicks: ticks,
+        replyTo: message.replyToText,
+        // reactions is Map<String,Set<String>>; MessageBubble takes List<String> emoji-only
+        reactions: message.reactions.keys.toList(),
+        onLongPress: _hasMenu
+            ? () => _showMessageActions(context)
+            : null,
       );
     }
 
@@ -2827,40 +2923,34 @@ class _MessageBubble extends StatelessWidget {
     if (status == MessageStatus.read) return Colors.blue;
     return colorScheme.outline;
   }
+
+  /// Maps [MessageStatus] to a Unicode tick string for [MessageBubble.statusTicks].
+  static String? _statusTicksFor(MessageStatus status) {
+    switch (status) {
+      case MessageStatus.sending:
+        return '⏳';
+      case MessageStatus.queued:
+        return '🕐';
+      case MessageStatus.sent:
+        return '✓';
+      case MessageStatus.storedInNetwork:
+        return '✓✓';
+      case MessageStatus.delivered:
+        return '✓✓';
+      case MessageStatus.read:
+        return '✓✓';
+    }
+  }
 }
 
-/// Chat background widget that paints a skin-specific pattern behind messages.
+/// Chat background widget.
+///
+/// Pass-through — the AppBarScaffold now renders SkinSurface fullscreen
+/// behind the entire body, so no extra background layer is needed here.
 class _ChatBackground extends StatelessWidget {
   final Widget child;
   const _ChatBackground({required this.child});
 
   @override
-  Widget build(BuildContext context) {
-    final activeId = IdentityManager().getActiveIdentity();
-    final skin = Skins.byId(activeId?.skinId);
-    final colorScheme = Theme.of(context).colorScheme;
-
-    final hasPattern = skin.id != 'teal' && skin.id != 'contrast';
-    final hasWatermark = skin.id != 'teal' && skin.id != 'contrast' && skin.id != 'slate';
-
-    if (!hasPattern && !hasWatermark) {
-      return child;
-    }
-
-    return CustomPaint(
-      painter: hasPattern
-          ? SkinBackgroundPainter(
-              skinId: skin.id,
-              patternColor: colorScheme.onSurface,
-            )
-          : null,
-      foregroundPainter: hasWatermark
-          ? SkinWatermarkPainter(
-              skinId: skin.id,
-              watermarkColor: colorScheme.onSurface,
-            )
-          : null,
-      child: child,
-    );
-  }
+  Widget build(BuildContext context) => child;
 }

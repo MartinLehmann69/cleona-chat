@@ -5,11 +5,28 @@ import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
+import 'package:cleona/ui/components/contact_tile.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
 
 class ContactsScreen extends StatelessWidget {
   final ICleonaService service;
   const ContactsScreen({super.key, required this.service});
+
+  /// Maps the string-based verificationLevel from ContactInfo to the
+  /// ContactVerification enum used by ContactTile.
+  static ContactVerification _mapVerification(String level) {
+    switch (level) {
+      case 'seen':
+        return ContactVerification.seen;
+      case 'verified':
+        return ContactVerification.verified;
+      case 'trusted':
+        return ContactVerification.trusted;
+      default:
+        return ContactVerification.unverified;
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -18,142 +35,145 @@ class ContactsScreen extends StatelessWidget {
     final accepted = svc.acceptedContacts;
     final pending = svc.pendingContacts;
 
-    return ListView(
-      children: [
-        // Own info card
-        Card(
-          margin: const EdgeInsets.all(12),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Meine Node-ID', style: Theme.of(context).textTheme.titleSmall),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: SelectableText(
-                        svc.nodeIdHex,
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+    return AppBarScaffold(
+      title: 'Kontakte',
+      body: ListView(
+        children: [
+          // Own info card
+          Card(
+            margin: const EdgeInsets.all(12),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Meine Node-ID', style: Theme.of(context).textTheme.titleSmall),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SelectableText(
+                          svc.nodeIdHex,
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                        ),
                       ),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.copy, size: 18),
-                      onPressed: () {
-                        Clipboard.setData(ClipboardData(text: svc.nodeIdHex));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Node-ID kopiert')),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'Port: ${svc.port} | Peers: ${svc.peerCount}',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
+                      IconButton(
+                        icon: const Icon(Icons.copy, size: 18),
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: svc.nodeIdHex));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('Node-ID kopiert')),
+                          );
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Port: ${svc.port} | Peers: ${svc.peerCount}',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              ),
             ),
           ),
-        ),
 
-        // Pending contact requests
-        if (pending.isNotEmpty) ...[
+          // Pending contact requests
+          if (pending.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(
+                'Kontaktanfragen (${pending.length})',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            ...pending.map((contact) => ContactTile(
+                  name: contact.displayName,
+                  status: contact.nodeIdHex.substring(0, 16),
+                  verificationLevel: _mapVerification(contact.verificationLevel),
+                  avatarOverride: contact.profilePictureBase64 != null
+                      ? CircleAvatar(
+                          backgroundImage: MemoryImage(base64Decode(contact.profilePictureBase64!)),
+                          radius: 22,
+                        )
+                      : Container(
+                          width: 44, height: 44,
+                          decoration: const BoxDecoration(color: Colors.orange, shape: BoxShape.circle),
+                          child: const Icon(Icons.person_add, color: Colors.white),
+                        ),
+                  trailing: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.red),
+                        tooltip: 'Ablehnen',
+                        onPressed: () => _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.check, color: Colors.green),
+                        tooltip: 'Annehmen',
+                        onPressed: () => svc.acceptContactRequest(contact.nodeIdHex),
+                      ),
+                    ],
+                  ),
+                )),
+            const Divider(),
+          ],
+
+          // Accepted contacts
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(
-              'Kontaktanfragen (${pending.length})',
+              'Kontakte (${accepted.length})',
               style: Theme.of(context).textTheme.titleMedium,
             ),
           ),
-          ...pending.map((contact) => ListTile(
-                leading: _contactAvatar(context, contact.displayName, contact.profilePictureBase64, isRequest: true),
-                title: Text(contact.displayName),
-                subtitle: Text(contact.nodeIdHex.substring(0, 16)),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.red),
-                      tooltip: 'Ablehnen',
-                      onPressed: () => _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.check, color: Colors.green),
-                      tooltip: 'Annehmen',
-                      onPressed: () => svc.acceptContactRequest(contact.nodeIdHex),
-                    ),
+          if (accepted.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(32),
+              child: Center(child: Text('Noch keine Kontakte')),
+            ),
+          ...accepted.map((contact) => ContactTile(
+                name: contact.displayName,
+                status: _contactSubtitle(contact),
+                verificationLevel: _mapVerification(contact.verificationLevel),
+                avatarOverride: contact.profilePictureBase64 != null
+                    ? CircleAvatar(
+                        backgroundImage: MemoryImage(base64Decode(contact.profilePictureBase64!)),
+                        radius: 22,
+                      )
+                    : null,
+                trailing: PopupMenuButton<String>(
+                  onSelected: (value) {
+                    if (value == 'delete') {
+                      _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName);
+                    } else if (value == 'birthday') {
+                      _showBirthdayDialog(context, svc, contact);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    PopupMenuItem(value: 'birthday', child: Row(children: const [
+                      Icon(Icons.cake, size: 18),
+                      SizedBox(width: 8),
+                      Text('Geburtstag'),
+                    ])),
+                    const PopupMenuItem(value: 'delete', child: Text('Kontakt loeschen')),
                   ],
                 ),
-              )),
-          const Divider(),
-        ],
-
-        // Accepted contacts
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Text(
-            'Kontakte (${accepted.length})',
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-        ),
-        if (accepted.isEmpty)
-          const Padding(
-            padding: EdgeInsets.all(32),
-            child: Center(child: Text('Noch keine Kontakte')),
-          ),
-        ...accepted.map((contact) => ListTile(
-              leading: _contactAvatar(context, contact.displayName, contact.profilePictureBase64),
-              title: Text(contact.displayName),
-              subtitle: Text(_contactSubtitle(contact)),
-              trailing: PopupMenuButton<String>(
-                onSelected: (value) {
-                  if (value == 'delete') {
-                    _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName);
-                  } else if (value == 'birthday') {
-                    _showBirthdayDialog(context, svc, contact);
-                  }
-                },
-                itemBuilder: (_) => [
-                  PopupMenuItem(value: 'birthday', child: Row(children: const [
-                    Icon(Icons.cake, size: 18),
-                    SizedBox(width: 8),
-                    Text('Geburtstag'),
-                  ])),
-                  const PopupMenuItem(value: 'delete', child: Text('Kontakt loeschen')),
-                ],
-              ),
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => ChatScreen(
-                      conversationId: contact.nodeIdHex,
-                      displayName: contact.displayName,
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => ChatScreen(
+                        conversationId: contact.nodeIdHex,
+                        displayName: contact.displayName,
+                      ),
                     ),
-                  ),
-                );
-              },
-            )),
-      ],
-    );
-  }
-
-  Widget _contactAvatar(BuildContext context, String name, String? picBase64, {bool isRequest = false}) {
-    if (picBase64 != null) {
-      return CircleAvatar(backgroundImage: MemoryImage(base64Decode(picBase64)));
-    }
-    if (isRequest) {
-      return CircleAvatar(
-        backgroundColor: Colors.orange.shade100,
-        child: const Icon(Icons.person_add, color: Colors.orange),
-      );
-    }
-    return CircleAvatar(
-      backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-      child: Text(name.isNotEmpty ? name[0].toUpperCase() : '?'),
+                  );
+                },
+              )),
+        ],
+      ),
     );
   }
 

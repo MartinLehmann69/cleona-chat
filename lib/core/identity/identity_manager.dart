@@ -76,6 +76,29 @@ class IdentityManager {
       : baseDir = baseDir ?? AppPaths.dataDir;
 
   String get _identitiesFile => '$baseDir/identities.json';
+  String get _crimsonDismissedFlagFile =>
+      '$baseDir/crimson_migration_dismissed.flag';
+
+  /// Returns true if any identity has a stored skinId of 'crimson' AND the
+  /// user has not yet permanently dismissed the migration banner.
+  /// Dismissal is persisted to disk (survives app restart).
+  bool get crimsonMigrationShouldShow {
+    if (File(_crimsonDismissedFlagFile).existsSync()) return false;
+    final identities = loadIdentities();
+    return identities.any((id) => id.skinId == 'crimson');
+  }
+
+  /// Called when user taps "Got it" on the migration banner.
+  /// Writes a flag file so the banner stays dismissed across restarts.
+  void dismissCrimsonBanner() {
+    try {
+      final f = File(_crimsonDismissedFlagFile);
+      f.parent.createSync(recursive: true);
+      f.writeAsStringSync('1');
+    } catch (_) {
+      // Non-fatal: if disk is read-only, banner re-shows next start.
+    }
+  }
 
   // ── Seed Phrase Management ──────────────────────────────────────
 

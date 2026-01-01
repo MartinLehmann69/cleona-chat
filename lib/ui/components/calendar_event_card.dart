@@ -4,13 +4,73 @@ import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/calendar/recurrence_engine.dart';
+import 'package:cleona/ui/theme/theme_access.dart';
+
+/// Density control for [CalendarEventCard].
+///
+/// - [compact]     — tight vertical padding (4 px); ideal for list views.
+/// - [comfortable] — default padding (8 px); balanced for chat bubbles.
+/// - [spacious]    — generous padding (12 px); suitable for standalone event
+///                   previews where breathing room aids readability.
+enum CardDensity { compact, comfortable, spacious }
 
 /// Interactive calendar event card displayed inline in group chat.
 /// Shows event details, RSVP status, and action buttons.
 class CalendarEventCard extends StatelessWidget {
   final CalendarEvent event;
 
-  const CalendarEventCard({super.key, required this.event});
+  /// Controls vertical padding of the card body. Defaults to [CardDensity.comfortable].
+  final CardDensity density;
+
+  /// When true, renders a 4 px colour stripe at the left edge keyed to
+  /// [event.category]. Defaults to false for backward compatibility.
+  final bool showCategory;
+
+  const CalendarEventCard({
+    super.key,
+    required this.event,
+    this.density = CardDensity.comfortable,
+    this.showCategory = false,
+  });
+
+  // ---------------------------------------------------------------------------
+  // Density + category helpers
+  // ---------------------------------------------------------------------------
+
+  double _verticalPadding(BuildContext context) {
+    final tokens = Theme.of(context).tokens;
+    switch (density) {
+      case CardDensity.compact:
+        return tokens.spacing.xs;
+      case CardDensity.comfortable:
+        return tokens.spacing.sm;
+      case CardDensity.spacious:
+        return tokens.spacing.md;
+    }
+  }
+
+  Widget _categoryStripe() {
+    return Container(width: 4, color: _categoryColor(event.category));
+  }
+
+  static Color _categoryColor(EventCategory category) {
+    switch (category) {
+      case EventCategory.meeting:
+        return Colors.blue;
+      case EventCategory.appointment:
+        return Colors.teal;
+      case EventCategory.task:
+        return Colors.orange;
+      case EventCategory.birthday:
+        return Colors.pink;
+      case EventCategory.reminder:
+        return Colors.grey;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
 
   @override
   Widget build(BuildContext context) {
@@ -19,10 +79,129 @@ class CalendarEventCard extends StatelessWidget {
     final appState = context.watch<CleonaAppState>();
     final service = appState.service;
 
+    final vPad = _verticalPadding(context);
+
     final start = DateTime.fromMillisecondsSinceEpoch(event.startTime);
     final end = DateTime.fromMillisecondsSinceEpoch(event.endTime);
     final now = DateTime.now();
     final isUpcoming = start.isAfter(now) && start.difference(now).inMinutes <= 15;
+
+    // Card body (column of header + details + actions)
+    final cardBody = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header
+        Container(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: vPad),
+          decoration: BoxDecoration(
+            color: colorScheme.primary.withValues(alpha: 0.1),
+            borderRadius: showCategory
+                ? BorderRadius.zero
+                : const BorderRadius.vertical(top: Radius.circular(12)),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.calendar_today, size: 16, color: colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  event.title,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: colorScheme.onSurface,
+                    decoration: event.cancelled ? TextDecoration.lineThrough : null,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        // Date/Time
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12, vertical: vPad),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                event.allDay
+                    ? _formatDate(start)
+                    : '${_formatDate(start)}, ${_formatTime(start)} – ${_formatTime(end)}',
+                style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.7)),
+              ),
+              if (event.recurrenceRule != null)
+                Text(
+                  RecurrenceEngine.formatRrule(event.recurrenceRule!),
+                  style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.5)),
+                ),
+              if (event.location != null && event.location!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Row(
+                    children: [
+                      Icon(Icons.location_on, size: 14, color: colorScheme.onSurface.withValues(alpha: 0.5)),
+                      const SizedBox(width: 4),
+                      Text(event.location!, style: TextStyle(
+                        fontSize: 12,
+                        color: colorScheme.onSurface.withValues(alpha: 0.5),
+                      )),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+
+        // RSVP summary
+        if (event.rsvpResponses.isNotEmpty)
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12, vertical: vPad),
+            child: Wrap(
+              spacing: 8,
+              children: _buildRsvpSummary(colorScheme),
+            ),
+          ),
+
+        // Action buttons
+        if (!event.cancelled)
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: 8, vertical: vPad),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                // Accept
+                _ActionButton(
+                  icon: Icons.check,
+                  label: locale.get('calendar_accept'),
+                  color: Colors.green,
+                  onTap: () => service?.sendCalendarRsvp(event.eventId, RsvpStatus.accepted),
+                ),
+                // Decline
+                _ActionButton(
+                  icon: Icons.close,
+                  label: locale.get('calendar_decline'),
+                  color: Colors.red,
+                  onTap: () => service?.sendCalendarRsvp(event.eventId, RsvpStatus.declined),
+                ),
+                // Call (only at event time, if hasCall)
+                if (event.hasCall && isUpcoming)
+                  _ActionButton(
+                    icon: Icons.call,
+                    label: 'Call',
+                    color: Colors.blue,
+                    onTap: () {
+                      // Start group call via existing call infrastructure
+                      if (event.groupId != null) {
+                        service?.startGroupCall(event.groupId!);
+                      }
+                    },
+                  ),
+              ],
+            ),
+          ),
+      ],
+    );
 
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
@@ -31,118 +210,20 @@ class CalendarEventCard extends StatelessWidget {
         border: Border.all(color: colorScheme.primary.withValues(alpha: 0.3)),
         color: colorScheme.surfaceContainerHighest.withValues(alpha: 0.8),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Header
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              color: colorScheme.primary.withValues(alpha: 0.1),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.calendar_today, size: 16, color: colorScheme.primary),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    event.title,
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 14,
-                      color: colorScheme.onSurface,
-                      decoration: event.cancelled ? TextDecoration.lineThrough : null,
-                    ),
-                  ),
+      // ClipRRect ensures the category stripe is clipped to the card's rounded corners.
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: showCategory
+            ? IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _categoryStripe(),
+                    Expanded(child: cardBody),
+                  ],
                 ),
-              ],
-            ),
-          ),
-
-          // Date/Time
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  event.allDay
-                      ? _formatDate(start)
-                      : '${_formatDate(start)}, ${_formatTime(start)} – ${_formatTime(end)}',
-                  style: TextStyle(fontSize: 13, color: colorScheme.onSurface.withValues(alpha: 0.7)),
-                ),
-                if (event.recurrenceRule != null)
-                  Text(
-                    RecurrenceEngine.formatRrule(event.recurrenceRule!),
-                    style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.5)),
-                  ),
-                if (event.location != null && event.location!.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Row(
-                      children: [
-                        Icon(Icons.location_on, size: 14, color: colorScheme.onSurface.withValues(alpha: 0.5)),
-                        const SizedBox(width: 4),
-                        Text(event.location!, style: TextStyle(
-                          fontSize: 12,
-                          color: colorScheme.onSurface.withValues(alpha: 0.5),
-                        )),
-                      ],
-                    ),
-                  ),
-              ],
-            ),
-          ),
-
-          // RSVP summary
-          if (event.rsvpResponses.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-              child: Wrap(
-                spacing: 8,
-                children: _buildRsvpSummary(colorScheme),
-              ),
-            ),
-
-          // Action buttons
-          if (!event.cancelled)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  // Accept
-                  _ActionButton(
-                    icon: Icons.check,
-                    label: locale.get('calendar_accept'),
-                    color: Colors.green,
-                    onTap: () => service?.sendCalendarRsvp(event.eventId, RsvpStatus.accepted),
-                  ),
-                  // Decline
-                  _ActionButton(
-                    icon: Icons.close,
-                    label: locale.get('calendar_decline'),
-                    color: Colors.red,
-                    onTap: () => service?.sendCalendarRsvp(event.eventId, RsvpStatus.declined),
-                  ),
-                  // Call (only at event time, if hasCall)
-                  if (event.hasCall && isUpcoming)
-                    _ActionButton(
-                      icon: Icons.call,
-                      label: 'Call',
-                      color: Colors.blue,
-                      onTap: () {
-                        // Start group call via existing call infrastructure
-                        if (event.groupId != null) {
-                          service?.startGroupCall(event.groupId!);
-                        }
-                      },
-                    ),
-                ],
-              ),
-            ),
-        ],
+              )
+            : cardBody,
       ),
     );
   }

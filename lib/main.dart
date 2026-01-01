@@ -696,6 +696,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Force Navigator rebuild when transitioning from loading to home
         navigatorKey = GlobalKey<NavigatorState>();
         notifyListeners();
+        // Precache the active skin's hero image after the first home-screen frame.
+        final activeIdForPrecache = IdentityManager().getActiveIdentity();
+        _scheduleSkinPrecache(activeIdForPrecache?.skinId);
         return;
       }
     }
@@ -832,6 +835,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _queryPublicIp(); // §27: discover own public IPv4/IPv6 for external reachability
     navigatorKey = GlobalKey<NavigatorState>();
     notifyListeners();
+    // Precache the active skin's hero image after the first home-screen frame.
+    _scheduleSkinPrecache(activeId?.skinId);
   }
 
   // ── Incoming Call ──────────────────────────────────────────────
@@ -867,6 +872,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (ok) {
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
+        _scheduleSkinPrecache(identity.skinId);
         return;
       }
     }
@@ -878,12 +884,40 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _service = service;
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
+        _scheduleSkinPrecache(identity.skinId);
         return;
       }
     }
 
     IdentityManager().setActiveIdentity(identity);
     notifyListeners();
+    _scheduleSkinPrecache(identity.skinId);
+  }
+
+  /// Schedules a [precacheImage] call for the hero asset of the skin identified
+  /// by [skinId] after the current frame completes.  Using a post-frame callback
+  /// ensures that [navigatorKey.currentContext] is attached (the Navigator is
+  /// part of [MaterialApp] which rebuilds after [notifyListeners]).
+  void _scheduleSkinPrecache(String? skinId) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx == null) return;
+      _precacheSkinHero(ctx, Skins.byId(skinId));
+    });
+  }
+
+  /// Preloads the hero [AssetImage] for [skin] into Flutter's image cache so
+  /// that the first paint after a skin switch does not stall on I/O.
+  /// Failures are non-fatal — the [SkinBackgroundImage] fallback gradient
+  /// renders correctly without the cached asset.
+  Future<void> _precacheSkinHero(BuildContext context, Skin skin) async {
+    final path = skin.heroAssetPath;
+    if (path == null) return;
+    try {
+      await precacheImage(AssetImage(path), context);
+    } catch (e) {
+      debugPrint('[skin] precacheImage failed for $path: $e');
+    }
   }
 
   /// Wires standard callbacks on a CleonaService (avoids duplication).
@@ -1101,10 +1135,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
                 ChangeNotifierProvider.value(value: this),
                 if (_appLocale != null) ChangeNotifierProvider.value(value: _appLocale!),
               ],
-              child: Scaffold(
-                appBar: AppBar(title: const Text('Settings')),
-                body: SafeArea(top: false, child: SettingsScreen(service: _service!)),
-              ),
+              child: SettingsScreen(service: _service!),
             ),
           ));
         }

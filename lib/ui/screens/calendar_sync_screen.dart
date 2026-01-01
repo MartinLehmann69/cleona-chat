@@ -15,6 +15,7 @@ import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/theme/skins.dart';
+import 'package:cleona/ui/components/app_bar_scaffold.dart';
 
 /// Calendar Sync settings screen (§23.8).
 ///
@@ -181,8 +182,9 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
     final errorText = _status['lastError'] as String?;
     final count = (_status['syncedEventCount'] as num?)?.toInt() ?? 0;
 
-    return Scaffold(
-      appBar: AppBar(title: Text(locale.get('calendar_sync_title'))),
+    return AppBarScaffold(
+      title: locale.get('calendar_sync_title'),
+      opaqueBody: true,
       body: SafeArea(
         top: false,
         child: _loading
