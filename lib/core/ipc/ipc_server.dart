@@ -1904,23 +1904,6 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
-        case 'set_serve_binary_updates':
-          final sbuService = _resolveService(client, req);
-          if (sbuService == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final enabled = req.params['enabled'];
-          if (enabled is! bool) {
-            _sendResponse(client, IpcResponse(
-              id: req.id, success: false,
-              error: 'Missing/invalid bool param: enabled'));
-            break;
-          }
-          sbuService.setServeBinaryUpdates(enabled);
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'update_notification_settings':
           final nsService = _resolveService(client, req);
           if (nsService == null) {

@@ -237,8 +237,6 @@ const Map<String, Map<String, String>> translations = {
   'port_label': {'de': 'Port', 'en': 'Port', 'es': 'Puerto', 'hu': 'Port', 'sv': 'Port', 'ar': 'المنفذ', 'he': 'פורט', 'fa': 'پورت', 'fr': 'Port', 'it': 'Porta', 'pt': 'Porta', 'nl': 'Poort', 'pl': 'Port', 'ro': 'Port', 'cs': 'Port', 'sk': 'Port', 'hr': 'Port', 'bg': 'Порт', 'el': 'Θύρα', 'da': 'Port', 'fi': 'Portti', 'no': 'Port', 'uk': 'Порт', 'ru': 'Порт', 'tr': 'Port', 'zh': '端口', 'ja': 'ポート', 'ko': '포트', 'hi': 'पोर्ट', 'th': 'พอร์ต', 'vi': 'Cổng', 'id': 'Port', 'ms': 'Port'},
   'connected_peers': {'de': 'Verbundene Peers', 'en': 'Connected peers', 'es': 'Peers conectados', 'hu': 'Kapcsolódott peerek', 'sv': 'Anslutna peers', 'ar': 'الأقران المتصلون', 'he': 'עמיתים מחוברים', 'fa': 'همتایان متصل', 'fr': 'Pairs connectés', 'it': 'Peer connessi', 'pt': 'Peers conectados', 'nl': 'Verbonden peers', 'pl': 'Połączeni peerzy', 'ro': 'Peers conectați', 'cs': 'Připojení peerové', 'sk': 'Pripojení peerovia', 'hr': 'Povezani peerovi', 'bg': 'Свързани пиъри', 'el': 'Συνδεδεμένοι peers', 'da': 'Forbundne peers', 'fi': 'Yhdistetyt peerit', 'no': 'Tilkoblede peers', 'uk': 'Підключені піри', 'ru': 'Подключённые пиры', 'tr': 'Bağlı peerler', 'zh': '已连接节点', 'ja': '接続中のピア', 'ko': '연결된 피어', 'hi': 'जुड़े हुए पीयर', 'th': 'เพียร์ที่เชื่อมต่อ', 'vi': 'Peer đã kết nối', 'id': 'Peer terhubung', 'ms': 'Peer disambung'},
   'stored_fragments': {'de': 'Gespeicherte Fragmente', 'en': 'Stored fragments', 'es': 'Fragmentos almacenados', 'hu': 'Tárolt fragmentumok', 'sv': 'Lagrade fragment', 'ar': 'الأجزاء المخزنة', 'he': 'פרגמנטים מאוחסנים', 'fa': 'قطعات ذخیره شده', 'fr': 'Fragments stockés', 'it': 'Frammenti archiviati', 'pt': 'Fragmentos armazenados', 'nl': 'Opgeslagen fragmenten', 'pl': 'Zapisane fragmenty', 'ro': 'Fragmente stocate', 'cs': 'Uložené fragmenty', 'sk': 'Uložené fragmenty', 'hr': 'Pohranjeni fragmenti', 'bg': 'Съхранени фрагменти', 'el': 'Αποθηκευμένα τμήματα', 'da': 'Lagrede fragmenter', 'fi': 'Tallennetut fragmentit', 'no': 'Lagrede fragmenter', 'uk': 'Збережені фрагменти', 'ru': 'Хранимые фрагменты', 'tr': 'Depolanmış parçalar', 'zh': '已存储碎片', 'ja': '保存済みフラグメント', 'ko': '저장된 조각', 'hi': 'संग्रहीत अंश', 'th': 'ส่วนที่เก็บไว้', 'vi': 'Mảnh đã lưu', 'id': 'Fragmen tersimpan', 'ms': 'Serpihan disimpan'},
-  'settingsServeBinaryUpdates': {'de': 'Binäre Updates bereitstellen', 'en': 'Serve Binary Updates', 'es': 'Compartir actualizaciones binarias', 'hu': 'Bináris frissítések megosztása', 'sv': 'Dela binära uppdateringar', 'ar': 'مشاركة التحديثات الثنائية', 'he': 'שיתוף עדכונים בינאריים', 'fa': 'اشتراک‌گذاری به‌روزرسانی‌های باینری', 'fr': 'Partager les mises à jour binaires', 'it': 'Condividi aggiornamenti binari', 'pt': 'Compartilhar atualizações binárias', 'nl': 'Binaire updates delen', 'pl': 'Udostępniaj aktualizacje binarne', 'ro': 'Partajează actualizările binare', 'cs': 'Sdílet binární aktualizace', 'sk': 'Zdieľať binárne aktualizácie', 'hr': 'Dijeli binarne nadogradnje', 'bg': 'Споделяне на бинарни актуализации', 'el': 'Κοινή χρήση δυαδικών ενημερώσεων', 'da': 'Del binære opdateringer', 'fi': 'Jaa binaaripäivitykset', 'no': 'Del binære oppdateringer', 'uk': 'Надсилати бінарні оновлення', 'ru': 'Раздавать бинарные обновления', 'tr': 'İkili güncellemeleri paylaş', 'zh': '分享二进制更新', 'ja': 'バイナリアップデートを共有', 'ko': '바이너리 업데이트 공유', 'hi': 'बाइनरी अपडेट साझा करें', 'th': 'แชร์การอัปเดตไบนารี', 'vi': 'Chia sẻ bản cập nhật nhị phân', 'id': 'Bagikan pembaruan biner', 'ms': 'Kongsi kemas kini binari'},
-  'settingsServeBinaryUpdatesDesc': {'de': 'Update-Fragmente mit anderen Cleona-Nutzern teilen', 'en': 'Share update fragments with other Cleona users', 'es': 'Comparte fragmentos de actualización con otros usuarios de Cleona', 'hu': 'Frissítési töredékek megosztása más Cleona-felhasználókkal', 'sv': 'Dela uppdateringsfragment med andra Cleona-användare', 'ar': 'مشاركة أجزاء التحديث مع مستخدمي Cleona الآخرين', 'he': 'שיתוף קטעי עדכון עם משתמשי Cleona אחרים', 'fa': 'اشتراک‌گذاری قطعات به‌روزرسانی با سایر کاربران Cleona', 'fr': 'Partager les fragments de mise à jour avec d\'autres utilisateurs de Cleona', 'it': 'Condividi i frammenti di aggiornamento con altri utenti Cleona', 'pt': 'Compartilhe fragmentos de atualização com outros usuários do Cleona', 'nl': 'Deel update-fragmenten met andere Cleona-gebruikers', 'pl': 'Udostępniaj fragmenty aktualizacji innym użytkownikom Cleona', 'ro': 'Partajează fragmentele de actualizare cu alți utilizatori Cleona', 'cs': 'Sdílejte fragmenty aktualizace s ostatními uživateli Cleona', 'sk': 'Zdieľajte fragmenty aktualizácie s ostatnými používateľmi Cleona', 'hr': 'Dijelite fragmente nadogradnje s drugim Cleona korisnicima', 'bg': 'Споделяйте фрагменти от актуализацията с други потребители на Cleona', 'el': 'Μοιραστείτε τα θραύσματα ενημέρωσης με άλλους χρήστες Cleona', 'da': 'Del opdateringsfragmenter med andre Cleona-brugere', 'fi': 'Jaa päivitysfragmentteja muiden Cleona-käyttäjien kanssa', 'no': 'Del oppdateringsfragmenter med andre Cleona-brukere', 'uk': 'Діліться фрагментами оновлення з іншими користувачами Cleona', 'ru': 'Делитесь фрагментами обновлений с другими пользователями Cleona', 'tr': 'Güncelleme parçalarını diğer Cleona kullanıcılarıyla paylaşın', 'zh': '与其他 Cleona 用户共享更新片段', 'ja': '更新フラグメントを他の Cleona ユーザーと共有する', 'ko': '다른 Cleona 사용자와 업데이트 조각 공유', 'hi': 'अपडेट के टुकड़े अन्य Cleona उपयोगकर्ताओं के साथ साझा करें', 'th': 'แชร์ชิ้นส่วนการอัปเดตกับผู้ใช้ Cleona คนอื่น', 'vi': 'Chia sẻ các phần cập nhật với người dùng Cleona khác', 'id': 'Bagikan fragmen pembaruan dengan pengguna Cleona lainnya', 'ms': 'Kongsi serpihan kemas kini dengan pengguna Cleona lain'},
   'design_label': {'de': 'Design', 'en': 'Design', 'es': 'Diseño', 'hu': 'Téma', 'sv': 'Design', 'ar': 'التصميم', 'he': 'עיצוב', 'fa': 'طراحی', 'fr': 'Design', 'it': 'Design', 'pt': 'Design', 'nl': 'Design', 'pl': 'Styl', 'ro': 'Design', 'cs': 'Design', 'sk': 'Dizajn', 'hr': 'Dizajn', 'bg': 'Дизайн', 'el': 'Σχεδιασμός', 'da': 'Design', 'fi': 'Ulkoasu', 'no': 'Design', 'uk': 'Дизайн', 'ru': 'Дизайн', 'tr': 'Tasarım', 'zh': '设计', 'ja': 'デザイン', 'ko': '디자인', 'hi': 'डिज़ाइन', 'th': 'การออกแบบ', 'vi': 'Thiết kế', 'id': 'Desain', 'ms': 'Reka bentuk'},
   'show_recovery_phrase': {'de': 'Recovery-Phrase anzeigen', 'en': 'Show recovery phrase', 'es': 'Mostrar frase de recuperación', 'hu': 'Helyreállítási kifejezés megjelenítése', 'sv': 'Visa återställningsfras', 'ar': 'عرض عبارة الاسترداد', 'he': 'הצג ביטוי שחזור', 'fa': 'نمایش عبارت بازیابی', 'fr': 'Afficher la phrase de récupération', 'it': 'Mostra frase di recupero', 'pt': 'Mostrar frase de recuperação', 'nl': 'Herstelzin tonen', 'pl': 'Pokaż frazę odzyskiwania', 'ro': 'Arată fraza de recuperare', 'cs': 'Zobrazit frázi obnovy', 'sk': 'Zobraziť frázu obnovy', 'hr': 'Prikaži frazu za oporavak', 'bg': 'Покажи фраза за възстановяване', 'el': 'Εμφάνιση φράσης ανάκτησης', 'da': 'Vis gendannelsesfrase', 'fi': 'Näytä palautuslause', 'no': 'Vis gjenopprettingsfrase', 'uk': 'Показати фразу відновлення', 'ru': 'Показать фразу восстановления', 'tr': 'Kurtarma ifadesini göster', 'zh': '显示恢复短语', 'ja': '回復フレーズ表示', 'ko': '복구 문구 표시', 'hi': 'रिकवरी वाक्यांश दिखाएं', 'th': 'แสดงวลีกู้คืน', 'vi': 'Hiển thị cụm từ khôi phục', 'id': 'Tampilkan frasa pemulihan', 'ms': 'Tunjuk frasa pemulihan'},
   'recovery_phrase_subtitle': {'de': '24 Wörter — dein einziges Backup', 'en': '24 words — your only backup', 'es': '24 palabras — tu único respaldo', 'hu': '24 szó — az egyetlen biztonsági mentésed', 'sv': '24 ord — din enda säkerhetskopia', 'ar': '24 كلمة — نسختك الاحتياطية الوحيدة', 'he': '24 מילים — הגיבוי היחיד שלך', 'fa': '۲۴ کلمه — تنها پشتیبان شما', 'fr': '24 mots — votre seule sauvegarde', 'it': '24 parole — il tuo unico backup', 'pt': '24 palavras — seu único backup', 'nl': '24 woorden — je enige back-up', 'pl': '24 słowa — jedyna kopia', 'ro': '24 cuvinte — singura ta copie', 'cs': '24 slov — jediná záloha', 'sk': '24 slov — jediná záloha', 'hr': '24 riječi — jedina sigurnosna kopija', 'bg': '24 думи — единственото копие', 'el': '24 λέξεις — μοναδικό αντίγραφο', 'da': '24 ord — din eneste sikkerhedskopi', 'fi': '24 sanaa — ainoa varmuuskopio', 'no': '24 ord — din eneste sikkerhetskopi', 'uk': '24 слова — єдина резервна копія', 'ru': '24 слова — единственная резервная копия', 'tr': '24 kelime — tek yedeğin', 'zh': '24个词——唯一备份', 'ja': '24語——唯一のバックアップ', 'ko': '24단어——유일한 백업', 'hi': '24 शब्द — एकमात्र बैकअप', 'th': '24 คำ — สำรองข้อมูลเดียว', 'vi': '24 từ — bản sao lưu duy nhất', 'id': '24 kata — satu-satunya cadangan', 'ms': '24 perkataan — sandaran tunggal'},
@@ -1714,6 +1712,41 @@ const Map<String, Map<String, String>> translations = {
     'id': 'Atur perangkat ini sebagai perangkat tertaut', // uncertain:
     'ms': 'Tetapkan peranti ini sebagai peranti terpaut', // uncertain:
   },
+  'linked_device_request_pairing_help': {
+    'de': 'Dieses Gerät als zweites Gerät mit einem bestehenden Cleona-Konto verknüpfen. Das Primärgerät muss die Anfrage bestätigen. Beide Geräte teilen dann dieselbe Identität.',
+    'en': 'Link this device as a secondary device to an existing Cleona account. The primary device must confirm the request. Both devices then share the same identity.',
+    'es': 'Vincular este dispositivo como dispositivo secundario a una cuenta Cleona existente. El dispositivo primario debe confirmar la solicitud. Ambos dispositivos comparten entonces la misma identidad.', // uncertain:
+    'hu': 'Eszköz csatlakoztatása másodlagos eszközként egy meglévő Cleona-fiókhoz. Az elsődleges eszköznek meg kell erősítenie a kérést. Mindkét eszköz ezután ugyanazt az identitást használja.', // uncertain:
+    'sv': 'Länka denna enhet som en sekundär enhet till ett befintligt Cleona-konto. Den primära enheten måste bekräfta förfrågan. Båda enheterna delar sedan samma identitet.', // uncertain:
+    'ar': 'ربط هذا الجهاز كجهاز ثانوي بحساب Cleona موجود. يجب على الجهاز الأساسي تأكيد الطلب. يشترك كلا الجهازين بعد ذلك في نفس الهوية.', // uncertain:
+    'he': 'קשר מכשיר זה כמכשיר משני לחשבון Cleona קיים. המכשיר הראשי חייב לאשר את הבקשה. שני המכשירים חולקים אז את אותה זהות.', // uncertain:
+    'fa': 'این دستگاه را به‌عنوان دستگاه ثانویه به یک حساب Cleona موجود متصل کنید. دستگاه اصلی باید درخواست را تأیید کند. هر دو دستگاه سپس همان هویت را به اشتراک می‌گذارند.', // uncertain:
+    'fr': 'Lier cet appareil comme appareil secondaire à un compte Cleona existant. L\'appareil principal doit confirmer la demande. Les deux appareils partagent ensuite la même identité.', // uncertain:
+    'it': 'Collegare questo dispositivo come dispositivo secondario a un account Cleona esistente. Il dispositivo primario deve confermare la richiesta. Entrambi i dispositivi condividono quindi la stessa identità.', // uncertain:
+    'pt': 'Vincular este dispositivo como dispositivo secundário a uma conta Cleona existente. O dispositivo primário deve confirmar a solicitação. Ambos os dispositivos compartilham então a mesma identidade.', // uncertain:
+    'nl': 'Dit apparaat als secundair apparaat koppelen aan een bestaand Cleona-account. Het primaire apparaat moet het verzoek bevestigen. Beide apparaten delen dan dezelfde identiteit.', // uncertain:
+    'pl': 'Połącz to urządzenie jako urządzenie dodatkowe z istniejącym kontem Cleona. Urządzenie główne musi potwierdzić żądanie. Oba urządzenia dzielą wtedy tę samą tożsamość.', // uncertain:
+    'ro': 'Asociază acest dispozitiv ca dispozitiv secundar la un cont Cleona existent. Dispozitivul principal trebuie să confirme cererea. Ambele dispozitive partajează apoi aceeași identitate.', // uncertain:
+    'cs': 'Propojit toto zařízení jako sekundární zařízení s existujícím účtem Cleona. Primární zařízení musí potvrdit žádost. Obě zařízení pak sdílejí stejnou identitu.', // uncertain:
+    'sk': 'Prepojiť toto zariadenie ako sekundárne zariadenie s existujúcim účtom Cleona. Primárne zariadenie musí potvrdiť žiadosť. Obe zariadenia potom zdieľajú rovnakú identitu.', // uncertain:
+    'hr': 'Poveži ovaj uređaj kao sekundarni uređaj s postojećim Cleona računom. Primarni uređaj mora potvrditi zahtjev. Oba uređaja zatim dijele isti identitet.', // uncertain:
+    'bg': 'Свържете това устройство като вторично устройство към съществуващ Cleona акаунт. Основното устройство трябва да потвърди заявката. И двете устройства след това споделят една и съща самоличност.', // uncertain:
+    'el': 'Σύνδεση αυτής της συσκευής ως δευτερεύουσα συσκευή σε έναν υπάρχοντα λογαριασμό Cleona. Η κύρια συσκευή πρέπει να επιβεβαιώσει το αίτημα. Και οι δύο συσκευές μοιράζονται στη συνέχεια την ίδια ταυτότητα.', // uncertain:
+    'da': 'Tilknyt denne enhed som en sekundær enhed til en eksisterende Cleona-konto. Den primære enhed skal bekræfte anmodningen. Begge enheder deler derefter den samme identitet.', // uncertain:
+    'fi': 'Yhdistä tämä laite toissijaiseksi laitteeksi olemassa olevaan Cleona-tiliin. Ensisijaisen laitteen on vahvistettava pyyntö. Molemmat laitteet jakavat sitten saman identiteetin.', // uncertain:
+    'no': 'Koble denne enheten som en sekundær enhet til en eksisterende Cleona-konto. Primærenheten må bekrefte forespørselen. Begge enhetene deler deretter den samme identiteten.', // uncertain:
+    'uk': 'Прив\'язати цей пристрій як вторинний пристрій до існуючого облікового запису Cleona. Основний пристрій повинен підтвердити запит. Обидва пристрої потім використовують одну й ту саму ідентичність.', // uncertain:
+    'ru': 'Привязать это устройство как вторичное устройство к существующей учётной записи Cleona. Основное устройство должно подтвердить запрос. Оба устройства затем используют одну и ту же личность.', // uncertain:
+    'tr': 'Bu cihazı mevcut bir Cleona hesabına ikincil cihaz olarak bağlayın. Birincil cihaz isteği onaylamalıdır. Her iki cihaz daha sonra aynı kimliği paylaşır.', // uncertain:
+    'zh': '将此设备作为辅助设备关联到现有的 Cleona 账户。主设备必须确认请求。两台设备随后共享同一身份。', // uncertain:
+    'ja': 'このデバイスを既存のCleonaアカウントにセカンダリデバイスとしてリンクします。プライマリデバイスがリクエストを確認する必要があります。その後、両方のデバイスが同じIDを共有します。', // uncertain:
+    'ko': '이 기기를 기존 Cleona 계정에 보조 기기로 연결합니다. 기본 기기가 요청을 확인해야 합니다. 그 후 두 기기가 동일한 신원을 공유합니다.', // uncertain:
+    'hi': 'इस डिवाइस को मौजूदा Cleona खाते से सेकेंडरी डिवाइस के रूप में जोड़ें। प्राइमरी डिवाइस को अनुरोध की पुष्टि करनी होगी। दोनों डिवाइस फिर एक ही पहचान साझा करते हैं।', // uncertain:
+    'th': 'เชื่อมต่ออุปกรณ์นี้เป็นอุปกรณ์รองกับบัญชี Cleona ที่มีอยู่ อุปกรณ์หลักต้องยืนยันคำขอ จากนั้นอุปกรณ์ทั้งสองจะใช้ตัวตนเดียวกัน', // uncertain:
+    'vi': 'Liên kết thiết bị này làm thiết bị phụ với tài khoản Cleona hiện có. Thiết bị chính phải xác nhận yêu cầu. Sau đó cả hai thiết bị chia sẻ cùng một danh tính.', // uncertain:
+    'id': 'Tautkan perangkat ini sebagai perangkat sekunder ke akun Cleona yang ada. Perangkat utama harus mengonfirmasi permintaan. Kedua perangkat kemudian berbagi identitas yang sama.', // uncertain:
+    'ms': 'Pautkan peranti ini sebagai peranti sekunder kepada akaun Cleona sedia ada. Peranti utama mesti mengesahkan permintaan. Kedua-dua peranti kemudian berkongsi identiti yang sama.', // uncertain:
+  },
   'linked_device_request_sent': {
     'de': 'Kopplungsanfrage gesendet — warte auf Bestätigung vom Primärgerät',
     'en': 'Pairing request sent — waiting for Primary approval',
@@ -2063,5 +2096,110 @@ const Map<String, Map<String, String>> translations = {
     'vi': 'Kênh', // uncertain:
     'id': 'Saluran', // uncertain:
     'ms': 'Saluran', // uncertain:
+  },
+  'share_cleona': {
+    'de': 'Cleona teilen',
+    'en': 'Share Cleona',
+    'es': 'Compartir Cleona', // uncertain:
+    'hu': 'Cleona megosztása', // uncertain:
+    'sv': 'Dela Cleona', // uncertain:
+    'ar': 'مشاركة Cleona', // uncertain:
+    'he': 'שתף את Cleona', // uncertain:
+    'fa': 'اشتراک‌گذاری Cleona', // uncertain:
+    'fr': 'Partager Cleona', // uncertain:
+    'it': 'Condividi Cleona', // uncertain:
+    'pt': 'Compartilhar Cleona', // uncertain:
+    'nl': 'Cleona delen', // uncertain:
+    'pl': 'Udostępnij Cleona', // uncertain:
+    'ro': 'Partajează Cleona', // uncertain:
+    'cs': 'Sdílet Cleona', // uncertain:
+    'sk': 'Zdieľať Cleona', // uncertain:
+    'hr': 'Podijeli Cleona', // uncertain:
+    'bg': 'Сподели Cleona', // uncertain:
+    'el': 'Κοινοποίηση Cleona', // uncertain:
+    'da': 'Del Cleona', // uncertain:
+    'fi': 'Jaa Cleona', // uncertain:
+    'no': 'Del Cleona', // uncertain:
+    'uk': 'Поділитися Cleona', // uncertain:
+    'ru': 'Поделиться Cleona', // uncertain:
+    'tr': 'Cleona paylaş', // uncertain:
+    'zh': '分享 Cleona', // uncertain:
+    'ja': 'Cleonaを共有', // uncertain:
+    'ko': 'Cleona 공유', // uncertain:
+    'hi': 'Cleona साझा करें', // uncertain:
+    'th': 'แชร์ Cleona', // uncertain:
+    'vi': 'Chia sẻ Cleona', // uncertain:
+    'id': 'Bagikan Cleona', // uncertain:
+    'ms': 'Kongsi Cleona', // uncertain:
+  },
+  'share_cleona_download_link': {
+    'de': 'Download-Link kopieren',
+    'en': 'Copy download link',
+    'es': 'Copiar enlace de descarga', // uncertain:
+    'hu': 'Letöltési link másolása', // uncertain:
+    'sv': 'Kopiera nedladdningslänk', // uncertain:
+    'ar': 'نسخ رابط التنزيل', // uncertain:
+    'he': 'העתק קישור הורדה', // uncertain:
+    'fa': 'کپی لینک دانلود', // uncertain:
+    'fr': 'Copier le lien de téléchargement', // uncertain:
+    'it': 'Copia link di download', // uncertain:
+    'pt': 'Copiar link de download', // uncertain:
+    'nl': 'Downloadlink kopiëren', // uncertain:
+    'pl': 'Kopiuj link do pobrania', // uncertain:
+    'ro': 'Copiază linkul de descărcare', // uncertain:
+    'cs': 'Kopírovat odkaz ke stažení', // uncertain:
+    'sk': 'Kopírovať odkaz na stiahnutie', // uncertain:
+    'hr': 'Kopiraj poveznicu za preuzimanje', // uncertain:
+    'bg': 'Копирай линк за изтегляне', // uncertain:
+    'el': 'Αντιγραφή συνδέσμου λήψης', // uncertain:
+    'da': 'Kopiér downloadlink', // uncertain:
+    'fi': 'Kopioi latauslinkki', // uncertain:
+    'no': 'Kopier nedlastingslenke', // uncertain:
+    'uk': 'Копіювати посилання для завантаження', // uncertain:
+    'ru': 'Копировать ссылку для скачивания', // uncertain:
+    'tr': 'İndirme bağlantısını kopyala', // uncertain:
+    'zh': '复制下载链接', // uncertain:
+    'ja': 'ダウンロードリンクをコピー', // uncertain:
+    'ko': '다운로드 링크 복사', // uncertain:
+    'hi': 'डाउनलोड लिंक कॉपी करें', // uncertain:
+    'th': 'คัดลอกลิงก์ดาวน์โหลด', // uncertain:
+    'vi': 'Sao chép liên kết tải xuống', // uncertain:
+    'id': 'Salin tautan unduhan', // uncertain:
+    'ms': 'Salin pautan muat turun', // uncertain:
+  },
+  'share_cleona_lan_url': {
+    'de': 'LAN-Download von diesem Gerät',
+    'en': 'LAN download from this device',
+    'es': 'Descarga LAN desde este dispositivo', // uncertain:
+    'hu': 'LAN letöltés erről az eszközről', // uncertain:
+    'sv': 'LAN-nedladdning från denna enhet', // uncertain:
+    'ar': 'تنزيل عبر الشبكة المحلية من هذا الجهاز', // uncertain:
+    'he': 'הורדה מרשת מקומית ממכשיר זה', // uncertain:
+    'fa': 'دانلود از شبکه محلی از این دستگاه', // uncertain:
+    'fr': 'Téléchargement LAN depuis cet appareil', // uncertain:
+    'it': 'Download LAN da questo dispositivo', // uncertain:
+    'pt': 'Download LAN deste dispositivo', // uncertain:
+    'nl': 'LAN-download van dit apparaat', // uncertain:
+    'pl': 'Pobieranie LAN z tego urządzenia', // uncertain:
+    'ro': 'Descărcare LAN de pe acest dispozitiv', // uncertain:
+    'cs': 'Stažení z LAN z tohoto zařízení', // uncertain:
+    'sk': 'Stiahnutie z LAN z tohto zariadenia', // uncertain:
+    'hr': 'LAN preuzimanje s ovog uređaja', // uncertain:
+    'bg': 'LAN изтегляне от това устройство', // uncertain:
+    'el': 'Λήψη LAN από αυτή τη συσκευή', // uncertain:
+    'da': 'LAN-download fra denne enhed', // uncertain:
+    'fi': 'LAN-lataus tältä laitteelta', // uncertain:
+    'no': 'LAN-nedlasting fra denne enheten', // uncertain:
+    'uk': 'Завантаження з LAN з цього пристрою', // uncertain:
+    'ru': 'Скачивание по LAN с этого устройства', // uncertain:
+    'tr': 'Bu cihazdan LAN indirme', // uncertain:
+    'zh': '从此设备进行局域网下载', // uncertain:
+    'ja': 'この端末からLANダウンロード', // uncertain:
+    'ko': '이 기기에서 LAN 다운로드', // uncertain:
+    'hi': 'इस डिवाइस से LAN डाउनलोड', // uncertain:
+    'th': 'ดาวน์โหลด LAN จากอุปกรณ์นี้', // uncertain:
+    'vi': 'Tải xuống LAN từ thiết bị này', // uncertain:
+    'id': 'Unduhan LAN dari perangkat ini', // uncertain:
+    'ms': 'Muat turun LAN dari peranti ini', // uncertain:
   },
 };

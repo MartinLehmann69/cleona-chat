@@ -205,15 +205,6 @@ class SettingsScreen extends StatelessWidget {
                 title: Text(locale.get('stored_fragments')),
                 subtitle: Text('${service.fragmentCount}'),
               ),
-              // §19.6.5: opt-in, default: on. Lets the user stop this device
-              // from serving binary/fragment updates to other Cleona nodes.
-              SwitchListTile(
-                secondary: const Icon(Icons.cloud_upload),
-                title: Text(locale.get('settingsServeBinaryUpdates')),
-                subtitle: Text(locale.get('settingsServeBinaryUpdatesDesc')),
-                value: service.serveBinaryUpdates,
-                onChanged: (v) => service.setServeBinaryUpdates(v),
-              ),
             ],
           ),
 
@@ -276,7 +267,7 @@ class SettingsScreen extends StatelessWidget {
               if (!service.isLinkedDevice)
                 ListTile(
                   leading: const Icon(Icons.link),
-                  title: Text(locale.get('linked_device_request_pairing')),
+                  title: _titleWithHelp(context, 'linked_device_request_pairing', 'linked_device_request_pairing_help'),
                   subtitle: Text(locale.get('linked_device_request_pairing_subtitle')),
                   onTap: () => _showPairRequestDialog(context),
                 ),

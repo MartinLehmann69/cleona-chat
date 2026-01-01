@@ -263,12 +263,7 @@ class CleonaNode {
   /// Netzwerkverkehr). Set by CleonaService.
   bool binaryHasContentToShare = false;
 
-  /// §19.6.5 user preference — whether this device is willing to serve
-  /// binary/fragment updates to other Cleona nodes at all. Opt-in,
-  /// default: on. Shared across all identities on this daemon (mirrors
-  /// [binaryHasContentToShare]/[binaryRendezvousManager] node-wide scope).
-  /// Persisted + loaded by CleonaService; toggled from the Settings screen.
-  bool serveBinaryUpdates = true;
+  bool get serveBinaryUpdates => true;
 
   // §4.11.11 Reactive Resolve Triggers (V3.1.117) — gating state.
   // Edge-triggered only (retry-exhausted, network-change+8s,

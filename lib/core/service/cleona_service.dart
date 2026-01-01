@@ -761,11 +761,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // first identity's service on this daemon wires it up, mirroring the
     // node.rendezvousManager ??= _rendezvousManager first-wins pattern above.
     if (node.binaryRendezvousManager == null) {
-      // §19.6.5: "opt-in, default: on" user preference — load once here
-      // (daemon-wide, see _loadServeBinaryUpdates) before any of the
-      // binaryHasContentToShare = true assignments below run.
-      node.serveBinaryUpdates = _loadServeBinaryUpdates();
-
       await InstallSourceDetector.detect();
 
       _binaryFragmentStore = BinaryFragmentStore(profileDir);
@@ -791,7 +786,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // legitimate distribution source — (re)publish availability so
       // other cold-starting nodes can find it.
       _binaryUpdateManager!.onUpdateReady = (version, path) {
-        if (!node.serveBinaryUpdates) return;
         node.binaryHasContentToShare = true;
         _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
         _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
@@ -829,9 +823,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // periodic Nostr republish if this device already holds binary/
       // fragment data worth advertising. Devices with an empty store stay
       // silent until BinaryUpdateManager.onUpdateReady flips the flag above.
-      // §19.6.5: also gated by the user's serve-binary-updates preference.
-      node.binaryHasContentToShare = node.serveBinaryUpdates &&
-          _binaryFragmentStore!
+      node.binaryHasContentToShare = _binaryFragmentStore!
               .storedVersionsSync(Platform.operatingSystem)
               .isNotEmpty;
       if (node.binaryHasContentToShare) {
@@ -843,6 +835,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (InstallSourceDetector.cached == InstallSource.sideload) {
         _selfSeedCurrentBinary();
       }
+
+      _selfPublishManifest();
 
       // §19.6 fragment GC — prune old/excess fragment data once per hour,
       // and once immediately at startup to clean up stale data from
@@ -6025,6 +6019,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  @override
+  bool get serveBinaryUpdates => true;
+
   // ── Link Preview Settings ────────────────────────────────────────────
 
   @override
@@ -6060,75 +6057,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       file.writeAsStringSync(jsonEncode(_linkPreviewSettings.toJson()));
     } catch (e) {
       _log.debug('Failed to save link preview settings: $e');
-    }
-  }
-
-  // ── §19.6.5 Binary Distribution: Serve-Updates Preference ────────────
-  //
-  // Node-wide (not per-identity): only the first identity's CleonaService
-  // wires up the binary-distribution subsystem onto the shared [node] (see
-  // the `node.binaryRendezvousManager == null` guard in startService()), but
-  // any identity's Settings screen may flip the toggle. The preference —
-  // and its effect, [CleonaNode.binaryHasContentToShare] /
-  // [CleonaNode.binaryRendezvousManager] — therefore lives on the shared
-  // [node], and is persisted daemon-wide under [AppPaths.dataDir] (same
-  // scope as identities.json), not inside a single identity's profileDir.
-
-  static const String _serveBinaryUpdatesFile = 'binary_settings.json';
-
-  @override
-  bool get serveBinaryUpdates => node.serveBinaryUpdates;
-
-  @override
-  void setServeBinaryUpdates(bool enabled) {
-    node.serveBinaryUpdates = enabled;
-    _saveServeBinaryUpdates(enabled);
-    final rendezvous = node.binaryRendezvousManager;
-    if (!enabled) {
-      // Arbeitsregel #5: stop advertising immediately, don't wait for the
-      // next network-change/periodic tick.
-      node.binaryHasContentToShare = false;
-      rendezvous?.stopPeriodicRefresh();
-      _log.info('[update] Binary seeding disabled by user (§19.6.5 opt-out)');
-    } else {
-      final recordProvider = node.binaryRecordProvider;
-      final record = recordProvider?.call();
-      final hasContent =
-          record != null && (record.hasFullBinary || record.fragmentIndices.isNotEmpty);
-      node.binaryHasContentToShare = hasContent;
-      if (hasContent && rendezvous != null && recordProvider != null) {
-        rendezvous.startPeriodicRefresh(recordProvider);
-        rendezvous.publish(record);
-      }
-      _log.info('[update] Binary seeding re-enabled by user (§19.6.5 opt-in)'
-          '${hasContent ? '' : ' — nothing to share yet'}');
-    }
-    onStateChanged?.call();
-  }
-
-  /// Loads the persisted preference (default: true — §19.6.5 "opt-in,
-  /// default: on"). Only called once, from the `node.binaryRendezvousManager
-  /// == null` first-identity block in startService().
-  bool _loadServeBinaryUpdates() {
-    try {
-      final file = File('${AppPaths.dataDir}${Platform.pathSeparator}$_serveBinaryUpdatesFile');
-      if (file.existsSync()) {
-        final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-        return json['serveBinaryUpdates'] as bool? ?? true;
-      }
-    } catch (e) {
-      _log.debug('Failed to load binary-seeding preference: $e');
-    }
-    return true;
-  }
-
-  void _saveServeBinaryUpdates(bool enabled) {
-    try {
-      final file = File('${AppPaths.dataDir}${Platform.pathSeparator}$_serveBinaryUpdatesFile');
-      file.parent.createSync(recursive: true);
-      file.writeAsStringSync(jsonEncode({'serveBinaryUpdates': enabled}), flush: true);
-    } catch (e) {
-      _log.debug('Failed to save binary-seeding preference: $e');
     }
   }
 
@@ -8297,7 +8225,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           .map((e) => e.key)
           .toList(),
       'mediaSettings': _mediaSettings.toJson(),
-      'serveBinaryUpdates': node.serveBinaryUpdates,
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),
       'localDeviceId': _localDeviceId,
@@ -10633,13 +10560,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       );
       if (count > 0) {
         _log.info('[update] Self-seeded $count fragments for $platform/$version');
-        // §19.6.5: fragments stay on disk either way (so an opt-in later is
-        // instant), but only announce availability if the user allows it.
-        if (node.serveBinaryUpdates) {
-          node.binaryHasContentToShare = true;
-          _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
-          _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
-        }
+        node.binaryHasContentToShare = true;
+        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+        _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
       }
     }).catchError((e) {
       _log.warn('[update] Self-seed failed: $e');
@@ -10658,6 +10581,40 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return null; // TODO: resolve via PackageManager
     }
     return Platform.resolvedExecutable;
+  }
+
+  void _selfPublishManifest() {
+    try {
+      final manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest.json';
+      final file = File(manifestPath);
+      if (!file.existsSync()) return;
+      final jsonData = file.readAsStringSync();
+      final checker = UpdateChecker(log: _log);
+      final manifest = checker.verifyManifest(jsonData);
+      if (manifest == null) {
+        _log.warn('[update] update_manifest.json has invalid signature — ignoring');
+        return;
+      }
+      final dhtKey = UpdateManifest.dhtKey();
+      final data = Uint8List.fromList(utf8.encode(jsonData));
+      final messageId = SodiumFFI().sha256(data);
+      final stored = mailboxStore.storeFragment(StoredFragment(
+        mailboxId: dhtKey,
+        messageId: messageId,
+        fragmentIndex: 0,
+        totalFragments: 1,
+        requiredFragments: 1,
+        data: data,
+        originalSize: data.length,
+        expiresAt: DateTime.now().add(const Duration(days: 30)),
+      ));
+      if (stored) {
+        _log.info('[update] Published manifest v${manifest.version} to local DHT store');
+        _latestManifest = manifest;
+      }
+    } catch (e) {
+      _log.debug('[update] Self-publish manifest failed: $e');
+    }
   }
 
   /// §19.6.2 — trigger an in-network binary update download. Public entry
@@ -10791,11 +10748,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       version: manifest.version,
       maxFragments: maxFragments,
     );
-    // §19.6.5: fragments are kept locally either way; only announce
-    // availability to other nodes if the user opted in to serving them.
-    if (node.serveBinaryUpdates) {
-      node.binaryHasContentToShare = true;
-    }
+    node.binaryHasContentToShare = true;
     _log.info('startInNetworkUpdate: v${manifest.version} verified and ready '
         '(${binary.length}B), seeded $seededCount fragment(s)');
   }

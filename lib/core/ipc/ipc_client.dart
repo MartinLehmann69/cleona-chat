@@ -644,7 +644,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _isGuardianSetUp = state['isGuardianSetUp'] as bool? ?? false;
     final ms = state['mediaSettings'] as Map<String, dynamic>?;
     if (ms != null) _mediaSettings = MediaSettings.fromJson(ms);
-    _serveBinaryUpdates = state['serveBinaryUpdates'] as bool? ?? _serveBinaryUpdates;
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
@@ -1602,22 +1601,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     onStateChanged?.call();
   }
 
-  // ── §19.6.5 Binary Distribution: Serve-Updates Preference ──────────
-
-  bool _serveBinaryUpdates = true;
-
   @override
-  bool get serveBinaryUpdates => _serveBinaryUpdates;
+  bool get serveBinaryUpdates => true;
 
-  @override
-  void setServeBinaryUpdates(bool enabled) {
-    _serveBinaryUpdates = enabled;
-    _sendRequest('set_serve_binary_updates', params: {'enabled': enabled});
-    onStateChanged?.call();
-  }
-
-  /// Change the daemon's listening port at runtime.
-  /// Returns true on success, false on failure (port in use, invalid range).
   @override
   Future<bool> setPort(int newPort) async {
     final resp = await _sendRequest('set_port', params: {'port': newPort});
