@@ -1,0 +1,101 @@
+Cleona Chat Source Available License
+Version 1.0
+
+Copyright (c) 2026 Martin Lehmann. All rights reserved.
+
+TERMS AND CONDITIONS
+
+1. DEFINITIONS
+
+"Software" means the Cleona Chat source code, documentation, and associated
+files made available under this license.
+
+"Maintainer" means the copyright holder, Martin Lehmann.
+
+"You" means the individual or entity exercising the rights granted under
+this license.
+
+2. PERMITTED USE
+
+You are granted a non-exclusive, non-transferable, non-sublicensable,
+revocable right to:
+
+  a) Read, study, and review the source code for educational purposes,
+     security research, and transparency verification.
+
+  b) Audit the cryptographic implementation for security vulnerabilities
+     and report findings to the Maintainer.
+
+  c) Submit bug reports, feature requests, and security disclosures
+     to the Maintainer.
+
+  d) Build the Software from source for your own personal,
+     non-commercial use on your own devices.
+
+3. RESTRICTIONS
+
+You may NOT:
+
+  a) Distribute, sublicense, sell, lease, or otherwise make the Software
+     or any derivative work available to third parties, whether in source
+     or binary form.
+
+  b) Create, publish, or distribute modified versions (forks) of the
+     Software.
+
+  c) Use the Software or any part thereof for commercial purposes,
+     including but not limited to incorporating it into commercial
+     products or services.
+
+  d) Use the name "Cleona Chat", the Cleona logo, or any associated
+     trademarks in connection with any software, product, or service
+     without prior written permission from the Maintainer.
+
+  e) Remove, alter, or obscure this license notice or any copyright,
+     trademark, or attribution notices contained in the Software.
+
+  f) Use the Software to create a competing messaging service or
+     protocol-compatible client without prior written permission
+     from the Maintainer.
+
+4. CONTRIBUTIONS
+
+By submitting bug reports, feature requests, patches, or other
+contributions to the Maintainer, you agree that such contributions
+become the property of the Maintainer and are subject to this license.
+You waive any claims to compensation for accepted contributions.
+
+5. SECURITY RESEARCH
+
+Security researchers acting in good faith are expressly permitted to
+analyze the Software for vulnerabilities, provided that any findings
+are reported to the Maintainer through responsible disclosure before
+public release. See SECURITY.md for disclosure procedures.
+
+6. NO WARRANTY
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE MAINTAINER BE LIABLE FOR ANY
+CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+7. TERMINATION
+
+This license terminates automatically if you violate any of its terms.
+Upon termination, you must destroy all copies of the Software in your
+possession. The Maintainer reserves the right to revoke this license
+at any time for any reason with 30 days written notice.
+
+8. GOVERNING LAW
+
+This license shall be governed by and construed in accordance with the
+laws of the Federal Republic of Germany, without regard to its conflict
+of law provisions.
+
+9. CONTACT
+
+For licensing inquiries, security disclosures, or permission requests:
+See SECURITY.md or the project's GitHub repository.
