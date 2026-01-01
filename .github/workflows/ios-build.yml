@@ -289,6 +289,7 @@ jobs:
               distribute_external: true,
               groups: ["CleonaWeitereTestUser"],
               skip_waiting_for_build_processing: false,
+              reject_build_waiting_for_review: true,
               notify_external_testers: true,
               changelog: "Bug fixes and improvements"
             )
