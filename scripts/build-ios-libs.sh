@@ -437,7 +437,6 @@ for platform_tag in device simulator; do
             [ -f "$a" ] || continue
             case "$(basename "$a")" in
                 libggml-base.a|libggml-cpu.a) echo "  skip $(basename "$a") (in libggml.a)"; continue ;;
-                libXorcode.a|libnullcode.a|liberasurecode_rs_vand.a) echo "  skip $(basename "$a") (in liberasurecode.a)"; continue ;;
             esac
             ALL_ARCHIVES+=("$a")
         done
