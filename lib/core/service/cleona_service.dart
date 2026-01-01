@@ -61,7 +61,6 @@ import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
-import 'package:cleona/core/channels/feature_request_helper.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -361,12 +360,9 @@ class CleonaService implements ICleonaService {
 
   // System channels (§9.5)
   CrashReporter? _crashReporter;
-  FeatureRequestHelper? _featureRequestHelper;
   Timer? _systemChannelEvictionTimer;
 
   CrashReporter get crashReporter => _crashReporter ??= CrashReporter(this);
-  FeatureRequestHelper get featureRequestHelper =>
-      _featureRequestHelper ??= FeatureRequestHelper(this);
 
   // Guardian restore callback
   @override
@@ -4018,6 +4014,7 @@ class CleonaService implements ICleonaService {
     }
 
     _addMessageToConversation(channelIdHex, msg, isChannel: true);
+
     return msg;
   }
 
@@ -8761,8 +8758,14 @@ class CleonaService implements ICleonaService {
     if (delete) {
       pollManager.deletePoll(pollId);
       await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_DELETE);
+      // System channels: remove the UiMessage container entirely
+      if (SystemChannels.isSystemChannel(poll.groupId)) {
+        final conv = conversations[poll.groupId];
+        conv?.messages.removeWhere((m) => m.pollId == pollId);
+      }
       onPollStateChanged?.call(pollId);
       onStateChanged?.call();
+      _saveConversations();
       return true;
     }
     if (close == true) {
@@ -13410,7 +13413,12 @@ class CleonaService implements ICleonaService {
           pollManager.extendDeadline(pollIdHex, msg.newDeadline.toInt());
           break;
         case proto.PollAction.POLL_ACTION_DELETE:
+          if (SystemChannels.isSystemChannel(poll.groupId)) {
+            final conv = conversations[poll.groupId];
+            conv?.messages.removeWhere((m) => m.pollId == pollIdHex);
+          }
           pollManager.deletePoll(pollIdHex);
+          _saveConversations();
           break;
         default:
           break;

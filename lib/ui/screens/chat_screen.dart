@@ -791,6 +791,25 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildInputArea(BuildContext context, ICleonaService? service) {
     final locale = AppLocale.read(context);
+
+    // Feature Request channel: FAB instead of text input
+    if (widget.isChannel && sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId)) {
+      return Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+        ),
+        child: Center(
+          child: FilledButton.icon(
+            onPressed: () => _showFeatureRequestDialog(context, service),
+            icon: const Icon(Icons.lightbulb_outline),
+            label: Text(locale.get('feature_request_submit')),
+          ),
+        ),
+      );
+    }
+
     // Subscribers can't post in channels
     if (widget.isChannel && !_canPostInChannel(service)) {
       return Container(
@@ -1251,6 +1270,104 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  void _showFeatureRequestDialog(BuildContext context, ICleonaService? service) {
+    if (service == null) return;
+    final locale = AppLocale.read(context);
+    final headingCtrl = TextEditingController();
+    final descCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(locale.get('feature_request_submit')),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: headingCtrl,
+                decoration: InputDecoration(
+                  labelText: locale.get('feature_request_heading'),
+                  border: const OutlineInputBorder(),
+                ),
+                maxLength: 100,
+                autofocus: true,
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: descCtrl,
+                decoration: InputDecoration(
+                  labelText: locale.get('feature_request_description'),
+                  border: const OutlineInputBorder(),
+                ),
+                maxLines: 4,
+                maxLength: 500,
+              ),
+              const SizedBox(height: 12),
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: Text(
+                  '${locale.get('poll_create')}:',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Theme.of(ctx).colorScheme.onSurface,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 4),
+              for (final key in ['feature_vote_yes', 'feature_vote_no', 'feature_vote_neutral'])
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      Icon(Icons.radio_button_unchecked, size: 16,
+                          color: Theme.of(ctx).colorScheme.outline),
+                      const SizedBox(width: 8),
+                      Text(locale.get(key)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(locale.get('cancel')),
+          ),
+          FilledButton(
+            onPressed: () async {
+              final heading = headingCtrl.text.trim();
+              if (heading.isEmpty) return;
+              Navigator.pop(ctx);
+              try {
+                await service.createPoll(
+                  question: heading,
+                  description: descCtrl.text.trim(),
+                  pollType: PollType.singleChoice,
+                  options: [
+                    PollOption(optionId: 0, label: locale.get('feature_vote_yes')),
+                    PollOption(optionId: 1, label: locale.get('feature_vote_no')),
+                    PollOption(optionId: 2, label: locale.get('feature_vote_neutral')),
+                  ],
+                  settings: PollSettings(
+                    anonymous: false,
+                    allowVoteChange: true,
+                    showResultsBeforeClose: true,
+                  ),
+                  groupIdHex: widget.conversationId,
+                );
+              } catch (e) {
+                debugPrint('Feature request poll failed: $e');
+              }
+            },
+            child: Text(locale.get('feature_request_submit')),
+          ),
+        ],
       ),
     );
   }

@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:dc85b92e1cdb, 2026-06-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:17c2681d3480, 2026-06-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1622,7 +1622,9 @@ LAN-Discovery's send path on Linux and Windows desktop runs through a small C li
 
 **Security model.** The shim sees raw UDP datagrams that the rest of Cleona has already constructed — CLEO discovery probes (38 bytes including magic) for the LAN-Discovery send path, no other payload types. The shim performs no cryptography, validates no headers, and has no awareness of the Closed-Network HMAC framing (§4.10) — that wrapping happens above the FFI seam on the Dart side. The C source has no parsing, no allocation past the per-call buffer, and no state beyond the socket handle. The trusted native code surface introduced by this shim is therefore small and self-contained.
 
-**Build and deployment.** The C source lives under `native/cleona_net/` with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. Linux builds are bundled into the Flutter Linux release alongside `libcleona_audio.so`; Windows builds drop into `build/windows/x64/runner/Release/` next to `libsodium.dll`. Android, iOS, and macOS desktop builds skip the shim entirely — those platforms continue to use Dart's `RawDatagramSocket` directly, with no functional regression observed. Phase 2 may extend the shim to other platforms if a measurable drop pattern is later observed there.
+**Build and deployment.** The C source lives under `native/cleona_net/` with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. Linux builds are bundled into the Flutter Linux release alongside `libcleona_audio.so`; Windows builds drop into `build/windows/x64/runner/Release/` next to `libsodium.dll`. Android and macOS desktop builds skip the shim entirely — those platforms continue to use Dart's `RawDatagramSocket` directly, with no functional regression observed. iOS uses a separate native send strategy described below.
+
+**iOS send path (IosUdpSender).** iOS exhibits the same symptom as Windows — Dart's `RawDatagramSocket.send()` returns 0 for all destinations — but the root cause differs: the kqueue-based I/O path reports errno 64 (EHOSTUNREACH) or 65 (ENETDOWN) silently as a zero return value. The fix follows a different strategy than `libcleona_net`: instead of opening a second socket, `IosUdpSender` (`ios_udp_sender.dart`) locates the Dart socket's existing file descriptor by scanning `/dev/fd` and calls native `sendto()` directly via FFI (`cleona_udp_ios.c`). This preserves the one-socket-per-port invariant — no second bound socket, no receive-path starvation risk. For the discovery port (41338), a separate send-only socket is created via `createSendOnly()` because iOS aggressively recycles the Dart discovery socket's fd (ENOTSOCK on reuse). The native library is statically linked into the Runner binary (`cleona_exported_symbols.txt` controls symbol visibility against the linker's `-dead_strip`).
 
 **Peer-list format** (carried in the PEER_LIST_PUSH application frame):
 
@@ -6372,6 +6374,16 @@ The first platform where the OS actively works against Cleona's architecture. Th
 **Tier 5 — iOS**
 
 The most restrictive platform for Cleona's use case. Apple does not offer a Foreground Service equivalent. Background execution is limited to BGTaskScheduler, which grants approximately 30 seconds of runtime at OS-determined intervals (typically every 15–30 minutes, sometimes longer). There is no way to maintain a persistent UDP socket in the background. **User impact:** while the app is open, messages arrive instantly. When the app is in the background, message delivery is delayed until the next BGTask window or until the user opens the app. Calls cannot be received in the background without the VoIP push exception (which Apple restricts to apps using CallKit). This is not a bug or missing feature — it is a fundamental conflict between iOS's design philosophy (apps should not run in the background) and Cleona's architecture (peers must be reachable). The full P2P experience is only available while the app is in the foreground.
+
+**Dart Socket Constraints on iOS.** Beyond the background-execution limitations, Dart's `RawDatagramSocket` on iOS has two platform-specific behaviors that require architectural mitigation:
+
+*Send path failure.* `RawDatagramSocket.send()` silently returns 0 for all destinations (errno 64/65 from the kqueue I/O path). Cleona uses `IosUdpSender` to call native `sendto()` on the Dart socket's own file descriptor — see §4.5.2 for details.
+
+*Socket file-descriptor death.* iOS closes Dart's UDP socket file descriptors approximately 40–60 seconds after app start (EBADF, errno 9, on both IPv4 and IPv6). This appears related to iOS's network-route lifecycle: sockets opened before the WiFi route is fully established are invalidated when iOS finalizes the route. After socket death, both the Dart listen stream and `IosUdpSender`'s cached fd become stale. **Recovery:** Transport runs a 10-second diagnostic timer that calls `recvPeek()` on the native fd. When the return value is -9 (EBADF), it fires `onUdpSocketDead`, which triggers the full network-change recovery cycle: close dead sockets, bind fresh ones on the same port, rescan the new fd for `IosUdpSender`, re-PING all neighbors, re-publish identity. The gap between socket death and recovery is at most one timer tick (10 seconds); messages sent during the gap land in the persistent `SendQueue` and are delivered after reconnection. The socket `onError` stream handlers provide a faster parallel detection path for the same condition.
+
+*Async error propagation.* Fire-and-forget UDP sends (LAN discovery broadcasts, UPnP SSDP probes) throw `SocketException` asynchronously via the socket's error stream when iOS has no network route at startup — not synchronously from `send()`. Every `RawDatagramSocket.listen()` call in iOS-reachable code paths must include an `onError` handler; omitting it causes the exception to propagate as an unhandled zone error.
+
+These three constraints apply only to the foreground session. The BGTaskScheduler path (§12.5) opens fresh sockets per wakeup cycle and closes them before completion, sidestepping the fd-lifecycle issue entirely.
 
 ### 25.3 Summary
 
