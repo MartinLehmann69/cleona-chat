@@ -31,6 +31,7 @@ import 'package:cleona/ui/screens/nat_wizard/nat_wizard_instructions_screen.dart
 import 'package:cleona/core/network/router_db.dart';
 import 'package:cleona/core/network/nfc_platform_bridge.dart' show isNfcAvailable;
 import 'package:cleona/core/network/contact_seed.dart';
+import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
@@ -1212,7 +1213,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
               ],
               if (conv.isChannel) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
-                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+                if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
+                  PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
               ],
               if (!conv.isGroup && !conv.isChannel) ...[
                 PopupMenuItem(value: 'rename_contact', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('rename_contact'))])),
@@ -1427,6 +1429,18 @@ class _ConversationListViewState extends State<_ConversationListView> {
       );
     }
     if (conv.isChannel) {
+      if (conv.id == sys_ch.SystemChannels.bugLogChannelIdHex) {
+        return CircleAvatar(
+          backgroundColor: colorScheme.errorContainer,
+          child: Icon(Icons.bug_report, color: colorScheme.onErrorContainer),
+        );
+      }
+      if (conv.id == sys_ch.SystemChannels.featureReqChannelIdHex) {
+        return CircleAvatar(
+          backgroundColor: colorScheme.tertiaryContainer,
+          child: Icon(Icons.lightbulb_outline, color: colorScheme.onTertiaryContainer),
+        );
+      }
       return CircleAvatar(
         backgroundColor: colorScheme.secondaryContainer,
         child: Icon(Icons.campaign, color: colorScheme.onSecondaryContainer),

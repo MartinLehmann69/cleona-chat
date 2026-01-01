@@ -87,6 +87,7 @@ def main():
                 data = state_resp.get("data", {})
                 pending = data.get("pendingContacts", [])
 
+                did_accept = False
                 for contact in pending:
                     nid = contact.get("nodeId") or contact.get("nodeIdHex", "")
                     if not nid:
@@ -98,11 +99,16 @@ def main():
                     acc_resp = ipc_call(sock, "accept_contact", {"nodeIdHex": nid}, iid)
                     if acc_resp.get("success"):
                         accepted.add(key)
+                        did_accept = True
                         print(f"[WATCHER] {name}: accepted {contact.get('displayName','?')} ({nid[:12]}...)")
                     else:
                         print(f"[WATCHER] {name}: accept failed for {nid[:12]}: {acc_resp.get('error')}")
 
-                # Send test message to newly accepted contacts that we haven't messaged yet
+                if did_accept:
+                    time.sleep(2)
+                    state_resp = ipc_call(sock, "get_state", identity_id=iid)
+                    data = state_resp.get("data", {})
+
                 for contact in data.get("acceptedContacts", []):
                     nid = contact.get("nodeId") or contact.get("nodeIdHex", "")
                     if not nid:
@@ -111,10 +117,8 @@ def main():
                     if msg_key in messaged:
                         continue
                     if msg_key not in accepted:
-                        # Pre-existing contact, skip
                         continue
 
-                    time.sleep(2)
                     msg_text = f"CI-ACK-{name}"
                     send_resp = ipc_call(sock, "send_text", {"recipientId": nid, "text": msg_text}, iid)
                     if send_resp.get("success"):

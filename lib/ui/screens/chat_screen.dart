@@ -30,6 +30,8 @@ import 'package:cleona/core/media/clipboard_helper.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/ui/components/poll_card.dart';
 import 'package:cleona/ui/screens/poll_editor_screen.dart';
+import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/ui/components/system_channel_post.dart';
 
 /// Defensive base64 decode for image fields persisted in conversations.
 /// Wraps base64Decode's FormatException — invalid input returns null and the
@@ -316,6 +318,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               chatConfig: conv?.config,
                               onMessageAction: (action, m) => _handleMessageAction(action, m, service),
                               isSearchHighlight: isHighlighted,
+                              isSystemChannel: sys_ch.SystemChannels.isSystemChannel(widget.conversationId),
                             );
                           },
                         ),
@@ -779,6 +782,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool _canPostInChannel(ICleonaService? service) {
     if (!widget.isChannel || service == null) return true;
+    if (sys_ch.SystemChannels.isSystemChannel(widget.conversationId)) return true;
     final channel = service.channels[widget.conversationId];
     if (channel == null) return false;
     final myRole = channel.members[service.nodeIdHex]?.role ?? 'subscriber';
@@ -2252,6 +2256,7 @@ class _MessageBubble extends StatelessWidget {
   final ChatConfig? chatConfig;
   final void Function(String action, UiMessage message)? onMessageAction;
   final bool isSearchHighlight;
+  final bool isSystemChannel;
 
   const _MessageBubble({
     required this.message,
@@ -2261,6 +2266,7 @@ class _MessageBubble extends StatelessWidget {
     this.chatConfig,
     this.onMessageAction,
     this.isSearchHighlight = false,
+    this.isSystemChannel = false,
   });
 
   /// Default edit window: 1 hour.
@@ -2387,6 +2393,16 @@ class _MessageBubble extends StatelessWidget {
             ),
           ),
         ),
+      );
+    }
+
+    // System channel posts: render crash reports and duplicates as cards
+    if (isSystemChannel && !deleted && message.text.startsWith('{')) {
+      final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
+      return SystemChannelPost(
+        text: message.text,
+        isOutgoing: isOutgoing,
+        timestamp: ts,
       );
     }
 
