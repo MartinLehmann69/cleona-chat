@@ -291,8 +291,19 @@ class BinaryHttpServer {
 
     try {
       client.add(ascii.encode(header.toString()));
-      if (body != null) client.add(body);
-      client.flush().whenComplete(() => client.destroy());
+      if (body != null) {
+        const chunkSize = 65536;
+        for (var i = 0; i < body.length; i += chunkSize) {
+          client.add(body.sublist(i, i + chunkSize > body.length ? body.length : i + chunkSize));
+        }
+      }
+      client.flush().then((_) => client.close()).catchError((_) {}).whenComplete(() {
+        final destroyDelay = Duration(
+            seconds: contentLength > 0 ? (contentLength ~/ 500000).clamp(30, 600) : 30);
+        Future.delayed(destroyDelay, () {
+          try { client.destroy(); } catch (_) {}
+        });
+      });
     } catch (e) {
       _log.debug('HTTP response write failed: $e');
       try {

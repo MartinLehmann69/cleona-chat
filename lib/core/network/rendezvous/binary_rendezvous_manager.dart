@@ -243,12 +243,19 @@ class BinaryRendezvousManager {
       final tag = computeBinaryTag(secret, epoch, platform);
       final key = deriveBinaryKey(secret, epoch);
 
-      final records = await Future.wait(_providers
-          .where((p) => p.isAvailable)
-          .map((p) => p.resolve(tag).catchError((_) => null)));
+      final allSigned = <SignedEndpointRecord>[];
+      for (final p in _providers.where((p) => p.isAvailable)) {
+        try {
+          if (p is NostrProvider) {
+            allSigned.addAll(await p.resolveMulti(tag));
+          } else {
+            final single = await p.resolve(tag);
+            if (single != null) allSigned.add(single);
+          }
+        } catch (_) {}
+      }
 
-      for (final signed in records) {
-        if (signed == null) continue;
+      for (final signed in allSigned) {
         final rec = decryptBinaryRecord(signed, key, tag);
         if (rec == null || rec.addresses.isEmpty) continue;
         final devHex = rec.deviceId

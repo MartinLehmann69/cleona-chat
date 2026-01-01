@@ -78,10 +78,9 @@ class BinarySeeder {
       for (var i = 0; i < storeCount; i++) {
         await _store.storeFragment(platform, version, i, fragments[i]);
       }
-      await _store.storeComplete(platform, version, binary);
 
       _log.info('seed $platform/$version: stored $storeCount/'
-          '${fragments.length} fragments + complete binary');
+          '${fragments.length} fragments');
       return storeCount;
     } catch (e) {
       _log.error('seed $platform/$version failed: $e');

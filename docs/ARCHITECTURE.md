@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:b664c3da0eb8, 2026-07-11). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:208a2509971a, 2026-07-11). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7057,17 +7057,17 @@ Development uses a three-directory model to separate working code from secrets a
 | `CleonaPrivat/` | Private keys, credentials, internal documentation | No | Never |
 | `CleonaGit/` | Sanitized prestage for GitHub (source + public docs + releases) | Yes (pushed to GitHub) | Yes |
 
-**Sync workflow:** `Cleona/scripts/sync-to-git.sh` copies sanitized source from `Cleona/` to `CleonaGit/`, excluding all secrets, test infrastructure, and internal documentation. A built-in security check scans for leaked passwords and private keys before completion.
+**Release pipeline (5 scripts):** `sync-to-git.sh` copies sanitized source from `Cleona/` to `CleonaGit/` (allowlist-based, default-deny, with tripwire security checks). `dry-run-cleonagit-push.sh` validates the push against a local bare mirror (6 invariants). `approve-cleonagit-push.sh` requires interactive human approval (`JA-PUSH`). `push-cleonagit.sh` pushes code and tag to GitHub (no release creation). `release-build.sh` orchestrates all platform builds in parallel (Apple CI + Windows RDP first, then Android + Linux locally), signs the update manifest with per-platform `dhtBinaryTag`, publishes the in-network update via DHT seeding, and creates the GitHub Release with all artifacts. See `docs/PUBLISHING.md` for the full pipeline specification.
 
 **Commit date neutralization:** All commits pushed to GitHub use a fixed neutral date (`2026-01-01T12:00:00+00:00`) to hide the development timeline. Push timestamps (set by GitHub server-side) are accepted as unavoidable.
 
-**Published content:** Source code (`lib/`, `proto/`, `assets/`), public architecture document, security whitepaper, user manual (33 languages), changelog (sanitized), signed release artifacts (Linux/Windows/Android + SHA256SUMS).
+**Published content:** Source code (`lib/`, `proto/`, `assets/`), public architecture document, security whitepaper, user manual (33 languages), changelog (sanitized), signed release artifacts (Linux/Windows/Android/iOS/macOS + SHA256SUMS).
 
 **Not published:** Private keys, test infrastructure (`test/`, `scripts/vm/`), internal docs (`CLAUDE.md`, `HANDOVER.md`, `BUGFIX_*.md`), internal tooling (`headless.dart`, `init_profile.dart`), debug builds, VM credentials.
 
 **Reproducible builds:** Users can verify that official binaries match the published source by building from source and comparing the unsigned output. The Ed25519 release signature is a separate verification step (authenticity, not integrity). The maintainer's private key is never needed by verifiers.
 
-**Distribution channels (external, for initial installation):** GitHub Releases (signed binaries), Google Play (maintainer-signed APK), project website. F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
+**Distribution channels (external, for initial installation):** GitHub Releases (signed binaries for Linux, Windows, Android, macOS), Apple TestFlight (iOS, uploaded automatically by Apple CI via Fastlane), Google Play (maintainer-signed APK), project website. F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
 
 **Linux packaging:** Three formats built from the Flutter Linux bundle via `scripts/build-linux-packages.sh`: AppImage (universal, no installation), .deb (Debian/Ubuntu/Mint), .rpm (Fedora/openSUSE/RHEL). All install to `/opt/cleona/` with a wrapper script in `/usr/bin/cleona-chat` and a `.desktop` entry for application menu integration.
 
@@ -7205,7 +7205,7 @@ For users who already have Cleona installed. The network delivers updates itself
    - `minMonotoneSeq: int` — monotonically increasing sequence number. Nodes reject any manifest with a `minMonotoneSeq` lower than or equal to the highest previously seen value. Prevents downgrade attacks via replayed old (but validly signed) manifests.
 4. Receiver node reads the manifest (existing 6h poller), detects new version.
 5. Receiver fetches K fragments from N over DHT, assembles the binary, verifies SHA-256 hash + Ed25519 signature.
-6. User is prompted for installation (no auto-install — user consent required).
+6. Installation starts automatically: Android opens the system package installer (user consent via OS dialog), desktop backs up the current binary and exits for restart. No intermediate "tap to install" step.
 
 **Release protection — no dev builds in the network:**
 
@@ -7214,7 +7214,7 @@ The update manifest must be signed with the **Ed25519 maintainer private key**. 
 | Protection | What it prevents |
 |---|---|
 | Manifest signature (maintainer key) | No node accepts an unsigned or incorrectly signed manifest — dev builds without signature trigger no update |
-| Explicit release script (`scripts/publish-in-network-update.sh`) | Manual act, no automatic pipeline trigger — analogous to the existing 4-script push pipeline |
+| Integrated release pipeline (`release-build.sh` calls `sign-update-manifest.sh` + `publish-in-network-update.sh`) | Automated within the 5-script release pipeline, but only after human-approved code push (step 4 requires interactive `JA-PUSH` approval) — the manifest is signed and fragments are seeded to the local daemon and the bootstrap node (via SSH + SCP) as step 7/8 of `release-build.sh` |
 | Beta/Live network separation (§19.5.6) | Different network secrets = different DHT tags — beta updates never reach the live network |
 | Monotone sequence number (`minMonotoneSeq`) | Prevents downgrade attacks via replayed old manifests. Each new release increments the sequence; nodes reject manifests with equal or lower sequence than the highest seen |
 
@@ -7236,7 +7236,7 @@ Higher N means more fragments must be distributed, but each fragment is small en
 
 | Node type | Budget | What it holds |
 |---|---|---|
-| **Bootstrap** (early phase only) | All platforms, complete | Primary download source during network bootstrap. This role is relinquished once sufficient fragment coverage exists across regular nodes. |
+| **Bootstrap** (early phase only) | All platforms, complete | Primary download source during network bootstrap. Seeded automatically by `release-build.sh` (SSH + SCP + remote `publish-in-network-update.sh`). This role is relinquished once sufficient fragment coverage exists across regular nodes. |
 | **Desktop node** | Max. 20 MB | ~6-8 fragments of own platform + optionally other platforms |
 | **Mobile node** | Max. 5 MB | 1-2 fragments of own platform |
 
@@ -7436,7 +7436,7 @@ Users in high-threat environments should use the physical transfer path (§19.6.
 
 **iOS special case:** The web app can download an IPA, but iOS does not install it (no sideloading, except EU-DMA markets from iOS 17.4). The web app detects iOS and shows: "On iOS, Cleona is available through the App Store" + Store link.
 
-**Platform-specific installation (implemented):** Once §19.6.2 delivers the verified binary, installation is platform-specific: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it, writes an `update-pending.json` marker, and requires a daemon restart. **Android** — `ApkInstaller` copies the verified binary to `cacheDir`, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission). **Windows** — same desktop flow as Linux (backup + replace + restart). **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
+**Platform-specific installation (implemented, auto-install):** Once §19.6.2 delivers and verifies the binary, `onUpdateStateChanged` triggers `applyUpdate()` automatically — no user tap required. RS fragment seeding runs fire-and-forget after the install fires, so the CPU-intensive encoding does not block the UI. Platform details: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it with the verified copy, writes an `update-pending.json` marker, and calls `exit(0)` for restart. **Android** — the Kotlin `installApk` handler copies the complete binary to `cacheDir/update.apk` on a background thread, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission); user consent is provided by the OS installer dialog. **Windows** — same desktop flow as Linux (backup + replace + restart). **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
 
 **No user-facing rollback (architectural decision, 2026-07-08).** Cleona does NOT offer a rollback/downgrade mechanism to the user, for three reasons: (1) **Forward-only database migrations.** Drift/SQLite schema migrations are irreversible — a newer version may alter tables that the older binary cannot read, causing data loss or crashes on downgrade. (2) **Cryptographic protocol evolution.** Newer versions may rotate KEM parameters, key formats, or message envelope fields. A rolled-back binary may fail to decrypt messages sent by peers who already upgraded, silently dropping traffic. (3) **Monotone sequence enforcement.** The `minMonotoneSeq` field in signed update manifests prevents downgrade attacks (§19.6.2). Accepting a rollback would require bypassing this security gate, weakening the update chain's integrity. Instead: if a release introduces a critical bug, the maintainer publishes a hotfix release (new version, forward migration) within the same distribution pipeline. The Beta cluster provides early detection; the 6h DHT manifest refresh cycle bounds worst-case exposure. Desktop nodes retain a `.bak` backup internally for crash recovery (auto-restore if the app fails within 30s of an update), but this is a safety net, not a user-facing feature — it does not survive across database migrations.
 

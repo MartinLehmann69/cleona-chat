@@ -315,7 +315,7 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
   }
 
   Future<void> _submit() async {
-    final locale = AppLocale.of(context);
+    final locale = AppLocale.read(context);
     final messenger = ScaffoldMessenger.of(context);
     final navigator = Navigator.of(context);
     final service = context.read<CleonaAppState>().service;

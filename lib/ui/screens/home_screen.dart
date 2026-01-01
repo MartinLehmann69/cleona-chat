@@ -3051,7 +3051,8 @@ class _SoftUpdateBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final manifest = appState.availableUpdateManifest;
     if (manifest == null || appState.updateBannerDismissed ||
-        appState.service?.reducedMode == true) {
+        appState.service?.reducedMode == true ||
+        !appState.availableUpdateInNetwork) {
       return const SizedBox.shrink();
     }
 
@@ -3087,27 +3088,35 @@ class _SoftUpdateBanner extends StatelessWidget {
           '${locale.get('update_available_title')}: v${manifest.version}',
           style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13),
         );
+      case BinaryUpdateState.checking:
+        return Row(children: [
+          const SizedBox(width: 80, child: LinearProgressIndicator()),
+          const SizedBox(width: 8),
+          Text(locale.get('update_verifying'),
+              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+        ]);
       case BinaryUpdateState.downloading:
       case BinaryUpdateState.assembling:
       case BinaryUpdateState.verifying:
-      case BinaryUpdateState.checking:
         final label = state == BinaryUpdateState.downloading
             ? locale.get('update_downloading')
             : state == BinaryUpdateState.assembling
                 ? locale.get('update_assembling')
                 : locale.get('update_verifying');
+        final indeterminate = progress <= 0 || progress >= 1;
         return Row(children: [
-          SizedBox(width: 80, child: LinearProgressIndicator(value: progress)),
+          SizedBox(
+            width: 80,
+            child: indeterminate
+                ? const LinearProgressIndicator()
+                : LinearProgressIndicator(value: progress),
+          ),
           const SizedBox(width: 8),
-          Text('$label ${(progress * 100).toInt()}%',
+          Text(indeterminate ? '$label...' : '$label ${(progress * 100).toInt()}%',
               style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
         ]);
       case BinaryUpdateState.ready:
-        final msg = Platform.isAndroid
-            ? locale.get('update_ready_install')
-            : locale.get('update_ready_restart');
-        return Text(msg,
-            style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13));
+        return const SizedBox.shrink();
       case BinaryUpdateState.failed:
         return Text(locale.get('update_failed'),
             style: TextStyle(color: cs.error, fontSize: 13));

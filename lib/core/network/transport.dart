@@ -1944,11 +1944,13 @@ class Transport {
         _log.info('WiFi recovered (native rx) — deactivating mobile fallback');
         stopMobileFallback();
       }
-      final datagram = Datagram(
-        result.data,
-        InternetAddress(result.sourceIp),
-        result.sourcePort,
-      );
+      final InternetAddress addr;
+      try {
+        addr = InternetAddress(result.sourceIp);
+      } catch (_) {
+        continue;
+      }
+      final datagram = Datagram(result.data, addr, result.sourcePort);
       _processUdpDatagram(datagram);
     }
   }
@@ -2039,7 +2041,7 @@ class Transport {
   /// Current multi-interface mode. Returns [MultiInterfaceMode.off] when
   /// the manager is not initialized.
   MultiInterfaceMode get multiInterfaceMode =>
-      _multiIfaceManager?.mode ?? MultiInterfaceMode.off;
+      _multiIfaceManager?.mode ?? MultiInterfaceMode.auto;
 
   /// Whether multi-interface sockets are actively bound and ready.
   bool get isMultiInterfaceActive => _multiIfaceManager?.isActive ?? false;

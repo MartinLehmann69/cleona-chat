@@ -451,7 +451,7 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.shield_outlined),
                 title: Text(locale.get('security_hardening_title')),
-                subtitle: Text(locale.get('security_hardening_subtitle'), maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text(locale.get('security_hardening_subtitle')),
                 trailing: const Icon(Icons.verified, color: Colors.green),
               ),
             ],
@@ -464,7 +464,7 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.favorite, color: Colors.red),
                 title: Text(locale.get('donate_title')),
-                subtitle: Text(locale.get('donate_banner_text'), maxLines: 2, overflow: TextOverflow.ellipsis),
+                subtitle: Text(locale.get('donate_banner_text')),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => Navigator.push(
                   context,

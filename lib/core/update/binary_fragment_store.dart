@@ -47,7 +47,7 @@ class BinaryFragmentStore {
   String _fragmentPath(String platform, String version, int index) =>
       '${_versionDir(platform, version)}/fragment-${index.toString().padLeft(3, '0')}.bin';
 
-  String _completePath(String platform, String version) =>
+  String completePath(String platform, String version) =>
       '${_versionDir(platform, version)}/complete.bin';
 
   String _metaPath(String platform, String version) =>
@@ -82,7 +82,7 @@ class BinaryFragmentStore {
     try {
       final dir = Directory(_versionDir(platform, version));
       if (!await dir.exists()) await dir.create(recursive: true);
-      await File(_completePath(platform, version)).writeAsBytes(data);
+      await File(completePath(platform, version)).writeAsBytes(data);
       final hash = bytesToHex(SodiumFFI().sha256(data));
       await _touchMeta(platform, version, binaryHash: hash);
     } catch (e) {
@@ -90,9 +90,18 @@ class BinaryFragmentStore {
     }
   }
 
+  Future<void> deleteComplete(String platform, String version) async {
+    try {
+      final f = File(completePath(platform, version));
+      if (await f.exists()) await f.delete();
+    } catch (e) {
+      _log.error('deleteComplete $platform/$version failed: $e');
+    }
+  }
+
   Future<Uint8List?> getComplete(String platform, String version) async {
     try {
-      final f = File(_completePath(platform, version));
+      final f = File(completePath(platform, version));
       if (!await f.exists()) return null;
       return await f.readAsBytes();
     } catch (e) {
@@ -107,7 +116,7 @@ class BinaryFragmentStore {
   /// and [BinaryRendezvousManager]'s record-provider callbacks).
   Uint8List? getCompleteSync(String platform, String version) {
     try {
-      final f = File(_completePath(platform, version));
+      final f = File(completePath(platform, version));
       if (!f.existsSync()) return null;
       return f.readAsBytesSync();
     } catch (e) {
@@ -131,7 +140,7 @@ class BinaryFragmentStore {
   /// Synchronous variant of [hasComplete] — see [getCompleteSync].
   bool hasCompleteSync(String platform, String version) {
     try {
-      return File(_completePath(platform, version)).existsSync();
+      return File(completePath(platform, version)).existsSync();
     } catch (e) {
       _log.error('hasCompleteSync $platform/$version failed: $e');
       return false;
@@ -198,7 +207,7 @@ class BinaryFragmentStore {
 
   Future<bool> hasComplete(String platform, String version) async {
     try {
-      return await File(_completePath(platform, version)).exists();
+      return await File(completePath(platform, version)).exists();
     } catch (e) {
       _log.error('hasComplete $platform/$version failed: $e');
       return false;

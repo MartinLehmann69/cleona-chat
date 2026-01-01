@@ -252,23 +252,33 @@ class MainActivity : FlutterActivity() {
                         result.error("MISSING_PATH", "path argument required", null)
                         return@setMethodCallHandler
                     }
-                    try {
-                        val srcFile = File(path)
-                        val dstFile = File(cacheDir, "update.apk")
-                        srcFile.copyTo(dstFile, overwrite = true)
-                        val uri = androidx.core.content.FileProvider.getUriForFile(
-                            this, "$packageName.fileprovider", dstFile
-                        )
-                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-                            setDataAndType(uri, "application/vnd.android.package-archive")
-                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    Thread {
+                        try {
+                            val srcFile = File(path)
+                            val dstFile = File(cacheDir, "update.apk")
+                            srcFile.copyTo(dstFile, overwrite = true)
+                            runOnUiThread {
+                                try {
+                                    val uri = androidx.core.content.FileProvider.getUriForFile(
+                                        this, "$packageName.fileprovider", dstFile
+                                    )
+                                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, "application/vnd.android.package-archive")
+                                        addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(intent)
+                                    result.success("ok")
+                                } catch (e: Exception) {
+                                    result.error("INSTALL_ERROR", e.message, null)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            runOnUiThread {
+                                result.error("INSTALL_ERROR", e.message, null)
+                            }
                         }
-                        startActivity(intent)
-                        result.success("ok")
-                    } catch (e: Exception) {
-                        result.error("INSTALL_ERROR", e.message, null)
-                    }
+                    }.start()
                 }
                 else -> result.notImplemented()
             }

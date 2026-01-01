@@ -18,7 +18,7 @@ import 'package:cleona/core/network/clogger.dart';
 /// User-facing multi-interface mode setting.
 /// Persisted as `multi_interface_mode` in the profile JSON.
 enum MultiInterfaceMode {
-  /// Single socket (0.0.0.0), no multi-path. Default — saves battery and
+  /// Single socket (0.0.0.0), no multi-path. Saves battery and
   /// mobile data. Identical to pre-23.2 behavior.
   off,
 
@@ -27,8 +27,8 @@ enum MultiInterfaceMode {
   /// connections.
   on,
 
-  /// Smart mode: use the cheapest interface (wifi preferred) for normal
-  /// sends. Parallel send on all interfaces only for:
+  /// Smart mode (default): use the cheapest interface (wifi preferred) for
+  /// normal sends. Parallel send on all interfaces only for:
   ///   - ACK-timeout retransmits
   ///   - High-priority messages (e.g. call signaling)
   /// Balances reliability vs. data cost.
@@ -439,7 +439,7 @@ class MultiInterfaceManager {
     if (s == null) return MultiInterfaceMode.off;
     return MultiInterfaceMode.values.firstWhere(
       (e) => e.name == s,
-      orElse: () => MultiInterfaceMode.off,
+      orElse: () => MultiInterfaceMode.auto,
     );
   }
 }

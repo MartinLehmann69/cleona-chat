@@ -895,19 +895,39 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     if (source == null) return;
     if (Platform.isAndroid) {
       final mgr = source.binaryUpdateManager;
-      if (mgr == null) return;
-      final path = await mgr.getVerifiedBinaryPath(
+      final store = source.binaryFragmentStore;
+      if (mgr == null || store == null) return;
+      _updateState = BinaryUpdateState.verifying;
+      _updateProgress = 0.0;
+      notifyListeners();
+      final completePath = store.completePath(
           Platform.operatingSystem, mgr.targetVersion ?? '');
-      if (path == null) return;
+      if (!File(completePath).existsSync()) {
+        _updateState = BinaryUpdateState.ready;
+        notifyListeners();
+        return;
+      }
       final hasPermission = await ApkInstaller.canInstallPackages();
       if (!hasPermission) {
+        _updateState = BinaryUpdateState.ready;
+        notifyListeners();
         await ApkInstaller.openInstallPermissionSettings();
         return;
       }
-      await ApkInstaller.installApk(path);
+      await ApkInstaller.installApk(completePath);
     } else {
       final mgr = source.binaryUpdateManager;
       if (mgr == null) return;
+      _updateState = BinaryUpdateState.verifying;
+      _updateProgress = 0.0;
+      notifyListeners();
+      final path = await mgr.getVerifiedBinaryPath(
+          Platform.operatingSystem, mgr.targetVersion ?? '');
+      if (path == null) {
+        _updateState = BinaryUpdateState.ready;
+        notifyListeners();
+        return;
+      }
       final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
       if (ok) exit(0);
     }
@@ -1978,6 +1998,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _updateState = state;
       _updateProgress = progress;
       notifyListeners();
+      if (state == BinaryUpdateState.ready) {
+        applyUpdate();
+      }
     };
 
     // § F-B: 1:1 + group video engine factory. Only wired here — for

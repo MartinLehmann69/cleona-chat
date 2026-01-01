@@ -106,8 +106,9 @@ class BinaryUpdateManager {
       }
 
       final tag = manifest.dhtBinaryTag?[platform];
-      if (tag == null) {
-        _log.debug('No dhtBinaryTag for platform=$platform in manifest');
+      final hash = manifest.binaryHashes?[platform];
+      if (tag == null && hash == null) {
+        _log.debug('No dhtBinaryTag or binaryHash for platform=$platform in manifest');
         _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
@@ -141,6 +142,7 @@ class BinaryUpdateManager {
     required Future<Uint8List?> Function(
             EndpointAddress address, String platform, int index)
         fetchFragment,
+    int? expectedSize,
   }) async {
     _cancelled = false;
     _targetPlatform = platform;
@@ -157,6 +159,11 @@ class BinaryUpdateManager {
         final data = await fetchFragment(src.address, platform, -1);
         if (_cancelled) return;
         if (data != null) {
+          if (expectedSize != null && data.length != expectedSize) {
+            _log.warn('Full-binary from ${src.address.ip} truncated: '
+                'got ${data.length}B, expected ${expectedSize}B — trying next');
+            continue;
+          }
           await _store.storeComplete(platform, version, data);
           _setState(BinaryUpdateState.downloading, 1.0);
           return;
@@ -234,6 +241,8 @@ class BinaryUpdateManager {
     int k,
     int originalSize,
   ) async {
+    _targetPlatform = platform;
+    _targetVersion = version;
     _setState(BinaryUpdateState.assembling, 0.0);
     try {
       final existing = await _store.getComplete(platform, version);
@@ -296,9 +305,11 @@ class BinaryUpdateManager {
       }
 
       _setState(BinaryUpdateState.ready, 1.0);
-      if (_targetVersion != null) {
+      if (_targetVersion != null && !Platform.isAndroid) {
         getVerifiedBinaryPath(_targetPlatform ?? '', _targetVersion!).then((path) {
-          if (path != null) onUpdateReady?.call(_targetVersion!, path);
+          if (path != null) {
+            onUpdateReady?.call(_targetVersion!, path);
+          }
         });
       }
       return true;
@@ -308,18 +319,26 @@ class BinaryUpdateManager {
     }
   }
 
-  /// Path to the verified binary once assembled, for installation. Writes
-  /// the stored complete binary out to a file so the caller (installer /
-  /// package manager invocation) can reference it by path.
+  /// Path to the verified binary once assembled, for installation.
   Future<String?> getVerifiedBinaryPath(String platform, String version) async {
-    final data = await _store.getComplete(platform, version);
-    if (data == null) return null;
+    final srcFile = File(_store.completePath(platform, version));
+    if (!srcFile.existsSync()) return null;
+    final srcLen = srcFile.lengthSync();
+
+    final dir = Directory('$_updateDir/verified');
+    final ext = platform == 'android' ? 'apk' : 'bin';
+    final destPath = '${dir.path}/cleona-$platform-$version.$ext';
+    final destFile = File(destPath);
+
+    if (destFile.existsSync() && destFile.lengthSync() == srcLen) {
+      return destPath;
+    }
+
     try {
-      final dir = Directory('$_updateDir/verified');
       if (!dir.existsSync()) dir.createSync(recursive: true);
-      final file = File('${dir.path}/cleona-$platform-$version.bin');
-      await file.writeAsBytes(data, flush: true);
-      return file.path;
+      if (destFile.existsSync()) destFile.deleteSync();
+      await srcFile.copy(destPath);
+      return destPath;
     } catch (e) {
       _log.warn('getVerifiedBinaryPath failed: $e');
       return null;
@@ -388,14 +407,49 @@ class BinaryUpdateManager {
     try {
       final currentFile = File(currentBinaryPath);
       final bakPath = '$currentBinaryPath.bak';
-      if (currentFile.existsSync()) {
-        currentFile.copySync(bakPath);
-        _log.info('Backed up current binary to $bakPath');
+      final bakFile = File(bakPath);
+      if (bakFile.existsSync()) {
+        try { bakFile.deleteSync(); } catch (_) {}
       }
-      File(verifiedPath).copySync(currentBinaryPath);
-      if (!Platform.isWindows) {
-        Process.runSync('chmod', ['+x', currentBinaryPath]);
+
+      final raf = File(verifiedPath).openSync();
+      final header = raf.readSync(4);
+      raf.closeSync();
+      final isZip = header.length >= 4 &&
+          header[0] == 0x50 && header[1] == 0x4B &&
+          header[2] == 0x03 && header[3] == 0x04;
+
+      if (isZip && Platform.isWindows) {
+        final appDir = currentFile.parent.path;
+        if (currentFile.existsSync()) {
+          currentFile.renameSync(bakPath);
+          _log.info('Backed up current binary to $bakPath');
+        }
+        final tmpZip = '$verifiedPath.zip'.replaceAll('/', '\\');
+        final destPath = appDir.replaceAll('/', '\\');
+        File(verifiedPath).copySync('$verifiedPath.zip');
+        final result = await Process.run('powershell', [
+          '-NoProfile', '-Command',
+          "Expand-Archive -Path '$tmpZip' -DestinationPath '$destPath' -Force",
+        ]);
+        try { File('$verifiedPath.zip').deleteSync(); } catch (_) {}
+        if (result.exitCode != 0) {
+          _log.error('ZIP extraction failed (exit ${result.exitCode}): ${result.stderr}');
+          if (bakFile.existsSync()) bakFile.renameSync(currentBinaryPath);
+          return false;
+        }
+        _log.info('Extracted ZIP bundle to $appDir (${File(verifiedPath).lengthSync()}B)');
+      } else {
+        if (currentFile.existsSync()) {
+          currentFile.renameSync(bakPath);
+          _log.info('Backed up current binary to $bakPath');
+        }
+        File(verifiedPath).copySync(currentBinaryPath);
+        if (!Platform.isWindows) {
+          Process.runSync('chmod', ['+x', currentBinaryPath]);
+        }
       }
+
       final marker = File('$_updateDir/update-pending.json');
       if (!marker.parent.existsSync()) marker.parent.createSync(recursive: true);
       marker.writeAsStringSync(jsonEncode({

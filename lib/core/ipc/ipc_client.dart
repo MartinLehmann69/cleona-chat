@@ -1658,7 +1658,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // ── Multi-Interface Send (Architecture §23.2) ────────────────────
 
-  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.off;
+  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.auto;
 
   @override
   MultiInterfaceMode get multiInterfaceMode => _multiInterfaceMode;

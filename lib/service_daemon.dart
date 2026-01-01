@@ -677,6 +677,11 @@ class _MultiServiceDaemon {
     node.infraRendezvousManager = infraRv;
     infraRv.startPeriodicRefresh();
 
+    // §19.6 Auto-download + auto-install for daemon (no GUI to click).
+    // Only the first service to detect the update triggers the download —
+    // all services share the same binary, so one download suffices.
+    String? autoDownloadingVersion;
+
     // Create and start a CleonaService for each identity
     for (final ctx in _contexts.values) {
       final service = CleonaService(
@@ -686,6 +691,46 @@ class _MultiServiceDaemon {
       );
       // Wire badge count to tray icon
       service.onBadgeCountChanged = (count) => _updateTrayBadge();
+      // §19.6: wire auto-download BEFORE startService() so the callback is
+      // already set when startService() fires onUpdateAvailable for a cached
+      // manifest.
+      service.onUpdateAvailable = (manifest, inNetworkAvailable) {
+        if (inNetworkAvailable && autoDownloadingVersion != manifest.version) {
+          autoDownloadingVersion = manifest.version;
+          log.info('Auto-download: v${manifest.version} available in-network — starting download');
+          service.startInNetworkUpdate(manifest);
+        }
+      };
+      service.onUpdateStateChanged = (state, progress) {
+        if (state == BinaryUpdateState.ready) {
+          final mgr = service.binaryUpdateManager;
+          if (mgr == null) {
+            log.warn('Auto-install: binaryUpdateManager is null');
+            return;
+          }
+          log.info('Auto-install: ready for v${mgr.targetVersion} — resolving verified path');
+          () async {
+            try {
+              final path = await mgr.getVerifiedBinaryPath(
+                  Platform.operatingSystem, mgr.targetVersion ?? '');
+              if (path == null) {
+                log.warn('Auto-install: getVerifiedBinaryPath returned null');
+                return;
+              }
+              log.info('Auto-install: verified path=$path, applying to ${Platform.resolvedExecutable}');
+              final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
+              if (ok) {
+                log.info('Auto-update applied: v${mgr.targetVersion} — exiting for restart');
+                exit(0);
+              } else {
+                log.warn('Auto-install: applyDesktopUpdate returned false');
+              }
+            } catch (e) {
+              log.error('Auto-install error: $e');
+            }
+          }();
+        }
+      };
       await service.startService();
       _services[ctx.userIdHex] = service;
       log.info('Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
@@ -731,6 +776,9 @@ class _MultiServiceDaemon {
     Timer(const Duration(seconds: 30), () {
       BinaryUpdateManager.markUpdateHealthy(config.baseDir);
     });
+
+    // (§19.6 auto-download + auto-install callbacks are wired in the
+    // service creation loop above, before startService().)
 
     // Periodic timers
     _statusTimer = Timer.periodic(const Duration(seconds: 60), (_) {

@@ -427,7 +427,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   LinkPreviewSettings _linkPreviewSettings = LinkPreviewSettings();
   late LinkPreviewFetcher _linkPreviewFetcher;
   // Multi-interface send mode (Architecture §23.2)
-  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.off;
+  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.auto;
   // Guardian service (Shamir SSS)
   late GuardianService guardianService;
   // Groups
@@ -473,7 +473,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.134';
+  static const String kCurrentAppVersion = '3.1.135';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1175,7 +1175,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Init media auto-archive manager (if configured)
     await _initArchive();
 
-    // Update checking: check DHT for signed update manifest (every 6 hours)
+    // Update checking: bootstrap _latestManifest from cache so the version
+    // guard in _checkForUpdates rejects stale DHT fragments on the very first
+    // poll (otherwise _latestManifest is null → any version passes).
+    try {
+      final cacheFile = File(
+          '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
+      if (cacheFile.existsSync()) {
+        final cached = UpdateChecker(log: _log)
+            .verifyManifest(cacheFile.readAsStringSync());
+        if (cached != null) _latestManifest = cached;
+      }
+    } catch (_) {}
+    // If the cached manifest is already newer than the running version,
+    // fire the notification directly after a short delay (UI is ready by
+    // then). This bypasses checkForUpdate() intentionally — the monotoneSeq
+    // anti-downgrade guard in checkForUpdate() correctly rejects the same
+    // manifest on restart (§19.6.2: "lower than or equal to"), which is the
+    // right behavior for first-time discovery but wrong for re-notification.
+    // Instead, we read the persisted inNetworkAvailable flag that was saved
+    // when the manifest was first successfully checked.
+    if (_latestManifest != null) {
+      final cachedManifest = _latestManifest!;
+      final checker = UpdateChecker(log: _log);
+      if (!checker.isNewer(cachedManifest.version, kCurrentAppVersion)) {
+        _saveInNetworkFlag(false);
+      } else {
+        Timer(const Duration(seconds: 5), () {
+          _log.info('[update] Cached manifest v${cachedManifest.version} '
+              'is newer than running v$kCurrentAppVersion — re-firing notification');
+          final hasDhtTag = cachedManifest.dhtBinaryTag
+                  ?.containsKey(Platform.operatingSystem) ??
+              false;
+          final hasBinHash = cachedManifest.binaryHashes
+                  ?.containsKey(Platform.operatingSystem) ??
+              false;
+          if (!hasDhtTag && !hasBinHash) {
+            _log.debug('[update] Suppressing cached-update notification: '
+                'no binary for ${Platform.operatingSystem}');
+          } else {
+            var inNetworkAvailable = _loadInNetworkFlag();
+            if (!inNetworkAvailable && (hasDhtTag || hasBinHash)) {
+              inNetworkAvailable =
+                  _binaryUpdateManager?.shouldUseInNetworkUpdate() ?? false;
+            }
+            onUpdateAvailable?.call(cachedManifest, inNetworkAvailable);
+          }
+        });
+      }
+    }
     Timer(const Duration(seconds: 30), _checkForUpdates); // Initial check after 30s
     _updateCheckTimer = Timer.periodic(const Duration(hours: 6), (_) => _checkForUpdates());
 
@@ -1389,17 +1437,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (isNewer) {
         _log.info('[update] Pushed update available: '
             'v${manifest.version} (current: v$currentAppVersion)');
-        () async {
-          var inNetworkAvailable = false;
-          if (manifest.dhtBinaryTag != null && _binaryUpdateManager != null) {
-            try {
-              inNetworkAvailable = await _binaryUpdateManager!
-                  .checkForUpdate(manifest, currentAppVersion,
-                      Platform.operatingSystem);
-            } catch (_) {}
-          }
-          onUpdateAvailable?.call(manifest, inNetworkAvailable);
-        }();
+        final isHardBlock = checker.isHardBlocked(manifest, currentAppVersion);
+        final hasDhtTag = manifest.dhtBinaryTag
+                ?.containsKey(Platform.operatingSystem) ??
+            false;
+        final hasBinHash = manifest.binaryHashes
+                ?.containsKey(Platform.operatingSystem) ??
+            false;
+        if (!isHardBlock && !hasDhtTag && !hasBinHash) {
+          _log.debug('[update] Suppressing soft-update notification: '
+              'no binary for ${Platform.operatingSystem}');
+        } else {
+          () async {
+            var inNetworkAvailable = false;
+            if ((hasDhtTag || hasBinHash) && _binaryUpdateManager != null) {
+              try {
+                inNetworkAvailable = await _binaryUpdateManager!
+                    .checkForUpdate(manifest, currentAppVersion,
+                        Platform.operatingSystem);
+                if (inNetworkAvailable) _saveInNetworkFlag(true);
+              } catch (_) {}
+            }
+            onUpdateAvailable?.call(manifest, inNetworkAvailable);
+          }();
+        }
       }
     } catch (e) {
       _log.debug('[update] Incoming manifest check failed: $e');
@@ -10608,6 +10669,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── Update Checking (Architecture Section 17.5.5) ──────────────────
 
+  bool _loadInNetworkFlag() {
+    try {
+      final f = File(
+          '${AppPaths.dataDir}${Platform.pathSeparator}update_in_network.flag');
+      return f.existsSync();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  void _saveInNetworkFlag(bool available) {
+    try {
+      final f = File(
+          '${AppPaths.dataDir}${Platform.pathSeparator}update_in_network.flag');
+      if (available) {
+        f.parent.createSync(recursive: true);
+        f.writeAsStringSync('1', flush: true);
+      } else if (f.existsSync()) {
+        f.deleteSync();
+      }
+    } catch (_) {}
+  }
+
   /// Check the DHT for a signed update manifest.
   ///
   /// Uses FRAGMENT_RETRIEVE on the update manifest's DHT key, then
@@ -10635,6 +10719,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final manifest = checker.verifyManifest(jsonData);
         if (manifest == null) return;
 
+        _log.info('Update manifest verified: v${manifest.version}');
+
+        final prev = _latestManifest;
+        if (prev != null && !checker.isNewer(manifest.version, prev.version)) {
+          _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
+          // Re-push our own newer manifest to heal DHT pollution.
+          if (checker.isNewer(prev.version, manifest.version)) {
+            final prevJson = utf8.encode(jsonEncode(prev.toJson()));
+            _pushManifestToPeers(Uint8List.fromList(prevJson));
+          }
+          return;
+        }
+
         _latestManifest = manifest;
         // Sec H-5 (V3.1.72) / T13: persist verified manifest so that the next
         // startup of `lib/main.dart` can apply the hard-block check before
@@ -10651,25 +10748,34 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (isNewer) {
           _log.info('Update available: v${manifest.version} (current: v$currentAppVersion)');
 
-          // §19.6: if the manifest carries a DHT binary tag, also check
-          // whether this platform's update is reachable via in-network
-          // binary distribution (peer-fetched fragments/binary) rather than
-          // only the external manifest.downloadUrl.
-          var inNetworkAvailable = false;
-          if (manifest.dhtBinaryTag != null && _binaryUpdateManager != null) {
-            try {
-              inNetworkAvailable = await _binaryUpdateManager!
-                  .checkForUpdate(manifest, currentAppVersion, Platform.operatingSystem);
-              if (inNetworkAvailable) {
-                _log.info('In-network update available for '
-                    '${Platform.operatingSystem}: v${manifest.version}');
+          final isHardBlock = checker.isHardBlocked(manifest, currentAppVersion);
+          final hasDhtTag = manifest.dhtBinaryTag
+                  ?.containsKey(Platform.operatingSystem) ??
+              false;
+          final hasBinHash = manifest.binaryHashes
+                  ?.containsKey(Platform.operatingSystem) ??
+              false;
+          if (!isHardBlock && !hasDhtTag && !hasBinHash) {
+            _log.debug('Suppressing soft-update notification: '
+                'no binary for ${Platform.operatingSystem}');
+          } else {
+            var inNetworkAvailable = false;
+            if ((hasDhtTag || hasBinHash) && _binaryUpdateManager != null) {
+              try {
+                inNetworkAvailable = await _binaryUpdateManager!
+                    .checkForUpdate(manifest, currentAppVersion, Platform.operatingSystem);
+                if (inNetworkAvailable) {
+                  _log.info('In-network update available for '
+                      '${Platform.operatingSystem}: v${manifest.version}');
+                  _saveInNetworkFlag(true);
+                }
+              } catch (e) {
+                _log.debug('In-network update check failed: $e');
               }
-            } catch (e) {
-              _log.debug('In-network update check failed: $e');
             }
-          }
 
-          onUpdateAvailable?.call(manifest, inNetworkAvailable);
+            onUpdateAvailable?.call(manifest, inNetworkAvailable);
+          }
         } else {
           _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
         }
@@ -10927,7 +11033,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ));
       final isNew = _latestManifest == null ||
           checker.isNewer(manifest.version, _latestManifest!.version);
-      _latestManifest = manifest;
+      if (isNew) _latestManifest = manifest;
       if (stored) {
         _log.info('[update] Published manifest v${manifest.version} to local DHT store');
         _pushManifestToPeers(data);
@@ -10999,6 +11105,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.warn('startInNetworkUpdate: binary-update subsystem not initialized');
       return;
     }
+    onUpdateStateChanged?.call(BinaryUpdateState.checking, 0.0);
 
     // The manifest's per-platform hash/signature/size is the trust anchor —
     // without it there is nothing to verify the downloaded binary against,
@@ -11019,66 +11126,103 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return;
     }
 
-    // 1. Resolve binary sources via BinaryRendezvousManager (§19.6.5).
-    final resolved = await node.binaryRendezvousManager?.resolve(platform);
-    if (resolved == null || resolved.isEmpty) {
-      _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
-      return;
-    }
-
-    // 2. Convert ResolvedBinaryEndpoint -> FragmentSource.
-    // Expand each endpoint into one FragmentSource per address so the
-    // download layer can try multiple addresses (IPv4 LAN, IPv4 WAN,
-    // IPv6) instead of only the first one.
-    final fragmentSources = <FragmentSource>[];
-    for (final ep in resolved) {
-      for (final addr in ep.addresses) {
-        fragmentSources.add(FragmentSource(
-          address: addr,
-          fragmentIndices: ep.fragmentIndices,
-          hasFullBinary: ep.hasFullBinary,
-        ));
-      }
-    }
-    if (fragmentSources.isEmpty) {
-      _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
-      return;
-    }
-
     // 3. Reed-Solomon parameters for this platform (§19.6.2).
     final params = BinarySeeder.paramsFor(platform);
 
-    // 4./5. Delta path (§19.6.3): findDeltaPath() is a free, side-effect-free
-    // check — only logged here. Actually applying a delta requires
-    // libcleona_bsdiff, which DeltaUpdateManager.applyDelta() documents as
-    // not yet implemented (always returns null), and the manifest carries no
-    // delta-hash trust anchor yet either. So this stays a guarded no-op
-    // until both land — full-binary download below is the functioning path.
-    final deltaFromVersion = _deltaUpdateManager?.findDeltaPath(
-      manifest: manifest,
-      currentVersion: currentAppVersion,
-      platform: platform,
-    );
-    if (deltaFromVersion != null) {
-      _log.debug('startInNetworkUpdate: delta path $deltaFromVersion -> '
-          '${manifest.version} advertised, but bsdiff is not yet wired — '
-          'falling back to full binary');
-    }
+    // Fast path: if the complete binary is already in the local fragment
+    // store (e.g. from a previous download or self-seeding), skip the
+    // network download and go straight to assemble+verify.
+    final localComplete = File(store.completePath(platform, manifest.version));
+    if (localComplete.existsSync() && localComplete.lengthSync() == originalSize) {
+      _log.info('startInNetworkUpdate: complete binary already cached locally '
+          '(${localComplete.lengthSync()}B) — skipping download');
+    } else {
+      // 1. Resolve binary sources via BinaryRendezvousManager (§19.6.5).
+      final resolved = await node.binaryRendezvousManager?.resolve(platform);
+      if (resolved == null || resolved.isEmpty) {
+        _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
+        return;
+      }
 
-    // 6. Download (full binary in one shot if a source has it, else
-    // K-of-N fragments assembled below).
-    await updater.startDownload(
-      platform: platform,
-      version: manifest.version,
-      n: params.n,
-      k: params.k,
-      expectedHash: expectedHash,
-      sources: fragmentSources,
-      fetchFragment: fetchClient.fetch,
-    );
-    if (updater.state == BinaryUpdateState.failed) {
-      _log.warn('startInNetworkUpdate: download failed: ${updater.errorMessage}');
-      return;
+      // 2. Convert ResolvedBinaryEndpoint -> FragmentSource.
+      // Enrich with routing-table addresses: the Rendezvous record only
+      // carries public IPs, but LAN peers are reachable via their private
+      // addresses in the routing table. Append those as extra targets so
+      // the download layer can reach them even without public IPv4/IPv6.
+      // Interleave addresses across devices (round-robin) so the download
+      // layer quickly tries one address per device instead of exhausting all
+      // addresses of device A before ever contacting device B.
+      final perDevice = resolved.map((ep) {
+        final allAddrs = <EndpointAddress>[...ep.addresses];
+        final peer = node.routingTable.getPeer(hexToBytes(ep.deviceIdHex));
+        if (peer != null) {
+          final seen = allAddrs.map((a) => '${a.ip}:${a.port}').toSet();
+          for (final a in peer.addresses) {
+            if (!seen.contains('${a.ip}:${a.port}')) {
+              allAddrs.add(EndpointAddress(a.ip, a.port));
+              seen.add('${a.ip}:${a.port}');
+            }
+          }
+        }
+        return allAddrs
+            .map((addr) => FragmentSource(
+                  address: addr,
+                  fragmentIndices: ep.fragmentIndices,
+                  hasFullBinary: ep.hasFullBinary,
+                ))
+            .toList();
+      }).toList();
+      final fragmentSources = <FragmentSource>[];
+      var idx = 0;
+      bool added;
+      do {
+        added = false;
+        for (final addrs in perDevice) {
+          if (idx < addrs.length) {
+            fragmentSources.add(addrs[idx]);
+            added = true;
+          }
+        }
+        idx++;
+      } while (added);
+      if (fragmentSources.isEmpty) {
+        _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
+        return;
+      }
+
+      // 4./5. Delta path (§19.6.3): findDeltaPath() is a free, side-effect-free
+      // check — only logged here. Actually applying a delta requires
+      // libcleona_bsdiff, which DeltaUpdateManager.applyDelta() documents as
+      // not yet implemented (always returns null), and the manifest carries no
+      // delta-hash trust anchor yet either. So this stays a guarded no-op
+      // until both land — full-binary download below is the functioning path.
+      final deltaFromVersion = _deltaUpdateManager?.findDeltaPath(
+        manifest: manifest,
+        currentVersion: currentAppVersion,
+        platform: platform,
+      );
+      if (deltaFromVersion != null) {
+        _log.debug('startInNetworkUpdate: delta path $deltaFromVersion -> '
+            '${manifest.version} advertised, but bsdiff is not yet wired — '
+            'falling back to full binary');
+      }
+
+      // 6. Download (full binary in one shot if a source has it, else
+      // K-of-N fragments assembled below).
+      await updater.startDownload(
+        platform: platform,
+        version: manifest.version,
+        n: params.n,
+        k: params.k,
+        expectedHash: expectedHash,
+        sources: fragmentSources,
+        fetchFragment: fetchClient.fetch,
+        expectedSize: originalSize,
+      );
+      if (updater.state == BinaryUpdateState.failed) {
+        _log.warn('startInNetworkUpdate: download failed: ${updater.errorMessage}');
+        return;
+      }
     }
 
     // 7. Assemble the binary from downloaded fragments (or reuse the
@@ -11097,21 +11241,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (!verified) {
       _log.error('startInNetworkUpdate: verification FAILED for v${manifest.version} '
           '($platform) — refusing to seed or offer for install');
+      await store.deleteComplete(platform, manifest.version);
       return;
     }
 
-    // 9. Seed — encode into RS fragments so this node also becomes a
-    // fragment-serving distribution source, not just a full-binary source.
-    final maxFragments = Platform.isAndroid || Platform.isIOS ? 2 : 8;
-    final seededCount = await seeder.seed(
-      binary: binary,
-      platform: platform,
-      version: manifest.version,
-      maxFragments: maxFragments,
-    );
     node.binaryHasContentToShare = true;
     _log.info('startInNetworkUpdate: v${manifest.version} verified and ready '
-        '(${binary.length}B), seeded $seededCount fragment(s)');
+        '(${binary.length}B)');
+
+    // 9. Seed — encode into RS fragments so this node also becomes a
+    // fragment-serving distribution source, not just a full-binary source.
+    // Fire-and-forget: RS encoding is CPU-intensive (synchronous FFI) and
+    // must not block the auto-install flow on Android.
+    final maxFragments = Platform.isAndroid || Platform.isIOS ? 2 : 8;
+    unawaited(Future(() async {
+      final seededCount = await seeder.seed(
+        binary: binary,
+        platform: platform,
+        version: manifest.version,
+        maxFragments: maxFragments,
+      );
+      _log.info('startInNetworkUpdate: seeded $seededCount fragment(s) for '
+          'v${manifest.version}');
+    }));
   }
 
   // ── DHT Identity Registry Recovery (Architecture Section 6.4.3) ────

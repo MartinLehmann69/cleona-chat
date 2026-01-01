@@ -274,6 +274,32 @@ class NostrProvider implements RendezvousProvider {
       },
     );
   }
+
+  /// Like [resolve] but returns ALL records from all relays (deduped by
+  /// content), not just the highest-seq one. Used by BinaryRendezvousManager
+  /// to discover multiple provider devices.
+  Future<List<SignedEndpointRecord>> resolveMulti(Uint8List lookupTag) async {
+    if (_disposed) return [];
+    final tagHex = _bytesToHex(lookupTag);
+
+    final relays = _usableRelays();
+    final allRecords = <SignedEndpointRecord>[];
+    final seen = <String>{};
+
+    final futures = relays.map((uri) =>
+        _conn(uri).fetchAll(tagHex).catchError((_) => <SignedEndpointRecord>[]));
+    final results = await Future.wait(futures).timeout(
+      kRelayConnectTimeout + kRelayResponseTimeout,
+      onTimeout: () => [],
+    );
+    for (final batch in results) {
+      for (final record in batch) {
+        final key = base64Encode(record.ciphertext);
+        if (seen.add(key)) allRecords.add(record);
+      }
+    }
+    return allRecords;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -446,6 +472,17 @@ class _RelayConnection {
   /// REQ the tag, collect EVENTs until EOSE, return the highest-seq record
   /// this relay has (a relay may hold several via replaceable-event races).
   Future<SignedEndpointRecord?> fetchLatest(String tagHex) async {
+    final all = await fetchAll(tagHex);
+    SignedEndpointRecord? best;
+    for (final r in all) {
+      if (best == null || r.seq > best.seq) best = r;
+    }
+    return best;
+  }
+
+  /// REQ the tag, collect EVENTs until EOSE, return ALL valid records
+  /// (one per Nostr pubkey / device).
+  Future<List<SignedEndpointRecord>> fetchAll(String tagHex) async {
     _pendingOps++;
     final subId = 'rv${_subCounter++}';
     try {
@@ -467,19 +504,17 @@ class _RelayConnection {
       } catch (_) {}
       _recordSuccess();
 
-      SignedEndpointRecord? best;
+      final results = <SignedEndpointRecord>[];
       for (final eventJson in sub.events) {
         final event = NostrEvent.fromJson(eventJson);
         if (event == null) continue;
         try {
           final record = SignedEndpointRecord.deserialize(
               Uint8List.fromList(base64Decode(event.content)));
-          if (record != null && (best == null || record.seq > best.seq)) {
-            best = record;
-          }
+          if (record != null) results.add(record);
         } catch (_) {}
       }
-      return best;
+      return results;
     } catch (e) {
       _recordFailure();
       rethrow;

@@ -14,8 +14,9 @@ import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
 /// verified independently (SHA-256 hash + Ed25519 maintainer signature)
 /// before it is ever installed or seeded onward.
 class BinaryFetchClient {
-  /// Connection + response timeout for individual fragment fetches.
   static const Duration kFetchTimeout = Duration(seconds: 30);
+  static const Duration kFullBinaryTimeout = Duration(minutes: 10);
+  static const Duration kConnectTimeout = Duration(seconds: 3);
 
   final CLogger _log;
   final HttpClient _client;
@@ -23,7 +24,7 @@ class BinaryFetchClient {
   BinaryFetchClient({String? profileDir})
       : _log = CLogger.get('bin-fetch', profileDir: profileDir),
         _client = HttpClient()
-          ..connectionTimeout = kFetchTimeout
+          ..connectionTimeout = kConnectTimeout
           ..idleTimeout = kFetchTimeout;
 
   /// Fetch a fragment (or complete binary when [index] == -1) from [address].
@@ -50,8 +51,9 @@ class BinaryFetchClient {
         return null;
       }
 
+      final streamTimeout = index == -1 ? kFullBinaryTimeout : kFetchTimeout;
       final builder = BytesBuilder(copy: false);
-      await for (final chunk in response.timeout(kFetchTimeout)) {
+      await for (final chunk in response.timeout(streamTimeout)) {
         builder.add(chunk);
       }
       final bytes = builder.toBytes();

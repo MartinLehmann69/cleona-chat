@@ -7,6 +7,7 @@ import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart'
@@ -186,6 +187,45 @@ void main(List<String> args) {
     );
     node.infraRendezvousManager = infraRv;
     infraRv.startPeriodicRefresh();
+
+    // §19.6 Auto-download + auto-install: wire callbacks BEFORE startService()
+    // so a cached manifest fires into a live callback immediately.
+    service.onUpdateAvailable = (manifest, inNetworkAvailable) {
+      if (inNetworkAvailable) {
+        log.info('Auto-download: v${manifest.version} available in-network — starting download');
+        service.startInNetworkUpdate(manifest);
+      }
+    };
+    service.onUpdateStateChanged = (state, progress) {
+      if (state == BinaryUpdateState.ready) {
+        final mgr = service.binaryUpdateManager;
+        if (mgr == null) {
+          log.warn('Auto-install: binaryUpdateManager is null');
+          return;
+        }
+        log.info('Auto-install: ready for v${mgr.targetVersion} — resolving verified path');
+        () async {
+          try {
+            final path = await mgr.getVerifiedBinaryPath(
+                Platform.operatingSystem, mgr.targetVersion ?? '');
+            if (path == null) {
+              log.warn('Auto-install: getVerifiedBinaryPath returned null');
+              return;
+            }
+            log.info('Auto-install: verified path=$path, applying to ${Platform.resolvedExecutable}');
+            final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
+            if (ok) {
+              log.info('Auto-update applied: v${mgr.targetVersion} — exiting for restart');
+              exit(0);
+            } else {
+              log.warn('Auto-install: applyDesktopUpdate returned false');
+            }
+          } catch (e) {
+            log.error('Auto-install error: $e');
+          }
+        }();
+      }
+    };
 
     // Start service (contacts, conversations, mailbox)
     await service.startService();

@@ -3913,11 +3913,27 @@ class CleonaNode {
       }
     }
 
-    // Try remaining neighbors (skip GW already tried, skip destination, skip self,
-    // skip excluded relay sender).
-    // §4.7 Relay-Candidate Reachability Filter: also skip neighbors that are
-    // not reachable from the current network or (for cross-family) lack dual-stack.
+    // Fire-and-forget infrastructure messages (DHT_PING, FRAGMENT_STORE,
+    // IDENTITY publishes, etc.) stop after DV-routes + direct-target + GW.
+    // The N-neighbor relay spray is only warranted for request/response
+    // messages (user messages, CR delivers) where delivery matters.
+    // Without this gate, 174 DHT peers × 18 neighbors = 3000+ relay
+    // attempts per round — O(peers × neighbors) traffic for zero benefit.
+    if (!expectsReply) {
+      _log.debug('sendToDevice ${destHex.substring(0, 8)}: fire-and-forget '
+          '— skipping neighbor relay spray');
+      return false;
+    }
+
+    // Last-resort neighbor relay: try up to _kMaxNeighborSpray eligible
+    // neighbors as relay hops (request/response messages only).
+    // GW is already tried above; remaining neighbors cover the CGNAT
+    // First-CR case where seed peers are the only available relay path.
+    // Cap prevents O(N) traffic when the neighbor table is large.
+    const kMaxNeighborSpray = 5;
+    var neighborsTried = 0;
     for (final neighborHex in dvRouting.neighbors.keys) {
+      if (neighborsTried >= kMaxNeighborSpray) break;
       if (triedNeighbors.contains(neighborHex)) continue;
       if (neighborHex == destHex) continue;
       if (_isLocalIdentity(neighborHex)) continue;
@@ -3926,34 +3942,19 @@ class CleonaNode {
       final nBytes = hexToBytes(neighborHex);
       final nPeer = routingTable.getPeer(nBytes);
       if (nPeer == null) continue;
-      // D3 Phase 2: skip neighbor if not admission-PoW verified.
-      // §13.1.2 exception: isProtectedSeed peers (ContactSeed §8.1.1)
-      // are exempt — bounded (≤5), ephemeral, integrity-anchored.
-      if (!nPeer.idPowVerified && !nPeer.isProtectedSeed) {
-        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
-            '${neighborHex.substring(0, 8)} skipped — not admission-verified');
-        continue;
-      }
-      // §4.7: skip neighbor if we cannot reach it from the current network.
-      if (!_isHopReachableFromHere(nPeer)) {
-        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
-            '${neighborHex.substring(0, 8)} skipped — not reachable from current network');
-        continue;
-      }
-      // §4.7: cross-family — skip neighbor if not dual-stack.
-      if (needsDualStack && !_hopIsDualStack(nPeer)) {
-        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
-            '${neighborHex.substring(0, 8)} skipped — cross-family send requires dual-stack hop');
-        continue;
-      }
+      if (!nPeer.idPowVerified && !nPeer.isProtectedSeed) continue;
+      if (!_isHopReachableFromHere(nPeer)) continue;
+      if (needsDualStack && !_hopIsDualStack(nPeer)) continue;
+      neighborsTried++;
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
-          'trying neighbor ${neighborHex.substring(0, 8)} as relay');
+          'trying neighbor ${neighborHex.substring(0, 8)} as relay '
+          '($neighborsTried/$kMaxNeighborSpray)');
       final ok = await _sendV3ViaHop(packet, nBytes);
       if (ok) return true;
     }
 
     _log.warn('sendToDevice ${destHex.substring(0, 8)}: cascade exhausted '
-        '(routes=${routes.length}, neighbors=${triedNeighbors.length})');
+        '(routes=${routes.length}, neighbors=$neighborsTried/$kMaxNeighborSpray)');
     return false;
   }
 
@@ -4259,6 +4260,12 @@ class CleonaNode {
   /// True for message types that expect a reply (request/response patterns).
   /// False for fire-and-forget DHT publishes and stores — these should not
   /// drive the §5.10.4 unacked-packets counter because no reply is expected.
+  ///
+  /// DHT infrastructure queries (AUTH/LIVE/KEM_RETRIEVE, FIND_NODE) are
+  /// classified as fire-and-forget despite expecting a DhtRpc-level response:
+  /// they fan out to K=10 closest peers via _parallelSendAndWait, so the
+  /// K-way redundancy replaces the per-query neighbor relay spray. DhtRpc
+  /// handles its own timeouts independently of the unacked-packets counter.
   static bool _isRequestResponseType(proto.MessageTypeV3 type) {
     switch (type) {
       // Fire-and-forget: DHT publishes, fragment/peer stores, broadcasts
@@ -4275,8 +4282,14 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
       case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
       case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+      // DHT infrastructure queries: K=10 fanout provides redundancy,
+      // neighbor relay spray per query is O(K×N) for zero benefit.
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_NODE:
         return false;
-      // Everything else: request/response (PING→PONG, RETRIEVE→RESPONSE, etc.)
+      // Everything else: request/response (PING→PONG, user messages, CRs)
       default:
         return true;
     }
