@@ -192,12 +192,24 @@ class MainActivity : FlutterActivity() {
         }
 
         // Share receiver (Bug #U16): Dart drains pending ACTION_SEND payload.
+        // Also: getOwnApkPath for "Cleona teilen" direct APK sharing.
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "consumePendingShare" -> {
                     val share = pendingShare
                     pendingShare = null
                     result.success(share)
+                }
+                "getOwnApkPath" -> {
+                    try {
+                        val appInfo = packageManager.getApplicationInfo(packageName, 0)
+                        val srcApk = File(appInfo.sourceDir)
+                        val dstApk = File(cacheDir, "cleona-share.apk")
+                        srcApk.copyTo(dstApk, overwrite = true)
+                        result.success(dstApk.absolutePath)
+                    } catch (e: Exception) {
+                        result.error("APK_ERROR", e.message, null)
+                    }
                 }
                 else -> result.notImplemented()
             }

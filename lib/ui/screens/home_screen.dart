@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -37,6 +36,7 @@ import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
+import 'package:cleona/ui/components/share_cleona_dialog.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -700,12 +700,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 label: Text(locale.get('share_cleona')),
                 onPressed: () {
                   Navigator.pop(ctx);
-                  Clipboard.setData(const ClipboardData(
-                    text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
-                  ));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-                  );
+                  final svc = service;
+                  if (svc != null) {
+                    ShareCleonaDialog.show(context, svc);
+                  }
                 },
               ),
             ),

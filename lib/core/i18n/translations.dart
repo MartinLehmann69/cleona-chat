@@ -2202,4 +2202,214 @@ const Map<String, Map<String, String>> translations = {
     'id': 'Unduhan LAN dari perangkat ini', // uncertain:
     'ms': 'Muat turun LAN dari peranti ini', // uncertain:
   },
+  'share_cleona_direct_share': {
+    'de': 'Direkt teilen',
+    'en': 'Share directly',
+    'es': 'Compartir directamente', // uncertain:
+    'hu': 'Közvetlen megosztás', // uncertain:
+    'sv': 'Dela direkt', // uncertain:
+    'ar': 'مشاركة مباشرة', // uncertain:
+    'he': 'שיתוף ישיר', // uncertain:
+    'fa': 'اشتراک‌گذاری مستقیم', // uncertain:
+    'fr': 'Partager directement', // uncertain:
+    'it': 'Condividi direttamente', // uncertain:
+    'pt': 'Compartilhar diretamente', // uncertain:
+    'nl': 'Direct delen', // uncertain:
+    'pl': 'Udostępnij bezpośrednio', // uncertain:
+    'ro': 'Partajare directă', // uncertain:
+    'cs': 'Sdílet přímo', // uncertain:
+    'sk': 'Zdieľať priamo', // uncertain:
+    'hr': 'Izravno dijeli', // uncertain:
+    'bg': 'Споделяне директно', // uncertain:
+    'el': 'Κοινοποίηση απευθείας', // uncertain:
+    'da': 'Del direkte', // uncertain:
+    'fi': 'Jaa suoraan', // uncertain:
+    'no': 'Del direkte', // uncertain:
+    'uk': 'Поділитися напряму', // uncertain:
+    'ru': 'Поделиться напрямую', // uncertain:
+    'tr': 'Doğrudan paylaş', // uncertain:
+    'zh': '直接分享', // uncertain:
+    'ja': '直接共有', // uncertain:
+    'ko': '직접 공유', // uncertain:
+    'hi': 'सीधे साझा करें', // uncertain:
+    'th': 'แชร์โดยตรง', // uncertain:
+    'vi': 'Chia sẻ trực tiếp', // uncertain:
+    'id': 'Bagikan langsung', // uncertain:
+    'ms': 'Kongsi terus', // uncertain:
+  },
+  'share_cleona_for_android': {
+    'de': 'Für Android-Geräte',
+    'en': 'For Android devices',
+    'es': 'Para dispositivos Android', // uncertain:
+    'hu': 'Android eszközökhöz', // uncertain:
+    'sv': 'För Android-enheter', // uncertain:
+    'ar': 'لأجهزة أندرويد', // uncertain:
+    'he': 'למכשירי אנדרואיד', // uncertain:
+    'fa': 'برای دستگاه‌های اندروید', // uncertain:
+    'fr': 'Pour appareils Android', // uncertain:
+    'it': 'Per dispositivi Android', // uncertain:
+    'pt': 'Para dispositivos Android', // uncertain:
+    'nl': 'Voor Android-apparaten', // uncertain:
+    'pl': 'Dla urządzeń z Androidem', // uncertain:
+    'ro': 'Pentru dispozitive Android', // uncertain:
+    'cs': 'Pro zařízení s Androidem', // uncertain:
+    'sk': 'Pre zariadenia s Androidom', // uncertain:
+    'hr': 'Za Android uređaje', // uncertain:
+    'bg': 'За Android устройства', // uncertain:
+    'el': 'Για συσκευές Android', // uncertain:
+    'da': 'Til Android-enheder', // uncertain:
+    'fi': 'Android-laitteille', // uncertain:
+    'no': 'For Android-enheter', // uncertain:
+    'uk': 'Для пристроїв Android', // uncertain:
+    'ru': 'Для устройств Android', // uncertain:
+    'tr': 'Android cihazlar için', // uncertain:
+    'zh': '适用于安卓设备', // uncertain:
+    'ja': 'Androidデバイス用', // uncertain:
+    'ko': 'Android 기기용', // uncertain:
+    'hi': 'Android डिवाइस के लिए', // uncertain:
+    'th': 'สำหรับอุปกรณ์ Android', // uncertain:
+    'vi': 'Cho thiết bị Android', // uncertain:
+    'id': 'Untuk perangkat Android', // uncertain:
+    'ms': 'Untuk peranti Android', // uncertain:
+  },
+  'share_cleona_for_desktop': {
+    'de': 'Für Windows / Linux / macOS',
+    'en': 'For Windows / Linux / macOS',
+    'es': 'Para Windows / Linux / macOS', // uncertain:
+    'hu': 'Windows / Linux / macOS rendszerekhez', // uncertain:
+    'sv': 'För Windows / Linux / macOS', // uncertain:
+    'ar': 'لأنظمة Windows / Linux / macOS', // uncertain:
+    'he': 'עבור Windows / Linux / macOS', // uncertain:
+    'fa': 'برای Windows / Linux / macOS', // uncertain:
+    'fr': 'Pour Windows / Linux / macOS', // uncertain:
+    'it': 'Per Windows / Linux / macOS', // uncertain:
+    'pt': 'Para Windows / Linux / macOS', // uncertain:
+    'nl': 'Voor Windows / Linux / macOS', // uncertain:
+    'pl': 'Dla Windows / Linux / macOS', // uncertain:
+    'ro': 'Pentru Windows / Linux / macOS', // uncertain:
+    'cs': 'Pro Windows / Linux / macOS', // uncertain:
+    'sk': 'Pre Windows / Linux / macOS', // uncertain:
+    'hr': 'Za Windows / Linux / macOS', // uncertain:
+    'bg': 'За Windows / Linux / macOS', // uncertain:
+    'el': 'Για Windows / Linux / macOS', // uncertain:
+    'da': 'Til Windows / Linux / macOS', // uncertain:
+    'fi': 'Windows / Linux / macOS -käyttöjärjestelmille', // uncertain:
+    'no': 'For Windows / Linux / macOS', // uncertain:
+    'uk': 'Для Windows / Linux / macOS', // uncertain:
+    'ru': 'Для Windows / Linux / macOS', // uncertain:
+    'tr': 'Windows / Linux / macOS için', // uncertain:
+    'zh': '适用于 Windows / Linux / macOS', // uncertain:
+    'ja': 'Windows / Linux / macOS 用', // uncertain:
+    'ko': 'Windows / Linux / macOS용', // uncertain:
+    'hi': 'Windows / Linux / macOS के लिए', // uncertain:
+    'th': 'สำหรับ Windows / Linux / macOS', // uncertain:
+    'vi': 'Cho Windows / Linux / macOS', // uncertain:
+    'id': 'Untuk Windows / Linux / macOS', // uncertain:
+    'ms': 'Untuk Windows / Linux / macOS', // uncertain:
+  },
+  'share_cleona_copy_command': {
+    'de': 'Befehl kopieren',
+    'en': 'Copy command',
+    'es': 'Copiar comando', // uncertain:
+    'hu': 'Parancs másolása', // uncertain:
+    'sv': 'Kopiera kommando', // uncertain:
+    'ar': 'نسخ الأمر', // uncertain:
+    'he': 'העתק פקודה', // uncertain:
+    'fa': 'کپی دستور', // uncertain:
+    'fr': 'Copier la commande', // uncertain:
+    'it': 'Copia comando', // uncertain:
+    'pt': 'Copiar comando', // uncertain:
+    'nl': 'Opdracht kopiëren', // uncertain:
+    'pl': 'Kopiuj polecenie', // uncertain:
+    'ro': 'Copiază comanda', // uncertain:
+    'cs': 'Kopírovat příkaz', // uncertain:
+    'sk': 'Kopírovať príkaz', // uncertain:
+    'hr': 'Kopiraj naredbu', // uncertain:
+    'bg': 'Копирай командата', // uncertain:
+    'el': 'Αντιγραφή εντολής', // uncertain:
+    'da': 'Kopiér kommando', // uncertain:
+    'fi': 'Kopioi komento', // uncertain:
+    'no': 'Kopier kommando', // uncertain:
+    'uk': 'Копіювати команду', // uncertain:
+    'ru': 'Копировать команду', // uncertain:
+    'tr': 'Komutu kopyala', // uncertain:
+    'zh': '复制命令', // uncertain:
+    'ja': 'コマンドをコピー', // uncertain:
+    'ko': '명령어 복사', // uncertain:
+    'hi': 'कमांड कॉपी करें', // uncertain:
+    'th': 'คัดลอกคำสั่ง', // uncertain:
+    'vi': 'Sao chép lệnh', // uncertain:
+    'id': 'Salin perintah', // uncertain:
+    'ms': 'Salin arahan', // uncertain:
+  },
+  'share_cleona_copy_link': {
+    'de': 'Link kopieren',
+    'en': 'Copy link',
+    'es': 'Copiar enlace', // uncertain:
+    'hu': 'Link másolása', // uncertain:
+    'sv': 'Kopiera länk', // uncertain:
+    'ar': 'نسخ الرابط', // uncertain:
+    'he': 'העתק קישור', // uncertain:
+    'fa': 'کپی لینک', // uncertain:
+    'fr': 'Copier le lien', // uncertain:
+    'it': 'Copia link', // uncertain:
+    'pt': 'Copiar link', // uncertain:
+    'nl': 'Link kopiëren', // uncertain:
+    'pl': 'Kopiuj link', // uncertain:
+    'ro': 'Copiază linkul', // uncertain:
+    'cs': 'Kopírovat odkaz', // uncertain:
+    'sk': 'Kopírovať odkaz', // uncertain:
+    'hr': 'Kopiraj poveznicu', // uncertain:
+    'bg': 'Копирай линка', // uncertain:
+    'el': 'Αντιγραφή συνδέσμου', // uncertain:
+    'da': 'Kopiér link', // uncertain:
+    'fi': 'Kopioi linkki', // uncertain:
+    'no': 'Kopier lenke', // uncertain:
+    'uk': 'Копіювати посилання', // uncertain:
+    'ru': 'Копировать ссылку', // uncertain:
+    'tr': 'Bağlantıyı kopyala', // uncertain:
+    'zh': '复制链接', // uncertain:
+    'ja': 'リンクをコピー', // uncertain:
+    'ko': '링크 복사', // uncertain:
+    'hi': 'लिंक कॉपी करें', // uncertain:
+    'th': 'คัดลอกลิงก์', // uncertain:
+    'vi': 'Sao chép liên kết', // uncertain:
+    'id': 'Salin tautan', // uncertain:
+    'ms': 'Salin pautan', // uncertain:
+  },
+  'share_cleona_http_hint': {
+    'de': 'Im Browser öffnen:',
+    'en': 'Open in browser:',
+    'es': 'Abrir en el navegador:', // uncertain:
+    'hu': 'Megnyitás böngészőben:', // uncertain:
+    'sv': 'Öppna i webbläsare:', // uncertain:
+    'ar': 'فتح في المتصفح:', // uncertain:
+    'he': 'פתח בדפדפן:', // uncertain:
+    'fa': 'باز کردن در مرورگر:', // uncertain:
+    'fr': 'Ouvrir dans le navigateur :', // uncertain:
+    'it': 'Apri nel browser:', // uncertain:
+    'pt': 'Abrir no navegador:', // uncertain:
+    'nl': 'Openen in browser:', // uncertain:
+    'pl': 'Otwórz w przeglądarce:', // uncertain:
+    'ro': 'Deschide în browser:', // uncertain:
+    'cs': 'Otevřít v prohlížeči:', // uncertain:
+    'sk': 'Otvoriť v prehliadači:', // uncertain:
+    'hr': 'Otvori u pregledniku:', // uncertain:
+    'bg': 'Отвори в браузъра:', // uncertain:
+    'el': 'Άνοιγμα στο πρόγραμμα περιήγησης:', // uncertain:
+    'da': 'Åbn i browser:', // uncertain:
+    'fi': 'Avaa selaimessa:', // uncertain:
+    'no': 'Åpne i nettleser:', // uncertain:
+    'uk': 'Відкрити у браузері:', // uncertain:
+    'ru': 'Открыть в браузере:', // uncertain:
+    'tr': 'Tarayıcıda aç:', // uncertain:
+    'zh': '在浏览器中打开：', // uncertain:
+    'ja': 'ブラウザで開く：', // uncertain:
+    'ko': '브라우저에서 열기:', // uncertain:
+    'hi': 'ब्राउज़र में खोलें:', // uncertain:
+    'th': 'เปิดในเบราว์เซอร์:', // uncertain:
+    'vi': 'Mở trong trình duyệt:', // uncertain:
+    'id': 'Buka di browser:', // uncertain:
+    'ms': 'Buka dalam pelayar:', // uncertain:
+  },
 };
