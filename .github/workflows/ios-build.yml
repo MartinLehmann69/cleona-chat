@@ -235,8 +235,9 @@ jobs:
           # xcodebuild archive re-links the Runner binary. Since we injected
           # -force_load into the Pods xcconfigs, the linker will now include
           # all native FFI symbols from libcleona_all_device.a.
-          # Clean the build dir to force a fresh link (no cached Runner binary).
-          rm -rf build/ios/archive
+          # Clean DerivedData to force a fresh link (Xcode caches the linked
+          # binary there and skips re-linking if sources haven't changed).
+          rm -rf ~/Library/Developer/Xcode/DerivedData/Runner-*
           xcodebuild archive \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
