@@ -187,6 +187,11 @@ class NotificationSoundService {
   /// Android: callback for vibration via platform channel (set by Flutter app).
   Future<void> Function(int durationMs)? onVibrateAndroid;
 
+  /// Android: is the ringer silent or vibrate-only? (S412, the screenshot
+  /// click follows it — the one-shot player uses the media stream, which the
+  /// ringer mode does not mute.)
+  Future<bool> Function()? onRingerSilentAndroid;
+
   NotificationSettings get settings => _settings;
 
   /// Initialize with profile directory for settings persistence.
@@ -487,6 +492,28 @@ class NotificationSoundService {
   /// Stop ringback tone.
   Future<void> stopRingback() async {
     await _stopLoop();
+  }
+
+  /// The click of the application's own screenshot (§23.10; S412, owner
+  /// 05.11.2026, decision A): played only when the picture was saved, only
+  /// with the app's sound switch on, and on Android only while the ringer is
+  /// in normal mode — silent or vibrate-only leave the vibration of the
+  /// button as the only feedback. Returns whether the click was played.
+  Future<bool> playScreenshotShutter() async {
+    if (!_settings.soundEnabled) return false;
+    if (Platform.isAndroid) {
+      final silent = onRingerSilentAndroid;
+      // Unknown ringer state counts as silent: a click in a meeting is
+      // worse than a missing one.
+      if (silent == null) return false;
+      try {
+        if (await silent()) return false;
+      } catch (_) {
+        return false;
+      }
+    }
+    await _playOnce('shutter.ogg');
+    return true;
   }
 
   /// Play short "connected" confirmation beep.

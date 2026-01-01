@@ -103,7 +103,7 @@ jobs:
     if: github.event.inputs.platform != 'macos'
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: brew install cmake ninja autoconf automake libtool pkg-config
@@ -115,7 +115,7 @@ jobs:
         # valid-looking key — a foreign tree laundered into a release.
         # Skipping the step means nothing is restored AND nothing is saved.
         if: env.IS_RELEASE != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/ios-libs-build-*
           key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
@@ -379,12 +379,13 @@ jobs:
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 
-      - name: Run smoke tests
-        continue-on-error: true
-        run: |
-          dart test test/smoke/ --reporter expanded \
-            --exclude-tags=needs-native \
-            || echo "::warning::Some smoke tests failed"
+      # No smoke step here (S412, 05.11.2026). One stood here since 6cabcea8
+      # (10.07.2026): `dart test test/smoke/` under continue-on-error. test/
+      # is never published (docs/PUBLISHING.md §13 — lab addresses), so it ran
+      # no single test and printed "Some smoke tests failed" on every run.
+      # The smokes run where they can: scripts/preflight.sh and the smoke
+      # worker of every E2E run. sync-to-git.sh tripwire [4k] now refuses a
+      # workflow that names an unpublished path.
 
       - name: Diagnose Runner binary symbols
         if: always()
@@ -518,7 +519,7 @@ jobs:
         # always() so a failed TestFlight upload still leaves the IPA behind,
         # but only in RELEASE mode — a VERIFY run builds unsigned and has none.
         if: always() && env.IS_RELEASE == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cleona-ios-${{ steps.channel.outputs.channel }}
           path: |
@@ -538,7 +539,7 @@ jobs:
     if: github.event.inputs.platform != 'ios'
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: brew install cmake ninja autoconf automake libtool pkg-config
@@ -546,7 +547,7 @@ jobs:
       - name: Cache native lib sources
         # Skipped in RELEASE mode — see the iOS cache step above.
         if: env.IS_RELEASE != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
@@ -763,7 +764,7 @@ jobs:
 
       - name: Upload DMG artifact
         if: env.IS_RELEASE == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cleona-macos-${{ steps.channel.outputs.channel }}
           path: build/cleona-chat-macos-arm64.dmg

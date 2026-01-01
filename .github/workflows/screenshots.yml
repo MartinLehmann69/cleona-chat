@@ -19,7 +19,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: brew install cmake ninja autoconf automake libtool pkg-config
@@ -28,7 +28,7 @@ jobs:
       #  Build macOS native libs + app
       # ════════════════════════════════════════════════════════════════
       - name: Cache macOS native lib sources
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
@@ -145,7 +145,7 @@ jobs:
       #  Build iOS Simulator app
       # ════════════════════════════════════════════════════════════════
       - name: Cache iOS native lib sources
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/ios-libs-build-*
           key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
@@ -554,7 +554,7 @@ jobs:
       # ════════════════════════════════════════════════════════════════
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: appstore-screenshots
           path: build/screenshots/

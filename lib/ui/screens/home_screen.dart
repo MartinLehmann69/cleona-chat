@@ -22,6 +22,7 @@ import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
+import 'package:cleona/ui/theme/skin_foreground.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
 import 'package:cleona/ui/components/contact_name.dart';
@@ -1473,6 +1474,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
             alignment: Alignment.centerRight,
             child: IconButton(
               icon: const Icon(Icons.search, size: 20),
+              // On the photo/slate background (S412).
+              color: skinBackgroundForeground(context),
               tooltip: locale.get('search_conversations'),
               onPressed: () => setState(() => _isSearching = true),
             ),
@@ -1514,7 +1517,10 @@ class _ConversationListViewState extends State<_ConversationListView> {
         Expanded(
           child: conversations.isEmpty && _searchQuery.isNotEmpty
               ? Center(child: Text(locale.get('search_no_results'),
-                  style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)))
+                  style: TextStyle(
+                      color: skinBackgroundForeground(context) ??
+                          Theme.of(context).colorScheme.onSurfaceVariant,
+                      shadows: skinBackgroundTextShadows(context))))
               : ListView.builder(
       itemCount: conversations.length + bannerOffset,
       itemBuilder: (context, index) {
@@ -1680,7 +1686,9 @@ class _ConversationListViewState extends State<_ConversationListView> {
               bottom: 0,
               child: Align(
                 alignment: Alignment.centerRight,
-                child: contextMenu,
+                // Card colour, not the scheme's (S412: dark menu on the dark
+                // photo card — practically invisible with "Ocean").
+                child: SkinCardControls(child: contextMenu),
               ),
             ),
           ],
@@ -2445,16 +2453,21 @@ class _EmptyState extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    // On the photo/slate background the scheme's outline grey sat dark on
+    // dark (S412); there the page foreground with the photo shadow.
+    final fg = skinBackgroundForeground(context);
+    final color = fg ?? colorScheme.outline;
+    final shadows = skinBackgroundTextShadows(context);
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, size: 56, color: colorScheme.outline),
+          Icon(icon, size: 56, color: color, shadows: shadows),
           const SizedBox(height: 12),
-          Text(text, style: Theme.of(context).textTheme.titleMedium?.copyWith(color: colorScheme.outline)),
+          Text(text, style: Theme.of(context).textTheme.titleMedium?.copyWith(color: color, shadows: shadows)),
           if (subtext != null) ...[
             const SizedBox(height: 4),
-            Text(subtext!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: colorScheme.outline)),
+            Text(subtext!, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color, shadows: shadows)),
           ],
         ],
       ),
@@ -3005,7 +3018,12 @@ class _DonationBannerState extends State<_DonationBanner> {
       padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       child: Card(
         elevation: 0,
-        color: colorScheme.primaryContainer.withValues(alpha: 0.3),
+        // On the photo/slate background a 30 % tint left text and the
+        // "dismiss" button on the photo (S412); there the card is the
+        // scheme's own light surface, on which its colours were chosen.
+        color: skinBackgroundForeground(context) != null
+            ? colorScheme.surface.withValues(alpha: 0.92)
+            : colorScheme.primaryContainer.withValues(alpha: 0.3),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 8, 8),

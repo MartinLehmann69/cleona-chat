@@ -3787,6 +3787,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         await channel.invokeMethod('vibrate', {'duration': durationMs});
       };
 
+      // Ringer state for the screenshot click (S412, owner A).
+      service.notificationSound.onRingerSilentAndroid = () async {
+        const channel = MethodChannel('chat.cleona/notification');
+        return await channel.invokeMethod<bool>('ringerSilent') ?? true;
+      };
+
       service.onSetCallAudioModeAndroid = (speaker) {
         const channel = MethodChannel('chat.cleona/notification');
         channel.invokeMethod('setCallAudioMode', {'speaker': speaker});

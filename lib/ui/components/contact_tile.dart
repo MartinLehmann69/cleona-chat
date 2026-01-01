@@ -3,6 +3,7 @@ import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
+import 'package:cleona/ui/theme/skin_foreground.dart';
 
 enum ContactVerification { unverified, seen, verified, trusted }
 
@@ -356,7 +357,9 @@ class ContactTile extends StatelessWidget {
           ),
           if (trailing != null) ...[
             const SizedBox(width: 8),
-            trailing!,
+            // The menu and other controls take the card's colour, not the
+            // scheme's (S412: dark menu on the dark photo card).
+            SkinCardControls(child: trailing!),
           ],
         ],
       ),

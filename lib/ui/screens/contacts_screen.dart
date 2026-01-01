@@ -12,6 +12,7 @@ import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/components/system_notice_text.dart';
 import 'package:cleona/ui/date_format.dart' as df;
 import 'package:cleona/ui/screens/chat_screen.dart';
+import 'package:cleona/ui/theme/skin_foreground.dart';
 
 /// S367 §3.1: this used to be the app's only carrier of the four
 /// verification levels and the §9.5.2a contact-issue-report path, but had
@@ -193,7 +194,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Text(
                 locale.tr('contact_requests_count', {'count': '${pending.length}'}),
-                style: Theme.of(context).textTheme.titleMedium,
+                style: skinBackgroundHeading(context, Theme.of(context).textTheme.titleMedium),
               ),
             ),
             ...pending.map((contact) => ContactTile(
@@ -236,7 +237,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Text(
                 '${locale.get('contact_issue_waiting')} (${pendingOutgoing.length})',
-                style: Theme.of(context).textTheme.titleMedium,
+                style: skinBackgroundHeading(context, Theme.of(context).textTheme.titleMedium),
               ),
             ),
             ...pendingOutgoing.map((contact) => ContactTile(
@@ -291,7 +292,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Text(
                 '${locale.get('contact_stored_header')} (${storedForDelivery.length})',
-                style: Theme.of(context).textTheme.titleMedium,
+                style: skinBackgroundHeading(context, Theme.of(context).textTheme.titleMedium),
               ),
             ),
             ...storedForDelivery.map((contact) => ContactTile(
@@ -338,12 +339,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 Expanded(
                   child: Text(
                     locale.tr('contacts_count', {'count': '${accepted.length}'}),
-                    style: Theme.of(context).textTheme.titleMedium,
+                    style: skinBackgroundHeading(context, Theme.of(context).textTheme.titleMedium),
                   ),
                 ),
                 if (accepted.isNotEmpty)
                   IconButton(
                     icon: Icon(_isSearching ? Icons.close : Icons.search, size: 20),
+                    color: skinBackgroundForeground(context), // photo/slate background (S412)
                     tooltip: locale.get('search_conversations'),
                     onPressed: () => setState(() {
                       _isSearching = !_isSearching;
@@ -375,7 +377,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
           if (accepted.isEmpty)
             Padding(
               padding: const EdgeInsets.all(32),
-              child: Center(child: Text(locale.get('no_contacts_yet'))),
+              child: Center(child: Text(locale.get('no_contacts_yet'),
+                  style: skinBackgroundHeading(context, null))),
             )
           else if (acceptedRows.isEmpty)
             Padding(
@@ -383,7 +386,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
               child: Center(
                 child: Text(
                   locale.get('search_no_results'),
-                  style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  style: skinBackgroundHeading(context,
+                      TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
                 ),
               ),
             ),

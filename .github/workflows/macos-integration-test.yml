@@ -44,13 +44,13 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install build tools
         run: brew install cmake ninja autoconf automake libtool pkg-config
 
       - name: Cache native lib sources
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
@@ -88,12 +88,55 @@ jobs:
           echo "=== Dylibs in Frameworks ==="
           ls -lh "$FRAMEWORKS"/*.dylib 2>/dev/null || echo "No dylibs found!"
 
-      - name: Run integration test
+      # DIAGNOSIS (S412, 05.11.2026 — measure before the fix, owner A). The
+      # runs of 30.10. and 04.11. hung 43 min after "[main] KeyringService OK"
+      # until the 50-min job limit; the cleanup killed an orphan `security`.
+      # lib/core/crypto/keyring_service.dart _MacOsKeychainKeyring calls
+      # `security` with Process.runSync and no bound, which blocks the whole
+      # isolate — `--timeout 120s` never fired. Not yet measured: WHICH
+      # `security` call waits and WHY (locked keychain? a prompt without a
+      # screen?). This step records the keychain state before the test and,
+      # if the test is still running after 8 min (green runs took 2:35–2:51
+      # including the app build), the processes with their arguments (the
+      # value after -w is a secret and is masked), the keychain state again
+      # and the test output so far; then it stops the test and fails.
+      # Every `security` call here is bounded by perl's alarm (macOS ships no
+      # `timeout`). Remove this diagnosis with the fix of the keychain backend.
+      - name: Run integration test (with hang diagnosis)
         env:
           BOOTSTRAP_CONTACT_SEED: ${{ vars.BOOTSTRAP_CONTACT_SEED }}
         run: |
-          flutter test integration_test/app_test_ci.dart -d macos --timeout 120s 2>&1 | tee test-output.log
-          EXIT_CODE=${PIPESTATUS[0]}
+          set +e
+          bounded() { perl -e 'alarm shift; exec @ARGV' "$@"; echo "  (exit $?)"; }
+          keychain_state() {
+            echo "--- keychains (user): ---";   bounded 20 security list-keychains -d user
+            echo "--- default keychain: ---";   bounded 20 security default-keychain -d user
+            KC=$(bounded 20 security default-keychain -d user | head -1 | tr -d ' "')
+            echo "--- show-keychain-info $KC: ---"; bounded 20 security show-keychain-info "$KC"
+          }
+          echo "=== DIAG before the test ==="
+          keychain_state
+          flutter test integration_test/app_test_ci.dart -d macos --timeout 120s > test-output.log 2>&1 &
+          TEST_PID=$!
+          WAITED=0
+          while kill -0 "$TEST_PID" 2>/dev/null && [ "$WAITED" -lt 480 ]; do
+            sleep 15; WAITED=$((WAITED + 15))
+          done
+          if kill -0 "$TEST_PID" 2>/dev/null; then
+            echo "=== DIAG: test still running after ${WAITED}s — hang ==="
+            echo "--- processes (security, Cleona, dart, SecurityAgent; -w value masked): ---"
+            ps -axo pid,ppid,etime,stat,command \
+              | grep -E '[s]ecurity|[C]leona|[d]art|[S]ecurityAgent|[s]ecurityd' \
+              | sed -E 's/(-w )[^ ]+/\1<masked>/g'
+            keychain_state
+            echo "--- test output so far (last 60 lines): ---"
+            tail -60 test-output.log
+            pkill -P "$TEST_PID" 2>/dev/null; kill "$TEST_PID" 2>/dev/null
+            echo "::error::integration test hung (> ${WAITED}s) — see DIAG above"
+            exit 1
+          fi
+          wait "$TEST_PID"; EXIT_CODE=$?
+          cat test-output.log
           exit $EXIT_CODE
 
       - name: Collect crash logs on failure
@@ -109,7 +152,7 @@ jobs:
 
       - name: Upload test artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: macos-test-failure-logs
           path: |

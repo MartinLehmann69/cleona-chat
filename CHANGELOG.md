@@ -1,5 +1,16 @@
 # Cleona Chat — Changelog
 
+## 4.2.6
+
+### Appearance
+- With the photo skins (Ocean, Sunset, Forest, Amethyst, Fire, Storm, Gold) and Slate, the three-dot menus of the contact and conversation rows were dark on the dark row card and practically invisible; they now take the card's light colour. The same holds for the list search, the section headings, the empty-list notes and the donation banner on the photo background. Every skin is checked for at least 3:1 contrast, light and dark
+
+### Screenshots
+- The app's own screenshot now gives feedback you can feel and hear: a short shutter click and a short vibration when the picture was saved, two short vibrations when it was refused or failed. The click follows the app's sound switch and, on Android, the ringer mode (silent or vibrate: no click)
+
+### Build
+- CI: Apple workflows on the Node 24 actions; a CI step that ran no test is removed
+
 ## 4.2.5
 
 ### Calls

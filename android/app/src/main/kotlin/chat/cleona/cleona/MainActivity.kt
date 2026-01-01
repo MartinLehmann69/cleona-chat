@@ -338,6 +338,14 @@ class MainActivity : FlutterActivity() {
                     manager.cancel(conversationId.hashCode())
                     result.success(null)
                 }
+                // S412 (owner 05.11.2026, A): the screenshot click follows
+                // the ringer — silent or vibrate-only means no sound. The
+                // one-shot player plays on the media stream, which the
+                // ringer mode does not mute, so the caller asks first.
+                "ringerSilent" -> {
+                    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    result.success(am.ringerMode != AudioManager.RINGER_MODE_NORMAL)
+                }
                 "playSound" -> {
                     val asset = call.argument<String>("asset")
                     if (asset == null) {
