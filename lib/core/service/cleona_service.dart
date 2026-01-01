@@ -392,7 +392,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.100';
+  static const String kCurrentAppVersion = '3.1.101';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -3243,20 +3243,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final peer = node.routingTable.getPeer(hexToBytes(nhHex));
       if (peer == null || !peer.isProtectedSeed) continue;
       if (peer.addresses.isEmpty) continue;
-      final addr = peer.addresses.first;
-      try {
-        final ok = await node.sendInfraDirect(
-          messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
-          innerPayload: storeBytes,
-          recipientDeviceId: hexToBytes(nhHex),
-          addr: InternetAddress(addr.ip),
-          port: addr.port,
-        );
-        if (ok) sent++;
-        _log.info('§5.5b FIRST_CR_STORE → ${nhHex.substring(0, 8)} '
-            '(${addr.ip}:${addr.port}) ok=$ok');
-      } catch (e) {
-        _log.debug('§5.5b FIRST_CR_STORE to ${nhHex.substring(0, 8)} error: $e');
+      // Send to ALL known addresses (fire-and-forget, first-ACK-wins).
+      // Critical for DS-Lite/CGNAT: private IPv4 unreachable from mobile,
+      // but global IPv6 is.
+      var peerSent = false;
+      for (final addr in peer.allConnectionTargets()) {
+        if (addr.ip.isEmpty || addr.port <= 0) continue;
+        try {
+          final ok = await node.sendInfraDirect(
+            messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
+            innerPayload: storeBytes,
+            recipientDeviceId: hexToBytes(nhHex),
+            addr: InternetAddress(addr.ip),
+            port: addr.port,
+          );
+          if (ok && !peerSent) { sent++; peerSent = true; }
+          _log.info('§5.5b FIRST_CR_STORE → ${nhHex.substring(0, 8)} '
+              '(${addr.ip}:${addr.port}) ok=$ok');
+        } catch (e) {
+          _log.debug('§5.5b FIRST_CR_STORE to ${nhHex.substring(0, 8)} '
+              '(${addr.ip}:${addr.port}) error: $e');
+        }
       }
     }
     if (sent > 0) {

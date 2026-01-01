@@ -964,6 +964,13 @@ bool isBootstrapMessageTypeV3(proto.MessageTypeV3 type) {
     // recipient's Device-KEM-PK and cannot KEM-encrypt without it.
     case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
     case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
+    // First-CR-Mailbox (§5.5b) — must be BOOT: scanner sends to seed
+    // peers whose Device-KEM-PK is unknown (QR carries only target keys,
+    // not seed-peer keys). Payload is already end-to-end KEM-encrypted
+    // under the target's Device-KEM-PK — seed peer stores opaque blob.
+    case proto.MessageTypeV3.MTV3_FIRST_CR_STORE:
+    case proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK:
+    case proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER:
       // Sanity: every BOOT entry MUST also be in the §2.3.5 selector. If
       // these ever drift, the receiver-side `isInfrastructureMessageTypeV3`
       // gate in [decryptAndVerifyInfrastructure] would still admit BOOT

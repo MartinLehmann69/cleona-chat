@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c3fa9787a66f, 2026-06-20). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:0dc66a743ad4, 2026-06-20). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -324,7 +324,7 @@ message InfrastructureFrame {
 | Delivery ACK | DELIVERY_RECEIPT (when targeting senderDeviceId without UserID context) | KEM |
 | Identity-Layer Infrastructure (Welle 6) | RESTORE_BROADCAST, KEY_ROTATION_BROADCAST (Emergency-variant only — when both `oldSignatureEd25519` and `newSignatureEd25519` are set in the body) | KEM |
 | Deferred Key Exchange (rev3) | DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER | **BOOT** |
-| First-CR-Mailbox (rev3) | FIRST_CR_STORE, FIRST_CR_STORE_ACK, FIRST_CR_DELIVER | KEM |
+| First-CR-Mailbox (rev3) | FIRST_CR_STORE, FIRST_CR_STORE_ACK, FIRST_CR_DELIVER | **BOOT** |
 
 **BOOT-path requirements** (mandatory for every BOOT-row above):
 
@@ -1327,7 +1327,7 @@ Cleona uses a Kademlia DHT as the backbone for peer discovery, mailbox lookup, e
 
 **DHT address space**: 256-bit, identical key space as DeviceIDs and Mailbox IDs.
 
-**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with ~20 entries per bucket.
+**k-bucket configuration**: 256 buckets (one per XOR-distance bit), with 200 entries per bucket. Standard Kademlia uses k=20, designed for networks with millions of nodes. Cleona operates in the 10–500 node range, where SHA-256-based Node-IDs cause ~50% of peers to land in bucket 255 — a k=20 bucket overflows at just ~40 peers, causing routing-table rejections and DV-routing desync (3,400+ failed sends/day observed on a mobile node, 2026-06-20). k=200 eliminates this failure mode with negligible memory overhead (~200 PeerInfo × ~1KB ≈ 200KB per bucket worst case).
 
 **Closed Network authentication**: every DHT operation is authenticated by the HMAC in the outer frame (§4.10). Nodes without the `network_secret` can neither perform DHT operations nor interpret responses.
 
@@ -1342,7 +1342,7 @@ Cleona uses a Kademlia DHT as the backbone for peer discovery, mailbox lookup, e
 
 **Replication factor**: K=10 (Kademlia convention). DHT records survive the loss of 9 replicator nodes, which remains safe for small mesh sizes (10–100 nodes).
 
-**Eviction**: standard Kademlia rules — the oldest bucket entry is pinged and replaced by a new one on timeout.
+**Eviction**: oldest-entry-first eviction when a bucket exceeds k=200 — the oldest entry is pinged and replaced by the new candidate if the ping times out (stale threshold: 4 hours). With k=200 and realistic mesh sizes (10–500 nodes), eviction is a safety net that rarely triggers, not a load-shedding mechanism. Note: periodic self-broadcasts (§5.11 `_dvSafetyNetExchange`, hourly) refresh `lastSeen` for all peers — only truly departed nodes (offline >4h) become eviction candidates.
 
 ### 4.3 Identity Resolution (2D-DHT)
 
@@ -1855,7 +1855,7 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 
 **CGNAT address reachability (V3.1.90+, updated V3.1.94):** The `isReachableFromCurrentNetwork` filter and `_filterNatContext` distinguish RFC 1918 private addresses from CGNAT addresses (RFC 6598 `100.64.0.0/10` + RFC 7335 `192.0.0.0/24` DS-Lite). A node on a CGNAT address **must not** send to RFC 1918 targets and vice versa — these address spaces have zero routing relationship. Cross-class private-to-private is permitted only within RFC 1918 (e.g. two RFC 1918 ranges behind the same gateway, common in home/lab networks). This eliminates guaranteed-futile UDP sends that waste traffic and obscure real delivery failures in logs.
 
-**Reachability precondition, relay selection & inbound probe.** Online delivery between two endpoints that have **no** common direct path — both behind DS-Lite/CGNAT, or one IPv4-only and the other IPv6-only — depends on at least one **inbound-reachable relay** being online (global-IPv6-inbound, public-IPv4-with-port-mapping, or shared LAN; for the IPv4↔IPv6 case that relay must additionally be **dual-stack**). This is a hard precondition, not an emergent property — the word "implicit" above refers only to the address-selection mechanism, not to the availability of such a node. Relay-candidate selection therefore filters on `isReachableFromCurrentNetwork` (and, for cross-family delivery, dual-stack capability); a relay that the sender cannot itself reach is never chosen. Because a node's *self-announced* global IPv6 is not necessarily **inbound-reachable** (many mobile carriers firewall incoming IPv6), each node runs a one-shot **IPv6 inbound probe** at every network-join: a peer/bootstrap echoes the self-announced global IPv6 back; if no PONG returns, the address is flagged advertise-but-not-inbound-reachable, dropped from priority-2 direct, and kept only as a relay hint. This is the IPv6 analogue of the existing IPv4 STUN ping-pong (§4.6) — one round-trip per join, no timer. Note that the TLS transport fallback (§4.1) and the mobile fallback socket address **DPI/censorship**, not NAT reachability — neither makes a CGNAT endpoint inbound-reachable; under mutual CGNAT, relay remains the only online path.
+**Reachability precondition, relay selection & inbound probe.** Online delivery between two endpoints that have **no** common direct path — both behind DS-Lite/CGNAT, or one IPv4-only and the other IPv6-only — depends on at least one **inbound-reachable relay** being online (global-IPv6-inbound, public-IPv4-with-port-mapping, or shared LAN; for the IPv4↔IPv6 case that relay must additionally be **dual-stack**). This is a hard precondition, not an emergent property — the word "implicit" above refers only to the address-selection mechanism, not to the availability of such a node. Relay-candidate selection therefore filters on `isReachableFromCurrentNetwork` (and, for cross-family delivery, dual-stack capability); a relay that the sender cannot itself reach is never chosen. To verify that a node's *self-announced* global IPv6 is actually **inbound-reachable** (network topology or local firewall rules may block incoming IPv6 despite a global address), each node runs a one-shot **IPv6 inbound probe** at every network-join: a peer/bootstrap echoes the self-announced global IPv6 back; if no PONG returns, the address is flagged advertise-but-not-inbound-reachable, dropped from priority-2 direct, and kept only as a relay hint. This is the IPv6 analogue of the existing IPv4 STUN ping-pong (§4.6) — one round-trip per join, no timer. Note that the TLS transport fallback (§4.1) and the mobile fallback socket address **DPI/censorship**, not NAT reachability — neither makes a CGNAT endpoint inbound-reachable; under mutual CGNAT, relay remains the only online path.
 
 **IPv6 Reception Bug (V3.1.x fix):** Investigation of the 2026-06-04 finding (Phone→Bootstrap IPv6 packet lost) revealed two root causes: (1) `MulticastDiscovery` bound a second IPv6 socket to `nodePort` with `SO_REUSEPORT` — on Linux the kernel distributed inbound IPv6 unicast packets between Transport and MulticastDiscovery; packets that landed on MulticastDiscovery were silently dropped (same class as the 2fbc879 IPv4 regression, §4.5.2). Fix: MulticastDiscovery now binds to `discoveryPort` (41338) like LocalDiscovery does for IPv4. The §4.5.2 invariant check was extended to also verify `/proc/net/udp6`. (2) `currentSelfAddresses()` classified all local IPv6 as `IPV6_GLOBAL` — ULA/link-local addresses were advertised as globally routable and tried by remote peers. Fix: uses `PeerAddress.classifyIp()` for correct classification.
 
@@ -2231,7 +2231,7 @@ message FirstCrDeliver {
 
 1. Scanner (A) builds First-CR (KEM-encrypted under B's Device-KEM-PK, see §8.1.1 rev3 step 6)
 2. A sends First-CR to recipient (B) via normal routing cascade (§4.4 sendToDevice)
-3. If no `DELIVERY_RECEIPT` after 15 seconds: A sends `FIRST_CR_STORE` to each reachable SeedPeer from the ContactSeed. `FIRST_CR_STORE` is sent as a **direct infrastructure message** (`sendInfraTo`) to each seed peer's known address — **not** via the DV relay cascade (`sendToDevice`). This is architecturally critical: the D3 admission gate (§13.1.2) applies to relay candidacy, but a direct infra send to a known address bypasses the relay path entirely. The scanner knows the seed peer's addresses from the ContactSeed; it does not need to relay through the seed peer to reach it.
+3. If no `DELIVERY_RECEIPT` after 15 seconds: A sends `FIRST_CR_STORE` to each reachable SeedPeer from the ContactSeed. `FIRST_CR_STORE` is sent as a **direct infrastructure message** (`sendInfraTo`) to **every known address** of each seed peer (IPv4 + IPv6, private + public — fire-and-forget to all, first-ACK-wins) — **not** via the DV relay cascade (`sendToDevice`). This multi-address send is critical for DS-Lite/CGNAT scanners: the seed peer's private IPv4 is unreachable from mobile data, but its global IPv6 is. This is architecturally critical: the D3 admission gate (§13.1.2) applies to relay candidacy, but a direct infra send to a known address bypasses the relay path entirely. The scanner knows the seed peer's addresses from the ContactSeed; it does not need to relay through the seed peer to reach it.
 4. SeedPeer validates (see acceptance criteria below) and stores; responds with `FIRST_CR_STORE_ACK`. Receipt of ≥1 ACK transitions the CR to `storedForDelivery` on the scanner — the canonical success signal for asynchronous ContactSeeds (§8.1.1 CR Bootstrap Delivery Lifecycle).
 5. When B sends any firstParty packet to the SeedPeer (PONG, DV-Update, DHT-Request — **not** relayed packets): SeedPeer checks mailbox for B's `deviceId` → pushes `FIRST_CR_DELIVER`
 6. B receives, decrypts with Device-KEM-SK, processes as normal First-CR (§8.1.1 step 8)
@@ -6480,7 +6480,7 @@ This section exposes the routing-layer view of the network. **All entries are ke
 | Routing table size | Total devices in DHT routing table |
 | Average latency | Mean RTT to all reachable devices (ms) |
 | Min/Max latency | Lowest and highest observed RTT |
-| K-bucket fill | Bar chart: device count per k-bucket (capacity: 20 per bucket) |
+| K-bucket fill | Bar chart: device count per k-bucket (capacity: 200 per bucket) |
 | Device latencies | List of top 10 devices with individual RTT values, NAT type, current route, and packet-loss estimate |
 
 **Per-device row format** (Device Latencies list and "Connection Details" expandable views):
@@ -6502,7 +6502,7 @@ Last seen:     3 s ago
 
 **Multi-Identity on the local node:** A device may host several local user identities (see §3.6). Connection statistics for the local node are reported once (one DeviceID, one routing table, one set of RTTs) and are independent of which local identity is currently active in the GUI. Identity-switching never restarts the transport layer, so all metrics persist across switches.
 
-**K-bucket visualization:** A bar chart where each bar represents one k-bucket in the Kademlia routing table. Bar height scales from 0 to capacity (20 devices). Tooltip shows bucket index and current fill ratio. This gives advanced users immediate insight into routing table balance — uneven fill indicates proximity clustering in the DHT address space.
+**K-bucket visualization:** A bar chart where each bar represents one k-bucket in the Kademlia routing table. Bar height scales from 0 to capacity (200 devices). Tooltip shows bucket index and current fill ratio. This gives advanced users immediate insight into routing table balance — uneven fill indicates proximity clustering in the DHT address space.
 
 **Connection sheet (recovery actions).** Tapping **"Active Peers"** (this dashboard) or **"Connected Peers"** (Settings → Network) opens a shared connection sheet that keeps the dashboard itself read-only while giving recovery actions a home: (1) the live active-peer list, (2) a debounced **Reconnect** button (§12.3.1 tier 2), (3) **import / share peer-list rescue bundle** (§8.1.2 / §12.3.1 tier 3), co-located with manual peer entry.
 

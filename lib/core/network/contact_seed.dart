@@ -757,13 +757,12 @@ class ContactSeedBuilder {
         break;
       }
     }
-    // LAN peers from different /16 subnets (max 2)
-    final seenSubnets = <String>{};
+    // LAN peers (max 2, dedup by nodeId only — /16 subnet filter removed:
+    // it collapsed all 192.168.x.y into one slot, yielding 1 seed peer
+    // instead of 3)
     for (final p in validPeers.where(
         (p) => _isPrivateIp(p.address) && !p.address.contains(':'))) {
       if (!seenNodeIds.add(p.nodeIdHex)) continue;
-      final subnet = p.address.split('.').take(2).join('.');
-      if (!seenSubnets.add(subnet)) continue;
       selected.add(p);
       if (selected.length >= 3) break;
     }

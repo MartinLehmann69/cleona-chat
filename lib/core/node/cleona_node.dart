@@ -1963,7 +1963,7 @@ class CleonaNode {
       // which were unreachable — these messageTypes route as
       // InfrastructureFrames per §2.3.5 selector. Reply via _sendInfra.
       case proto.MessageTypeV3.MTV3_DHT_PING:
-        _handleDhtPingInfra(frame, senderDeviceId);
+        _handleDhtPingInfra(frame, senderDeviceId, from, fromPort);
         return true;
       case proto.MessageTypeV3.MTV3_DHT_FIND_NODE:
         _handleDhtFindNodeInfra(frame, senderDeviceId);
@@ -2050,19 +2050,30 @@ class CleonaNode {
   // natTraversal, peerManager) — no service-state access.
 
   void _handleDhtPingInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
+      InternetAddress from, int fromPort) {
     try {
-      // V2-equivalent: just respond with DHT_PONG. The V3 receive pipeline
-      // (`_onPacketV3Received` lines 802-836) already registers the sender
-      // as a DV neighbor + records UdpKeepalive observation, so a PING
-      // implicitly bumps liveness without the V2 `_handlePing` body needing
-      // to do it manually.
-      final pong = proto.DhtPong()
+      final pongPayload = (proto.DhtPong()
         ..senderId = primaryIdentity.deviceNodeId
-        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch);
+        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch))
+          .writeToBuffer();
+      // Send PONG directly back to the sender's source address. This
+      // bypasses the routing-table lookup in sendToDevice — critical when
+      // the sender is a DV neighbor but not in the routing table (k-bucket
+      // full). Without this, the PONG is lost and the sender never learns
+      // our addresses (including IPv6).
+      sendInfraDirect(
+        messageType: proto.MessageTypeV3.MTV3_DHT_PONG,
+        innerPayload: pongPayload,
+        recipientDeviceId: senderDeviceId,
+        addr: from,
+        port: fromPort,
+      );
+      // Also send via routing-table path (if available) — covers cases
+      // where the source address is a relay hop, not the originator.
       _sendInfra(
         messageType: proto.MessageTypeV3.MTV3_DHT_PONG,
-        innerPayload: pong.writeToBuffer(),
+        innerPayload: pongPayload,
         recipientDeviceId: senderDeviceId,
       );
 

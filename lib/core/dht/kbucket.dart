@@ -2,8 +2,11 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/peer_info.dart';
 
-/// K-bucket size (standard Kademlia parameter).
-const int kBucketSize = 20;
+/// K-bucket size. Standard Kademlia uses k=20 (designed for millions of nodes).
+/// Cleona operates at 10–500 nodes where ~50% land in bucket 255 — k=20
+/// overflows at ~40 peers causing DV-routing/routing-table desync. k=200
+/// eliminates this with negligible memory overhead.
+const int kBucketSize = 200;
 
 /// Max addresses per peer. Prevents unbounded accumulation from gossip.
 const int maxAddressesPerPeer = 15;
