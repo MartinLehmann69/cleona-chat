@@ -431,19 +431,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   String? _initError;
   /// Sec H-5 (V3.1.72) / T13: true after the user clicked "open anyway
   /// (limited)" on the [UpdateRequiredScreen]. Per-session, not persisted.
-  /// Propagated to every concrete [CleonaService] (Android in-process) and,
+  /// Propagated to every concrete [CleonaService] (in-process) and,
   /// on Desktop, pushed to the daemon via [IpcClient.setReducedModeSession]
   /// (Folge-Task 2026-04-26). See sec-h5 §8.2.
   bool _sessionReducedMode = false;
 
   /// Toggle reducedMode for this GUI session. Sets the flag on every
-  /// concrete [CleonaService] currently known to this state (Android
+  /// concrete [CleonaService] currently known to this state (in-process
   /// multi-identity), pushes it to the daemon over IPC (Desktop), and
   /// stores the value so future services created via [_boot] /
   /// identity-add inherit it.
   void setReducedModeSession(bool v) {
     _sessionReducedMode = v;
-    for (final service in _androidServices.values) {
+    for (final service in _inProcessServices.values) {
       service.reducedMode = v;
     }
     if (_service is CleonaService) {
@@ -460,9 +460,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
   ThemeMode _themeMode = ThemeMode.system;
   Timer? _showTriggerTimer;
-  Timer? _androidHeartbeatTimer;
-  DateTime? _androidHeartbeatLastAt;
-  int _androidHeartbeatTick = 0;
+  Timer? _heartbeatTimer;
+  DateTime? _heartbeatLastAt;
+  int _heartbeatTick = 0;
   AppLocale? _appLocale;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult> _connectivityResults = [];
@@ -475,8 +475,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Number of peers with confirmed bidirectional UDP contact this session.
   /// Combines OS connectivity with actual P2P reachability for the status icon.
   int get confirmedPeerCount {
-    // Android in-process: read directly from node
-    if (_androidNode != null) return _androidNode!.confirmedPeerIds.length;
+    // In-process: read directly from node
+    if (_inProcessNode != null) return _inProcessNode!.confirmedPeerIds.length;
     // Desktop daemon: IPC client carries confirmedPeerCount
     if (_ipcClient != null) return _ipcClient!.confirmedPeerCount;
     return 0;
@@ -485,7 +485,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// True when UPnP/PCP successfully opened an inbound port mapping — used by
   /// the connection-status icon to split "strong (Hulk)" from "good (normal man)".
   bool get hasPortMapping {
-    if (_androidNode != null) return _androidNode!.natTraversal.hasPortMapping;
+    if (_inProcessNode != null) return _inProcessNode!.natTraversal.hasPortMapping;
     if (_ipcClient != null) return _ipcClient!.hasPortMapping;
     return false;
   }
@@ -494,8 +494,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// When true, icon should show mobile even if OS reports WiFi.
   bool _mobileFallbackActive = false;
   bool get isMobileFallbackActive {
-    // Android in-process: read from node's transport
-    if (_androidNode != null) return _androidNode!.transport.isMobileFallbackActive;
+    // In-process: read from node's transport
+    if (_inProcessNode != null) return _inProcessNode!.transport.isMobileFallbackActive;
     // Desktop daemon: IPC client carries the state
     if (_ipcClient != null) return _ipcClient!.mobileFallbackActive;
     return _mobileFallbackActive;
@@ -505,10 +505,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   final List<(Object, StackTrace)> _pendingCrashes = [];
   bool _crashDialogShowing = false;
 
-  // Android in-process multi-identity state
-  CleonaNode? _androidNode;
-  final Map<String, CleonaService> _androidServices = {};
-  final Map<String, IdentityContext> _androidContexts = {};
+  // In-process multi-identity state (Android, iOS, macOS-no-daemon)
+  CleonaNode? _inProcessNode;
+  final Map<String, CleonaService> _inProcessServices = {};
+  final Map<String, IdentityContext> _inProcessContexts = {};
 
   ICleonaService? get service => _service;
   IpcClient? get ipcClient => _ipcClient;
@@ -529,8 +529,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   CleonaService? get _activeCleonaService {
-    if (_androidServices.isNotEmpty) {
-      return _androidServices.values.first;
+    if (_inProcessServices.isNotEmpty) {
+      return _inProcessServices.values.first;
     }
     return null;
   }
@@ -644,20 +644,20 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Propagate foreground state to every per-identity service so that
     // _shouldSuppressForegroundNotification can gate sound/vibrate/banner
     // for the conversation that ChatScreen has registered as active.
-    for (final service in _androidServices.values) {
+    for (final service in _inProcessServices.values) {
       service.setAppResumed(isResumed);
     }
     _service?.setAppResumed(isResumed);
 
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      for (final service in _androidServices.values) {
+      for (final service in _inProcessServices.values) {
         service.saveState();
       }
       if (_service is CleonaService) {
         (_service as CleonaService).saveState();
       }
-      if (_androidNode != null && _androidNode!.isRunning) {
-        _androidNode!.saveNetworkState();
+      if (_inProcessNode != null && _inProcessNode!.isRunning) {
+        _inProcessNode!.saveNetworkState();
       }
       // S12.5: Schedule iOS background fetch when going to background.
       // The BGTaskScheduler will wake the app periodically (earliest 15 min)
@@ -669,8 +669,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // After Doze/background: network may have changed, re-discover peers.
       // Protected seed peers survived pruning — now ping them to reconnect.
       // Guard: node must be running (transport/natTraversal are late-initialized).
-      if (_androidNode != null && _androidNode!.isRunning) {
-        _androidNode!.onNetworkChanged();
+      if (_inProcessNode != null && _inProcessNode!.isRunning) {
+        _inProcessNode!.onNetworkChanged();
         _queryPublicIp();
       }
     }
@@ -678,7 +678,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Discover own public IPv4 + IPv6 via ipify (§27 — Android has no daemon).
   void _queryPublicIp() {
-    final node = _androidNode;
+    final node = _inProcessNode;
     if (node == null) return;
     // Delay 5s — let network stabilize after resume
     Timer(const Duration(seconds: 5), () async {
@@ -1054,12 +1054,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _connectivityResults = results;
       notifyListeners();
       if (!_isInitialized) return;
-      // Android multi-identity: notify node ONCE + service-side cleanup per
+      // In-process multi-identity: notify node ONCE + service-side cleanup per
       // identity (mailbox poll, identity-publisher). Avoid the N+1 node-reset
       // multiplication — node-reset is global, not per-service.
-      if (_androidNode != null) {
-        _androidNode!.onNetworkChanged();
-        for (final service in _androidServices.values) {
+      if (_inProcessNode != null) {
+        _inProcessNode!.onNetworkChanged();
+        for (final service in _inProcessServices.values) {
           service.onNetworkChanged(triggerNodeReset: false);
         }
       } else {
@@ -1143,10 +1143,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // Schedule heavy init after the current frame completes
       Future(() async {
         try {
-          await _initAndroidInProcess();
+          await _initInProcess();
         } catch (e, stack) {
-          debugPrint('[main] _initAndroidInProcess FAILED: $e\n$stack');
-          _logCrash('initAndroidInProcess', e, stack);
+          debugPrint('[main] _initInProcess FAILED: $e\n$stack');
+          _logCrash('initInProcess', e, stack);
           _initError = '$e\n\nbaseDir: $_baseDir\n\n$stack';
           notifyListeners();
         }
@@ -1164,9 +1164,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _scheduleRetryConnect();
   }
 
-  // ── Android in-process init (deferred from initialize()) ──────
+  // ── In-process init (Android, iOS, macOS — deferred from initialize()) ──
 
-  Future<void> _initAndroidInProcess() async {
+  Future<void> _initInProcess() async {
     // Ensure base directory exists (iOS: path_provider container may not
     // have .cleona/ yet on first post-install run).
     final baseDirObj = Directory(_baseDir);
@@ -1218,7 +1218,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     );
     await primaryCtx.initKeys();
     firstId.nodeIdHex = primaryCtx.userIdHex;
-    _androidContexts[primaryCtx.userIdHex] = primaryCtx;
+    _inProcessContexts[primaryCtx.userIdHex] = primaryCtx;
 
     // Create contexts for ALL additional identities
     for (var i = 1; i < identities.length; i++) {
@@ -1234,7 +1234,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       );
       await ctx.initKeys();
       id.nodeIdHex = ctx.userIdHex;
-      _androidContexts[ctx.userIdHex] = ctx;
+      _inProcessContexts[ctx.userIdHex] = ctx;
     }
 
     // ONE shared node for all identities
@@ -1244,16 +1244,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       networkChannel: NetworkSecret.channel.name,
     );
     node.primaryIdentity = primaryCtx;
-    _androidNode = node;
+    _inProcessNode = node;
 
     // Register ALL identities with the node
-    for (final ctx in _androidContexts.values) {
+    for (final ctx in _inProcessContexts.values) {
       node.registerIdentity(ctx);
     }
 
     // Notify GUI when peer addresses change
     node.onPeersChanged = () {
-      for (final service in _androidServices.values) {
+      for (final service in _inProcessServices.values) {
         service.onStateChanged?.call();
       }
     };
@@ -1275,7 +1275,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     };
 
     // Create and start a CleonaService for EACH identity
-    for (final ctx in _androidContexts.values) {
+    for (final ctx in _inProcessContexts.values) {
       final service = CleonaService(
         identity: ctx,
         node: node,
@@ -1285,33 +1285,33 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (_sessionReducedMode) service.reducedMode = true;
       _wireServiceCallbacks(service);
       await service.startService();
-      _androidServices[ctx.userIdHex] = service;
+      _inProcessServices[ctx.userIdHex] = service;
       debugPrint('[main] Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
 
     // Process any crashes that occurred before services were ready (§9.5)
     _processPendingCrashes();
 
-    // §2.4 receiver step [9] — multi-identity KEM-Try-Loop for Android
-    // in-process mode. Mirrors service_daemon.dart wiring.
-    final androidServiceRecency = <String>[];
+    // §2.4 receiver step [9] — multi-identity KEM-Try-Loop for in-process
+    // mode (Android/iOS/macOS). Mirrors service_daemon.dart wiring.
+    final serviceRecency = <String>[];
     node.onApplicationFramePayload = (packet, from, port, snapshot) async {
-      if (_androidServices.isEmpty) return;
+      if (_inProcessServices.isEmpty) return;
       final seen = <String>{};
       final ordered = <CleonaService>[];
-      for (final id in androidServiceRecency) {
-        final s = _androidServices[id];
+      for (final id in serviceRecency) {
+        final s = _inProcessServices[id];
         if (s != null && seen.add(id)) ordered.add(s);
       }
-      for (final entry in _androidServices.entries) {
+      for (final entry in _inProcessServices.entries) {
         if (seen.add(entry.key)) ordered.add(entry.value);
       }
       for (final service in ordered) {
         final outcome = await service.handleIncomingApplicationPacket(
             packet, from, port, snapshot);
         if (outcome == AppFrameDispatchOutcome.delivered) {
-          androidServiceRecency.remove(service.nodeIdHex);
-          androidServiceRecency.insert(0, service.nodeIdHex);
+          serviceRecency.remove(service.nodeIdHex);
+          serviceRecency.insert(0, service.nodeIdHex);
           return;
         }
         if (outcome == AppFrameDispatchOutcome.droppedAfterDecap) return;
@@ -1341,7 +1341,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final identities = node.identitiesForDevice(deviceIdBytes).toList();
       if (identities.isEmpty) return;
       for (final id in identities) {
-        final service = _androidServices[id.userIdHex];
+        final service = _inProcessServices[id.userIdHex];
         if (service == null) continue;
         switch (mt) {
           case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
@@ -1414,7 +1414,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Set active service (based on IdentityManager selection)
     final activeId = IdentityManager().getActiveIdentity();
     final activeHex = activeId?.nodeIdHex ?? primaryCtx.userIdHex;
-    _service = _androidServices[activeHex] ?? _androidServices.values.first;
+    _service = _inProcessServices[activeHex] ?? _inProcessServices.values.first;
 
     _isInitialized = true;
     _startConnectivityMonitor();
@@ -1424,30 +1424,30 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Precache the active skin's hero image after the first home-screen frame.
     _scheduleSkinPrecache(activeId?.skinId);
 
-    // Android in-process heartbeat — liveness diagnostics for the main Dart
-    // isolate. On Linux/Windows/macOS the equivalent lives in
-    // lib/service_daemon.dart (commit a13b490); on Android the node runs
+    // In-process heartbeat — liveness diagnostics for the main Dart
+    // isolate. On Linux/Windows the equivalent lives in
+    // lib/service_daemon.dart (commit a13b490); on mobile/macOS the node runs
     // in-process in the UI isolate, so we add the same Timer.periodic(5s)
     // drift-detector here. Logs to `[heartbeat]` via the primary service's
     // CLogger so entries land in the identity's tages-log AND in logcat
     // (INFO level not filtered). Relevant for #U17 Hotel-WLAN-Crashes and
     // any future ANR — the last heartbeat-tick timestamp narrows the
     // freeze-window from 60s status-beacon to ~5s.
-    _androidHeartbeatLastAt = DateTime.now();
-    _androidHeartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+    _heartbeatLastAt = DateTime.now();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       final svc = _service;
       if (svc == null || !svc.isRunning) return;
       final now = DateTime.now();
-      final last = _androidHeartbeatLastAt;
-      _androidHeartbeatLastAt = now;
-      _androidHeartbeatTick++;
+      final last = _heartbeatLastAt;
+      _heartbeatLastAt = now;
+      _heartbeatTick++;
       final dtMs = last == null ? 0 : now.difference(last).inMilliseconds;
       // Expected dt ≈ 5000ms; anything >6500ms indicates main-loop drift
       // (GC pause, blocking FFI call, expensive async-gap on the isolate).
-      final msg = 'tick=$_androidHeartbeatTick dt=${dtMs}ms';
+      final msg = 'tick=$_heartbeatTick dt=${dtMs}ms';
       if (dtMs > 6500) {
         debugPrint('[heartbeat] $msg (DRIFT — main loop delayed ${dtMs - 5000}ms)');
-      } else if (_androidHeartbeatTick % 12 == 0) {
+      } else if (_heartbeatTick % 12 == 0) {
         // Every 60s: an INFO-level beat marker so filtered log viewers
         // still see the app is alive.
         debugPrint('[heartbeat] $msg');
@@ -1493,9 +1493,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // Android in-process: switch to the right service
-    if (_androidServices.isNotEmpty && identity.nodeIdHex != null) {
-      final service = _androidServices[identity.nodeIdHex!];
+    // In-process: switch to the right service
+    if (_inProcessServices.isNotEmpty && identity.nodeIdHex != null) {
+      final service = _inProcessServices[identity.nodeIdHex!];
       if (service != null) {
         _service = service;
         IdentityManager().setActiveIdentity(identity);
@@ -1536,12 +1536,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Sum of unreadCount across every Android identity service. Drives the
+  /// Sum of unreadCount across every in-process identity service. Drives the
   /// system Launcher-Badge (#U3 — single counter for a multi-identity daemon).
   void _updateAndroidBadge() {
     if (!Platform.isAndroid) return;
     var total = 0;
-    for (final svc in _androidServices.values) {
+    for (final svc in _inProcessServices.values) {
       for (final conv in svc.conversations.values) {
         total += conv.unreadCount;
       }
@@ -1630,18 +1630,18 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Removes an identity at runtime (Android in-process).
   Future<bool> deleteIdentityAndroid(String nodeIdHex) async {
-    if (_androidServices.length <= 1) return false;
+    if (_inProcessServices.length <= 1) return false;
 
-    final service = _androidServices.remove(nodeIdHex);
+    final service = _inProcessServices.remove(nodeIdHex);
     if (service != null) {
       await service.stop();
     }
-    _androidContexts.remove(nodeIdHex);
-    _androidNode?.unregisterIdentity(nodeIdHex);
+    _inProcessContexts.remove(nodeIdHex);
+    _inProcessNode?.unregisterIdentity(nodeIdHex);
 
     // Switch _service if we just deleted the active one
-    if (_service == service && _androidServices.isNotEmpty) {
-      _service = _androidServices.values.first;
+    if (_service == service && _inProcessServices.isNotEmpty) {
+      _service = _inProcessServices.values.first;
       final mgr = IdentityManager();
       final identities = mgr.loadIdentities();
       final firstId = identities.firstOrNull;
@@ -1676,7 +1676,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     // Android: in-process
-    if (_androidServices.isNotEmpty) {
+    if (_inProcessServices.isNotEmpty) {
       IdentityManager().deleteIdentity(identity.id);
       return deleteIdentityAndroid(nodeIdHex);
     }
@@ -2213,7 +2213,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     // Android in-process: create identity and register with running node
-    if (_androidNode != null) {
+    if (_inProcessNode != null) {
       final mgr = IdentityManager();
       final identity = await mgr.createIdentity(displayName);
       final masterSeed = mgr.loadMasterSeed();
@@ -2229,19 +2229,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       await ctx.initKeys();
       identity.nodeIdHex = ctx.userIdHex;
 
-      _androidContexts[ctx.userIdHex] = ctx;
-      _androidNode!.registerIdentity(ctx);
+      _inProcessContexts[ctx.userIdHex] = ctx;
+      _inProcessNode!.registerIdentity(ctx);
 
       final service = CleonaService(
         identity: ctx,
-        node: _androidNode!,
+        node: _inProcessNode!,
         displayName: displayName,
       );
       // Sec H-5 / T13: inherit splash decision for newly added identities.
       if (_sessionReducedMode) service.reducedMode = true;
       _wireServiceCallbacks(service);
       await service.startService();
-      _androidServices[ctx.userIdHex] = service;
+      _inProcessServices[ctx.userIdHex] = service;
 
       // Save updated nodeIdHex
       final identities = mgr.loadIdentities();
@@ -2267,8 +2267,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _showTriggerTimer?.cancel();
-    _androidHeartbeatTimer?.cancel();
-    _androidHeartbeatTimer = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _connectivitySub?.cancel();
     final home = AppPaths.home;
     try { File('$home/.cleona/gui.lock').deleteSync(); } catch (_) {}
@@ -2276,15 +2276,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // Prevent onDaemonDied from firing during intentional GUI close
       _ipcClient!.onDaemonDied = null;
       _ipcClient!.disconnect();
-    } else if (_androidServices.isNotEmpty) {
-      // Android: stop all services and shared node
-      for (final service in _androidServices.values) {
+    } else if (_inProcessServices.isNotEmpty) {
+      // In-process: stop all services and shared node
+      for (final service in _inProcessServices.values) {
         service.stop();
       }
-      _androidServices.clear();
-      _androidContexts.clear();
-      _androidNode?.stop();
-      _androidNode = null;
+      _inProcessServices.clear();
+      _inProcessContexts.clear();
+      _inProcessNode?.stop();
+      _inProcessNode = null;
     } else if (_service is CleonaService) {
       (_service as CleonaService).stop();
     }

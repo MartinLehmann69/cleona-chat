@@ -318,7 +318,9 @@ class UpnpIgdClient {
       // 1. SSDP multicast (works if IGD is on same subnet)
       for (final st in ssdpSearchTargets) {
         final request = buildMSearch(st);
-        socket.send(utf8.encode(request), multicastAddr, ssdpPort);
+        try {
+          socket.send(utf8.encode(request), multicastAddr, ssdpPort);
+        } on SocketException catch (_) {}
       }
 
       // 2. SSDP unicast to default gateway + upstream gateways

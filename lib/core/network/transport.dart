@@ -170,7 +170,12 @@ class Transport {
     }
     _udpSocket!.listen(
       _onUdpEvent,
-      onError: (e) => _log.warn('UDP socket error: $e'),
+      onError: (e) {
+        _log.warn('UDP socket error: $e');
+        if ('$e'.contains('errno = 9') && !_reconnecting) {
+          onUdpSocketDead?.call();
+        }
+      },
     );
     _log.info('UDP listening on port $port');
 
@@ -243,7 +248,12 @@ class Transport {
       } catch (_) {}
       _udpSocket6!.listen(
         _onUdpEvent6,
-        onError: (e) => _log.warn('UDP6 socket error: $e'),
+        onError: (e) {
+          _log.warn('UDP6 socket error: $e');
+          if ('$e'.contains('errno = 9') && !_reconnecting) {
+            onUdpSocketDead?.call();
+          }
+        },
       );
       _log.info('UDP6 listening on port $port');
     } catch (e) {
@@ -1342,6 +1352,13 @@ class Transport {
       _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount peek=$peek '
           '(rxEvents>0=OK, peek>0=data stuck in kernel/Dart broken, '
           'peek=-35=EAGAIN/empty)');
+      // peek=-9 (EBADF) = socket fd is dead → trigger reconnect
+      if (peek == -9 && !_reconnecting) {
+        _log.warn('iOS UDP socket dead (EBADF) — triggering reconnect');
+        _iosRxEventCount = 0;
+        onUdpSocketDead?.call();
+        return;
+      }
       _iosRxEventCount = 0;
     });
     // Localhost echo: send 4 bytes to 127.0.0.1:ownPort. If _onUdpEvent

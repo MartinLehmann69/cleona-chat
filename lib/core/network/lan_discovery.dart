@@ -108,7 +108,8 @@ class LocalDiscovery {
         _log.debug('IPv4 multicast join failed (IGMP not available): $e');
       }
 
-      _socket!.listen(_onEvent); // Listener stays PERMANENTLY active
+      _socket!.listen(_onEvent,
+          onError: (e) => _log.debug('discovery socket error: $e'));
       _sendBurst(burstCount);
       _log.info('Local discovery started on port $discoveryPort');
       // Receive-side summary every 60s. See _logRxSummary docs.
@@ -731,7 +732,8 @@ class MulticastDiscovery {
         _log.debug('IPv6 multicast join failed: $e');
       }
 
-      _socket!.listen(_onEvent); // Listener stays PERMANENTLY active
+      _socket!.listen(_onEvent,
+          onError: (e) => _log.debug('IPv6 discovery socket error: $e'));
       _sendBurst(burstCount);
       _log.info('IPv6 multicast discovery started on port ${LocalDiscovery.discoveryPort}');
     } catch (e) {
