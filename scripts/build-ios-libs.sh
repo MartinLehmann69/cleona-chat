@@ -437,6 +437,7 @@ for platform_tag in device simulator; do
             [ -f "$a" ] || continue
             case "$(basename "$a")" in
                 libggml-base.a|libggml-cpu.a) echo "  skip $(basename "$a") (in libggml.a)"; continue ;;
+                libXorcode.a|libnullcode.a|liberasurecode_rs_vand.a) echo "  skip $(basename "$a") (in liberasurecode.a)"; continue ;;
             esac
             ALL_ARCHIVES+=("$a")
         done
@@ -451,7 +452,35 @@ for platform_tag in device simulator; do
     echo "  Merging ${#ALL_ARCHIVES[@]} archives for $platform_tag..."
     # Apple libtool -static merges multiple .a into one, resolving internal refs
     xcrun libtool -static -o "$MERGED" "${ALL_ARCHIVES[@]}"
-    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1))"
+    # Remove duplicate C++ runtime .o files that appear in both liboqs and
+    # whisper/libggml (strong symbols, can't be resolved by ld -r or dead_strip).
+    DEDUP_DIR=$(mktemp -d)
+    cd "$DEDUP_DIR"
+    xcrun ar x "$MERGED"
+    # Find .o files that ONLY contain C++ runtime stubs (no unique symbols)
+    REMOVED=0
+    for o in *.o; do
+        # Count unique (non-C++-runtime) defined text symbols
+        unique=$(xcrun nm -g "$o" 2>/dev/null | grep ' T ' | grep -v '__clang_call_terminate\|__ZNSt\|__ZSt28' | wc -l | tr -d ' ')
+        if [ "$unique" -eq 0 ]; then
+            total=$(xcrun nm -g "$o" 2>/dev/null | grep ' T ' | wc -l | tr -d ' ')
+            if [ "$total" -gt 0 ]; then
+                echo "  strip C++ stub: $o ($total symbols)"
+                rm "$o"
+                REMOVED=$((REMOVED + 1))
+                # Keep one copy — only remove extras
+                if [ "$REMOVED" -ge 1 ]; then break; fi
+            fi
+        fi
+    done
+    if [ "$REMOVED" -gt 0 ]; then
+        xcrun ar rcs "$MERGED" *.o
+        xcrun ranlib "$MERGED"
+    fi
+    cd "$PROJECT_DIR"
+    rm -rf "$DEDUP_DIR"
+    DUPS=$(xcrun nm -g "$MERGED" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l | tr -d ' ')
+    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1)), $DUPS duplicates remaining"
 done
 
 # Create XCFramework for the merged archive
