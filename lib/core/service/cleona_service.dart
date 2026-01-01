@@ -298,11 +298,6 @@ class CleonaService implements ICleonaService {
   // Keeps retrying forever so eventually-online contacts still get through,
   // but at low frequency after the initial burst (~10 attempts in 20min).
   final Map<String, int> _crRetryCountPerContact = {};
-  // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
-  // Key = hex(targetDeviceId), value = completer resolved by the
-  // incoming DEVICE_KEM_OFFER handler. Timeout in sendContactRequest.
-  final Map<String, Completer<({Uint8List dxk, Uint8List dmk})>>
-      _pendingKemOfferCompleters = {};
   // Per-contact last end-to-end-confirmed ACK (any message type).
   // Proves reachability to the contact — stops CR-Response retry flooding
   // on CGNAT peers where DELIVERY_RECEIPTs arrive only via relay and thus
@@ -385,7 +380,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.82';
+  static const String kCurrentAppVersion = '3.1.83';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -543,8 +538,13 @@ class CleonaService implements ICleonaService {
     // Load channels
     _loadChannels();
 
-    // Seed system channels (§9.5)
-    _seedSystemChannels();
+    // NOTE: _seedSystemChannels() is intentionally NOT called here. It seeds
+    // entries into `conversations`, which is not loaded until _loadConversations()
+    // further down. Seeding before the load made _seedSystemChannels' own
+    // _saveConversations() write a conversations.json containing ONLY the two
+    // system channels — overwriting all real chats before they were ever read
+    // back (catastrophic data loss on every restart). It now runs right after
+    // _loadConversations(), mirroring _loadGroups/_loadChannels above.
 
     // Load moderation state
     _loadModeration();
@@ -617,6 +617,14 @@ class CleonaService implements ICleonaService {
 
     // Load conversations
     _loadConversations();
+
+    // Seed system channels (§9.5) — MUST run after _loadConversations() so the
+    // real chats are already in `conversations`; seeding then only adds the two
+    // system-channel entries if missing and the subsequent save persists the
+    // FULL set. (Running this before the load destroyed all chats — see note
+    // next to _loadChannels above.)
+    _seedSystemChannels();
+
     // After load: surface the persisted unreadCount to the system badge so
     // the Launcher-Badge matches the on-disk truth right after daemon-start.
     _updateBadgeCount();
@@ -2771,73 +2779,34 @@ class CleonaService implements ICleonaService {
             '${bytesToHex(recipientDeviceId).substring(0, 8)} for '
             '${recipientUserIdHex.substring(0, 8)} '
             '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
-      } else if (seedDeviceIdHex != null && seedDeviceIdHex.isNotEmpty) {
-        // §8.1.1 rev3 step 1b: DHT miss — fallback to DEVICE_KEM_REQUEST.
-        // Send a plaintext BOOT-frame request to the target device (no KEM
-        // needed). The target responds with a signed DEVICE_KEM_OFFER
-        // containing its Device-KEM-PK pair. We verify the OFFER signature
-        // against the ep trust-anchor from the ContactSeed.
-        final targetDevId = hexToBytes(seedDeviceIdHex);
-        _log.info('CONTACT_REQUEST First-CR: DHT miss — '
-            'sending DEVICE_KEM_REQUEST to '
-            '${seedDeviceIdHex.substring(0, 8)}');
-        final nonce = SodiumFFI().randomBytes(16);
-        final request = proto.DeviceKemRequestV3()
-          ..targetUserId = recipientUserId
-          ..targetDeviceId = targetDevId
-          ..nonce = nonce
-          ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
-        final requestBytes =
-            Uint8List.fromList(request.writeToBuffer());
-
-        final completer = Completer<({Uint8List dxk, Uint8List dmk})>();
-        final targetDevHex = seedDeviceIdHex;
-        _pendingKemOfferCompleters[targetDevHex] = completer;
-
-        // Send to target directly (BOOT-path, no KEM) + via seed peers.
-        unawaited(node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
-          innerPayload: requestBytes,
-          recipientDeviceId: targetDevId,
-        ));
-
-        try {
-          final offer = await completer.future
-              .timeout(const Duration(seconds: 8));
-          dxk = offer.dxk;
-          dmk = offer.dmk;
-          recipientDeviceId = targetDevId;
-          // Prime the DKR cache so retries skip DHT+handshake.
-          final primed = DeviceKemRecord(
-            userId: recipientUserId,
-            deviceId: targetDevId,
-            deviceX25519Pk: dxk,
-            deviceMlKemPk: dmk,
-            ttlSeconds: 24 * 3600,
-            sequenceNumber: 0,
-            publishedAtMs: DateTime.now().millisecondsSinceEpoch,
-            userEd25519Pk: Uint8List(0),
-            ed25519Sig: Uint8List(0),
-          );
-          node.identityDhtHandler.handleKemPublish(primed);
-          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER received '
-              'for ${seedDeviceIdHex.substring(0, 8)} — proceeding');
-        } on TimeoutException {
-          _pendingKemOfferCompleters.remove(targetDevHex);
-          _log.warn('CONTACT_REQUEST: Deferred Key Exchange timeout — '
-              'no DEVICE_KEM_OFFER from '
-              '${seedDeviceIdHex.substring(0, 8)} within 8s. '
-              'CR queued for retry.');
-          return false;
-        } finally {
-          _pendingKemOfferCompleters.remove(targetDevHex);
-        }
+      } else if (seedEpB64 != null &&
+          seedDeviceIdHex != null &&
+          seedDeviceIdHex.isNotEmpty) {
+        // §8.1.1 rev3 Deferred Key Exchange step 1b: the DHT had no
+        // DeviceKemRecord (the common case for a fresh QR-scan between two
+        // isolated networks — AP-isolation + CGNAT — where neither side's
+        // 2D-DHT has converged). v2 ContactSeeds carry no inline dxk/dmk, so
+        // we ask the recipient directly: a plaintext BOOT DEVICE_KEM_REQUEST
+        // is routed to the target device (relayed through the ContactSeed's
+        // seed peers via the DV cascade — the same path the CR itself uses).
+        // The recipient answers with a DEVICE_KEM_OFFER signed by its user
+        // Ed25519 key; handleIncomingDeviceKemOffer verifies that against the
+        // `ep` trust-anchor, persists dxk/dmk onto this contact, and
+        // re-triggers the CR. This is self-healing: we do NOT block on a
+        // single timeout window — the CR stays pending_outgoing and the retry
+        // timer re-issues the request until an OFFER arrives (or the user
+        // gives up). See §8.1.1 step 1b.
+        _requestDeviceKem(
+            recipientUserId, hexToBytes(seedDeviceIdHex), seedEpB64);
+        _log.info('CONTACT_REQUEST First-CR: DHT miss for '
+            '${recipientUserIdHex.substring(0, 8)} — sent DEVICE_KEM_REQUEST '
+            '(step 1b); CR deferred until DEVICE_KEM_OFFER resolves the key.');
+        return false;
       } else {
         _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
             'no DeviceKemRecord in DHT for '
-            '${recipientUserIdHex.substring(0, 8)} '
-            'and no seedDeviceIdHex for fallback. '
-            'CR queued for retry (exponential backoff).');
+            '${recipientUserIdHex.substring(0, 8)} and no ep+seedDeviceId for '
+            'the step-1b fallback. CR queued for retry (exponential backoff).');
         return false;
       }
     }
@@ -2880,6 +2849,210 @@ class CleonaService implements ICleonaService {
     // Return true so the UI shows "sent" rather than "failed" — the retry
     // timer handles delivery even when the routing table isn't warm yet.
     return true;
+  }
+
+  // ── §8.1.1 rev3 Deferred Key Exchange (step 1b) ─────────────────────────
+  //
+  // v2 ContactSeeds carry only the 32-byte `ep` (userEd25519Pk) trust-anchor,
+  // not the 1216-byte Device-KEM-PK pair. When the primary DHT resolution
+  // (step 1a) misses — which it always does for a fresh first contact between
+  // two isolated networks whose 2D-DHT has not converged — the sender asks the
+  // recipient directly for its Device-KEM-PK via a plaintext BOOT
+  // DEVICE_KEM_REQUEST. The recipient answers with a DEVICE_KEM_OFFER signed by
+  // its user Ed25519 key, which the sender verifies against `ep`. Closed-Network
+  // HMAC + Outer Device-Sig (BOOT path) and this `ep`-anchored inner signature
+  // carry the security properties; the request/offer themselves cannot be
+  // KEM-encrypted because the KEM-PK is precisely what they are discovering.
+
+  /// In-flight throttle for outbound DEVICE_KEM_REQUEST, keyed by target
+  /// deviceHex → last-sent time. The CR retry timer replays sendContactRequest
+  /// every backoff tick; without this guard a deferred v2 first-CR would emit a
+  /// fresh request on every tick. Throttled to the OFFER round-trip budget (8s).
+  final Map<String, DateTime> _lastKemRequestSent = {};
+
+  /// Per-sender anti-flood for inbound DEVICE_KEM_REQUEST (§8.2 Layer-3 rate
+  /// limit). senderDeviceHex → recent request timestamps (sliding 60s window).
+  final Map<String, List<DateTime>> _kemRequestTimes = {};
+
+  /// §8.1.1 rev3 step 1b sender: ask [deviceId] (owned by [userId]) for its
+  /// Device-KEM-PK pair. Fire-and-forget — the reply is handled asynchronously
+  /// by [handleIncomingDeviceKemOffer]. [epB64] is already persisted on the
+  /// contact (used there to verify the OFFER); passed here only for logging.
+  void _requestDeviceKem(Uint8List userId, Uint8List deviceId, String epB64) {
+    final devHex = bytesToHex(deviceId);
+    final now = DateTime.now();
+    final last = _lastKemRequestSent[devHex];
+    if (last != null && now.difference(last).inSeconds < 8) return;
+    _lastKemRequestSent[devHex] = now;
+
+    final request = proto.DeviceKemRequestV3()
+      ..targetUserId = userId
+      ..targetDeviceId = deviceId
+      ..nonce = SodiumFFI().randomBytes(16)
+      ..timestampMs = Int64(now.millisecondsSinceEpoch);
+    unawaited(node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
+      innerPayload: Uint8List.fromList(request.writeToBuffer()),
+      recipientDeviceId: deviceId,
+    ));
+    _log.info('DEVICE_KEM_REQUEST → ${devHex.substring(0, 8)} '
+        '(user ${bytesToHex(userId).substring(0, 8)}, §8.1.1 step 1b)');
+  }
+
+  /// §8.1.1 rev3 step 1b receiver (recipient side): a DEVICE_KEM_REQUEST
+  /// addressed to this identity+device arrived. Answer with a DEVICE_KEM_OFFER
+  /// carrying our Device-KEM-PK pair, signed with our user Ed25519 SK so the
+  /// requester can verify it against the `ep` trust-anchor from our ContactSeed.
+  void handleIncomingDeviceKemRequest(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+  ) {
+    try {
+      final req = proto.DeviceKemRequestV3.fromBuffer(frame.payload);
+      // Multi-identity fan-out: only the addressed identity + device answers.
+      if (bytesToHex(Uint8List.fromList(req.targetUserId)) !=
+          identity.userIdHex) {
+        return;
+      }
+      if (bytesToHex(Uint8List.fromList(req.targetDeviceId)) !=
+          identity.deviceNodeIdHex) {
+        return;
+      }
+      // §8.2 Layer-3 anti-flood: max 5 requests / minute per sender device.
+      final senderHex = bytesToHex(senderDeviceId);
+      final now = DateTime.now();
+      final times = _kemRequestTimes.putIfAbsent(senderHex, () => <DateTime>[]);
+      times.removeWhere((t) => now.difference(t).inSeconds > 60);
+      if (times.length >= 5) {
+        _log.debug('DEVICE_KEM_REQUEST from ${senderHex.substring(0, 8)} '
+            'rate-limited (>5/min)');
+        return;
+      }
+      times.add(now);
+
+      final dxk = node.deviceKem.x25519PublicKey;
+      final dmk = node.deviceKem.mlKemPublicKey;
+      final nonce = Uint8List.fromList(req.nonce);
+      final sig =
+          SodiumFFI().signEd25519(_kemOfferSigInput(dxk, dmk, nonce),
+              identity.ed25519SecretKey);
+
+      final offer = proto.DeviceKemOfferV3()
+        ..deviceX25519Pk = dxk
+        ..deviceMlKemPk = dmk
+        ..nonce = nonce
+        ..userEd25519Sig = sig
+        ..timestampMs = Int64(now.millisecondsSinceEpoch);
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER,
+        innerPayload: Uint8List.fromList(offer.writeToBuffer()),
+        recipientDeviceId: senderDeviceId,
+      ));
+      _log.info('DEVICE_KEM_REQUEST from ${senderHex.substring(0, 8)} '
+          '→ replied DEVICE_KEM_OFFER (§8.1.1 step 1b)');
+    } catch (e) {
+      _log.warn('DEVICE_KEM_REQUEST handle error: $e');
+    }
+  }
+
+  /// §8.1.1 rev3 step 1b requester side: a DEVICE_KEM_OFFER arrived. Verify it
+  /// against the `ep` trust-anchor of the matching pending contact, persist the
+  /// resolved Device-KEM-PK pair onto the contact (so the CR + retries take the
+  /// hasFullSeed fast path), prime the local DKR cache, and re-trigger the
+  /// deferred first-CR immediately (self-healing).
+  void handleIncomingDeviceKemOffer(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
+    try {
+      final offer = proto.DeviceKemOfferV3.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(senderDeviceId);
+
+      // Find the pending contact whose scanned ContactSeed names this device.
+      ContactInfo? contact;
+      String? contactUserHex;
+      for (final e in _contacts.entries) {
+        if (e.value.seedDeviceIdHex == senderHex &&
+            e.value.seedEpB64 != null &&
+            e.value.status == 'pending_outgoing') {
+          contact = e.value;
+          contactUserHex = e.key;
+          break;
+        }
+      }
+      if (contact == null || contactUserHex == null) {
+        _log.debug('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
+            'no matching pending contact, ignoring');
+        return;
+      }
+
+      final dxk = Uint8List.fromList(offer.deviceX25519Pk);
+      final dmk = Uint8List.fromList(offer.deviceMlKemPk);
+      final nonce = Uint8List.fromList(offer.nonce);
+      final sig = Uint8List.fromList(offer.userEd25519Sig);
+      final ep = base64Url.decode(base64Url.normalize(contact.seedEpB64!));
+
+      // Trust-anchor verify: the signature (by the recipient's user Ed25519
+      // key) over (dxk + dmk + nonce) must validate against `ep`. This binds
+      // the resolved Device-KEM-PK to the identity the user actually scanned —
+      // a malicious relay cannot substitute its own keys.
+      if (!SodiumFFI().verifyEd25519(_kemOfferSigInput(dxk, dmk, nonce), sig, ep)) {
+        _log.warn('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
+            'Ed25519 sig verify FAILED against ep trust-anchor, dropping');
+        return;
+      }
+      // Length sanity before KEM-encap (X25519=32, ML-KEM-768=1184).
+      if (dxk.length != 32 || dmk.length != 1184) {
+        _log.warn('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
+            'bad key lengths (dxk=${dxk.length}, dmk=${dmk.length}), dropping');
+        return;
+      }
+
+      // Persist resolved keys onto the contact (CR fast path) + prime DKR cache.
+      contact.seedDxkB64 = base64Encode(dxk);
+      contact.seedDmkB64 = base64Encode(dmk);
+      _saveContacts();
+      node.identityDhtHandler.handleKemPublish(DeviceKemRecord(
+        userId: contact.nodeId,
+        deviceId: senderDeviceId,
+        deviceX25519Pk: dxk,
+        deviceMlKemPk: dmk,
+        ttlSeconds: 24 * 3600,
+        sequenceNumber: 0,
+        publishedAtMs: DateTime.now().millisecondsSinceEpoch,
+        userEd25519Pk: ep,
+        ed25519Sig: Uint8List(0),
+      ));
+
+      _log.info('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} verified '
+          'against ep — Device-KEM-PK resolved, re-triggering first-CR');
+
+      // Self-healing: send the CR right now via the hasFullSeed fast path.
+      unawaited(sendContactRequest(
+        contactUserHex,
+        message: contact.message ?? '',
+        seedDeviceIdHex: contact.seedDeviceIdHex,
+        seedDxkB64: contact.seedDxkB64,
+        seedDmkB64: contact.seedDmkB64,
+        seedEpB64: contact.seedEpB64,
+      ));
+    } catch (e) {
+      _log.warn('DEVICE_KEM_OFFER handle error: $e');
+    }
+  }
+
+  /// Canonical bytes signed/verified for a DEVICE_KEM_OFFER: dxk ++ dmk ++
+  /// nonce. Signer (recipient) and verifier (requester) MUST build this
+  /// identically, else the Ed25519 check fails.
+  static Uint8List _kemOfferSigInput(
+      Uint8List dxk, Uint8List dmk, Uint8List nonce) {
+    final out = Uint8List(dxk.length + dmk.length + nonce.length);
+    out.setRange(0, dxk.length, dxk);
+    out.setRange(dxk.length, dxk.length + dmk.length, dmk);
+    out.setRange(dxk.length + dmk.length, out.length, nonce);
+    return out;
   }
 
   /// Accept a pending (or re-) contact request.
@@ -6171,8 +6344,19 @@ class CleonaService implements ICleonaService {
       if (json == null) {
         final encFile = File('$profileDir/conversations.json.enc');
         if (encFile.existsSync()) {
-          _log.warn('conversations.json.enc exists (${encFile.lengthSync()} bytes) but could not be decrypted — DATA LOSS');
+          // The file is present but could not be decrypted (transient FFI/key
+          // hiccup, partial write the sidecar-recovery didn't catch, etc.).
+          // Do NOT mark _conversationsLoaded — leaving it false makes
+          // _saveConversations REFUSE to overwrite, so the on-disk data is
+          // preserved for the next start instead of being clobbered with an
+          // empty set. (Closes the second data-loss vector alongside the
+          // seed-before-load fix.)
+          _log.warn('conversations.json.enc exists (${encFile.lengthSync()} '
+              'bytes) but could not be decrypted — preserving file, saves '
+              'refused until a clean load succeeds');
+          return;
         }
+        // Genuine first run: no file yet → loading is "done" (empty is correct).
         _conversationsLoaded = true;
         return;
       }
@@ -6267,10 +6451,19 @@ class CleonaService implements ICleonaService {
   }
 
   void _saveConversations() {
-    if (!_conversationsLoaded && conversations.isEmpty) {
+    // Safety net: never overwrite an existing conversations file before the
+    // load has completed. Before _conversationsLoaded, `conversations` can only
+    // ever be a partial/seeded set (e.g. the §9.5 system channels), so
+    // persisting it would clobber the real chats still on disk. This is the
+    // data-loss root cause (seed-before-load); the ordering is also fixed in
+    // start(), and this guard makes any future pre-load save harmless too.
+    // NOTE: the guard deliberately does NOT also require `conversations.isEmpty`
+    // — the original bug was a pre-load save with a NON-empty (seeded) map.
+    if (!_conversationsLoaded) {
       final encFile = File('$profileDir/conversations.json.enc');
       if (encFile.existsSync()) {
-        _log.warn('REFUSED to save empty conversations — load failed but file exists');
+        _log.warn('REFUSED to save conversations before load completed — '
+            'on-disk file exists (prevents pre-load overwrite)');
         return;
       }
     }
@@ -10022,110 +10215,6 @@ class CleonaService implements ICleonaService {
   /// §8.1.1 trust-bootstrap (the recipient cannot do contact-registry
   /// lookup because the CR is what creates the contact).
   ///
-  // ── §8.1.1 rev3 step 1b: Deferred Key Exchange handlers ──────────
-
-  /// Handle incoming DEVICE_KEM_REQUEST — respond with DEVICE_KEM_OFFER
-  /// containing our Device-KEM-PK pair, signed with our user Ed25519 SK.
-  void handleIncomingDeviceKemRequest(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-  ) {
-    try {
-      final req = proto.DeviceKemRequestV3.fromBuffer(frame.payload);
-      final targetUserHex = bytesToHex(Uint8List.fromList(req.targetUserId));
-      final targetDevHex = bytesToHex(Uint8List.fromList(req.targetDeviceId));
-      if (targetUserHex != identity.userIdHex) return;
-      if (targetDevHex != identity.deviceNodeIdHex) return;
-
-      final dxk = node.deviceKem.x25519PublicKey;
-      final dmk = node.deviceKem.mlKemPublicKey;
-      final nonce = Uint8List.fromList(req.nonce);
-
-      // Sign (dxk + dmk + nonce) with user Ed25519 SK.
-      final sigPayload = Uint8List(dxk.length + dmk.length + nonce.length);
-      sigPayload.setRange(0, dxk.length, dxk);
-      sigPayload.setRange(dxk.length, dxk.length + dmk.length, dmk);
-      sigPayload.setRange(dxk.length + dmk.length, sigPayload.length, nonce);
-      final sig = SodiumFFI().signEd25519(sigPayload, identity.ed25519SecretKey);
-
-      final offer = proto.DeviceKemOfferV3()
-        ..deviceX25519Pk = dxk
-        ..deviceMlKemPk = dmk
-        ..nonce = nonce
-        ..userEd25519Sig = sig
-        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
-      final offerBytes = Uint8List.fromList(offer.writeToBuffer());
-
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER,
-        innerPayload: offerBytes,
-        recipientDeviceId: senderDeviceId,
-      ));
-      _log.info('DEVICE_KEM_REQUEST from '
-          '${bytesToHex(senderDeviceId).substring(0, 8)} — '
-          'replied with DEVICE_KEM_OFFER');
-    } catch (e) {
-      _log.warn('DEVICE_KEM_REQUEST parse/handle error: $e');
-    }
-  }
-
-  /// Handle incoming DEVICE_KEM_OFFER — verify signature against the ep
-  /// trust-anchor and resolve the pending completer.
-  void handleIncomingDeviceKemOffer(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-  ) {
-    try {
-      final offer = proto.DeviceKemOfferV3.fromBuffer(frame.payload);
-      final senderDevHex = bytesToHex(senderDeviceId);
-      final completer = _pendingKemOfferCompleters[senderDevHex];
-      if (completer == null || completer.isCompleted) {
-        _log.debug('DEVICE_KEM_OFFER from $senderDevHex — '
-            'no pending completer (stale or duplicate)');
-        return;
-      }
-
-      final dxk = Uint8List.fromList(offer.deviceX25519Pk);
-      final dmk = Uint8List.fromList(offer.deviceMlKemPk);
-      final nonce = Uint8List.fromList(offer.nonce);
-      final sig = Uint8List.fromList(offer.userEd25519Sig);
-
-      // Find the ep trust-anchor for this device from the pending contact.
-      Uint8List? epPk;
-      for (final c in _contacts.values) {
-        if (c.seedDeviceIdHex == senderDevHex && c.seedEpB64 != null) {
-          epPk = base64Decode(c.seedEpB64!);
-          break;
-        }
-      }
-      if (epPk == null) {
-        _log.warn('DEVICE_KEM_OFFER from $senderDevHex — '
-            'no ep trust-anchor found, dropping');
-        return;
-      }
-
-      // Verify: sig over (dxk + dmk + nonce) with the ep public key.
-      final sigPayload = Uint8List(dxk.length + dmk.length + nonce.length);
-      sigPayload.setRange(0, dxk.length, dxk);
-      sigPayload.setRange(dxk.length, dxk.length + dmk.length, dmk);
-      sigPayload.setRange(dxk.length + dmk.length, sigPayload.length, nonce);
-      final valid = SodiumFFI().verifyEd25519(sigPayload, sig, epPk);
-      if (!valid) {
-        _log.warn('DEVICE_KEM_OFFER from $senderDevHex — '
-            'Ed25519 signature verification FAILED against ep');
-        return;
-      }
-
-      completer.complete((dxk: dxk, dmk: dmk));
-      _log.info('DEVICE_KEM_OFFER from $senderDevHex — '
-          'sig verified against ep, completer resolved');
-    } catch (e) {
-      _log.warn('DEVICE_KEM_OFFER parse/handle error: $e');
-    }
-  }
-
   /// Verify path: parse inner ApplicationFrameV3, parse its
   /// ContactRequestMsg payload, extract `(ed25519_pk, ml_dsa_pk)`, run the
   /// User-Sig verify against those — then dispatch through the normal
@@ -12386,7 +12475,6 @@ class CleonaService implements ICleonaService {
         existing.seedDeviceIdHex = null;
         existing.seedDxkB64 = null;
         existing.seedDmkB64 = null;
-        existing.seedEpB64 = null;
         existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
         existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
         existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);

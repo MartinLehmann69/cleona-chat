@@ -1336,6 +1336,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
           mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
           mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
+          // §8.1.1 rev3: Deferred Key Exchange (step 1b)
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
       if (!isServiceRouted) return;
@@ -1409,8 +1410,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
                 frame, senderDeviceId, from, port);
             break;
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
-            service.handleIncomingDeviceKemOffer(
-                frame, senderDeviceId);
+            service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
             break;
           default:
             break;

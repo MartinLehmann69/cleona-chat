@@ -509,7 +509,7 @@ class _MultiServiceDaemon {
           mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
           // Wave 2B.3 (§10.2): channel-index gossip
           mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
-          // §8.1.1 rev3: Deferred Key Exchange
+          // §8.1.1 rev3: Deferred Key Exchange (step 1b)
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
           mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
       if (!isServiceRouted) {
@@ -595,8 +595,7 @@ class _MultiServiceDaemon {
                 frame, senderDeviceId, from, port);
             break;
           case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
-            service.handleIncomingDeviceKemOffer(
-                frame, senderDeviceId);
+            service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
             break;
           default:
             break;
