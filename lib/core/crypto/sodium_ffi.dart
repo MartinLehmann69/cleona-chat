@@ -352,7 +352,15 @@ class SodiumFFI {
     if (Platform.isLinux) {
       return DynamicLibrary.open('libsodium.so');
     } else if (Platform.isMacOS) {
-      return DynamicLibrary.open('libsodium.dylib');
+      for (final p in [
+        'libsodium.dylib',
+        '@executable_path/../Frameworks/libsodium.dylib',
+        '/opt/homebrew/lib/libsodium.dylib',
+        '/usr/local/lib/libsodium.dylib',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw const SodiumException('libsodium.dylib not found');
     } else if (Platform.isWindows) {
       return DynamicLibrary.open('libsodium.dll');
     } else if (Platform.isAndroid) {

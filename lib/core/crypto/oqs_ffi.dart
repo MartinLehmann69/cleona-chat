@@ -161,7 +161,17 @@ class OqsFFI {
   static DynamicLibrary _openLib() {
     if (Platform.isIOS) return DynamicLibrary.process();
     if (Platform.isAndroid || Platform.isLinux) return DynamicLibrary.open('liboqs.so');
-    if (Platform.isMacOS) return DynamicLibrary.open('liboqs.dylib');
+    if (Platform.isMacOS) {
+      for (final p in [
+        'liboqs.dylib',
+        '@executable_path/../Frameworks/liboqs.dylib',
+        '/opt/homebrew/lib/liboqs.dylib',
+        '/usr/local/lib/liboqs.dylib',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw StateError('liboqs.dylib not found');
+    }
     if (Platform.isWindows) return DynamicLibrary.open('liboqs.dll');
     return DynamicLibrary.open('liboqs.so');
   }

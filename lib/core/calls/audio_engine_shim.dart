@@ -140,6 +140,8 @@ class AudioEngineShim {
       } catch (_) {/* ignore */}
     } else if (Platform.isMacOS) {
       candidates.add('cleona_audio.dylib');
+      candidates.add('@executable_path/../Frameworks/cleona_audio.dylib');
+      candidates.add('/opt/homebrew/lib/cleona_audio.dylib');
     } else if (Platform.isIOS) {
       // Static-linked via CleonaNative.podspec → DynamicLibrary.process()
       return AudioEngineShim._(DynamicLibrary.process());

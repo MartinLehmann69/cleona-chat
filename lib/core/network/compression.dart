@@ -47,7 +47,7 @@ typedef _ZstdCompressBoundDart = int Function(int srcSize);
 /// ```
 class ZstdCompression {
   ZstdCompression._() {
-    _lib = Platform.isIOS ? DynamicLibrary.process() : DynamicLibrary.open(_libName());
+    _lib = _openLib();
     _compress =
         _lib.lookupFunction<_ZstdCompressNative, _ZstdCompressDart>(
             'ZSTD_compress');
@@ -67,10 +67,21 @@ class ZstdCompression {
 
   static final ZstdCompression instance = ZstdCompression._();
 
-  static String _libName() {
-    if (Platform.isWindows) return 'libzstd.dll';
-    if (Platform.isMacOS) return 'libzstd.dylib';
-    return 'libzstd.so'; // Linux, Android
+  static DynamicLibrary _openLib() {
+    if (Platform.isIOS) return DynamicLibrary.process();
+    if (Platform.isMacOS) {
+      for (final p in [
+        'libzstd.dylib',
+        '@executable_path/../Frameworks/libzstd.dylib',
+        '/opt/homebrew/lib/libzstd.dylib',
+        '/usr/local/lib/libzstd.dylib',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw StateError('libzstd.dylib not found');
+    }
+    if (Platform.isWindows) return DynamicLibrary.open('libzstd.dll');
+    return DynamicLibrary.open('libzstd.so');
   }
 
   late final DynamicLibrary _lib;
