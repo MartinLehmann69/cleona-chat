@@ -1702,10 +1702,9 @@ class IpcServer {
           break;
 
         case 'test_reset_nat_wizard_dismissed':
-          // Test-only (E2E gui-53): clear the persistent
-          // `nat_wizard_dismissed_until` flag so the next trigger can fire
-          // again. Pair with the GUI-level latch reset via
-          // `gui_action('reset_nat_wizard_latch')`.
+          // Test-only (E2E gui-53): clear BOTH the service-side
+          // `nat_wizard_dismissed_until` flag AND the GUI-side
+          // `_natWizardShown` latch in one atomic IPC call.
           {
             final service = _resolveService(client, req);
             if (service == null) {
@@ -1713,6 +1712,7 @@ class IpcServer {
               break;
             }
             service.testResetNatWizardDismissed();
+            _broadcastEvent(IpcEvent(event: 'gui_action', data: {'action': 'reset_nat_wizard_latch'}));
             _sendResponse(client, IpcResponse(id: req.id, success: true));
           }
           break;
@@ -2513,6 +2513,14 @@ class IpcServer {
         case 'poll_update':
         case 'poll_list':
         case 'poll_convert_to_event':
+          await _handlePolls(client, req);
+          break;
+
+        // ── §19.6 In-network update ─────────────────────────
+        case 'seed_binary':
+        case 'get_seeded_platforms':
+        case 'reload_manifest':
+        case 'get_update_status':
           await _handlePolls(client, req);
           break;
 

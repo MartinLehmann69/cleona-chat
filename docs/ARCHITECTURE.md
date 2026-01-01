@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8a12baa7cae0, 2026-07-09). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1b857c394868, 2026-07-09). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1689,6 +1689,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 | **NFC** | pairing bump between two devices | first introduction, contact exchange |
 | **QR code** | device pubkey + addresses encoded as QR | visual pairing path |
 | **ContactSeed URI** | `cleona://...` link, copy/paste | sharing via email or messenger |
+| **Channel URI** | `cleona://channel/<id>?n=<name>` link, share/deep-link | subscribing to a public channel via link (§9.2.1) |
 
 **Discovery cascade** (startup and Stage-5 Re-Discovery §5.10.5):
 
@@ -3504,6 +3505,21 @@ QR and NFC are inherently synchronous (physical co-presence guarantees both devi
 | `dxk` | 32 bytes, standard base64 | Device-X25519-PK — enables direct KEM-encap of the First-CR InfrastructureFrame without DKE round-trip |
 | `dmk` | 1184 bytes, standard base64 | Device-ML-KEM-768-PK — hybrid KEM counterpart to `dxk` |
 
+#### Channel URI (V3.1.130+)
+
+**URI format:** `cleona://channel/<channelIdHex>?n=<encodedName>`
+
+| Param | Format | Purpose |
+|---|---|---|
+| `<channelIdHex>` | 64-char hex | Channel identity (same as the key used in `ChannelIndex` and `joinPublicChannel`) |
+| `n` | URL-encoded UTF-8 | Human-readable channel name (display only — the `channelIdHex` is authoritative) |
+
+**Contrast with ContactSeed URI:** ContactSeed URIs (`cleona://<userIdHex>?...`) carry cryptographic identity material (Ed25519 pubkeys, X25519/ML-KEM device keys, seed peers) because the recipient must establish a KEM-encrypted channel to the contact. Channel URIs carry **no** cryptographic material — the join flow resolves the channel's owner and membership via the DHT-backed `ChannelIndex` (§9.2.1), sends a `CHANNEL_JOIN_REQUEST` to the owner, and the owner auto-accepts (public channels) or manually approves (private channels).
+
+**URI disambiguation:** Parsers distinguish the two URI types by path prefix: `cleona://channel/` → channel link; `cleona://<64-hex-chars>?` → ContactSeed. The path component `channel/` is reserved and cannot collide with a valid 64-char hex userId.
+
+**Deep-link platform registration (V3.1.130+):** The `cleona://` URI scheme is registered as a system-level deep link on mobile platforms so that tapping a channel (or contact) link in an external app (Signal, WhatsApp, email, browser) opens Cleona directly. Android: `ACTION_VIEW` intent-filter with `<data android:scheme="cleona"/>` on `MainActivity` (`singleTop` launch mode — warm-start reuses the existing activity). iOS: `CFBundleURLSchemes` entry in `Info.plist`, URL delivered via `application(_:open:options:)` in `AppDelegate`. Both platforms stash the URI for Dart-side consumption via `MethodChannel` drain on app resume. Desktop platforms (Linux, Windows, macOS) do not register the scheme — URI sharing on desktop uses clipboard copy-paste into the existing ContactSeed/Channel input fields.
+
 **Seed-peer selection criteria** (V3.1.113):
 
 Peers are sorted by **stability tier (§4.9.2) first, then by public-address availability**. Selection proceeds in three passes:
@@ -3891,6 +3907,8 @@ Public, openly discoverable broadcast channels with decentralized content modera
 #### 9.2.1 Channel Discovery & Index
 
 Public channels are listed in a **compressed DHT index** (~200–300 bytes per channel). Users discover channels via a searchable "Suche" tab (default on first app start). The index stores: name, language, content rating (adult/general), description snippet, subscriber count, Bad Badge status (level + timestamps for badge set and correction submitted).
+
+**Channel-URI sharing (V3.1.130+):** In addition to DHT search, channels can be shared via `cleona://channel/<channelIdHex>?n=<encodedName>` links. The link can be forwarded within Cleona (sent as a text message to any contact, group, or channel — rendered inline as a tappable invite card with "Join" button) or shared externally via the OS share sheet (Signal, WhatsApp, email, etc.). External links open the app via deep link (Android `ACTION_VIEW` intent-filter, iOS `CFBundleURLSchemes`) and show a join confirmation dialog. The join flow uses the existing `joinPublicChannel` path: ChannelIndex lookup → local subscription → `CHANNEL_JOIN_REQUEST` to the channel owner. Unlike ContactSeed URIs, channel URIs carry no cryptographic material — the channel's identity and membership are resolved entirely via the DHT-backed ChannelIndex.
 
 **Uniqueness:** Channel names are globally unique via `SHA-256("channel-name:" + lowercase(name))` as DHT key. First-come-first-served with squatting protection (identity must be 7+ days old).
 

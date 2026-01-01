@@ -42,6 +42,7 @@ import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/platform/share_receiver.dart';
+import 'package:cleona/core/platform/deep_link_receiver.dart';
 import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
@@ -374,6 +375,10 @@ class _CleonaAppState extends State<CleonaApp> {
           // Bug #U16: Android Share-Sheet-Empfang. Kontext + Service werden
           // lazy beim Share-Event ausgewertet (Identity-Wechsel andert Service).
           ShareReceiver.init(
+            contextProvider: () => navigatorKey.currentContext!,
+            serviceProvider: () => state.service,
+          );
+          DeepLinkReceiver.init(
             contextProvider: () => navigatorKey.currentContext!,
             serviceProvider: () => state.service,
           );

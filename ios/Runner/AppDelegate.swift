@@ -44,6 +44,24 @@ import Network
       CameraHandler.register(with: cameraRegistrar)
     }
 
+    // Deep link drain: Dart calls consumePendingDeepLink to pick up
+    // cleona:// URIs that opened the app (cold or warm start).
+    if let deepLinkRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "DeepLinkHandler") {
+      let deepLinkChannel = FlutterMethodChannel(
+        name: "chat.cleona/deeplink",
+        binaryMessenger: deepLinkRegistrar.messenger()
+      )
+      deepLinkChannel.setMethodCallHandler { [weak self] (call, result) in
+        if call.method == "consumePendingDeepLink" {
+          let link = self?.pendingDeepLink
+          self?.pendingDeepLink = nil
+          result(link)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+    }
+
     // Set up the MethodChannel for background fetch communication with Dart.
     // The FlutterEngine is now available via the plugin registry's messenger.
     guard let messenger = engineBridge.pluginRegistry.registrar(forPlugin: "BackgroundFetchPlugin")?.messenger() else {
@@ -63,6 +81,20 @@ import Network
     channel.setMethodCallHandler { [weak self] (call, result) in
       self?.handleMethodCall(call, result: result)
     }
+  }
+
+  // Deep link: cleona:// URI scheme, stashed for Dart drain via MethodChannel.
+  private var pendingDeepLink: String?
+
+  override func application(
+    _ app: UIApplication,
+    open url: URL,
+    options: [UIApplication.OpenURLOptionsKey : Any] = [:]
+  ) -> Bool {
+    if url.scheme == "cleona" {
+      pendingDeepLink = url.absoluteString
+    }
+    return super.application(app, open: url, options: options)
   }
 
   /// Trigger Local Network permission via NWBrowser. The browse itself is

@@ -59,6 +59,9 @@ class MainActivity : FlutterActivity() {
     // Shape: {"text": String?, "files": List<String>} (content:// → cacheDir copy).
     private var pendingShare: Map<String, Any>? = null
 
+    // Deep link: cleona:// URI from ACTION_VIEW intent, drained by Dart.
+    private var pendingDeepLink: String? = null
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -220,6 +223,11 @@ class MainActivity : FlutterActivity() {
                         result.error("APK_ERROR", e.message, null)
                     }
                 }
+                "consumePendingDeepLink" -> {
+                    val link = pendingDeepLink
+                    pendingDeepLink = null
+                    result.success(link)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -365,6 +373,7 @@ class MainActivity : FlutterActivity() {
         // Payload. Vorher hier die lokale Service-Intent-Variable übergeben —
         // handleShareIntent verwarf sie wegen falscher Action.
         handleShareIntent(intent)
+        handleDeepLinkIntent(intent)
     }
 
     // §16.2 lifecycle invariant: the FGS must be (re)started whenever the
@@ -381,11 +390,12 @@ class MainActivity : FlutterActivity() {
         startForegroundService(Intent(this, CleonaForegroundService::class.java))
     }
 
-    // Warm-launch via Share-Sheet (singleTop reuses this activity).
+    // Warm-launch via Share-Sheet or deep link (singleTop reuses this activity).
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+        handleDeepLinkIntent(intent)
     }
 
     // Resolves the pending RECORD_AUDIO MethodChannel.Result (Bug #U10b)
@@ -403,6 +413,14 @@ class MainActivity : FlutterActivity() {
             pendingAudioPermissionResult?.success(granted)
             pendingAudioPermissionResult = null
         }
+    }
+
+    // Stashes cleona:// deep link URIs for Dart-side consumption.
+    private fun handleDeepLinkIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        if (uri.scheme != "cleona") return
+        pendingDeepLink = uri.toString()
     }
 
     // Extracts EXTRA_TEXT + EXTRA_STREAM URIs into `pendingShare`. Content

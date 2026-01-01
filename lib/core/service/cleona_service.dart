@@ -467,7 +467,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.130';
+  static const String kCurrentAppVersion = '3.1.131';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -837,9 +837,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
 
       // Self-seed: encode the running binary into RS fragments so this node
-      // can serve updates immediately (§19.6.2).
+      // can serve updates (§19.6.2). Fire-and-forget: the Isolate-based
+      // RS encoding of the ~90 MB binary must not block conversation loading
+      // and DHT bootstrap. The seed sets binaryHasContentToShare + starts
+      // rendezvous publishing on completion (line 10606-10608).
       if (InstallSourceDetector.cached != InstallSource.playStore) {
-        await _selfSeedCurrentBinary();
+        unawaited(_selfSeedCurrentBinary());
       }
 
       _selfPublishManifest();
@@ -1338,10 +1341,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (_isOurMailbox(mailboxId)) {
         _tryReassemble(Uint8List.fromList(frag.messageId));
       } else if (stored) {
+        if (_bytesEqual(mailboxId, UpdateManifest.dhtKey())) {
+          _handleIncomingManifestFragment(frag);
+        }
         _proactivePush(frag, mailboxId);
       }
     } catch (e) {
       _log.debug('Fragment store error: $e');
+    }
+  }
+
+  /// Immediately verify a pushed manifest fragment instead of waiting
+  /// for the next 6h poll cycle.
+  void _handleIncomingManifestFragment(proto.FragmentStore frag) {
+    try {
+      final jsonData = utf8.decode(frag.fragmentData);
+      final checker = UpdateChecker(log: _log);
+      final manifest = checker.verifyManifest(jsonData);
+      if (manifest == null) return;
+
+      final prev = _latestManifest;
+      if (prev != null && !checker.isNewer(manifest.version, prev.version)) {
+        return;
+      }
+      _latestManifest = manifest;
+      try {
+        final cacheFile = File(
+            '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
+        cacheFile.parent.createSync(recursive: true);
+        cacheFile.writeAsStringSync(jsonData, flush: true);
+      } catch (_) {}
+
+      final isNewer = checker.isNewer(manifest.version, currentAppVersion);
+      if (isNewer) {
+        _log.info('[update] Pushed update available: '
+            'v${manifest.version} (current: v$currentAppVersion)');
+        () async {
+          var inNetworkAvailable = false;
+          if (manifest.dhtBinaryTag != null && _binaryUpdateManager != null) {
+            try {
+              inNetworkAvailable = await _binaryUpdateManager!
+                  .checkForUpdate(manifest, currentAppVersion,
+                      Platform.operatingSystem);
+            } catch (_) {}
+          }
+          onUpdateAvailable?.call(manifest, inNetworkAvailable);
+        }();
+      }
+    } catch (e) {
+      _log.debug('[update] Incoming manifest check failed: $e');
     }
   }
 
@@ -10464,13 +10512,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Check collected fragments after a delay
     Timer(const Duration(seconds: 8), () async {
-      final fragments = mailboxStore.retrieveFragments(dhtKey);
-      if (fragments.isEmpty) return;
+      final localFrags = mailboxStore.retrieveFragments(dhtKey);
+      if (localFrags.isEmpty) return;
 
       // The manifest is small enough to be stored as a single fragment
       // (or the first fragment contains the complete JSON).
       try {
-        final data = fragments.first.data;
+        final data = localFrags.first.data;
         final jsonData = utf8.decode(data);
         final manifest = checker.verifyManifest(jsonData);
         if (manifest == null) return;
@@ -10513,6 +10561,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         } else {
           _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
         }
+
+        // Push verified manifest to all peers so nodes that connected
+        // after our startup learn about the update immediately.
+        _pushManifestToPeers(data);
       } catch (e) {
         _log.debug('Update manifest check failed: $e');
       }
@@ -10723,12 +10775,51 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         originalSize: data.length,
         expiresAt: DateTime.now().add(const Duration(days: 30)),
       ));
+      final isNew = _latestManifest == null ||
+          checker.isNewer(manifest.version, _latestManifest!.version);
+      _latestManifest = manifest;
       if (stored) {
         _log.info('[update] Published manifest v${manifest.version} to local DHT store');
-        _latestManifest = manifest;
+        _pushManifestToPeers(data);
+      } else if (isNew) {
+        _pushManifestToPeers(data);
       }
     } catch (e) {
       _log.debug('[update] Self-publish manifest failed: $e');
+    }
+  }
+
+  /// Push a verified manifest fragment to all confirmed peers via
+  /// FRAGMENT_STORE so the update spreads virally through the network
+  /// instead of requiring each node to poll.
+  void _pushManifestToPeers(Uint8List manifestData) {
+    final dhtKey = UpdateManifest.dhtKey();
+    final messageId = SodiumFFI().sha256(manifestData);
+    final fragStore = proto.FragmentStore(
+      mailboxId: dhtKey,
+      messageId: messageId,
+      fragmentIndex: 0,
+      totalFragments: 1,
+      requiredFragments: 1,
+      fragmentData: manifestData,
+      originalSize: manifestData.length,
+    );
+    final payload = Uint8List.fromList(fragStore.writeToBuffer());
+    final peers = node.routingTable.allPeers;
+    var sent = 0;
+    for (final peer in peers) {
+      if (node.routingTable.isLocalNode(Uint8List.fromList(peer.nodeId))) {
+        continue;
+      }
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+        innerPayload: payload,
+        recipientDeviceId: Uint8List.fromList(peer.nodeId),
+      );
+      sent++;
+    }
+    if (sent > 0) {
+      _log.info('[update] Pushed manifest v${_latestManifest?.version} to $sent peers');
     }
   }
 

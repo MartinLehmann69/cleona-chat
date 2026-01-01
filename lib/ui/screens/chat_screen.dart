@@ -35,6 +35,7 @@ import 'package:cleona/ui/screens/poll_editor_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:cleona/ui/components/system_channel_post.dart';
 import 'package:cleona/ui/date_format.dart' as df;
+import 'package:cleona/core/network/channel_uri.dart';
 
 /// Defensive base64 decode for image fields persisted in conversations.
 /// Wraps base64Decode's FormatException — invalid input returns null and the
@@ -3367,6 +3368,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
                 ),
                 if (message.hasLinkPreview)
                   _buildLinkPreviewCard(context),
+                if (ChannelUri.findInText(message.text) != null)
+                  _buildChannelInviteCard(context),
               ],
               if (message.membershipMismatch && !deleted)
                 Padding(
@@ -3645,6 +3648,110 @@ class _MessageBubbleState extends State<_MessageBubble> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  // ── Channel Invite Card ────────────────────────────────────────────────
+
+  Widget _buildChannelInviteCard(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final locale = AppLocale.read(context);
+    final channelUri = ChannelUri.findInText(message.text);
+    if (channelUri == null) return const SizedBox.shrink();
+
+    final service = context.read<CleonaAppState>().service;
+    final alreadyMember = service != null &&
+        (service.channels.containsKey(channelUri.channelIdHex) ||
+         service.conversations.containsKey(channelUri.channelIdHex));
+
+    return Container(
+      margin: const EdgeInsets.only(top: 6),
+      decoration: BoxDecoration(
+        color: colorScheme.primaryContainer.withAlpha(80),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: colorScheme.primary.withAlpha(60)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Row(children: [
+          Icon(Icons.campaign, size: 28, color: colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  channelUri.name.isNotEmpty ? channelUri.name : 'Channel',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: colorScheme.onSurface,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  'Channel',
+                  style: TextStyle(fontSize: 11, color: colorScheme.outline),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (alreadyMember)
+            Icon(Icons.check_circle, color: colorScheme.primary, size: 22)
+          else
+            FilledButton.tonal(
+              onPressed: () => _joinChannelFromCard(context, channelUri),
+              child: Text(locale.get('channel_join'), style: const TextStyle(fontSize: 12)),
+            ),
+        ]),
+      ),
+    );
+  }
+
+  void _joinChannelFromCard(BuildContext context, ChannelUri channelUri) {
+    final locale = AppLocale.read(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    final service = context.read<CleonaAppState>().service;
+    if (service == null) return;
+
+    showDialog(
+      context: context,
+      builder: (d) => AlertDialog(
+        title: Row(children: [
+          const Icon(Icons.campaign, size: 24),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            channelUri.name.isNotEmpty ? channelUri.name : 'Channel',
+            overflow: TextOverflow.ellipsis,
+          )),
+        ]),
+        content: Text(locale.get('join_channel_question')
+            .replaceAll('{name}', channelUri.name.isNotEmpty ? channelUri.name : channelUri.channelIdHex.substring(0, 16))),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(d),
+            child: Text(locale.get('cancel')),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(d);
+              final ok = await service.joinPublicChannel(channelUri.channelIdHex);
+              if (ok) {
+                messenger?.showSnackBar(SnackBar(
+                  content: Text(locale.get('channel_joined_success')),
+                ));
+              } else {
+                messenger?.showSnackBar(SnackBar(
+                  content: Text(locale.get('channel_not_found')),
+                ));
+              }
+            },
+            child: Text(locale.get('channel_join')),
+          ),
+        ],
       ),
     );
   }

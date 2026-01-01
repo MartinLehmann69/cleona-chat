@@ -36,6 +36,8 @@ import 'package:cleona/core/network/router_db.dart';
 import 'package:cleona/core/network/nfc_platform_bridge.dart' show isNfcAvailable;
 import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/core/network/channel_uri.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
@@ -1240,6 +1242,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
               } else if (conv.isChannel) {
                 _showChannelInfoDialog(context, conv.id, widget.service);
               }
+            } else if (action == 'share_channel') {
+              _showShareChannelDialog(context, conv.id, widget.service);
             }
           },
           itemBuilder: (_) {
@@ -1264,6 +1268,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
               ],
               if (conv.isChannel) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
+                if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
+                  PopupMenuItem(value: 'share_channel', child: Row(children: [const Icon(Icons.share, size: 18), const SizedBox(width: 8), Text(locale.get('share'))])),
                 if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
                   PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_channel'), style: const TextStyle(color: Colors.red))])),
               ],
@@ -1821,6 +1827,85 @@ class _ConversationListViewState extends State<_ConversationListView> {
               );
             },
           ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
+        ],
+      ),
+    );
+  }
+
+  void _showShareChannelDialog(BuildContext context, String channelIdHex, ICleonaService service) {
+    final channel = service.channels[channelIdHex];
+    if (channel == null) return;
+    final locale = AppLocale.read(context);
+    final uri = ChannelUri(channelIdHex: channelIdHex, name: channel.name);
+
+    final targets = <MapEntry<String, String>>[];
+    for (final c in service.acceptedContacts) {
+      targets.add(MapEntry(c.nodeIdHex, c.displayName));
+    }
+    for (final g in service.groups.values) {
+      targets.add(MapEntry(g.groupIdHex, '${g.name} (${locale.get('group')})'));
+    }
+    for (final ch in service.channels.values) {
+      if (ch.channelIdHex == channelIdHex) continue;
+      final myRole = ch.members[service.nodeIdHex]?.role ?? 'subscriber';
+      if (myRole == 'owner' || myRole == 'admin') {
+        targets.add(MapEntry(ch.channelIdHex, '${ch.name} (Channel)'));
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          const Icon(Icons.share, size: 22),
+          const SizedBox(width: 8),
+          Expanded(child: Text('${locale.get('share')}: ${channel.name}',
+              overflow: TextOverflow.ellipsis)),
+        ]),
+        content: SizedBox(
+          width: 320,
+          height: 400,
+          child: Column(children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(locale.get('share_via_cleona'),
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+            ),
+            Expanded(
+              child: targets.isEmpty
+                  ? Center(child: Text(locale.get('no_contacts')))
+                  : ListView.builder(
+                      itemCount: targets.length,
+                      itemBuilder: (_, i) {
+                        final target = targets[i];
+                        return ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.person, size: 20),
+                          title: Text(target.value),
+                          onTap: () {
+                            Navigator.pop(ctx);
+                            service.sendTextMessage(target.key, uri.toUri());
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text(locale.get('channel_link_sent'))),
+                            );
+                          },
+                        );
+                      },
+                    ),
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.open_in_new),
+              title: Text(locale.get('share_external')),
+              onTap: () {
+                Navigator.pop(ctx);
+                Share.share(uri.toShareText());
+              },
+            ),
+          ]),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
