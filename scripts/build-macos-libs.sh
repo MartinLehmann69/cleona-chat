@@ -54,7 +54,7 @@ export MACOSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET"
 # Versions pinned — match Android script where possible so both platforms
 # agree on ABI-relevant flags.
 LIBSODIUM_VERSION="1.0.20"
-LIBOQS_VERSION="0.10.1"
+LIBOQS_VERSION="0.15.0"
 LIBZSTD_VERSION="1.5.6"
 LIBERASURECODE_VERSION="1.6.2"
 LIBOPUS_VERSION="1.5.2"
@@ -130,6 +130,14 @@ build_libsodium() {
 build_liboqs() {
     echo "── liboqs ───────────────────────────────────────────────────"
     local src="$BUILD_DIR/liboqs"
+    if [ -d "$src" ]; then
+        local cached_tag
+        cached_tag=$(git -C "$src" describe --tags --exact-match 2>/dev/null || echo "unknown")
+        if [ "$cached_tag" != "$LIBOQS_VERSION" ]; then
+            echo "  Cached liboqs is $cached_tag, need $LIBOQS_VERSION — re-cloning"
+            rm -rf "$src"
+        fi
+    fi
     if [ ! -d "$src" ]; then
         git clone --depth 1 --branch "$LIBOQS_VERSION" \
             https://github.com/open-quantum-safe/liboqs.git "$src"

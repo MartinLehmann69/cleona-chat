@@ -120,11 +120,20 @@ build_libsodium() {
 
 build_liboqs() {
     echo "=== liboqs bauen ==="
+    local LIBOQS_VERSION="0.15.0"
     local SRC="$BUILD_DIR/liboqs"
 
+    if [ -d "$SRC" ]; then
+        local cached_tag
+        cached_tag=$(git -C "$SRC" describe --tags --exact-match 2>/dev/null || echo "unknown")
+        if [ "$cached_tag" != "$LIBOQS_VERSION" ]; then
+            echo "  Cached liboqs is $cached_tag, need $LIBOQS_VERSION — re-cloning"
+            rm -rf "$SRC"
+        fi
+    fi
     if [ ! -d "$SRC" ]; then
-        echo "  Klone liboqs (main)..."
-        git clone --depth 1 --branch main https://github.com/open-quantum-safe/liboqs.git "$SRC"
+        echo "  Klone liboqs ($LIBOQS_VERSION)..."
+        git clone --depth 1 --branch "$LIBOQS_VERSION" https://github.com/open-quantum-safe/liboqs.git "$SRC"
     fi
 
     local BUILD="$SRC/build-android"

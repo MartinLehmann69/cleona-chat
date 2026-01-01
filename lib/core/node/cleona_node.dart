@@ -2741,6 +2741,9 @@ class CleonaNode {
       // §3.7.3 relay loop prevention: skip routes through the excluded node
       if (excludeNextHopHex != null && bytesToHex(hopId) == excludeNextHopHex) continue;
       attempts++;
+      _log.info('sendToDevice ${destHex.substring(0, 8)}: DV route #$attempts '
+          'via hop=${bytesToHex(hopId).substring(0, 8)} '
+          '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
       final ok = await _sendV3ViaHop(packet, hopId);
       if (ok) return true;
     }
@@ -2860,6 +2863,9 @@ class CleonaNode {
     // auto-fragments payloads >1200B with CFRA + NACK retry).
     final wireSize = packet.writeToBuffer().length;
     final isLargePayload = wireSize > maxFragmentPacketSize;
+    _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: wireSize=$wireSize '
+        'large=$isLargePayload confirmed=$isConfirmed '
+        'targets=${targets.map((a) => "${a.ip}:${a.port}").join(",")}');
     var anySent = false;
     for (final addr in targets) {
       try {

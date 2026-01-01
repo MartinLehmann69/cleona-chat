@@ -8,6 +8,16 @@ class CLogger {
   static final Map<String, StringBuffer> _buffers = {};
   static Timer? _flushTimer;
 
+  /// Ring buffer of the most recent log lines (across all modules).
+  /// Used by the crash reporter (§9.5) to attach log context to reports.
+  static const int _ringCapacity = 50;
+  static final List<String> _ring = [];
+
+  static List<String> getRecentLines([int count = 30]) {
+    if (count >= _ring.length) return List.unmodifiable(_ring);
+    return List.unmodifiable(_ring.sublist(_ring.length - count));
+  }
+
   /// iOS: mirror log output to this path (Documents/, AFC-accessible).
   /// Set from main.dart via path_provider before any CLogger is created.
   static String? iosMirrorPath;
@@ -57,6 +67,10 @@ class CLogger {
     if (level == LogLevel.error) {
       try { stderr.writeln(line); } catch (_) {}
     }
+
+    // Ring buffer for crash reporter
+    _ring.add(line);
+    if (_ring.length > _ringCapacity) _ring.removeAt(0);
 
     // Buffer for file write
     if (profileDir != null) {

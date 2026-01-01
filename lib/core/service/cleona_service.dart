@@ -59,6 +59,9 @@ import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/crypto/linkable_ring_signature.dart';
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/identity/identity_dht_registry.dart';
+import 'package:cleona/core/channels/system_channels.dart';
+import 'package:cleona/core/channels/crash_reporter.dart';
+import 'package:cleona/core/channels/feature_request_helper.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -356,6 +359,15 @@ class CleonaService implements ICleonaService {
   /// CSAM reporter strikes: nodeIdHex -> strike count.
   final Map<String, int> _csamStrikes = {};
 
+  // System channels (§9.5)
+  CrashReporter? _crashReporter;
+  FeatureRequestHelper? _featureRequestHelper;
+  Timer? _systemChannelEvictionTimer;
+
+  CrashReporter get crashReporter => _crashReporter ??= CrashReporter(this);
+  FeatureRequestHelper get featureRequestHelper =>
+      _featureRequestHelper ??= FeatureRequestHelper(this);
+
   // Guardian restore callback
   @override
   void Function(String ownerName, String triggeringGuardianName, String ownerNodeIdHex, String recoveryMailboxIdHex)? onGuardianRestoreRequest;
@@ -526,6 +538,9 @@ class CleonaService implements ICleonaService {
     // Load channels
     _loadChannels();
 
+    // Seed system channels (§9.5)
+    _seedSystemChannels();
+
     // Load moderation state
     _loadModeration();
 
@@ -673,6 +688,10 @@ class CleonaService implements ICleonaService {
 
     // Moderation timer: periodic check of all time-based moderation limits
     _startModerationTimer();
+
+    // System channel eviction (§9.5.5)
+    _systemChannelEvictionTimer = Timer.periodic(
+        const Duration(minutes: 30), (_) => _evictSystemChannels());
 
     // Stats wiring lives on CleonaNode now (single shared collector across
     // all identities). #U5: previous per-Service `??=` only let the first
@@ -5312,6 +5331,12 @@ class CleonaService implements ICleonaService {
 
   /// Check if caller has permission for channel action.
   bool _hasChannelPermission(ChannelInfo channel, String action) {
+    // System channels (§9.5): zero-owner, any member can post
+    if (SystemChannels.isSystemChannel(channel.channelIdHex)) {
+      if (action == 'post') return true;
+      return false;
+    }
+
     final myMember = channel.members[identity.userIdHex];
     if (myMember == null) return false;
 
@@ -6274,6 +6299,112 @@ class CleonaService implements ICleonaService {
     } catch (e) {
       _log.warn('Failed to save channels: $e');
     }
+  }
+
+  // ── System Channels (§9.5) ────────────────────────────────────────
+
+  void _seedSystemChannels() {
+    bool changed = false;
+
+    for (final entry in [
+      (SystemChannels.bugLogChannelIdHex, 'Cleona Bug Log'),
+      (SystemChannels.featureReqChannelIdHex, 'Feature Requests'),
+    ]) {
+      final (idHex, name) = entry;
+      if (!_channels.containsKey(idHex)) {
+        _channels[idHex] = ChannelInfo(
+          channelIdHex: idHex,
+          name: name,
+          ownerNodeIdHex: SystemChannels.zeroOwnerHex,
+          isPublic: true,
+          isAdult: false,
+          language: 'multi',
+        );
+        changed = true;
+        _log.info('Seeded system channel: $name');
+      }
+      if (!conversations.containsKey(idHex)) {
+        conversations[idHex] = Conversation(
+          id: idHex,
+          displayName: name,
+          isChannel: true,
+        );
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      _saveChannels();
+      _saveConversations();
+    }
+  }
+
+  void _evictSystemChannels() {
+    _evictChannel(
+      SystemChannels.bugLogChannelIdHex,
+      SystemChannels.maxChannelStorageBytes,
+      oldestFirst: true,
+    );
+    _evictChannel(
+      SystemChannels.featureReqChannelIdHex,
+      SystemChannels.maxChannelStorageBytes,
+      oldestFirst: false,
+    );
+  }
+
+  void _evictChannel(String channelIdHex, int maxBytes,
+      {required bool oldestFirst}) {
+    final conv = conversations[channelIdHex];
+    if (conv == null || conv.messages.isEmpty) return;
+
+    int totalBytes = 0;
+    for (final msg in conv.messages) {
+      totalBytes += msg.text.length;
+    }
+    if (totalBytes <= maxBytes) return;
+
+    final sorted = List<UiMessage>.from(conv.messages);
+    if (oldestFirst) {
+      sorted.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    } else {
+      // Feature requests: fewest-votes first, then oldest
+      sorted.sort((a, b) {
+        final aVotes = _featureVoteScore(a);
+        final bVotes = _featureVoteScore(b);
+        if (aVotes != bVotes) return aVotes.compareTo(bVotes);
+        return a.timestamp.compareTo(b.timestamp);
+      });
+    }
+
+    int removed = 0;
+    while (totalBytes > maxBytes && sorted.isNotEmpty) {
+      final victim = sorted.removeAt(0);
+      totalBytes -= victim.text.length;
+      conv.messages.remove(victim);
+      removed++;
+    }
+    if (removed > 0) {
+      _saveConversations();
+      _log.info('Evicted $removed messages from $channelIdHex (${totalBytes ~/ 1024}KB remaining)');
+    }
+  }
+
+  int _featureVoteScore(UiMessage msg) {
+    try {
+      final json = jsonDecode(msg.text);
+      if (json is Map && json['pollId'] != null) {
+        final poll = pollManager.polls[json['pollId']];
+        if (poll != null) {
+          int yes = 0, no = 0;
+          for (final v in poll.votes.values) {
+            if (v.selectedOptions.contains(0)) yes++;
+            if (v.selectedOptions.contains(1)) no++;
+          }
+          return yes - no;
+        }
+      }
+    } catch (_) {}
+    return 0;
   }
 
   // ── Migration: deviceNodeId → userIdHex (V3.1.44) ─────────────────
@@ -9333,6 +9464,8 @@ class CleonaService implements ICleonaService {
     _channelIndexGossipTimer = null;
     _moderationTimer?.cancel();
     _moderationTimer = null;
+    _systemChannelEvictionTimer?.cancel();
+    _systemChannelEvictionTimer = null;
     _updateCheckTimer?.cancel();
     _updateCheckTimer = null;
     _natWizardTrigger?.stop();

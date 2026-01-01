@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:cdbefc3971f2, 2026-06-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:dc85b92e1cdb, 2026-06-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -3040,6 +3040,170 @@ All moderation timeouts, thresholds, and qualification requirements are centrali
 The config also provides calculation methods: `independenceThreshold(totalUsers)`, `effectiveJurySize(availableJurors)`, `csamStage2Threshold(subscribers)`, `csamStage3Threshold(subscribers)`, `hasJuryMajority(votesFor, totalVotes)`, and time-based checks (`isJuryVoteExpired`, `isProbationComplete`, etc.).
 
 **Enums:** `ReportCategory` (6 categories), `JuryVote` (approve/reject/abstain), `JuryConsequence` (reclassifyNsfw/addBadBadge/deleteChannel/noAction), `BadBadgeLevel` (none/questionable/repeatedlyMisleading/permanent).
+
+### 9.5 System Channels — Bug Log & Feature Requests
+
+Cleona ships two **default public channels** that every node knows at compile time. They provide decentralized, opt-in bug reporting and community-driven feature prioritization — without any external service, telemetry endpoint, or analytics backend. Both channels are moderated by the same jury mechanism as all other public channels (§9.3).
+
+#### 9.5.1 Channel Identity
+
+Both channels have deterministic, well-known IDs derived from fixed strings:
+
+```
+BUG_LOG_CHANNEL_ID      = SHA-256("cleona-system-channel-bug-log")
+FEATURE_REQ_CHANNEL_ID  = SHA-256("cleona-system-channel-feature-requests")
+```
+
+These IDs are compile-time constants. The channels are pre-seeded in the DHT index on first node boot (if not already present). They have no owner — the `ownerNodeId` field is set to the zero hash (`0x00…00`), and owner-only actions (delete channel, change settings) are disabled for zero-owner channels. Moderation is handled exclusively by the jury system (§9.3).
+
+Both channels appear in every node's channel list under a "System" category. They are not auto-subscribed — the user sees them listed and can choose to subscribe. Posts to these channels are always visible to all nodes (public channel semantics, §9.2).
+
+#### 9.5.2 Bug Log Channel — Automatic Crash Reporting
+
+**Crash detection:** A global `FlutterError.onError` + `PlatformDispatcher.onError` + Dart `Zone.onError` handler catches uncaught exceptions and assertion failures. On crash, the handler collects a structured report:
+
+```
+CrashReport {
+  fingerprint:    SHA-256(exceptionType + top5FramesNormalized)   // line numbers stripped
+  appVersion:     string        // e.g. "3.1.72"
+  platform:       string        // e.g. "linux-x86_64", "android-arm64", "ios-arm64"
+  dartVersion:    string
+  timestamp:      int64         // Unix ms
+  exceptionType:  string        // e.g. "StateError"
+  exceptionMsg:   string        // truncated to 500 chars
+  stackTrace:     string        // top 20 frames, normalized (no absolute paths)
+  logTail:        string        // last 30 log lines from CLogger ring buffer
+  peerCount:      int32
+  uptime:         int64         // seconds
+  memoryUsage:    int64         // bytes, from ProcessInfo
+}
+```
+
+**No private data:** The report deliberately excludes: message content, encryption keys, contact lists, IP addresses, node IDs, identity names, conversation history, and file paths (normalized to relative).
+
+**Fingerprint:** The fingerprint is computed from the exception type and the top 5 stack frames with line numbers stripped and paths normalized. This groups crashes by root cause — the same bug on different versions or platforms produces the same fingerprint.
+
+**Duplicate detection and counting:**
+
+Before showing the popup, the node checks its local copy of the Bug Log channel for an existing post with the same fingerprint.
+
+- **No match (new crash):** The node shows the **consent popup** (§9.5.4 Variant 1). If the user approves, a new `CrashReport` post is published to the channel.
+- **Match found (known crash):** The node shows the **known-crash popup** (§9.5.4 Variant 2) with a link to the existing post. A lightweight "+1" reply is silently posted to the original (no second opt-in needed — the reply contains only platform, version, and timestamp, no new data). The original post's UI displays an aggregated counter: "47× reported by 12 nodes".
+- **Rate limit reached:** The node shows the **rate-limit popup** (§9.5.4 Variant 3).
+
+**+1 reply format:**
+
+```
+CrashDuplicateReply {
+  fingerprint:    bytes         // must match parent post
+  appVersion:     string
+  platform:       string
+  timestamp:      int64
+}
+```
+
+**Manual reporting:** Users can also post free-text descriptions of problems directly in the channel, with optional screenshot or log attachments (max 2 MB per post). These manual reports do not have fingerprints and are not subject to dedup.
+
+#### 9.5.3 Feature Request Channel — Community Voting
+
+Users post feature requests as free-text posts. On submission, a **poll is automatically attached** to the post:
+
+```
+Auto-Poll {
+  question:    "<first line of feature request, truncated to 100 chars>"
+  pollType:    SINGLE_CHOICE
+  options:     ["Ja, umsetzen", "Nein", "Egal"]
+  settings:    { anonymous: false, allowVoteChange: true, showResultsBeforeClose: true }
+}
+```
+
+The poll uses the existing §11.3 infrastructure. No additional protocol messages are needed.
+
+**Sorting:** The channel UI sorts feature requests by vote count (descending: "Ja" votes minus "Nein" votes), with ties broken by newest first. This is a local UI sort — no network-level ordering.
+
+**Manual posting without poll:** Not supported. Every post in this channel gets an auto-poll. This keeps the channel focused and sortable.
+
+#### 9.5.4 Crash Popup UX
+
+Three popup variants, shown as a modal dialog over the current screen:
+
+**Variant 1 — New crash (consent required):**
+```
+┌─────────────────────────────────────────┐
+│  ⚠ Ein Fehler ist aufgetreten           │
+│                                         │
+│  Folgende Daten würden im öffentlichen  │
+│  Bug-Log-Kanal veröffentlicht:          │
+│                                         │
+│  ┌─────────────────────────────────┐    │
+│  │ Version: 3.1.72                 │    │
+│  │ Plattform: linux-x86_64        │    │
+│  │ Fehler: StateError — No elem…  │    │
+│  │ Stack: _handleTap (chat_scr…   │    │
+│  │        build (message_bubbl…   │    │
+│  │        ... (18 weitere)        │    │
+│  │ Logs: [letzte 30 Zeilen]       │    │
+│  └─────────────────────────────────┘    │
+│                                         │
+│  [ Veröffentlichen ]    [ Verwerfen ]   │
+│                                         │
+│  Bei "Verwerfen" wird der Bug nicht     │
+│  erfasst und kann nicht bearbeitet      │
+│  werden.                                │
+└─────────────────────────────────────────┘
+```
+
+**Variant 2 — Known crash (info + link):**
+```
+┌─────────────────────────────────────────┐
+│  ℹ Bekanntes Problem                    │
+│                                         │
+│  Dieses Problem ist bereits erfasst     │
+│  (47 Meldungen).                        │
+│                                         │
+│       [ Zum Bericht → ]    [ OK ]       │
+└─────────────────────────────────────────┘
+```
+
+"Zum Bericht" navigates to the Bug Log channel, scrolled to the matching post. "OK" dismisses the popup.
+
+**Variant 3 — Rate limit reached:**
+```
+┌─────────────────────────────────────────┐
+│  ℹ Fehler aufgetreten                   │
+│                                         │
+│  Tägliches Meldelimit erreicht.         │
+│  Der Fehler wurde lokal protokolliert.  │
+│                                         │
+│                  [ OK ]                 │
+└─────────────────────────────────────────┘
+```
+
+#### 9.5.5 Storage Limits & Eviction
+
+| Parameter | Bug Log | Feature Requests |
+|-----------|---------|------------------|
+| Max channel storage | 25 MB | 25 MB |
+| Max single post (auto) | 256 KB | — |
+| Max single post (manual) | 2 MB | 2 MB |
+| Rate limit | 3 reports/hour, 10/day per node | 3 posts/day per node |
+| Eviction strategy | Oldest posts first | Fewest votes first, then oldest |
+
+**Eviction** is enforced locally: when the local storage for a system channel exceeds 25 MB, posts are evicted according to the channel's strategy. Evicted posts are removed from local storage only — other nodes may still retain them until their own storage limit triggers eviction. This is consistent with standard channel post lifecycle (§9.2).
+
+**Feature Request eviction detail:** Posts are ranked by `net_votes = count("Ja") - count("Nein")`. Posts with the lowest `net_votes` are evicted first. Among posts with equal `net_votes`, the oldest is evicted first. This ensures popular requests survive and low-interest requests are naturally pruned.
+
+#### 9.5.6 Moderation
+
+Both system channels are public channels and subject to the full moderation pipeline (§9.3):
+
+- **Content reports** trigger the jury mechanism (§9.3.1). Spam, off-topic, or abusive posts are handled identically to any public channel.
+- **Bad Badge** applies to both channels (§9.3.2).
+- **CSAM procedure** applies (§9.3.3) — though extremely unlikely given the channels' purpose.
+- **Anti-Sybil** (§9.4) protects against vote manipulation on feature requests and fake crash reports.
+- **KEX Gate** (§8.2) applies: posts from unknown senders are silently dropped.
+
+No special moderation rules are needed. The existing infrastructure covers all abuse scenarios.
 
 ---
 

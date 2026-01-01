@@ -41,6 +41,8 @@ import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
+import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
+import 'package:cleona/ui/components/crash_report_dialog.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart' as pp;
 
@@ -118,10 +120,14 @@ void main() async {
   // Android stillschweigend. Mirror des Patterns aus headless.dart:20.
   FlutterError.onError = (details) {
     _logCrash('FlutterError', details.exception, details.stack);
+    if (details.stack != null) {
+      CleonaAppState._instance?.handleCrash(details.exception, details.stack!);
+    }
     FlutterError.presentError(details);
   };
   PlatformDispatcher.instance.onError = (error, stack) {
     _logCrash('PlatformDispatcher', error, stack);
+    CleonaAppState._instance?.handleCrash(error, stack);
     return true;
   };
 
@@ -174,6 +180,7 @@ void main() async {
     ));
   }, (error, stack) {
     _logCrash('runZonedGuarded', error, stack);
+    CleonaAppState._instance?.handleCrash(error, stack);
   });
 }
 
@@ -415,6 +422,8 @@ class _LoadingScreen extends StatelessWidget {
 }
 
 class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
+  static CleonaAppState? _instance;
+
   ICleonaService? _service;
   IpcClient? _ipcClient;
   bool _isInitialized = false;
@@ -492,6 +501,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     return _mobileFallbackActive;
   }
 
+  // System channel crash reporting (§9.5)
+  final List<(Object, StackTrace)> _pendingCrashes = [];
+  bool _crashDialogShowing = false;
+
   // Android in-process multi-identity state
   CleonaNode? _androidNode;
   final Map<String, CleonaService> _androidServices = {};
@@ -502,6 +515,88 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Refreshes UI after identity changes.
   void refresh() => notifyListeners();
+
+  /// Called from the global error handlers to queue a crash for reporting.
+  /// If a CleonaService is available and the UI is ready, shows the dialog
+  /// immediately; otherwise queues it for later processing.
+  void handleCrash(Object error, StackTrace stack) {
+    final service = _activeCleonaService;
+    if (service == null) {
+      _pendingCrashes.add((error, stack));
+      return;
+    }
+    _scheduleCrashDialog(service, error, stack);
+  }
+
+  CleonaService? get _activeCleonaService {
+    if (_androidServices.isNotEmpty) {
+      return _androidServices.values.first;
+    }
+    return null;
+  }
+
+  void _processPendingCrashes() {
+    if (_pendingCrashes.isEmpty) return;
+    final service = _activeCleonaService;
+    if (service == null) return;
+    final pending = List<(Object, StackTrace)>.from(_pendingCrashes);
+    _pendingCrashes.clear();
+    for (final (error, stack) in pending) {
+      _scheduleCrashDialog(service, error, stack);
+    }
+  }
+
+  void _scheduleCrashDialog(CleonaService service, Object error, StackTrace stack) {
+    if (_crashDialogShowing) return;
+    final reporter = service.crashReporter;
+    final report = reporter.buildReport(error, stack);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = navigatorKey.currentContext;
+      if (ctx == null) return;
+      _crashDialogShowing = true;
+      showCrashReportDialog(
+        context: ctx,
+        reporter: reporter,
+        report: report,
+      ).then((result) async {
+        _crashDialogShowing = false;
+        switch (result.action) {
+          case CrashDialogResult.publish:
+            await reporter.publishReport(report);
+          case CrashDialogResult.dismissKnown:
+            await reporter.publishDuplicate(report);
+          case CrashDialogResult.navigateToReport:
+            await reporter.publishDuplicate(report);
+            if (result.existingPostId != null && navigatorKey.currentContext != null) {
+              // Navigate to the Bug Log channel
+              _navigateToChannel(
+                  navigatorKey.currentContext!, result.existingPostId!);
+            }
+          case CrashDialogResult.discard:
+          case CrashDialogResult.rateLimitAck:
+            break;
+        }
+      });
+    });
+  }
+
+  void _navigateToChannel(BuildContext context, String postId) {
+    final channelIdHex = sys_ch.SystemChannels.bugLogChannelIdHex;
+    final service = _activeCleonaService;
+    if (service != null && service.conversations.containsKey(channelIdHex)) {
+      final conv = service.conversations[channelIdHex]!;
+      Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => ChatScreen(
+            conversationId: channelIdHex,
+            displayName: conv.displayName,
+            isChannel: true,
+          ),
+        ),
+      );
+    }
+  }
 
   @override
   void notifyListeners() {
@@ -664,6 +759,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Boot: check profile SYNCHRONOUSLY, then connect async.
   void _boot() {
+    _instance = this;
     WidgetsBinding.instance.addObserver(this);
     _restoreThemeMode();
     // Monitor show-trigger (Unix desktops — pairs with Single-Instance-Guard
@@ -1192,6 +1288,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _androidServices[ctx.userIdHex] = service;
       debugPrint('[main] Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
+
+    // Process any crashes that occurred before services were ready (§9.5)
+    _processPendingCrashes();
 
     // §2.4 receiver step [9] — multi-identity KEM-Try-Loop for Android
     // in-process mode. Mirrors service_daemon.dart wiring.

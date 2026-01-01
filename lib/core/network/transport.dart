@@ -655,6 +655,8 @@ class Transport {
           final sent = _udpSendRaw(wrappedFragments[i], address, remotePort, socket);
           if (sent > 0) {
             anySent = true;
+            _log.debug('sendUdp: fragment $i/${wrappedFragments.length} OK ($sent B) '
+                'to ${address.address}:$remotePort');
           } else {
             if (i == 0) frag0Failed = true;
             _log.debug('sendUdp: fragment $i/${wrappedFragments.length} returned $sent '
@@ -674,6 +676,8 @@ class Transport {
         if (anySent) {
           _consecutiveZeroSends = 0;
           onBytesSent?.call(data.length);
+          _log.info('sendUdp: ${wrappedFragments.length} fragments (${data.length}B) '
+              'sent to ${address.address}:$remotePort');
           final header = UdpFragmenter.parseHeader(fragments.first);
           if (header != null) {
             final cacheKey = '${address.address}:${header.fragmentId}';
