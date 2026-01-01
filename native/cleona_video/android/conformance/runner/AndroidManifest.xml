@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Test-only host for the cleona_video conformance harness (work package V1.14).
+
+  Separate from the Cleona application on purpose: the harness must not be part
+  of any shipped APK, and a separate package keeps the CAMERA grant of the
+  conformance run from being confused with the app's own permission state.
+
+  No resources are referenced anywhere in here, so the APK needs no resource
+  compilation step; see conformance/run_conformance.sh.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="chat.cleona.videoconformance">
+
+    <!-- The backend opens the camera via Camera2 with TEMPLATE_RECORD. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+
+    <application
+        android:label="Cleona Video Conformance"
+        android:debuggable="true"
+        android:allowBackup="false">
+
+        <activity
+            android:name="chat.cleona.videoconformance.ConformanceActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

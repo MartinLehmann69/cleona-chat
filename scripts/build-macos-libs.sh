@@ -320,6 +320,23 @@ build_cleona_audio() {
     rewrite_install_name "$OUT_DIR/cleona_audio.dylib"
 }
 
+build_cleona_voice() {
+    echo "── libcleona_voice (VoiceProcessingIO) ──────────────────────"
+    local src="$PROJECT_DIR/native/cleona_voice"
+    local build="$BUILD_DIR/cleona_voice"
+    rm -rf "$build" && mkdir -p "$build"
+    cmake -GNinja -S "$src" -B "$build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+        -DCLEONA_VOICE_BUILD_MOCK=OFF \
+        -DCLEONA_VOICE_BUILD_SMOKE=OFF \
+        -DCLEONA_VOICE_APPLE_BUILD_CONFORMANCE=OFF
+    ninja -C "$build"
+    cp "$build/apple/libcleona_voice.dylib" "$OUT_DIR/cleona_voice.dylib"
+    rewrite_install_name "$OUT_DIR/cleona_voice.dylib"
+}
+
 # ── Homebrew shortcut ────────────────────────────────────────────────────────
 use_homebrew_libs() {
     echo ">>> Using Homebrew-installed libs (symlinks into $OUT_DIR)"
@@ -377,15 +394,7 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
-    # cleona_voice / cleona_video deliberately absent — see the matching
-    # comment in scripts/build-ios-libs.sh (V1.3 shares this backend with iOS;
-    # V1.15 is the video counterpart). Only the mocks exist today and they must
-    # never enter a shipped dylib bundle (native/cleona_voice/BUILD_REQUEST.md §4,
-    # native/cleona_video/BUILD_REQUEST.md §5). When V1.3/V1.15 land, add a
-    # `build_cleona_voice`/`build_cleona_video` function (dylib into
-    # Contents/Frameworks, matching cleona_audio) and add it here and to the
-    # `case "$t"` dispatch below.
-    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_pow cleona_audio)
+    local all_targets=(sodium oqs zstd erasurecode opus whisper vpx cleona_pow cleona_audio cleona_voice)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")
     fi
@@ -404,6 +413,7 @@ run_builds() {
             vpx) build_vpx_shim ;;
             cleona_pow) build_cleona_pow ;;
             cleona_audio) build_cleona_audio ;;
+            cleona_voice) build_cleona_voice ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done

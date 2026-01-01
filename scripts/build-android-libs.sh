@@ -590,24 +590,61 @@ build_libcleona_voice() {
     echo "  → $JNILIBS/libcleona_voice.so.srchash ($(cat "$JNILIBS/libcleona_voice.so.srchash"))"
 }
 
-# --- cleona_video — nothing to build yet, deliberately ---
-# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) +
-# native/cleona_video/BUILD_REQUEST.md §4.
-#
-# The Android backend is V1.14. It does not exist yet — only the hardware-free
-# mock under native/cleona_video/mock, which must never reach an APK (a mock
-# answers every call with a synthetic bitstream, indistinguishable from
-# success). Adding a `build_libcleona_video` target here before the backend
-# exists would have nothing real to compile.
-#
-# When V1.14 lands, add a `build_libcleona_video` function following
-# `build_libcleona_voice` above (same shape: NDK toolchain, install into
-# jniLibs/<abi>/, write a .srchash matching preflight.sh Check 5's
-# cleona_video branch), add it to the `case "$TARGET"` dispatch and the `all)`
-# branch below, and — in the SAME commit, not before — add
-# `libcleona_video.so` to BOTH `ARM64_LIBS` and `X86_64_LIBS` in
-# scripts/preflight.sh Check 8 (see the comment there for why "same commit"
-# matters).
+build_libcleona_video() {
+    echo "=== libcleona_video bauen (Android-Backend, V1.14) ==="
+    local SRC="$PROJECT_DIR/native/cleona_video"
+    local BUILD="$BUILD_DIR/cleona_video"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    # MOCK=OFF and SMOKE=OFF are not optional, for the same reason as
+    # cleona_voice above: CLEONA_VIDEO_BUILD_MOCK defaults ON
+    # (native/cleona_video/CMakeLists.txt) and would also emit
+    # libcleona_video_mock.so into the same build tree — the mock answers
+    # every call with a synthetic bitstream, indistinguishable from success,
+    # which is exactly what preflight.sh Check 15 ("Mock voice/video backend
+    # not in production build wiring") exists to keep out of a release build.
+    # CLEONA_VIDEO_ANDROID_CONFORMANCE stays at its default OFF — the
+    # on-device conformance harness is test-only, built via
+    # native/cleona_video/android/conformance/run_conformance.sh, not via
+    # this script. ANDROID_ABI/the NDK toolchain file already set ANDROID=1
+    # for CMake, the same way build_libcleona_voice above relies on it —
+    # no separate -DANDROID=ON is needed or read by any CMakeLists here.
+    cmake -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
+        -DANDROID_ABI="$CMAKE_ABI" \
+        -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
+        -DCLEONA_VIDEO_BUILD_MOCK=OFF \
+        -DCLEONA_VIDEO_BUILD_SMOKE=OFF \
+        "$SRC"
+
+    ninja -j"$(nproc)"
+
+    # native/cleona_video/CMakeLists.txt adds the platform backend as a
+    # subdirectory, so the artefact lands under android/ in the build tree.
+    cp android/libcleona_video.so "$JNILIBS/libcleona_video.so"
+    "$STRIP" "$JNILIBS/libcleona_video.so"
+    verify_alignment "$JNILIBS/libcleona_video.so"
+    echo "  → $JNILIBS/libcleona_video.so ($(du -h "$JNILIBS/libcleona_video.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # Must match Check 5's cleona_video branch exactly: every tracked
+    # *.c/*.h under native/cleona_video/ except test/ and smoke/, fed as
+    # "<path-relative-to-PROJECT_DIR> <content-sha256>" pairs — NOT the
+    # absolute path (native/cleona_voice/BUILD_REQUEST_V1.2.md §4: an
+    # absolute path in the hash makes a .so built in one worktree read as
+    # stale in every other one). Unlike cleona_voice's branch, Check 5 does
+    # not fold VideoSession.kt into this hash, so this stamp does not either.
+    { find "$SRC" \( -name '*.c' -o -name '*.h' \) \
+        -not -path '*/test/*' -not -path '*/smoke/*' -print0 | sort -z
+    } | while IFS= read -r -d '' _bv_f; do
+        printf '%s %s\n' "${_bv_f#"$PROJECT_DIR"/}" "$(sha256sum "$_bv_f" | cut -d' ' -f1)"
+      done | sha256sum | cut -d' ' -f1 > "$JNILIBS/libcleona_video.so.srchash"
+    echo "  → $JNILIBS/libcleona_video.so.srchash ($(cat "$JNILIBS/libcleona_video.so.srchash"))"
+}
 
 # --- Main ---
 # Every remaining argument is a target. This used to be `TARGET="${1:-all}"`,
@@ -633,6 +670,7 @@ build_target() {
         pow)           build_libcleona_pow ;;
         net)           build_libcleona_net ;;
         voice)         build_libcleona_voice ;;
+        video)         build_libcleona_video ;;
         all)
             build_libsodium
             echo ""
@@ -652,10 +690,12 @@ build_target() {
             echo ""
             build_libcleona_voice
             echo ""
+            build_libcleona_video
+            echo ""
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|opus|whisper|cleona_audio|vpx|pow|net|voice|all]"
+            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|opus|whisper|cleona_audio|vpx|pow|net|voice|video|all]"
             exit 1
             ;;
     esac

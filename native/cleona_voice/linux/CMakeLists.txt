@@ -84,7 +84,7 @@ cmake_minimum_required(VERSION 3.13)
 # exactly this reason. `return()` at the top of an add_subdirectory()'d file
 # is documented CMake behaviour: it ends processing of this file only, the
 # parent loop continues to the next platform directory unaffected.
-if(ANDROID)
+if(NOT UNIX OR ANDROID OR APPLE)
   return()
 endif()
 

@@ -540,34 +540,38 @@ build_cleona_vpx() {
     cd "$PROJECT_DIR"
 }
 
+build_cleona_voice() {
+    local platform="$1"
+    echo "── libcleona_voice (VoiceProcessingIO) ($platform) ─────────────"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/cleona_voice"
+    local build="$BUILD_DIR/cleona_voice"
+    rm -rf "$build" && mkdir -p "$build" && cd "$build"
+
+    cmake -GNinja \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLEONA_IOS_STATIC=ON \
+        -DCLEONA_VOICE_BUILD_MOCK=OFF \
+        -DCLEONA_VOICE_BUILD_SMOKE=OFF \
+        -DCLEONA_VOICE_APPLE_BUILD_CONFORMANCE=OFF \
+        "$src"
+    ninja -j"$NPROC"
+    mkdir -p "$INSTALL_DIR/cleona_voice/lib" "$INSTALL_DIR/cleona_voice/include"
+    cp apple/libcleona_voice.a "$INSTALL_DIR/cleona_voice/lib/"
+    cp "$src/cleona_voice.h"   "$INSTALL_DIR/cleona_voice/include/"
+    cd "$PROJECT_DIR"
+}
+
 # ── Build orchestrator ───────────────────────────────────────────────────────
 PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-# cleona_voice / cleona_video are deliberately NOT in this list yet.
-# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) +
-# native/cleona_voice/BUILD_REQUEST.md §4, native/cleona_video/BUILD_REQUEST.md §5.
-# The Apple backends are V1.3 (voice, VoiceProcessingIO, shared iOS+macOS) and
-# V1.15 (video). Only the hardware-free mocks exist today, and the mock must
-# never enter a shipped iOS archive (both BUILD_REQUESTs) — there is nothing
-# real to statically link in yet.
-#
-# When V1.3/V1.15 land: add a `build_cleona_voice`/`build_cleona_video` function
-# (CLEONA_IOS_STATIC=ON / CLEONA_VIDEO_STATIC=ON, per native/cleona_voice/CMakeLists.txt
-# and native/cleona_video/CMakeLists.txt), add it to this array and to the `case "$t"`
-# dispatch below, add a `make_xcfw` call in the second dispatch loop further down,
-# and add its install subdir (`cleona_voice/lib`, `cleona_video/lib`) to the static
-# merge loop near the end of this file (search this file for "sodium/lib" to find
-# it — spelling the loop's own opening words out here would confuse
-# preflight.sh Check 12, which greps this file for exactly that phrase and takes
-# the FIRST match; a comment mentioning it earlier in the file would shadow the
-# real loop and make the check parse a sentence instead of the merge list).
-# Check 12 derives its lists straight from this file at runtime, so once those
-# three spots are consistent the gate needs no separate edit — but all three
-# must land in the same commit, or Check 12 (A) fails immediately (built but
-# not merged).
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio cleona_pow vpx cleona_vpx)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio cleona_pow vpx cleona_vpx cleona_voice)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -593,6 +597,7 @@ for platform in "${PLATFORMS[@]}"; do
             cleona_pow)    build_cleona_pow "$platform" ;;
             vpx)           build_libvpx "$platform" ;;
             cleona_vpx)    build_cleona_vpx "$platform" ;;
+            cleona_voice)  build_cleona_voice "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done
@@ -645,6 +650,7 @@ for t in "${WANTED[@]}"; do
         cleona_pow)    make_xcfw libcleona_pow cleona_pow libcleona_pow.a ;;
         vpx)           make_xcfw libvpx vpx libvpx.a include ;;
         cleona_vpx)    make_xcfw libcleona_vpx cleona_vpx libcleona_vpx.a ;;
+        cleona_voice)  make_xcfw CleonaVoice cleona_voice libcleona_voice.a include ;;
     esac
 done
 
@@ -696,7 +702,7 @@ for platform_tag in device simulator; do
     _index="$_symdir/index"
     : > "$_index"
 
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib cleona_pow/lib vpx/lib cleona_vpx/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib cleona_pow/lib vpx/lib cleona_vpx/lib cleona_voice/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             _slug="$(echo "$a" | tr -c 'A-Za-z0-9' '_')"

@@ -86,29 +86,43 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Copying cleona_pow.dll into Windows bundle"
 )
 
-# === cleona_voice / cleona_video — NOT wired in yet, deliberately ===
-# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) + the two
-# BUILD_REQUEST.md files under native/cleona_voice/ and native/cleona_video/.
+# === cleona_voice backend (cleona_voice.dll) ===
+# WASAPI voice session — Cleona_Chat_Architecture_v3_0.md §10.4, work package
+# docs/SPEC_VOICE_VIDEO_REWORK.md V1.4. Built from
+# native/cleona_voice/windows/, copied next to cleona.exe so DynamicLibrary
+# can load it for FFI calls (voice_session.dart looks for "cleona_voice.dll"
+# in the same directory as the executable, VoiceNativeLibrary.platform()).
 #
-# Only the hardware-free mocks exist today (native/cleona_voice/mock,
-# native/cleona_video/mock). Wiring add_subdirectory here now would have
-# nothing but the mock to copy next to cleona.exe, and it must never ship in a
-# release (both BUILD_REQUESTs). scripts/preflight.sh Check "Mock backend not
-# in production build wiring" keeps this file free of `cleona_voice_mock` /
-# `cleona_video_mock` until a real backend lands.
-#
-# Wire this up when the real backend lands, not before:
-#   voice (V1.4, WASAPI):  add_subdirectory + add_dependencies + POST_BUILD copy of
-#                          cleona_voice.dll (NOT cleona_voice_mock.dll), same shape as
-#                          cleona_pow above. See native/cleona_voice/BUILD_REQUEST.md §3 —
-#                          the mock needs no /std:c17 /experimental:c11atomics flags,
-#                          but the real backend's requirements are V1.4's to determine.
-#   video (V1.16, Media Foundation MFT): same shape, cleona_video.dll (NOT
-#                          cleona_video_mock.dll). See native/cleona_video/BUILD_REQUEST.md §3.
-# Once either DLL is added, extend NATIVE_DLLS below only if it becomes a build
-# INPUT (pinned upstream via a provision-*.ps1) — a DLL built from
-# add_subdirectory is an OUTPUT and is copied via $<TARGET_FILE:...> instead
-# (preflight.sh Check 14 enforces this distinction).
+# native/cleona_voice/CMakeLists.txt's own platform loop already
+# add_subdirectory()s native/cleona_voice/windows when it exists, so this
+# add_subdirectory line is what pulls native/cleona_voice/** as a whole into
+# the Flutter Windows build for the first time (BUILD_REQUEST_V1.4.md §1).
+# CMake target name is cleona_voice_windows (not cleona_voice — collision
+# avoidance, native/cleona_voice/windows/CMakeLists.txt), OUTPUT_NAME/PREFIX
+# make the produced file cleona_voice.dll regardless.
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_voice" "${CMAKE_BINARY_DIR}/cleona_voice_build")
+add_dependencies(${BINARY_NAME} cleona_voice_windows)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_voice_windows>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_voice.dll into Windows bundle"
+)
+
+# === cleona_video backend (cleona_video.dll) ===
+# Media Foundation capture/encode/decode — Cleona_Chat_Architecture_v3_0.md
+# §10.6, work package docs/SPEC_VOICE_VIDEO_REWORK.md V1.16. Built from
+# native/cleona_video/windows/, copied next to cleona.exe so DynamicLibrary
+# can load it for FFI calls (video_pipeline.dart looks for "cleona_video.dll"
+# in the same directory as the executable).
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_video" "${CMAKE_BINARY_DIR}/cleona_video_build")
+add_dependencies(${BINARY_NAME} cleona_video_windows)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_video_windows>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_video.dll into Windows bundle"
+)
 
 # Copy native DLLs (libsodium, liboqs, libzstd) to the build output directory.
 # libsodium comes out of the provisioned MSVC package when cleona_pow resolved
@@ -247,7 +261,7 @@ endforeach()
 add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
-          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_audio.dll,cleona_pow.dll
+          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_audio.dll,cleona_pow.dll,cleona_voice.dll,cleona_video.dll
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

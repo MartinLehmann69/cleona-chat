@@ -65,6 +65,7 @@ _ZSTD_compressBound
 _opus_encoder_create
 _opus_encoder_destroy
 _opus_encode
+_opus_encoder_ctl
 _opus_decoder_create
 _opus_decoder_destroy
 _opus_decode

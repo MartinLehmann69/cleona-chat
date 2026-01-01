@@ -106,3 +106,15 @@ enable_testing()
 if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/CMakeLists.txt")
   add_subdirectory(test)
 endif()
+
+# ---------------------------------------------------------------------------
+# Platform backends, when they land (V1.13-V1.16). Each brings its own
+# CMakeLists.txt and its own BUILD_REQUEST.md. Added after test/ so that
+# cleona_video_add_conformance_test() is already defined (mirrors
+# native/cleona_voice/CMakeLists.txt's identical loop).
+# ---------------------------------------------------------------------------
+foreach(_plat linux android apple windows)
+  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_plat}/CMakeLists.txt")
+    add_subdirectory(${_plat})
+  endif()
+endforeach()
