@@ -156,6 +156,12 @@ jobs:
         run: |
           ls -lh ios/CleonaNative/libcleona_all_device.a
           ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
+          echo "=== Symbols in merged archive ==="
+          nm ios/CleonaNative/libcleona_all_device.a 2>&1 | grep -c ' T ' || echo "nm failed"
+          nm ios/CleonaNative/libcleona_all_device.a 2>&1 | grep ' T _sodium_init\| T _crypto_aead\| T _OQS_KEM\| T _ZSTD_compress\| T _cleona_audio' | head -5
+          echo "=== PODS_ROOT resolution test ==="
+          echo "PODS_ROOT would be: ios/Pods"
+          ls -la "ios/Pods/../CleonaNative/libcleona_all_device.a" 2>&1
 
       - name: Install distribution certificate
         env:
