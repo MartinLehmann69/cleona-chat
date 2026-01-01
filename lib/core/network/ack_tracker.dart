@@ -295,16 +295,27 @@ class AckTracker {
     // hard-clamped at 8) so a peer with three alternatives doesn't lose
     // its full recovery budget on a single broken route.
     if (entry.serializedPacket != null && entry.recipientUserId != null) {
-      final retries = (_messageRetryCount[messageIdHex] ?? 0) + 1;
-      final maxRetries = _computeMaxRetries(entry.recipientUserIdHex);
-      if (retries <= maxRetries) {
-        _messageRetryCount[messageIdHex] = retries;
-        onRetryNeeded?.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
-      } else {
-        _log.info('ACK retry limit ($retries/$maxRetries) reached for $msgShort — '
-            'triggering offline cascade');
+      // When onRetryNeeded is unwired (V3: no per-timeout re-send), skip
+      // the retry counter and trigger exhaustion immediately — the entry
+      // is already removed from _pending, so no further timeouts will fire.
+      if (onRetryNeeded == null) {
         _messageRetryCount.remove(messageIdHex);
+        _log.info('ACK exhausted for $msgShort (no retry handler) — '
+            'triggering offline cascade');
         onRetryExhausted?.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
+      } else {
+        final retryCallback = onRetryNeeded;
+        final retries = (_messageRetryCount[messageIdHex] ?? 0) + 1;
+        final maxRetries = _computeMaxRetries(entry.recipientUserIdHex);
+        if (retries <= maxRetries && retryCallback != null) {
+          _messageRetryCount[messageIdHex] = retries;
+          retryCallback.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
+        } else {
+          _log.info('ACK retry limit ($retries/$maxRetries) reached for $msgShort — '
+              'triggering offline cascade');
+          _messageRetryCount.remove(messageIdHex);
+          onRetryExhausted?.call(entry.messageIdHex, entry.serializedPacket!, entry.recipientUserId!);
+        }
       }
     }
   }

@@ -623,9 +623,16 @@ class CleonaNode {
     // re-send via alternative DV routes (the cascade handles offline delivery).
     ackTracker.onRetryExhausted =
         (messageIdHex, serializedPacket, recipientUserId) {
+      // Fire-and-forget: service handler is async but errors are
+      // handled internally (outbox fallback on L3 failure).
       onMessageRetryExhausted?.call(
           messageIdHex, serializedPacket, recipientUserId);
     };
+
+    // onRetryNeeded (per-timeout intermediate retries) is intentionally
+    // unwired. V3 relies on the outbox for crash-safety and the exhaustion
+    // callback for Layer 3 offline placement. Per-timeout re-sends would
+    // waste bandwidth on routes already proven broken.
 
     // Wire Route-Down: 3x ACK timeout → surgical DV markRouteDown → Poison Reverse
     // V3.1: Only the specific route (via nextHop) is marked down, not all routes.
