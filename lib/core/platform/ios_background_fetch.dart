@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
+import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/sender_identity_snapshot.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -21,6 +21,7 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 /// NO APNs, NO Firebase, NO push -- pure OS-controlled pull.
 class IosBackgroundFetch {
   static const _channel = MethodChannel('cleona/background_fetch');
+  static final _log = CLogger.get('ios-bg', profileDir: '${AppPaths.home}/.cleona');
 
   /// Whether a background fetch is currently in progress.
   static bool _isFetching = false;
@@ -30,7 +31,7 @@ class IosBackgroundFetch {
   /// handler for incoming `performBackgroundFetch` calls from the native side.
   static void init() {
     _channel.setMethodCallHandler(_handleMethodCall);
-    debugPrint('[ios-bg-fetch] MethodChannel handler registered');
+    _log.info('MethodChannel handler registered');
   }
 
   /// Schedule the next background fetch via the native side.
@@ -38,9 +39,9 @@ class IosBackgroundFetch {
   static Future<void> scheduleBackgroundFetch() async {
     try {
       await _channel.invokeMethod('scheduleBackgroundFetch');
-      debugPrint('[ios-bg-fetch] Scheduled background fetch');
+      _log.info('Scheduled background fetch');
     } catch (e) {
-      debugPrint('[ios-bg-fetch] Failed to schedule: $e');
+      _log.warn('Failed to schedule: $e');
     }
   }
 
@@ -48,9 +49,9 @@ class IosBackgroundFetch {
   static Future<void> cancelBackgroundFetch() async {
     try {
       await _channel.invokeMethod('cancelBackgroundFetch');
-      debugPrint('[ios-bg-fetch] Cancelled background fetch');
+      _log.info('Cancelled background fetch');
     } catch (e) {
-      debugPrint('[ios-bg-fetch] Failed to cancel: $e');
+      _log.warn('Failed to cancel: $e');
     }
   }
 
@@ -88,7 +89,7 @@ class IosBackgroundFetch {
     String taskType = 'refresh',
   }) async {
     if (_isFetching) {
-      debugPrint('[ios-bg-fetch] Already fetching, returning empty');
+      _log.info('Already fetching, returning empty');
       return {'messageCount': 0, 'senderNames': <String>[], 'previews': <String>[]};
     }
 
@@ -96,10 +97,10 @@ class IosBackgroundFetch {
     final peerContactBudget = isProcessing ? 10 : 3;
     // BGProcessingTask gives minutes; BGAppRefreshTask ~30s (20s effective).
     final waitSeconds = isProcessing ? 120 : 20;
+    final sw = Stopwatch()..start();
 
     _isFetching = true;
-    debugPrint('[ios-bg-fetch] Starting background fetch '
-        '(type=$taskType, peerBudget=$peerContactBudget, wait=${waitSeconds}s)...');
+    _log.info('BG-WAKEUP START type=$taskType peerBudget=$peerContactBudget wait=${waitSeconds}s');
 
     CleonaNode? node;
     final services = <CleonaService>[];
@@ -110,7 +111,7 @@ class IosBackgroundFetch {
       final mgr = IdentityManager();
       final identities = mgr.loadIdentities();
       if (identities.isEmpty) {
-        debugPrint('[ios-bg-fetch] No identities, aborting');
+        _log.warn('BG-WAKEUP ABORT no identities');
         return {'messageCount': 0, 'senderNames': <String>[], 'previews': <String>[]};
       }
 
@@ -151,7 +152,7 @@ class IosBackgroundFetch {
       }
 
       await node.startQuick();
-      debugPrint('[ios-bg-fetch] Node started on port ${firstId.port}');
+      _log.info('Node started on port ${firstId.port}');
 
       // Step 3-5: Create services and poll for messages.
       // Track message counts before and after polling.
@@ -199,7 +200,7 @@ class IosBackgroundFetch {
 
       // BGAppRefreshTask: ~30s window → 20s for messages, rest for state save.
       // BGProcessingTask: minutes-long window → 120s for broader peer contact.
-      debugPrint('[ios-bg-fetch] Waiting for message retrieval (${waitSeconds}s)...');
+      _log.debug('Waiting ${waitSeconds}s for message retrieval...');
       await Future<void>.delayed(Duration(seconds: waitSeconds));
 
       // Step 6: Collect new messages
@@ -226,16 +227,20 @@ class IosBackgroundFetch {
         }
       }
 
-      debugPrint('[ios-bg-fetch] Found ${newMessages.length} new message(s)');
-
       // Step 7: Persist state
       for (final service in services) {
         service.saveState();
       }
       node.saveNetworkState();
 
+      sw.stop();
+      final peers = node.routingTable.allPeers.length;
+      _log.info('BG-WAKEUP DONE type=$taskType duration=${sw.elapsedMilliseconds}ms '
+          'messages=${newMessages.length} peers=$peers');
+
     } catch (e, stack) {
-      debugPrint('[ios-bg-fetch] Error: $e\n$stack');
+      sw.stop();
+      _log.error('BG-WAKEUP FAIL type=$taskType duration=${sw.elapsedMilliseconds}ms error=$e\n$stack');
     } finally {
       // Step 8: Clean shutdown
       for (final service in services) {
@@ -249,7 +254,7 @@ class IosBackgroundFetch {
         } catch (_) {}
       }
       _isFetching = false;
-      debugPrint('[ios-bg-fetch] Background fetch complete');
+      await CLogger.flushAll();
     }
 
     // Step 9: Return results to native side (native handles scheduling + notifications)
