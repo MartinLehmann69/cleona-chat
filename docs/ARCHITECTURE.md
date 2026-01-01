@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:d10d2536648e, 2026-07-14). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a9520ed50f82, 2026-07-15). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7186,7 +7186,7 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 3. If true, `UpdateRequiredScreen` is rendered as the initial route, before the normal `MaterialApp` shell. The screen shows:
    - Title: `t('update_required_title')`
    - Body: `t(manifest.minRequiredReason)` (i18n in 34 locales)
-   - Primary button: attempts In-Network Update first (§19.6.2), falls back to `manifest.downloadUrl` externally (browser / Play Store)
+   - Update banner: rendered globally via `AppBarScaffold` (visible on all screens: home, settings, chat, contacts, calendar, event editor), not only on the home screen. Tapping the banner text starts the In-Network Update (§19.6.2); a download button and a dismiss button (session-scoped) are shown alongside. Play Store installs are excluded — Android enforces signature consistency, so Play Store users receive updates through the store mechanism only (see §19.6.4).
    - Secondary link: "Open anyway (limited)" → enters Reduced-Mode
 
 **Reduced-Mode semantics (`CleonaService._reducedMode = true`):**
@@ -7242,7 +7242,7 @@ The update manifest must be signed with the **Ed25519 maintainer private key**. 
 | Protection | What it prevents |
 |---|---|
 | Manifest signature (maintainer key) | No node accepts an unsigned or incorrectly signed manifest — dev builds without signature trigger no update |
-| Integrated release pipeline (`release-build.sh` calls `sign-update-manifest.sh` + `publish-in-network-update.sh`) | Automated within the 5-script release pipeline, but only after human-approved code push (step 4 requires interactive `JA-PUSH` approval) — the manifest is signed and fragments are seeded to the local daemon and the bootstrap node (via SSH + SCP) as step 7/8 of `release-build.sh` |
+| Integrated release pipeline (`release-build.sh` calls `sign-update-manifest.sh` + `publish-in-network-update.sh`) | Automated within the 5-script release pipeline, but only after human-approved code push (step 4 requires interactive `JA-PUSH` approval) — the manifest is signed and fragments are seeded to the local daemon and the bootstrap node as step 7/8 of `release-build.sh`. Bootstrap deployment follows a strict sequence: stop daemon → deploy new binary + manifest → restart daemon → wait for socket → seed fragments. This guarantees the bootstrap always runs the release version before seeding begins. **IPC event filtering (V3.1.139):** `publish-in-network-update.sh` filters `state_changed` events on the IPC socket and waits for the response matching the request ID — pre-fix, long-running `seed_binary` calls (~30s for large binaries) were silently broken by interleaved daemon events. |
 | Beta/Live network separation (§19.5.6) | Different network secrets = different DHT tags — beta updates never reach the live network |
 | Monotone sequence number (`minMonotoneSeq`) | Prevents downgrade attacks via replayed old manifests. Each new release increments the sequence; nodes reject manifests with equal or lower sequence than the highest seen |
 | Windows code integrity gate (`release-build.sh`: tag checkout + SHA verification) | Prevents building from stale or modified code on the Windows VM — `git fetch --tags && git checkout --force <TAG>`, verified by `git rev-parse HEAD == TAG_SHA` (from `.push-completed` marker) before build starts; hard fail on mismatch (no warn-and-continue) |
@@ -7265,7 +7265,7 @@ Higher N means more fragments must be distributed, but each fragment is small en
 
 | Node type | Budget | What it holds |
 |---|---|---|
-| **Bootstrap** (early phase only) | All platforms, complete | Primary download source during network bootstrap. Seeded automatically by `release-build.sh` (SSH + SCP + remote `publish-in-network-update.sh`). This role is relinquished once sufficient fragment coverage exists across regular nodes. |
+| **Bootstrap** (early phase only) | All platforms, complete | Initial seed source that guarantees full fragment coverage while the network is still small. Updated automatically by `release-build.sh`: new binary replaces the running daemon (stop → deploy → restart), manifest is copied to `~/.cleona/update_manifest.json`, then `publish-in-network-update.sh` seeds fragments into the fresh daemon. Once enough regular nodes hold fragments via distributed erasure coding (the primary distribution vector), the bootstrap's role becomes redundant. |
 | **Desktop node** | Max. 20 MB | ~6-8 fragments of own platform + optionally other platforms |
 | **Mobile node** | Max. 5 MB | 1-2 fragments of own platform |
 

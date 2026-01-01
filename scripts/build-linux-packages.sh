@@ -23,7 +23,7 @@ HOMEPAGE="https://github.com/MartinLehmann69/cleona-chat"
 SRC_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BUNDLE_DIR="$SRC_DIR/build/linux/x64/release/bundle"
 OUTPUT_DIR="$SRC_DIR/build/packages"
-ICON_PATH="$SRC_DIR/assets/icon/cleona_icon.png"
+ICON_PATH="$SRC_DIR/assets/app_icon.png"
 
 # Pruefen ob Flutter-Bundle existiert
 if [ ! -d "$BUNDLE_DIR" ]; then
@@ -53,7 +53,7 @@ Icon=cleona-chat
 Categories=Network;InstantMessaging;Chat;
 Keywords=messenger;chat;p2p;encrypted;quantum;
 Terminal=false
-StartupWMClass=cleona
+StartupWMClass=chat.cleona.cleona
 MimeType=x-scheme-handler/cleona;
 EOF
 }

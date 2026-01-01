@@ -9,7 +9,13 @@
 //
 // Reference: docs/design/skins-final-browser-preview.html
 
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:cleona/main.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/luminance.dart';
 import 'package:cleona/ui/theme/skin_surface.dart';
@@ -60,6 +66,7 @@ class AppBarScaffold extends StatelessWidget {
                 leading: leading,
                 actions: actions,
               ),
+              const _GlobalUpdateBanner(),
               Expanded(
                 child: SafeArea(
                   top: false,
@@ -194,6 +201,118 @@ class _HeaderRow extends StatelessWidget {
             IconTheme(data: IconThemeData(color: fg), child: Row(children: actions!)),
         ],
       ),
+    );
+  }
+}
+
+class _GlobalUpdateBanner extends StatelessWidget {
+  const _GlobalUpdateBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.watch<CleonaAppState>();
+    final manifest = appState.availableUpdateManifest;
+    if (manifest == null || appState.updateBannerDismissed ||
+        appState.service?.reducedMode == true) {
+      return const SizedBox.shrink();
+    }
+
+    final locale = AppLocale.read(context);
+    final state = appState.updateState;
+    final progress = appState.updateProgress;
+    final cs = Theme.of(context).colorScheme;
+
+    return GestureDetector(
+      onTap: state == BinaryUpdateState.idle
+          ? appState.startInNetworkUpdate
+          : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        color: cs.primaryContainer,
+        child: Row(
+          children: [
+            Expanded(child: _content(state, progress, manifest, locale, cs)),
+            if (state == BinaryUpdateState.idle ||
+                state == BinaryUpdateState.failed ||
+                state == BinaryUpdateState.ready)
+              _actionButton(appState, state, locale, cs),
+            if (state == BinaryUpdateState.idle)
+              IconButton(
+                icon: Icon(Icons.close, size: 18, color: cs.onPrimaryContainer),
+                visualDensity: VisualDensity.compact,
+                onPressed: appState.dismissUpdateBanner,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _content(BinaryUpdateState state, double progress,
+      UpdateManifest manifest, AppLocale locale, ColorScheme cs) {
+    switch (state) {
+      case BinaryUpdateState.idle:
+        return Text(
+          '${locale.get('update_available_title')}: v${manifest.version}',
+          style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13),
+        );
+      case BinaryUpdateState.checking:
+        return Row(children: [
+          const SizedBox(width: 80, child: LinearProgressIndicator()),
+          const SizedBox(width: 8),
+          Text(locale.get('update_verifying'),
+              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+        ]);
+      case BinaryUpdateState.downloading:
+      case BinaryUpdateState.assembling:
+      case BinaryUpdateState.verifying:
+        final label = state == BinaryUpdateState.downloading
+            ? locale.get('update_downloading')
+            : state == BinaryUpdateState.assembling
+                ? locale.get('update_assembling')
+                : locale.get('update_verifying');
+        final indeterminate = progress <= 0 || progress >= 1;
+        return Row(children: [
+          SizedBox(
+            width: 80,
+            child: indeterminate
+                ? const LinearProgressIndicator()
+                : LinearProgressIndicator(value: progress),
+          ),
+          const SizedBox(width: 8),
+          Text(indeterminate ? '$label...' : '$label ${(progress * 100).toInt()}%',
+              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+        ]);
+      case BinaryUpdateState.ready:
+        return const SizedBox.shrink();
+      case BinaryUpdateState.failed:
+        return Text(locale.get('update_failed'),
+            style: TextStyle(color: cs.error, fontSize: 13));
+    }
+  }
+
+  Widget _actionButton(CleonaAppState appState, BinaryUpdateState state,
+      AppLocale locale, ColorScheme cs) {
+    if (state == BinaryUpdateState.ready) {
+      final label = Platform.isAndroid
+          ? locale.get('update_ready_install')
+          : locale.get('update_ready_restart');
+      return TextButton(
+        onPressed: appState.applyUpdate,
+        child: Text(label, style: TextStyle(color: cs.onPrimaryContainer)),
+      );
+    }
+    if (state == BinaryUpdateState.failed) {
+      return TextButton(
+        onPressed: appState.startInNetworkUpdate,
+        child: Text(locale.get('update_retry'),
+            style: TextStyle(color: cs.onPrimaryContainer)),
+      );
+    }
+    return TextButton(
+      onPressed: appState.startInNetworkUpdate,
+      child: Text(locale.get('update_download'),
+          style: TextStyle(color: cs.onPrimaryContainer)),
     );
   }
 }

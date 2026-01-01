@@ -39,9 +39,20 @@ Terminal=false
 Categories=Network;Chat;InstantMessaging;
 Keywords=chat;messenger;p2p;encryption;
 StartupNotify=true
-StartupWMClass=cleona
+StartupWMClass=chat.cleona.cleona
 EOF
 chmod +x "$DESKTOP_DIR/cleona.desktop"
+
+# Install icon into hicolor theme so DEs resolve it by name ("cleona")
+ICON_THEME_DIR="$HOME/.local/share/icons/hicolor"
+for SIZE in 48 128 256; do
+  mkdir -p "$ICON_THEME_DIR/${SIZE}x${SIZE}/apps"
+done
+ICON_SRC_DIR="$APP_DIR/data/flutter_assets/assets"
+[ -f "$ICON_SRC_DIR/icon_48.png" ] && cp "$ICON_SRC_DIR/icon_48.png" "$ICON_THEME_DIR/48x48/apps/cleona.png"
+[ -f "$ICON_SRC_DIR/icon_128.png" ] && cp "$ICON_SRC_DIR/icon_128.png" "$ICON_THEME_DIR/128x128/apps/cleona.png"
+[ -f "$ICON_SRC_DIR/app_icon.png" ] && cp "$ICON_SRC_DIR/app_icon.png" "$ICON_THEME_DIR/256x256/apps/cleona.png"
+gtk-update-icon-cache "$ICON_THEME_DIR" 2>/dev/null || true
 
 for DIR in "$HOME/Desktop" "$HOME/Schreibtisch"; do
   if [ -d "$DIR" ]; then

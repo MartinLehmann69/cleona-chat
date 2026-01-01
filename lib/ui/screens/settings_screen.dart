@@ -43,10 +43,7 @@ class SettingsScreen extends StatelessWidget {
         trailing: Icon(Icons.system_update,
             size: 20,
             color: Theme.of(context).colorScheme.primary),
-        onTap: () {
-          appState.undismissUpdateBanner();
-          Navigator.pop(context);
-        },
+        onTap: () => appState.undismissUpdateBanner(),
       );
     }
     return SectionRow(

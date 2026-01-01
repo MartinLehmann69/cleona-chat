@@ -76,7 +76,10 @@ static void my_application_activate(GApplication* application) {
 
   gtk_window_set_default_size(window, 1280, 720);
 
-  // Set window icon from bundled asset (prefer beta variant if present)
+  // Set window icon from bundled asset (prefer beta variant if present).
+  // Also set the default icon name so the DE can find it via the icon theme
+  // even without a .desktop match (e.g. WM_CLASS lookup fallback).
+  gtk_window_set_default_icon_name("cleona");
   {
     g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", NULL);
     if (exe_path != NULL) {

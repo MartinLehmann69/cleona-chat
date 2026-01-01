@@ -18,6 +18,14 @@
 #                              chat.cleona.cleona, named "Cleona App Store" (the name
 #                              referenced in ios/ExportOptions.plist). A Development or
 #                              Ad-Hoc profile will NOT work for TestFlight upload.
+#
+# Parallelization (S206):
+#   - iOS + macOS jobs run on separate runners in parallel
+#   - Within each job, native lib compilation runs in the background while
+#     Flutter setup, pub get, and pod install (iOS) / flutter build (macOS)
+#     run in the foreground — no idle wait during the ~30min native builds
+#   - iOS no longer uses a separate native-libs job (eliminated artifact
+#     upload/download overhead + runner provisioning delay)
 ###############################################################################
 name: Apple Build (iOS + macOS)
 
@@ -55,10 +63,10 @@ env:
 
 jobs:
   # ════════════════════════════════════════════════════════════════
-  #  iOS Pipeline
+  #  iOS Pipeline (native libs + IPA in one job, parallelized)
   # ════════════════════════════════════════════════════════════════
-  build-ios-native-libs:
-    name: iOS — Native Libraries
+  build-ios:
+    name: iOS — Build IPA & TestFlight
     if: github.event.inputs.platform != 'macos'
     runs-on: macos-26
     steps:
@@ -74,43 +82,46 @@ jobs:
           key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
           restore-keys: ios-native-libs-
 
-      - name: Build all native libs
-        run: ./scripts/build-ios-libs.sh
-        timeout-minutes: 45
-
-      - name: Upload XCFrameworks
-        uses: actions/upload-artifact@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
         with:
-          name: ios-xcframeworks
-          path: build/ios-frameworks/
-          retention-days: 7
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
 
-  build-ipa:
-    name: iOS — Build IPA & TestFlight
-    needs: build-ios-native-libs
-    if: github.event.inputs.platform != 'macos'
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v4
+      - name: Build native libs + Flutter setup (parallel)
+        timeout-minutes: 50
+        run: |
+          # ── Native libs in background (the long-running part) ──
+          ./scripts/build-ios-libs.sh > /tmp/ios-native-build.log 2>&1 &
+          NATIVE_PID=$!
+          echo "Native libs building in background (PID: $NATIVE_PID)"
 
-      - name: Download XCFrameworks
-        uses: actions/download-artifact@v4
-        with:
-          name: ios-xcframeworks
-          path: build/ios-frameworks/
+          # ── Flutter + CocoaPods in foreground (independent of native libs) ──
+          echo "::group::Flutter pub get"
+          flutter pub get
+          echo "::endgroup::"
+
+          echo "::group::CocoaPods install"
+          cd ios && pod install --repo-update && cd ..
+          echo "::endgroup::"
+
+          # ── Wait for native libs ──
+          echo "Waiting for native libs build to finish..."
+          if ! wait $NATIVE_PID; then
+            echo "::error::Native libs build failed"
+            echo "::group::Native libs build log (last 200 lines)"
+            tail -200 /tmp/ios-native-build.log
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "Native libs build complete"
 
       - name: Place merged archives for Podfile
         run: |
-          # The build script creates libcleona_all.xcframework with device and
-          # simulator slices. Extract the .a files into ios/CleonaNative/ where
-          # the Podfile post_install hook expects them.
           NATIVE_DIR="ios/CleonaNative"
           XCFW="build/ios-frameworks/libcleona_all.xcframework"
 
-          # XCFramework directory structure:
-          #   ios-arm64/libcleona_all.a          (device)
-          #   ios-arm64_x86_64-simulator/...     (simulator, if built)
-          # The directory names may vary; find them by platform.
           if [ -d "$XCFW" ]; then
             for slice_dir in "$XCFW"/ios-arm64*; do
               A="$slice_dir/libcleona_all.a"
@@ -125,14 +136,12 @@ jobs:
             done
           fi
 
-          # Also check if build script already placed them directly
           for f in libcleona_all_device.a libcleona_all_simulator.a; do
             if [ -f "$NATIVE_DIR/$f" ]; then
               echo "Found: $NATIVE_DIR/$f ($(du -h "$NATIVE_DIR/$f" | cut -f1))"
             fi
           done
 
-          # Verify at least the device archive exists (required for IPA)
           if [ ! -f "$NATIVE_DIR/libcleona_all_device.a" ]; then
             echo "ERROR: libcleona_all_device.a not found — native libs will not be linked!"
             echo "Contents of $XCFW:"
@@ -141,21 +150,6 @@ jobs:
             ls -la "$NATIVE_DIR/"
             exit 1
           fi
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_VERSION }}
-          channel: stable
-          cache: true
-
-      - name: Flutter dependencies
-        run: flutter pub get
-
-      - name: Install CocoaPods
-        run: |
-          cd ios
-          pod install --repo-update
 
       - name: Verify native archives
         run: |
@@ -321,7 +315,7 @@ jobs:
         run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
 
   # ════════════════════════════════════════════════════════════════
-  #  macOS Pipeline (runs in parallel with iOS)
+  #  macOS Pipeline (runs in parallel with iOS on separate runner)
   # ════════════════════════════════════════════════════════════════
   build-macos:
     name: macOS — Build & Notarize
@@ -340,19 +334,12 @@ jobs:
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
           restore-keys: macos-native-libs-
 
-      - name: Build native dylibs
-        run: ./scripts/build-macos-libs.sh --arch arm64
-        timeout-minutes: 30
-
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
-
-      - name: Flutter dependencies
-        run: flutter pub get
 
       - name: Determine channel
         id: channel
@@ -362,16 +349,41 @@ jobs:
           CHANNEL="${INPUT_CHANNEL:-beta}"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Build macOS app
+      - name: Build native libs + Flutter app (parallel)
+        timeout-minutes: 35
         env:
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
+          # ── Native libs in background (the long-running part) ──
+          ./scripts/build-macos-libs.sh --arch arm64 > /tmp/macos-native-build.log 2>&1 &
+          NATIVE_PID=$!
+          echo "Native libs building in background (PID: $NATIVE_PID)"
+
+          # ── Flutter build in foreground (independent of native dylibs) ──
+          echo "::group::Flutter pub get"
+          flutter pub get
+          echo "::endgroup::"
+
+          echo "::group::Build macOS app"
           BUILD_MODE="--debug"
           if [ "$BUILD_CHANNEL" = "live" ]; then BUILD_MODE="--release"; fi
           flutter build macos $BUILD_MODE --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
+          echo "::endgroup::"
 
-      - name: Compile daemon
-        run: dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+          echo "::group::Compile daemon"
+          dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+          echo "::endgroup::"
+
+          # ── Wait for native libs ──
+          echo "Waiting for native libs build to finish..."
+          if ! wait $NATIVE_PID; then
+            echo "::error::Native libs build failed"
+            echo "::group::Native libs build log (last 200 lines)"
+            tail -200 /tmp/macos-native-build.log
+            echo "::endgroup::"
+            exit 1
+          fi
+          echo "Native libs build complete"
 
       - name: Assemble app bundle
         env:
@@ -388,9 +400,6 @@ jobs:
             cp "$f" "$FRAMEWORKS/"
           done
 
-          # Deploy gate: call audio needs the miniaudio/speexdsp shim in the
-          # bundle (audio_engine_shim.dart loads it from Contents/Frameworks).
-          # Fail the build instead of shipping a silently audio-less app.
           if [ ! -f "$FRAMEWORKS/cleona_audio.dylib" ]; then
             echo "::error::cleona_audio.dylib missing from Contents/Frameworks — calls would have no audio"
             exit 1

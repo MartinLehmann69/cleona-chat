@@ -105,28 +105,30 @@ class SectionRow {
               value: toggle!,
               onChanged: onToggleChanged,
             )
-          else if (trailing != null)
-            trailing!
-          else if (value != null)
-            Flexible(
-              // Problem 1 (S119): values on rows without onTap must be
-              // natively selectable (long-press) — IPs, IDs, versions.
-              child: onTap == null
-                  ? SelectableText(
-                      value!,
-                      style: tokens.typography.mono.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+          else ...[
+            if (value != null)
+              Flexible(
+                child: onTap == null
+                    ? SelectableText(
+                        value!,
+                        style: tokens.typography.mono.copyWith(
+                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                        ),
+                        textAlign: TextAlign.end,
+                      )
+                    : Text(
+                        value!,
+                        style: tokens.typography.mono.copyWith(
+                          color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                        ),
+                        textAlign: TextAlign.end,
                       ),
-                      textAlign: TextAlign.end,
-                    )
-                  : Text(
-                      value!,
-                      style: tokens.typography.mono.copyWith(
-                        color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
-                      ),
-                      textAlign: TextAlign.end,
-                    ),
-            ),
+              ),
+            if (trailing != null) ...[
+              if (value != null) SizedBox(width: tokens.spacing.sm),
+              trailing!,
+            ],
+          ],
         ],
       ),
     );

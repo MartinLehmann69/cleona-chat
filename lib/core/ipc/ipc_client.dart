@@ -709,6 +709,21 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       }
     }
 
+    // Catch up on pending update state from daemon
+    final manifestData = state['updateManifest'] as Map<String, dynamic>?;
+    if (manifestData != null) {
+      final manifest = UpdateManifest.fromJson(manifestData);
+      if (manifest != null) {
+        final stateIdx = state['updateState'] as int? ?? 0;
+        final progress = (state['updateProgress'] as num?)?.toDouble() ?? 0.0;
+        final inNetwork = stateIdx >= BinaryUpdateState.downloading.index;
+        onUpdateAvailable?.call(manifest, inNetwork);
+        if (stateIdx >= 0 && stateIdx < BinaryUpdateState.values.length) {
+          onUpdateStateChanged?.call(BinaryUpdateState.values[stateIdx], progress);
+        }
+      }
+    }
+
     // Update conversations
     final convMap = state['conversations'] as Map<String, dynamic>?;
     if (convMap != null) {

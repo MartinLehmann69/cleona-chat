@@ -475,7 +475,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.139';
+  static const String kCurrentAppVersion = '3.1.144';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1220,6 +1220,35 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (cached != null) _latestManifest = cached;
       }
     } catch (_) {}
+    // Startup scan: check mailbox store for manifest fragments that were
+    // stored but never processed (e.g. handler failed after store, crash,
+    // or duplicate-identical race). Process any that are newer than cache.
+    try {
+      final dhtKey = UpdateManifest.dhtKey();
+      final storedFrags = mailboxStore.retrieveFragments(dhtKey);
+      if (storedFrags.isNotEmpty) {
+        final checker = UpdateChecker(log: _log);
+        for (final frag in storedFrags) {
+          try {
+            final json = utf8.decode(frag.data);
+            final m = checker.verifyManifest(json);
+            if (m == null) continue;
+            if (_latestManifest == null ||
+                checker.isNewer(m.version, _latestManifest!.version)) {
+              _latestManifest = m;
+              try {
+                final cacheFile = File(
+                    '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
+                cacheFile.parent.createSync(recursive: true);
+                cacheFile.writeAsStringSync(json, flush: true);
+              } catch (_) {}
+              _log.info('[update] Startup scan: found stored manifest '
+                  'v${m.version} (promoted from mailbox store)');
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
     // If the cached manifest is already newer than the running version,
     // fire the notification directly after a short delay (UI is ready by
     // then). This bypasses checkForUpdate() intentionally — the monotoneSeq
@@ -1435,11 +1464,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final mailboxId = Uint8List.fromList(frag.mailboxId);
       if (_isOurMailbox(mailboxId)) {
         _tryReassemble(Uint8List.fromList(frag.messageId));
-      } else if (storeResult == FragmentStoreResult.stored) {
+      } else {
         if (constantTimeEquals(mailboxId, UpdateManifest.dhtKey())) {
           _handleIncomingManifestFragment(frag);
         }
-        _proactivePush(frag, mailboxId);
+        if (storeResult == FragmentStoreResult.stored) {
+          _proactivePush(frag, mailboxId);
+        }
       }
     } catch (e) {
       _log.debug('Fragment store error: $e');
@@ -8691,6 +8722,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       'userEd25519PkB64': base64Encode(userEd25519Pk),
       // SR-2: founding anchor (== userEd25519Pk for never-rotated identities).
       'foundingEd25519PkB64': base64Encode(foundingEd25519Pk),
+      if (_latestManifest != null &&
+          UpdateChecker().isNewer(_latestManifest!.version, kCurrentAppVersion))
+        'updateManifest': _latestManifest!.toJson(),
+      if (_binaryUpdateManager != null) ...{
+        'updateState': _binaryUpdateManager!.state.index,
+        'updateProgress': _binaryUpdateManager!.progress,
+        'updateTargetVersion': _binaryUpdateManager!.targetVersion,
+      },
     };
   }
 
@@ -8706,7 +8745,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       rttMap: node.dhtRpc.rttMap,
       isRunning: isRunning,
       profileDir: profileDir,
-      reachablePeerCount: node.confirmedPeerIds.length,
+      reachablePeerCount: node.reachablePeerIds.length,
       // D5 (§13.1.3): collective-quota observability.
       poolDropsRate: node.rateLimiter.poolDroppedPackets,
       poolDropsRelay: node.relayPoolDrops,
@@ -10908,82 +10947,93 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Check collected fragments after a delay
     Timer(const Duration(seconds: 8), () async {
       final localFrags = mailboxStore.retrieveFragments(dhtKey);
-      if (localFrags.isEmpty) return;
+      if (localFrags.isEmpty) {
+        _log.debug('[update] Poll returned 0 manifest fragments');
+        return;
+      }
 
-      // The manifest is small enough to be stored as a single fragment
-      // (or the first fragment contains the complete JSON).
       try {
-        final data = localFrags.first.data;
-        final jsonData = utf8.decode(data);
-        final manifest = checker.verifyManifest(jsonData);
-        if (manifest == null) return;
+        UpdateManifest? best;
+        Uint8List? bestData;
+        String? bestJson;
+        for (final frag in localFrags) {
+          try {
+            final json = utf8.decode(frag.data);
+            final m = checker.verifyManifest(json);
+            if (m == null) continue;
+            if (best == null || checker.isNewer(m.version, best.version)) {
+              best = m;
+              bestData = frag.data;
+              bestJson = json;
+            }
+          } catch (_) {}
+        }
+        if (best == null || bestData == null || bestJson == null) return;
 
-        _log.info('Update manifest verified: v${manifest.version}');
+        _log.info('[update] Poll: best manifest v${best.version} '
+            '(from ${localFrags.length} fragments)');
 
         final prev = _latestManifest;
-        if (prev != null && !checker.isNewer(manifest.version, prev.version)) {
-          _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
-          // Re-push our own newer manifest to heal DHT pollution.
-          if (checker.isNewer(prev.version, manifest.version)) {
+        if (prev != null && !checker.isNewer(best.version, prev.version)) {
+          _log.debug('[update] No update available '
+              '(manifest: v${best.version}, current: v$currentAppVersion)');
+          if (checker.isNewer(prev.version, best.version)) {
             final prevJson = utf8.encode(jsonEncode(prev.toJson()));
             _pushManifestToPeers(Uint8List.fromList(prevJson));
           }
           return;
         }
 
-        _latestManifest = manifest;
-        // Sec H-5 (V3.1.72) / T13: persist verified manifest so that the next
-        // startup of `lib/main.dart` can apply the hard-block check before
-        // services initialize. Best-effort — IO errors must not break the poll.
+        _latestManifest = best;
         try {
           final cacheFile = File('${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
           cacheFile.parent.createSync(recursive: true);
-          cacheFile.writeAsStringSync(jsonData, flush: true);
+          cacheFile.writeAsStringSync(bestJson, flush: true);
         } catch (e) {
           _log.debug('Failed to cache update manifest: $e');
         }
-        final isNewer = checker.isNewer(manifest.version, currentAppVersion);
+        final isNewer = checker.isNewer(best.version, currentAppVersion);
 
         if (isNewer) {
-          _log.info('Update available: v${manifest.version} (current: v$currentAppVersion)');
+          _log.info('[update] Update available: v${best.version} '
+              '(current: v$currentAppVersion)');
 
-          final isHardBlock = checker.isHardBlocked(manifest, currentAppVersion);
-          final hasDhtTag = manifest.dhtBinaryTag
+          final isHardBlock = checker.isHardBlocked(best, currentAppVersion);
+          final hasDhtTag = best.dhtBinaryTag
                   ?.containsKey(Platform.operatingSystem) ??
               false;
-          final hasBinHash = manifest.binaryHashes
+          final hasBinHash = best.binaryHashes
                   ?.containsKey(Platform.operatingSystem) ??
               false;
           if (!isHardBlock && !hasDhtTag && !hasBinHash) {
-            _log.debug('Suppressing soft-update notification: '
+            _log.debug('[update] Suppressing soft-update notification: '
                 'no binary for ${Platform.operatingSystem}');
           } else {
             var inNetworkAvailable = false;
             if ((hasDhtTag || hasBinHash) && _binaryUpdateManager != null) {
               try {
                 inNetworkAvailable = await _binaryUpdateManager!
-                    .checkForUpdate(manifest, currentAppVersion, Platform.operatingSystem);
+                    .checkForUpdate(best, currentAppVersion, Platform.operatingSystem);
                 if (inNetworkAvailable) {
-                  _log.info('In-network update available for '
-                      '${Platform.operatingSystem}: v${manifest.version}');
+                  _log.info('[update] In-network update available for '
+                      '${Platform.operatingSystem}: v${best.version}');
                   _saveInNetworkFlag(true);
                 }
               } catch (e) {
-                _log.debug('In-network update check failed: $e');
+                _log.debug('[update] In-network update check failed: $e');
               }
             }
 
-            onUpdateAvailable?.call(manifest, inNetworkAvailable);
+            onUpdateAvailable?.call(best, inNetworkAvailable);
           }
         } else {
-          _log.debug('No update available (manifest: v${manifest.version}, current: v$currentAppVersion)');
+          _log.debug('[update] No update available '
+              '(manifest: v${best.version}, current: v$currentAppVersion)');
         }
 
-        // Push verified manifest to all peers so nodes that connected
-        // after our startup learn about the update immediately.
-        _pushManifestToPeers(data);
+        _pushManifestToPeers(bestData);
       } catch (e) {
-        _log.debug('Update manifest check failed: $e');
+        _log.debug('[update] Update manifest check failed: $e');
       }
     });
   }
@@ -11243,9 +11293,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _selfPublishManifest() {
     try {
-      final manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest.json';
-      final file = File(manifestPath);
-      if (!file.existsSync()) return;
+      var manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest.json';
+      var file = File(manifestPath);
+      if (!file.existsSync()) {
+        manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json';
+        file = File(manifestPath);
+        if (!file.existsSync()) return;
+      }
       final jsonData = file.readAsStringSync();
       final checker = UpdateChecker(log: _log);
       final manifest = checker.verifyManifest(jsonData);

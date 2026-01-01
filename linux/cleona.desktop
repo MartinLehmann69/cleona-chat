@@ -8,4 +8,4 @@ Terminal=false
 Categories=Network;Chat;InstantMessaging;
 Keywords=chat;messenger;p2p;encryption;
 StartupNotify=true
-StartupWMClass=cleona
+StartupWMClass=chat.cleona.cleona

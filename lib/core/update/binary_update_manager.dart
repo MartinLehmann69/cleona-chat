@@ -14,6 +14,8 @@ import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/install_source.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 
+Uint8List _sha256InIsolate(Uint8List binary) => SodiumFFI().sha256(binary);
+
 /// §19.6 — orchestrates in-network binary updates: checks a verified
 /// [UpdateManifest] against the DHT binary tag, fetches erasure-coded
 /// fragments from peers, assembles + verifies the binary, and hands a
@@ -296,7 +298,7 @@ class BinaryUpdateManager {
   ) async {
     _setState(BinaryUpdateState.verifying, 0.0);
     try {
-      final hash = await Isolate.run(() => SodiumFFI().sha256(binary));
+      final hash = await Isolate.run(() => _sha256InIsolate(binary));
       final hashHex = bytesToHex(hash);
       if (hashHex.toLowerCase() != expectedHash.toLowerCase()) {
         _fail('Hash mismatch: expected=$expectedHash got=$hashHex');
