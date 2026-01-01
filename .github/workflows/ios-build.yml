@@ -289,7 +289,8 @@ jobs:
               distribute_external: true,
               groups: ["CleonaTestUser", "CleonaWeitereTestUser"],
               skip_waiting_for_build_processing: false,
-              notify_external_testers: true
+              notify_external_testers: true,
+              changelog: "Bug fixes and improvements"
             )
           end
           FASTFILE
