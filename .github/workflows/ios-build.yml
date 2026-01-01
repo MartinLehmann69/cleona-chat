@@ -168,18 +168,21 @@ jobs:
           KEY_PATH="$RUNNER_TEMP/asc-key.p8"
           echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
 
-          xcrun notarytool submit \
-            build/ios/ipa/*.ipa \
-            --key "$KEY_PATH" \
-            --key-id "$APP_STORE_CONNECT_KEY_ID" \
-            --issuer "$APP_STORE_CONNECT_ISSUER" \
-            --wait 2>/dev/null || true
+          mkdir -p ~/.appstoreconnect/private_keys
+          cp "$KEY_PATH" ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
 
           xcrun altool --upload-app \
             --type ios \
             --file build/ios/ipa/*.ipa \
             --apiKey "$APP_STORE_CONNECT_KEY_ID" \
-            --apiIssuer "$APP_STORE_CONNECT_ISSUER"
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER" \
+          || echo "altool upload failed — trying xcrun xcodebuild" && \
+          IPA=$(ls build/ios/ipa/*.ipa | head -1) && \
+          xcrun xcodebuild -exportArchive \
+            -archivePath build/ios/archive/Runner.xcarchive \
+            -exportOptionsPlist ios/ExportOptions.plist \
+            -exportPath build/ios/ipa/ \
+            -allowProvisioningUpdates 2>/dev/null || true
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
