@@ -1,9 +1,10 @@
 #
 # CleonaNative — umbrella podspec for prebuilt native C libraries.
 #
-# The static .a files are built by scripts/build-ios-libs.sh and output as
-# XCFrameworks in build/ios-frameworks/. The CI workflow downloads them into
-# ios/CleonaNative/Frameworks/ before pod install.
+# The .a files are linked via -force_load in the Podfile post_install hook.
+# vendored_frameworks is NOT used — it causes duplicate symbols when
+# combined with -force_load, and without -force_load the linker
+# dead-strips symbols that dart:ffi needs at runtime.
 #
 Pod::Spec.new do |s|
   s.name         = 'CleonaNative'
@@ -16,18 +17,7 @@ Pod::Spec.new do |s|
   s.platform     = :ios, '15.5'
   s.static_framework = true
 
-  frameworks_dir = File.join(__dir__, 'Frameworks')
-  xcframeworks = Dir.glob("#{frameworks_dir}/*.xcframework").map { |f|
-    Pathname.new(f).relative_path_from(Pathname.new(__dir__)).to_s
-  }
-
-  if xcframeworks.any?
-    s.vendored_frameworks = xcframeworks
-  end
+  s.source_files = 'CleonaNative.h'
 
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation', 'Accelerate', 'Metal', 'MetalKit'
-
-  s.pod_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-ObjC',
-  }
 end

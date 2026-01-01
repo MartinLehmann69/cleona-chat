@@ -53,19 +53,23 @@ post_install do |installer|
   end
 
   # dart:ffi loads native symbols at runtime via DynamicLibrary.process().
-  # The linker only pulls object files from static archives when they
-  # resolve undefined symbols. Since Dart FFI never references them at
-  # compile time, we use -u (undefined) flags to force the linker to
-  # extract the relevant objects from the vendored .a archives.
-  ffi_symbols = %w[
-    _sodium_init _OQS_version _ZSTD_versionNumber
-    _opus_get_version_string _whisper_print_system_info
-  ]
-  undef_flags = ffi_symbols.map { |s| "-u #{s}" }.join(' ')
-  Dir.glob(File.join(__dir__, 'Pods', 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig|
-    content = File.read(xcconfig)
-    content += "\nOTHER_LDFLAGS = $(inherited) #{undef_flags}\n"
-    File.write(xcconfig, content)
+  # vendored_frameworks is not used (causes duplicate symbols with
+  # -force_load). Instead we inject -force_load for each .a file directly
+  # into the xcconfig. This ensures ALL symbols from each archive are
+  # included in the Runner binary.
+  ffi_libs = %w[libsodium liboqs libzstd libopus libwhisper libggml]
+  fwdir = File.join(__dir__, 'CleonaNative', 'Frameworks')
+  force_flags = ffi_libs.filter_map { |lib|
+    a_path = File.join(fwdir, "#{lib}.xcframework", 'ios-arm64', "#{lib}.a")
+    "-force_load #{a_path}" if File.exist?(a_path)
+  }
+  if force_flags.any?
+    flag_str = force_flags.join(' ')
+    Dir.glob(File.join(__dir__, 'Pods', 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig|
+      content = File.read(xcconfig)
+      content += "\nOTHER_LDFLAGS = $(inherited) #{flag_str}\n"
+      File.write(xcconfig, content)
+    end
+    Pod::UI.puts "Injected -force_load for #{force_flags.length} FFI libraries"
   end
-  Pod::UI.puts "Injected #{ffi_symbols.length} -u flags for FFI symbols into Pods-Runner xcconfigs"
 end
