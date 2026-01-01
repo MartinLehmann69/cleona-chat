@@ -151,18 +151,19 @@ jobs:
       - name: Build iOS Simulator app
         continue-on-error: true
         run: |
-          flutter build ios --simulator --debug --no-codesign 2>&1 || true
-          find build/ios -name "Runner.app" -type d 2>/dev/null
-          echo "---"
-          # Alternative: build via xcodebuild for simulator
           xcodebuild build \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
             -configuration Debug \
-            -destination 'generic/platform=iOS Simulator' \
+            -sdk iphonesimulator \
+            -arch arm64 \
             -derivedDataPath build/ios-sim \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tail -20
+          echo "---"
+          find build/ios-sim -name "Runner.app" -type d 2>/dev/null
+          # Verify executable exists
+          find build/ios-sim -name "Runner" -not -name "*.app" -type f 2>/dev/null | head -3
 
       # ════════════════════════════════════════════════════════════════
       #  Create demo profile
@@ -193,12 +194,14 @@ jobs:
           SCREENSHOTS="build/screenshots/macos"
           mkdir -p "$SCREENSHOTS"
 
-          # Launch the app in background
-          open -a "$APP"
-          echo "App launched, waiting 20s for startup..."
-          sleep 20
+          # Launch the app (use path, not -a which searches by name)
+          open "$APP"
+          echo "App launched, waiting 25s for startup..."
+          sleep 25
 
-          # Check if app is visible
+          # Bring app to front and check visibility
+          osascript -e 'tell application "Cleona" to activate' 2>/dev/null || true
+          sleep 3
           osascript -e 'tell application "System Events" to get name of every process whose visible is true' || true
 
           # Helper function for IPC
@@ -225,15 +228,28 @@ jobs:
           " 2>&1
           }
 
+          # Get the window ID for Cleona app
+          WINID=$(osascript -e 'tell application "System Events" to tell process "Cleona" to get id of window 1' 2>/dev/null || echo "")
+          echo "Window ID: $WINID"
+
+          # Capture function: window if available, else full screen
+          capture() {
+            if [ -n "$WINID" ]; then
+              screencapture -x -l "$WINID" "$1"
+            else
+              screencapture -x "$1"
+            fi
+          }
+
           # Screenshot 1: Home screen (chat list)
-          sleep 5
-          screencapture -x "$SCREENSHOTS/01-home.png"
-          echo "Captured: 01-home.png"
+          sleep 3
+          capture "$SCREENSHOTS/01-home.png"
+          echo "Captured: 01-home.png ($(du -h "$SCREENSHOTS/01-home.png" | cut -f1))"
 
           # Screenshot 2: Settings
           ipc_cmd 1 gui_action '{"action":"open_settings"}'
           sleep 4
-          screencapture -x "$SCREENSHOTS/02-settings.png"
+          capture "$SCREENSHOTS/02-settings.png"
           echo "Captured: 02-settings.png"
 
           # Screenshot 3: Calendar
@@ -241,7 +257,7 @@ jobs:
           sleep 2
           ipc_cmd 3 gui_action '{"action":"open_calendar"}'
           sleep 4
-          screencapture -x "$SCREENSHOTS/03-calendar.png"
+          capture "$SCREENSHOTS/03-calendar.png"
           echo "Captured: 03-calendar.png"
 
           # Screenshot 4: Network stats
@@ -249,7 +265,7 @@ jobs:
           sleep 2
           ipc_cmd 5 gui_action '{"action":"open_network_stats"}'
           sleep 4
-          screencapture -x "$SCREENSHOTS/04-network.png"
+          capture "$SCREENSHOTS/04-network.png"
           echo "Captured: 04-network.png"
 
           # Screenshot 5: Identity detail
@@ -257,7 +273,7 @@ jobs:
           sleep 2
           ipc_cmd 7 gui_action '{"action":"open_identity_detail"}'
           sleep 4
-          screencapture -x "$SCREENSHOTS/05-identity.png"
+          capture "$SCREENSHOTS/05-identity.png"
           echo "Captured: 05-identity.png"
 
           # Kill the app
@@ -282,16 +298,20 @@ jobs:
           xcrun simctl list devices available | grep -i "iphone"
 
           DEVICE=""
-          for model in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 16 Pro" "iPhone 15 Pro"; do
+          for model in "iPhone 17 Pro Max" "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 17 Pro" "iPhone 16 Pro"; do
             DEVICE=$(xcrun simctl list devices available | grep "$model" | head -1 | grep -oE '[A-F0-9-]{36}')
             [ -n "$DEVICE" ] && echo "Selected: $model ($DEVICE)" && break
           done
 
           if [ -z "$DEVICE" ]; then
-            echo "No suitable iPhone simulator found, creating one..."
-            RUNTIME=$(xcrun simctl list runtimes | grep "iOS" | tail -1 | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+')
-            DEVICE=$(xcrun simctl create "iPhone 15 Pro Max" "com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro-Max" "$RUNTIME")
-            echo "Created: $DEVICE"
+            echo "No Pro Max found, trying any large iPhone..."
+            DEVICE=$(xcrun simctl list devices available | grep -i "iphone.*max\|iphone.*pro" | head -1 | grep -oE '[A-F0-9-]{36}')
+          fi
+
+          if [ -z "$DEVICE" ]; then
+            echo "No suitable iPhone simulator found"
+            xcrun simctl list devices available | grep -i iphone
+            exit 0
           fi
 
           echo "Booting simulator $DEVICE..."
