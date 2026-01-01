@@ -4495,51 +4495,10 @@ class CleonaService implements ICleonaService {
     );
     _saveGroups();
 
-    // Send GROUP_INVITE to new member with full member list
-    final invite = proto.GroupInvite()
-      ..groupId = hexToBytes(groupIdHex)
-      ..groupName = group.name
-      ..inviterId = identity.nodeId;
-    for (final m in group.members.values) {
-      invite.members.add(proto.GroupMember()
-        ..nodeId = hexToBytes(m.nodeIdHex)
-        ..displayName = m.displayName
-        ..role = m.role
-        ..ed25519PublicKey = m.ed25519Pk ?? Uint8List(0)
-        ..x25519PublicKey = m.x25519Pk ?? Uint8List(0)
-        ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
-    }
-
-    final inviteBytes = invite.writeToBuffer();
-    var payload = Uint8List.fromList(inviteBytes);
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
-      try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {}
-    }
-
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: payload,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
-    );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.GROUP_INVITE,
-      ciphertext,
-      recipientId: contact.nodeId,
-      compress: false,
-    );
-    envelope.kemHeader = kemHeader;
-    envelope.compression = compression;
-
-    // Fire-and-forget: don't await — invite is best-effort
-    node.sendEnvelope(envelope, contact.nodeId);
+    // Send GROUP_INVITE to new member AND broadcast updated member list to
+    // existing members — otherwise their local state stays stale and they
+    // can't target the new member for role changes, messages, etc.
+    _broadcastGroupUpdate(group);
 
     // System message
     final sysMsg = UiMessage(
@@ -4609,10 +4568,10 @@ class CleonaService implements ICleonaService {
     if (memberNodeIdHex == identity.userIdHex) return false;
 
     if (group != null) {
-      // Permission: owner or admin (admin can't promote to owner or change other admins)
+      // Permission: Owner only. Architecture §10.2: "Owner … appoints Admins".
+      // Admins can invite/remove members + moderate content, but cannot change roles.
       final myMember = group.members[identity.userIdHex];
-      if (myMember == null || (myMember.role != 'owner' && myMember.role != 'admin')) return false;
-      if (myMember.role == 'admin' && (role == 'owner' || group.members[memberNodeIdHex]?.role == 'admin')) return false;
+      if (myMember == null || myMember.role != 'owner') return false;
 
       final member = group.members[memberNodeIdHex];
       if (member == null) return false;
@@ -4643,10 +4602,9 @@ class CleonaService implements ICleonaService {
       _log.info('Role changed: ${member.displayName} $oldRole -> $role in group "${group.name}"');
 
     } else {
-      // Channel
+      // Channel — same rule as groups: Owner only can change roles (§10.2).
       final myMember = channel!.members[identity.userIdHex];
-      if (myMember == null || (myMember.role != 'owner' && myMember.role != 'admin')) return false;
-      if (myMember.role == 'admin' && (role == 'owner' || channel.members[memberNodeIdHex]?.role == 'admin')) return false;
+      if (myMember == null || myMember.role != 'owner') return false;
 
       final member = channel.members[memberNodeIdHex];
       if (member == null) return false;
@@ -6773,15 +6731,10 @@ class CleonaService implements ICleonaService {
     final group = _groups[entityIdHex];
 
     if (channel != null) {
-      // Verify sender is owner or admin
+      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
       final senderMember = channel.members[senderHex];
-      if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner/admin in channel $entityIdHex');
-        return;
-      }
-      // Admin cannot promote to owner or change other admins
-      if (senderMember.role == 'admin' && (newRole == 'owner' || channel.members[targetIdHex]?.role == 'admin')) {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: admin cannot promote to owner or change other admins');
+      if (senderMember == null || senderMember.role != 'owner') {
+        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in channel $entityIdHex');
         return;
       }
 
@@ -6818,14 +6771,10 @@ class CleonaService implements ICleonaService {
       _log.info('Channel role update: ${target.displayName} $oldRole → $newRole in "${channel.name}"');
 
     } else if (group != null) {
-      // Verify sender is owner or admin
+      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
       final senderMember = group.members[senderHex];
-      if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner/admin in group $entityIdHex');
-        return;
-      }
-      if (senderMember.role == 'admin' && (newRole == 'owner' || group.members[targetIdHex]?.role == 'admin')) {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: admin cannot promote to owner or change other admins');
+      if (senderMember == null || senderMember.role != 'owner') {
+        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in group $entityIdHex');
         return;
       }
 
