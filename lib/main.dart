@@ -1001,10 +1001,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // Android + iOS: no daemon, start node in-process (the app IS the node).
+    // Mobile + macOS-no-daemon: start node in-process (the app IS the node).
+    // On Android/iOS this is always the case. On macOS it happens when no
+    // daemon binary is found (CI integration test, dev without daemon build).
     // Same multi-identity model as the Linux daemon: one node, all identities active.
     // IMPORTANT: Defer heavy work so the loading screen renders first.
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (Platform.isAndroid || Platform.isIOS || Platform.isMacOS) {
       // Signal that we have a profile (shows loading screen immediately)
       notifyListeners();
       // Schedule heavy init after the current frame completes
