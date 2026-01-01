@@ -40,9 +40,24 @@ import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:path_provider/path_provider.dart' as pp;
 
-void main() {
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // iOS: resolve writable data container via path_provider BEFORE anything
+  // touches AppPaths.home. On iOS, HOME is '/tmp' (sandbox) and the bundle
+  // path is read-only — only path_provider gives the correct writable
+  // Application Support directory inside the data container.
+  if (Platform.isIOS) {
+    try {
+      final appSupport = await pp.getApplicationSupportDirectory();
+      AppPaths.setHome(appSupport.path);
+      debugPrint('[main] iOS home set via path_provider: ${appSupport.path}');
+    } catch (e) {
+      debugPrint('[main] path_provider failed: $e — falling back to AppPaths default');
+    }
+  }
 
   // Single-Instance (Unix desktops — Linux + macOS; both have kill -0 and $HOME)
   if (Platform.isLinux || Platform.isMacOS) {

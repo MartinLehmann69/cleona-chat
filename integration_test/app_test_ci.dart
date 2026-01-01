@@ -47,7 +47,21 @@ void main() {
       final startButton = find.byIcon(Icons.play_arrow);
       if (startButton.evaluate().isNotEmpty) {
         await tester.tap(startButton);
-        for (var i = 0; i < 20; i++) {
+
+        // Seed-phrase dialog appears after tapping Start — dismiss it.
+        // Can't use pumpAndSettle (dialog blocks idle), so poll for the
+        // FilledButton that closes the dialog.
+        for (var i = 0; i < 30; i++) {
+          await tester.pump(const Duration(seconds: 1));
+          final dismissBtn = find.byType(FilledButton);
+          if (dismissBtn.evaluate().isNotEmpty) {
+            await tester.tap(dismissBtn.last);
+            break;
+          }
+        }
+
+        // Wait for service init after dialog dismissal
+        for (var i = 0; i < 30; i++) {
           await tester.pump(const Duration(seconds: 1));
           if (find.byIcon(Icons.settings).evaluate().isNotEmpty) break;
         }
