@@ -39,8 +39,8 @@ class LocalDiscovery {
 
   // Receive-side diagnostics for LAN-Discovery (2026-05-15). The pre-existing
   // _onEvent path silently drops malformed datagrams; without per-source
-  // counters we cannot tell if WinVM's 65k subnet-scan probes reach Alice's
-  // OS at all, or where they get filtered. These counters get rolled into
+  // counters we cannot tell if a Windows peer's 65k subnet-scan probes reach
+  // the receiver's OS at all, or where they get filtered. These counters get rolled into
   // a periodic 60s summary so the per-receive cost stays at one integer
   // increment.
   int _rxTotal = 0;            // every RawSocketEvent.read with a datagram
@@ -80,7 +80,7 @@ class LocalDiscovery {
       // SO_REUSEPORT is POSIX-only. On Windows the option does not exist and
       // setting it on the broadcastEnabled+multicast-joined socket leaves the
       // socket in a state where send() either throws WSAEINVAL or silently
-      // returns 0 — discovered 2026-05-08 after a full day of WinVM peers=0.
+      // returns 0 — discovered 2026-05-08 after a full day of Windows peer peers=0.
       // SO_REUSEADDR alone is sufficient on Windows for our daemon+GUI
       // co-bind use case.
       _socket = await RawDatagramSocket.bind(
@@ -122,9 +122,10 @@ class LocalDiscovery {
       //
       // Using discoveryPort (41338) here caused a critical receive-path bug:
       // on Linux with SO_REUSEPORT the kernel distributes unicast packets by
-      // 4-tuple hash across ALL sockets bound to the same port. WinVM's entire
-      // subnet scan (fixed src+dst IP pair) hashed to this send-only socket
-      // and was never read, so Alice never discovered WinVM. Peer port is
+      // 4-tuple hash across ALL sockets bound to the same port. The Windows
+      // peer's entire subnet scan (fixed src+dst IP pair) hashed to this
+      // send-only socket and was never read, so the receiver never discovered
+      // the Windows peer. Peer port is
       // carried in the CLEO payload (bytes 36-37), not in the UDP src-port,
       // so the source port of outgoing packets is irrelevant. (2026-05-15)
       _nativeSender = NativeUdpSender.open(
@@ -197,8 +198,8 @@ class LocalDiscovery {
 
   /// Periodic 60s summary of receive-side counters. Logged unconditionally
   /// (even at all-zero) so a stretch of zero receives stays diagnosable —
-  /// "I see 0 probes per 60s on Alice while WinVM claims to be sending 65k
-  /// in 130s" is the smoking gun for a layer-2/3 drop between WinVM and
+  /// "I see 0 probes per 60s on peer A while peer B claims to be sending 65k
+  /// in 130s" is the smoking gun for a layer-2/3 drop between the sender and
   /// the receiver's NIC. Started in [start], cancelled in [close].
   void _logRxSummary() {
     _log.info('LAN-discovery RX last 60s: '
@@ -371,8 +372,8 @@ class LocalDiscovery {
   int _scanTotalAttempts = 0;
   int _scanRetrySaves = 0;
 
-  // Per-class send-outcome counters (added 2026-05-15 to investigate WinVM
-  // "65k probes claimed sent, 0 received by Alice"). Without these, the
+  // Per-class send-outcome counters (added 2026-05-15 to investigate Windows
+  // "65k probes claimed sent, 0 received by peer"). Without these, the
   // scan-complete summary collapses positive Dart-socket returns, positive
   // native-sender returns, and silent kernel drops into a single "sent=N"
   // value — useless for narrowing the loss-layer.
@@ -490,7 +491,7 @@ class LocalDiscovery {
           // Diagnostics added 2026-05-15: split first-try-positive vs
           // fallback-positive vs fallback-negative so the scan-complete log
           // shows which layer believes it sent (Dart-socket Reports OK, but
-          // packets do not arrive at Alice — observed WinVM).
+          // packets do not arrive at the receiver — observed on Windows).
           final firstTry = _socket?.send(packet, InternetAddress(ip), discoveryPort) ?? 0;
           if (firstTry > 0) {
             _scanDartFirstPositive++;
@@ -560,7 +561,7 @@ class LocalDiscovery {
     // unicast scan. Since ICMP (and therefore unicast UDP) routes correctly
     // via the ARP-proxy/IP-forward chain, scanning the own /24 does reach
     // them. Cost: 255 extra probes ≈ 0.5 s on a 500 pps budget — negligible.
-    // (2026-05-15 fix: was always skipping ownC, causing WinVM↔KVM-VM misses)
+    // (2026-05-15 fix: was always skipping ownC, causing cross-platform peer misses)
     final subnets = <int>[];
     for (var c = 0; c < 256; c++) {
       if (c != ownC) subnets.add(c);

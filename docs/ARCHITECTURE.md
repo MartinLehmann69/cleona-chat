@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c505dc56a7c8, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:9ae47223e414, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -30,7 +30,7 @@
 6. Identity Recovery
 7. Multi-Device Support
 8. Identity-Authorization Protocols
-9. Group Features (Channels, Moderation)
+9. Group Features
 10. Calls
 11. Calendar & Polls
 12. Synchronization Strategy
@@ -46,8 +46,9 @@
 22. Development Environment
 23. V2.2 → V3.0 Migration
 24. Roadmap
+25. Platform Suitability
 
-Appendix A. Protocol Message Format (Wire Definitions)
+Appendix A. Protocol Message Format
 Appendix B. Frame Examples (Hex Dumps)
 Appendix C. V2.2 → V3.0 Section Cross-Walk
 

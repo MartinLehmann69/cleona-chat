@@ -2691,9 +2691,9 @@ class CleonaService implements ICleonaService {
     }
 
     // First-contact CR (Welle 5 §8.1.1 First-CR-Bootstrap): wrap a
-    // User-signed ApplicationFrameV3 (recipientUserId=Bob, payload=CR) into
-    // an InfrastructureFrame whose KEM-encap subject is the recipient's
-    // *Device*-KEM-PK (NOT User-KEM-PK — Alice doesn't have that yet, the
+    // User-signed ApplicationFrameV3 (recipientUserId=recipient, payload=CR)
+    // into an InfrastructureFrame whose KEM-encap subject is the recipient's
+    // *Device*-KEM-PK (NOT User-KEM-PK — the sender doesn't have that yet, the
     // CR is what bootstraps the User-KEM exchange). The Device-KEM-PK pair
     // is delivered out-of-band via the ContactSeed `dxk`/`dmk` parameters.
     //
@@ -11849,8 +11849,8 @@ class CleonaService implements ICleonaService {
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
 
       // Multi-Identity guard: only process CRs addressed to THIS identity.
-      // Without this, a CR to AllyCat could be processed by Alice's service
-      // on the same node, resulting in Alice responding instead of AllyCat.
+      // Without this, a CR to identity B could be processed by identity A's
+      // service on the same node, resulting in A responding instead of B.
       // Accept both userId and deviceNodeId: senders with pre-V3.1.44 contacts
       // may have stored our deviceNodeId instead of userId.
       if (frame.recipientUserId.isNotEmpty) {
@@ -12012,8 +12012,8 @@ class CleonaService implements ICleonaService {
 
       if (resp.accepted) {
         // Validate: we must have a pending outgoing CR to this sender.
-        // Without this check, a response from a wrong identity (e.g. Alice
-        // responding to a CR addressed to AllyCat) would create a ghost contact.
+        // Without this check, a response from a wrong identity (e.g. identity A
+        // responding to a CR addressed to identity B) would create a ghost contact.
         final existing = _contacts[senderHex];
         if (existing == null || (existing.status != 'pending_outgoing' && existing.status != 'accepted')) {
           _log.warn('CR-Response from ${senderHex.substring(0, 8)} but no pending CR — ignoring');

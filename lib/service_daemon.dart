@@ -667,7 +667,7 @@ class _MultiServiceDaemon {
     // logs the *observed* interval so drift (GC pauses, slow event handlers)
     // shows up as dt > 5500ms WARN before the full hang.
     //
-    // Added 2026-04-24 after Alice's daemon hung silently from 15:10:20 to
+    // Added 2026-04-24 after a daemon hung silently from 15:10:20 to
     // 19:44:53 (4h 34min) without a single log entry — the last entry was
     // a PeerListPush handler, and the next status tick never fired.
     // Without this heartbeat the ante-hang timeline was 60s-fuzzy; with it,

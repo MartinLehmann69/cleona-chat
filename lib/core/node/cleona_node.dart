@@ -109,7 +109,7 @@ class CleonaNode {
   }
 
   /// All identities hosted on [deviceId] (may be >1 after C-1/§3.1 made
-  /// deviceNodeId daemon-global — Bob and Charly share device 8a631212).
+  /// deviceNodeId daemon-global — two identities share one device).
   /// Used by service-routed handlers that carry recipientUserId in the payload.
   Iterable<IdentityContext> identitiesForDevice(Uint8List deviceId) {
     final hex = bytesToHex(deviceId);
@@ -222,10 +222,9 @@ class CleonaNode {
   /// it can be touched without a real receive (e.g. by `_loadRoutingTable`
   /// at startup, or via address-update paths). A stale entry from a dead
   /// peer could keep lastSeen ahead of any session marker and silently
-  /// abort Stage-5, leaving the daemon isolated. See C-3 WinVM forensics
-  /// 2026-05-15: routing-table entry 7e41005a @ 192.168.10.92 (no Cleona
-  /// daemon there) had lastSeen freshly updated each session, scan aborted
-  /// `sent=0` 12× the same day, mesh isolation.
+  /// abort Stage-5, leaving the daemon isolated. Forensics 2026-05-15:
+  /// a routing-table entry for a dead peer had lastSeen freshly updated
+  /// each session, scan aborted `sent=0` 12× the same day, mesh isolation.
   int _authenticatedReceivesInSession = 0;
 
   DateTime? _lastNetworkChangeAt;
@@ -868,7 +867,7 @@ class CleonaNode {
     // until a confirmed cross-subnet peer is found (e.g. Bootstrap). This
     // ensures the QR ContactSeed includes a publicly-reachable relay.
     // Using _hasCrossSubnetPeer as the sole stop condition: finding only
-    // same-subnet peers (Node2) keeps scanning; finding Bootstrap stops.
+    // same-subnet peers keeps scanning; finding a cross-subnet peer stops.
     if (!_hasCrossSubnetPeer()) {
       _log.info('No cross-subnet peer at startup — starting subnet scan');
       localDiscovery.startSubnetScan(_localIps, () => _hasCrossSubnetPeer());
@@ -1483,7 +1482,7 @@ class CleonaNode {
           // routing-table with the announced device — Liveness carries
           // userId + deviceId + concrete addresses, which is exactly the
           // tuple `sendToDevice` / DV-routing needs to compute a path. In
-          // a multi-identity-on-one-daemon setup (Bob + Charly on the same
+          // a multi-identity-on-one-daemon setup (two identities on the same
           // physical node) the secondary identity never bonds via the V3
           // BOOT-cascade on its own (the daemon already V3-bonded with
           // its primary identity), so without this hop a sender that has
@@ -2292,7 +2291,7 @@ class CleonaNode {
     if (!_running) return;
 
     // §5.10.5 cooldown: suppress repeated Re-Discovery triggers within 60 s.
-    // Empirically (2026-05-09 WinVM bonding-loop investigation) the cascade
+    // Empirically (2026-05-09 bonding-loop investigation) the cascade
     // could fire 4 Re-Discoveries in 4 minutes when no peer was reachable —
     // each one re-emits multicast + broadcast 3-bursts on top of the
     // already-running subnet scan, flooding the LAN and never letting the
@@ -3247,7 +3246,7 @@ class CleonaNode {
       } else if (userId != null &&
           existing.userId != null &&
           !_bytesEqual(userId, existing.userId!)) {
-        // Multi-identity: same device, different userId (e.g. Bob+Charly on
+        // Multi-identity: same device, different userId (e.g. two identities on
         // the same daemon). Register the additional userId in the secondary
         // index so resolveUserToDevices() can find this device for either
         // identity (§26 §3.1). Primary field stays unchanged.

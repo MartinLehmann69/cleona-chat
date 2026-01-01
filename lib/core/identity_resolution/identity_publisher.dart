@@ -287,9 +287,9 @@ class IdentityPublisher {
 
   Future<void> _waitForPeersThenPublish() async {
     // 2026-05-08 diagnostic wave: trace each entry into the cold-start
-    // state machine + the branch decision so the WinVM/AVM "publisher
-    // never publishes" investigation can pinpoint exactly which branch
-    // is taken (or where the await hangs).
+    // state machine + the branch decision so the "publisher never
+    // publishes" investigation can pinpoint exactly which branch is
+    // taken (or where the await hangs).
     _log.info('_waitForPeersThenPublish entry: peerCount='
         '${routingTable.peerCount}, threshold=$peerThreshold, '
         'coldStartTimedOut=$_coldStartTimedOut');

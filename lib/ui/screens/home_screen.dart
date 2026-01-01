@@ -2276,7 +2276,7 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
                   // 70% opacity so the frozen weak-tier is visually distinct
                   // from a healthy medium-tier (which renders at full opacity).
                   // Without this, both look identical and users misread weak as
-                  // medium ("Mobilfunk"). Observed 2026-05-15 WinVM.
+                  // medium ("Mobilfunk"). Observed 2026-05-15.
                   ? Opacity(opacity: 0.7, child: image)
                   : AnimatedBuilder(
                       animation: _pulseAnimation,

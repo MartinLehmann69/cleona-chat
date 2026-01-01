@@ -88,8 +88,8 @@ class _QrShowScreenState extends State<QrShowScreen> {
     }
 
     // Use GUI-selected identity, not daemon IPC state.
-    // When Alice-Tab is visible but daemon internally has AllyCat active,
-    // the QR must show Alice's nodeId (IdentityManager tracks GUI selection).
+    // When identity A's tab is visible but daemon internally has identity B
+    // active, the QR must show A's nodeId (IdentityManager tracks GUI selection).
     final activeIdentity = IdentityManager().getActiveIdentity();
     final qrNodeIdHex = activeIdentity?.nodeIdHex ?? service.nodeIdHex;
     final qrDisplayName = activeIdentity?.displayName ?? service.displayName;

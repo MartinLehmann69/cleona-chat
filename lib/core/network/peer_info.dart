@@ -767,7 +767,7 @@ class PeerInfo {
   final Map<String, DateTime> _relayCooldownUntil = {};
 
   /// Default cooldown: long enough to survive several incoming relay packets
-  /// (Bob's CHANNEL_INDEX_EXCHANGE arrives every 5-15min) but short enough
+  /// (a peer's CHANNEL_INDEX_EXCHANGE arrives every 5-15min) but short enough
   /// that genuine path repair (NAT mapping refresh) recovers within minutes.
   static const Duration relayFailureCooldown = Duration(minutes: 5);
 

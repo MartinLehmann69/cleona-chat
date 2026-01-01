@@ -140,11 +140,15 @@ class Transport {
     _udpSocket!.readEventsEnabled = true;
     // Increase receive buffer to prevent drops under load (relay nodes).
     // Default 208KB is too small for bursty relay traffic with fragmentation.
+    // Socket constants differ: Linux SOL_SOCKET=1/SO_RCVBUF=8,
+    // BSD/macOS/iOS SOL_SOCKET=0xFFFF/SO_RCVBUF=0x1002.
     try {
       final size = 2 * 1024 * 1024; // 2 MB
       final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
-      // SOL_SOCKET=1, SO_RCVBUF=8 (Linux)
-      _udpSocket!.setRawOption(RawSocketOption(1, 8, sizeBytes));
+      final isBsd = Platform.isMacOS || Platform.isIOS;
+      final solSocket = isBsd ? 0xFFFF : 1;
+      final soRcvBuf = isBsd ? 0x1002 : 8;
+      _udpSocket!.setRawOption(RawSocketOption(solSocket, soRcvBuf, sizeBytes));
       _log.info('UDP receive buffer set to 2MB');
     } catch (e) {
       _log.debug('Could not set UDP receive buffer: $e');
@@ -201,7 +205,9 @@ class Transport {
       try {
         final size = 2 * 1024 * 1024; // 2 MB
         final sizeBytes = Uint8List(4)..buffer.asByteData().setInt32(0, size, Endian.host);
-        _udpSocket6!.setRawOption(RawSocketOption(1, 8, sizeBytes));
+        final isBsd = Platform.isMacOS || Platform.isIOS;
+        _udpSocket6!.setRawOption(RawSocketOption(
+            isBsd ? 0xFFFF : 1, isBsd ? 0x1002 : 8, sizeBytes));
       } catch (_) {}
       _udpSocket6!.listen(
         _onUdpEvent6,

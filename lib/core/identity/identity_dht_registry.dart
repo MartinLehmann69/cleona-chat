@@ -22,8 +22,8 @@ import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 /// {
 ///   "version": 1,
 ///   "identities": [
-///     {"index": 0, "name": "Alice", "active": true},
-///     {"index": 1, "name": "AllyCat", "active": true}
+///     {"index": 0, "name": "Primary", "active": true},
+///     {"index": 1, "name": "Secondary", "active": true}
 ///   ],
 ///   "next_index": 2,
 ///   "updated_at": 1711234567890

@@ -836,7 +836,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Deleting the file creates a new inode, breaking the single-instance
   /// guarantee: the old daemon still holds the lock on the deleted inode
   /// while a new daemon locks the newly-created file. This race condition
-  /// allowed multiple daemon instances (observed 2026-05-16 on Node2).
+  /// allowed multiple daemon instances (observed 2026-05-16).
   void _killExistingDaemon() {
     final lockFile = File('$_baseDir/cleona.lock');
     try {
@@ -1725,9 +1725,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // identity, switch first so `_service.conversations[convId]` resolves.
         //
         // `targetIdentityId` may be either the identityId (UUID) or the
-        // nodeIdHex — historically tests pass `bob.identityId` (the UUID
-        // returned by listIdentities), but the lookup also has to support
-        // nodeIdHex for callers that fetch via getState. Match against both.
+        // nodeIdHex — historically tests pass the identity UUID (returned
+        // by listIdentities), but the lookup also has to support nodeIdHex
+        // for callers that fetch via getState. Match against both.
         unawaited(() async {
           if (targetIdentityId != null) {
             final active = IdentityManager().getActiveIdentity();

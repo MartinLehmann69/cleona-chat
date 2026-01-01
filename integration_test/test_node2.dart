@@ -1,4 +1,4 @@
-// Integration Tests for Node2 (Bob) — Chat, Groups, Channels, Inbox, Message Popup
+// Integration Tests for Node 2 — Chat, Groups, Channels, Inbox, Message Popup
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';

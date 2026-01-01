@@ -2,9 +2,15 @@ import Flutter
 import UIKit
 import BackgroundTasks
 import UserNotifications
+import Network
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  /// NWBrowser triggers the "Local Network" permission dialog on iOS 14+.
+  /// Raw UDP sockets alone do NOT trigger it — without this, iOS silently
+  /// drops all incoming LAN packets while outgoing sends succeed.
+  private var localNetworkBrowser: NWBrowser?
+
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -15,6 +21,11 @@ import UserNotifications
 
     // Request notification permission for background-fetched messages.
     BackgroundFetchHandler.shared.requestNotificationAuthorization()
+
+    // Trigger the Local Network permission dialog. This MUST happen before
+    // the Dart node opens UDP sockets, otherwise iOS silently drops inbound
+    // packets (sends work, receives don't — the classic iOS UDP gotcha).
+    triggerLocalNetworkPermission()
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -40,6 +51,26 @@ import UserNotifications
     // Handle method calls FROM Dart (schedule/cancel).
     channel.setMethodCallHandler { [weak self] (call, result) in
       self?.handleMethodCall(call, result: result)
+    }
+  }
+
+  /// Trigger Local Network permission via NWBrowser. The browse itself is
+  /// ephemeral — we start it, the OS shows the dialog, and we cancel after 2s.
+  /// The Bonjour service type matches NSBonjourServices in Info.plist.
+  private func triggerLocalNetworkPermission() {
+    let params = NWParameters()
+    params.includePeerToPeer = true
+    let browser = NWBrowser(for: .bonjour(type: "_cleona._udp", domain: nil), using: params)
+    browser.stateUpdateHandler = { state in
+      NSLog("[LocalNetwork] Browser state: \(state)")
+    }
+    browser.start(queue: .main)
+    localNetworkBrowser = browser
+    // Keep browsing for 2s to ensure the dialog appears, then cancel.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+      self?.localNetworkBrowser?.cancel()
+      self?.localNetworkBrowser = nil
+      NSLog("[LocalNetwork] Browser cancelled (permission dialog should have appeared)")
     }
   }
 
