@@ -266,34 +266,48 @@ jobs:
         run: |
           gem install fastlane --no-document
 
-          # Decode base64 secret → raw .p8 PEM, then escape newlines for JSON
-          P8_FILE="$RUNNER_TEMP/AuthKey.p8"
-          echo "$APP_STORE_CONNECT_KEY" | base64 -d > "$P8_FILE"
-
-          # Build JSON with key as \n-escaped PEM string (Fastlane JSON requires this)
-          KEY_ESCAPED=$(awk '{printf "%s\\n", $0}' "$P8_FILE" | sed 's/\\n$//')
-          KEY_JSON="$RUNNER_TEMP/asc-api-key.json"
-          cat > "$KEY_JSON" <<EOF
-          {
-            "key_id": "$APP_STORE_CONNECT_KEY_ID",
-            "issuer_id": "$APP_STORE_CONNECT_ISSUER",
-            "key": "$KEY_ESCAPED",
-            "in_house": false
+          # Validate key: decode base64 and check PEM structure
+          echo "--- Key validation ---"
+          echo -n "key_id length: "; echo -n "$APP_STORE_CONNECT_KEY_ID" | wc -c
+          echo -n "issuer_id length: "; echo -n "$APP_STORE_CONNECT_ISSUER" | wc -c
+          echo -n "key secret length: "; echo -n "$APP_STORE_CONNECT_KEY" | wc -c
+          DECODED=$(echo "$APP_STORE_CONNECT_KEY" | base64 -d 2>&1) && {
+            echo "base64 decode: OK"
+            echo -n "decoded length: "; echo -n "$DECODED" | wc -c
+            echo -n "starts with: "; echo "$DECODED" | head -1 | cut -c1-27
+            echo -n "ends with: "; echo "$DECODED" | tail -1 | cut -c1-25
+          } || {
+            echo "base64 decode: FAILED — secret is probably raw PEM, not base64"
+            echo "Trying raw PEM approach..."
           }
-          EOF
-
-          rm -f "$P8_FILE"
+          echo "--- End validation ---"
 
           IPA=$(find build/ios -name "*.ipa" | head -1)
-          if [ -n "$IPA" ]; then
-            fastlane pilot upload \
-              --api_key_path "$KEY_JSON" \
-              --ipa "$IPA" \
-              --skip_waiting_for_build_processing
-          else
+          if [ -z "$IPA" ]; then
             echo "No IPA found — skipping upload"
             exit 1
           fi
+
+          # Use Fastlane Ruby API where is_key_content_base64 actually works
+          mkdir -p fastlane
+          cat > fastlane/Fastfile <<'FASTFILE'
+          lane :upload_testflight do
+            api_key = app_store_connect_api_key(
+              key_id: ENV['APP_STORE_CONNECT_KEY_ID'],
+              issuer_id: ENV['APP_STORE_CONNECT_ISSUER'],
+              key_content: ENV['APP_STORE_CONNECT_KEY'],
+              is_key_content_base64: true,
+              in_house: false
+            )
+            pilot(
+              api_key: api_key,
+              ipa: ENV['IPA_PATH'],
+              skip_waiting_for_build_processing: true
+            )
+          end
+          FASTFILE
+
+          IPA_PATH="$IPA" fastlane upload_testflight
 
       - name: Upload IPA artifact
         if: always()
