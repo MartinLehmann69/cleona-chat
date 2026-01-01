@@ -450,9 +450,9 @@ class UpnpIgdClient {
     int leaseDuration = 7200,
     String description = 'Cleona',
     String? internalClient,
+    List<IgdDevice>? knownDevices,
   }) async {
-    // Discover IGD
-    final devices = await discoverDevices();
+    final devices = knownDevices ?? await discoverDevices();
     if (devices.isEmpty) {
       _log.debug('No IGD devices found');
       return null;

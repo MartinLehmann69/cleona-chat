@@ -218,6 +218,7 @@ class CleonaNode {
 
   // State
   StreamSubscription<PortMapperEvent>? _portMapperSub;
+  bool _portMapperPublicIpRetried = false;
   Timer? _maintenanceTimer;
   Timer? _peerExchangeTimer;
   Timer? _dvSafetyNetTimer;
@@ -1466,12 +1467,16 @@ class CleonaNode {
         }
       }
 
-      // Public-IP-Trigger for port mapping.
-      if (!PeerAddress.isPrivateIp(from.address) &&
+      // Public-IP-Trigger for port mapping (one-shot per startup/network-change
+      // cycle: covers the edge case where the node starts offline and later
+      // gains internet connectivity).
+      if (!_portMapperPublicIpRetried &&
+          !PeerAddress.isPrivateIp(from.address) &&
           !natTraversal.hasPortMapping &&
           portMapper.state != PortMapperState.acquiring &&
           portMapper.state != PortMapperState.mapped) {
-        _log.info('Public-IP peer detected (${from.address}) — starting port mapping');
+        _portMapperPublicIpRetried = true;
+        _log.info('Public-IP peer detected (${from.address}) — starting port mapping (one-shot)');
         portMapper.start();
       }
     }
@@ -4589,6 +4594,7 @@ class CleonaNode {
     // 1. Reset NAT + port mapping
     natTraversal.reset();
     await portMapper.reset();
+    _portMapperPublicIpRetried = false;
     // Re-acquire port mapping in background
     portMapper.start();
 

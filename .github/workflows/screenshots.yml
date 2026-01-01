@@ -1,0 +1,329 @@
+###############################################################################
+# screenshots.yml — Generate App Store screenshots via macOS + iOS Simulator
+#
+# One-time workflow to produce screenshots for App Store Connect listings.
+# Builds macOS app + iOS Simulator app, seeds a demo profile, takes
+# screenshots of key screens, uploads as artifacts.
+###############################################################################
+name: App Store Screenshots
+
+on:
+  workflow_dispatch: {}
+
+env:
+  FLUTTER_VERSION: '3.41.2'
+
+jobs:
+  screenshots:
+    name: Generate Screenshots
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja autoconf automake libtool pkg-config libvpx
+
+      # ════════════════════════════════════════════════════════════════
+      #  Build macOS native libs + app
+      # ════════════════════════════════════════════════════════════════
+      - name: Cache macOS native lib sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/macos-libs-build-*
+          key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
+          restore-keys: macos-native-libs-
+
+      - name: Build macOS native libs
+        run: ./scripts/build-macos-libs.sh --arch arm64
+        timeout-minutes: 30
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter dependencies
+        run: flutter pub get
+
+      - name: Build macOS app
+        run: flutter build macos --debug
+
+      - name: Compile daemon
+        run: dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+
+      - name: Compile init_profile
+        run: dart compile exe scripts/init_profile.dart -o build/init-profile
+
+      - name: Assemble macOS app bundle
+        run: |
+          APP_PATH="build/macos/Build/Products/Debug/Cleona.app"
+          FRAMEWORKS="$APP_PATH/Contents/Frameworks"
+          MACOS_BIN="$APP_PATH/Contents/MacOS"
+          mkdir -p "$FRAMEWORKS"
+
+          for f in build/macos-libs/arm64/*.dylib; do
+            cp "$f" "$FRAMEWORKS/"
+          done
+
+          cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
+          chmod +x "$MACOS_BIN/cleona-daemon"
+          codesign --force --deep --sign - "$APP_PATH"
+
+      # ════════════════════════════════════════════════════════════════
+      #  Build iOS Simulator app
+      # ════════════════════════════════════════════════════════════════
+      - name: Cache iOS native lib sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ios-libs-build-*
+          key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
+          restore-keys: ios-native-libs-
+
+      - name: Build iOS native libs
+        run: ./scripts/build-ios-libs.sh
+        timeout-minutes: 45
+
+      - name: Place iOS native archives
+        run: |
+          NATIVE_DIR="ios/CleonaNative"
+          XCFW="build/ios-frameworks/libcleona_all.xcframework"
+          if [ -d "$XCFW" ]; then
+            for slice_dir in "$XCFW"/ios-arm64*; do
+              A="$slice_dir/libcleona_all.a"
+              [ -f "$A" ] || continue
+              if echo "$slice_dir" | grep -q simulator; then
+                cp "$A" "$NATIVE_DIR/libcleona_all_simulator.a"
+                echo "Placed simulator archive"
+              else
+                cp "$A" "$NATIVE_DIR/libcleona_all_device.a"
+                echo "Placed device archive"
+              fi
+            done
+          fi
+
+      - name: Install CocoaPods
+        run: cd ios && pod install --repo-update
+
+      - name: Build iOS Simulator app
+        run: |
+          flutter build ios --simulator --debug --no-codesign 2>&1 || true
+          find build/ios -name "Runner.app" -type d 2>/dev/null
+          echo "---"
+          # Alternative: build via xcodebuild for simulator
+          xcodebuild build \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/ios-sim \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tail -20
+
+      # ════════════════════════════════════════════════════════════════
+      #  Create demo profile
+      # ════════════════════════════════════════════════════════════════
+      - name: Make native libs available for init-profile
+        run: |
+          sudo mkdir -p /usr/local/lib
+          for f in build/macos-libs/arm64/*.dylib; do
+            sudo cp "$f" /usr/local/lib/
+          done
+
+      - name: Create demo profile
+        run: |
+          PROFILE_DIR="$HOME/.cleona"
+          ./build/init-profile "$PROFILE_DIR" "Alice" 8081
+          echo "=== Profile ==="
+          ls -la "$PROFILE_DIR/"
+
+      # ════════════════════════════════════════════════════════════════
+      #  macOS Screenshots
+      # ════════════════════════════════════════════════════════════════
+      - name: Take macOS screenshots
+        run: |
+          set +e
+          APP="build/macos/Build/Products/Debug/Cleona.app"
+          SCREENSHOTS="build/screenshots/macos"
+          mkdir -p "$SCREENSHOTS"
+
+          # Launch the app in background
+          open -a "$APP"
+          echo "App launched, waiting 20s for startup..."
+          sleep 20
+
+          # Check if app is visible
+          osascript -e 'tell application "System Events" to get name of every process whose visible is true' || true
+
+          # Helper function for IPC
+          ipc_cmd() {
+            python3 -c "
+          import socket, json, time, sys
+          sock_path = '$HOME/.cleona/cleona.sock'
+          try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(5)
+            s.connect(sock_path)
+            cmd = json.dumps({'type':'request','id':$1,'command':'$2','params':$3})
+            s.sendall((cmd + '\n').encode())
+            resp = b''
+            while True:
+              chunk = s.recv(8192)
+              if not chunk: break
+              resp += chunk
+              if b'\n' in resp: break
+            s.close()
+            print(resp.decode().strip())
+          except Exception as e:
+            print(f'IPC error: {e}', file=sys.stderr)
+          " 2>&1
+          }
+
+          # Screenshot 1: Home screen (chat list)
+          sleep 5
+          screencapture -x "$SCREENSHOTS/01-home.png"
+          echo "Captured: 01-home.png"
+
+          # Screenshot 2: Settings
+          ipc_cmd 1 gui_action '{"action":"open_settings"}'
+          sleep 4
+          screencapture -x "$SCREENSHOTS/02-settings.png"
+          echo "Captured: 02-settings.png"
+
+          # Screenshot 3: Calendar
+          ipc_cmd 2 gui_action '{"action":"go_back"}'
+          sleep 2
+          ipc_cmd 3 gui_action '{"action":"open_calendar"}'
+          sleep 4
+          screencapture -x "$SCREENSHOTS/03-calendar.png"
+          echo "Captured: 03-calendar.png"
+
+          # Screenshot 4: Network stats
+          ipc_cmd 4 gui_action '{"action":"go_back"}'
+          sleep 2
+          ipc_cmd 5 gui_action '{"action":"open_network_stats"}'
+          sleep 4
+          screencapture -x "$SCREENSHOTS/04-network.png"
+          echo "Captured: 04-network.png"
+
+          # Screenshot 5: Identity detail
+          ipc_cmd 6 gui_action '{"action":"go_back"}'
+          sleep 2
+          ipc_cmd 7 gui_action '{"action":"open_identity_detail"}'
+          sleep 4
+          screencapture -x "$SCREENSHOTS/05-identity.png"
+          echo "Captured: 05-identity.png"
+
+          # Kill the app
+          osascript -e 'tell application "Cleona" to quit' 2>/dev/null || killall Cleona 2>/dev/null || true
+          sleep 3
+
+          echo "=== macOS screenshots ==="
+          ls -la "$SCREENSHOTS/"
+
+      # ════════════════════════════════════════════════════════════════
+      #  iOS Simulator Screenshots
+      # ════════════════════════════════════════════════════════════════
+      - name: Take iOS screenshots
+        run: |
+          set +e
+          SCREENSHOTS="build/screenshots/ios"
+          mkdir -p "$SCREENSHOTS"
+
+          # Find a suitable iPhone simulator (6.7" = iPhone 15/16 Pro Max)
+          echo "Available simulators:"
+          xcrun simctl list devices available | grep -i "iphone"
+
+          DEVICE=""
+          for model in "iPhone 16 Pro Max" "iPhone 15 Pro Max" "iPhone 16 Pro" "iPhone 15 Pro"; do
+            DEVICE=$(xcrun simctl list devices available | grep "$model" | head -1 | grep -oE '[A-F0-9-]{36}')
+            [ -n "$DEVICE" ] && echo "Selected: $model ($DEVICE)" && break
+          done
+
+          if [ -z "$DEVICE" ]; then
+            echo "No suitable iPhone simulator found, creating one..."
+            RUNTIME=$(xcrun simctl list runtimes | grep "iOS" | tail -1 | grep -oE 'com\.apple\.CoreSimulator\.SimRuntime\.[^ ]+')
+            DEVICE=$(xcrun simctl create "iPhone 15 Pro Max" "com.apple.CoreSimulator.SimDeviceType.iPhone-15-Pro-Max" "$RUNTIME")
+            echo "Created: $DEVICE"
+          fi
+
+          echo "Booting simulator $DEVICE..."
+          xcrun simctl boot "$DEVICE" 2>/dev/null || true
+          sleep 15
+
+          # Set status bar to a clean state (removes battery %, sets time)
+          xcrun simctl status_bar "$DEVICE" override --time "9:41" --batteryState charged --batteryLevel 100 2>/dev/null || true
+
+          # Find the iOS simulator .app
+          SIM_APP=""
+          for p in \
+            "build/ios-sim/Build/Products/Debug-iphonesimulator/Runner.app" \
+            "build/ios/iphonesimulator/Runner.app" \
+            "build/ios/Debug-iphonesimulator/Runner.app"; do
+            [ -d "$p" ] && SIM_APP="$p" && break
+          done
+
+          if [ -z "$SIM_APP" ]; then
+            SIM_APP=$(find build/ios-sim build/ios -name "Runner.app" -path "*simulator*" -type d 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$SIM_APP" ]; then
+            echo "ERROR: No iOS simulator app found"
+            find build/ios-sim build/ios -name "Runner.app" -type d 2>/dev/null || true
+          else
+            echo "Installing: $SIM_APP"
+            xcrun simctl install "$DEVICE" "$SIM_APP"
+
+            # Pre-populate the app container with the demo profile
+            sleep 3
+            CONTAINER=$(xcrun simctl get_app_container "$DEVICE" chat.cleona.cleona data 2>/dev/null || true)
+            echo "App container: $CONTAINER"
+
+            if [ -n "$CONTAINER" ] && [ -d "$HOME/.cleona" ]; then
+              echo "Copying demo profile into simulator container..."
+              mkdir -p "$CONTAINER/Documents/.cleona"
+              cp -r "$HOME/.cleona/"* "$CONTAINER/Documents/.cleona/" 2>/dev/null || true
+              echo "Profile copied"
+              ls -la "$CONTAINER/Documents/.cleona/" 2>/dev/null || true
+            fi
+
+            # Launch the app
+            echo "Launching app..."
+            xcrun simctl launch "$DEVICE" chat.cleona.cleona 2>/dev/null || true
+            sleep 20
+
+            # Screenshot 1: Home screen
+            xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/01-home.png"
+            echo "Captured: ios/01-home.png"
+
+            # Wait and take another (app might still be loading)
+            sleep 5
+            xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/02-main.png"
+            echo "Captured: ios/02-main.png"
+
+            # Try tapping settings icon area (top-right, approximate)
+            # On iPhone 15 Pro Max (1290x2796 at 3x = 430x932 points)
+            # Settings gear is typically in AppBar, top-right area
+            sleep 3
+            xcrun simctl io "$DEVICE" screenshot "$SCREENSHOTS/03-loaded.png"
+            echo "Captured: ios/03-loaded.png"
+          fi
+
+          # Shutdown simulator
+          xcrun simctl shutdown "$DEVICE" 2>/dev/null || true
+
+          echo "=== iOS screenshots ==="
+          ls -la "$SCREENSHOTS/" 2>/dev/null || echo "(none)"
+
+      # ════════════════════════════════════════════════════════════════
+      #  Upload
+      # ════════════════════════════════════════════════════════════════
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: appstore-screenshots
+          path: build/screenshots/
+          retention-days: 30

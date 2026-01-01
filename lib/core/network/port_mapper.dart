@@ -281,6 +281,7 @@ class PortMapper {
         internalPort: internalPort,
         externalPort: requestedExternalPort,
         leaseDuration: requestedLifetime,
+        knownDevices: devices,
       );
       // A working IGD responded but may have rejected the mapping (error 718
       // conflict retry also failed, or admin-disabled AddPortMapping while
@@ -363,7 +364,7 @@ class PortMapper {
       _log.debug('Renewal attempt failed: $e');
     }
 
-    if (_disposed) return;
+    if (_disposed || _state == PortMapperState.idle) return;
 
     if (result != null) {
       _activeMapping = result;
@@ -381,7 +382,7 @@ class PortMapper {
       // Retry once after 5 seconds
       _log.debug('Renewal failed — retrying in 5s');
       _renewalTimer = Timer(const Duration(seconds: 5), () async {
-        if (_disposed) return;
+        if (_disposed || _state == PortMapperState.idle) return;
 
         PortMappingResult? retryResult;
         try {
@@ -400,7 +401,7 @@ class PortMapper {
           }
         } catch (_) {}
 
-        if (_disposed) return;
+        if (_disposed || _state == PortMapperState.idle) return;
 
         if (retryResult != null) {
           _activeMapping = retryResult;
