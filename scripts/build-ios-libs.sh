@@ -57,6 +57,13 @@ LIBOPUS_VERSION="1.5.2"
 WHISPER_VERSION="v1.7.1"
 
 NPROC="$(sysctl -n hw.ncpu)"
+
+# macOS Homebrew names libtool as glibtool to avoid conflict with Apple's
+# libtool. Autotools scripts (autogen.sh) look for libtoolize which is
+# glibtoolize on macOS. Ensure the symlink path from brew is on PATH.
+if command -v glibtoolize &>/dev/null && ! command -v libtoolize &>/dev/null; then
+    export LIBTOOLIZE="glibtoolize"
+fi
 XCFW_DIR="$PROJECT_DIR/build/ios-frameworks"
 mkdir -p "$XCFW_DIR"
 
@@ -230,6 +237,7 @@ build_liberasurecode() {
     cd "$src"
     make distclean 2>/dev/null || true
     [ -f configure ] || ./autogen.sh
+    CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-error" \
     ./configure --host="$CONFIGURE_HOST" \
         --prefix="$INSTALL_DIR/ec" \
         --enable-static --disable-shared
@@ -271,8 +279,10 @@ build_whisper() {
     cd "$src"
     rm -rf build-ios && mkdir build-ios && cd build-ios
 
+    # Metal acceleration only on device (not simulator). Requires iOS Metal SDK
+    # in the Xcode toolchain. Disable if Metal headers aren't available.
     local metal_flag="-DGGML_METAL=OFF"
-    if [ "$platform" = "iphoneos" ]; then
+    if [ "$platform" = "iphoneos" ] && [ -d "$SDK_PATH/System/Library/Frameworks/Metal.framework" ]; then
         metal_flag="-DGGML_METAL=ON"
     fi
 

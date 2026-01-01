@@ -67,7 +67,7 @@ jobs:
 
       - name: Build all native libs
         run: ./scripts/build-ios-libs.sh
-        timeout-minutes: 30
+        timeout-minutes: 45
 
       - name: Upload XCFrameworks
         uses: actions/upload-artifact@v4
