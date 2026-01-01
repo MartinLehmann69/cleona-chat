@@ -1,28 +1,20 @@
 ###############################################################################
-# ios-build.yml — Build Cleona iOS IPA and upload to TestFlight
+# apple-build.yml — Build Cleona for iOS (IPA → TestFlight) and macOS (DMG)
 #
 # Triggers:
-#   - Manual dispatch (workflow_dispatch) with optional tag
-#   - Push of a tag matching v*-ios or v*
+#   - Manual dispatch (workflow_dispatch) with channel + platform selection
+#   - Push of a tag matching v*
 #
 # Required GitHub Secrets:
 #   APPLE_TEAM_ID            — 10-char Apple Developer Team ID
 #   APP_STORE_CONNECT_KEY_ID — App Store Connect API Key ID
 #   APP_STORE_CONNECT_ISSUER — App Store Connect API Issuer UUID
 #   APP_STORE_CONNECT_KEY    — App Store Connect API Key (.p8 content, base64)
-#   MATCH_PASSWORD           — Encryption password for signing certificates
 #   CERT_P12_BASE64          — Distribution certificate .p12 (base64-encoded)
 #   CERT_P12_PASSWORD        — Password for the .p12 file
 #   PROVISIONING_PROFILE_B64 — Provisioning profile (base64-encoded)
-#
-# Architecture:
-#   1. Build all native libs (libsodium, liboqs, libzstd, liberasurecode,
-#      libopus, whisper.cpp, libcleona_audio) as static .a via build-ios-libs.sh
-#   2. flutter build ipa (--release, beta flavor via dart-define)
-#   3. Sign with distribution certificate
-#   4. Upload to TestFlight via xcrun altool / App Store Connect API
 ###############################################################################
-name: iOS Build & TestFlight
+name: Apple Build (iOS + macOS)
 
 on:
   workflow_dispatch:
@@ -35,23 +27,35 @@ on:
         options:
           - beta
           - live
+      platform:
+        description: 'Target platform'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - both
+          - ios
+          - macos
   push:
     tags:
       - 'v*'
 
-# Cancel in-progress runs for the same ref
 concurrency:
-  group: ios-build-${{ github.ref }}
+  group: apple-build-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  FLUTTER_VERSION: '3.32.1'
+  FLUTTER_VERSION: '3.41.2'
   IOS_DEPLOYMENT_TARGET: '13.0'
 
 jobs:
-  build-native-libs:
-    name: Build Native Libraries
-    runs-on: macos-14  # Apple Silicon (M1) runner
+  # ════════════════════════════════════════════════════════════════
+  #  iOS Pipeline
+  # ════════════════════════════════════════════════════════════════
+  build-ios-native-libs:
+    name: iOS — Native Libraries
+    if: github.event.inputs.platform != 'macos'
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
@@ -77,8 +81,9 @@ jobs:
           retention-days: 7
 
   build-ipa:
-    name: Build IPA & Upload to TestFlight
-    needs: build-native-libs
+    name: iOS — Build IPA & TestFlight
+    needs: build-ios-native-libs
+    if: github.event.inputs.platform != 'macos'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -104,7 +109,6 @@ jobs:
           cd ios
           pod install --repo-update
 
-      # ── Signing setup ────────────────────────────────────────────────
       - name: Install distribution certificate
         env:
           CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
@@ -137,7 +141,6 @@ jobs:
           cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID.mobileprovision"
           echo "PROVISIONING_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
 
-      # ── Build ────────────────────────────────────────────────────────
       - name: Determine channel
         id: channel
         env:
@@ -156,7 +159,6 @@ jobs:
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 
-      # ── Upload ───────────────────────────────────────────────────────
       - name: Upload to TestFlight
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -186,7 +188,137 @@ jobs:
           path: build/ios/ipa/*.ipa
           retention-days: 30
 
-      # ── Cleanup ──────────────────────────────────────────────────────
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+
+  # ════════════════════════════════════════════════════════════════
+  #  macOS Pipeline (runs in parallel with iOS)
+  # ════════════════════════════════════════════════════════════════
+  build-macos:
+    name: macOS — Build & Notarize
+    if: github.event.inputs.platform != 'ios'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja autoconf automake libtool pkg-config libvpx
+
+      - name: Cache native lib sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/macos-libs-build-*
+          key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
+          restore-keys: macos-native-libs-
+
+      - name: Build native dylibs
+        run: ./scripts/build-macos-libs.sh --arch arm64
+        timeout-minutes: 30
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter dependencies
+        run: flutter pub get
+
+      - name: Determine channel
+        id: channel
+        env:
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          CHANNEL="${INPUT_CHANNEL:-beta}"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Build macOS app
+        env:
+          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          flutter build macos --release --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
+
+      - name: Compile daemon
+        run: dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+
+      - name: Assemble app bundle
+        run: |
+          APP_PATH="build/macos/Build/Products/Release/Cleona.app"
+          FRAMEWORKS="$APP_PATH/Contents/Frameworks"
+          MACOS_BIN="$APP_PATH/Contents/MacOS"
+          mkdir -p "$FRAMEWORKS"
+
+          for f in build/macos-libs/arm64/*.dylib; do
+            cp "$f" "$FRAMEWORKS/"
+          done
+
+          cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
+          chmod +x "$MACOS_BIN/cleona-daemon"
+
+      - name: Sign app bundle
+        env:
+          CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          APP_PATH="build/macos/Build/Products/Release/Cleona.app"
+
+          for f in "$APP_PATH/Contents/Frameworks"/*.dylib "$APP_PATH/Contents/MacOS/cleona-daemon"; do
+            codesign --force --sign - "$f" || true
+          done
+          codesign --force --deep --sign - "$APP_PATH"
+
+      - name: Create DMG
+        run: |
+          APP_PATH="build/macos/Build/Products/Release/Cleona.app"
+          DMG_PATH="build/cleona-chat-macos-arm64.dmg"
+          hdiutil create -volname "Cleona Chat" \
+            -srcfolder "$APP_PATH" \
+            -ov -format UDZO \
+            "$DMG_PATH"
+
+      - name: Notarize DMG
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/asc-key.p8"
+          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit \
+            build/cleona-chat-macos-arm64.dmg \
+            --key "$KEY_PATH" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER" \
+            --wait || echo "Notarization failed or timed out — DMG still available as artifact"
+
+          xcrun stapler staple build/cleona-chat-macos-arm64.dmg || true
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleona-macos-${{ steps.channel.outputs.channel }}
+          path: build/cleona-chat-macos-arm64.dmg
+          retention-days: 30
+
       - name: Cleanup keychain
         if: always()
         run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
