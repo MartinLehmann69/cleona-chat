@@ -34,7 +34,7 @@ class KeyMigration {
     final marker = File('$baseDir/.keyring_migrated');
     if (!marker.existsSync()) return false; // not yet migrated
 
-    final repairMarker = File('$baseDir/.keyring_repair_done');
+    final repairMarker = File('$baseDir/.keyring_repair_v2');
     if (repairMarker.existsSync()) return false; // already repaired
 
     final oldKeyFile = File('$baseDir/.db.key.migrated');
@@ -73,7 +73,18 @@ class KeyMigration {
 
       final fileEncKey = HdWallet.deriveFileEncKey(seedBytes, hdIndex);
       final newFileEnc = FileEncryption(baseDir: baseDir, key: fileEncKey);
-      final profileDir = identity.profileDir;
+
+      // iOS container UUIDs change between app updates — rebase profileDir
+      var profileDir = identity.profileDir;
+      if (!Directory(profileDir).existsSync() &&
+          profileDir.contains('/.cleona/')) {
+        final relative = profileDir.split('/.cleona/').last;
+        final rebased = '$baseDir/$relative';
+        if (Directory(rebased).existsSync()) {
+          _log.info('Repair: rebased profileDir to $rebased');
+          profileDir = rebased;
+        }
+      }
 
       for (final name in _serviceFiles) {
         final path = '$profileDir/$name';
@@ -100,7 +111,11 @@ class KeyMigration {
     }
 
     repairMarker.writeAsStringSync(DateTime.now().toIso8601String());
-    _log.info('Repair complete: $repaired files re-encrypted');
+    if (repaired > 0) {
+      _log.info('Repair complete: $repaired files re-encrypted');
+    } else {
+      _log.info('Repair complete: no files needed re-encryption');
+    }
     return repaired > 0;
   }
 
