@@ -873,6 +873,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  void undismissUpdateBanner() {
+    _updateBannerDismissed = false;
+    notifyListeners();
+  }
+
   /// Starts the in-network binary update using the service that most
   /// recently reported [_availableUpdateManifest]. No-op if no update (or
   /// its owning service) is currently known.
@@ -1937,6 +1942,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _availableUpdateManifest = manifest;
       _availableUpdateInNetwork = inNetworkAvailable;
       _availableUpdateSourceService = service;
+      _updateBannerDismissed = false;
       notifyListeners();
     };
     service.onUpdateStateChanged = (state, progress) {

@@ -31,6 +31,28 @@ class SettingsScreen extends StatelessWidget {
   final ICleonaService service;
   const SettingsScreen({super.key, required this.service});
 
+  SectionRow _buildVersionRow(BuildContext context, CleonaAppState appState,
+      AppLocale locale) {
+    final manifest = appState.availableUpdateManifest;
+    if (manifest != null) {
+      return SectionRow(
+        label: locale.get('version_label'),
+        value: '${CleonaService.kCurrentAppVersion}  →  v${manifest.version}',
+        trailing: Icon(Icons.system_update,
+            size: 20,
+            color: Theme.of(context).colorScheme.primary),
+        onTap: () {
+          appState.undismissUpdateBanner();
+          Navigator.pop(context);
+        },
+      );
+    }
+    return SectionRow(
+      label: locale.get('version_label'),
+      value: '${CleonaService.kCurrentAppVersion} (Architecture v3.0)',
+    );
+  }
+
   String _buildIpAddressText() {
     final ips = <String>[];
     for (final ip in service.localIps) {
@@ -362,10 +384,7 @@ class SettingsScreen extends StatelessWidget {
           SectionCard(
             title: locale.get('section_info'),
             children: [
-              SectionRow(
-                label: locale.get('version_label'),
-                value: '${CleonaService.kCurrentAppVersion} (Architecture v3.0)',
-              ),
+              _buildVersionRow(context, appState, locale),
               SectionRow(
                 label: locale.get('encryption_label'),
                 value: 'X25519 + ML-KEM-768\nEd25519 + ML-DSA-65',

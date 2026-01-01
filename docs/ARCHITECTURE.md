@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1b857c394868, 2026-07-09). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a14ba9551a06, 2026-07-09). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -4132,7 +4132,7 @@ CrashReport {
   exceptionType:  string        // e.g. "StateError"
   exceptionMsg:   string        // truncated to 500 chars
   stackTrace:     string        // top 20 frames, normalized (no absolute paths)
-  logTail:        string        // last 30 log lines from CLogger ring buffer
+  logTail:        string        // last 200 log lines, smart-filtered (§9.5.8)
   peerCount:      int32
   uptime:         int64         // seconds
   memoryUsage:    int64         // bytes, from ProcessInfo
@@ -4186,7 +4186,7 @@ ContactIssueReport {
   confirmedPeerCount: int32         // bidirectionally confirmed this session
   hasPortMapping:     bool          // UPnP/PCP success
   peerSeenInDht:      bool          // target user found in routing table
-  logTail:            string        // last 30 CLogger lines
+  logTail:            string        // last 200 lines, smart-filtered (§9.5.8)
   uptimeSeconds:      int64
 }
 ```
@@ -4211,17 +4211,19 @@ LogReport {
   appVersion:     string
   platform:       string
   timestamp:      int64
-  logTail:        string        // last 50 CLogger lines, paths normalized
+  logTail:        string        // last 200 lines, smart-filtered (§9.5.8)
   peerCount:      int32
   uptimeSeconds:  int64
   memoryBytes:    int64
   natType:        string        // fullCone / symmetric / unknown
   hasPortMapping: bool
   routeCount:     int32         // active DV routes
+  contactSummary: string?       // e.g. "3x accepted, 1x pending_outgoing"
+  eventTail:      string?       // recent diagnostic events (§9.5.8)
 }
 ```
 
-**Preview and consent:** Clicking "Log veröffentlichen" opens a preview dialog showing the exact report content (system info + all log lines) in a scrollable monospace view. A privacy notice explains that file paths are anonymized but network data (IPs, node IDs in log lines) is preserved for diagnostic value. The user must explicitly confirm with "Veröffentlichen" before the report is posted.
+**Preview and consent:** Clicking "Log veröffentlichen" opens a preview dialog showing the exact report content (system info + events + filtered log lines) in a scrollable monospace view. A privacy notice explains that file paths are anonymized but network data (IPs, node IDs in log lines) is preserved for diagnostic value. The user must explicitly confirm with "Veröffentlichen" before the report is posted.
 
 **Rate limiting:** Shares the same rate limiter as CrashReport (3/hour, 10/day per node).
 
@@ -4363,6 +4365,27 @@ The four gossip messages `SYSCHAN_DIGEST`, `SYSCHAN_SUMMARY`, `SYSCHAN_WANT`, `S
 - **UX:** long-press → retract sheet on a `SystemChannelPost`. Gesture collision with the A1 SelectionArea/SelectableText work is resolved in the implementation.
 
 **Spam posture (unchanged):** admission is the §8.2 context-proof (self-signed record + known `channel_id`); the per-identity cost is the existing admission PoW (§13.1.2, already required for network roles since V3.1.90, enforced via the D5 collective quota, §13.1.8) plus the receiver-side rate limits (§9.5.5: 3 posts/day FR, 10/day Bug-Log) and jury moderation (§9.3). No new admission-PoW gate is added at the KEX-Gate layer — message delivery remains ungated by admission, per the §13.1.2 Phase-2 principle.
+
+#### 9.5.8 Smart Log Filtering & Event Ring (V3.1.133)
+
+**Problem:** The CLogger ring buffer (500 lines) stores ALL log levels from ALL modules equally. Transport-layer DEBUG lines (`sendUdp: fragment X/Y OK`, Fragment NACK, HMAC dispatch, keepalive pong) fire at packet-rate and displace application-level INFO lines (contact requests, delivery receipts, identity events) within seconds. A bug report with 200 unfiltered tail lines from a node with 100+ peers contains nothing but transport noise — zero diagnostic value.
+
+**Solution — two complementary mechanisms:**
+
+1. **Event Ring Buffer** (`CLogger._events`, capacity 200): A separate in-memory ring that captures only diagnostic-critical application events via the `CLogger.event()` method. Events are automatically also logged at INFO level into the main ring and log files. Instrumented code paths:
+   - CR sent (re-contact, First-CR), CR received, CR auto-accepted, CR dropped
+   - Contact accepted, contact deleted, contact state transitions
+   - KEX Gate decisions (allowed, blocked)
+   - `_deletedContacts` marker cleared on re-add
+
+2. **Filtered Log Selection** (`CLogger.getReportLines()`): Bug reports use a filtered view of the main ring buffer that excludes DEBUG-level lines from transport-noise modules (`transport`, `udp-keepalive`, `lan-mcast`, `local-disc`). This preserves INFO/WARN/ERROR from all modules and DEBUG from non-transport modules (e.g. `service`, `node`, `dht`, `moderation`).
+
+**Report structure (LogReport):** The report now includes three sections:
+- **Header:** Version, platform, uptime, peers, routes, NAT, RAM, contact summary (`3x accepted, 1x pending_outgoing`)
+- **Events:** All entries from the event ring — rare but diagnostic-critical, guaranteed not displaced by transport noise
+- **Log (filtered):** Up to 200 lines from the main ring, excluding transport DEBUG noise. Covers a much longer time window than the unfiltered 200-line tail.
+
+**Privacy:** Event lines contain only short node-ID prefixes (8 hex chars) and display names — consistent with the existing privacy model of log reports (§9.5.2b). No message content, no full node IDs, no encryption keys.
 
 ---
 

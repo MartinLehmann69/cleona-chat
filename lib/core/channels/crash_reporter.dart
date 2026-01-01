@@ -57,7 +57,7 @@ class CrashReporter {
         .join('\n');
 
     final logLines =
-        CLogger.getRecentLines(SystemChannels.maxLogTailLines).join('\n');
+        CLogger.getReportLines(SystemChannels.maxLogTailLines).join('\n');
 
     final uptime = DateTime.now().difference(_startTime).inSeconds;
 
@@ -176,7 +176,7 @@ class CrashReporter {
   // ── Manual log report ──────────────────────────────────────────────
 
   LogReport buildLogReport() {
-    final logLines = CLogger.getRecentLines(SystemChannels.maxLogTailLines)
+    final logLines = CLogger.getReportLines(SystemChannels.maxLogTailLines)
         .map(_normalizePath)
         .toList();
 
@@ -198,6 +198,26 @@ class CrashReporter {
       memBytes = ProcessInfo.currentRss;
     } catch (_) {}
 
+    // Contact state summary for diagnostic context
+    String contactSummary = '';
+    try {
+      final contacts = _service.contacts;
+      if (contacts.isNotEmpty) {
+        final byStatus = <String, int>{};
+        for (final c in contacts.values) {
+          byStatus[c.status] = (byStatus[c.status] ?? 0) + 1;
+        }
+        contactSummary = byStatus.entries
+            .map((e) => '${e.value}x ${e.key}')
+            .join(', ');
+      }
+    } catch (_) {}
+
+    // Recent events (CR, contact changes, KEX, delivery)
+    final events = CLogger.getRecentEvents()
+        .map(_normalizePath)
+        .toList();
+
     return LogReport(
       appVersion: CleonaService.kCurrentAppVersion,
       platform: _platformString(),
@@ -209,6 +229,8 @@ class CrashReporter {
       natType: natType,
       hasPortMapping: hasPortMapping,
       routeCount: routeCount,
+      contactSummary: contactSummary,
+      eventTail: events.isEmpty ? null : events.join('\n'),
     );
   }
 

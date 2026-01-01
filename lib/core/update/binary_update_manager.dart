@@ -149,21 +149,22 @@ class BinaryUpdateManager {
 
     try {
       // Prefer a node that has the full binary — one shot, no reconstruction.
-      final fullSource = sources.firstWhere(
-        (s) => s.hasFullBinary,
-        orElse: () => const FragmentSource(
-            address: EndpointAddress('', 0), fragmentIndices: [], hasFullBinary: false),
-      );
-      if (fullSource.hasFullBinary) {
-        _log.info('Fetching full binary from ${fullSource.address.ip}:${fullSource.address.port}');
-        final data = await fetchFragment(fullSource.address, platform, -1);
+      // Try ALL full-binary sources (different addresses of the same or
+      // different endpoints) before falling back to fragment assembly.
+      final fullSources = sources.where((s) => s.hasFullBinary).toList();
+      for (final src in fullSources) {
+        _log.info('Fetching full binary from ${src.address.ip}:${src.address.port}');
+        final data = await fetchFragment(src.address, platform, -1);
         if (_cancelled) return;
         if (data != null) {
           await _store.storeComplete(platform, version, data);
           _setState(BinaryUpdateState.downloading, 1.0);
           return;
         }
-        _log.warn('Full-binary fetch failed, falling back to fragments');
+        _log.warn('Full-binary fetch from ${src.address.ip} failed, trying next');
+      }
+      if (fullSources.isNotEmpty) {
+        _log.warn('All full-binary sources exhausted, falling back to fragments');
       }
 
       final have = (await _store.availableFragments(platform, version)).toSet();

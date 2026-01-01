@@ -467,7 +467,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.131';
+  static const String kCurrentAppVersion = '3.1.133';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -3798,6 +3798,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final crBytes = Uint8List.fromList(cr.writeToBuffer());
 
     if (!isReContact) {
+      if (_deletedContacts.remove(recipientUserIdHex)) {
+        _log.info('sendContactRequest: cleared deletedContacts marker for ${recipientUserIdHex.substring(0, 8)}');
+      }
       _contacts[recipientUserIdHex] = ContactInfo(
         nodeId: recipientUserId,
         displayName: 'Pending...',
@@ -3823,7 +3826,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST,
         payload: crBytes,
       );
-      _log.info('CONTACT_REQUEST (re-contact V3) sendToUser ok=$ok');
+      _log.event('CR SENT (re-contact) to ${recipientUserIdHex.substring(0, 8)} ok=$ok');
       return true;
     }
 
@@ -3968,9 +3971,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       recipientDeviceMlKemPk: dmk,
     );
     final ok = await node.sendToDevice(packet, recipientDeviceId);
-    _log.info('CONTACT_REQUEST V3 First-CR-Bootstrap to '
+    _log.event('CR SENT (First-CR) to '
         '${recipientUserIdHex.substring(0, 8)} (device='
-        '${bytesToHex(recipientDeviceId).substring(0, 8)}) sendToDevice ok=$ok');
+        '${bytesToHex(recipientDeviceId).substring(0, 8)}) ok=$ok');
 
     // §5.5b FIRST_CR_STORE: also deposit the CR on seed peers so the
     // target can retrieve it even if currently offline (async CR via
@@ -4346,7 +4349,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE,
         payload: Uint8List.fromList(resp.writeToBuffer()),
       );
-      _log.info('CONTACT_REQUEST_RESPONSE V3 sendToUser ok=$sent');
+      _log.event('CR ACCEPTED ${contact.displayName} (${nodeIdHex.substring(0, 8)}) — response sent ok=$sent');
     } else {
       sent = false;
       _log.warn('CONTACT_REQUEST_RESPONSE drop: contact ${nodeIdHex.substring(0, 8)} '
@@ -4376,7 +4379,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _saveContacts();
     _saveConversations();
     onStateChanged?.call();
-    _log.info('Contact deleted: ${nodeIdHex.substring(0, 8)} (source=$source)');
+    _log.event('CONTACT DELETED ${nodeIdHex.substring(0, 8)} (source=$source)');
 
     // Twin-Sync (§26)
     _sendTwinSync(proto.TwinSyncType.CONTACT_DELETED, Uint8List.fromList(utf8.encode(nodeIdHex)));
@@ -10877,14 +10880,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     // 2. Convert ResolvedBinaryEndpoint -> FragmentSource.
-    final fragmentSources = resolved
-        .where((ep) => ep.addresses.isNotEmpty)
-        .map((ep) => FragmentSource(
-              address: ep.addresses.first,
-              fragmentIndices: ep.fragmentIndices,
-              hasFullBinary: ep.hasFullBinary,
-            ))
-        .toList();
+    // Expand each endpoint into one FragmentSource per address so the
+    // download layer can try multiple addresses (IPv4 LAN, IPv4 WAN,
+    // IPv6) instead of only the first one.
+    final fragmentSources = <FragmentSource>[];
+    for (final ep in resolved) {
+      for (final addr in ep.addresses) {
+        fragmentSources.add(FragmentSource(
+          address: addr,
+          fragmentIndices: ep.fragmentIndices,
+          hasFullBinary: ep.hasFullBinary,
+        ));
+      }
+    }
     if (fragmentSources.isEmpty) {
       _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
       return;
@@ -13690,7 +13698,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _deletedContacts.remove(senderHex);
         wasPreviouslyDeleted = true;
         _saveContacts();
-        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} re-requesting — allowed');
+        _log.event('CR RECV from previously-deleted ${senderHex.substring(0, 8)} — cleared deleted marker');
       }
 
       // Already accepted contact sends new CR: update keys and re-send acceptance.
@@ -13779,9 +13787,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // Never downgrade accepted→pending — the contact relationship is
         // already established. If a legitimate re-install happened, the
         // next direct-path CR (with verified outer-sig) will handle it.
-        _log.warn('CR from accepted contact ${cr.displayName} '
-            '(${senderHex.substring(0, 8)}) dropped — outerSigStatus='
-            '${snapshot.outerSigStatus.name}, contact already accepted');
+        _log.event('CR DROPPED from accepted ${cr.displayName} '
+            '(${senderHex.substring(0, 8)}) — outerSigStatus='
+            '${snapshot.outerSigStatus.name}, no auto-overwrite');
         return;
       }
       if (existing != null && existing.status == 'pending_outgoing') {
@@ -13800,7 +13808,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
         }
         _saveContacts();
-        _log.info('Bidirectional CR from ${cr.displayName} — auto-accepting');
+        _log.event('CR RECV bidirectional from ${cr.displayName} (${senderHex.substring(0, 8)}) — auto-accepting');
         acceptContactRequest(senderHex);
         return;
       }
@@ -13855,18 +13863,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _contacts[senderHex] = contact;
       _saveContacts();
       _saveConversations();
-      _log.info('CR from ${cr.displayName} (${senderHex.substring(0, 8)}) → pending');
+      _log.event('CR RECV from ${cr.displayName} (${senderHex.substring(0, 8)}) → pending');
 
       if (wasPreviouslyDeleted) {
-        _log.info('Auto-accepting CR from previously deleted contact '
-            '${cr.displayName} (${senderHex.substring(0, 8)})');
+        _log.event('CR AUTO-ACCEPT (previously deleted) ${cr.displayName} (${senderHex.substring(0, 8)})');
         acceptContactRequest(senderHex);
         return;
       }
 
       onContactRequestReceived?.call(senderHex, cr.displayName);
       onStateChanged?.call();
-      _log.info('Contact request from ${cr.displayName} (${senderHex.substring(0, 8)})');
     } catch (e) {
       _log.error('Contact request parse error: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
     }

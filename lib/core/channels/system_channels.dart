@@ -319,6 +319,8 @@ class LogReport {
   final String natType;
   final bool hasPortMapping;
   final int routeCount;
+  final String? contactSummary;
+  final String? eventTail;
 
   const LogReport({
     required this.appVersion,
@@ -331,6 +333,8 @@ class LogReport {
     required this.natType,
     required this.hasPortMapping,
     required this.routeCount,
+    this.contactSummary,
+    this.eventTail,
   });
 
   Map<String, dynamic> toJson() => {
@@ -345,6 +349,9 @@ class LogReport {
         'natType': natType,
         'hasPortMapping': hasPortMapping,
         'routeCount': routeCount,
+        if (contactSummary != null && contactSummary!.isNotEmpty)
+          'contactSummary': contactSummary,
+        if (eventTail != null) 'eventTail': eventTail,
       };
 
   static LogReport? fromJson(Map<String, dynamic> json) {
@@ -361,6 +368,8 @@ class LogReport {
         natType: json['natType'] as String? ?? 'unknown',
         hasPortMapping: json['hasPortMapping'] as bool? ?? false,
         routeCount: json['routeCount'] as int? ?? 0,
+        contactSummary: json['contactSummary'] as String?,
+        eventTail: json['eventTail'] as String?,
       );
     } catch (_) {
       return null;
@@ -377,9 +386,22 @@ class LogReport {
       ..writeln('Uptime: ${ContactIssueReport.formatDuration(uptimeSeconds)}')
       ..writeln('Peers: $peerCount, Routen: $routeCount')
       ..writeln('NAT: $natType, UPnP: ${hasPortMapping ? "ja" : "nein"}')
-      ..writeln('RAM: ${(memoryBytes / 1024 / 1024).toStringAsFixed(1)} MB')
+      ..writeln('RAM: ${(memoryBytes / 1024 / 1024).toStringAsFixed(1)} MB');
+    if (contactSummary != null && contactSummary!.isNotEmpty) {
+      buf.writeln('Kontakte: $contactSummary');
+    }
+    if (eventTail != null) {
+      final eventLines = eventTail!.split('\n');
+      buf
+        ..writeln('')
+        ..writeln('--- Events (${eventLines.length}) ---');
+      for (final line in eventLines) {
+        buf.writeln(line);
+      }
+    }
+    buf
       ..writeln('')
-      ..writeln('--- Log (${logLines.length} Zeilen) ---');
+      ..writeln('--- Log (${logLines.length} Zeilen, gefiltert) ---');
     for (final line in logLines) {
       buf.writeln(line);
     }

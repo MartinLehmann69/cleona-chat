@@ -215,12 +215,21 @@ class BinaryHttpServer {
       _logRequest(method, path, 404, 0);
       return;
     }
+    final ext = switch (platform) {
+      'android' => '.apk',
+      'windows' => '.exe',
+      'macos'   => '.dmg',
+      _         => '',
+    };
+    final mime = platform == 'android'
+        ? 'application/vnd.android.package-archive'
+        : 'application/octet-stream';
     _sendResponse(client, 200,
-        contentType: 'application/octet-stream',
+        contentType: mime,
         body: method == 'HEAD' ? null : body,
         bodyLength: body.length,
         extraHeaders: {
-          'Content-Disposition': 'attachment; filename="cleona-$platform"',
+          'Content-Disposition': 'attachment; filename="cleona$ext"',
         });
     _logRequest(method, path, 200, body.length);
   }

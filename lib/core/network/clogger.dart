@@ -49,9 +49,46 @@ class CLogger {
   static const int _ringCapacity = 500;
   static final List<String> _ring = [];
 
+  /// Separate ring buffer for application-level events (CR, contact state,
+  /// KEX, delivery, identity). These are rare but diagnostic-critical and
+  /// must not be displaced by high-frequency transport noise.
+  static const int _eventCapacity = 200;
+  static final List<String> _events = [];
+
+  /// Modules whose DEBUG lines are pure transport noise and should be
+  /// excluded from bug reports (but still written to the log file).
+  static const _transportModules = {'transport', 'udp-keepalive', 'lan-mcast', 'local-disc'};
+
   static List<String> getRecentLines([int count = 30]) {
     if (count >= _ring.length) return List.unmodifiable(_ring);
     return List.unmodifiable(_ring.sublist(_ring.length - count));
+  }
+
+  /// Returns lines for bug reports: ALL events + filtered log lines
+  /// (no DEBUG from transport modules). Much more diagnostic value than
+  /// raw tail of the ring buffer.
+  static List<String> getReportLines(int maxLines) {
+    final filtered = <String>[];
+    for (final line in _ring) {
+      if (line.contains('[DEBUG]') && _isTransportNoise(line)) continue;
+      filtered.add(line);
+    }
+    if (filtered.length > maxLines) {
+      return List.unmodifiable(filtered.sublist(filtered.length - maxLines));
+    }
+    return List.unmodifiable(filtered);
+  }
+
+  static bool _isTransportNoise(String line) {
+    for (final m in _transportModules) {
+      if (line.contains('[$m]')) return true;
+    }
+    return false;
+  }
+
+  static List<String> getRecentEvents([int count = 200]) {
+    if (count >= _events.length) return List.unmodifiable(_events);
+    return List.unmodifiable(_events.sublist(_events.length - count));
   }
 
   /// iOS: mirror log output to this path (Documents/, AFC-accessible).
@@ -78,6 +115,18 @@ class CLogger {
   void info(String msg) => _log(LogLevel.info, msg);
   void warn(String msg) => _log(LogLevel.warn, msg);
   void error(String msg) => _log(LogLevel.error, msg);
+
+  /// Log a diagnostic event that survives transport noise in bug reports.
+  /// Use for: CR sent/received/accepted, contact state changes, KEX
+  /// decisions, delivery receipts, identity events, QR scans.
+  void event(String msg) {
+    final now = DateTime.now();
+    final ts = now.toIso8601String();
+    final line = '$ts [EVENT] [$module] $msg';
+    _events.add(line);
+    if (_events.length > _eventCapacity) _events.removeAt(0);
+    _log(LogLevel.info, msg);
+  }
 
   void _log(LogLevel level, String msg) {
     final now = DateTime.now();
