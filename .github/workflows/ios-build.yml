@@ -266,16 +266,23 @@ jobs:
         run: |
           gem install fastlane --no-document
 
+          # Decode base64 secret → raw .p8 PEM, then escape newlines for JSON
+          P8_FILE="$RUNNER_TEMP/AuthKey.p8"
+          echo "$APP_STORE_CONNECT_KEY" | base64 -d > "$P8_FILE"
+
+          # Build JSON with key as \n-escaped PEM string (Fastlane JSON requires this)
+          KEY_ESCAPED=$(awk '{printf "%s\\n", $0}' "$P8_FILE" | sed 's/\\n$//')
           KEY_JSON="$RUNNER_TEMP/asc-api-key.json"
-          cat > "$KEY_JSON" <<APIKEY
+          cat > "$KEY_JSON" <<EOF
           {
             "key_id": "$APP_STORE_CONNECT_KEY_ID",
             "issuer_id": "$APP_STORE_CONNECT_ISSUER",
-            "key": "$APP_STORE_CONNECT_KEY",
-            "is_key_content_base64": true,
+            "key": "$KEY_ESCAPED",
             "in_house": false
           }
-          APIKEY
+          EOF
+
+          rm -f "$P8_FILE"
 
           IPA=$(find build/ios -name "*.ipa" | head -1)
           if [ -n "$IPA" ]; then
