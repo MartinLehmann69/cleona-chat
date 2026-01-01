@@ -3125,24 +3125,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // single timeout window — the CR stays pending_outgoing and the retry
         // timer re-issues the request until an OFFER arrives (or the user
         // gives up). See §8.1.1 step 1b.
-        _requestDeviceKem(
-            recipientUserId, hexToBytes(seedDeviceIdHex), seedEpB64);
+        final targetDeviceId = hexToBytes(seedDeviceIdHex);
+        _requestDeviceKem(recipientUserId, targetDeviceId, seedEpB64);
         _log.info('CONTACT_REQUEST First-CR: DHT miss for '
             '${recipientUserIdHex.substring(0, 8)} — sent DEVICE_KEM_REQUEST '
             '(step 1b); waiting up to 15s for DEVICE_KEM_OFFER...');
         final completer = _dkeCompleters.putIfAbsent(
             recipientUserIdHex, () => Completer<void>());
+        // §4.5 DKE retry: resend after DV routing converges. The first
+        // attempt often hits an incomplete routing table (discovery cascade
+        // not finished, Bootstrap routes not yet accepted via D3 PoW
+        // verification). A retry at 8s (matching the per-device rate-limit
+        // cooldown) gives the mesh time to converge and picks up the newly
+        // elected default-GW (typically Bootstrap with 50+ routes).
+        final retryTimer = Timer(const Duration(seconds: 8), () {
+          if (!completer.isCompleted) {
+            _requestDeviceKem(recipientUserId, targetDeviceId, seedEpB64);
+          }
+        });
         try {
           await completer.future.timeout(const Duration(seconds: 15));
+          retryTimer.cancel();
           _dkeCompleters.remove(recipientUserIdHex);
           _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER received for '
               '${recipientUserIdHex.substring(0, 8)} — CR sent by offer handler');
           return true;
         } on TimeoutException {
+          retryTimer.cancel();
           _dkeCompleters.remove(recipientUserIdHex);
-          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER timeout for '
-              '${recipientUserIdHex.substring(0, 8)} — CR stays pending_outgoing, '
-              'retry timer will continue');
+          _log.warn('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER timeout for '
+              '${recipientUserIdHex.substring(0, 8)} — no RUDP-Light confirmation '
+              'received. CR stays pending_outgoing for background retry '
+              '(exponential backoff).');
           return false;
         }
       } else {
@@ -3295,11 +3309,35 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..targetDeviceId = deviceId
       ..nonce = SodiumFFI().randomBytes(16)
       ..timestampMs = Int64(now.millisecondsSinceEpoch);
+    final payload = Uint8List.fromList(request.writeToBuffer());
     unawaited(node.sendInfraTo(
       messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
-      innerPayload: Uint8List.fromList(request.writeToBuffer()),
+      innerPayload: payload,
       recipientDeviceId: deviceId,
     ));
+    // §8.1.1 step 1b direct-path: also send directly to the target's known
+    // addresses (from ContactSeed). If the target is on the same LAN, this
+    // arrives immediately — the DV cascade above handles cross-network relay.
+    final targetPeer = node.routingTable.getPeer(deviceId);
+    if (targetPeer != null) {
+      var directCount = 0;
+      for (final addr in targetPeer.allConnectionTargets()) {
+        if (addr.ip.isEmpty || addr.port <= 0) continue;
+        if (!addr.isReachableFromCurrentNetwork) continue;
+        unawaited(node.sendInfraDirect(
+          messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
+          innerPayload: payload,
+          recipientDeviceId: deviceId,
+          addr: InternetAddress(addr.ip),
+          port: addr.port,
+        ));
+        directCount++;
+      }
+      if (directCount > 0) {
+        _log.info('DEVICE_KEM_REQUEST → ${devHex.substring(0, 8)} '
+            'also sent direct to $directCount address(es)');
+      }
+    }
     _log.info('DEVICE_KEM_REQUEST → ${devHex.substring(0, 8)} '
         '(user ${bytesToHex(userId).substring(0, 8)}, §8.1.1 step 1b)');
   }

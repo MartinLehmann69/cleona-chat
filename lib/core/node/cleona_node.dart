@@ -3347,6 +3347,37 @@ class CleonaNode {
       await _sendV3ViaHop(packet, deviceId);
     }
 
+    // §8.1.1 Direct-target attempt: the target is in the routing table
+    // (added via addPeersFromContactSeed) with addresses from the
+    // ContactSeed, but is neither a DV neighbor nor confirmed — the
+    // PING→PONG round-trip hasn't completed yet. Send UDP directly to
+    // its reachable addresses (fire-and-forget). This handles the common
+    // case where both nodes have direct IPv6 reachability on Mobilfunk
+    // but the DV routing hasn't converged. The relay cascade below runs
+    // regardless — belt-and-suspenders.
+    if (!dvRouting.neighbors.containsKey(destHex)) {
+      final targetPeer = routingTable.getPeer(deviceId);
+      if (targetPeer != null) {
+        final allAddrs = targetPeer.allConnectionTargets();
+        final reachable = _filterNatContext(allAddrs, targetPeer)
+            .where((a) => a.ip.isNotEmpty && a.port > 0 &&
+                !a.isInBackoff && a.isReachableFromCurrentNetwork)
+            .toList();
+        if (reachable.isNotEmpty) {
+          _log.info('sendToDevice ${destHex.substring(0, 8)}: '
+              'direct-target attempt — ${reachable.length} reachable '
+              'address(es) from routing table');
+          for (final addr in reachable) {
+            try {
+              await transport.sendUdp(
+                  packet, InternetAddress(addr.ip), addr.port);
+            } catch (_) {}
+          }
+          directSentBestEffort = true;
+        }
+      }
+    }
+
     // Last-resort: try ALL DV neighbors as relay candidates.
     // Prefer the elected default gateway first, then remaining neighbors.
     // This ensures first-contact CRs (phone behind CGNAT with only seed peers

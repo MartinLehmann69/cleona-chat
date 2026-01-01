@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1cec481ddd4f, 2026-06-20). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c3fa9787a66f, 2026-06-20). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1599,6 +1599,16 @@ sendToDevice(packet, deviceId):
     success = _attemptDelivery(packet, route, maxRetries=3)
     if success: return true
     // ACK timeout 8s direct, ~16s relay (RTT-based), surgical mark route DOWN
+  // Direct-target attempt: target is in routing table (e.g. from
+  // addPeersFromContactSeed) with addresses but is NOT yet a DV neighbor
+  // — the PING→PONG round-trip hasn't completed. Fire-and-forget UDP
+  // to all reachable addresses. The relay cascade below runs regardless.
+  if deviceId NOT in dvRouting.neighbors:
+    targetPeer = routingTable.getPeer(deviceId)
+    if targetPeer != null:
+      reachableAddrs = filterNatContext(targetPeer.allAddresses)
+      for addr in reachableAddrs:
+        transport.sendUdp(packet, addr)   // best-effort, no ACK wait
   // All learned routes exhausted — try defaultGateway as last resort
   defaultGw = dvRouting.defaultGatewayHex
   if defaultGw != null && defaultGw != deviceId:
@@ -2050,6 +2060,7 @@ Layer 2 — Per-Device Routing (§4.4)
     node.sendToDevice(packet, deviceId)
       → tries cheapest route, max 3 ACK retries
       → next-cheaper route on failure
+      → direct-target attempt (routing-table addresses, fire-and-forget)
       → defaultGateway as last resort
       → returns true on DELIVERY_RECEIPT, false on cascade-exhausted
 
@@ -3261,10 +3272,13 @@ This is the only place in V3 where the §2.3.5 InfrastructureFrame selector list
                    nextHopDeviceId: bobDeviceId,
                    payload: PerMessageKem-bytes,
                    ... Outer-Sig (Ed25519-only per §3.5 Infrastructure rule) }
-7. Send via standard routing (§4.4 sendToDevice). Per §4.6 this gates on
-   reachability, not direct-confirmed: the target is by definition not yet
-   direct-confirmed, so the cascade attempts the URI's a= addresses directly
-   AND relays via the s= seed peers; RUDP-Light (CR-Retry) confirms delivery.
+7. Send via standard routing (§4.4 sendToDevice). The target is by definition
+   not yet a DV neighbor (PING→PONG hasn't completed), so no learned routes
+   exist. The cascade's direct-target attempt (§4.4) sends fire-and-forget UDP
+   to Bob's addresses from the ContactSeed (a= parameter) — critical when both
+   nodes have direct IPv6 reachability (Mobilfunk). In parallel, the relay
+   cascade runs via seed peers and defaultGateway.
+   RUDP-Light (DELIVERY_RECEIPT) confirms delivery.
    If Bob is OFFLINE: the CR is stored on SeedPeers via First-CR-Mailbox
    (§5.5b), delivered when Bob comes online.
 8. Bob's daemon decrypts (using Device-KEM-SK), reads the InfrastructureFrame,
