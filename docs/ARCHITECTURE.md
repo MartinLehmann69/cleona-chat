@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8a05c7113a05, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1d32975393ff, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1539,6 +1539,13 @@ sendToDevice(packet, deviceId):
   return false
 ```
 
+**Default-Gateway Selection (V3.1)**: `updateDefaultGateway()` scores each DV neighbor by five criteria in strict priority order:
+1. **relay-confirmed** — neighbors through which a DELIVERY_RECEIPT has been received beat unconfirmed neighbors unconditionally.
+2. **unique destination coverage** — count of destinations reachable ONLY through this neighbor. A neighbor that is the sole relay to mobile/CGNAT devices (e.g. Bootstrap) scores higher than a LAN peer with many routes but no exclusive destinations. Prevents high-route-count LAN neighbors from shadowing the only relay path to hard-to-reach devices.
+3. **route count** — total alive destinations reachable via this neighbor.
+4. **average cost** — lower is better.
+5. **recency** — most recent `lastConfirmed` timestamp breaks ties.
+
 **Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: erasure-coded S&F on mutual peers (§5.5) plus a mailbox entry (§5.6) for receiver pull-up.
 
 **MessageQueue no longer exists.** v2.2's MessageQueue retried the same send for 7 days. v3.0 stops after cascade exhaustion. The receiver pulls offline messages from the mailbox itself.
@@ -2003,6 +2010,9 @@ message RelayForward {
 - Future sends use the learned route directly — no fresh discovery
 - On RELAY_ACK timeout: the relay route is marked DOWN (surgical, §4.4)
 - No timer-based expiry — only failures cause marking
+
+**Reverse-Relay-Path-Learning (V3.1)**:
+When a node receives a relayed packet (`hopCount > 0`) from sender S, the transport-layer source address identifies the relay node R. The receiver records a DV relay-route hint: "S is reachable via R" with `cost = connectionTypeCost(self→R) + 10` (relay penalty), `ackConfirmed=false`. This hint enables reply-path symmetry for NAT-asymmetric scenarios: a mobile device behind CGNAT sends via Bootstrap with `hopCount=0`; Bootstrap relays to Alice with `hopCount=1`; Alice learns "mobile is reachable via Bootstrap" and can use Bootstrap as relay for the reply. The hint does NOT override existing alive confirmed routes — it is a low-priority fallback tried after confirmed routes in the `sendToDevice` cascade (§5.1 Step 1). If an alive route via the same relay already exists, only `lastConfirmed` is refreshed. The hint follows standard DV route aging and pruning.
 
 **Chunking for large payloads**: when a packet to be relayed exceeds `relayBudget.maxFrameSize` (300 KB), it is chunked and forwarded in multiple parts — with its own reassembly semantics on the receiver.
 

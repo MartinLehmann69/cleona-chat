@@ -1044,7 +1044,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         } catch (e, stack) {
           debugPrint('[main] _initAndroidInProcess FAILED: $e\n$stack');
           _logCrash('initAndroidInProcess', e, stack);
-          _initError = '$e';
+          _initError = '$e\n\nbaseDir: $_baseDir\n\n$stack';
           notifyListeners();
         }
       });
@@ -1064,9 +1064,41 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   // ── Android in-process init (deferred from initialize()) ──────
 
   Future<void> _initAndroidInProcess() async {
+    // Ensure base directory exists (iOS: path_provider container may not
+    // have .cleona/ yet on first post-install run).
+    final baseDirObj = Directory(_baseDir);
+    if (!baseDirObj.existsSync()) {
+      baseDirObj.createSync(recursive: true);
+    }
+
     final mgr = IdentityManager();
     final identities = mgr.loadIdentities();
     if (identities.isEmpty) return;
+
+    // iOS: the data container path is stable across reinstalls, but the
+    // profileDir stored in identities.json is an absolute path. If the
+    // app's base dir was relocated (e.g. after an AppPaths fix deployment),
+    // rebase all profileDirs to the current _baseDir.
+    if (Platform.isIOS || Platform.isAndroid) {
+      var needsSave = false;
+      for (final id in identities) {
+        if (!Directory(id.profileDir).existsSync()) {
+          final relative = id.profileDir.split('/.cleona/').last;
+          final rebased = '$_baseDir/$relative';
+          if (Directory(rebased).existsSync()) {
+            debugPrint('[main] Rebasing profileDir: ${id.profileDir} -> $rebased');
+            id.profileDir = rebased;
+            needsSave = true;
+          } else {
+            debugPrint('[main] profileDir missing, recreating: $rebased');
+            Directory(rebased).createSync(recursive: true);
+            id.profileDir = rebased;
+            needsSave = true;
+          }
+        }
+      }
+      if (needsSave) mgr.saveIdentities(identities);
+    }
 
     final masterSeed = mgr.loadMasterSeed();
     final firstId = identities.first;

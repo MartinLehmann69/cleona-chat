@@ -14,7 +14,7 @@ import 'package:cleona/core/storage/atomic_json_writer.dart';
 class Identity {
   final String id;
   String displayName;
-  final String profileDir;
+  String profileDir;
   int port;
   final DateTime createdAt;
   String? nodeIdHex;

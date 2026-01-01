@@ -603,6 +603,38 @@ class DvRoutingTable {
     return null;
   }
 
+  /// Add a low-priority relay route hint learned from an incoming relayed
+  /// packet (Reverse-Relay-Path-Learning, §5.3). When we receive a packet
+  /// from sender S relayed through neighbor R, we record "S is reachable
+  /// via R" so the reply cascade can use R as relay for S.
+  /// Does NOT override existing alive confirmed routes.
+  bool addRelayRouteHint(String destHex, String relayHex, int cost) {
+    if (destHex == _ownHex || destHex == relayHex) return false;
+    if (!_neighbors.containsKey(relayHex)) return false;
+
+    final existing = _routes[destHex];
+    if (existing != null) {
+      for (final r in existing) {
+        if (r.nextHopHex == relayHex && r.isAlive) {
+          r.lastConfirmed = DateTime.now();
+          if (r.consecutiveFailures > 0) r.consecutiveFailures = 0;
+          return false;
+        }
+      }
+    }
+
+    final route = Route(
+      destination: hexToBytes(destHex),
+      nextHop: hexToBytes(relayHex),
+      hopCount: 2,
+      cost: cost,
+      type: RouteType.relay,
+      connType: ConnectionType.relay,
+    );
+    _addOrUpdateRoute(destHex, route);
+    return true;
+  }
+
   /// All routes to a destination, sorted by cost.
   List<Route> routesTo(String destHex) {
     return List.unmodifiable(_routes[destHex] ?? []);
@@ -616,53 +648,80 @@ class DvRoutingTable {
 
   // ── Default-Gateway ───────────────────────────────────────────────────
 
-  /// Selects the best default gateway:
-  /// Chooses the best neighbor as default gateway.
-  /// Primary criterion: relay-confirmed (DELIVERY_RECEIPT/Relay-Delivery
-  /// received) beats pure Discovery/PONG neighbors.
-  /// Secondary: most routes → lowest avg cost → most recent confirmation.
+  /// Selects the best default gateway (§4.4).
+  /// Scoring: relay-confirmed → unique coverage → route count → avg cost → recency.
+  /// "Unique coverage" counts destinations reachable ONLY through this neighbor —
+  /// a neighbor that is the sole path to N destinations gets a bonus that outweighs
+  /// raw route count. This prevents a high-route-count LAN peer from shadowing
+  /// a Bootstrap that is the only relay to mobile/CGNAT devices.
   void updateDefaultGateway() {
     if (_neighbors.isEmpty) {
       _defaultGatewayHex = null;
       return;
     }
 
-    // For each neighbor, count: how many destinations are reachable through it?
-    final scores = <String, _GatewayScore>{};
+    // Pass 1: for each destination, collect which neighbors can reach it.
+    final destToNeighbors = <String, List<String>>{};
+    final neighborRouteCount = <String, int>{};
+    final neighborTotalCost = <String, int>{};
+    final neighborNewestConfirm = <String, DateTime>{};
 
     for (final neighborHex in _neighbors.keys) {
-      var routeCount = 0;
-      var totalCost = 0;
-      DateTime? newestConfirm;
+      neighborRouteCount[neighborHex] = 0;
+      neighborTotalCost[neighborHex] = 0;
+    }
 
-      _routes.forEach((_, routes) {
-        for (final r in routes) {
-          if (r.isAlive && (r.nextHopHex == neighborHex || (r.isDirect && r.destinationHex == neighborHex))) {
-            routeCount++;
-            totalCost += r.cost;
-            if (newestConfirm == null || r.lastConfirmed.isAfter(newestConfirm!)) {
-              newestConfirm = r.lastConfirmed;
-            }
-            break; // Only count the best route per destination
-          }
+    _routes.forEach((destHex, routes) {
+      for (final r in routes) {
+        if (!r.isAlive) continue;
+        final via = r.isDirect ? r.destinationHex : r.nextHopHex;
+        if (via == null || !_neighbors.containsKey(via)) continue;
+        destToNeighbors.putIfAbsent(destHex, () => []);
+        if (!destToNeighbors[destHex]!.contains(via)) {
+          destToNeighbors[destHex]!.add(via);
         }
-      });
+        neighborRouteCount[via] = (neighborRouteCount[via] ?? 0) + 1;
+        neighborTotalCost[via] = (neighborTotalCost[via] ?? 0) + r.cost;
+        final nc = neighborNewestConfirm[via];
+        if (nc == null || r.lastConfirmed.isAfter(nc)) {
+          neighborNewestConfirm[via] = r.lastConfirmed;
+        }
+        break; // best route per destination per neighbor
+      }
+    });
 
+    // Pass 2: count unique destinations per neighbor (reachable ONLY via this one).
+    final uniqueCoverage = <String, int>{};
+    for (final neighborHex in _neighbors.keys) {
+      uniqueCoverage[neighborHex] = 0;
+    }
+    for (final entry in destToNeighbors.entries) {
+      if (entry.value.length == 1) {
+        uniqueCoverage[entry.value.first] =
+            (uniqueCoverage[entry.value.first] ?? 0) + 1;
+      }
+    }
+
+    final scores = <String, _GatewayScore>{};
+    for (final neighborHex in _neighbors.keys) {
+      final rc = neighborRouteCount[neighborHex] ?? 0;
       scores[neighborHex] = _GatewayScore(
-        routeCount: routeCount,
-        avgCost: routeCount > 0 ? totalCost / routeCount : 999999,
-        newestConfirm: newestConfirm ?? DateTime(2000),
+        routeCount: rc,
+        uniqueCoverage: uniqueCoverage[neighborHex] ?? 0,
+        avgCost: rc > 0 ? (neighborTotalCost[neighborHex] ?? 0) / rc : 999999,
+        newestConfirm: neighborNewestConfirm[neighborHex] ?? DateTime(2000),
         relayConfirmed: _relayConfirmedNeighbors.contains(neighborHex),
       );
     }
 
-    // Sort: relay-confirmed first, then most routes → cost → recency
+    // Sort: relay-confirmed → unique coverage → route count → cost → recency
     final sorted = scores.entries.toList()
       ..sort((a, b) {
-        // Relay-confirmed neighbors ALWAYS before unconfirmed ones
         if (a.value.relayConfirmed != b.value.relayConfirmed) {
           return a.value.relayConfirmed ? -1 : 1;
         }
+        final ucCmp = b.value.uniqueCoverage.compareTo(a.value.uniqueCoverage);
+        if (ucCmp != 0) return ucCmp;
         final routeCmp = b.value.routeCount.compareTo(a.value.routeCount);
         if (routeCmp != 0) return routeCmp;
         final costCmp = a.value.avgCost.compareTo(b.value.avgCost);
@@ -987,12 +1046,14 @@ class RouteEntry {
 
 class _GatewayScore {
   final int routeCount;
+  final int uniqueCoverage;
   final double avgCost;
   final DateTime newestConfirm;
   final bool relayConfirmed;
 
   _GatewayScore({
     required this.routeCount,
+    required this.uniqueCoverage,
     required this.avgCost,
     required this.newestConfirm,
     required this.relayConfirmed,

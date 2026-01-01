@@ -1154,6 +1154,15 @@ class CleonaNode {
       }
     }
 
+    // [5b] Reverse-Relay-Path-Learning (§5.3): when we receive a relayed
+    // packet (hopCount > 0) from originator S, learn "S is reachable via
+    // the relay that forwarded this packet". This enables reply-path
+    // symmetry for NAT-asymmetric scenarios (e.g. mobile sends via
+    // Bootstrap, we can relay back via Bootstrap).
+    if (senderDeviceId.isNotEmpty && packet.hopCount > 0 && from.address != '0.0.0.0') {
+      _learnReverseRelayPath(senderHex, from.address, fromPort);
+    }
+
     // [6] Routing decision: am I the next hop?
     // Per §3.1 the DeviceID is daemon-global — all hosted identities share
     // the same deviceNodeId. Equality with primaryIdentity.deviceNodeId is
@@ -3198,6 +3207,28 @@ class CleonaNode {
 
   void _onPeerDiscovered(Uint8List peerId, int peerPort, InternetAddress from, int fromPort) {
     _onDiscoveryReceived(peerId, peerPort, from, fromPort);
+  }
+
+  /// §5.3 Reverse-Relay-Path-Learning: identify which DV neighbor
+  /// physically relayed a packet from [originatorHex] and add a relay
+  /// route hint so the reply cascade can use the same relay.
+  void _learnReverseRelayPath(String originatorHex, String relayIp, int relayPort) {
+    for (final neighborHex in dvRouting.neighborIds) {
+      final peer = routingTable.getPeer(hexToBytes(neighborHex));
+      if (peer == null) continue;
+      for (final addr in peer.addresses) {
+        if (addr.ip == relayIp) {
+          final ct = connectionTypeFromPriority(addr.priority);
+          final cost = connectionTypeCost(ct) + 10; // relay penalty
+          final added = dvRouting.addRelayRouteHint(originatorHex, neighborHex, cost);
+          if (added) {
+            _log.info('Reverse-relay-path: ${originatorHex.substring(0, 8)} '
+                'reachable via ${neighborHex.substring(0, 8)} (cost=$cost)');
+          }
+          return;
+        }
+      }
+    }
   }
 
   /// Update or create a peer entry in the routing table.
