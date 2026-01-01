@@ -1742,6 +1742,37 @@ class IpcClient implements ICleonaService {
     return resp.success;
   }
 
+  @override
+  LogReport buildLogReport() {
+    return LogReport(
+      appVersion: '',
+      platform: '',
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      logTail: '',
+      peerCount: 0,
+      uptimeSeconds: 0,
+      memoryBytes: 0,
+      natType: 'unknown',
+      hasPortMapping: false,
+      routeCount: 0,
+    );
+  }
+
+  Future<LogReport?> fetchLogReport() async {
+    final resp = await _sendRequest('build_log_report');
+    if (resp.success && resp.data.containsKey('report')) {
+      return LogReport.fromJson(
+          resp.data['report'] as Map<String, dynamic>);
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> publishLogReport() async {
+    final resp = await _sendRequest('publish_log_report');
+    return resp.success;
+  }
+
   // ── NAT-Troubleshooting-Wizard (§27.9) — IPC proxy ──────────────────
   @override
   void Function()? onNatWizardTriggered;

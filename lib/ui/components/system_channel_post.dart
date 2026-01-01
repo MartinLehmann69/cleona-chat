@@ -36,6 +36,9 @@ class SystemChannelPost extends StatelessWidget {
     if (type == 'contact_issue') {
       return _buildContactIssue(context, json, colorScheme);
     }
+    if (type == 'log_report') {
+      return _buildLogReport(context, json, colorScheme);
+    }
     return _plainFallback(colorScheme);
   }
 
@@ -228,6 +231,106 @@ class SystemChannelPost extends StatelessWidget {
                   style: TextStyle(
                     fontSize: 10,
                     color: cs.onTertiaryContainer.withValues(alpha: 0.5),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLogReport(
+      BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
+    final report = LogReport.fromJson(json);
+    if (report == null) return _plainFallback(cs);
+
+    final logLines = report.logTail.split('\n');
+
+    return Card(
+      color: cs.secondaryContainer.withValues(alpha: 0.3),
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.article_outlined, size: 18, color: cs.secondary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Log Report',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: cs.onSecondaryContainer,
+                    ),
+                  ),
+                ),
+                Text(
+                  'v${report.appVersion}',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: cs.onSecondaryContainer.withValues(alpha: 0.7),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'NAT: ${report.natType} · '
+              '${report.peerCount} Peers · '
+              '${report.routeCount} Routen · '
+              'Uptime: ${ContactIssueReport.formatDuration(report.uptimeSeconds)}',
+              style: TextStyle(fontSize: 12, color: cs.onSecondaryContainer),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: 8),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: cs.surface.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                logLines.take(8).join('\n'),
+                style: TextStyle(
+                  fontFamily: 'monospace',
+                  fontSize: 10,
+                  color: cs.onSurface.withValues(alpha: 0.8),
+                ),
+                maxLines: 8,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (logLines.length > 8)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  '... ${logLines.length - 8} weitere Zeilen',
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontStyle: FontStyle.italic,
+                    color: cs.onSecondaryContainer.withValues(alpha: 0.5),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                _chip(cs, report.platform),
+                const SizedBox(width: 4),
+                _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
+                const Spacer(),
+                Text(
+                  timestamp,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: cs.onSecondaryContainer.withValues(alpha: 0.5),
                   ),
                 ),
               ],

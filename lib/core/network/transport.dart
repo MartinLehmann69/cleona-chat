@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show min;
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/clogger.dart';
@@ -53,6 +54,8 @@ class Transport {
   String? _mobileFallbackIp; // The local IP the mobile socket is bound to
   int _consecutiveZeroSends = 0;
   bool _reconnecting = false;
+  int _consecutiveDeadFromBirth = 0;
+  int _lastReconnectMs = 0;
   int _lastUdpReceiveMs = 0;
   int _startedAtMs = 0;
   bool _selfProbeAcked = false;
@@ -1300,17 +1303,35 @@ class Transport {
       // sent; if 10s passed and it still hasn't arrived, the IOCP socket is
       // dead from birth.
       if (!_selfProbeAcked && _startedAtMs > 0 && (now - _startedAtMs) > 10000) {
+        _consecutiveDeadFromBirth++;
+        // Exponential backoff: after repeated dead-from-birth, delay reconnect
+        // to avoid a tight 15s cycle that never recovers (observed: Dart IOCP
+        // bug produces dead sockets on every RawDatagramSocket.bind(), cycling
+        // 4x/min until the VM GCs the old completion port — typically 2-10min).
+        final cooldownMs = _consecutiveDeadFromBirth <= 2
+            ? 0
+            : min(60000, 5000 * (1 << (_consecutiveDeadFromBirth - 2)));
+        final sinceLast = now - _lastReconnectMs;
+        if (sinceLast < cooldownMs) {
+          _selfProbeAcked = true;
+          return;
+        }
         _log.warn('UDP socket dead from birth (self-probe not received after '
-            '${(now - _startedAtMs) ~/ 1000}s) — triggering recovery');
-        _selfProbeAcked = true; // prevent re-triggering every 5s
+            '${(now - _startedAtMs) ~/ 1000}s, attempt=$_consecutiveDeadFromBirth) '
+            '— triggering recovery');
+        _selfProbeAcked = true;
+        _lastReconnectMs = now;
         onUdpSocketDead?.call();
       }
       return;
     }
+    // Socket received at least once — reset dead-from-birth counter.
+    _consecutiveDeadFromBirth = 0;
     final silenceMs = now - _lastUdpReceiveMs;
     if (silenceMs > 30000) {
       _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
       _lastUdpReceiveMs = now;
+      _lastReconnectMs = now;
       onUdpSocketDead?.call();
     }
   }

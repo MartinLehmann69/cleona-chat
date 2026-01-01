@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:270c41f838eb, 2026-06-08). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ad76625994d7, 2026-06-09). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1284,7 +1284,7 @@ Cleona nodes communicate over **a single UDP port per daemon** that additionally
 
 **Port assignment:**
 - **Bootstrap nodes**: UDP+TCP 8080 (live channel), 8081 (beta channel)
-- **Mobile/desktop daemons**: a random port in `[1024, 65535]`, fixed on first start and persisted in `~/.cleona/`. It remains stable across daemon restarts — important for NAT hole punching and for stored routing-table entries.
+- **Mobile/desktop daemons**: a random port in `[1024, 65535]`, fixed on first start and persisted in `identities.json`. It remains stable across daemon restarts — important for NAT hole punching and for stored routing-table entries. Manual port changes via Settings are persisted to the same file (`IdentityManager.updatePort()`) so they survive restarts.
 
 **Protocol Escalation** (order applied as payload size or unreliability grows):
 1. **UDP single-shot** (default): payload ≤ 1200 bytes → one UDP packet
@@ -1743,7 +1743,8 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 
 **IPv6 Reception Bug (V3.1.x fix):** Investigation of the 2026-06-04 finding (Phone→Bootstrap IPv6 packet lost) revealed two root causes: (1) `MulticastDiscovery` bound a second IPv6 socket to `nodePort` with `SO_REUSEPORT` — on Linux the kernel distributed inbound IPv6 unicast packets between Transport and MulticastDiscovery; packets that landed on MulticastDiscovery were silently dropped (same class as the 2fbc879 IPv4 regression, §4.5.2). Fix: MulticastDiscovery now binds to `discoveryPort` (41338) like LocalDiscovery does for IPv4. The §4.5.2 invariant check was extended to also verify `/proc/net/udp6`. (2) `currentSelfAddresses()` classified all local IPv6 as `IPV6_GLOBAL` — ULA/link-local addresses were advertised as globally routable and tried by remote peers. Fix: uses `PeerAddress.classifyIp()` for correct classification.
 
-**Bootstrap IPv6 reachability**: the bootstrap node obtains a global IPv6 via SLAAC from the DMZ prefix (e.g. `2001:db8:a::4ef0:215:5dff:fea8:21c`). OPNsense's WAN firewall passes IPv6 TCP/UDP 8080-8081 to this address; NDP on the DMZ bridge resolves the MAC. The bootstrap publishes its IPv6 via `api6.ipify.org`, so DS-Lite mobile peers can reach it directly.
+*A section is omitted from the public edition.*
+
 
 ### 4.8 Bootstrap Node
 
@@ -3247,7 +3248,7 @@ CrashDuplicateReply {
 }
 ```
 
-**Manual reporting:** Users can also post free-text descriptions of problems directly in the channel, with optional screenshot or log attachments (max 2 MB per post). These manual reports do not have fingerprints and are not subject to dedup.
+**No manual text input:** The Bug Log channel does not provide a free-text input field. All posts are structured: automatic `CrashReport` posts (§9.5.2), manual `ContactIssueReport` posts (§9.5.2a), or manual `LogReport` posts (§9.5.2b). The input area shows a read-only info bar ("Crash-Reports werden automatisch gepostet") and a "Log veröffentlichen" button.
 
 #### 9.5.2a Contact Issue Reporting — Manual Diagnostic Reports
 
@@ -3284,6 +3285,33 @@ ContactIssueReport {
 - **Post to Bug Log (only when `peerCount > 0`):** Publishes the report as a structured JSON post to the Bug Log channel, rendered with the same card UI as crash reports but with a distinct tertiary-color scheme and contact-specific fields. When no peers are connected, this button is hidden and an info text explains the limitation.
 
 **Privacy:** The report contains no message content, no full node IDs (only first 16 hex chars), no encryption keys, and no IP addresses. The log tail is the same truncated, path-normalized excerpt used by CrashReport.
+
+#### 9.5.2b Manual Log Report — User-Triggered Diagnostics
+
+When no crash occurs but the application behaves unexpectedly (logic error, missing message, wrong routing), the user can publish a diagnostic log snapshot from the Bug Log channel's input area via "Log veröffentlichen".
+
+**LogReport:**
+
+```
+LogReport {
+  appVersion:     string
+  platform:       string
+  timestamp:      int64
+  logTail:        string        // last 50 CLogger lines, paths normalized
+  peerCount:      int32
+  uptimeSeconds:  int64
+  memoryBytes:    int64
+  natType:        string        // fullCone / symmetric / unknown
+  hasPortMapping: bool
+  routeCount:     int32         // active DV routes
+}
+```
+
+**Preview and consent:** Clicking "Log veröffentlichen" opens a preview dialog showing the exact report content (system info + all log lines) in a scrollable monospace view. A privacy notice explains that file paths are anonymized but network data (IPs, node IDs in log lines) is preserved for diagnostic value. The user must explicitly confirm with "Veröffentlichen" before the report is posted.
+
+**Rate limiting:** Shares the same rate limiter as CrashReport (3/hour, 10/day per node).
+
+**Rendering:** Displayed as a card with secondary-color scheme, showing system info chips (platform, NAT, UPnP status) and the first 8 log lines with a "… N weitere Zeilen" indicator.
 
 #### 9.5.3 Feature Request Channel — Community Voting
 
@@ -3368,6 +3396,7 @@ Three popup variants, shown as a modal dialog over the current screen:
 | Max single post (auto) | 256 KB | — |
 | Max single post (manual) | 2 MB | 2 MB |
 | Max contact issue report | 2 MB | — |
+| Max log report | 256 KB | — |
 | Rate limit | 3 reports/hour, 10/day per node | 3 posts/day per node |
 | Eviction strategy | Oldest posts first | Fewest votes first, then oldest |
 

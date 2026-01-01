@@ -306,6 +306,87 @@ class ContactIssueReport {
   }
 }
 
+/// Manual log report — user-triggered when no crash occurred but something
+/// behaves unexpectedly (logic error, wrong routing, missing message).
+class LogReport {
+  final String appVersion;
+  final String platform;
+  final int timestampMs;
+  final String logTail;
+  final int peerCount;
+  final int uptimeSeconds;
+  final int memoryBytes;
+  final String natType;
+  final bool hasPortMapping;
+  final int routeCount;
+
+  const LogReport({
+    required this.appVersion,
+    required this.platform,
+    required this.timestampMs,
+    required this.logTail,
+    required this.peerCount,
+    required this.uptimeSeconds,
+    required this.memoryBytes,
+    required this.natType,
+    required this.hasPortMapping,
+    required this.routeCount,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'type': 'log_report',
+        'appVersion': appVersion,
+        'platform': platform,
+        'timestampMs': timestampMs,
+        'logTail': logTail,
+        'peerCount': peerCount,
+        'uptimeSeconds': uptimeSeconds,
+        'memoryBytes': memoryBytes,
+        'natType': natType,
+        'hasPortMapping': hasPortMapping,
+        'routeCount': routeCount,
+      };
+
+  static LogReport? fromJson(Map<String, dynamic> json) {
+    if (json['type'] != 'log_report') return null;
+    try {
+      return LogReport(
+        appVersion: json['appVersion'] as String,
+        platform: json['platform'] as String,
+        timestampMs: json['timestampMs'] as int,
+        logTail: json['logTail'] as String,
+        peerCount: json['peerCount'] as int,
+        uptimeSeconds: json['uptimeSeconds'] as int,
+        memoryBytes: json['memoryBytes'] as int,
+        natType: json['natType'] as String? ?? 'unknown',
+        hasPortMapping: json['hasPortMapping'] as bool? ?? false,
+        routeCount: json['routeCount'] as int? ?? 0,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String toPostText() => jsonEncode(toJson());
+
+  String toPreviewText() {
+    final logLines = logTail.split('\n');
+    final buf = StringBuffer()
+      ..writeln('Version: $appVersion')
+      ..writeln('Plattform: $platform')
+      ..writeln('Uptime: ${ContactIssueReport.formatDuration(uptimeSeconds)}')
+      ..writeln('Peers: $peerCount, Routen: $routeCount')
+      ..writeln('NAT: $natType, UPnP: ${hasPortMapping ? "ja" : "nein"}')
+      ..writeln('RAM: ${(memoryBytes / 1024 / 1024).toStringAsFixed(1)} MB')
+      ..writeln('')
+      ..writeln('--- Log (${logLines.length} Zeilen) ---');
+    for (final line in logLines) {
+      buf.writeln(line);
+    }
+    return buf.toString();
+  }
+}
+
 /// Compute a crash fingerprint from exception type and stack frames.
 /// Strips line numbers and normalizes paths so the same bug on different
 /// versions produces the same fingerprint.

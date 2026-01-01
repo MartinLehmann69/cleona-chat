@@ -173,6 +173,66 @@ class CrashReporter {
     return false;
   }
 
+  // ── Manual log report ──────────────────────────────────────────────
+
+  LogReport buildLogReport() {
+    final logLines = CLogger.getRecentLines(SystemChannels.maxLogTailLines)
+        .map(_normalizePath)
+        .toList();
+
+    final uptime = DateTime.now().difference(_startTime).inSeconds;
+
+    int peerCount = 0;
+    int routeCount = 0;
+    String natType = 'unknown';
+    bool hasPortMapping = false;
+    try {
+      peerCount = _service.node.routingTable.allPeers.length;
+      routeCount = _service.node.dvRouting.routeCount;
+      natType = _service.node.natTraversal.natType.name;
+      hasPortMapping = _service.node.natTraversal.hasPortMapping;
+    } catch (_) {}
+
+    int memBytes = 0;
+    try {
+      memBytes = ProcessInfo.currentRss;
+    } catch (_) {}
+
+    return LogReport(
+      appVersion: CleonaService.kCurrentAppVersion,
+      platform: _platformString(),
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      logTail: logLines.join('\n'),
+      peerCount: peerCount,
+      uptimeSeconds: uptime,
+      memoryBytes: memBytes,
+      natType: natType,
+      hasPortMapping: hasPortMapping,
+      routeCount: routeCount,
+    );
+  }
+
+  Future<bool> publishLogReport(LogReport report) async {
+    if (isRateLimited) return false;
+
+    final postText = report.toPostText();
+    if (postText.length > SystemChannels.maxAutoReportBytes) {
+      _log.warn('Log report exceeds size limit');
+      return false;
+    }
+
+    final result = await _service.sendChannelPost(
+      SystemChannels.bugLogChannelIdHex,
+      postText,
+    );
+    if (result != null) {
+      _recordReport();
+      _log.info('Log report published');
+      return true;
+    }
+    return false;
+  }
+
   // ── Helpers ───────────────────────────────────────────────────────
 
   static String _platformString() {

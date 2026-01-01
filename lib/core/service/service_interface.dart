@@ -209,6 +209,10 @@ abstract class ICleonaService {
   ContactIssueReport? buildContactIssueReport(String contactNodeIdHex);
   Future<bool> publishContactIssueReport(String contactNodeIdHex);
 
+  // Manual log report (Bug Log)
+  LogReport buildLogReport();
+  Future<bool> publishLogReport();
+
   // ── NAT-Troubleshooting-Wizard (§27.9) ─────────────────────────────
   /// Fired when the 10-min trigger (0 direct + UPnP fail + PCP fail +
   /// no CGNAT + not dismissed) has been satisfied and the dialog should

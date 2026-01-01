@@ -5718,6 +5718,7 @@ class CleonaService implements ICleonaService {
     try {
       await node.changePort(newPort);
       port = newPort;
+      IdentityManager().updatePort(newPort);
       onStateChanged?.call();
       return true;
     } on SocketException {
@@ -7199,6 +7200,15 @@ class CleonaService implements ICleonaService {
     final report = buildContactIssueReport(contactNodeIdHex);
     if (report == null) return false;
     return contactIssueReporter.publishReport(report);
+  }
+
+  @override
+  LogReport buildLogReport() => crashReporter.buildLogReport();
+
+  @override
+  Future<bool> publishLogReport() async {
+    final report = buildLogReport();
+    return crashReporter.publishLogReport(report);
   }
 
   // ── NAT-Troubleshooting-Wizard (§27.9) ───────────────────────────────

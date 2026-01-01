@@ -80,3 +80,13 @@ foreach(DLL ${NATIVE_DLLS})
     )
   endif()
 endforeach()
+
+# Bundle MSVC runtime (vcruntime140.dll, msvcp140.dll, etc.) next to the
+# executable so end users don't need the VC++ Redistributable installed.
+set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+include(InstallRequiredSystemLibraries)
+foreach(RUNTIME_LIB ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS})
+  add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${RUNTIME_LIB}" "$<TARGET_FILE_DIR:${BINARY_NAME}>")
+endforeach()

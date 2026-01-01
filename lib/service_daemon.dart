@@ -311,6 +311,7 @@ class _MultiServiceDaemon {
   Process? _networkMonitor;
   Timer? _triggerTimer;
   Timer? _heartbeatTimer;
+  Timer? _socketWatchdog;
   DateTime? _heartbeatLastAt;
   int _heartbeatTick = 0;
   bool _running = false;
@@ -353,7 +354,7 @@ class _MultiServiceDaemon {
     final mgr = IdentityManager(baseDir: config.baseDir);
     var identities = mgr.loadIdentities();
     if (identities.isEmpty) {
-      log.warn('Keine Identitäten gefunden');
+      log.warn('Keine Identitäten gefunden — warte auf GUI-Setup (cleona.start trigger)');
       return;
     }
 
@@ -730,6 +731,19 @@ class _MultiServiceDaemon {
     try {
       File('${config.baseDir}/cleona.ready').writeAsStringSync('$pid');
     } catch (_) { /* non-fatal */ }
+
+    // Socket watchdog: if the IPC socket inode is deleted externally (e.g. by
+    // a test recovery script that rm's *.sock while the daemon holds the fd),
+    // new IPC connections silently fail. Recreate the socket on the same path.
+    if (!Platform.isWindows) {
+      _socketWatchdog = Timer.periodic(const Duration(seconds: 30), (_) {
+        if (!_running || _ipcServer == null) return;
+        if (!File(socketPath).existsSync()) {
+          log.warn('IPC socket deleted externally — recreating');
+          _ipcServer!.rebindSocket();
+        }
+      });
+    }
   }
 
   // Boot-window gate read by V3 ApplicationFrame / InfrastructureFrame hooks
@@ -915,6 +929,7 @@ class _MultiServiceDaemon {
   Future<void> shutdownAll() async {
     log.info('Daemon wird beendet...');
     _triggerTimer?.cancel();
+    _socketWatchdog?.cancel();
     if (_running) await stopAll();
     // Do NOT delete cleona.lock — the flock is inode-based and released
     // automatically by the kernel when this process exits (fd closed).

@@ -103,6 +103,30 @@ class IpcServer {
     }
   }
 
+  /// Re-create the Unix socket on the same path. Called by the daemon's socket
+  /// watchdog when the inode is deleted externally. Existing connected clients
+  /// keep their fd; only new connections use the fresh socket.
+  Future<void> rebindSocket() async {
+    if (Platform.isWindows) return;
+    try {
+      final oldServer = _server;
+      final socketFile = File(socketPath);
+      if (socketFile.existsSync()) socketFile.deleteSync();
+      _server = await ServerSocket.bind(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+      _server!.listen(
+        _onClientConnected,
+        onError: (e) => _log.error('IPC server error: $e'),
+      );
+      _log.info('IPC socket re-created on $socketPath');
+      oldServer?.close();
+    } catch (e) {
+      _log.error('IPC socket rebind failed: $e');
+    }
+  }
+
   /// Add a service at runtime (new identity created).
   void addService(String identityId, CleonaService service) {
     _services[identityId] = service;
@@ -1090,6 +1114,33 @@ class IpcServer {
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: pubOk,
+          ));
+          break;
+
+        case 'build_log_report':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final logReport = service.buildLogReport();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {'report': logReport.toJson()},
+          ));
+          break;
+
+        case 'publish_log_report':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final logPubOk = await service.publishLogReport();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: logPubOk,
           ));
           break;
 

@@ -794,6 +794,39 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildInputArea(BuildContext context, ICleonaService? service) {
     final locale = AppLocale.read(context);
 
+    // Bug Log channel: info bar + manual log report button
+    if (widget.isChannel && sys_ch.SystemChannels.isBugLogChannel(widget.conversationId)) {
+      return Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.info_outline, size: 16, color: Theme.of(context).colorScheme.outline),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                locale.get('bug_log_auto_info'),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Theme.of(context).colorScheme.outline,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonalIcon(
+              onPressed: () => _showLogReportDialog(context, service),
+              icon: const Icon(Icons.upload_outlined, size: 18),
+              label: Text(locale.get('bug_log_publish')),
+            ),
+          ],
+        ),
+      );
+    }
+
     // Feature Request channel: FAB instead of text input
     if (widget.isChannel && sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId)) {
       return Container(
@@ -1272,6 +1305,92 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  void _showLogReportDialog(BuildContext context, ICleonaService? service) {
+    if (service == null) return;
+    final locale = AppLocale.read(context);
+
+    final report = service.buildLogReport();
+    final previewText = report.toPreviewText();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.article_outlined, color: Theme.of(ctx).colorScheme.secondary),
+            const SizedBox(width: 8),
+            Expanded(child: Text(locale.get('bug_log_publish_title'))),
+          ],
+        ),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(locale.get('bug_log_publish_text')),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  constraints: const BoxConstraints(maxHeight: 300),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      previewText,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Icon(Icons.shield_outlined, size: 16,
+                        color: Theme.of(ctx).colorScheme.outline),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        locale.get('bug_log_publish_privacy'),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Theme.of(ctx).colorScheme.outline,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(locale.get('cancel')),
+          ),
+          FilledButton.icon(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              try {
+                await service.publishLogReport();
+              } catch (e) {
+                debugPrint('Log report publish failed: $e');
+              }
+            },
+            icon: const Icon(Icons.upload_outlined, size: 16),
+            label: Text(locale.get('bug_log_publish_confirm')),
+          ),
+        ],
       ),
     );
   }
