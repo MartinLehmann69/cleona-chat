@@ -1,6 +1,39 @@
 # Cleona Chat — Changelog
 
-## V3.1 — Current Release
+## 4.2.0 — upcoming
+
+**A new line.** 4.2 replaces the delivery layer of 3.x completely and is deliberately not compatible with it: no migration of profiles, no shared network, no shared wire format. The specification is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Delivery
+- The Kademlia DHT and distance-vector routing of 3.x are gone. A message goes out on up to four ways at once — local network, public address, through a neighbour (up to 3 hops), post box — and the first acknowledgement wins
+- Offline delivery through a post box held by three neighbours for up to 7 days
+- Contacts can serve as fixed neighbours instead of strangers
+- One UDP port for IPv4 and IPv6; knocking and forwarding for devices behind address translation
+- Every packet on the data port is sealed pairwise and has the same size; a cover stream runs beside the traffic
+- Nothing periodic in idle except the keep-alive a translator needs and the cover stream
+- No packet HMAC and no network-side admission filter; abuse is answered by the KEX gate and reputation
+
+### First contact
+- Invitation cards (QR code, NFC, text line) built from the device's own keys, usable on a device that has never been online
+- A request to an invitation carries a proof of work bound to the invitation
+
+### Identity & recovery
+- Recovery when all devices are lost rebuilds the data from the chats with contacts, groups and channels; Shamir secret sharing is no longer part of the design
+- Up to 5 devices per identity; replacing a device is an ordinary device-set change
+
+### Storage
+- Messages in an encrypted SQLite database per identity (SQLite3 Multiple Ciphers) without a plaintext temporary file
+
+### Calls
+- Native OS voice sessions per platform; video through the platform's hardware codecs (H.264 baseline)
+
+### Updates
+- In-network updates with a hybrid-signed manifest (Ed25519 + ML-DSA-65); offered only once complete and verified
+
+### Languages
+- 34 languages
+
+## V3.1 — Previous line (3.x, superseded by 4.2)
 
 ### Messaging
 - Text, images, video, audio, files — all end-to-end encrypted via single UDP path

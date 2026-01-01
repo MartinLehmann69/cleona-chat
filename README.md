@@ -1,127 +1,112 @@
 # Cleona Chat
 
-**Decentralized. Post-Quantum Secure. No Servers. No Phone Number. No Compromise.**
+**Decentralized. Post-Quantum Secure. No Servers. No Phone Number.**
 
-Cleona Chat is a peer-to-peer messenger that operates entirely without central servers. Your messages travel directly between devices — encrypted with post-quantum cryptography that protects against both current and future threats.
+Cleona Chat is a peer-to-peer messenger without servers. Every participant is a peer; a peer that forwards for somebody else is still just a peer. Identity is purely cryptographic — no phone number, no email address, no account.
+
+This is the **4.2** line. It is a new delivery layer and is not compatible with the 3.x releases: no migration, no shared network, no shared wire format. The full specification is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Why Cleona?
 
-- **No servers** — All communication is peer-to-peer via a Kademlia-based DHT. There is no single point of failure, no entity that can be compelled to hand over data, and no infrastructure to seize.
-- **Post-quantum encryption** — Hybrid cryptography combining classical (X25519, Ed25519, AES-256-GCM) and post-quantum (ML-KEM-768, ML-DSA-65) algorithms. If either scheme is broken, the other still protects your communication.
-- **No identity required** — No phone number, no email, no personal information. Your identity is purely cryptographic — a keypair generated on your device.
-- **Offline delivery** — Messages reach you even when you're offline, through erasure-coded fragments distributed across the network and store-and-forward on mutual contacts.
-- **Open for audit** — The source code is publicly available so anyone can verify the cryptographic implementation and security claims.
+- **No servers** — peers are the network. There is no central directory, no account server and no infrastructure to seize.
+- **Post-quantum encryption** — every message carries its own hybrid key encapsulation (X25519 + ML-KEM-768) and a hybrid signature (Ed25519 + ML-DSA-65). There is no session state that could desynchronize.
+- **No identity required** — your identity is a keypair generated on your device, backed up by a 24-word phrase.
+- **Offline delivery** — a message for an absent recipient waits in a post box held by three neighbours for up to 7 days.
+- **Hard to censor** — sealed content, packets of one fixed size, a cover stream beside the traffic, and several independent paths instead of a single point to block.
+- **Open for audit** — the source is public so anyone can verify the cryptography and the security claims.
+
+## How a message travels
+
+```
+text → compress → seal (hybrid KEM, signature inside) → split into 1200-byte parts
+     → all delivery ways at once, first acknowledgement wins:
+         1  local network address            milliseconds
+         2  public address (knocking if needed)  seconds
+         3  through a neighbour, up to 3 hops    seconds
+         4  post box at three neighbours         until the recipient returns
+     → recipient opens the seal, checks the signature, acknowledges
+```
+
+What this costs is stated openly in the specification (§1.4) — for example, a forwarding neighbour learns that two identifiers exchange packets, though not who they are or what they say.
 
 ## Features
 
 ### Messaging
-- Text, images, video, audio, files — all end-to-end encrypted
-- Message editing (configurable window) and deletion (unbounded)
-- Emoji reactions, reply/quoting, read receipts, typing indicators
-- Voice messages with source-side transcription (whisper.cpp)
-- Inline media preview, pinch-to-zoom, video/audio player
-- URL detection with sender-side link previews (no network request by receiver)
-- Clipboard paste and drag & drop for media
-- Chat search with match navigation
+- Text, images, video, audio and files — all end-to-end encrypted
+- Message editing and deletion, emoji reactions, reply/quoting, read receipts
+- Voice messages with on-device transcription (whisper.cpp)
+- Link previews created by the sender — the recipient makes no network request
+
+### First contact
+- Invitation cards as QR code, NFC touch or a text line; a card is built from the device's own keys and works on a device that has never reached the network
+- Requests from strangers need an explicit acceptance; contacts can be verified in four levels
 
 ### Groups & Channels
-- Groups with pairwise fan-out encryption and 3-role system
-- Public channels with DHT-based discovery and search
-- System channels (Bug Log, Feature Requests)
-- Decentralized moderation with jury system
-- Content rating and language filtering
+- End-to-end encrypted groups with roles
+- Public channels with decentralized moderation by a jury of users
 
-### Calendar
-- Multi-identity calendar with encrypted persistence and P2P event sharing
-- 5 views (day/week/month/year + tasks), recurring events (RFC 5545 RRULE)
-- Free/busy protocol, RSVP, iCal import/export, PDF print
-- External sync: CalDAV, Google Calendar, local ICS, Android CalendarContract
+### Calendar & Polls
+- Encrypted calendar with recurring events (RFC 5545), RSVP, iCal import/export and CalDAV sync
+- Polls, including anonymous voting with linkable ring signatures
 
-### Polls
-- 5 poll types (single/multiple choice, date poll, scale, free text)
-- Anonymous voting via linkable ring signatures
-- Date poll to calendar event bridge
+### Calls
+- 1:1 and group audio/video calls, Opus audio
+- Video through the platform's hardware codecs (H.264 as the common baseline; HEVC, AV1 and VP9 when both sides support them)
 
-### Voice & Video Calls
-- 1:1 and group audio/video calls
-- Opus audio codec with jitter buffer
-- VP8 video with adaptive bitrate
-- Overlay multicast for efficient group calls
-- Picture-in-picture layout
+### Identity, devices & recovery
+- Several identities from one seed phrase
+- Up to 5 devices per identity; a replaced device is simply removed from the device set
+- If all devices are lost: the 24-word phrase restores the identities, and the data is rebuilt from the chats with your contacts, groups and channels
 
-### Network & Delivery
-- Distance-vector routing with three-layer delivery cascade
-- Direct → Relay → Store-and-Forward + Erasure Coding backup
-- NAT hole punching with coordinated traversal
-- Protocol escalation: UDP → UDP+NACK → TLS (anti-censorship fallback)
-- Closed network model with HMAC authentication on every packet
+### Storage
+- Messages in an encrypted SQLite database per identity (SQLite3 Multiple Ciphers), configuration in encrypted files, media encrypted on disk
 
-### Identity & Recovery
-- Multiple identities via HD wallet derivation from a single seed
-- Multi-device support (max 5 devices, device revocation, emergency key rotation)
-- 24-word seed phrase backup
-- Restore broadcast to contacts (one online contact is enough)
-- Shamir Secret Sharing (3-of-5) for guardian-based recovery
-- Contact verification levels (4 tiers)
-- NFC contact exchange
+### Updates
+- In-network updates with a hybrid-signed manifest (Ed25519 + ML-DSA-65); an update is only offered once it is complete and verified
 
-### Software Distribution
-- Censorship-resistant in-network binary updates (erasure-coded)
-- Nostr binary discovery, embedded HTTP server, invite links
-- Physical transfer support (USB/LAN)
-
-### Privacy & Security
-- Per-message KEM encryption (no session state, no desync)
-- Database encryption at rest (XSalsa20-Poly1305)
-- DoS protection: PoW + rate limiting + reputation system + fragment budgets + network banning
-- KEX gate: unknown senders are silently dropped
-- No telemetry, no analytics, no tracking
-
-### Platforms
-- Linux Desktop (.deb, .tar.gz)
-- Windows Desktop (.zip)
-- Android (APK)
-- iOS (IPA via TestFlight)
-- macOS (DMG, notarized)
-
-### Internationalization
-- 33 languages including RTL support
+### Platforms & languages
+- Linux, Windows, macOS, Android, iOS
+- 34 languages including right-to-left scripts
 
 ## Building from Source
 
 ### Prerequisites
-- Flutter SDK (stable channel)
-- Dart SDK
-- Native libraries: libsodium, liboqs, libzstd, liberasurecode
+- Flutter SDK (stable channel) with its Dart SDK
+- Native libraries: libsodium, liboqs, libzstd, Opus; Cleona's own native modules are in `native/`
 
 ### Linux
 ```bash
 flutter build linux --release
-# Build distribution packages (AppImage, .deb, .rpm):
-./scripts/build-linux-packages.sh 3.2.0
+# The daemon — `dart build cli` (not `dart compile exe`) so that the build
+# hooks run and the encrypted store library is bundled:
+dart build cli --target bin/cleona_daemon.dart --output build/daemon-cli
 ```
 
 ### Android
 ```bash
+./scripts/build-android-libs.sh   # native libraries
 flutter build apk --release
 ```
 
 ### Windows
 ```bash
 flutter build windows --release
+windows\scripts\compile-daemon.bat
 ```
 
 ### iOS
 ```bash
-./scripts/build-ios-libs.sh    # Build native libs
-flutter build ipa              # Build IPA
+./scripts/build-ios-libs.sh    # native libraries
+flutter build ipa
 ```
 
 ### macOS
 ```bash
-./scripts/build-macos-libs.sh  # Build native libs
-flutter build macos --release  # Build app
+./scripts/build-macos-libs.sh  # native libraries
+./scripts/deploy-macos-app.sh  # app bundle including the daemon
 ```
+
+**Note:** the key material of the official update path is not part of the published source (see `lib/core/crypto/network_secret_material.dart`). A build from this source takes part in the network like any other, but cannot find or read the official update path.
 
 ## Verifying Releases
 
@@ -130,14 +115,6 @@ Each release includes Ed25519-signed binaries. To verify:
 1. Download the release artifact and its `.sig` file
 2. Download `SHA256SUMS` and `SHA256SUMS.sig`
 3. Verify the signature using the maintainer's public key (included in `assets/cleona_maintainer_public.pem`)
-
-### Reproducible Builds
-
-You can verify that official binaries match the published source:
-
-1. Build from source using the same Flutter/Dart versions noted in the release
-2. Strip the release signature from the official binary
-3. Compare the unsigned binaries — they should be byte-for-byte identical
 
 ## License
 
