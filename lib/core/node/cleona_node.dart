@@ -1782,6 +1782,22 @@ class CleonaNode {
       if (senderPeerLocal?.userId != null) {
         _decrementUnackedPacketsToPeer(bytesToHex(senderPeerLocal!.userId!));
       }
+      // A BOOT-path response (e.g. DHT_PONG) proves bidirectional
+      // reachability just like an ApplicationFrame with hopCount==0.
+      // On Mobilfunk/CGNAT, BOOT is the ONLY inbound path — without this,
+      // hasSessionConfirmedPeers stays false and the QR convergence gate
+      // never opens.
+      if (from.address != '0.0.0.0') {
+        _confirmedPeers[senderHexLocal] = DateTime.now();
+        if (!hasSessionConfirmedPeers) {
+          hasSessionConfirmedPeers = true;
+          _log.info('First session-confirmed peer (BOOT): '
+              '${senderHexLocal.substring(0, 8)}');
+        }
+        _disarmIsolatedNodeTimer();
+        _zeroPeerRecoveryTimer?.cancel();
+        _zeroPeerRecoveryTimer = null;
+      }
     }
     switch (frame.messageType) {
       case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:

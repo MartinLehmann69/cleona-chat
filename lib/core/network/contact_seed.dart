@@ -651,7 +651,11 @@ class ContactSeedBuilder {
   /// True once the network has enough data for a complete CR.
   bool get isReady =>
       _source.hasSessionConfirmedPeers &&
-      (_source.publicIp != null || _hasOnlyLanPeers);
+      (_source.publicIp != null || _hasGlobalIpv6 || _hasOnlyLanPeers);
+
+  bool get _hasGlobalIpv6 => _source.localIps.any((ip) =>
+      ip.contains(':') && !ip.startsWith('fe80:') &&
+      !ip.startsWith('fd') && !ip.startsWith('fc'));
 
   bool get _hasOnlyLanPeers =>
       _source.peerSummaries.every((p) => _isPrivateIp(p.address));
