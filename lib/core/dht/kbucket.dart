@@ -781,11 +781,14 @@ class RoutingTable {
           pruned++;
           return true;
         }
-        // Private IPv4 not in any local /24 → unreachable from here.
-        // Skip the check for IPv6 entirely (no /24 concept).
+        // Private IPv4: prune only if WE have no private IP at all
+        // (= we're on a public-only network). Cross-subnet private
+        // routing (e.g. 192.168.10.x ↔ 192.168.178.x via OPNsense)
+        // is common in routed home/lab networks — the old /24 check
+        // broke these setups by pruning valid cross-subnet addresses.
         if (!addr.ip.contains(':') &&
             PeerAddress.isPrivateIp(addr.ip) &&
-            !PeerAddress.isInLocalSubnet(addr.ip, localIps)) {
+            !localIps.any((l) => !l.contains(':') && _isPrivateIp(l))) {
           pruned++;
           return true;
         }

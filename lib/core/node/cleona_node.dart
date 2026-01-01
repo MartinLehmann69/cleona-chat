@@ -3434,8 +3434,20 @@ class CleonaNode {
     }
     _touchPeer(peerId, from.address, peerPort, isAuthoritative: true);
 
-    // Send PING to discovered peer
+    // Send PING to discovered peer (works same-subnet, may fail cross-NAT)
     _sendPing(from.address, peerPort);
+
+    // NAT-compatible echo: send a discovery probe BACK via the discovery
+    // socket to the actual source address:port. In NAT scenarios the
+    // transport-port PING above is dropped (OPNsense only has a NAT
+    // mapping for discovery port 41338, not for the transport port).
+    // The echo uses the same port-41338 channel the probe arrived on,
+    // so it traverses the existing NAT mapping. The remote side receives
+    // our nodeId+port, adds us to its routing table, and can then
+    // initiate transport-level traffic (creating its own NAT state).
+    if (fromPort != peerPort) {
+      localDiscovery.sendUnicastDiscovery(from.address, fromPort);
+    }
   }
 
   void _onPeerDiscovered(Uint8List peerId, int peerPort, InternetAddress from, int fromPort) {
@@ -3837,13 +3849,26 @@ class CleonaNode {
     if (ownThirdOctets.isEmpty) return false;
     for (final peer in routingTable.allPeers) {
       if (!isPeerConfirmed(peer.nodeIdHex)) continue;
+      // A peer that also has an address on our own /24 is a same-subnet
+      // peer with extra addresses (e.g. KVM libvirt bridge 192.168.122.1).
+      // Only count peers that have NO address on our subnet — those are
+      // genuine cross-subnet peers (e.g. Bootstrap on 192.168.178.x).
+      bool hasLocalAddr = false;
+      bool hasCrossAddr = false;
       for (final addr in peer.addresses) {
         final parts = addr.ip.split('.');
         if (parts.length == 4) {
           final c = int.tryParse(parts[2]);
-          if (c != null && !ownThirdOctets.contains(c)) return true;
+          if (c != null) {
+            if (ownThirdOctets.contains(c)) {
+              hasLocalAddr = true;
+            } else {
+              hasCrossAddr = true;
+            }
+          }
         }
       }
+      if (hasCrossAddr && !hasLocalAddr) return true;
     }
     return false;
   }
