@@ -8,6 +8,11 @@ class CLogger {
   static final Map<String, StringBuffer> _buffers = {};
   static Timer? _flushTimer;
 
+  /// iOS: mirror log output to this path (Documents/, AFC-accessible).
+  /// Set from main.dart via path_provider before any CLogger is created.
+  static String? iosMirrorPath;
+  static StringBuffer? _iosMirrorBuffer;
+
   final String module;
   final String? profileDir;
 
@@ -57,6 +62,11 @@ class CLogger {
     if (profileDir != null) {
       _buffers[profileDir]?.writeln(line);
     }
+
+    // iOS mirror: duplicate ALL log lines to the AFC-accessible Documents path
+    if (iosMirrorPath != null) {
+      (_iosMirrorBuffer ??= StringBuffer()).writeln(line);
+    }
   }
 
   static void _ensureFlushTimer() {
@@ -83,6 +93,19 @@ class CLogger {
       } catch (_) {
         // Non-fatal: logging should never crash the app
       }
+    }
+
+    // iOS mirror flush — writes to Documents/logs/ (AFC-accessible)
+    if (iosMirrorPath != null && _iosMirrorBuffer != null && _iosMirrorBuffer!.isNotEmpty) {
+      final content = _iosMirrorBuffer!.toString();
+      _iosMirrorBuffer!.clear();
+      try {
+        final logDir = Directory('$iosMirrorPath/logs');
+        if (!logDir.existsSync()) logDir.createSync(recursive: true);
+        final date = DateTime.now().toIso8601String().substring(0, 10);
+        final file = File('${logDir.path}/cleona_$date.log');
+        await file.writeAsString(content, mode: FileMode.append);
+      } catch (_) {}
     }
   }
 

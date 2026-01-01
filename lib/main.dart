@@ -34,6 +34,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/platform/share_receiver.dart';
 import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
@@ -55,6 +56,12 @@ void main() async {
       final appSupport = await pp.getApplicationSupportDirectory();
       AppPaths.setHome(appSupport.path);
       debugPrint('[main] iOS home set via path_provider: ${appSupport.path}');
+      // Mirror ALL CLogger output to Documents/ — the only directory
+      // accessible via AFC/iTunes for debug log retrieval on iOS 18+
+      // (idevicesyslog no longer shows app-level logs).
+      final docs = await pp.getApplicationDocumentsDirectory();
+      CLogger.iosMirrorPath = docs.path;
+      debugPrint('[main] iOS log mirror: ${docs.path}/logs/');
     } catch (e) {
       debugPrint('[main] path_provider failed: $e — falling back to AppPaths default');
     }
@@ -194,13 +201,13 @@ void _logCrash(String source, Object error, StackTrace? stack) {
       entry, mode: FileMode.append, flush: true);
   } catch (_) {/* never crash the crash handler */}
   if (Platform.isIOS) {
-    // Try multiple paths — HOME may not be set on iOS, and AFC
-    // can only see the app container root.
+    // Write to CLogger's iOS mirror path (Documents/, AFC-accessible).
+    // Falls back to bundle-derived paths if mirror isn't set yet (early crash).
     final candidates = <String>[
+      if (CLogger.iosMirrorPath != null)
+        '${CLogger.iosMirrorPath}/crash.log',
       if (Platform.environment['HOME'] != null)
         '${Platform.environment['HOME']}/Documents/crash.log',
-      // Resolve via executable path (always inside the .app bundle's container)
-      '${Platform.resolvedExecutable.split('.app/').first.replaceAll('/Runner.app', '')}/Documents/crash.log',
       '/tmp/crash.log',
     ];
     for (final path in candidates) {

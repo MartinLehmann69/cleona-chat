@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1d32975393ff, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c505dc56a7c8, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -6169,6 +6169,50 @@ Concrete items to be addressed post-V3.0 — not part of V3.0, but deliberately 
 - Threat-model extension by network-observer class (leads to onion activation)
 
 The roadmap is planned in the project memory with concrete sessions/sprints — this spec only links the architectural end goals.
+
+---
+
+## 25. Platform Suitability
+
+Cleona is a serverless P2P messenger. Its architecture requires: a permanently open UDP port, a long-running background process, and unrestricted network access. How well each operating system supports these requirements directly determines the user experience.
+
+### 25.1 Ranking
+
+| Rank | Platform | Verdict |
+|------|----------|---------|
+| 1 | Linux Desktop | Best possible experience |
+| 2 | macOS | Near-Linux experience |
+| 3 | Windows Desktop | Full experience, platform-specific workarounds required |
+| 4 | Android | Good experience with one architectural compromise |
+| 5 | iOS | Significantly degraded background delivery |
+
+### 25.2 Platform Details
+
+**Tier 1 — Linux Desktop**
+
+The reference platform. The daemon runs without restrictions, UDP works natively, IPC uses Unix sockets, and the OS imposes no limits on background execution or networking. Users get instant message delivery, reliable calls, and full offline-recovery — exactly as the architecture intends.
+
+**Tier 2 — macOS**
+
+Architecturally almost identical to Linux: Unix foundation, daemon + GUI over Unix-socket IPC, no background execution limits, no sandbox enforcement (outside App Store distribution). The only friction is distribution-side: Apple requires notarization and Gatekeeper approval, and builds need a macOS runner. At runtime, the user experience matches Linux.
+
+**Tier 3 — Windows Desktop**
+
+Conceptually a good fit — Windows allows background services without restrictions, and ports can be opened freely. However, Dart's `RawDatagramSocket` on Windows exhibited an 87.9% UDP packet drop rate due to IOCP (I/O Completion Port) behavior, which required a native C shim (`libcleona_net`, direct `WSASendTo`) to work around (see §4.5). IPC uses TCP + auth token instead of Unix sockets, adding complexity. Process management (Scheduled Task, PID/lock files) proved more error-prone than on Unix. These are solved problems, but each Windows-specific behavior costs disproportionate development effort. Users get the full experience after these workarounds.
+
+**Tier 4 — Android**
+
+The first platform where the OS actively works against Cleona's architecture. There is no separate daemon — everything runs in-process. Background message delivery relies on a Foreground Service with a persistent notification (all push-based alternatives were evaluated and rejected — see §12.4). Google's battery optimization (Doze, App Standby) can delay or kill background processes despite the Foreground Service contract. Mobile networks typically use CGNAT/DS-Lite, making direct peer connections unreliable and forcing the relay cascade (Direct → Relay → Store-and-Forward). **User impact:** messages generally arrive promptly while the app is in foreground or the Foreground Service is active, but aggressive OEM battery management (Samsung, Xiaomi, Huawei) may occasionally delay delivery. Users must exempt Cleona from battery optimization for reliable background operation.
+
+**Tier 5 — iOS**
+
+The most restrictive platform for Cleona's use case. Apple does not offer a Foreground Service equivalent. Background execution is limited to BGTaskScheduler, which grants approximately 30 seconds of runtime at OS-determined intervals (typically every 15–30 minutes, sometimes longer). There is no way to maintain a persistent UDP socket in the background. **User impact:** while the app is open, messages arrive instantly. When the app is in the background, message delivery is delayed until the next BGTask window or until the user opens the app. Calls cannot be received in the background without the VoIP push exception (which Apple restricts to apps using CallKit). This is not a bug or missing feature — it is a fundamental conflict between iOS's design philosophy (apps should not run in the background) and Cleona's architecture (peers must be reachable). The full P2P experience is only available while the app is in the foreground.
+
+### 25.3 Summary
+
+The core pattern: the less a platform restricts background execution and network access, the better Cleona works. Linux and macOS let the daemon run as designed. Windows requires workarounds but achieves the same result. Android compromises with a Foreground Service. iOS cannot deliver the real-time P2P experience that the other platforms provide — background message delivery is at the mercy of the OS scheduler.
+
+Users who rely on instant, reliable message delivery should prefer desktop platforms. Mobile platforms trade some reliability for portability, with Android offering a significantly better background experience than iOS.
 
 ---
 ## Appendix A. Protocol Message Format
