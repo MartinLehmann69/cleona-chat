@@ -160,8 +160,6 @@ class CleonaForegroundService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java)
-            // Delete old channel (importance cannot be changed after creation)
-            manager.deleteNotificationChannel("cleona_service")
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "Cleona Chat",
