@@ -79,6 +79,7 @@ void main(List<String> args) {
     OqsFFI().init();
     await KeyringService.init(config.profileDir);
     KeyMigration.migrateIfNeeded(config.profileDir);
+    KeyMigration.repairIfNeeded(config.profileDir);
 
     // Create identity context
     final identity = IdentityContext(

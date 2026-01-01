@@ -15,6 +15,95 @@ import 'package:cleona/core/network/clogger.dart';
 class KeyMigration {
   static final _log = CLogger.get('key-migration');
 
+  static const _serviceFiles = [
+    'conversations.json',
+    'contacts.json',
+    'groups.json',
+    'channels.json',
+    'outbox.json',
+    'mailbox_transition.json',
+    'membership_resend.json',
+    'processed_msg_ids.json',
+  ];
+
+  /// Repair profiles where migration completed but service-level .enc files
+  /// were not re-encrypted (bug in versions before v3.1.109).
+  /// Uses the backup `.db.key.migrated` to decrypt, then re-encrypts with
+  /// the correct seed-derived key.
+  static bool repairIfNeeded(String baseDir) {
+    final marker = File('$baseDir/.keyring_migrated');
+    if (!marker.existsSync()) return false; // not yet migrated
+
+    final repairMarker = File('$baseDir/.keyring_repair_done');
+    if (repairMarker.existsSync()) return false; // already repaired
+
+    final oldKeyFile = File('$baseDir/.db.key.migrated');
+    if (!oldKeyFile.existsSync()) {
+      repairMarker.writeAsStringSync(DateTime.now().toIso8601String());
+      return false; // no old key — nothing to repair
+    }
+
+    final oldKeyBytes = oldKeyFile.readAsBytesSync();
+    if (oldKeyBytes.length != 32) {
+      _log.warn('Repair: .db.key.migrated has unexpected length '
+          '${oldKeyBytes.length} — skipping');
+      repairMarker.writeAsStringSync('skip:bad-key-length');
+      return false;
+    }
+
+    final keyring = KeyringService.instance;
+    final seedBytes = keyring.load('master_seed');
+    if (seedBytes == null) {
+      _log.warn('Repair: master_seed not in keyring — skipping');
+      repairMarker.writeAsStringSync('skip:no-seed');
+      return false;
+    }
+
+    _log.info('Repairing service-level files missed by initial migration...');
+    final oldFileEnc = FileEncryption(
+      baseDir: baseDir, key: Uint8List.fromList(oldKeyBytes));
+
+    final identityMgr = IdentityManager(baseDir: baseDir);
+    final identities = identityMgr.loadIdentities();
+    var repaired = 0;
+
+    for (final identity in identities) {
+      final hdIndex = identity.hdIndex;
+      if (hdIndex == null) continue;
+
+      final fileEncKey = HdWallet.deriveFileEncKey(seedBytes, hdIndex);
+      final newFileEnc = FileEncryption(baseDir: baseDir, key: fileEncKey);
+      final profileDir = identity.profileDir;
+
+      for (final name in _serviceFiles) {
+        final path = '$profileDir/$name';
+        final encFile = File('$path.enc');
+        if (!encFile.existsSync()) continue;
+
+        // Try new key first — if it works, file is already correct
+        final alreadyOk = newFileEnc.readJsonFile(path);
+        if (alreadyOk != null) continue;
+
+        // Try old key
+        final recovered = oldFileEnc.readJsonFile(path);
+        if (recovered == null) {
+          _log.warn('Repair: $name unreadable with both keys');
+          continue;
+        }
+
+        // Re-encrypt with the correct derived key
+        newFileEnc.writeJsonFile(path, recovered);
+        _log.info('Repair: $name re-encrypted for '
+            '"${identity.displayName}"');
+        repaired++;
+      }
+    }
+
+    repairMarker.writeAsStringSync(DateTime.now().toIso8601String());
+    _log.info('Repair complete: $repaired files re-encrypted');
+    return repaired > 0;
+  }
+
   /// Run migration if needed. Returns true if migration was performed.
   static bool migrateIfNeeded(String baseDir) {
     final marker = File('$baseDir/.keyring_migrated');
@@ -105,6 +194,7 @@ class KeyMigration {
       final newFileEnc = FileEncryption(baseDir: baseDir, key: fileEncKey);
       final profileDir = identity.profileDir;
 
+      // Per-identity files (Identity layer)
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/keys.json');
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/identity_resolution.json');
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/polls.json');
@@ -115,6 +205,11 @@ class KeyMigration {
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/key_rotation_retry.json');
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/guardian_shares.json');
       _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/guardian_list.json');
+
+      // CleonaService-level files (also per-identity, in same profileDir)
+      for (final name in _serviceFiles) {
+        _reEncryptJsonFile(oldFileEnc, newFileEnc, '$profileDir/$name');
+      }
 
       _log.info('Identity "${identity.displayName}" (index $hdIndex) re-encrypted');
     }

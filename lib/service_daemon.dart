@@ -355,6 +355,7 @@ class _MultiServiceDaemon {
     // §3.7: Initialize OS keyring before any key access
     await KeyringService.init(config.baseDir);
     KeyMigration.migrateIfNeeded(config.baseDir);
+    KeyMigration.repairIfNeeded(config.baseDir);
 
     // Load all identities
     final mgr = IdentityManager(baseDir: config.baseDir);

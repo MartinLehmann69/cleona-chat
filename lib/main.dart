@@ -116,6 +116,7 @@ void main() async {
     }
     await KeyringService.init(AppPaths.dataDir);
     KeyMigration.migrateIfNeeded(AppPaths.dataDir);
+    KeyMigration.repairIfNeeded(AppPaths.dataDir);
     debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
   } catch (e, stack) {
     startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
