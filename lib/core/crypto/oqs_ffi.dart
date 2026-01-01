@@ -152,17 +152,18 @@ class OqsFFI {
   factory OqsFFI() => _instance ??= OqsFFI._internal();
 
   OqsFFI._internal() {
-    _lib = DynamicLibrary.open(_libPath());
+    _lib = _openLib();
     _bindFunctions();
   }
 
   static OqsFFI? _instance;
 
-  static String _libPath() {
-    if (Platform.isAndroid || Platform.isLinux) return 'liboqs.so';
-    if (Platform.isMacOS) return 'liboqs.dylib';
-    if (Platform.isWindows) return 'liboqs.dll';
-    return '/usr/local/lib/liboqs.so';
+  static DynamicLibrary _openLib() {
+    if (Platform.isIOS) return DynamicLibrary.process();
+    if (Platform.isAndroid || Platform.isLinux) return DynamicLibrary.open('liboqs.so');
+    if (Platform.isMacOS) return DynamicLibrary.open('liboqs.dylib');
+    if (Platform.isWindows) return DynamicLibrary.open('liboqs.dll');
+    return DynamicLibrary.open('liboqs.so');
   }
 
   // ---- ML-KEM-768 sizes ----

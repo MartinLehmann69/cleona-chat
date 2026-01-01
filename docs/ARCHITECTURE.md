@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1ee40ed2a5ba, 2026-06-01). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1cc94662a5d8, 2026-06-02). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -4997,14 +4997,19 @@ Mapping to wire layers:
 
 **iOS**:
 - In-process, analogous to Android
-- Background modes: `voip` for call wake-up, `audio` for live calls, `processing` for DHT maintenance
-- Native libs: statically linked into the iOS app bundle
-- BGProcessingTasks for mailbox polling (15-30 min schedule)
+- Background modes: `audio` for live calls, `fetch` for periodic updates, `processing` for DHT maintenance
+- Native libs: all 7 libraries (libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp, libcleona_audio) built as static `.a` archives via `scripts/build-ios-libs.sh`, packaged as XCFrameworks, linked via CleonaNative CocoaPods podspec with `-ObjC -all_load`. Dart FFI loads symbols via `DynamicLibrary.process()`.
+- Build: GitHub Actions `macos-14` runner → `flutter build ipa` → IPA signed with Apple Development certificate
+- Deployment Target: iOS 15.5 (required by `mobile_scanner` plugin)
+- Permissions (Info.plist): microphone, camera, photo library, NFC tag reading, local network discovery, background modes
+- Device install: `ideviceinstaller -i <ipa>` via USB (Development provisioning profile with registered UDID)
 
-**macOS** (planned — see §24 Roadmap):
+**macOS**:
 - Daemon + GUI analogous to Linux
 - IPC via Unix socket
-- Tray: NSStatusBar via FFI
+- Native libs: `.dylib` in `Cleona.app/Contents/Frameworks/` (built via `scripts/build-macos-libs.sh`, install_name rewritten to `@rpath`)
+- Build: GitHub Actions `macos-14` runner → `flutter build macos --release` + `dart compile exe service_daemon.dart` → app bundle assembly → DMG → notarization via App Store Connect API
+- Tray: NSStatusBar via FFI (planned)
 
 ### 15.3 Service Layer API (sendToUser/sendToDevice)
 
@@ -5615,7 +5620,7 @@ The Signed Update Manifest (Section 19.5.5) carries two optional fields:
 
 | Library | Dart FFI Binding | Provides | Notes |
 |---------|-----------------|----------|-------|
-| **libsodium** | `sodium_ffi.dart` | Ed25519, X25519, AES-256-GCM, XSalsa20-Poly1305, SHA-256, HMAC-SHA256, HKDF, Argon2id, BLAKE2b | System package (`libsodium-dev`). 32-byte keys, 64-byte sigs. |
+| **libsodium** | `sodium_ffi.dart` | Ed25519, X25519, AES-256-GCM, XSalsa20-Poly1305, SHA-256, HMAC-SHA256, HKDF, Argon2id, BLAKE2b | System package (`libsodium-dev`). 32-byte keys, 64-byte sigs. On iOS: static-linked, `DynamicLibrary.process()`. |
 | **liboqs** | `oqs_ffi.dart` | ML-KEM-768 (post-quantum KEM), ML-DSA-65 (post-quantum signatures) | Built from source (not in distro repos). `OQS_init()` required before first use. |
 | **libzstd** | `compression.dart` | Zstandard compression/decompression | System package (`libzstd-dev`). All payloads compressed before encryption. |
 | **liberasurecode** | `reed_solomon.dart` | Reed-Solomon erasure coding (N=10, K=7) | System package. Pure Dart fallback on platforms without it. |
@@ -5635,6 +5640,28 @@ Android, iOS, and macOS builds do not include `libcleona_net` and continue to us
 ### 20.3a Build Mechanics for cleona_net
 
 C sources live under `native/cleona_net/` (parallel to `native/cleona_audio/`) with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. The Linux build is bundled into the Flutter Linux release alongside `libcleona_audio.so`; the Windows build drops into `build/windows/x64/runner/Release/` next to `libsodium.dll` and `liboqs.dll`. Exact build invocations and packaging steps are kept with the source tree rather than duplicated here — see `native/cleona_net/README.md` for the build recipe and `docs/PUBLISHING.md` for the release-bundle assembly.
+
+### 20.3b iOS and macOS Native Library Build Pipeline
+
+iOS forbids loading custom dynamic libraries at runtime — all native code must be statically linked into the app binary. Dart FFI accesses symbols via `DynamicLibrary.process()` (the process-global symbol table). macOS uses traditional dynamic libraries (`.dylib`) loaded from `Cleona.app/Contents/Frameworks/`.
+
+**iOS build** (`scripts/build-ios-libs.sh`, must run on macOS):
+- Cross-compiles all 7 native libraries (libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp, libcleona_audio) as **static archives** (`.a`) for two platforms: `arm64-iphoneos` (device) and `arm64-iphonesimulator`.
+- Packages each library as an **XCFramework** (`xcodebuild -create-xcframework`) in `build/ios-frameworks/`.
+- XCFrameworks are integrated via `ios/CleonaNative/CleonaNative.podspec` (vendored_frameworks, `-ObjC -all_load` linker flags to force-export all symbols for FFI).
+- `libcleona_audio` requires Objective-C compilation on Apple platforms (miniaudio.h includes AVFoundation ObjC headers); CMakeLists.txt conditionally enables `project(cleona_audio C OBJC)` and links AudioToolbox + AVFoundation frameworks.
+- iOS Deployment Target: 15.5 (required by `mobile_scanner` plugin).
+
+**macOS build** (`scripts/build-macos-libs.sh`, must run on macOS):
+- Builds all libraries as shared `.dylib` for arm64 (Apple Silicon), x86_64 (Intel), or universal (lipo merge).
+- `install_name_tool` rewrites LC_LOAD_DYLIB to `@rpath/<name>.dylib`; all dylibs are ad-hoc signed.
+- `scripts/deploy-macos-app.sh` assembles the final `Cleona.app` bundle: Flutter GUI + headless daemon + dylibs in Contents/Frameworks/.
+
+**CI/CD** (`.github/workflows/ios-build.yml`, GitHub Actions `macos-14` runner):
+- Workflow "Apple Build (iOS + macOS)" with platform selector (both/ios/macos) and channel selector (beta/live).
+- iOS pipeline: build native libs → upload XCFrameworks artifact → flutter build ipa → code sign (manual, Apple Development certificate) → upload IPA artifact.
+- macOS pipeline (parallel): build native dylibs → flutter build macos → dart compile daemon → assemble app bundle → code sign → create DMG → notarize via App Store Connect API.
+- Signing credentials (certificate .p12, provisioning profile, API key) stored as GitHub Secrets (base64-encoded). The .p12 must use legacy PKCS12 format (3DES+SHA1) because macOS `security import` on CI runners rejects the OpenSSL 3.x default cipher suite.
 
 ### 20.4 Flutter Packages
 
@@ -5672,8 +5699,8 @@ C sources live under `native/cleona_net/` (parallel to `native/cleona_audio/`) w
 | Linux Desktop (x86_64) | Primary development | Daemon + GUI (separate processes, IPC via Unix socket) | `cleona-daemon` + `cleona` (Flutter bundle) |
 | Windows Desktop (x86_64) | Test | Daemon + GUI (IPC via TCP loopback + auth-token) | `cleona-daemon.exe` + `cleona.exe` |
 | Android (arm64-v8a, x86_64) | Release | In-process (single Flutter app) | APK with jniLibs |
-| iOS (arm64) | Release (planned) | In-process | IPA |
-| macOS (arm64, x86_64) | Release (planned) | Daemon + GUI (separate processes, IPC via Unix socket) | `cleona-daemon` + `cleona.app` |
+| iOS (arm64) | Release | In-process (static native libs via XCFrameworks, `DynamicLibrary.process()`) | IPA (via GitHub Actions macOS-14 runner) |
+| macOS (arm64) | Release | Daemon + GUI (separate processes, IPC via Unix socket) | `cleona-daemon` + `Cleona.app` (DMG, via GitHub Actions) |
 
 ---
 

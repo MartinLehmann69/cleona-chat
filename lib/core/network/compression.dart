@@ -47,7 +47,7 @@ typedef _ZstdCompressBoundDart = int Function(int srcSize);
 /// ```
 class ZstdCompression {
   ZstdCompression._() {
-    _lib = DynamicLibrary.open(_libName());
+    _lib = Platform.isIOS ? DynamicLibrary.process() : DynamicLibrary.open(_libName());
     _compress =
         _lib.lookupFunction<_ZstdCompressNative, _ZstdCompressDart>(
             'ZSTD_compress');
