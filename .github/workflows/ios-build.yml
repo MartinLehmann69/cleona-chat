@@ -156,12 +156,6 @@ jobs:
         run: |
           ls -lh ios/CleonaNative/libcleona_all_device.a
           ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
-          echo "=== Symbols in merged archive ==="
-          nm ios/CleonaNative/libcleona_all_device.a 2>&1 | grep -c ' T ' || echo "nm failed"
-          nm ios/CleonaNative/libcleona_all_device.a 2>&1 | grep ' T _sodium_init\| T _crypto_aead\| T _OQS_KEM\| T _ZSTD_compress\| T _cleona_audio' | head -5
-          echo "=== PODS_ROOT resolution test ==="
-          echo "PODS_ROOT would be: ios/Pods"
-          ls -la "ios/Pods/../CleonaNative/libcleona_all_device.a" 2>&1
 
       - name: Install distribution certificate
         env:
@@ -208,20 +202,10 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          # Verbose build — capture full xcodebuild output to extract linker invocation
           flutter build ipa \
             --release \
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
-            --export-options-plist=ios/ExportOptions.plist \
-            --verbose 2>&1 | tee /tmp/build.log | grep -E 'force_load|Ld |ld |OTHER_LDFLAGS|libcleona_all|error:' || true
-          echo "=== Linker invocation ==="
-          grep -E 'Ld .*Runner|ld .*-o.*Runner' /tmp/build.log | head -3
-          echo "=== force_load in linker args ==="
-          grep 'force_load' /tmp/build.log | head -5
-          echo "=== Pods-Runner.release.xcconfig AFTER flutter internal pod install ==="
-          grep 'force_load\|OTHER_LDFLAGS' "ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig" || echo "NOT FOUND"
-          echo "=== Runner binary ==="
-          find build/ios -name Runner -not -path '*/Frameworks/*' -type f -exec ls -la {} \; 2>/dev/null | head -3
+            --export-options-plist=ios/ExportOptions.plist
 
       - name: List build outputs
         if: always()

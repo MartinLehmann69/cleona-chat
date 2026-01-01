@@ -73,7 +73,9 @@ class _CallScreenState extends State<CallScreen> {
       if (!_autoPopScheduled && !_userInitiatedPop) {
         _autoPopScheduled = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) Navigator.of(context).pop();
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
         });
       }
     }

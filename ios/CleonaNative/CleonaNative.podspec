@@ -29,6 +29,7 @@ Pod::Spec.new do |s|
   # references the C symbols directly. Without this, the linker
   # dead-strips everything and DynamicLibrary.process() finds nothing.
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a'
+    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a',
+    'DEAD_CODE_STRIPPING' => 'NO'
   }
 end
