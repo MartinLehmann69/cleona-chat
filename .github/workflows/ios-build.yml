@@ -80,7 +80,13 @@ jobs:
         with:
           path: /tmp/ios-libs-build-*
           key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
-          restore-keys: ios-native-libs-
+          # Deliberately NO restore-keys: this caches a *build tree*, not
+          # immutable downloads. A prefix fallback serves autoconf state and
+          # config.cache produced by a different version of the build script.
+          # That is what broke run 30206210858 — b042cd09 changed the whisper
+          # pin, the exact key missed, the S275 tree came back, and autoreconf
+          # plus the cross-compile probes failed on it. Exact key or clean
+          # rebuild; a slower cold build beats an unbuildable release.
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -388,7 +394,9 @@ jobs:
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
-          restore-keys: macos-native-libs-
+          # No restore-keys — see the iOS cache step above for the rationale.
+          # The prefix fallback restored a 456 MB build tree from a different
+          # script version and aclocal then died on m4/lt~obsolete.m4.
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2

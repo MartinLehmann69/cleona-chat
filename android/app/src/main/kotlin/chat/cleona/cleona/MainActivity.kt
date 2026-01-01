@@ -25,7 +25,6 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.util.Log
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
@@ -61,19 +60,18 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val REQUEST_AUDIO_PERMISSION = 1002
+        private const val REQUEST_INSTALL_PERMISSION = 1003
     }
 
     // Samsung Auto-Blocker revokes REQUEST_INSTALL_PACKAGES after ~30 min.
-    // ActivityResultLauncher awaits the user's return from settings so the
-    // install happens within milliseconds of the grant — timer irrelevant.
+    // We await the user's return from the settings screen so the install
+    // happens within milliseconds of the grant — timer irrelevant.
+    //
+    // startActivityForResult + onActivityResult rather than the AndroidX
+    // ActivityResultLauncher: FlutterActivity extends the framework Activity,
+    // not ComponentActivity, so registerForActivityResult is unavailable here
+    // (same request-code pattern as REQUEST_AUDIO_PERMISSION above).
     private var pendingInstallPermissionResult: MethodChannel.Result? = null
-    private val installPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        val granted = packageManager.canRequestPackageInstalls()
-        pendingInstallPermissionResult?.success(granted)
-        pendingInstallPermissionResult = null
-    }
 
     // Bug #U16: ACTION_SEND payload, drained by Dart via `chat.cleona/share`.
     // Shape: {"text": String?, "files": List<String>} (content:// → cacheDir copy).
@@ -310,7 +308,7 @@ class MainActivity : FlutterActivity() {
                             android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
                             android.net.Uri.parse("package:$packageName")
                         )
-                        installPermissionLauncher.launch(intent)
+                        startActivityForResult(intent, REQUEST_INSTALL_PERMISSION)
                     }
                 }
                 "installApk" -> {
@@ -496,6 +494,21 @@ class MainActivity : FlutterActivity() {
                 grantResults[0] == PackageManager.PERMISSION_GRANTED
             pendingAudioPermissionResult?.success(granted)
             pendingAudioPermissionResult = null
+        }
+    }
+
+    // Resolves the pending REQUEST_INSTALL_PACKAGES MethodChannel.Result once
+    // the user returns from ACTION_MANAGE_UNKNOWN_APP_SOURCES. resultCode is
+    // always RESULT_CANCELED for that settings screen — the toggle state is
+    // what matters, so we re-query the package manager instead. super() first
+    // so FlutterActivity keeps forwarding results to plugins.
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_INSTALL_PERMISSION) {
+            pendingInstallPermissionResult?.success(
+                packageManager.canRequestPackageInstalls()
+            )
+            pendingInstallPermissionResult = null
         }
     }
 
