@@ -32,6 +32,11 @@ class IdentityDhtHandler {
   final FileEncryption? fileEncryption;
   final String? storagePath;
 
+  /// D1 (§4.3 Trust anchor): userId-Ableitung fuer die Store-Time-
+  /// Verifikation eingehender AuthManifests. Null (alte Tests) → nur
+  /// Sig-Selbstkonsistenz-Check, keine Anker-Bindung.
+  final Uint8List Function(Uint8List ed25519Pk)? deriveUserId;
+
   // Storage-Caps
   static const int maxAuthManifests = 1000;
   static const int maxLivenessRecords = 5000;
@@ -52,6 +57,7 @@ class IdentityDhtHandler {
     required this.ownNodeId,
     this.fileEncryption,
     this.storagePath,
+    this.deriveUserId,
   });
 
   Future<void> start() async {
@@ -72,14 +78,48 @@ class IdentityDhtHandler {
   // ── Auth-Manifest API ─────────────────────────────────────────
 
   /// Wird vom Wire-Layer aufgerufen wenn IDENTITY_AUTH_PUBLISH ankommt.
-  /// Sig-Verification erfolgt in cleona_node.dart bevor wir hier landen,
-  /// weil wir den Sender-Pubkey aus dem AuthManifest selbst holen
-  /// (selbst-validierende Records).
+  ///
+  /// D1 (§4.3 Trust anchor) — Store-Time-Verifikation: forged Manifests
+  /// werden hier verworfen, BEVOR sie per seq-Monotonie legitime
+  /// Republishes blockieren koennen (ein forged Record mit seq=999 wuerde
+  /// sonst den echten Publisher dauerhaft aussperren). Verified schlaegt
+  /// legacy auch am Store; ein verankertes Manifest wird nur durch ein
+  /// passendes (oder per Rotationskette brueckendes) ersetzt.
   void handleAuthPublish(AuthManifest m) {
     final hex = bytesToHex(m.userId);
+
+    var incomingVerified = false;
+    if (m.hasEmbeddedKeys) {
+      if (deriveUserId != null) {
+        final status = m.verifySelfCertified(deriveUserId: deriveUserId!);
+        if (status != AnchorStatus.verified) return; // forged → silent drop
+        incomingVerified = true;
+      } else {
+        // Kein deriveUserId injiziert (Test-Skeletons): mindestens die
+        // Sig-Selbstkonsistenz der embedded Keys verlangen.
+        if (!m.verify(m.userEd25519Pk, m.userMlDsaPk)) return;
+        incomingVerified = true;
+      }
+    }
+
     final existing = _storedAuthManifests[hex];
-    if (existing != null && m.sequenceNumber <= existing.sequenceNumber) {
-      return; // Replay-Schutz
+    if (existing != null) {
+      final existingVerified = existing.hasEmbeddedKeys;
+      if (existingVerified && !incomingVerified) {
+        return; // legacy ersetzt nie ein verankertes Manifest (§4.3 TOFU)
+      }
+      if (existingVerified && incomingVerified) {
+        // Anker-Kontinuitaet: gleicher Pk oder brueckende Rotationskette.
+        final sameAnchor =
+            _pkEqual(existing.userEd25519Pk, m.userEd25519Pk) ||
+                m.rotationChain.any(
+                    (l) => _pkEqual(l.oldEd25519Pk, existing.userEd25519Pk));
+        if (!sameAnchor) return;
+      }
+      if (!(incomingVerified && !existingVerified) &&
+          m.sequenceNumber <= existing.sequenceNumber) {
+        return; // Replay-Schutz (verified-beats-legacy ignoriert seq)
+      }
     }
     _storedAuthManifests[hex] = m;
     _enforceAuthCap();
@@ -93,6 +133,12 @@ class IdentityDhtHandler {
   // ── Liveness API ──────────────────────────────────────────────
 
   void handleLivePublish(LivenessRecord r) {
+    // D1: liegt fuer den User ein verankertes AuthManifest vor, muss die
+    // Liveness-Sig gegen den Anker verifizieren — sonst kann ein forged
+    // Record mit hoher seq den echten verdraengen. Ohne Anker (Manifest
+    // fehlt noch / legacy) gilt das bisherige Verhalten (Transition).
+    final anchor = _anchorFor(r.userId);
+    if (anchor != null && !r.verify(anchor)) return;
     final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceNodeId)}';
     final existing = _storedLiveness[key];
     if (existing != null && r.sequenceNumber <= existing.sequenceNumber) {
@@ -115,6 +161,14 @@ class IdentityDhtHandler {
   /// im Wire-Layer (cleona_node.dart) bevor wir hier landen — derselbe
   /// Pattern wie bei AuthManifest/Liveness.
   void handleKemPublish(DeviceKemRecord r) {
+    // D1: mit verankertem AuthManifest muss der embedded userEd25519Pk dem
+    // Anker entsprechen UND die Sig gegen ihn verifizieren (schliesst den
+    // selbstreferenziellen Check). Ohne Anker: Transition-Verhalten.
+    final anchor = _anchorFor(r.userId);
+    if (anchor != null &&
+        (!_pkEqual(r.userEd25519Pk, anchor) || !r.verify(anchor))) {
+      return;
+    }
     final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceId)}';
     final existing = _storedKemRecords[key];
     if (existing != null && r.sequenceNumber <= existing.sequenceNumber) {
@@ -123,6 +177,22 @@ class IdentityDhtHandler {
     _storedKemRecords[key] = r;
     _enforceKemCap();
     _persistAsync();
+  }
+
+  /// D1: verankerter User-Pk aus dem gespeicherten AuthManifest (nur wenn
+  /// es embedded Keys traegt — die wurden bei handleAuthPublish verifiziert).
+  Uint8List? _anchorFor(Uint8List userId) {
+    final m = _storedAuthManifests[bytesToHex(userId)];
+    return (m != null && m.hasEmbeddedKeys) ? m.userEd25519Pk : null;
+  }
+
+  static bool _pkEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
   }
 
   DeviceKemRecord? getKemRecord(Uint8List userId, Uint8List deviceId) {

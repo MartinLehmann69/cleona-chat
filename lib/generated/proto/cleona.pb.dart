@@ -12269,11 +12269,15 @@ class PollVoteRevokeMsg extends $pb.GeneratedMessage {
 /// currently embedded manifest keys.
 class RotationChainLinkProto extends $pb.GeneratedMessage {
   factory RotationChainLinkProto({
+    $core.List<$core.int>? oldEd25519Pk,
     $core.List<$core.int>? newEd25519Pk,
     $core.List<$core.int>? newMlDsaPk,
     $core.List<$core.int>? oldSignatureEd25519,
   }) {
     final $result = create();
+    if (oldEd25519Pk != null) {
+      $result.oldEd25519Pk = oldEd25519Pk;
+    }
     if (newEd25519Pk != null) {
       $result.newEd25519Pk = newEd25519Pk;
     }
@@ -12290,9 +12294,10 @@ class RotationChainLinkProto extends $pb.GeneratedMessage {
   factory RotationChainLinkProto.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RotationChainLinkProto', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'newEd25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'oldSignatureEd25519', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'oldEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'oldSignatureEd25519', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -12318,31 +12323,43 @@ class RotationChainLinkProto extends $pb.GeneratedMessage {
   static RotationChainLinkProto? _defaultInstance;
 
   @$pb.TagNumber(1)
-  $core.List<$core.int> get newEd25519Pk => $_getN(0);
+  $core.List<$core.int> get oldEd25519Pk => $_getN(0);
   @$pb.TagNumber(1)
-  set newEd25519Pk($core.List<$core.int> v) { $_setBytes(0, v); }
+  set oldEd25519Pk($core.List<$core.int> v) { $_setBytes(0, v); }
   @$pb.TagNumber(1)
-  $core.bool hasNewEd25519Pk() => $_has(0);
+  $core.bool hasOldEd25519Pk() => $_has(0);
   @$pb.TagNumber(1)
-  void clearNewEd25519Pk() => clearField(1);
+  void clearOldEd25519Pk() => clearField(1);
 
+  /// old pk MUST hash to the userId (founding
+  /// anchor); link[i>0]'s old pk MUST equal
+  /// link[i-1].new_ed25519_pk
   @$pb.TagNumber(2)
-  $core.List<$core.int> get newMlDsaPk => $_getN(1);
+  $core.List<$core.int> get newEd25519Pk => $_getN(1);
   @$pb.TagNumber(2)
-  set newMlDsaPk($core.List<$core.int> v) { $_setBytes(1, v); }
+  set newEd25519Pk($core.List<$core.int> v) { $_setBytes(1, v); }
   @$pb.TagNumber(2)
-  $core.bool hasNewMlDsaPk() => $_has(1);
+  $core.bool hasNewEd25519Pk() => $_has(1);
   @$pb.TagNumber(2)
-  void clearNewMlDsaPk() => clearField(2);
+  void clearNewEd25519Pk() => clearField(2);
 
   @$pb.TagNumber(3)
-  $core.List<$core.int> get oldSignatureEd25519 => $_getN(2);
+  $core.List<$core.int> get newMlDsaPk => $_getN(2);
   @$pb.TagNumber(3)
-  set oldSignatureEd25519($core.List<$core.int> v) { $_setBytes(2, v); }
+  set newMlDsaPk($core.List<$core.int> v) { $_setBytes(2, v); }
   @$pb.TagNumber(3)
-  $core.bool hasOldSignatureEd25519() => $_has(2);
+  $core.bool hasNewMlDsaPk() => $_has(2);
   @$pb.TagNumber(3)
-  void clearOldSignatureEd25519() => clearField(3);
+  void clearNewMlDsaPk() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get oldSignatureEd25519 => $_getN(3);
+  @$pb.TagNumber(4)
+  set oldSignatureEd25519($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasOldSignatureEd25519() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearOldSignatureEd25519() => clearField(4);
 }
 
 class AuthManifestProto extends $pb.GeneratedMessage {

@@ -2723,17 +2723,19 @@ final $typed_data.Uint8List pollVoteRevokeMsgDescriptor = $convert.base64Decode(
 const RotationChainLinkProto$json = {
   '1': 'RotationChainLinkProto',
   '2': [
-    {'1': 'new_ed25519_pk', '3': 1, '4': 1, '5': 12, '10': 'newEd25519Pk'},
-    {'1': 'new_ml_dsa_pk', '3': 2, '4': 1, '5': 12, '10': 'newMlDsaPk'},
-    {'1': 'old_signature_ed25519', '3': 3, '4': 1, '5': 12, '10': 'oldSignatureEd25519'},
+    {'1': 'old_ed25519_pk', '3': 1, '4': 1, '5': 12, '10': 'oldEd25519Pk'},
+    {'1': 'new_ed25519_pk', '3': 2, '4': 1, '5': 12, '10': 'newEd25519Pk'},
+    {'1': 'new_ml_dsa_pk', '3': 3, '4': 1, '5': 12, '10': 'newMlDsaPk'},
+    {'1': 'old_signature_ed25519', '3': 4, '4': 1, '5': 12, '10': 'oldSignatureEd25519'},
   ],
 };
 
 /// Descriptor for `RotationChainLinkProto`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List rotationChainLinkProtoDescriptor = $convert.base64Decode(
-    'ChZSb3RhdGlvbkNoYWluTGlua1Byb3RvEiQKDm5ld19lZDI1NTE5X3BrGAEgASgMUgxuZXdFZD'
-    'I1NTE5UGsSIQoNbmV3X21sX2RzYV9waxgCIAEoDFIKbmV3TWxEc2FQaxIyChVvbGRfc2lnbmF0'
-    'dXJlX2VkMjU1MTkYAyABKAxSE29sZFNpZ25hdHVyZUVkMjU1MTk=');
+    'ChZSb3RhdGlvbkNoYWluTGlua1Byb3RvEiQKDm9sZF9lZDI1NTE5X3BrGAEgASgMUgxvbGRFZD'
+    'I1NTE5UGsSJAoObmV3X2VkMjU1MTlfcGsYAiABKAxSDG5ld0VkMjU1MTlQaxIhCg1uZXdfbWxf'
+    'ZHNhX3BrGAMgASgMUgpuZXdNbERzYVBrEjIKFW9sZF9zaWduYXR1cmVfZWQyNTUxORgEIAEoDF'
+    'ITb2xkU2lnbmF0dXJlRWQyNTUxOQ==');
 
 @$core.Deprecated('Use authManifestProtoDescriptor instead')
 const AuthManifestProto$json = {

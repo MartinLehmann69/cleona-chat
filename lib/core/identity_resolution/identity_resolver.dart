@@ -23,16 +23,18 @@
 //     Wave 4 (Integration) verdrahtet (Task 13/14 wiring auf
 //     `cleona_node.findClosestPeers + parallel sendAndWait`). Tests injizieren
 //     einfache Klassen mit `sendAndWait(envelope, peer)`-Methode.
-//   - Sig-Verify im Resolver-Skeleton wird bewusst übersprungen (Plan
-//     Step 9.3 Kommentar): Pubkey-Resolution aus userId ist in dieser Phase
-//     noch nicht aufgelöst (User-Pubkey-Cache kommt erst beim
-//     CleonaService-Wiring). Wir verlassen uns auf den Authorized-List-Filter
-//     (Revocation-Schutz) und das KEM-Setup-Failure als Backstop gegen
-//     forged Liveness-Records.
+//   - D1 (§4.3 Trust anchor): Die Skeleton-Phase uebersprang die Sig-Verify
+//     mangels Pubkey-Quelle. Seit D1 sind AuthManifests self-certifying
+//     (embedded Pubkeys + Founding-Hash/Rotationskette/Contact-Match) und
+//     werden hier hybrid verifiziert; Liveness + DeviceKem verifizieren
+//     gegen den verankerten User-Pk. Legacy-Records (ohne embedded Keys)
+//     laufen bis zum Phase-2-Gate als legacy-unverified mit.
 
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
@@ -66,6 +68,15 @@ class ResolvedDevice {
     this.deviceMlKemPk,
     this.deviceKemPublishedAtMs,
   });
+}
+
+/// Ergebnis des Auth-Manifest-Lookups (D1): Manifest + verankerter User-Pk.
+/// `anchoredPk == null` bedeutet legacy-unverified (Transition, §4.3) —
+/// Liveness/KEM koennen dann nicht gegen einen Anker verifiziert werden.
+class _AuthLookup {
+  final AuthManifest manifest;
+  final Uint8List? anchoredPk;
+  _AuthLookup(this.manifest, this.anchoredPk);
 }
 
 /// Auflöser: User-ID → `List<ResolvedDevice>`.
@@ -107,11 +118,32 @@ class IdentityResolver {
   /// den Eintrag — sowohl bei Success als auch bei Error.
   final Map<String, Future<List<ResolvedDevice>>> _inflight = {};
 
+  /// D1 (§4.3 Trust anchor): userId-Ableitung aus einem Ed25519-Pubkey —
+  /// `SHA-256(network_secret || pk)`. Injizierbar fuer Tests; Default nutzt
+  /// das produktive NetworkSecret.
+  final Uint8List Function(Uint8List ed25519Pk) _deriveUserId;
+
+  /// D1: optionaler Contact-Pubkey-Lookup (wired vom Service-Layer). Liefert
+  /// er einen Pk fuer eine userId, MUSS der embedded Manifest-Key matchen
+  /// (oder eine Rotationskette brueckt) — sonst Reject + onContactKeyMismatch.
+  Uint8List? Function(Uint8List userId)? contactEd25519PkLookup;
+
+  /// D1: Key-Change-Detection-Hook (§8.3) — feuert bei contactMismatch.
+  void Function(Uint8List userId, Uint8List embeddedEd25519Pk)?
+      onContactKeyMismatch;
+
+  /// D1 TOFU-Anchor-Cache: userIdHex → verankerter userEd25519Pk. Ein einmal
+  /// verifizierter Anker wird nie durch hoehere seq allein ersetzt — nur
+  /// durch eine gueltige Rotationskette.
+  final Map<String, Uint8List> _anchoredPkByUserHex = {};
+
   IdentityResolver({
     required this.routingTable,
     required this.dhtRpc,
     this.dhtHandler,
-  });
+    Uint8List Function(Uint8List ed25519Pk)? deriveUserId,
+  }) : _deriveUserId = deriveUserId ??
+            ((pk) => HdWallet.computeUserId(pk, NetworkSecret.secret));
 
   /// Auflöse `userId` zu einer Liste authorisierter Devices.
   /// Bei Cache-Hit (frisch < 1h) sofortige Rückgabe ohne DHT-Lookup.
@@ -144,6 +176,11 @@ class IdentityResolver {
     // only when we have BOTH addresses and KEM locally — otherwise the
     // sender silently drops First-CR even though the network might be
     // able to provide the missing record.
+    // Fallback-Halter: frischer Cache ohne komplette KEM-Abdeckung. Liefert
+    // der DHT-Lookup unten gar nichts, geben wir lieber die gecachten
+    // Adressen zurueck als ein leeres Ergebnis (Adressen, die wir HABEN,
+    // nie wegen fehlendem KEM-Record verlieren).
+    List<ResolvedDevice>? cachedFallback;
     final cachedPeers = routingTable.getAllPeersForUserId(userId);
     final fresh = cachedPeers.where(_cacheStillFresh).toList();
     if (fresh.isNotEmpty) {
@@ -178,46 +215,46 @@ class IdentityResolver {
       final allHaveKem = cached.every((d) =>
           d.deviceX25519Pk != null && d.deviceMlKemPk != null);
       if (allHaveKem) return cached;
+      cachedFallback = cached;
     }
 
-    // ── 2. Auth-Manifest Lookup ────────────────────────────────────────
-    final authManifest = await _lookupAuthManifest(userId);
-    if (authManifest == null) {
-      return [];
+    // ── 2.+3. Auth-Manifest Lookup + D1 Trust-Anchor-Verifikation ──────
+    // §4.3 "Trust anchor & record verification": hybrid Sig gegen die
+    // EMBEDDED Pubkeys + Identitaetsbindung (Founding-Hash / Rotations-
+    // kette / Contact-Match). Selection: verified schlaegt legacy, hoechste
+    // seq innerhalb der Klasse. Der verankerte Pk ist Trust-Anchor fuer
+    // Liveness- und DeviceKem-Verifikation (Steps 4/4b).
+    final authLookup = await _lookupAuthManifest(userId);
+    if (authLookup == null) {
+      return cachedFallback ?? [];
+    }
+    final authManifest = authLookup.manifest;
+    final anchorPk = authLookup.anchoredPk;
+    if (anchorPk != null) {
+      _anchoredPkByUserHex[bytesToHex(userId)] = anchorPk;
     }
 
-    // Sig-Verify Auth-Manifest: bewusst skipped im Skeleton (siehe
-    // File-Header). Ein vollständiges Wave-4-Wiring zieht den User-Pubkey
-    // aus einem CleonaService-Cache (Auth-Manifest-Reception füllt den)
-    // und verifiziert hier hybrid Ed25519 + ML-DSA.
-
-    // ── 3. Liveness-Lookup + Step 4b Device-KEM-Lookup parallel ────────
+    // ── 4./4b. Liveness-Lookup + Device-KEM-Lookup parallel ────────────
     // Welle 5 (§4.3): pro Device zwei Records gleichzeitig fetchen
-    // (Liveness + DeviceKemRecord). Beide haben denselben Trust-Anchor
-    // (User-Master-Ed25519 — Liveness signiert vom DEVICE-Key in der V3-Spec
-    // hat ein anderes Trust-Profil, aber im aktuellen Skeleton ist die
-    // Liveness-Sig vom User-Key gemeint — siehe LivenessRecord.sign).
+    // (Liveness + DeviceKemRecord). Beide verifizieren gegen den D1-Anker;
+    // bei legacy-unverified Manifest (anchorPk == null, Transition) gilt
+    // das alte Verhalten.
     final results = await Future.wait(
       authManifest.authorizedDeviceNodeIds.map((deviceId) async {
-        final liveFuture = _lookupLiveness(userId, deviceId);
-        final kemFuture = _lookupDeviceKem(userId, deviceId);
+        final liveFuture = _lookupLiveness(userId, deviceId, anchorPk);
+        final kemFuture = _lookupDeviceKem(userId, deviceId, anchorPk);
         final live = await liveFuture;
         final kem = await kemFuture;
 
-        // Step 4b: KEM-Sig-Verify in-place (Pubkey ist im Record, Trust-
-        // Anchor wird durch Cross-Check mit anderen Records desselben Users
-        // sichergestellt — sobald CleonaService den User-Pubkey-Cache
-        // bereitstellt verifizieren wir hier zusaetzlich gegen den Cache).
+        // Step 4b: mit Anker ist der Record bereits in _lookupDeviceKem
+        // verifiziert (embedded userEd25519Pk == Anker + Sig). Ohne Anker
+        // (legacy Transition) bleibt nur der selbstreferenzielle Check —
+        // dokumentiert schwach, endet mit Phase 2.
         DeviceKemRecord? validatedKem;
         if (kem != null) {
-          if (kem.verify(kem.userEd25519Pk)) {
+          if (anchorPk != null || kem.verify(kem.userEd25519Pk)) {
             validatedKem = kem;
           }
-          // Hinweis: ohne externen Pubkey-Cache kann ein malicious Replicator
-          // die Sig zwar valide austauschen, aber nicht die KEM-PK von einem
-          // legitim publisht-Record (dort ist die Sig mit dem echten User-Sk
-          // gemacht und der User-Pk zeigt auf den echten Key). Welle-5-Teil-2
-          // wired CleonaService.userPubkeyCache hier rein.
         }
 
         if (live == null) {
@@ -297,10 +334,14 @@ class IdentityResolver {
     return results;
   }
 
-  /// Step 4b: K=10 closest replicators zum kem-key parallel anfragen,
-  /// hoechste seq gewinnt (Tie-Break ueber publishedAtMs). Spec §4.3.
+  /// Step 4b: K=10 closest replicators zum kem-key parallel anfragen.
+  /// D1: mit Anker zaehlen nur Records, deren embedded userEd25519Pk dem
+  /// Anker entspricht UND deren Sig gegen den Anker verifiziert — die
+  /// Filterung passiert VOR der best-Selektion, damit ein forged Record
+  /// mit hoher seq den echten nicht verdraengt. Hoechste seq gewinnt
+  /// (Tie-Break ueber publishedAtMs). Spec §4.3.
   Future<DeviceKemRecord?> _lookupDeviceKem(
-      Uint8List userId, Uint8List deviceId) async {
+      Uint8List userId, Uint8List deviceId, Uint8List? anchorPk) async {
     final body = Uint8List.fromList((proto.IdentityKemRetrieveRequest()
           ..userId = userId
           ..deviceId = deviceId)
@@ -321,6 +362,11 @@ class IdentityResolver {
       try {
         final p = proto.DeviceKemRecordV3.fromBuffer(response.payload);
         final r = DeviceKemRecord.fromProto(p);
+        if (anchorPk != null &&
+            (!_bytesEqual(r.userEd25519Pk, anchorPk) ||
+                !r.verify(anchorPk))) {
+          continue; // forged/foreign record — vor Selektion aussortieren
+        }
         if (best == null ||
             r.sequenceNumber > best.sequenceNumber ||
             (r.sequenceNumber == best.sequenceNumber &&
@@ -334,12 +380,16 @@ class IdentityResolver {
     return best;
   }
 
-  /// K=10 closest replicators zum Schlüssel parallel anfragen, höchste seq
-  /// gewinnt (Tie-Break über publishedAtMs). Spec §4.3 Schritt 1.
+  /// K=10 closest replicators zum Schlüssel parallel anfragen. D1 (§4.3
+  /// Trust anchor): jede Antwort wird klassifiziert (verified / legacy /
+  /// forged / contactMismatch); verified schlaegt legacy, hoechste seq
+  /// innerhalb der Klasse (Tie-Break ueber publishedAtMs). TOFU: existiert
+  /// bereits ein verankerter Pk fuer diese userId, muss ein verified
+  /// Manifest dazu passen oder per Rotationskette bruecken.
   ///
   /// Fallback (Test-Skeleton-Kompat): wenn routingTable keine Peers hat,
   /// Single-Call mit `peer=null` — Mocks akzeptieren das.
-  Future<AuthManifest?> _lookupAuthManifest(Uint8List userId) async {
+  Future<_AuthLookup?> _lookupAuthManifest(Uint8List userId) async {
     final body = Uint8List.fromList(
         (proto.IdentityAuthRetrieveRequest()..userId = userId).writeToBuffer());
 
@@ -349,7 +399,11 @@ class IdentityResolver {
       dhtKey: _authKey(userId),
     );
 
-    AuthManifest? best;
+    final contactPk = contactEd25519PkLookup?.call(userId);
+    final tofuPk = _anchoredPkByUserHex[bytesToHex(userId)];
+
+    AuthManifest? bestVerified;
+    AuthManifest? bestLegacy;
     for (final response in responses) {
       if (response == null) continue;
       if (response.type != proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE) {
@@ -358,21 +412,58 @@ class IdentityResolver {
       try {
         final p = proto.AuthManifestProto.fromBuffer(response.payload);
         final m = AuthManifest.fromProto(p);
-        if (best == null ||
-            m.sequenceNumber > best.sequenceNumber ||
-            (m.sequenceNumber == best.sequenceNumber &&
-                m.publishedAtMs > best.publishedAtMs)) {
-          best = m;
+        final status = m.verifySelfCertified(
+          deriveUserId: _deriveUserId,
+          contactEd25519Pk: contactPk,
+        );
+        switch (status) {
+          case AnchorStatus.forged:
+            continue; // silent drop — kryptografisch widerlegt
+          case AnchorStatus.contactMismatch:
+            onContactKeyMismatch?.call(userId, m.userEd25519Pk);
+            continue;
+          case AnchorStatus.legacy:
+            if (_better(m, bestLegacy)) bestLegacy = m;
+            continue;
+          case AnchorStatus.verified:
+            // TOFU-Kontinuitaet: bestehender Anker darf nur per Match oder
+            // brueckender Rotationskette ersetzt werden — hoehere seq
+            // allein reicht nicht.
+            if (tofuPk != null &&
+                !_bytesEqual(m.userEd25519Pk, tofuPk) &&
+                !m.rotationChain
+                    .any((l) => _bytesEqual(l.oldEd25519Pk, tofuPk))) {
+              continue;
+            }
+            if (_better(m, bestVerified)) bestVerified = m;
+            continue;
         }
       } catch (_) {
         // skip malformed
       }
     }
-    return best;
+
+    if (bestVerified != null) {
+      return _AuthLookup(bestVerified, bestVerified.userEd25519Pk);
+    }
+    // Transition (§4.3): legacy-unverified akzeptiert, aber ohne Anker —
+    // Liveness/KEM laufen dann im Legacy-Modus weiter. Ein gecachter
+    // TOFU-Anker wird dadurch NICHT ersetzt.
+    if (bestLegacy != null) return _AuthLookup(bestLegacy, null);
+    return null;
   }
 
+  bool _better(AuthManifest m, AuthManifest? best) {
+    return best == null ||
+        m.sequenceNumber > best.sequenceNumber ||
+        (m.sequenceNumber == best.sequenceNumber &&
+            m.publishedAtMs > best.publishedAtMs);
+  }
+
+  /// D1: mit Anker zaehlen nur Liveness-Records, deren Ed25519-Sig gegen
+  /// den verankerten User-Pk verifiziert (Filterung VOR best-Selektion).
   Future<LivenessRecord?> _lookupLiveness(
-      Uint8List userId, Uint8List deviceNodeId) async {
+      Uint8List userId, Uint8List deviceNodeId, Uint8List? anchorPk) async {
     final body = Uint8List.fromList((proto.IdentityLiveRetrieveRequest()
           ..userId = userId
           ..deviceNodeId = deviceNodeId)
@@ -393,6 +484,9 @@ class IdentityResolver {
       try {
         final p = proto.LivenessRecordProto.fromBuffer(response.payload);
         final r = LivenessRecord.fromProto(p);
+        if (anchorPk != null && !r.verify(anchorPk)) {
+          continue; // forged — Adressen eines Angreifers nie uebernehmen
+        }
         if (best == null ||
             r.sequenceNumber > best.sequenceNumber ||
             (r.sequenceNumber == best.sequenceNumber &&
@@ -419,7 +513,14 @@ class IdentityResolver {
   }) async {
     final closest = routingTable.findClosestPeers(dhtKey, count: 10);
     if (closest.isEmpty) {
-      return <dynamic>[null];
+      // Dokumentierter Fallback: Single-Call mit peer=null (Test-Skeleton/
+      // Cold-Start). Production-DhtRpc wirft auf null-Peer → catch → [null];
+      // Mocks akzeptieren null und antworten.
+      try {
+        return <dynamic>[await dhtRpc.sendAndWait(requestType, body, null)];
+      } catch (_) {
+        return <dynamic>[null];
+      }
     }
     return Future.wait(closest.map((peer) async {
       try {

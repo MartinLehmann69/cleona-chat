@@ -1194,9 +1194,13 @@ message PollVoteRevokeMsg {
 // continuity from the founding key (whose hash is the userId) to the
 // currently embedded manifest keys.
 message RotationChainLinkProto {
-  bytes new_ed25519_pk = 1;        // 32 bytes — successor user pubkey
-  bytes new_ml_dsa_pk = 2;         // ML-DSA-65 successor pubkey
-  bytes old_signature_ed25519 = 3; // OLD key's sig over (new_ed25519_pk || new_ml_dsa_pk)
+  bytes old_ed25519_pk = 1;        // 32 bytes — predecessor pubkey; link[0]'s
+                                   // old pk MUST hash to the userId (founding
+                                   // anchor); link[i>0]'s old pk MUST equal
+                                   // link[i-1].new_ed25519_pk
+  bytes new_ed25519_pk = 2;        // 32 bytes — successor user pubkey
+  bytes new_ml_dsa_pk = 3;         // ML-DSA-65 successor pubkey
+  bytes old_signature_ed25519 = 4; // OLD key's sig over (new_ed25519_pk || new_ml_dsa_pk)
 }
 
 message AuthManifestProto {

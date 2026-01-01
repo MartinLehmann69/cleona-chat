@@ -7,6 +7,8 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_keys_store.dart';
+import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/proof_of_work.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
@@ -678,6 +680,9 @@ class CleonaNode {
       ownNodeId: primaryIdentity.deviceNodeId,
       fileEncryption: identityFileEnc,
       storagePath: '$profileDir/identity_dht_storage.json',
+      // D1 (§4.3 Trust anchor): Store-Time-Verifikation eingehender
+      // AuthManifests gegen Founding-Key-Hash/Rotationsketten-Anker.
+      deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.secret),
     );
     await identityDhtHandler.start();
     identityResolver = IdentityResolver(

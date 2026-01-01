@@ -380,7 +380,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.83';
+  static const String kCurrentAppVersion = '3.1.84';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -770,6 +770,23 @@ class CleonaService implements ICleonaService {
 
     // Mutual Peer Selection for S&F (Architecture Section 3.3.7).
     node.getMutualPeerIds = _computeMutualPeerIds;
+
+    // D1 (§4.3 Trust anchor): Contact-Pubkey-Lookup fuer den Contact-Match/
+    // Continuity-Pfad des Resolvers. Multi-Identity: Services teilen einen
+    // Node — chainen statt ueberschreiben, damit Kontakte aller gehosteten
+    // Identitaeten gefunden werden (Pattern wie onAckReceived oben).
+    final prevContactPkLookup = node.identityResolver.contactEd25519PkLookup;
+    node.identityResolver.contactEd25519PkLookup = (userId) {
+      final pk = _contacts[bytesToHex(userId)]?.ed25519Pk;
+      if (pk != null && pk.isNotEmpty) return pk;
+      return prevContactPkLookup?.call(userId);
+    };
+    node.identityResolver.onContactKeyMismatch ??= (userId, embeddedPk) {
+      _log.warn('D1 trust anchor: AuthManifest fuer Kontakt '
+          '${bytesToHex(userId).substring(0, 16)}... traegt einen User-Key, '
+          'der dem gespeicherten Kontakt-Key widerspricht (keine brueckende '
+          'Rotationskette) — Record verworfen (§4.3 contact continuity)');
+    };
 
     // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't
     // reset uptime every time a second/third identity comes up.
