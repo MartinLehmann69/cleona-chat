@@ -21,9 +21,16 @@
 	     = Manual, project.pbxproj). UNGEPRUEFT: no Apple device or Xcode
 	     available in this session to confirm the profile already carries
 	     it. -->
+	<!-- S397 (25.09.2026): TAG, not NDEF. nfc_manager 3.5.1 opens an
+	     NFCTagReaderSession (ios/Classes/SwiftNfcManagerPlugin.swift:92),
+	     whose format is TAG; NDEF belongs to NFCNDEFReaderSession, which the
+	     plugin does not use. App Store Connect rejected the upload of
+	     v4.2.0-beta: "entitlement 'com.apple.developer.nfc.readersession.formats'
+	     ... 'NDEF is disallowed'. (90778)" (SDK 26.5, min OS 15.5). NDEF tags
+	     are still read and written through the TAG session. -->
 	<key>com.apple.developer.nfc.readersession.formats</key>
 	<array>
-		<string>NDEF</string>
+		<string>TAG</string>
 	</array>
 
 	<!-- §11 / `lib/core/tagline/lan_entry_wiring.dart:58`:
