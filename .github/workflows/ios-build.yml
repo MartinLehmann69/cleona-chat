@@ -152,50 +152,47 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Inject force_load into Runner target
+      - name: Inject force_load into Pods xcconfigs
         run: |
-          # CocoaPods "Integrating client project" overwrites Runner.xcodeproj
-          # AFTER the Podfile post_install hook. So we inject -force_load as a
-          # separate step using the xcodeproj gem (bundled with CocoaPods).
+          # Xcode build-setting resolution: xcconfig > project.pbxproj.
+          # CocoaPods generates Pods-Runner.{debug,release,profile}.xcconfig
+          # which set OTHER_LDFLAGS. We append -force_load to each one.
+          # flutter build ipa does NOT regenerate these xcconfigs (only
+          # Generated.xcconfig is regenerated). So the flags persist.
           DEVICE_A="$(pwd)/ios/CleonaNative/libcleona_all_device.a"
-          SIM_A="$(pwd)/ios/CleonaNative/libcleona_all_simulator.a"
           if [ ! -f "$DEVICE_A" ]; then
             echo "ERROR: $DEVICE_A not found"
             ls -la ios/CleonaNative/
             exit 1
           fi
-          ruby - "$DEVICE_A" "$SIM_A" <<'RUBY'
-          require 'xcodeproj'
-          device_a, sim_a = ARGV
-          project = Xcodeproj::Project.open('ios/Runner.xcodeproj')
-          runner = project.targets.find { |t| t.name == 'Runner' }
-          abort "Runner target not found" unless runner
-          runner.build_configurations.each do |config|
-            flags = config.build_settings['OTHER_LDFLAGS'] || ['$(inherited)']
-            flags = [flags] if flags.is_a?(String)
-            flags.reject! { |f| f.include?('force_load') && f.include?('libcleona_all') }
-            if config.name == 'Debug'
-              config.build_settings.delete('OTHER_LDFLAGS[sdk=iphoneos*]')
-              config.build_settings.delete('OTHER_LDFLAGS[sdk=iphonesimulator*]')
-              config.build_settings['OTHER_LDFLAGS'] = flags
-              iphoneos_flags = flags.dup + ["-force_load #{device_a}"]
-              config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] = iphoneos_flags
-              if File.exist?(sim_a.to_s)
-                sim_flags = flags.dup + ["-force_load #{sim_a}"]
-                config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] = sim_flags
-              end
+          FORCE_FLAG="-force_load $DEVICE_A"
+          XCCONFIG_DIR="ios/Pods/Target Support Files/Pods-Runner"
+          INJECTED=0
+          for xcconfig in "$XCCONFIG_DIR"/Pods-Runner.*.xcconfig; do
+            [ -f "$xcconfig" ] || continue
+            CONFIG_NAME=$(basename "$xcconfig")
+            if grep -q 'force_load.*libcleona_all' "$xcconfig"; then
+              echo "  $CONFIG_NAME: already has force_load — skipping"
+              continue
+            fi
+            # Append to existing OTHER_LDFLAGS line, or add a new one
+            if grep -q '^OTHER_LDFLAGS' "$xcconfig"; then
+              sed -i '' "s|^OTHER_LDFLAGS = \(.*\)|OTHER_LDFLAGS = \1 $FORCE_FLAG|" "$xcconfig"
             else
-              flags << "-force_load #{device_a}"
-              config.build_settings['OTHER_LDFLAGS'] = flags
-            end
-            puts "  #{config.name}: force_load injected"
-          end
-          project.save
-          pbx = File.read('ios/Runner.xcodeproj/project.pbxproj')
-          count = pbx.scan('force_load').length
-          puts "Verified: #{count} force_load references in project.pbxproj"
-          abort "ERROR: force_load not written!" if count == 0
-          RUBY
+              echo "OTHER_LDFLAGS = \$(inherited) $FORCE_FLAG" >> "$xcconfig"
+            fi
+            echo "  $CONFIG_NAME: injected force_load"
+            INJECTED=$((INJECTED + 1))
+          done
+          echo "Injected into $INJECTED xcconfig files"
+          if [ "$INJECTED" -eq 0 ]; then
+            echo "ERROR: No xcconfig files found or modified!"
+            ls -la "$XCCONFIG_DIR/" 2>/dev/null || echo "Dir not found"
+            exit 1
+          fi
+          # Verify
+          echo "--- Verification ---"
+          grep 'force_load' "$XCCONFIG_DIR"/*.xcconfig || echo "WARNING: force_load not found in any xcconfig!"
 
       - name: Install distribution certificate
         env:
@@ -263,19 +260,27 @@ jobs:
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
         run: |
-          KEY_PATH="$RUNNER_TEMP/asc-key.p8"
+          # Write the decoded .p8 into a dedicated temp directory named exactly
+          # AuthKey_<KEY_ID>.p8 so altool's JWT generator finds it unambiguously.
+          # altool searches for the file in: ./private_keys, ~/private_keys,
+          # ~/.private_keys, ~/.appstoreconnect/private_keys, and $API_PRIVATE_KEYS_DIR.
+          # Using $API_PRIVATE_KEYS_DIR makes the lookup explicit and immune to
+          # working-directory changes. altool is deprecated since Xcode 14 but
+          # remains the only CLI path for iOS IPA upload (notarytool is macOS-only).
+          KEY_DIR="$RUNNER_TEMP/asc-private-keys"
+          mkdir -p "$KEY_DIR"
+          KEY_PATH="$KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
           echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
-
-          mkdir -p ~/.appstoreconnect/private_keys
-          cp "$KEY_PATH" ~/.appstoreconnect/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8
+          chmod 600 "$KEY_PATH"
 
           IPA=$(find build/ios -name "*.ipa" | head -1)
           if [ -n "$IPA" ]; then
-            xcrun altool --upload-app \
+            API_PRIVATE_KEYS_DIR="$KEY_DIR" xcrun altool --upload-app \
               --type ios \
               --file "$IPA" \
               --apiKey "$APP_STORE_CONNECT_KEY_ID" \
-              --apiIssuer "$APP_STORE_CONNECT_ISSUER"
+              --apiIssuer "$APP_STORE_CONNECT_ISSUER" \
+              --verbose
           else
             echo "No IPA found — skipping upload"
           fi
