@@ -60,3 +60,17 @@ int cleona_ios_sendto(int fd, const char* dest_ip, int dest_port,
     }
     return (int)sent;
 }
+
+/* Peek at the socket's receive buffer without consuming data.
+ * Diagnostic: detects data stuck in kernel buffer that Dart's event loop
+ * isn't reading (kqueue/CFSocket integration bug).
+ * Returns 1 if data is available, 0 on EOF, or -errno (-35 = EAGAIN = empty). */
+__attribute__((visibility("default"), used))
+int cleona_ios_recv_peek(int fd) {
+    char buf[1];
+    ssize_t n = recvfrom(fd, buf, 1, MSG_DONTWAIT | MSG_PEEK, NULL, NULL);
+    if (n > 0) return 1;
+    if (n == 0) return 0;
+    extern int errno;
+    return -errno;
+}

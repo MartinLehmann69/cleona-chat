@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/ios_udp_sender.dart';
 import 'package:cleona/core/network/native_udp_sender.dart';
 import 'package:cleona/core/network/transport.dart';
 
@@ -32,10 +33,14 @@ class LocalDiscovery {
   /// Native UDP send-path shim (§4.5.2). Send-only — receive remains on
   /// [_socket] (Dart's RawDatagramSocket). On Linux/Windows desktop this is
   /// loaded eagerly in [start] and a missing library raises a hard error.
-  /// On other platforms (Android/iOS/macOS) it stays null and all sends fall
-  /// through to the Dart-RawDatagramSocket path that those platforms use
-  /// without observed defects.
+  /// On other platforms (Android/macOS) it stays null and all sends fall
+  /// through to the Dart-RawDatagramSocket path.
   NativeUdpSender? _nativeSender;
+
+  /// iOS native sendto() bypass for discovery. Dart's send() returns 0 on
+  /// iOS (errno 64/65). Same fd-based approach as Transport.IosUdpSender —
+  /// finds the discovery socket's fd and calls sendto() directly.
+  IosUdpSender? _iosSender;
 
   // Receive-side diagnostics for LAN-Discovery (2026-05-15). The pre-existing
   // _onEvent path silently drops malformed datagrams; without per-source
@@ -135,6 +140,21 @@ class LocalDiscovery {
       );
       _nativeSender!.setBuffers(rcvBytes: 2 * 1024 * 1024, sndBytes: 4 * 1024 * 1024);
       _log.info('Native UDP sender attached (${NativeUdpSender.libraryVersion()})');
+    }
+
+    // iOS: Dart's RawDatagramSocket.send() returns 0 for all destinations
+    // (errno 64/65). Find the discovery socket's fd and use native sendto().
+    if (Platform.isIOS) {
+      try {
+        _iosSender = IosUdpSender.open(discoveryPort);
+        if (_iosSender != null) {
+          _log.info('iOS native discovery sender attached (fd=${_iosSender!.fd} port $discoveryPort)');
+        } else {
+          _log.warn('iOS native discovery sender: fd not found for port $discoveryPort');
+        }
+      } catch (e) {
+        _log.warn('iOS native discovery sender init failed: $e');
+      }
     }
   }
 
@@ -248,7 +268,20 @@ class LocalDiscovery {
       return n < 0 ? 0 : n;
     }
 
-    // Dart-RawDatagramSocket fallback path (Android/iOS/macOS only).
+    // iOS native sendto() bypass (same pattern as Transport.IosUdpSender).
+    if (_iosSender != null) {
+      final n = _iosSender!.send(addr.address, port, packet);
+      if (n > 0) {
+        _scanNativeFallbackPositive++;
+      } else if (n < 0) {
+        _scanNativeFallbackNegative++;
+        if (_scanNativeErrnoSamples.length < 5) _scanNativeErrnoSamples.add(n);
+        _scanFirstNegativeIp ??= addr.address;
+      }
+      return n < 0 ? 0 : n;
+    }
+
+    // Dart-RawDatagramSocket fallback path (Android/macOS only).
     var n = _socket?.send(packet, addr, port) ?? 0;
     if (n > 0) return n;
     for (var attempt = 0; attempt < 2 && n == 0; attempt++) {
@@ -298,6 +331,9 @@ class LocalDiscovery {
     int sendUdp(String ip, int port) {
       if (_nativeSender != null) {
         return _nativeSender!.send(ip, port, packet);
+      }
+      if (_iosSender != null) {
+        return _iosSender!.send(ip, port, packet);
       }
       return _socket?.send(packet, InternetAddress(ip), port) ?? 0;
     }
@@ -351,6 +387,8 @@ class LocalDiscovery {
     try {
       if (_nativeSender != null) {
         _nativeSender!.send(ip, targetPort, packet);
+      } else if (_iosSender != null) {
+        _iosSender!.send(ip, targetPort, packet);
       } else {
         _socket!.send(packet, InternetAddress(ip), targetPort);
       }
@@ -492,7 +530,13 @@ class LocalDiscovery {
           // fallback-positive vs fallback-negative so the scan-complete log
           // shows which layer believes it sent (Dart-socket Reports OK, but
           // packets do not arrive at the receiver — observed on Windows).
-          final firstTry = _socket?.send(packet, InternetAddress(ip), discoveryPort) ?? 0;
+          final int firstTry;
+          if (_iosSender != null) {
+            final n = _iosSender!.send(ip, discoveryPort, packet);
+            firstTry = n > 0 ? n : 0;
+          } else {
+            firstTry = _socket?.send(packet, InternetAddress(ip), discoveryPort) ?? 0;
+          }
           if (firstTry > 0) {
             _scanDartFirstPositive++;
           } else {
@@ -630,6 +674,7 @@ class LocalDiscovery {
     _socket = null;
     _nativeSender?.close();
     _nativeSender = null;
+    _iosSender = null;
   }
 }
 
@@ -742,7 +787,14 @@ class MulticastDiscovery {
     if (_socket == null) return false;
     final packet = Transport.buildDiscoveryPacket(nodeId, nodePort);
     try {
-      _socket!.send(packet, InternetAddress(multicastGroupV6), LocalDiscovery.discoveryPort);
+      // IPv6 multicast: Dart's send() is the only path. The iOS native
+      // sendto() shim only supports AF_INET (IPv4). On iOS, IPv6 multicast
+      // may silently fail — IPv4 broadcast/unicast via LocalDiscovery is
+      // the primary iOS discovery mechanism.
+      final n = _socket!.send(packet, InternetAddress(multicastGroupV6), LocalDiscovery.discoveryPort);
+      if (n <= 0 && Platform.isIOS) {
+        _log.debug('IPv6 multicast send → n=$n (expected on iOS — Dart send broken, no IPv6 native shim)');
+      }
       return true;
     } catch (e) {
       _log.debug('IPv6 multicast send failed: $e');

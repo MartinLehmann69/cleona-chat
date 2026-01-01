@@ -124,6 +124,15 @@ class Transport {
   /// socket, no §4.5.2 dual-socket risk.
   IosUdpSender? _iosUdpSender;
 
+  // ── iOS Receive Diagnostics ────────────────────────────────────────
+  // Dart's RawDatagramSocket on iOS has a proven send-path defect (returns 0
+  // for all destinations). The receive path (kqueue/CFSocket → RawSocketEvent.read)
+  // may have a similar integration bug. These counters + native peek probe
+  // distinguish "no packets arriving" from "data in kernel buffer but Dart
+  // not reading it".
+  Timer? _iosDiagTimer;
+  int _iosRxEventCount = 0;
+
   NetworkPacketCallback? onPacketV3;
   DiscoveryCallback? onDiscovery;
   /// Callback when a CPRB port probe packet arrives: (probeId, fromAddress, fromPort).
@@ -172,13 +181,14 @@ class Transport {
       try {
         _iosUdpSender = IosUdpSender.open(port);
         if (_iosUdpSender != null) {
-          _log.info('iOS native sendto() activated on fd (port $port)');
+          _log.info('iOS native sendto() activated on fd=${_iosUdpSender!.fd} (port $port)');
         } else {
           _log.warn('iOS native sendto(): could not find UDP fd for port $port');
         }
       } catch (e) {
         _log.warn('iOS native sendto() init failed: $e');
       }
+      _startIosDiagnostics();
     }
 
     // Native UDP sender for Transport.sendUdp — bypasses Dart's
@@ -382,6 +392,7 @@ class Transport {
 
   void _onUdpEvent(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
+    if (_iosDiagTimer != null) _iosRxEventCount++;
     for (;;) {
       final datagram = _udpSocket?.receive();
       if (datagram == null) break;
@@ -397,6 +408,7 @@ class Transport {
 
   void _onUdpEvent6(RawSocketEvent event) {
     if (event != RawSocketEvent.read) return;
+    if (_iosDiagTimer != null) _iosRxEventCount++;
     for (;;) {
       final datagram = _udpSocket6?.receive();
       if (datagram == null) break;
@@ -1283,6 +1295,18 @@ class Transport {
         _udpSocket6 = null;
       }
       _consecutiveZeroSends = 0;
+      // iOS: old fd is stale after socket close+reopen — must rescan.
+      if (Platform.isIOS) {
+        _iosUdpSender = null;
+        try {
+          _iosUdpSender = IosUdpSender.open(port);
+          if (_iosUdpSender != null) {
+            _log.info('iOS native sendto() reattached on fd=${_iosUdpSender!.fd}');
+          }
+        } catch (e) {
+          _log.warn('iOS native sendto() reattach failed: $e');
+        }
+      }
       _log.info('UDP sockets reconnected on port $port');
     } catch (e) {
       _log.warn('UDP socket reconnect failed: $e');
@@ -1306,12 +1330,38 @@ class Transport {
     _log.info('Transport rebound to port $newPort');
   }
 
+  // ── iOS Receive Diagnostics (§4.5.2 iOS) ───────────────────────────
+  void _startIosDiagnostics() {
+    _iosRxEventCount = 0;
+    _iosDiagTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      final peek = _iosUdpSender?.recvPeek() ?? -999;
+      _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount peek=$peek '
+          '(rxEvents>0=OK, peek>0=data stuck in kernel/Dart broken, '
+          'peek=-35=EAGAIN/empty)');
+      _iosRxEventCount = 0;
+    });
+    // Localhost echo: send 4 bytes to 127.0.0.1:ownPort. If _onUdpEvent
+    // fires within 2s → Dart's kqueue integration works. If not → broken.
+    if (_iosUdpSender != null) {
+      final echo = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
+      final sent = _iosUdpSender!.send('127.0.0.1', port, echo);
+      _log.info('iOS localhost echo: sendto→$sent to 127.0.0.1:$port');
+      Timer(const Duration(seconds: 2), () {
+        _log.info('iOS localhost echo result: '
+            '${_iosRxEventCount > 0 ? "OK (rxEvents=$_iosRxEventCount)" : "FAILED — 0 read events in 2s"}');
+      });
+    }
+  }
+
   Future<void> stop() async {
+    _iosDiagTimer?.cancel();
+    _iosDiagTimer = null;
     _tlsRebindTimer?.cancel();
     _tlsRebindTimer = null;
     _tlsRebindAttempt = 0;
     _nativeSender?.close();
     _nativeSender = null;
+    _iosUdpSender = null;
     _udpSocket?.close();
     _udpSocket = null;
     _udpSocket6?.close();

@@ -19,11 +19,15 @@ typedef _SendtoDart = int Function(
     ffi.Pointer<ffi.Uint8> data,
     int len);
 
+typedef _RecvPeekC = ffi.Int32 Function(ffi.Int32 fd);
+typedef _RecvPeekDart = int Function(int fd);
+
 class IosUdpSender {
   final int _fd;
   final _SendtoDart _sendto;
+  final _RecvPeekDart _recvPeek;
 
-  IosUdpSender._(this._fd, this._sendto);
+  IosUdpSender._(this._fd, this._sendto, this._recvPeek);
 
   static IosUdpSender? open(int localPort) {
     if (!Platform.isIOS) return null;
@@ -34,12 +38,16 @@ class IosUdpSender {
         'cleona_ios_find_udp_fd');
     final sendto =
         lib.lookupFunction<_SendtoC, _SendtoDart>('cleona_ios_sendto');
+    final recvPeek =
+        lib.lookupFunction<_RecvPeekC, _RecvPeekDart>('cleona_ios_recv_peek');
 
     final fd = findFd(localPort);
     if (fd < 0) return null;
 
-    return IosUdpSender._(fd, sendto);
+    return IosUdpSender._(fd, sendto, recvPeek);
   }
+
+  int get fd => _fd;
 
   int send(String destIp, int destPort, Uint8List data) {
     final ipPtr = destIp.toNativeUtf8();
@@ -52,4 +60,8 @@ class IosUdpSender {
       calloc.free(dataPtr);
     }
   }
+
+  /// Peek at receive buffer without consuming. Returns 1 if data available,
+  /// -35 (EAGAIN) if empty, or other -errno on error.
+  int recvPeek() => _recvPeek(_fd);
 }
