@@ -326,7 +326,8 @@ build_cleona_pow() {
         -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
         -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_PREFIX_PATH="$INSTALL_DIR/sodium" \
+        -DSODIUM_LIB="$INSTALL_DIR/sodium/lib/libsodium.a" \
+        -DSODIUM_INCLUDE="$INSTALL_DIR/sodium/include" \
         "$src"
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_pow/lib"
