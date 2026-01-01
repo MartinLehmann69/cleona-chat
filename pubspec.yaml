@@ -1,7 +1,7 @@
 name: cleona
 description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
 publish_to: 'none'
-version: 3.1.120+1
+version: 3.1.122+1
 
 environment:
   sdk: ^3.11.0
@@ -57,6 +57,7 @@ dependencies:
   record: ^6.2.0
   url_launcher: ^6.3.2
   desktop_drop: ^0.7.0
+  share_plus: ^10.1.4
 
   # NFC Contact Exchange (Android only)
   nfc_manager: ^3.5.0

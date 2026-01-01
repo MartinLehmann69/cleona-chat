@@ -178,22 +178,15 @@ class IdentityDhtRegistry {
     return payload;
   }
 
-  /// Store the registry in the DHT as erasure-coded fragments.
-  ///
-  /// [storeFunction] takes (Uint8List mailboxId, int fragmentIndex, Uint8List fragmentData)
-  /// and stores the fragment via FRAGMENT_STORE to the closest DHT peers.
-  void storeInDht(
+  /// Prepare erasure-coded fragments for DHT storage.
+  /// Returns (mailboxId, fragments, payloadSize) for use with ErasurePlacementCoordinator.
+  ({Uint8List mailboxId, List<({int index, Uint8List data})> fragments, int payloadSize}) prepareForDht(
     List<Map<String, dynamic>> identities,
     int nextIndex,
-    void Function(Uint8List mailboxId, int fragmentIndex, Uint8List fragmentData) storeFunction,
   ) {
     final payload = buildPayload(identities, nextIndex);
     final fragments = encodeFragments(payload);
-
-    for (final frag in fragments) {
-      storeFunction(registryDhtKey, frag.index, frag.data);
-    }
-
-    _log.info('Registry stored in DHT: ${fragments.length} fragments, ${payload.length} bytes');
+    _log.info('Registry prepared for DHT: ${fragments.length} fragments, ${payload.length} bytes');
+    return (mailboxId: registryDhtKey, fragments: fragments, payloadSize: payload.length);
   }
 }

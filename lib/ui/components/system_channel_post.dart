@@ -8,7 +8,7 @@ import 'package:cleona/core/i18n/app_locale.dart';
 /// Renders a system channel post (crash report, duplicate, contact issue,
 /// log report, feature request) in a human-readable card format instead of
 /// raw JSON.
-class SystemChannelPost extends StatelessWidget {
+class SystemChannelPost extends StatefulWidget {
   final String text;
   final bool isOutgoing;
   final String timestamp;
@@ -28,12 +28,46 @@ class SystemChannelPost extends StatelessWidget {
   });
 
   @override
+  State<SystemChannelPost> createState() => _SystemChannelPostState();
+}
+
+class _SystemChannelPostState extends State<SystemChannelPost> {
+  Map<String, dynamic>? _cachedJson;
+  bool _parseFailed = false;
+
+  String get text => widget.text;
+  bool get isOutgoing => widget.isOutgoing;
+  String get timestamp => widget.timestamp;
+  Map<String, int>? get frTally => widget.frTally;
+  void Function(int option)? get onVote => widget.onVote;
+
+  @override
+  void initState() {
+    super.initState();
+    _parseJson();
+  }
+
+  @override
+  void didUpdateWidget(SystemChannelPost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.text != widget.text) _parseJson();
+  }
+
+  void _parseJson() {
+    try {
+      _cachedJson = jsonDecode(widget.text) as Map<String, dynamic>;
+      _parseFailed = false;
+    } catch (_) {
+      _cachedJson = null;
+      _parseFailed = true;
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    Map<String, dynamic>? json;
-    try {
-      json = jsonDecode(text) as Map<String, dynamic>;
-    } catch (_) {
+    final json = _cachedJson;
+    if (_parseFailed || json == null) {
       return _plainFallback(colorScheme);
     }
 
@@ -203,12 +237,13 @@ class SystemChannelPost extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 6),
-            Row(
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                const SizedBox(width: 4),
                 _chip(cs, '${report.peerCount} peers'),
-                const Spacer(),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -312,14 +347,14 @@ class SystemChannelPost extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 6),
-            Row(
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                const SizedBox(width: 4),
                 _chip(cs, '${report.peerCount} peers'),
-                const SizedBox(width: 4),
                 _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
-                const Spacer(),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -414,12 +449,13 @@ class SystemChannelPost extends StatelessWidget {
                 ),
               ),
             const SizedBox(height: 6),
-            Row(
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                const SizedBox(width: 4),
                 _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
-                const Spacer(),
                 Text(
                   timestamp,
                   style: TextStyle(

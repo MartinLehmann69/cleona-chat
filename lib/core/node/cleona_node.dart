@@ -574,6 +574,10 @@ class CleonaNode {
   // each neighbor. Catch-up is skipped when routeEpoch hasn't changed.
   final Map<String, int> _lastRouteEpochSentTo = {};
 
+  // F5: Grace period after network change — suppress catch-up sends entirely
+  // to prevent the self-amplifying full-table storm.
+  DateTime? _networkChangeGraceUntil;
+
   // DV→K-bucket seeding: cooldown per destination to avoid repeated WANTs.
   final Map<String, DateTime> _dvSeedWantCooldown = {};
 
@@ -1765,7 +1769,10 @@ class CleonaNode {
     // symmetry for NAT-asymmetric scenarios (e.g. mobile sends via
     // Bootstrap, we can relay back via Bootstrap).
     if (senderDeviceId.isNotEmpty && packet.hopCount > 0 && from.address != '0.0.0.0') {
-      _learnReverseRelayPath(senderHex, from.address, fromPort);
+      final relayNeighborHex = _learnReverseRelayPath(senderHex, from.address, fromPort);
+      if (relayNeighborHex != null) {
+        dvRouting.confirmRoute(senderHex, viaNextHopHex: relayNeighborHex);
+      }
     }
 
     // [6] Routing decision: am I the next hop?
@@ -4303,7 +4310,7 @@ class CleonaNode {
   /// §5.3 Reverse-Relay-Path-Learning: identify which DV neighbor
   /// physically relayed a packet from [originatorHex] and add a relay
   /// route hint so the reply cascade can use the same relay.
-  void _learnReverseRelayPath(String originatorHex, String relayIp, int relayPort) {
+  String? _learnReverseRelayPath(String originatorHex, String relayIp, int relayPort) {
     for (final neighborHex in dvRouting.neighborIds) {
       final peer = routingTable.getPeer(hexToBytes(neighborHex));
       if (peer == null) continue;
@@ -4316,10 +4323,11 @@ class CleonaNode {
             _log.info('Reverse-relay-path: ${originatorHex.substring(0, 8)} '
                 'reachable via ${neighborHex.substring(0, 8)} (cost=$cost)');
           }
-          return;
+          return neighborHex;
         }
       }
     }
+    return null;
   }
 
   /// Update or create a peer entry in the routing table.
@@ -4996,6 +5004,9 @@ class CleonaNode {
     _log.debug('Soft-reset: marked $staleCount DV-routes as stale (30s deadline)');
     _lastRouteUpdateSentTo.clear();
     _lastRouteEpochSentTo.clear();
+    // F5: suppress catch-up for 15s after network change — delta propagation
+    // via _flushDvUpdates still runs and ensures convergence.
+    _networkChangeGraceUntil = DateTime.now().add(const Duration(seconds: 15));
 
     // Schedule the prune sweep for the soft-reset deadline. Routes /
     // relay-routes that did not revalidate via PONG / DV-update / Relay-
@@ -6047,21 +6058,30 @@ class CleonaNode {
     _log.info('DV: Welcome update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)}');
   }
 
-  /// Catch-up: send a full route update only if the routing table has
+  /// Catch-up: send a delta route update only if the routing table has
   /// actually changed since the last update to this neighbor.
   void _maybeSendCatchUpRouteUpdate(String neighborHex) {
     if (!isPeerConfirmed(neighborHex)) return;
+    // F5-B: suppress during network-change grace period
+    final grace = _networkChangeGraceUntil;
+    if (grace != null && DateTime.now().isBefore(grace)) return;
     final currentEpoch = dvRouting.routeEpoch;
     final lastEpoch = _lastRouteEpochSentTo[neighborHex];
     if (lastEpoch != null && lastEpoch >= currentEpoch) return;
+    // S128: throttle catch-up to prevent post-restart feedback loop
+    final lastSent = _lastRouteUpdateSentTo[neighborHex];
+    if (lastSent != null &&
+        DateTime.now().difference(lastSent).inSeconds < 5) return;
     final peer = routingTable.getPeer(hexToBytes(neighborHex));
     if (peer == null) return;
-    final fullUpdate = dvRouting.buildFullUpdate();
-    if (fullUpdate.isEmpty) return;
-    _sendRouteUpdate(peer, fullUpdate);
+    // F5-A: use delta with Split Horizon instead of full-table blast
+    final delta = dvRouting.buildDeltaFor(
+        neighborHex, dvRouting.allDestinations);
+    if (delta.isEmpty) return;
+    _sendRouteUpdate(peer, delta);
     _lastRouteUpdateSentTo[neighborHex] = DateTime.now();
     _lastRouteEpochSentTo[neighborHex] = currentEpoch;
-    _log.info('DV: Catch-up update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)} (epoch $currentEpoch)');
+    _log.info('DV: Catch-up delta sent ${delta.length} routes to ${neighborHex.substring(0, 8)} (epoch $currentEpoch)');
   }
 
   // ── NAT Keepalive Gate ──────────────────────────────────────────────

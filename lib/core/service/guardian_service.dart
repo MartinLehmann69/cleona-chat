@@ -1,12 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/erasure/erasure_placement.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/shamir_sss.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
+import 'package:cleona/core/network/peer_info.dart' show PeerInfo, bytesToHex, hexToBytes;
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/service_types.dart';
@@ -42,6 +44,11 @@ class GuardianService {
       onGuardianRestoreRequest;
   void Function(int sharesCollected, int sharesNeeded)? onRecoveryProgress;
   void Function(Uint8List masterSeed)? onRecoveryComplete;
+
+  /// Injected by CleonaService: sends FRAGMENT_STORE and waits for ACK.
+  /// Returns true if ACK received within timeout, false on timeout.
+  Future<bool> Function(Uint8List fragStoreBytes, Uint8List messageId,
+      int fragmentIndex, Uint8List recipientDeviceId)? sendFragmentStoreWithAck;
 
   GuardianService({
     required this.identity,
@@ -283,18 +290,43 @@ class GuardianService {
       ..originalSize = responseBytes.length;
     final fragStoreBytes = Uint8List.fromList(fragStore.writeToBuffer());
 
-    var sent = 0;
-    for (final peer in peers) {
-      final ok = await node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-        innerPayload: fragStoreBytes,
-        recipientDeviceId: Uint8List.fromList(peer.nodeId),
-      );
-      if (ok) sent++;
+    final ackSender = sendFragmentStoreWithAck;
+    if (ackSender == null) {
+      // Fallback: fire-and-forget (legacy path, should not happen after wiring)
+      var sent = 0;
+      for (final peer in peers) {
+        final ok = await node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+          innerPayload: fragStoreBytes,
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
+        );
+        if (ok) sent++;
+      }
+      _log.warn('Guardian restore for ${ownerNodeIdHex.substring(0, 8)}: fire-and-forget ($sent sends, no ACK)');
+      return sent > 0;
     }
 
-    _log.info('Guardian restore confirmed for ${ownerNodeIdHex.substring(0, 8)}: share sent to $sent peers');
-    return sent > 0;
+    final coordinator = ErasurePlacementCoordinator<PeerInfo>(
+      totalFragments: 1,
+      requiredFragments: 1,
+      peerId: (p) => bytesToHex(Uint8List.fromList(p.nodeId)),
+      initialReplicaCount: 3,
+      maxRetryWaves: 2,
+    );
+    final result = await coordinator.run(
+      initialPool: peers,
+      deeperPool: () => node.routingTable.findClosestPeers(recoveryMailboxId,
+          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup),
+      sendAndWait: (fragmentIndex, peer) =>
+          ackSender(fragStoreBytes, messageId, fragmentIndex, Uint8List.fromList(peer.nodeId)),
+    );
+
+    if (result.success) {
+      _log.info('Guardian restore confirmed for ${ownerNodeIdHex.substring(0, 8)}: ACK-verified');
+    } else {
+      _log.warn('Guardian restore for ${ownerNodeIdHex.substring(0, 8)}: placement FAILED');
+    }
+    return result.success;
   }
 
   // ── Flow D: Collect shares (recovering user side) ─────────────────

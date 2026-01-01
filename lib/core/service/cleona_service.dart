@@ -422,7 +422,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.120';
+  static const String kCurrentAppVersion = '3.1.121';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -561,6 +561,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
     guardianService.onGuardianRestoreRequest = (ownerName, triggerName, ownerHex, mailboxHex) {
       onGuardianRestoreRequest?.call(ownerName, triggerName, ownerHex, mailboxHex);
+    };
+    guardianService.sendFragmentStoreWithAck = (fragStoreBytes, messageId, fragmentIndex, recipientDeviceId) async {
+      final msgIdHex = bytesToHex(messageId);
+      final key = '$msgIdHex:$fragmentIndex';
+      final completer =
+          _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+        innerPayload: fragStoreBytes,
+        recipientDeviceId: recipientDeviceId,
+      ));
+      try {
+        await completer.future.timeout(_peerStoreAckTimeout);
+        _pendingFragmentStoreAcks.remove(key);
+        return true;
+      } on TimeoutException {
+        _pendingFragmentStoreAcks.remove(key);
+        return false;
+      }
     };
 
     // Load contacts
@@ -4341,12 +4360,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     conv.messages.add(msg);
     conv.lastActivity = msg.timestamp;
-    if (!msg.isOutgoing) {
+    if (!msg.isOutgoing &&
+        !(_isAppResumed && _activeConversationId == conversationId)) {
       conv.unreadCount++;
-      // Bug #U3+#U15: Launcher-Badge muss bei JEDEM eingehenden Increment
-      // aktualisiert werden — nicht nur bei Text/Media. Vorher fehlte es
-      // auf Channel-Posts und Config-Proposals, was zu Badge-Drift führte.
-      // Zentralisiert, damit neue Handler nichts vergessen können.
       _updateBadgeCount();
     }
 
@@ -10114,34 +10130,71 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     });
   }
 
-  /// Store the current identity registry in the DHT.
+  /// Store the current identity registry in the DHT with ACK-verified placement.
   /// Called after identity creation/deletion to keep the registry up-to-date.
-  void storeRegistryInDht(Uint8List masterSeed, List<({int? hdIndex, String name})> identities, int nextIndex) {
+  Future<bool> storeRegistryInDht(Uint8List masterSeed, List<({int? hdIndex, String name})> identities, int nextIndex) async {
     final registry = IdentityDhtRegistry(masterSeed: masterSeed, profileDir: profileDir);
     final entries = IdentityDhtRegistry.buildIdentityEntries(identities);
+    final prepared = registry.prepareForDht(entries, nextIndex);
 
-    registry.storeInDht(entries, nextIndex, (mailboxId, fragmentIndex, fragmentData) {
-      // Store via FRAGMENT_STORE to closest DHT peers.
-      // V3 (Architecture §23.3): FRAGMENT_STORE is an infrastructure
-      // message — route via DV cascade as InfrastructureFrame.
-      // D4 (§4.3): subnet-diverse replicator selection.
-      final peers = node.routingTable.findClosestPeers(mailboxId,
-          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-      for (final peer in peers) {
-        final store = proto.FragmentStore()
-          ..mailboxId = mailboxId
-          ..fragmentIndex = fragmentIndex
-          ..fragmentData = fragmentData
-          ..messageId = mailboxId // Use registry key as message ID
-          ..totalFragments = 10
-          ..originalSize = fragmentData.length;
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-          innerPayload: Uint8List.fromList(store.writeToBuffer()),
-          recipientDeviceId: Uint8List.fromList(peer.nodeId),
-        );
+    final initialPeers = node.routingTable.findClosestPeers(prepared.mailboxId,
+        count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
+    if (initialPeers.isEmpty) {
+      _log.debug('Registry DHT store skipped: no replicators known');
+      return false;
+    }
+
+    final msgIdHex = bytesToHex(prepared.mailboxId);
+
+    Future<bool> sendAndWait(int fragmentIndex, PeerInfo peer) async {
+      final frag = prepared.fragments[fragmentIndex];
+      final store = proto.FragmentStore()
+        ..mailboxId = prepared.mailboxId
+        ..messageId = prepared.mailboxId
+        ..fragmentIndex = frag.index
+        ..totalFragments = prepared.fragments.length
+        ..requiredFragments = ReedSolomon.defaultK
+        ..fragmentData = frag.data
+        ..originalSize = prepared.payloadSize;
+      final key = '$msgIdHex:$fragmentIndex';
+      final completer =
+          _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+        innerPayload: Uint8List.fromList(store.writeToBuffer()),
+        recipientDeviceId: Uint8List.fromList(peer.nodeId),
+      ));
+      try {
+        await completer.future.timeout(_peerStoreAckTimeout);
+        return true;
+      } on TimeoutException {
+        return false;
       }
-    });
+    }
+
+    final coordinator = ErasurePlacementCoordinator<PeerInfo>(
+      totalFragments: prepared.fragments.length,
+      requiredFragments: ReedSolomon.defaultK,
+      peerId: (p) => p.nodeIdHex,
+      isPeerConfirmed: (p) => node.isPeerConfirmed(p.nodeIdHex),
+    );
+    final result = await coordinator.run(
+      initialPool: initialPeers,
+      deeperPool: () => node.routingTable.findClosestPeers(prepared.mailboxId,
+          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup),
+      sendAndWait: sendAndWait,
+    );
+
+    for (var i = 0; i < prepared.fragments.length; i++) {
+      _pendingFragmentStoreAcks.remove('$msgIdHex:$i');
+    }
+
+    if (result.success) {
+      _log.info('Registry DHT store: ${result.confirmedCount}/${result.totalFragments} indices confirmed');
+    } else {
+      _log.warn('Registry DHT store FAILED: ${result.confirmedCount}/${result.totalFragments} indices confirmed');
+    }
+    return result.success;
   }
 
   /// Single-source-of-truth log message for KEM version rejections (Sec H-5

@@ -3,14 +3,14 @@
 ## Architecture & Technical Specification — v3.0
 
 **Status:** v3.0 Major Architecture Refactor (2026-05-01+)
-**Predecessor:** [`Cleona_Chat_Architecture_v2_2.md`](Cleona_Chat_Architecture_v2_2.md) — DEPRECATED, see §23 (Migration) for cross-walk
+**Predecessor:** v2.2 (archived, see git history)
 
 **v3.0 key features:**
 - **2-layer wire format**: Outer Frame (routing, device-signed) wraps Inner Frame (identity, KEM-encrypted)
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ce60c51e8ac6, 2026-07-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:73bb78ddbb95, 2026-07-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -44,13 +44,11 @@
 20. Tech Stack
 21. Testing Strategy
 22. Development Environment
-23. V2.2 → V3.0 Migration
-24. Roadmap
-25. Platform Suitability
+23. Roadmap
+24. Platform Suitability
 
 Appendix A. Protocol Message Format
 Appendix B. Frame Examples (Hex Dumps)
-Appendix C. V2.2 → V3.0 Section Cross-Walk
 
 ---
 ## 1. Executive Summary
@@ -103,7 +101,7 @@ V3.0 changes several fundamental structures compared to v2.2. The changes are no
 
 **7. Layered encryption pipeline** (§2.4). A precisely prescribed order on the sender and receiver side: Serialize → Sign Inner → Compress → KEM-Encrypt → Wrap Outer → Sign Outer → HMAC → PoW. The receiver mirrors the steps. Failure modes at every stage are documented (silent drop), no bounce-back, in order to avoid information leaks. This pipeline replaces the less formalized encryption-order block from v2.2 §4.6.
 
-**8. Profile reset on upgrade.** Because of wire-format incompatibility and new sig keypairs, v2.2 profiles must be created from scratch when v3.0 is brought up. Restore Broadcast permits recovery of an identity (recovery phrase or contacts), but local conversations are lost. This is an acceptable cut: v3.0 is a beta-grade build, no productive data set needs to be migrated. See §23 for migration details.
+**8. Profile reset on upgrade.** Because of wire-format incompatibility and new sig keypairs, v2.2 profiles must be created from scratch when v3.0 is brought up. Restore Broadcast permits recovery of an identity (recovery phrase or contacts), but local conversations are lost. This is an acceptable cut: v3.0 is a beta-grade build, no productive data set needs to be migrated.
 
 **What remains unchanged:**
 
@@ -904,7 +902,7 @@ V3.0 establishes two canonical APIs for send operations:
 
 - **`node.sendToDevice(packet, deviceId)`** — lower level. Pure routing operation: routing-table consult, cheapest-route cascade, defaultGateway fallback, ACK tracking. Called from the service layer, but also directly from routing components (relay forwarding, DHT gossip).
 
-The old v2.2 API `node.sendEnvelope(envelope, recipientNodeId)` with its overloaded, type-undifferentiated identifier parameter no longer exists in V3.0. All call sites have been migrated (see §15.3 Service Layer API + §23.3 Code Migration Map).
+The old v2.2 API `node.sendEnvelope(envelope, recipientNodeId)` with its overloaded, type-undifferentiated identifier parameter no longer exists in V3.0. All call sites have been migrated (see §15.3 Service Layer API).
 
 ---
 ## 3. Identity & Cryptography
@@ -963,7 +961,7 @@ Auth-Manifest (KEM v2 inside DHT-record):
 **Terminology hygiene** in v3.0:
 - When the spec mentions **userId**, the User-Identity is meant — this is the ID carried in the Inner Frame (`recipientUserId`, `senderUserId`) and what application code calls a "contact" in the UI.
 - When the spec mentions **deviceId**, the Device routing ID is meant — this is the ID carried in the Outer Frame (`nextHopDeviceId`, `senderDeviceId`) and used by DV-Routing.
-- The historical v2.2 term "nodeId" is **avoided** in v3.0 because it carried both meanings, which is exactly how the v2.2 ID-Mismatch bug arose. In code migration (§23.3) all `nodeId` sites are explicitly renamed to either `userId` or `deviceId`.
+- The historical v2.2 term "nodeId" is **avoided** in v3.0 because it carried both meanings, which is exactly how the v2.2 ID-Mismatch bug arose. All `nodeId` sites have been renamed to either `userId` or `deviceId`.
 
 ### 3.2 Cryptographic Primitives
 
@@ -6074,7 +6072,7 @@ V3.0's new service-layer API (`sendToUser`, §15.3) has clearly defined failure 
 - onAddressesChanged → debounced 5s → own-liveness republish (sender side)
 - On receive failure against a cached address: cache invalidation for the affected DeviceID, new resolver lookup
 
-**Service-layer test suite** (§21.4): explicit smoke tests for each failure mode. This makes resolver-miss, routing-cascade exhaustion, multi-device partial delivery, defaultGateway fallback, and offline fallback all individually verifiable.
+**Service-layer test suite**: explicit smoke tests for each failure mode. This makes resolver-miss, routing-cascade exhaustion, multi-device partial delivery, defaultGateway fallback, and offline fallback all individually verifiable.
 
 ---
 

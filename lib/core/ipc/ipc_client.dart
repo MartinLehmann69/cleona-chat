@@ -246,15 +246,29 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// Is the daemon process still running according to the lock file?
   /// Best-effort: missing lock file → daemon gone; lock-file PID alive → daemon up.
   bool _isDaemonProcessAlive() {
+    final lockPath = socketPath.replaceAll(
+        RegExp(r'cleona\.sock$'), 'cleona.lock');
+    final lockFile = File(lockPath);
+    if (!lockFile.existsSync()) return false;
+
+    int? pid;
     try {
-      final lockPath = socketPath.replaceAll(
-          RegExp(r'cleona\.sock$'), 'cleona.lock');
-      final lockFile = File(lockPath);
-      if (!lockFile.existsSync()) return false;
-      final pid = int.tryParse(lockFile.readAsStringSync().trim());
-      if (pid == null || pid <= 0) return false;
+      pid = int.tryParse(lockFile.readAsStringSync().trim());
+    } catch (_) {
+      // Windows: daemon holds cleona.lock with mandatory exclusive lock
+      // (LockFileEx) that blocks reads → readAsStringSync throws. Fall
+      // back to cleona.pid which is not locked.
+      try {
+        final pidPath = socketPath.replaceAll(
+            RegExp(r'cleona\.sock$'), 'cleona.pid');
+        pid = int.tryParse(File(pidPath).readAsStringSync().trim());
+      } catch (_) {}
+      if (pid == null || pid <= 0) return true; // lock exists → daemon owns it
+    }
+    if (pid == null || pid <= 0) return false;
+
+    try {
       if (Platform.isLinux || Platform.isMacOS) {
-        // `kill -0` on Unix: signal 0 doesn't deliver, just probes existence.
         return Process.runSync('kill', ['-0', '$pid']).exitCode == 0;
       }
       if (Platform.isWindows) {
@@ -262,10 +276,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
             'tasklist', ['/FI', 'PID eq $pid', '/NH']);
         return res.stdout.toString().contains('$pid');
       }
-      return true; // unknown platform — fail-safe: assume alive
     } catch (_) {
-      return false;
+      return true;
     }
+    return true;
   }
 
   void _onData(String data) {

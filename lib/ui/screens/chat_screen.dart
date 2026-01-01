@@ -12,6 +12,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/service/service_interface.dart';
@@ -141,6 +142,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // length == 0 and we don't want to trigger scroll.
   int _lastRenderedMessageCount = -1;
 
+  // Scroll navigation overlay state
+  bool _showScrollNav = false;
+  int _navMessageIndex = -1;
+  int _messageCountWhenScrolledUp = -1;
+
   @override
   void initState() {
     super.initState();
@@ -156,6 +162,7 @@ class _ChatScreenState extends State<ChatScreen> {
     // onKeyEvent fires BEFORE TextInput processes the keystroke, so returning
     // KeyEventResult.handled prevents the newline from being inserted.
     _inputFocusNode.onKeyEvent = _handleInputKeyEvent;
+    _scrollController.addListener(_onScrollChanged);
     // Defer markRead to after first frame — scroll-to-bottom on first render
     // is driven by build() via _lastRenderedMessageCount, which handles the
     // lazy-layout race ListView.builder introduces for long histories.
@@ -207,6 +214,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _textController.removeListener(_onTextEmptyChanged);
     _textController.dispose();
     _searchTextController.dispose();
+    _scrollController.removeListener(_onScrollChanged);
     _scrollController.dispose();
     _inputFocusNode.dispose();
     _recorder.dispose();
@@ -376,8 +384,10 @@ class _ChatScreenState extends State<ChatScreen> {
               if (!widget.isGroup && !widget.isChannel && conv?.pendingConfigProposal != null && conv?.pendingConfigProposer == widget.conversationId)
                 _buildConfigProposalBanner(context, conv!, service),
               Expanded(
-                child: _ChatBackground(
-                  child: messages.isEmpty
+                child: Stack(
+                  children: [
+                    _ChatBackground(
+                      child: messages.isEmpty
                       ? Center(
                           child: Text(
                             locale.get('no_messages_yet'),
@@ -430,6 +440,20 @@ class _ChatScreenState extends State<ChatScreen> {
                             );
                           },
                         ),
+                    ),
+                    Positioned(
+                      bottom: 8,
+                      right: 12,
+                      child: IgnorePointer(
+                        ignoring: !_showScrollNav || messages.isEmpty,
+                        child: AnimatedOpacity(
+                          opacity: _showScrollNav && messages.isNotEmpty ? 1.0 : 0.0,
+                          duration: const Duration(milliseconds: 200),
+                          child: _buildScrollNavOverlay(context, messages.length),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
               _buildInputArea(context, service),
@@ -614,6 +638,9 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'save_media':
         _saveMediaToDownloads(msg);
         break;
+      case 'share_media':
+        _shareMedia(msg);
+        break;
       case 'copy_media':
         _copyMediaToClipboard(msg);
         break;
@@ -685,6 +712,14 @@ class _ChatScreenState extends State<ChatScreen> {
         SnackBar(content: Text(locale.tr('file_saved_to', {'path': destPath}))),
       );
     }
+  }
+
+  Future<void> _shareMedia(UiMessage msg) async {
+    if (msg.filePath == null) return;
+    final src = File(msg.filePath!);
+    if (!src.existsSync()) return;
+    final xFile = XFile(src.path, name: msg.filename);
+    await Share.shareXFiles([xFile]);
   }
 
   Future<void> _copyMediaToClipboard(UiMessage msg) async {
@@ -875,6 +910,7 @@ class _ChatScreenState extends State<ChatScreen> {
               SizedBox(
                 height: 300,
                 child: EmojiPicker(
+                  key: const ValueKey('reaction_picker'),
                   onEmojiSelected: (category, emoji) => react(emoji.emoji),
                   config: Config(
                     height: 300,
@@ -1150,6 +1186,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return SizedBox(
       height: 260,
       child: EmojiPicker(
+        key: const ValueKey('input_emoji_picker'),
         onEmojiSelected: (category, emoji) {
           final cursor = _textController.selection.baseOffset;
           final text = _textController.text;
@@ -2395,6 +2432,148 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
   }
+
+  void _onScrollChanged() {
+    final shouldShow = !_isNearBottom();
+    if (shouldShow == _showScrollNav) return;
+    setState(() {
+      _showScrollNav = shouldShow;
+      if (!shouldShow) {
+        _navMessageIndex = -1;
+        _messageCountWhenScrolledUp = -1;
+      } else {
+        _messageCountWhenScrolledUp = _lastRenderedMessageCount;
+      }
+    });
+  }
+
+  int _estimateCurrentTopIndex() {
+    if (!_scrollController.hasClients) return 0;
+    final total = _lastRenderedMessageCount;
+    if (total <= 1) return 0;
+    final offset = _scrollController.offset;
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    if (maxExtent <= 0) return 0;
+    return (offset / maxExtent * (total - 1)).round().clamp(0, total - 1);
+  }
+
+  void _scrollToMessageByIndex(int index) {
+    if (!_scrollController.hasClients) return;
+    final total = _lastRenderedMessageCount;
+    if (total <= 1) return;
+    final maxExtent = _scrollController.position.maxScrollExtent;
+    final offset = (index / (total - 1)) * maxExtent;
+    _scrollController.animateTo(
+      offset.clamp(0.0, maxExtent),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+  }
+
+  void _scrollToPrevMessage() {
+    if (_navMessageIndex < 0) {
+      _navMessageIndex = _estimateCurrentTopIndex();
+    }
+    if (_navMessageIndex > 0) {
+      _navMessageIndex--;
+      _scrollToMessageByIndex(_navMessageIndex);
+    }
+  }
+
+  void _scrollToNextMessage() {
+    if (_navMessageIndex < 0) {
+      _navMessageIndex = _estimateCurrentTopIndex();
+    }
+    final total = _lastRenderedMessageCount;
+    if (_navMessageIndex < total - 1) {
+      _navMessageIndex++;
+      _scrollToMessageByIndex(_navMessageIndex);
+    }
+  }
+
+  Widget _buildScrollNavOverlay(BuildContext context, int messageCount) {
+    final cs = Theme.of(context).colorScheme;
+    final newCount = (_messageCountWhenScrolledUp > 0)
+        ? (messageCount - _messageCountWhenScrolledUp).clamp(0, 999)
+        : 0;
+
+    Widget navButton(IconData icon, double size, VoidCallback onPressed) {
+      return Material(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.9),
+        shape: const CircleBorder(),
+        elevation: 2,
+        child: InkWell(
+          customBorder: const CircleBorder(),
+          onTap: onPressed,
+          child: SizedBox(
+            width: size,
+            height: size,
+            child: Icon(icon, size: size * 0.55, color: cs.onSurface),
+          ),
+        ),
+      );
+    }
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (messageCount > 3) ...[
+          navButton(Icons.keyboard_arrow_up, 32, _scrollToPrevMessage),
+          const SizedBox(height: 4),
+          navButton(Icons.keyboard_arrow_down, 32, _scrollToNextMessage),
+          const SizedBox(height: 4),
+        ],
+        Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Material(
+              color: cs.primaryContainer.withValues(alpha: 0.9),
+              shape: const CircleBorder(),
+              elevation: 4,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: () {
+                  setState(() {
+                    _showScrollNav = false;
+                    _navMessageIndex = -1;
+                    _messageCountWhenScrolledUp = -1;
+                  });
+                  _jumpToBottomRepeatedly(remainingAttempts: 4);
+                },
+                child: SizedBox(
+                  width: 40,
+                  height: 40,
+                  child: Icon(Icons.keyboard_double_arrow_down,
+                      size: 22, color: cs.onPrimaryContainer),
+                ),
+              ),
+            ),
+            if (newCount > 0)
+              Positioned(
+                top: -4,
+                right: -4,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: cs.primary,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '$newCount',
+                    style: TextStyle(
+                      color: cs.onPrimary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 // ── Video Player Widget ──────────────────────────────────────────
@@ -2831,11 +3010,17 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   title: Text(locale.get('copy_text')),
                   onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('copy_text', message); },
                 ),
-              if (_canSaveMedia)
+              if (_canSaveMedia && !Platform.isIOS)
                 ListTile(
                   leading: const Icon(Icons.save_alt),
                   title: Text(locale.get('save_file')),
                   onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('save_media', message); },
+                ),
+              if (_canSaveMedia && (Platform.isIOS || Platform.isAndroid || Platform.isMacOS))
+                ListTile(
+                  leading: const Icon(Icons.share),
+                  title: Text(locale.get('share_media')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('share_media', message); },
                 ),
               if (_canSaveMedia)
                 ListTile(
@@ -3226,8 +3411,10 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         PopupMenuItem(value: 'react', child: Row(children: [const Icon(Icons.add_reaction_outlined, size: 18), const SizedBox(width: 8), Text(locale.get('react'))])),
                       if (_canCopyText)
                         PopupMenuItem(value: 'copy_text', child: Row(children: [const Icon(Icons.copy, size: 18), const SizedBox(width: 8), Text(locale.get('copy_text'))])),
-                      if (_canSaveMedia)
+                      if (_canSaveMedia && !Platform.isIOS)
                         PopupMenuItem(value: 'save_media', child: Row(children: [const Icon(Icons.save_alt, size: 18), const SizedBox(width: 8), Text(locale.get('save_file'))])),
+                      if (_canSaveMedia && (Platform.isIOS || Platform.isAndroid || Platform.isMacOS))
+                        PopupMenuItem(value: 'share_media', child: Row(children: [const Icon(Icons.share, size: 18), const SizedBox(width: 8), Text(locale.get('share_media'))])),
                       if (_canSaveMedia)
                         PopupMenuItem(value: 'copy_media', child: Row(children: [const Icon(Icons.copy_all, size: 18), const SizedBox(width: 8), Text(locale.get('copy_to_clipboard'))])),
                       if (_canForward)

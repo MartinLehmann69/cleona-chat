@@ -434,6 +434,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               children: [
                 TextField(
                   controller: nameController,
+                  autofocus: true,
                   decoration: InputDecoration(
                     labelText: locale.get('group_name_label'),
                     border: const OutlineInputBorder(),
@@ -511,6 +512,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 children: [
                   TextField(
                     controller: nameController,
+                    autofocus: true,
                     decoration: InputDecoration(
                       labelText: locale.get('channel_name_label'),
                       border: const OutlineInputBorder(),
