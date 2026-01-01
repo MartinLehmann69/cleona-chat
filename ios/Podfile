@@ -1,9 +1,10 @@
 # Cleona iOS — CocoaPods dependency file
 #
 # Native crypto/audio/codec libraries are built as static .a files by
-# scripts/build-ios-libs.sh and packaged as XCFrameworks in
-# build/ios-frameworks/. The CleonaNative podspec links them into the Runner
-# binary so dart:ffi can access symbols via DynamicLibrary.process().
+# scripts/build-ios-libs.sh, merged into libcleona_all_{device,simulator}.a,
+# and placed in ios/CleonaNative/. The post_install hook below injects
+# -force_load into the Runner target's OTHER_LDFLAGS so that all C symbols
+# are available to dart:ffi via DynamicLibrary.process().
 
 platform :ios, '15.5'
 
@@ -36,7 +37,9 @@ target 'Runner' do
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
 
   # Prebuilt native libs (libsodium, liboqs, libzstd, etc.)
-  # Built by scripts/build-ios-libs.sh → build/ios-frameworks/*.xcframework
+  # Built by scripts/build-ios-libs.sh → merged into libcleona_all.a
+  # The podspec is an anchor for system frameworks; actual linking is via
+  # -force_load in the post_install hook below.
   pod 'CleonaNative', :path => 'CleonaNative'
 end
 
@@ -51,4 +54,90 @@ post_install do |installer|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
     end
   end
+
+  # ── Force-link native FFI libraries into the Runner binary ───────────
+  #
+  # Problem: dart:ffi uses DynamicLibrary.process() which resolves symbols
+  # via dlsym(RTLD_DEFAULT). This only works if the C symbols are statically
+  # linked into the Runner executable. But the linker dead-strips them
+  # because no ObjC/Swift code references them.
+  #
+  # Solution: -force_load on the merged archive forces the linker to include
+  # ALL object files regardless of symbol references.
+  #
+  # We modify project.pbxproj (the Runner target's build configurations)
+  # directly. flutter build ipa does NOT regenerate project.pbxproj — it
+  # only regenerates Generated.xcconfig and Pod xcconfigs. So these flags
+  # persist across builds.
+  #
+  # This uses Xcodeproj which is bundled with CocoaPods (no extra gem).
+
+  project_path = File.join(__dir__, 'Runner.xcodeproj')
+  project = Xcodeproj::Project.open(project_path)
+
+  runner_target = project.targets.find { |t| t.name == 'Runner' }
+  unless runner_target
+    Pod::UI.warn "[CleonaNative] Could not find Runner target — skipping force_load injection"
+    next
+  end
+
+  native_dir = File.join(__dir__, 'CleonaNative')
+  device_lib = File.join(native_dir, 'libcleona_all_device.a')
+  sim_lib = File.join(native_dir, 'libcleona_all_simulator.a')
+
+  has_device = File.exist?(device_lib)
+  has_sim = File.exist?(sim_lib)
+
+  unless has_device || has_sim
+    Pod::UI.warn "[CleonaNative] No libcleona_all_*.a found in #{native_dir} — skipping force_load injection"
+    Pod::UI.warn "[CleonaNative] Run scripts/build-ios-libs.sh first to build native libraries"
+    project.save
+    next
+  end
+
+  runner_target.build_configurations.each do |config|
+    existing_flags = config.build_settings['OTHER_LDFLAGS'] || '$(inherited)'
+    existing_flags = existing_flags.join(' ') if existing_flags.is_a?(Array)
+
+    # Remove any previous force_load injection (idempotent re-runs)
+    existing_flags = existing_flags.gsub(/-force_load\s+\S*libcleona_all\S*/, '').strip
+    existing_flags = '$(inherited)' if existing_flags.empty?
+
+    # Use Xcode per-SDK build setting conditionals to select the right slice.
+    # project.pbxproj supports keys like:
+    #   "OTHER_LDFLAGS[sdk=iphoneos*]" = "..."
+    #   "OTHER_LDFLAGS[sdk=iphonesimulator*]" = "..."
+    # This avoids duplicate symbols from loading both archives.
+    #
+    # For Release/Profile: only device (IPA is always iphoneos).
+    # For Debug: both conditionals so simulator and device builds work.
+
+    # Clean up any old per-SDK entries too
+    config.build_settings.delete('OTHER_LDFLAGS[sdk=iphoneos*]')
+    config.build_settings.delete('OTHER_LDFLAGS[sdk=iphonesimulator*]')
+
+    config.build_settings['OTHER_LDFLAGS'] = existing_flags
+
+    if config.name == 'Debug'
+      if has_device
+        config.build_settings['OTHER_LDFLAGS[sdk=iphoneos*]'] =
+          "#{existing_flags} -force_load #{device_lib}"
+      end
+      if has_sim
+        config.build_settings['OTHER_LDFLAGS[sdk=iphonesimulator*]'] =
+          "#{existing_flags} -force_load #{sim_lib}"
+      end
+      Pod::UI.puts "  [CleonaNative] #{config.name}: per-SDK -force_load (device=#{has_device}, sim=#{has_sim})"
+    else
+      # Release/Profile: unconditional device-only (IPA = arm64-iphoneos)
+      if has_device
+        config.build_settings['OTHER_LDFLAGS'] =
+          "#{existing_flags} -force_load #{device_lib}"
+      end
+      Pod::UI.puts "  [CleonaNative] #{config.name}: -force_load device archive"
+    end
+  end
+
+  project.save
+  Pod::UI.puts "[CleonaNative] Injected -force_load into Runner target (#{runner_target.build_configurations.count} configs)"
 end

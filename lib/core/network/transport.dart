@@ -52,6 +52,7 @@ class Transport {
   String? _mobileFallbackIp; // The local IP the mobile socket is bound to
   int _consecutiveZeroSends = 0;
   bool _reconnecting = false;
+  int _lastUdpReceiveMs = 0;
   SecureServerSocket? _tlsServer;
   SecureServerSocket? _tlsServer6; // IPv6 TLS (§27)
   Timer? _tlsRebindTimer;
@@ -343,6 +344,7 @@ class Transport {
     for (;;) {
       final datagram = _udpSocket?.receive();
       if (datagram == null) break;
+      _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
       // WiFi recovery: packet arrived on main socket → WiFi works again
       if (_udpSocketMobile != null) {
         _log.info('WiFi recovered — deactivating mobile fallback');
@@ -357,6 +359,7 @@ class Transport {
     for (;;) {
       final datagram = _udpSocket6?.receive();
       if (datagram == null) break;
+      _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
       _processUdpDatagram(datagram);
     }
   }
@@ -1173,6 +1176,23 @@ class Transport {
   /// Callback when UDP socket is detected as dead (10+ consecutive 0-sends).
   /// CleonaNode uses this to trigger onNetworkChanged().
   void Function()? onUdpSocketDead;
+
+  /// Windows UDP receive watchdog. Dart's IOCP-based RawDatagramSocket
+  /// silently stops delivering RawSocketEvent.read after sustained traffic
+  /// bursts — same defect class as the send-path 87.9% drop that
+  /// libcleona_net fixed. Triggers the full network-change recovery cycle
+  /// (reconnect sockets + re-PING neighbors + re-publish addresses).
+  void checkReceiveHealth() {
+    if (!Platform.isWindows) return;
+    if (_lastUdpReceiveMs == 0) return;
+    if (_reconnecting) return;
+    final silenceMs = DateTime.now().millisecondsSinceEpoch - _lastUdpReceiveMs;
+    if (silenceMs > 120000) {
+      _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
+      _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
+      onUdpSocketDead?.call();
+    }
+  }
 
   /// Close and reopen UDP sockets on the same port. Called on network change
   /// to recover from dead sockets (Android invalidates sockets when the active

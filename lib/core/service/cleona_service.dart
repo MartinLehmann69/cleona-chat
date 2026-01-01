@@ -1750,21 +1750,6 @@ class CleonaService implements ICleonaService {
     );
   }
 
-  /// Poll known peers for Store-and-Forward messages (startup + network change).
-  void _pollStoredMessages() {
-    final peers = node.routingTable.allPeers
-        .where((p) => node.isPeerConfirmed(p.nodeIdHex))
-        .toList();
-    var sent = 0;
-    for (final peer in peers) {
-      _requestStoredMessages(peer);
-      sent++;
-    }
-    if (sent > 0) {
-      _log.info('Store-and-Forward poll sent to $sent peers');
-    }
-  }
-
   /// Send a single PEER_RETRIEVE to one peer.
   void _requestStoredMessages(PeerInfo peer) {
     // V3 (Architecture §23.3): PEER_RETRIEVE is an infrastructure message —

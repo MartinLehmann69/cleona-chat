@@ -92,7 +92,50 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ios-xcframeworks
-          path: ios/CleonaNative/Frameworks/
+          path: build/ios-frameworks/
+
+      - name: Place merged archives for Podfile
+        run: |
+          # The build script creates libcleona_all.xcframework with device and
+          # simulator slices. Extract the .a files into ios/CleonaNative/ where
+          # the Podfile post_install hook expects them.
+          NATIVE_DIR="ios/CleonaNative"
+          XCFW="build/ios-frameworks/libcleona_all.xcframework"
+
+          # XCFramework directory structure:
+          #   ios-arm64/libcleona_all.a          (device)
+          #   ios-arm64_x86_64-simulator/...     (simulator, if built)
+          # The directory names may vary; find them by platform.
+          if [ -d "$XCFW" ]; then
+            for slice_dir in "$XCFW"/ios-arm64*; do
+              A="$slice_dir/libcleona_all.a"
+              [ -f "$A" ] || continue
+              if echo "$slice_dir" | grep -q simulator; then
+                cp "$A" "$NATIVE_DIR/libcleona_all_simulator.a"
+                echo "Placed simulator archive ($(du -h "$A" | cut -f1))"
+              else
+                cp "$A" "$NATIVE_DIR/libcleona_all_device.a"
+                echo "Placed device archive ($(du -h "$A" | cut -f1))"
+              fi
+            done
+          fi
+
+          # Also check if build script already placed them directly
+          for f in libcleona_all_device.a libcleona_all_simulator.a; do
+            if [ -f "$NATIVE_DIR/$f" ]; then
+              echo "Found: $NATIVE_DIR/$f ($(du -h "$NATIVE_DIR/$f" | cut -f1))"
+            fi
+          done
+
+          # Verify at least the device archive exists (required for IPA)
+          if [ ! -f "$NATIVE_DIR/libcleona_all_device.a" ]; then
+            echo "ERROR: libcleona_all_device.a not found — native libs will not be linked!"
+            echo "Contents of $XCFW:"
+            find "$XCFW" -type f 2>/dev/null || echo "(not found)"
+            echo "Contents of $NATIVE_DIR:"
+            ls -la "$NATIVE_DIR/"
+            exit 1
+          fi
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -109,34 +152,22 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Force-link native FFI libraries
+      - name: Verify force_load injection
         run: |
-          # dart:ffi uses DynamicLibrary.process() which needs symbols in the
-          # Runner binary. CocoaPods vendored_frameworks does not reliably link
-          # static .a XCFrameworks. We inject -force_load into the Runner target
-          # buildSettings in project.pbxproj — this is the ONLY place that
-          # survives flutter build ipa (xcconfigs get regenerated).
-          FWDIR="$(pwd)/ios/CleonaNative/Frameworks"
-          FLAGS=""
-          for lib in libsodium liboqs libzstd libopus libwhisper libggml; do
-            A="$FWDIR/$lib.xcframework/ios-arm64/$lib.a"
-            if [ -f "$A" ]; then
-              FLAGS="$FLAGS -force_load $A"
-              echo "  + $lib"
-            fi
-          done
-          if [ -n "$FLAGS" ]; then
-            PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
-            # Insert OTHER_LDFLAGS into Runner target's Release and Debug
-            # buildSettings (after VERSIONING_SYSTEM line which is the last
-            # setting in each Runner config block).
-            sed -i '' "/PRODUCT_BUNDLE_IDENTIFIER = chat.cleona.cleona;/{
-              N
-              s|PRODUCT_NAME|OTHER_LDFLAGS = (\n\t\t\t\t\t\"\$(inherited)\",\n\t\t\t\t\t\"$FLAGS\",\n\t\t\t\t);\n\t\t\t\tPRODUCT_NAME|
-            }" "$PBXPROJ"
-            echo "Injected OTHER_LDFLAGS into project.pbxproj"
-            grep -c 'force_load' "$PBXPROJ"
+          # The Podfile post_install hook should have injected -force_load
+          # into the Runner target. Verify it worked.
+          PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+          COUNT=$(grep -c 'force_load.*libcleona_all' "$PBXPROJ" || true)
+          echo "force_load references in project.pbxproj: $COUNT"
+          if [ "$COUNT" -eq 0 ]; then
+            echo "ERROR: -force_load not found in project.pbxproj!"
+            echo "The Podfile post_install hook did not inject the linker flags."
+            echo "Check that libcleona_all_device.a exists in ios/CleonaNative/"
+            ls -la ios/CleonaNative/
+            exit 1
           fi
+          # Show the actual flags for verification
+          grep -A2 'force_load' "$PBXPROJ" | head -20
 
       - name: Install distribution certificate
         env:

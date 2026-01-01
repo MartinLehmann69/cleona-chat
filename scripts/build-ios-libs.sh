@@ -403,6 +403,71 @@ for t in "${WANTED[@]}"; do
     esac
 done
 
+# ── Merge all .a into libcleona_all.a ───────────────────────────────────────
+# iOS requires static linking (no dlopen). dart:ffi uses DynamicLibrary.process()
+# which needs symbols in the Runner binary. The linker dead-strips unreferenced
+# C symbols unless we use -force_load. Merging into one archive avoids:
+#   - liberasurecode internal cross-object-file deps under selective loading
+#   - 10 separate -force_load flags
+#   - path resolution headaches with per-lib XCFramework directories
+# The merged archive is placed in ios/CleonaNative/ where the Podfile can
+# reference it with a stable, known path.
+echo ""
+echo "╔══════════════════════════════════════════════════════════════╗"
+echo "║  Merging all .a into libcleona_all.a"
+echo "╚══════════════════════════════════════════════════════════════╝"
+
+CLEONA_NATIVE_DIR="$PROJECT_DIR/ios/CleonaNative"
+mkdir -p "$CLEONA_NATIVE_DIR"
+
+for platform_tag in device simulator; do
+    INSTALL="$( [ "$platform_tag" = "device" ] && echo "$DEVICE_INSTALL" || echo "$SIM_INSTALL" )"
+    [ -d "$INSTALL" ] || continue
+
+    # Collect all .a files from all lib install dirs
+    ALL_ARCHIVES=()
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib; do
+        for a in "$INSTALL/$subdir"/*.a; do
+            [ -f "$a" ] && ALL_ARCHIVES+=("$a")
+        done
+    done
+
+    if [ ${#ALL_ARCHIVES[@]} -eq 0 ]; then
+        echo "  [!] No .a files for $platform_tag — skipping merge"
+        continue
+    fi
+
+    MERGED="$INSTALL/libcleona_all.a"
+    echo "  Merging ${#ALL_ARCHIVES[@]} archives for $platform_tag..."
+    # Apple libtool -static merges multiple .a into one, resolving internal refs
+    xcrun libtool -static -o "$MERGED" "${ALL_ARCHIVES[@]}"
+    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1))"
+done
+
+# Create XCFramework for the merged archive
+MERGED_XCFW="$XCFW_DIR/libcleona_all.xcframework"
+rm -rf "$MERGED_XCFW"
+MERGE_ARGS=()
+[ -f "$DEVICE_INSTALL/libcleona_all.a" ] && MERGE_ARGS+=(-library "$DEVICE_INSTALL/libcleona_all.a")
+[ -f "$SIM_INSTALL/libcleona_all.a" ] && MERGE_ARGS+=(-library "$SIM_INSTALL/libcleona_all.a")
+if [ ${#MERGE_ARGS[@]} -gt 0 ]; then
+    xcodebuild -create-xcframework "${MERGE_ARGS[@]}" -output "$MERGED_XCFW"
+    echo "  -> $MERGED_XCFW"
+fi
+
+# Also copy the merged .a directly into ios/CleonaNative/ for the Podfile.
+# The Podfile post_install references this path for -force_load.
+# We copy the device slice (arm64-iphoneos) which is what ships in the IPA.
+# For simulator builds, the xcframework approach handles slice selection.
+if [ -f "$DEVICE_INSTALL/libcleona_all.a" ]; then
+    cp "$DEVICE_INSTALL/libcleona_all.a" "$CLEONA_NATIVE_DIR/libcleona_all_device.a"
+    echo "  -> $CLEONA_NATIVE_DIR/libcleona_all_device.a"
+fi
+if [ -f "$SIM_INSTALL/libcleona_all.a" ]; then
+    cp "$SIM_INSTALL/libcleona_all.a" "$CLEONA_NATIVE_DIR/libcleona_all_simulator.a"
+    echo "  -> $CLEONA_NATIVE_DIR/libcleona_all_simulator.a"
+fi
+
 # ── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "╔══════════════════════════════════════════════════════════════╗"
@@ -412,5 +477,8 @@ echo ""
 echo "XCFrameworks in: $XCFW_DIR/"
 ls -1 "$XCFW_DIR/" 2>/dev/null | sed 's/^/  /'
 echo ""
-echo "Next: these XCFrameworks are referenced by ios/Podfile."
-echo "Run 'cd ios && pod install' to link them into the Xcode project."
+echo "Merged archives in: $CLEONA_NATIVE_DIR/"
+ls -lh "$CLEONA_NATIVE_DIR"/libcleona_all_*.a 2>/dev/null | awk '{print "  " $NF " (" $5 ")"}'
+echo ""
+echo "Next: run 'cd ios && pod install' to set up the Xcode project."
+echo "The Podfile post_install hook injects -force_load automatically."

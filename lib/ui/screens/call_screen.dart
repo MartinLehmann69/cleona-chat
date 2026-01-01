@@ -27,9 +27,8 @@ class _CallScreenState extends State<CallScreen> {
   bool _speaker = false;
   bool _videoEnabled = true;
   bool _frontCamera = true;
-  // Verhindert Double-Pop: wenn der User „Auflegen" drückt, popped der Button-Handler;
-  // der Auto-Pop in build() darf dann nicht zusätzlich poppen.
   bool _userInitiatedPop = false;
+  bool _autoPopScheduled = false;
 
   // Video frames (set by VideoEngine callbacks via CleonaAppState)
   ui.Image? _remoteVideoFrame;
@@ -70,11 +69,13 @@ class _CallScreenState extends State<CallScreen> {
     final appState = context.watch<CleonaAppState>();
     final currentCall = appState.service?.currentCall;
 
-    // Call ended while screen is open
     if (currentCall == null || currentCall.state == CallState.ended) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_userInitiatedPop) Navigator.of(context).pop();
-      });
+      if (!_autoPopScheduled && !_userInitiatedPop) {
+        _autoPopScheduled = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) Navigator.of(context).pop();
+        });
+      }
     }
 
     // Call just got accepted → start timer

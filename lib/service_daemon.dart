@@ -692,6 +692,7 @@ class _MultiServiceDaemon {
       } else {
         log.debug('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
       }
+      _node?.transport.checkReceiveHealth();
     });
 
     _startNetworkMonitor();
