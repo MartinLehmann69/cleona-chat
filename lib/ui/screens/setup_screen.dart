@@ -183,40 +183,42 @@ class _SetupScreenState extends State<SetupScreen> {
           title: Text(locale.get('your_recovery_phrase')),
           content: SizedBox(
             width: 400,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(12),
-                  decoration: BoxDecoration(
-                    color: Theme.of(ctx).colorScheme.errorContainer.withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(8),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Theme.of(ctx).colorScheme.errorContainer.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      locale.get('seed_phrase_backup_warning'),
+                      style: const TextStyle(fontSize: 13),
+                    ),
                   ),
-                  child: Text(
-                    locale.get('seed_phrase_backup_warning'),
-                    style: const TextStyle(fontSize: 13),
+                  const SizedBox(height: 16),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: List.generate(words.length, (i) {
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '${i + 1}. ${words[i]}',
+                          style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                        ),
+                      );
+                    }),
                   ),
-                ),
-                const SizedBox(height: 16),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: List.generate(words.length, (i) {
-                    return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Theme.of(ctx).colorScheme.surfaceContainerHighest,
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        '${i + 1}. ${words[i]}',
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-                      ),
-                    );
-                  }),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [

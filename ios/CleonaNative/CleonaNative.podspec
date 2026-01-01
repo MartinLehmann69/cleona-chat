@@ -30,7 +30,7 @@ Pod::Spec.new do |s|
   # runtime (DynamicLibrary.process()). Duplicate symbols are eliminated
   # in build-ios-libs.sh (ec backends skipped, C++ stubs stripped).
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a',
+    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a -ld_classic',
     'DEAD_CODE_STRIPPING' => 'NO',
   }
 end
