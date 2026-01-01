@@ -82,3 +82,7 @@ _cleona_audio_*
 
 # libvpx shim
 _cleona_vpx_*
+
+# iOS native UDP sendto() bypass (cleona_udp_ios.c)
+_cleona_ios_find_udp_fd
+_cleona_ios_sendto

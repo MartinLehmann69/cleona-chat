@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/native_udp_sender.dart';
+import 'package:cleona/core/network/ios_udp_sender.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -115,8 +116,13 @@ class Transport {
   /// Native UDP sender (libcleona_net) for platforms where Dart's
   /// RawDatagramSocket.send() is unreliable (Windows: returns 0 despite
   /// valid socket — see §4.5.2). Initialized in [start] on supported
-  /// platforms; null on Android/iOS/macOS or when the library is missing.
+  /// platforms; null on Android/macOS or when the library is missing.
   NativeUdpSender? _nativeSender;
+
+  /// iOS native sendto() bypass. Dart's RawDatagramSocket.send() returns 0
+  /// on iOS (errno 64/65). Uses the SAME fd as the Dart socket — no second
+  /// socket, no §4.5.2 dual-socket risk.
+  IosUdpSender? _iosUdpSender;
 
   NetworkPacketCallback? onPacketV3;
   DiscoveryCallback? onDiscovery;
@@ -158,6 +164,22 @@ class Transport {
       onError: (e) => _log.warn('UDP socket error: $e'),
     );
     _log.info('UDP listening on port $port');
+
+    // iOS: Dart's RawDatagramSocket.send() returns 0 for ALL sends (errno
+    // 64/65). Find the Dart socket's fd and use native sendto() directly.
+    // Same fd = same port, no §4.5.2 dual-socket risk.
+    if (Platform.isIOS) {
+      try {
+        _iosUdpSender = IosUdpSender.open(port);
+        if (_iosUdpSender != null) {
+          _log.info('iOS native sendto() activated on fd (port $port)');
+        } else {
+          _log.warn('iOS native sendto(): could not find UDP fd for port $port');
+        }
+      } catch (e) {
+        _log.warn('iOS native sendto() init failed: $e');
+      }
+    }
 
     // Native UDP sender for Transport.sendUdp — bypasses Dart's
     // RawDatagramSocket.send() which silently returns 0 on Windows.
@@ -547,6 +569,10 @@ class Transport {
   /// falls back to Dart RawDatagramSocket. Returns bytes sent (>0 on success).
   int _udpSendRaw(Uint8List data, InternetAddress address, int remotePort,
       RawDatagramSocket socket) {
+    // iOS native sendto() — same fd as Dart socket, bypasses broken send()
+    if (_iosUdpSender != null && address.type == InternetAddressType.IPv4) {
+      return _iosUdpSender!.send(address.address, remotePort, data);
+    }
     if (_nativeSender != null && address.type == InternetAddressType.IPv4) {
       final sent = _nativeSender!.send(address.address, remotePort, data);
       if (sent > 0) return sent;
