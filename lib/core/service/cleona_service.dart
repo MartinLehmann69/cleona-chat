@@ -9544,21 +9544,26 @@ class CleonaService implements ICleonaService {
       return false;
     }
 
-    // 3. Resolve recipient → list of authorized device-IDs (Architecture
-    //    §2.6.2 — Identity-Resolution via 2D-DHT auth-manifest).
+    // 3. Resolve recipient → list of authorized device-IDs (§2.6.2).
+    //    Fast path: use locally-cached device IDs from received packets /
+    //    CR handshake. These are always fresh (populated on every incoming
+    //    ApplicationFrame at handleApplicationFrame:10335) and avoid the
+    //    2s+ DHT timeout on cold networks where auth-manifests haven't
+    //    been published yet. DHT resolution runs in the background to warm
+    //    the cache for future sends and to discover additional devices.
     List<Uint8List> deviceIds;
-    try {
-      deviceIds = await node.resolveUserToDevices(recipientUserId);
-    } catch (e) {
-      _log.warn('sendToUser: resolveUserToDevices threw $e — drop');
-      return false;
-    }
-    // DHT may time out before the routing table is warm (e.g. shortly after
-    // a CR-ACCEPT). Fall back to the device IDs we saw in the CR handshake.
-    if (deviceIds.isEmpty && contact.deviceNodeIds.isNotEmpty) {
-      _log.debug('sendToUser: DHT empty, falling back to contact.deviceNodeIds '
-          'for ${_hexShort(recipientUserId)}');
+    if (contact.deviceNodeIds.isNotEmpty) {
       deviceIds = contact.deviceNodeIds.map(hexToBytes).toList(growable: false);
+      _log.debug('sendToUser: fast-path ${deviceIds.length} cached deviceNodeIds '
+          'for ${_hexShort(recipientUserId)}');
+      unawaited(node.resolveUserToDevices(recipientUserId).catchError((_) => <Uint8List>[]));
+    } else {
+      try {
+        deviceIds = await node.resolveUserToDevices(recipientUserId);
+      } catch (e) {
+        _log.warn('sendToUser: resolveUserToDevices threw $e — drop');
+        return false;
+      }
     }
     if (deviceIds.isEmpty) {
       // §5.1 Layer 1 empty → skip Layer 2, go directly to Layer 3.
