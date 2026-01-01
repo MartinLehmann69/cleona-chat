@@ -152,16 +152,10 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Prepare force_load path
+      - name: Verify native archives
         run: |
-          DEVICE_A="$(pwd)/ios/CleonaNative/libcleona_all_device.a"
-          if [ ! -f "$DEVICE_A" ]; then
-            echo "ERROR: $DEVICE_A not found"
-            ls -la ios/CleonaNative/
-            exit 1
-          fi
-          echo "FORCE_LOAD_PATH=$DEVICE_A" >> "$GITHUB_ENV"
-          echo "Archive size: $(du -h "$DEVICE_A" | cut -f1)"
+          ls -lh ios/CleonaNative/libcleona_all_device.a
+          ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
 
       - name: Install distribution certificate
         env:
@@ -203,53 +197,15 @@ jobs:
           CHANNEL="${INPUT_CHANNEL:-beta}"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Compile Dart AOT
-        env:
-          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
-        run: |
-          # flutter build ios --no-codesign compiles Dart to AOT, runs pod
-          # install, and generates all Xcode project files. We use this ONLY
-          # for the Dart compilation — we do NOT use its xcodebuild output.
-          flutter build ios --release --no-codesign \
-            --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
-
-      - name: Archive and export IPA
+      - name: Build IPA
         env:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          # Read the existing OTHER_LDFLAGS from the Pods xcconfig (contains
-          # all -framework, -l, -ObjC flags) and append -force_load.
-          # Then pass the combined value as a command-line build setting to
-          # xcodebuild. Command-line settings have ABSOLUTE highest priority
-          # in Xcode — they override xcconfigs, pbxproj, and everything else.
-          XCCONFIG="ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
-          EXISTING_FLAGS=$(grep '^OTHER_LDFLAGS' "$XCCONFIG" | sed 's/^OTHER_LDFLAGS = //' | sed 's/\$(inherited)//')
-          LDFLAGS="$EXISTING_FLAGS -force_load $FORCE_LOAD_PATH"
-          echo "OTHER_LDFLAGS = $LDFLAGS"
-          echo "Binary before: $(ls -la build/ios/iphoneos/Runner.app/Runner | awk '{print $5}')"
-
-          # Clean DerivedData + build products to force fresh link
-          rm -rf ~/Library/Developer/Xcode/DerivedData/Runner-*
-          rm -rf build/ios/archive
-
-          xcodebuild archive \
-            -workspace ios/Runner.xcworkspace \
-            -scheme Runner \
-            -configuration Release \
-            -archivePath build/ios/archive/Runner.xcarchive \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="Apple Development" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            COMPILER_INDEX_STORE_ENABLE=NO \
-            "OTHER_LDFLAGS=$LDFLAGS" \
-            2>&1 | grep -E 'Ld |error:|warning:.*force|ARCHIVE|force_load|Runner\.app.*Runner$'
-
-          echo "Binary after: $(find build/ios/archive -name Runner -type f -exec ls -la {} \; 2>/dev/null | awk '{print $5}')"
-
-          xcodebuild -exportArchive \
-            -archivePath build/ios/archive/Runner.xcarchive \
-            -exportPath build/ios/ipa \
-            -exportOptionsPlist ios/ExportOptions.plist
+          flutter build ipa \
+            --release \
+            --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
+            --export-options-plist=ios/ExportOptions.plist
 
       - name: List build outputs
         if: always()

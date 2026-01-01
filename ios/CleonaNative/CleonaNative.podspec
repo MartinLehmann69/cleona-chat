@@ -1,17 +1,10 @@
 #
-# CleonaNative — umbrella podspec for prebuilt native C libraries.
+# CleonaNative — prebuilt native C libraries for Cleona Chat.
 #
-# The actual .a archives (merged into libcleona_all_{device,simulator}.a by
-# scripts/build-ios-libs.sh) are force-loaded via the Podfile post_install
-# hook, NOT via vendored_frameworks or vendored_libraries.
-#
-# This podspec exists as a CocoaPods dependency anchor to:
-#   1. Declare system frameworks needed by the native libs
-#   2. Declare system libraries (libc++, libz) needed for linking
-#   3. Provide a compilable source file so CocoaPods doesn't reject the pod
-#
-# vendored_frameworks / vendored_libraries are intentionally NOT used.
-# See the Podfile post_install comment for the full rationale.
+# All native libs (libsodium, liboqs, libzstd, liberasurecode, libopus,
+# whisper.cpp, libcleona_audio) are merged into a single static archive
+# by scripts/build-ios-libs.sh. The merged archive is force-loaded so
+# that dart:ffi can find symbols via DynamicLibrary.process().
 #
 Pod::Spec.new do |s|
   s.name         = 'CleonaNative'
@@ -24,17 +17,20 @@ Pod::Spec.new do |s|
   s.platform     = :ios, '15.5'
   s.static_framework = true
 
-  # Dummy source so CocoaPods accepts the pod (empty pods are rejected)
   s.source_files = 'CleonaNativeDummy.m'
 
-  # System frameworks required by the native libraries:
-  # - AudioToolbox, AVFoundation: libcleona_audio (miniaudio backend)
-  # - CoreFoundation: general
-  # - Accelerate: whisper.cpp GGML (BLAS/vecLib)
-  # - Metal, MetalKit: whisper.cpp GGML Metal acceleration (device only)
+  s.vendored_libraries = 'libcleona_all_device.a'
+
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation',
                  'Accelerate', 'Metal', 'MetalKit'
 
-  # System libraries required for C++ code in whisper.cpp/ggml and zstd
   s.libraries = 'c++', 'z'
+
+  # -force_load ensures ALL object files from the merged archive are
+  # included in the Runner binary, even though no ObjC/Swift code
+  # references the C symbols directly. Without this, the linker
+  # dead-strips everything and DynamicLibrary.process() finds nothing.
+  s.user_target_xcconfig = {
+    'OTHER_LDFLAGS' => '-force_load $(PODS_TARGET_SRCROOT)/libcleona_all_device.a'
+  }
 end
