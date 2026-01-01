@@ -1,7 +1,7 @@
 import 'package:cleona/core/network/clogger.dart';
 
 /// Tracks consecutive send failures per peer and decides when to
-/// fall back to TLS on port+2.
+/// fall back to TLS on the same port as UDP.
 ///
 /// V3: TLS is last resort. Threshold: 15 consecutive failures → enter TLS mode.
 /// TLS mode only kicks in after the entire routing cascade (Direct, Relay, DV, S&F).

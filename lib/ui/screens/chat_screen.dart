@@ -407,35 +407,45 @@ class _ChatScreenState extends State<ChatScreen> {
           tooltip: locale.get('call_tooltip'),
           onPressed: () => _startCall(context, appState),
         ),
-      if (widget.isGroup) ...[
+      if (widget.isGroup)
         IconButton(
           icon: const Icon(Icons.call),
           tooltip: 'Gruppenanruf',
           onPressed: () => _startGroupCall(context, appState),
         ),
-        IconButton(
-          icon: const Icon(Icons.poll),
-          tooltip: locale.get('poll_create'),
-          onPressed: () => _openPollEditor(context),
+      // Bug #U7: AppBarScaffold renders actions in a plain Row without
+      // overflow handling. On narrow Android screens (~360dp), 5 IconButtons
+      // push rightmost actions (poll, info) off the visible edge, so members
+      // could not reach the poll-create entry. Group & channel polls/info
+      // now live in a single overflow menu that always fits.
+      if (widget.isGroup || widget.isChannel)
+        PopupMenuButton<String>(
+          icon: const Icon(Icons.more_vert),
+          tooltip: locale.get('more_options'),
+          onSelected: (v) {
+            if (v == 'poll') _openPollEditor(context);
+            if (v == 'info' && widget.isGroup) _showGroupInfo(context, service);
+            if (v == 'info' && widget.isChannel) _showChannelInfo(context, service);
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(
+              value: 'poll',
+              child: Row(children: [
+                const Icon(Icons.poll),
+                const SizedBox(width: 12),
+                Text(locale.get('poll_create')),
+              ]),
+            ),
+            PopupMenuItem(
+              value: 'info',
+              child: Row(children: [
+                const Icon(Icons.info_outline),
+                const SizedBox(width: 12),
+                Text(locale.get(widget.isGroup ? 'group_info' : 'channel_info')),
+              ]),
+            ),
+          ],
         ),
-        IconButton(
-          icon: const Icon(Icons.info_outline),
-          tooltip: locale.get('group_info'),
-          onPressed: () => _showGroupInfo(context, service),
-        ),
-      ],
-      if (widget.isChannel) ...[
-        IconButton(
-          icon: const Icon(Icons.poll),
-          tooltip: locale.get('poll_create'),
-          onPressed: () => _openPollEditor(context),
-        ),
-        IconButton(
-          icon: const Icon(Icons.info_outline),
-          tooltip: locale.get('channel_info'),
-          onPressed: () => _showChannelInfo(context, service),
-        ),
-      ],
     ];
 
     return AppBarScaffold(
@@ -1148,16 +1158,73 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: Text(locale.get('close')),
+                child: Text(locale.get('cancel')),
               ),
-              TextButton(
-                style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+              // Fix #U14: Destructive action gets Danger styling + confirmation
+              // sub-dialog so "Leave" is no longer visually equivalent to "Cancel".
+              FilledButton.icon(
+                icon: const Icon(Icons.exit_to_app, size: 18),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                  foregroundColor: Theme.of(context).colorScheme.onError,
+                ),
+                label: Text(locale.get('leave')),
                 onPressed: () {
-                  Navigator.pop(ctx);
-                  service.leaveGroup(widget.conversationId);
-                  Navigator.pop(context);
+                  // Folgefix #U14: Owner-aware confirm body — warnt den Owner,
+                  // dass die Ownership automatisch transferiert wird, und
+                  // benennt das Transfer-Ziel (gleiche Logik wie in
+                  // CleonaService.leaveGroup: erster Admin sonst erster
+                  // verbleibender Member).
+                  final bool iAmOwner = currentGroup.ownerNodeIdHex == service.nodeIdHex;
+                  final Iterable<GroupMemberInfo> others = currentGroup.members.values
+                      .where((m) => m.nodeIdHex != service.nodeIdHex);
+                  String? ownerWarning;
+                  if (iAmOwner) {
+                    if (others.isEmpty) {
+                      ownerWarning = locale.get('leave_last_member_warning');
+                    } else {
+                      final GroupMemberInfo target =
+                          others.where((m) => m.role == 'admin').firstOrNull ?? others.first;
+                      ownerWarning = locale.tr('leave_owner_warning', {'name': target.displayName});
+                    }
+                  }
+                  showDialog(
+                    context: ctx,
+                    builder: (confirmCtx) => AlertDialog(
+                      title: Text(locale.get('leave_group_title')),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(locale.tr('leave_confirm', {'name': currentGroup.name})),
+                          if (ownerWarning != null) ...[
+                            const SizedBox(height: 12),
+                            Text(
+                              ownerWarning,
+                              style: TextStyle(color: Theme.of(context).colorScheme.error),
+                            ),
+                          ],
+                        ],
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(confirmCtx),
+                          child: Text(locale.get('cancel')),
+                        ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+                          onPressed: () {
+                            Navigator.pop(confirmCtx);
+                            Navigator.pop(ctx);
+                            service.leaveGroup(widget.conversationId);
+                            Navigator.pop(context);
+                          },
+                          child: Text(locale.get('leave')),
+                        ),
+                      ],
+                    ),
+                  );
                 },
-                child: Text(locale.get('leave')),
               ),
             ],
           );
@@ -1304,16 +1371,73 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: Text(locale.get('close')),
+                child: Text(locale.get('cancel')),
               ),
-              TextButton(
-                style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+              // Fix #U14: same treatment as group-info dialog — destructive
+              // "Leave" now requires a confirmation so it cannot be confused
+              // with the neutral dismiss action.
+              FilledButton.icon(
+                icon: const Icon(Icons.exit_to_app, size: 18),
+                style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error,
+                  foregroundColor: Theme.of(context).colorScheme.onError,
+                ),
+                label: Text(locale.get('leave')),
                 onPressed: () {
-                  Navigator.pop(ctx);
-                  service.leaveChannel(widget.conversationId);
-                  Navigator.pop(context);
+                  // Folgefix #U14 (symmetrisch zum Group-Leave): Channel-Owner
+                  // wird vor Auto-Transfer der Owner-Rolle gewarnt. Transfer-
+                  // Ziel-Logik mirrors CleonaService.leaveChannel (erster
+                  // Admin sonst erster verbleibender Subscriber).
+                  final bool iAmOwner = currentChannel.ownerNodeIdHex == service.nodeIdHex;
+                  final Iterable<ChannelMemberInfo> others = currentChannel.members.values
+                      .where((m) => m.nodeIdHex != service.nodeIdHex);
+                  String? ownerWarning;
+                  if (iAmOwner) {
+                    if (others.isEmpty) {
+                      ownerWarning = locale.get('leave_last_member_warning');
+                    } else {
+                      final ChannelMemberInfo target =
+                          others.where((m) => m.role == 'admin').firstOrNull ?? others.first;
+                      ownerWarning = locale.tr('leave_owner_warning', {'name': target.displayName});
+                    }
+                  }
+                  showDialog(
+                    context: ctx,
+                    builder: (confirmCtx) => AlertDialog(
+                      title: Text(locale.get('leave_channel_title')),
+                      content: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(locale.tr('leave_confirm', {'name': currentChannel.name})),
+                          if (ownerWarning != null) ...[
+                            const SizedBox(height: 12),
+                            Text(
+                              ownerWarning,
+                              style: TextStyle(color: Theme.of(context).colorScheme.error),
+                            ),
+                          ],
+                        ],
+                      ),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(confirmCtx),
+                          child: Text(locale.get('cancel')),
+                        ),
+                        FilledButton(
+                          style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
+                          onPressed: () {
+                            Navigator.pop(confirmCtx);
+                            Navigator.pop(ctx);
+                            service.leaveChannel(widget.conversationId);
+                            Navigator.pop(context);
+                          },
+                          child: Text(locale.get('leave')),
+                        ),
+                      ],
+                    ),
+                  );
                 },
-                child: Text(locale.get('leave')),
               ),
             ],
           );
@@ -2250,6 +2374,9 @@ class _MessageBubble extends StatelessWidget {
         replyTo: message.replyToText,
         // reactions is Map<String,Set<String>>; MessageBubble takes List<String> emoji-only
         reactions: message.reactions.keys.toList(),
+        onActionsPressed: _hasMenu
+            ? () => _showMessageActions(context)
+            : null,
         onLongPress: _hasMenu
             ? () => _showMessageActions(context)
             : null,

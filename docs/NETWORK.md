@@ -6,8 +6,8 @@
 - **Dual-Stack (V3.1.48):** IPv4-Socket (`_udpSocket`) + IPv6-Socket (`_udpSocket6`), gleicher Port, gleicher Handler
 - `_socketFor(addr)` waehlt Ausgangs-Socket nach Adresstyp (IPv4 oder IPv6)
 - Implizites IPv4↔IPv6 Bridging: Dual-Stack-Nodes koennen zwischen reinen IPv4- und IPv6-Peers vermitteln
-- **Kein TCP** (V3.2) — entfernt, da nicht relaybar und keine Offline-Zustellung
-- TLS 1.3 Fallback auf Port+2 (Anti-Zensur, IPv4 + IPv6), aktiviert nach 15 konsekutiven UDP-Fehlern
+- **Kein plain TCP** (V3.2) — entfernt, da nicht relaybar und keine Offline-Zustellung
+- TLS 1.3 Fallback auf **demselben Port wie UDP** (V3.1.71, IPv4 + IPv6), aktiviert nach 15 konsekutiven UDP-Fehlern. UDP (SOCK_DGRAM) und TCP (SOCK_STREAM) teilen sich die Port-Nummer kernel-seitig ohne Konflikt. Bootstrap: UDP+TCP 8080 (Live) / 8081 (Beta). Mobile/Desktop: zufälliger UDP-Port = TCP-Port
 - Payloads >1200B: App-Level-Fragmentierung (siehe ROUTING_V3.md)
 - RUDP Light fuer Zustellbestaetigung (DELIVERY_RECEIPT)
 
@@ -92,7 +92,7 @@
 - Nicht hardcoded — wird via ContactSeed QR gelernt
 - Normaler Peer, gleiches Protokoll
 - Decommission: ≥10 Nodes gleichzeitig online über 30 Tage
-- Aktuell: Hyper-V 192.168.15.15:8080 (NICHT die decommissioned KVM-VM starten!)
+- Aktuell: Hyper-V 192.0.2.15:8080 (NICHT die decommissioned KVM-VM starten!)
 
 ## Proof of Work (Spam-Schutz)
 - SHA-256-basiertes Hashcash auf jeder Anwendungs-Nachricht

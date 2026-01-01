@@ -37,6 +37,25 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- Android System-Share-Chooser: Cleona als Share-Target (Bug #U16). -->
+            <!-- SEND: einzelne Inhalte (Text aus Browser, Bild aus Galerie, ...). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/*"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="audio/*"/>
+                <data android:mimeType="application/*"/>
+            </intent-filter>
+            <!-- SEND_MULTIPLE: mehrere Inhalte gleichzeitig (z.B. mehrere Fotos). -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+                <data android:mimeType="video/*"/>
+                <data android:mimeType="*/*"/>
+            </intent-filter>
         </activity>
 
         <service

@@ -166,7 +166,7 @@ class PeerAddress {
     if (ip.startsWith('127.')) return true;
     // Target is private — are WE also on a private network?
     // If we have ANY private IP, assume private ranges are routable
-    // (different /24s within same org are common, e.g. 192.168.10.x ↔ 192.168.15.x)
+    // (different /24s within same org are common, e.g. 192.168.10.x ↔ 192.0.2.x)
     for (final localIp in currentLocalIps) {
       if (_isPrivateIp(localIp) && _sameRfc1918Class(ip, localIp)) return true;
     }

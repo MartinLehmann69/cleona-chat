@@ -8,6 +8,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.AssetFileDescriptor
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -34,9 +36,14 @@ class MainActivity : FlutterActivity() {
     private val AUDIO_CHANNEL = "chat.cleona/audio"
     private val NOTIFICATION_MSG_CHANNEL = "chat.cleona/notification"
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
+    private val SHARE_CHANNEL = "chat.cleona/share"
     private val MSG_CHANNEL_ID = "cleona_messages"
     private val NOTIFICATION_PERMISSION_CODE = 1001
     private var cameraHandler: CameraXHandler? = null
+
+    // Bug #U16: ACTION_SEND payload, drained by Dart via `chat.cleona/share`.
+    // Shape: {"text": String?, "files": List<String>} (content:// → cacheDir copy).
+    private var pendingShare: Map<String, Any>? = null
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -160,6 +167,18 @@ class MainActivity : FlutterActivity() {
             }
         }
 
+        // Share receiver (Bug #U16): Dart drains pending ACTION_SEND payload.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "consumePendingShare" -> {
+                    val share = pendingShare
+                    pendingShare = null
+                    result.success(share)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
         // CalendarContract bridge — mirrors Cleona events into the Android
         // system calendar (Samsung / Google Calendar). Opt-in from
         // Settings; runtime-permission flow handled in Kotlin.
@@ -169,6 +188,14 @@ class MainActivity : FlutterActivity() {
         ).setMethodCallHandler(
             CalendarContractHandler(applicationContext, this)
         )
+
+        // Clipboard bridge (Bug #U12) — surfaces binary clipboard items
+        // (image/video/audio/file) so mixed clipboards (media + text) no
+        // longer drop the media half on Android.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            ClipboardHandler.CHANNEL_NAME
+        ).setMethodCallHandler(ClipboardHandler(applicationContext))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -183,6 +210,66 @@ class MainActivity : FlutterActivity() {
         // Foreground Service starten
         val intent = Intent(this, CleonaForegroundService::class.java)
         startForegroundService(intent)
+
+        // Bug #U16: cold-start via Share-Sheet — stash payload for Dart drain.
+        handleShareIntent(intent)
+    }
+
+    // Warm-launch via Share-Sheet (singleTop reuses this activity).
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleShareIntent(intent)
+    }
+
+    // Extracts EXTRA_TEXT + EXTRA_STREAM URIs into `pendingShare`. Content
+    // URIs are copied into cacheDir so Dart can read them as file paths.
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action ?: return
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
+
+        val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+        val uris: List<Uri> = when (action) {
+            Intent.ACTION_SEND -> {
+                @Suppress("DEPRECATION")
+                val u = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+                if (u != null) listOf(u) else emptyList()
+            }
+            Intent.ACTION_SEND_MULTIPLE -> {
+                @Suppress("DEPRECATION")
+                intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM) ?: emptyList()
+            }
+            else -> emptyList()
+        }
+
+        val files = mutableListOf<String>()
+        val shareDir = File(cacheDir, "shared_in").apply { mkdirs() }
+        for (uri in uris) {
+            try {
+                val name = queryDisplayName(uri) ?: "share_${System.currentTimeMillis()}"
+                val sanitized = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
+                val dst = File(shareDir, "${System.currentTimeMillis()}_$sanitized")
+                contentResolver.openInputStream(uri)?.use { input ->
+                    dst.outputStream().use { output -> input.copyTo(output) }
+                }
+                if (dst.length() > 0) files.add(dst.absolutePath)
+            } catch (_: Exception) { /* skip unreadable URI */ }
+        }
+
+        if (text.isNullOrBlank() && files.isEmpty()) return
+        pendingShare = mapOf(
+            "text" to (text ?: ""),
+            "files" to files,
+        )
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (_: Exception) { null }
     }
 
     private fun createMessageNotificationChannel() {

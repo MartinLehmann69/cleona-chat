@@ -141,7 +141,13 @@ void main(List<String> args) {
     final tray = NativeTray();
     final iconPath = config.iconPath ?? _findIconPath(beta: isBeta);
     if (iconPath != null) {
-      final ok = tray.init(iconPath: iconPath, tooltip: trayTooltip);
+      final ok = tray.init(
+        iconPath: iconPath,
+        tooltip: trayTooltip,
+        logger: (level, msg) {
+          if (level == 'warn') { log.warn(msg); } else { log.info(msg); }
+        },
+      );
       log.info('Tray icon: ${ok ? "OK" : "FAILED"} (icon: $iconPath, channel: ${NetworkSecret.channel.name})');
     } else {
       log.warn('No tray icon found, running without tray');
@@ -187,6 +193,9 @@ class _MultiServiceDaemon {
   Timer? _statusTimer;
   Process? _networkMonitor;
   Timer? _triggerTimer;
+  Timer? _heartbeatTimer;
+  DateTime? _heartbeatLastAt;
+  int _heartbeatTick = 0;
   bool _running = false;
 
   _MultiServiceDaemon({
@@ -380,6 +389,41 @@ class _MultiServiceDaemon {
       if (!_running) return;
       final svcNames = _services.values.map((s) => s.displayName).join(', ');
       log.info('Status: peers=${node.routingTable.peerCount}, identities=${_services.length} [$svcNames]');
+    });
+
+    // Heartbeat (5s) for main-event-loop liveness diagnostics. The 60s
+    // status line above is too coarse to localize a hang — if the daemon
+    // freezes between two status ticks, we know only "hang happened within
+    // 60s of tick N", but not whether the main loop was already stalled at
+    // 30s, 45s, or 59s. The 5s heartbeat narrows that window to ~5s and
+    // logs the *observed* interval so drift (GC pauses, slow event handlers)
+    // shows up as dt > 5500ms WARN before the full hang.
+    //
+    // Added 2026-04-24 after Alice's daemon hung silently from 15:10:20 to
+    // 19:44:53 (4h 34min) without a single log entry — the last entry was
+    // a PeerListPush handler, and the next status tick never fired.
+    // Without this heartbeat the ante-hang timeline was 60s-fuzzy; with it,
+    // the next occurrence gives a 5s window + drift signal.
+    _heartbeatLastAt = DateTime.now();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!_running) return;
+      final now = DateTime.now();
+      final last = _heartbeatLastAt;
+      _heartbeatLastAt = now;
+      _heartbeatTick++;
+      final dtMs = last == null ? 0 : now.difference(last).inMilliseconds;
+      // Expected dt ≈ 5000ms. Log every tick at debug for post-mortem
+      // reconstruction; escalate to WARN on drift so live-tail greppers
+      // see it, and log INFO once per minute as a heartbeat marker that
+      // survives level-filtered viewers.
+      if (dtMs > 6500) {
+        log.warn('heartbeat tick=$_heartbeatTick dt=${dtMs}ms (DRIFT — main loop delayed ${dtMs - 5000}ms)');
+      } else if (_heartbeatTick % 12 == 0) {
+        // Every 60s: one info-level beat, sits alongside the 60s Status line.
+        log.info('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
+      } else {
+        log.debug('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
+      }
     });
 
     _startNetworkMonitor();
@@ -591,6 +635,8 @@ class _MultiServiceDaemon {
 
     _statusTimer?.cancel();
     _statusTimer = null;
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     _reminderService?.dispose();
     _reminderService = null;
     await _stopLocalCalDAVServer();

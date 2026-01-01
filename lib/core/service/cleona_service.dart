@@ -11,6 +11,7 @@ import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/dht/channel_index.dart';
 import 'package:cleona/core/dht/mailbox_store.dart';
+import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/compression.dart';
@@ -1145,7 +1146,7 @@ class CleonaService implements ICleonaService {
     notificationSound.vibrate(VibrationType.message);
     final textSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
     _postAndroidNotification(textSenderName, text.length > 100 ? '${text.substring(0, 100)}...' : text, conversationId);
-    _updateBadgeCount();
+    // Badge update happens inside _addMessageToConversation — single source of truth.
 
     _log.info('TEXT from ${senderHex.substring(0, 8)}: ${text.length > 50 ? text.substring(0, 50) : text}');
   }
@@ -2063,7 +2064,7 @@ class CleonaService implements ICleonaService {
         : metadata.mimeType.startsWith('audio/') ? '🎵 Audio'
         : '📎 Datei';
     _postAndroidNotification(mediaSenderName, mediaTypeLabel, conversationId);
-    _updateBadgeCount();
+    // Badge update happens inside _addMessageToConversation — single source of truth.
     _log.info('Media received: $filename (${actualFileData.length} bytes) from ${senderHex.substring(0, 8)}');
 
     // Local transcription fallback: if voice message has no transcript, transcribe locally
@@ -2195,10 +2196,19 @@ class CleonaService implements ICleonaService {
     switch (type) {
       case proto.MessageType.TEXT:
       case proto.MessageType.IMAGE:
+      case proto.MessageType.GIF:
       case proto.MessageType.FILE:
       case proto.MessageType.VIDEO:
       case proto.MessageType.VOICE_MESSAGE:
       case proto.MessageType.CHANNEL_POST:
+      // Two-stage media: user sees a chat placeholder the moment the
+      // announcement arrives, long before (or without) the content pull.
+      case proto.MessageType.MEDIA_ANNOUNCEMENT:
+      // Edits/deletes/reactions modify visible content; user perceives
+      // them as "received messages" in the Network-Stats sense.
+      case proto.MessageType.MESSAGE_EDIT:
+      case proto.MessageType.MESSAGE_DELETE:
+      case proto.MessageType.EMOJI_REACTION:
         return true;
       default:
         return false;
@@ -3478,6 +3488,7 @@ class CleonaService implements ICleonaService {
       conv.pendingConfigProposal = newConfig;
       conv.pendingConfigProposer = senderHex;
       conv.unreadCount++;
+      _updateBadgeCount();
       _saveConversations();
       onStateChanged?.call();
       _log.info('DM config proposal received from ${_contacts[senderHex]?.displayName ?? senderHex.substring(0, 8)} — awaiting accept/reject');
@@ -4124,6 +4135,11 @@ class CleonaService implements ICleonaService {
     conv.lastActivity = msg.timestamp;
     if (!msg.isOutgoing) {
       conv.unreadCount++;
+      // Bug #U3+#U15: Launcher-Badge muss bei JEDEM eingehenden Increment
+      // aktualisiert werden — nicht nur bei Text/Media. Vorher fehlte es
+      // auf Channel-Posts und Config-Proposals, was zu Badge-Drift führte.
+      // Zentralisiert, damit neue Handler nichts vergessen können.
+      _updateBadgeCount();
     }
 
     onNewMessage?.call(conversationId, msg);
@@ -7112,8 +7128,30 @@ class CleonaService implements ICleonaService {
   }
 
   /// Update own display name and broadcast to all contacts.
+  ///
+  /// Persists the new name to `identities.json` via [IdentityManager] so it
+  /// survives daemon restarts. Matches the Identity record by `profileDir`
+  /// (stable, unique per identity). If no matching record is found, the
+  /// in-memory + broadcast path still runs so that at least contacts learn
+  /// the new name in the current session.
   @override
   void updateDisplayName(String newName) {
+    final mgr = IdentityManager();
+    final match = mgr.loadIdentities().firstWhere(
+          (i) => i.profileDir == identity.profileDir,
+          orElse: () => Identity(
+            id: '',
+            displayName: '',
+            profileDir: '',
+            port: 0,
+            createdAt: DateTime.now(),
+          ),
+        );
+    if (match.id.isNotEmpty) {
+      mgr.renameIdentity(match.id, newName);
+    } else {
+      _log.warn('updateDisplayName: no Identity record for profileDir=${identity.profileDir}; skipping persist');
+    }
     displayName = newName;
     _broadcastProfileUpdate();
     onStateChanged?.call();
@@ -9014,7 +9052,13 @@ class CleonaService implements ICleonaService {
 
       final conv = conversations[conversationId];
       if (conv == null) return;
+      if (conv.unreadCount == 0) return;
       conv.unreadCount = 0;
+      // Bug #U3+#U15: Twin-Device-Read muss auch Android-Launcher-Badge
+      // aktualisieren — sonst bleibt Badge auf Primary hängen, obwohl der
+      // User auf dem Zweitgerät gelesen hat.
+      onCancelNotificationAndroid?.call(conversationId);
+      _updateBadgeCount();
       _saveConversations();
       onStateChanged?.call();
     } catch (e) {

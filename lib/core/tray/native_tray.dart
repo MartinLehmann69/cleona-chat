@@ -7,8 +7,8 @@ import 'package:cleona/core/tray/native_tray_windows.dart';
 
 // ── GTK type aliases ─────────────────────────────────────────────────
 
-typedef _GtkInitC = Void Function(Pointer<Int32>, Pointer<Pointer<Pointer<Utf8>>>);
-typedef _GtkInitDart = void Function(Pointer<Int32>, Pointer<Pointer<Pointer<Utf8>>>);
+typedef _GtkInitCheckC = Int32 Function(Pointer<Int32>, Pointer<Pointer<Pointer<Utf8>>>);
+typedef _GtkInitCheckDart = int Function(Pointer<Int32>, Pointer<Pointer<Pointer<Utf8>>>);
 
 typedef _GtkMenuNewC = Pointer Function();
 typedef _GtkMenuNewDart = Pointer Function();
@@ -96,7 +96,13 @@ class NativeTray {
   late _AppIndicatorSetMenuDart _appIndicatorSetMenu;
   late _AppIndicatorSetTitleDart _appIndicatorSetTitle;
 
-  bool init({required String iconPath, String tooltip = 'Cleona Chat'}) {
+  bool init({
+    required String iconPath,
+    String tooltip = 'Cleona Chat',
+    void Function(String level, String msg)? logger,
+  }) {
+    void logI(String m) => (logger ?? (_, _) {})('info', 'Tray: $m');
+    void logW(String m) => (logger ?? (_, _) {})('warn', 'Tray: $m');
     if (_initialized) return true;
 
     // Windows: delegate to Win32 implementation
@@ -110,13 +116,25 @@ class NativeTray {
       return _initialized;
     }
 
-    // macOS: no daemon-side tray in v1. The daemon is a plain Dart command-
-    // line binary without a FlutterEngine, so MethodChannel to Cocoa isn't
-    // available. An NSStatusItem via direct objc_msgSend FFI is feasible but
-    // ~500 LoC of bridging code and not needed for the first macOS ship.
-    // updateMenu()/dispose() below check _initialized and become no-ops.
+    // macOS: no daemon-side tray in v1. See original comment.
     if (Platform.isMacOS) {
       return false;
+    }
+
+    // Linux: log display context up-front — StatusNotifierItem on GNOME/KDE
+    // needs GTK to bind to a DISPLAY or WAYLAND_DISPLAY. If neither is set
+    // (headless/tty session) gtk_init_check returns 0 and app_indicator_new
+    // still produces a non-null handle but never registers on DBus → tray
+    // invisible while daemon log claims "OK". See gui-46.02.
+    final dispX = Platform.environment['DISPLAY'] ?? '';
+    final dispW = Platform.environment['WAYLAND_DISPLAY'] ?? '';
+    final xdgBus = Platform.environment['DBUS_SESSION_BUS_ADDRESS'] ?? '';
+    logI('env DISPLAY="$dispX" WAYLAND_DISPLAY="$dispW" '
+        'DBUS_SESSION_BUS_ADDRESS=${xdgBus.isEmpty ? "MISSING" : "set"}');
+    if (dispX.isEmpty && dispW.isEmpty) {
+      logW('no DISPLAY/WAYLAND_DISPLAY — GTK cannot bind a backend, '
+          'StatusNotifierItem will NOT register. Start daemon from a graphical '
+          'session or export DISPLAY=:0 before launch.');
     }
 
     try {
@@ -124,14 +142,31 @@ class NativeTray {
       final glib = DynamicLibrary.open('libglib-2.0.so.0');
       final gobject = DynamicLibrary.open('libgobject-2.0.so.0');
 
-      DynamicLibrary appindicatorLib;
-      try {
-        appindicatorLib = DynamicLibrary.open('libayatana-appindicator3.so.1');
-      } catch (_) {
-        appindicatorLib = DynamicLibrary.open('libappindicator3.so.1');
+      // Fallback chain: Ayatana (Ubuntu/Debian modern) → legacy SONAME-1 →
+      // legacy unversioned. On Fedora/Arch the older name can still show up.
+      DynamicLibrary? appindicatorLib;
+      String? loadedLibName;
+      for (final name in const [
+        'libayatana-appindicator3.so.1',
+        'libappindicator3.so.1',
+        'libappindicator3.so',
+      ]) {
+        try {
+          appindicatorLib = DynamicLibrary.open(name);
+          loadedLibName = name;
+          break;
+        } catch (e) {
+          logI('DynamicLibrary.open("$name") failed: $e');
+        }
       }
+      if (appindicatorLib == null) {
+        logW('no appindicator library found — install libayatana-appindicator3-1 '
+            '(or gnome-shell-extension-appindicator on GNOME)');
+        return false;
+      }
+      logI('loaded $loadedLibName');
 
-      final gtkInit = gtk.lookupFunction<_GtkInitC, _GtkInitDart>('gtk_init');
+      final gtkInitCheck = gtk.lookupFunction<_GtkInitCheckC, _GtkInitCheckDart>('gtk_init_check');
       _gtkMenuNew = gtk.lookupFunction<_GtkMenuNewC, _GtkMenuNewDart>('gtk_menu_new');
       _gtkMenuItemNew = gtk.lookupFunction<_GtkMenuItemNewC, _GtkMenuItemNewDart>(
           'gtk_menu_item_new_with_label');
@@ -168,7 +203,13 @@ class NativeTray {
           appindicatorLib.lookupFunction<_AppIndicatorSetTitleC, _AppIndicatorSetTitleDart>(
               'app_indicator_set_title');
 
-      gtkInit(nullptr, nullptr);
+      final gtkOk = gtkInitCheck(nullptr, nullptr);
+      logI('gtk_init_check → ${gtkOk != 0 ? "OK" : "FAILED (no display backend)"}');
+      if (gtkOk == 0) {
+        // Without GTK, app_indicator_new would still return non-null but never
+        // bind to DBus — bail out so the daemon logs a truthful "FAILED".
+        return false;
+      }
 
       // AppIndicator expects icon theme name, not absolute path.
       // Copy icon to temp dir with PID-unique name to bust GNOME Shell's icon cache.
@@ -185,7 +226,11 @@ class NativeTray {
       calloc.free(id);
       calloc.free(iconNameNative);
 
-      if (_indicator == null || _indicator == nullptr) return false;
+      if (_indicator == null || _indicator == nullptr) {
+        logW('app_indicator_new returned null — cannot create tray');
+        return false;
+      }
+      logI('app_indicator_new OK (id=cleona-daemon, icon=$iconName)');
 
       // Set icon search directory
       final iconDirNative = iconDir.toNativeUtf8();
@@ -213,7 +258,8 @@ class NativeTray {
 
       _initialized = true;
       return true;
-    } catch (e) {
+    } catch (e, st) {
+      logW('init threw: $e\n$st');
       try { stderr.writeln('NativeTray init failed: $e'); } catch (_) {}
       return false;
     }

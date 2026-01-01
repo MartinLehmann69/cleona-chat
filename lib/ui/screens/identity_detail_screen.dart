@@ -350,7 +350,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     final locale = AppLocale.read(context);
     final name = _nameController.text.trim();
     if (name.isNotEmpty && name != _identity.displayName) {
-      IdentityManager().renameIdentity(_identity.id, name);
+      // Service.updateDisplayName is authoritative: it persists to
+      // identities.json via IdentityManager AND broadcasts PROFILE_UPDATE.
       widget.service.updateDisplayName(name);
       appState.refresh();
       setState(() {

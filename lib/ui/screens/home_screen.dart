@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
@@ -18,6 +17,7 @@ import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
+import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
 import 'package:cleona/ui/screens/nfc_exchange_screen.dart';
@@ -1222,8 +1222,16 @@ class _ConversationListViewState extends State<_ConversationListView> {
               unreadCount: conv.unreadCount,
               avatarOverride: avatarWidget,
               onTap: () {
-                conv.unreadCount = 0;
+                // Bug #U3+#U15: nicht mehr direkt conv.unreadCount=0 setzen.
+                // markConversationRead ist die einzige Quelle-of-Truth und
+                // aktualisiert (a) in-App-Badge, (b) Android-Launcher-Badge
+                // per MethodChannel, (c) Android-Notification-Cancel, (d)
+                // sendet ReadReceipts. Die direkte Zuweisung umging (b-d).
+                // ChatScreen ruft markConversationRead im postFrameCallback
+                // ohnehin nochmal auf — der Doppel-Call ist idempotent
+                // (no-op bei unreadCount==0).
                 final appState = context.read<CleonaAppState>();
+                appState.service?.markConversationRead(conv.id);
                 Navigator.push(
                   context,
                   MaterialPageRoute(
@@ -1377,8 +1385,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
 
   Widget _avatar(BuildContext context, Conversation conv) {
     final colorScheme = Theme.of(context).colorScheme;
-    if (conv.profilePictureBase64 != null) {
-      return CircleAvatar(backgroundImage: MemoryImage(base64Decode(conv.profilePictureBase64!)));
+    if (conv.profilePictureBase64 != null && conv.profilePictureBase64!.isNotEmpty) {
+      return ProfileAvatar(base64: conv.profilePictureBase64);
     }
     if (conv.isGroup) {
       return CircleAvatar(
@@ -1788,12 +1796,11 @@ class _InboxView extends StatelessWidget {
           ),
         ),
         ...pending.map((c) => ListTile(
-              leading: c.profilePictureBase64 != null
-                  ? CircleAvatar(backgroundImage: MemoryImage(base64Decode(c.profilePictureBase64!)))
-                  : CircleAvatar(
-                      backgroundColor: Colors.orange.shade100,
-                      child: const Icon(Icons.person_add, color: Colors.orange),
-                    ),
+              leading: ProfileAvatar(
+                base64: c.profilePictureBase64,
+                backgroundColor: Colors.orange.shade100,
+                fallback: const Icon(Icons.person_add, color: Colors.orange),
+              ),
               title: Text(
                 c.displayName,
                 style: TextStyle(

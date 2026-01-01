@@ -33,7 +33,7 @@ typedef DiscoveryCallback = void Function(
   int remotePort,
 );
 
-/// UDP + TLS transport layer. Single UDP port for all traffic, TLS on port+2 as anti-censorship fallback.
+/// UDP + TLS transport layer. Single port for all traffic — UDP primary, TLS on the same port as anti-censorship fallback.
 ///
 /// Protocol escalation (V3.1.7): Start with lightest protocol, escalate only on failure.
 /// UDP (single packet) → UDP (fragmented + NACK retry) → TLS (TCP, last resort).
@@ -72,7 +72,7 @@ class Transport {
       : _profileDir = profileDir,
         _log = CLogger.get('transport', profileDir: profileDir);
 
-  /// Start listening on UDP and TLS (anti-censorship fallback on port+2).
+  /// Start listening on UDP and TLS (anti-censorship fallback on the same port).
   Future<void> start() async {
     // UDP — primary transport for all traffic
     _udpSocket = await RawDatagramSocket.bind(
@@ -134,7 +134,8 @@ class Transport {
       } catch (_) {}
     };
 
-    // TLS on port+2 (anti-censorship fallback, activates after 15 consecutive UDP failures)
+    // TLS on same port as UDP (anti-censorship fallback, activates after 15 consecutive UDP failures).
+    // UDP (SOCK_DGRAM) and TCP (SOCK_STREAM) live in separate kernel namespaces, so sharing the port number is safe.
     await _tryBindTlsListeners();
     if (_tlsServer == null || _tlsServer6 == null) {
       _scheduleTlsRebind();
@@ -151,20 +152,20 @@ class Transport {
     }
     if (_tlsServer == null) {
       try {
-        _tlsServer = await SecureServerSocket.bind(InternetAddress.anyIPv4, port + 2, ctx);
+        _tlsServer = await SecureServerSocket.bind(InternetAddress.anyIPv4, port, ctx);
         _tlsServer!.listen(_onTlsConnection);
-        _log.info('TLS listening on port ${port + 2}');
+        _log.info('TLS listening on port $port');
       } catch (e) {
-        _log.info('TLS listener not available (port ${port + 2}): $e');
+        _log.info('TLS listener not available (port $port): $e');
       }
     }
     if (_tlsServer6 == null) {
       try {
-        _tlsServer6 = await SecureServerSocket.bind(InternetAddress.anyIPv6, port + 2, ctx, v6Only: true);
+        _tlsServer6 = await SecureServerSocket.bind(InternetAddress.anyIPv6, port, ctx, v6Only: true);
         _tlsServer6!.listen(_onTlsConnection);
-        _log.info('TLS6 listening on port ${port + 2}');
+        _log.info('TLS6 listening on port $port');
       } catch (e) {
-        _log.info('TLS6 listener not available (port ${port + 2}): $e');
+        _log.info('TLS6 listener not available (port $port): $e');
       }
     }
     return _tlsServer != null;
@@ -493,7 +494,7 @@ class Transport {
     }
   }
 
-  /// Send an envelope via TLS (port+2). Anti-censorship fallback when UDP is blocked.
+  /// Send an envelope via TLS (same port as UDP). Anti-censorship fallback when UDP is blocked.
   Future<bool> sendTls(
     proto.MessageEnvelope envelope,
     InternetAddress address,
@@ -508,12 +509,15 @@ class Transport {
       lenPrefix[2] = (data.length >> 8) & 0xFF;
       lenPrefix[3] = data.length & 0xFF;
 
-      // Connect TLS on port+2, accept self-signed certs (verified via Cleona signatures)
+      // Connect TLS on the same port as UDP. Accept only self-signed certs matching the
+      // Cleona convention (CN=cleona-node, not expired). Envelope integrity
+      // itself is guaranteed by app-layer Ed25519+ML-DSA signatures; this
+      // callback rejects obviously foreign certs (MitM hardening, H-3).
       final socket = await SecureSocket.connect(
         address,
-        remotePort + 2,
+        remotePort,
         timeout: timeout,
-        onBadCertificate: (_) => true,
+        onBadCertificate: _isAcceptableCleonaCert,
       );
       socket.add(lenPrefix);
       socket.add(data);
@@ -522,7 +526,32 @@ class Transport {
       onBytesSent?.call(data.length + 4);
       return true;
     } catch (e) {
-      _log.debug('TLS send error to ${address.address}:${remotePort + 2}: $e');
+      _log.debug('TLS send error to ${address.address}:$remotePort: $e');
+      return false;
+    }
+  }
+
+  /// Gate for self-signed peer certs during TLS fallback (H-3).
+  /// Cleona generates certs with `CN=cleona-node` in _getOrCreateTlsContext;
+  /// here we accept only certs that match that convention and are not
+  /// expired. A blanket-accept would let a MitM terminate TLS with any
+  /// cert — while envelope signatures still protect content integrity, this
+  /// gate raises the cost of passive correlation / active tampering attempts.
+  /// Pubkey pinning against the node identity would require out-of-band
+  /// fingerprint distribution (not yet in protocol) and is tracked separately.
+  static bool _isAcceptableCleonaCert(X509Certificate cert) {
+    try {
+      final now = DateTime.now();
+      if (now.isBefore(cert.startValidity) || now.isAfter(cert.endValidity)) {
+        return false;
+      }
+      // Subject + issuer must both carry the Cleona self-signed marker.
+      final subject = cert.subject;
+      final issuer = cert.issuer;
+      if (!subject.contains('cleona-node')) return false;
+      if (!issuer.contains('cleona-node')) return false;
+      return true;
+    } catch (_) {
       return false;
     }
   }

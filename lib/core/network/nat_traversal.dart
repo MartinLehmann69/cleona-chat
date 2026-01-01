@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show Random;
 import 'dart:typed_data';
 
 import 'package:cleona/core/network/clogger.dart';
@@ -693,13 +694,17 @@ class NatTraversal {
     _log.debug('Hole punch PING sent to $ip:$port (+ ±10 port prediction)');
   }
 
-  /// Simple random bytes generator (no crypto dependency needed).
+  /// CSPRNG-backed random bytes for hole-punch requestIds.
+  ///
+  /// Security C-3: Previously used `DateTime.now().microsecondsSinceEpoch` as
+  /// sole entropy source, making requestIds predictable to an attacker who
+  /// could observe or estimate the sender's clock. Now uses `Random.secure()`
+  /// (OS CSPRNG: getrandom/CryptGenRandom/SecRandomCopyBytes).
+  static final Random _secureRng = Random.secure();
   static Uint8List _randomBytes(int length) {
-    // Use a simple PRNG for request IDs (no security requirement).
     final bytes = Uint8List(length);
-    final now = DateTime.now().microsecondsSinceEpoch;
     for (var i = 0; i < length; i++) {
-      bytes[i] = ((now >> (i * 3)) ^ (i * 17 + now)) & 0xFF;
+      bytes[i] = _secureRng.nextInt(256);
     }
     return bytes;
   }

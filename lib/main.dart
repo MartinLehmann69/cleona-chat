@@ -28,10 +28,12 @@ import 'package:cleona/ui/screens/chat_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
+import 'dart:ui' show PlatformDispatcher;
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/share_receiver.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/ui/theme/skin.dart';
@@ -72,7 +74,36 @@ void main() {
   // This is required for automated GUI testing via accessibility tools
   SemanticsBinding.instance.ensureSemantics();
 
-  runApp(const CleonaApp());
+  // H7 (#U17): Globale Error-Handler — uncaught exceptions crashen sonst
+  // Android stillschweigend. Mirror des Patterns aus headless.dart:20.
+  FlutterError.onError = (details) {
+    _logCrash('FlutterError', details.exception, details.stack);
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    _logCrash('PlatformDispatcher', error, stack);
+    return true;
+  };
+  runZonedGuarded(() {
+    runApp(const CleonaApp());
+  }, (error, stack) {
+    _logCrash('runZonedGuarded', error, stack);
+  });
+}
+
+/// Appends a crash entry to `~/.cleona/crash.log`. Swallows all IO errors
+/// so the handler itself never crashes.
+void _logCrash(String source, Object error, StackTrace? stack) {
+  try {
+    final dir = Directory('${AppPaths.home}/.cleona');
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    final file = File('${dir.path}/crash.log');
+    file.writeAsStringSync(
+      '${DateTime.now().toIso8601String()} [$source] $error\n$stack\n\n',
+      mode: FileMode.append,
+      flush: true,
+    );
+  } catch (_) {/* never crash the crash handler */}
 }
 
 /// Checks if another GUI instance is running. If so, write a trigger.
@@ -118,6 +149,12 @@ class CleonaApp extends StatelessWidget {
           final state = CleonaAppState();
           state._appLocale = appLocale;
           state._boot();
+          // Bug #U16: Android Share-Sheet-Empfang. Kontext + Service werden
+          // lazy beim Share-Event ausgewertet (Identity-Wechsel andert Service).
+          ShareReceiver.init(
+            contextProvider: () => navigatorKey.currentContext!,
+            serviceProvider: () => state.service,
+          );
           return state;
         }),
         ChangeNotifierProvider.value(value: appLocale..load()),

@@ -47,9 +47,15 @@ class ClipboardContent {
 /// Detects clipboard tool (wl-paste / xclip) and extracts content.
 ///
 /// Linux: uses wl-paste (Wayland) with xclip (X11) fallback.
-/// Android/iOS: text-only via Flutter Clipboard API.
+/// Android: binary items (image/video/audio/file) via native MethodChannel
+/// `chat.cleona/clipboard`, text via Flutter Clipboard API. Binary wins over
+/// text in mixed-content clipboards (Bug #U12) so media no longer gets
+/// silently dropped when a producer app also puts a caption in kTextPlain.
+/// iOS: text-only via Flutter Clipboard API.
 class ClipboardHelper {
   static String? _cachedTool;
+  static const MethodChannel _androidChannel =
+      MethodChannel('chat.cleona/clipboard');
 
   /// Detect which clipboard tool is available (cached).
   static Future<String?> _detectTool() async {
@@ -79,7 +85,42 @@ class ClipboardHelper {
     if (Platform.isMacOS) {
       return _getMacOSContent();
     }
-    // Android/iOS: text only via Flutter API
+    if (Platform.isAndroid) {
+      return _getAndroidContent();
+    }
+    // iOS: text only via Flutter API
+    final clipData = await Clipboard.getData(Clipboard.kTextPlain);
+    if (clipData?.text != null && clipData!.text!.isNotEmpty) {
+      return ClipboardContent(isText: true, text: clipData.text);
+    }
+    return const ClipboardContent();
+  }
+
+  /// Android: binary media item wins over text (Bug #U12). Native handler
+  /// iterates ClipData items, resolves the first media/file URI, copies it
+  /// to cacheDir, and returns {path, mimeType, filename}. Text falls back
+  /// via Flutter's Clipboard API only when no binary item is present.
+  static Future<ClipboardContent> _getAndroidContent() async {
+    try {
+      final res = await _androidChannel.invokeMapMethod<String, dynamic>('readMediaItem');
+      if (res != null) {
+        final path = res['path'] as String?;
+        final mime = (res['mimeType'] as String?) ?? 'application/octet-stream';
+        final filename = res['filename'] as String?;
+        if (path != null && path.isNotEmpty) {
+          return ClipboardContent(
+            filePath: path,
+            mimeType: mime,
+            isImage: mime.startsWith('image/'),
+            isVideo: mime.startsWith('video/'),
+            isAudio: mime.startsWith('audio/'),
+            suggestedFilename: filename,
+          );
+        }
+      }
+    } on PlatformException catch (_) {
+      // Native handler missing (older build) — fall through to text.
+    } catch (_) {}
     final clipData = await Clipboard.getData(Clipboard.kTextPlain);
     if (clipData?.text != null && clipData!.text!.isNotEmpty) {
       return ClipboardContent(isText: true, text: clipData.text);

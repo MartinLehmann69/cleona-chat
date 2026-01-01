@@ -1259,7 +1259,7 @@ class CleonaNode {
 
   /// Filter targets by NAT context: private IPs are only meaningful when our
   /// public IP matches the peer's public IP (same NAT). Without this check,
-  /// 192.168.15.15 behind NAT-A gets sent to a device behind NAT-B — wasted traffic.
+  /// 192.0.2.15 behind NAT-A gets sent to a device behind NAT-B — wasted traffic.
   List<PeerAddress> _filterNatContext(List<PeerAddress> targets, PeerInfo peer) {
     final myPublicIp = natTraversal.publicIpForNatContext;
     // If our "public" IP is actually a private IP (NAT module misdetection),

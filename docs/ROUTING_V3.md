@@ -284,7 +284,7 @@ Wenn ein neuer Node online geht, sendet ER seinen eigenen 3x-Burst. Die bestehen
 ### Cross-Subnet-Szenario
 
 ```
-Alice (192.168.10.201/24) ──── Router (IGMP) ──── Bootstrap (192.168.15.15/24)
+Alice (192.0.2.201/24) ──── Router (IGMP) ──── Bootstrap (192.0.2.15/24)
 
 Alice startet → sendet Multicast an 239.192.67.76
 → Router leitet an alle Subnetze weiter (IGMP)
@@ -537,7 +537,7 @@ TCP wurde **komplett aus dem Code entfernt**. Gruende:
 
 ### TLS-Fallback bleibt (Anti-Zensur)
 
-TLS auf Port+2 bleibt als letztes Mittel wenn UDP komplett blockiert ist (Corporate Firewalls, zensierte Laender). Aktiviert nach 15 konsekutiven UDP-Fehlern. Periodische UDP-Probes versuchen Rueckkehr zum normalen Pfad.
+TLS auf **demselben Port wie UDP** (V3.1.71, davor Port+2) bleibt als letztes Mittel wenn UDP komplett blockiert ist (Corporate Firewalls, zensierte Laender). Aktiviert nach 15 konsekutiven UDP-Fehlern. Periodische UDP-Probes versuchen Rueckkehr zum normalen Pfad. Kernel handhabt UDP (SOCK_DGRAM) und TCP (SOCK_STREAM) in getrennten Namespaces, sodass dieselbe Port-Nummer fuer beide Protokolle kein Bind-Konflikt ist.
 
 Fuer zukuenftige Skalierung (Millionen Peers) ist ein **Sliding-Window Congestion Control** auf RUDP-Light-Ebene geplant.
 
@@ -704,7 +704,7 @@ Key: "${peerHex}|${viaNextHopHex ?? 'direct'}"
 ### Beispiel-Szenario: Handy → Bootstrap → Alice
 
 ```
-1. Handy scannt Alice's QR (LAN-IP 192.168.10.201 + Bootstrap als Seed)
+1. Handy scannt Alice's QR (LAN-IP 192.0.2.201 + Bootstrap als Seed)
 2. sendEnvelope: DV-Route via Bootstrap → _sendViaNextHop an Bootstrap
 3. _trackAck: msgId, recipient=Alice, viaNextHop=Bootstrap, timeout=8s
 4. Bootstrap: RELAY_FORWARD → Alice (LAN)
