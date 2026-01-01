@@ -13,239 +13,6 @@ import 'dart:core' as $core;
 
 import 'package:protobuf/protobuf.dart' as $pb;
 
-class MessageType extends $pb.ProtobufEnum {
-  static const MessageType TEXT = MessageType._(0, _omitEnumNames ? '' : 'TEXT');
-  static const MessageType IMAGE = MessageType._(1, _omitEnumNames ? '' : 'IMAGE');
-  static const MessageType VIDEO = MessageType._(2, _omitEnumNames ? '' : 'VIDEO');
-  static const MessageType GIF = MessageType._(3, _omitEnumNames ? '' : 'GIF');
-  static const MessageType EMOJI_REACTION = MessageType._(4, _omitEnumNames ? '' : 'EMOJI_REACTION');
-  static const MessageType MEDIA_ANNOUNCEMENT = MessageType._(5, _omitEnumNames ? '' : 'MEDIA_ANNOUNCEMENT');
-  static const MessageType MEDIA_ACCEPT = MessageType._(6, _omitEnumNames ? '' : 'MEDIA_ACCEPT');
-  static const MessageType MEDIA_REJECT = MessageType._(7, _omitEnumNames ? '' : 'MEDIA_REJECT');
-  static const MessageType MESSAGE_EDIT = MessageType._(8, _omitEnumNames ? '' : 'MESSAGE_EDIT');
-  static const MessageType MESSAGE_EXPIRE_CONFIG = MessageType._(9, _omitEnumNames ? '' : 'MESSAGE_EXPIRE_CONFIG');
-  static const MessageType RESTORE_BROADCAST = MessageType._(13, _omitEnumNames ? '' : 'RESTORE_BROADCAST');
-  static const MessageType RESTORE_RESPONSE = MessageType._(14, _omitEnumNames ? '' : 'RESTORE_RESPONSE');
-  static const MessageType TYPING_INDICATOR = MessageType._(15, _omitEnumNames ? '' : 'TYPING_INDICATOR');
-  static const MessageType READ_RECEIPT = MessageType._(16, _omitEnumNames ? '' : 'READ_RECEIPT');
-  static const MessageType GROUP_CREATE = MessageType._(17, _omitEnumNames ? '' : 'GROUP_CREATE');
-  static const MessageType GROUP_INVITE = MessageType._(18, _omitEnumNames ? '' : 'GROUP_INVITE');
-  static const MessageType GROUP_LEAVE = MessageType._(19, _omitEnumNames ? '' : 'GROUP_LEAVE');
-  static const MessageType GROUP_KEY_UPDATE = MessageType._(20, _omitEnumNames ? '' : 'GROUP_KEY_UPDATE');
-  static const MessageType MESSAGE_DELETE = MessageType._(21, _omitEnumNames ? '' : 'MESSAGE_DELETE');
-  static const MessageType VOICE_MESSAGE = MessageType._(22, _omitEnumNames ? '' : 'VOICE_MESSAGE');
-  static const MessageType FILE = MessageType._(23, _omitEnumNames ? '' : 'FILE');
-  static const MessageType CALL_INVITE = MessageType._(30, _omitEnumNames ? '' : 'CALL_INVITE');
-  static const MessageType CALL_ANSWER = MessageType._(31, _omitEnumNames ? '' : 'CALL_ANSWER');
-  static const MessageType CALL_REJECT = MessageType._(32, _omitEnumNames ? '' : 'CALL_REJECT');
-  static const MessageType CALL_HANGUP = MessageType._(33, _omitEnumNames ? '' : 'CALL_HANGUP');
-  static const MessageType ICE_CANDIDATE = MessageType._(34, _omitEnumNames ? '' : 'ICE_CANDIDATE');
-  static const MessageType CALL_REJOIN = MessageType._(35, _omitEnumNames ? '' : 'CALL_REJOIN');
-  static const MessageType CALL_AUDIO = MessageType._(36, _omitEnumNames ? '' : 'CALL_AUDIO');
-  static const MessageType PEER_LIST_SUMMARY = MessageType._(50, _omitEnumNames ? '' : 'PEER_LIST_SUMMARY');
-  static const MessageType PEER_LIST_WANT = MessageType._(51, _omitEnumNames ? '' : 'PEER_LIST_WANT');
-  static const MessageType PEER_LIST_PUSH = MessageType._(52, _omitEnumNames ? '' : 'PEER_LIST_PUSH');
-  static const MessageType CONTACT_REQUEST = MessageType._(62, _omitEnumNames ? '' : 'CONTACT_REQUEST');
-  static const MessageType CONTACT_REQUEST_RESPONSE = MessageType._(63, _omitEnumNames ? '' : 'CONTACT_REQUEST_RESPONSE');
-  static const MessageType CHANNEL_CREATE = MessageType._(70, _omitEnumNames ? '' : 'CHANNEL_CREATE');
-  static const MessageType CHANNEL_POST = MessageType._(71, _omitEnumNames ? '' : 'CHANNEL_POST');
-  static const MessageType CHANNEL_INVITE = MessageType._(72, _omitEnumNames ? '' : 'CHANNEL_INVITE');
-  static const MessageType CHANNEL_ROLE_UPDATE = MessageType._(73, _omitEnumNames ? '' : 'CHANNEL_ROLE_UPDATE');
-  static const MessageType CHANNEL_LEAVE = MessageType._(74, _omitEnumNames ? '' : 'CHANNEL_LEAVE');
-  static const MessageType CHANNEL_JOIN_REQUEST = MessageType._(75, _omitEnumNames ? '' : 'CHANNEL_JOIN_REQUEST');
-  static const MessageType CHANNEL_REPORT = MessageType._(76, _omitEnumNames ? '' : 'CHANNEL_REPORT');
-  static const MessageType CHANNEL_REPORT_RESPONSE = MessageType._(77, _omitEnumNames ? '' : 'CHANNEL_REPORT_RESPONSE');
-  static const MessageType JURY_REQUEST = MessageType._(78, _omitEnumNames ? '' : 'JURY_REQUEST');
-  static const MessageType JURY_VOTE_MSG = MessageType._(79, _omitEnumNames ? '' : 'JURY_VOTE_MSG');
-  static const MessageType JURY_RESULT = MessageType._(88, _omitEnumNames ? '' : 'JURY_RESULT');
-  static const MessageType CHANNEL_INDEX_EXCHANGE = MessageType._(89, _omitEnumNames ? '' : 'CHANNEL_INDEX_EXCHANGE');
-  static const MessageType DHT_PING = MessageType._(80, _omitEnumNames ? '' : 'DHT_PING');
-  static const MessageType DHT_PONG = MessageType._(81, _omitEnumNames ? '' : 'DHT_PONG');
-  static const MessageType DHT_FIND_NODE = MessageType._(82, _omitEnumNames ? '' : 'DHT_FIND_NODE');
-  static const MessageType DHT_FIND_NODE_RESPONSE = MessageType._(83, _omitEnumNames ? '' : 'DHT_FIND_NODE_RESPONSE');
-  static const MessageType DHT_STORE = MessageType._(84, _omitEnumNames ? '' : 'DHT_STORE');
-  static const MessageType DHT_STORE_RESPONSE = MessageType._(85, _omitEnumNames ? '' : 'DHT_STORE_RESPONSE');
-  static const MessageType DHT_FIND_VALUE = MessageType._(86, _omitEnumNames ? '' : 'DHT_FIND_VALUE');
-  static const MessageType DHT_FIND_VALUE_RESPONSE = MessageType._(87, _omitEnumNames ? '' : 'DHT_FIND_VALUE_RESPONSE');
-  static const MessageType FRAGMENT_STORE = MessageType._(90, _omitEnumNames ? '' : 'FRAGMENT_STORE');
-  static const MessageType FRAGMENT_STORE_ACK = MessageType._(91, _omitEnumNames ? '' : 'FRAGMENT_STORE_ACK');
-  static const MessageType FRAGMENT_RETRIEVE = MessageType._(92, _omitEnumNames ? '' : 'FRAGMENT_RETRIEVE');
-  static const MessageType FRAGMENT_DELETE = MessageType._(93, _omitEnumNames ? '' : 'FRAGMENT_DELETE');
-  static const MessageType DELIVERY_RECEIPT = MessageType._(94, _omitEnumNames ? '' : 'DELIVERY_RECEIPT');
-  static const MessageType CHAT_CONFIG_UPDATE = MessageType._(100, _omitEnumNames ? '' : 'CHAT_CONFIG_UPDATE');
-  static const MessageType CHAT_CONFIG_RESPONSE = MessageType._(101, _omitEnumNames ? '' : 'CHAT_CONFIG_RESPONSE');
-  static const MessageType IDENTITY_DELETED = MessageType._(102, _omitEnumNames ? '' : 'IDENTITY_DELETED');
-  static const MessageType PROFILE_UPDATE = MessageType._(103, _omitEnumNames ? '' : 'PROFILE_UPDATE');
-  static const MessageType GUARDIAN_SHARE_STORE = MessageType._(104, _omitEnumNames ? '' : 'GUARDIAN_SHARE_STORE');
-  static const MessageType GUARDIAN_RESTORE_REQUEST = MessageType._(105, _omitEnumNames ? '' : 'GUARDIAN_RESTORE_REQUEST');
-  static const MessageType GUARDIAN_RESTORE_RESPONSE = MessageType._(106, _omitEnumNames ? '' : 'GUARDIAN_RESTORE_RESPONSE');
-  static const MessageType RELAY_FORWARD = MessageType._(110, _omitEnumNames ? '' : 'RELAY_FORWARD');
-  static const MessageType RELAY_ACK = MessageType._(111, _omitEnumNames ? '' : 'RELAY_ACK');
-  static const MessageType REACHABILITY_QUERY = MessageType._(112, _omitEnumNames ? '' : 'REACHABILITY_QUERY');
-  static const MessageType REACHABILITY_RESPONSE = MessageType._(113, _omitEnumNames ? '' : 'REACHABILITY_RESPONSE');
-  static const MessageType PEER_STORE = MessageType._(114, _omitEnumNames ? '' : 'PEER_STORE');
-  static const MessageType PEER_STORE_ACK = MessageType._(115, _omitEnumNames ? '' : 'PEER_STORE_ACK');
-  static const MessageType PEER_RETRIEVE = MessageType._(116, _omitEnumNames ? '' : 'PEER_RETRIEVE');
-  static const MessageType PEER_RETRIEVE_RESPONSE = MessageType._(117, _omitEnumNames ? '' : 'PEER_RETRIEVE_RESPONSE');
-  static const MessageType ROUTE_UPDATE = MessageType._(120, _omitEnumNames ? '' : 'ROUTE_UPDATE');
-  static const MessageType HOLE_PUNCH_REQUEST = MessageType._(121, _omitEnumNames ? '' : 'HOLE_PUNCH_REQUEST');
-  static const MessageType HOLE_PUNCH_NOTIFY = MessageType._(122, _omitEnumNames ? '' : 'HOLE_PUNCH_NOTIFY');
-  static const MessageType HOLE_PUNCH_PING = MessageType._(123, _omitEnumNames ? '' : 'HOLE_PUNCH_PING');
-  static const MessageType HOLE_PUNCH_PONG = MessageType._(124, _omitEnumNames ? '' : 'HOLE_PUNCH_PONG');
-  static const MessageType MEDIA_CHUNK = MessageType._(125, _omitEnumNames ? '' : 'MEDIA_CHUNK');
-  static const MessageType TWIN_ANNOUNCE = MessageType._(130, _omitEnumNames ? '' : 'TWIN_ANNOUNCE');
-  static const MessageType TWIN_SYNC = MessageType._(131, _omitEnumNames ? '' : 'TWIN_SYNC');
-  static const MessageType DEVICE_REVOKED = MessageType._(132, _omitEnumNames ? '' : 'DEVICE_REVOKED');
-  static const MessageType KEY_ROTATION_BROADCAST = MessageType._(133, _omitEnumNames ? '' : 'KEY_ROTATION_BROADCAST');
-  static const MessageType KEY_ROTATION_ACK = MessageType._(134, _omitEnumNames ? '' : 'KEY_ROTATION_ACK');
-  static const MessageType CALENDAR_INVITE = MessageType._(140, _omitEnumNames ? '' : 'CALENDAR_INVITE');
-  static const MessageType CALENDAR_RSVP = MessageType._(141, _omitEnumNames ? '' : 'CALENDAR_RSVP');
-  static const MessageType CALENDAR_UPDATE = MessageType._(142, _omitEnumNames ? '' : 'CALENDAR_UPDATE');
-  static const MessageType CALENDAR_DELETE = MessageType._(143, _omitEnumNames ? '' : 'CALENDAR_DELETE');
-  static const MessageType FREE_BUSY_REQUEST = MessageType._(144, _omitEnumNames ? '' : 'FREE_BUSY_REQUEST');
-  static const MessageType FREE_BUSY_RESPONSE = MessageType._(145, _omitEnumNames ? '' : 'FREE_BUSY_RESPONSE');
-  static const MessageType POLL_CREATE = MessageType._(146, _omitEnumNames ? '' : 'POLL_CREATE');
-  static const MessageType POLL_VOTE = MessageType._(147, _omitEnumNames ? '' : 'POLL_VOTE');
-  static const MessageType POLL_UPDATE = MessageType._(148, _omitEnumNames ? '' : 'POLL_UPDATE');
-  static const MessageType POLL_SNAPSHOT = MessageType._(149, _omitEnumNames ? '' : 'POLL_SNAPSHOT');
-  static const MessageType POLL_VOTE_ANONYMOUS = MessageType._(150, _omitEnumNames ? '' : 'POLL_VOTE_ANONYMOUS');
-  static const MessageType POLL_VOTE_REVOKE = MessageType._(151, _omitEnumNames ? '' : 'POLL_VOTE_REVOKE');
-  static const MessageType IDENTITY_AUTH_PUBLISH = MessageType._(152, _omitEnumNames ? '' : 'IDENTITY_AUTH_PUBLISH');
-  static const MessageType IDENTITY_AUTH_RETRIEVE = MessageType._(153, _omitEnumNames ? '' : 'IDENTITY_AUTH_RETRIEVE');
-  static const MessageType IDENTITY_AUTH_RESPONSE = MessageType._(154, _omitEnumNames ? '' : 'IDENTITY_AUTH_RESPONSE');
-  static const MessageType IDENTITY_LIVE_PUBLISH = MessageType._(155, _omitEnumNames ? '' : 'IDENTITY_LIVE_PUBLISH');
-  static const MessageType IDENTITY_LIVE_RETRIEVE = MessageType._(156, _omitEnumNames ? '' : 'IDENTITY_LIVE_RETRIEVE');
-  static const MessageType IDENTITY_LIVE_RESPONSE = MessageType._(157, _omitEnumNames ? '' : 'IDENTITY_LIVE_RESPONSE');
-  static const MessageType CALL_RTT_PING = MessageType._(37, _omitEnumNames ? '' : 'CALL_RTT_PING');
-  static const MessageType CALL_RTT_PONG = MessageType._(38, _omitEnumNames ? '' : 'CALL_RTT_PONG');
-  static const MessageType CALL_TREE_UPDATE = MessageType._(39, _omitEnumNames ? '' : 'CALL_TREE_UPDATE');
-  static const MessageType CALL_VIDEO = MessageType._(40, _omitEnumNames ? '' : 'CALL_VIDEO');
-  static const MessageType CALL_KEYFRAME_REQUEST = MessageType._(41, _omitEnumNames ? '' : 'CALL_KEYFRAME_REQUEST');
-  static const MessageType CALL_GROUP_AUDIO = MessageType._(42, _omitEnumNames ? '' : 'CALL_GROUP_AUDIO');
-  static const MessageType CALL_GROUP_LEAVE = MessageType._(43, _omitEnumNames ? '' : 'CALL_GROUP_LEAVE');
-  static const MessageType CALL_GROUP_KEY_ROTATE = MessageType._(44, _omitEnumNames ? '' : 'CALL_GROUP_KEY_ROTATE');
-  static const MessageType CALL_GROUP_VIDEO = MessageType._(45, _omitEnumNames ? '' : 'CALL_GROUP_VIDEO');
-
-  static const $core.List<MessageType> values = <MessageType> [
-    TEXT,
-    IMAGE,
-    VIDEO,
-    GIF,
-    EMOJI_REACTION,
-    MEDIA_ANNOUNCEMENT,
-    MEDIA_ACCEPT,
-    MEDIA_REJECT,
-    MESSAGE_EDIT,
-    MESSAGE_EXPIRE_CONFIG,
-    RESTORE_BROADCAST,
-    RESTORE_RESPONSE,
-    TYPING_INDICATOR,
-    READ_RECEIPT,
-    GROUP_CREATE,
-    GROUP_INVITE,
-    GROUP_LEAVE,
-    GROUP_KEY_UPDATE,
-    MESSAGE_DELETE,
-    VOICE_MESSAGE,
-    FILE,
-    CALL_INVITE,
-    CALL_ANSWER,
-    CALL_REJECT,
-    CALL_HANGUP,
-    ICE_CANDIDATE,
-    CALL_REJOIN,
-    CALL_AUDIO,
-    PEER_LIST_SUMMARY,
-    PEER_LIST_WANT,
-    PEER_LIST_PUSH,
-    CONTACT_REQUEST,
-    CONTACT_REQUEST_RESPONSE,
-    CHANNEL_CREATE,
-    CHANNEL_POST,
-    CHANNEL_INVITE,
-    CHANNEL_ROLE_UPDATE,
-    CHANNEL_LEAVE,
-    CHANNEL_JOIN_REQUEST,
-    CHANNEL_REPORT,
-    CHANNEL_REPORT_RESPONSE,
-    JURY_REQUEST,
-    JURY_VOTE_MSG,
-    JURY_RESULT,
-    CHANNEL_INDEX_EXCHANGE,
-    DHT_PING,
-    DHT_PONG,
-    DHT_FIND_NODE,
-    DHT_FIND_NODE_RESPONSE,
-    DHT_STORE,
-    DHT_STORE_RESPONSE,
-    DHT_FIND_VALUE,
-    DHT_FIND_VALUE_RESPONSE,
-    FRAGMENT_STORE,
-    FRAGMENT_STORE_ACK,
-    FRAGMENT_RETRIEVE,
-    FRAGMENT_DELETE,
-    DELIVERY_RECEIPT,
-    CHAT_CONFIG_UPDATE,
-    CHAT_CONFIG_RESPONSE,
-    IDENTITY_DELETED,
-    PROFILE_UPDATE,
-    GUARDIAN_SHARE_STORE,
-    GUARDIAN_RESTORE_REQUEST,
-    GUARDIAN_RESTORE_RESPONSE,
-    RELAY_FORWARD,
-    RELAY_ACK,
-    REACHABILITY_QUERY,
-    REACHABILITY_RESPONSE,
-    PEER_STORE,
-    PEER_STORE_ACK,
-    PEER_RETRIEVE,
-    PEER_RETRIEVE_RESPONSE,
-    ROUTE_UPDATE,
-    HOLE_PUNCH_REQUEST,
-    HOLE_PUNCH_NOTIFY,
-    HOLE_PUNCH_PING,
-    HOLE_PUNCH_PONG,
-    MEDIA_CHUNK,
-    TWIN_ANNOUNCE,
-    TWIN_SYNC,
-    DEVICE_REVOKED,
-    KEY_ROTATION_BROADCAST,
-    KEY_ROTATION_ACK,
-    CALENDAR_INVITE,
-    CALENDAR_RSVP,
-    CALENDAR_UPDATE,
-    CALENDAR_DELETE,
-    FREE_BUSY_REQUEST,
-    FREE_BUSY_RESPONSE,
-    POLL_CREATE,
-    POLL_VOTE,
-    POLL_UPDATE,
-    POLL_SNAPSHOT,
-    POLL_VOTE_ANONYMOUS,
-    POLL_VOTE_REVOKE,
-    IDENTITY_AUTH_PUBLISH,
-    IDENTITY_AUTH_RETRIEVE,
-    IDENTITY_AUTH_RESPONSE,
-    IDENTITY_LIVE_PUBLISH,
-    IDENTITY_LIVE_RETRIEVE,
-    IDENTITY_LIVE_RESPONSE,
-    CALL_RTT_PING,
-    CALL_RTT_PONG,
-    CALL_TREE_UPDATE,
-    CALL_VIDEO,
-    CALL_KEYFRAME_REQUEST,
-    CALL_GROUP_AUDIO,
-    CALL_GROUP_LEAVE,
-    CALL_GROUP_KEY_ROTATE,
-    CALL_GROUP_VIDEO,
-  ];
-
-  static final $core.Map<$core.int, MessageType> _byValue = $pb.ProtobufEnum.initByValue(values);
-  static MessageType? valueOf($core.int value) => _byValue[value];
-
-  const MessageType._($core.int v, $core.String n) : super(v, n);
-}
-
 class CompressionType extends $pb.ProtobufEnum {
   static const CompressionType NONE = CompressionType._(0, _omitEnumNames ? '' : 'NONE');
   static const CompressionType ZSTD = CompressionType._(1, _omitEnumNames ? '' : 'ZSTD');
@@ -265,11 +32,17 @@ class AddressType extends $pb.ProtobufEnum {
   static const AddressType IPV4_PUBLIC = AddressType._(0, _omitEnumNames ? '' : 'IPV4_PUBLIC');
   static const AddressType IPV4_PRIVATE = AddressType._(1, _omitEnumNames ? '' : 'IPV4_PRIVATE');
   static const AddressType IPV6_GLOBAL = AddressType._(2, _omitEnumNames ? '' : 'IPV6_GLOBAL');
+  static const AddressType IPV6_ULA = AddressType._(3, _omitEnumNames ? '' : 'IPV6_ULA');
+  static const AddressType IPV6_LINK_LOCAL = AddressType._(4, _omitEnumNames ? '' : 'IPV6_LINK_LOCAL');
+  static const AddressType IPV6_SITE_LOCAL = AddressType._(5, _omitEnumNames ? '' : 'IPV6_SITE_LOCAL');
 
   static const $core.List<AddressType> values = <AddressType> [
     IPV4_PUBLIC,
     IPV4_PRIVATE,
     IPV6_GLOBAL,
+    IPV6_ULA,
+    IPV6_LINK_LOCAL,
+    IPV6_SITE_LOCAL,
   ];
 
   static final $core.Map<$core.int, AddressType> _byValue = $pb.ProtobufEnum.initByValue(values);
@@ -498,6 +271,292 @@ class DateAvailability extends $pb.ProtobufEnum {
   static DateAvailability? valueOf($core.int value) => _byValue[value];
 
   const DateAvailability._($core.int v, $core.String n) : super(v, n);
+}
+
+class PayloadTypeV3 extends $pb.ProtobufEnum {
+  static const PayloadTypeV3 PAYLOAD_APPLICATION_FRAME = PayloadTypeV3._(0, _omitEnumNames ? '' : 'PAYLOAD_APPLICATION_FRAME');
+  static const PayloadTypeV3 PAYLOAD_ONION_LAYER = PayloadTypeV3._(1, _omitEnumNames ? '' : 'PAYLOAD_ONION_LAYER');
+  static const PayloadTypeV3 PAYLOAD_INFRASTRUCTURE_FRAME = PayloadTypeV3._(2, _omitEnumNames ? '' : 'PAYLOAD_INFRASTRUCTURE_FRAME');
+  static const PayloadTypeV3 PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME = PayloadTypeV3._(3, _omitEnumNames ? '' : 'PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME');
+
+  static const $core.List<PayloadTypeV3> values = <PayloadTypeV3> [
+    PAYLOAD_APPLICATION_FRAME,
+    PAYLOAD_ONION_LAYER,
+    PAYLOAD_INFRASTRUCTURE_FRAME,
+    PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME,
+  ];
+
+  static final $core.Map<$core.int, PayloadTypeV3> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static PayloadTypeV3? valueOf($core.int value) => _byValue[value];
+
+  const PayloadTypeV3._($core.int v, $core.String n) : super(v, n);
+}
+
+///  ── MessageType V3 (Numbering aus Appendix A.4) ─────────────────────────
+///
+///  ACHTUNG: Numbers WEICHEN VON MessageType (alt) AB. Beispiele:
+///    alt: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30
+///    alt: TWIN_SYNC=131          → V3: MTV3_TWIN_SYNC=180
+///  Hard-Cut in Welle 2 (Profile-Reset, §23.2). Bis dahin koexistieren beide
+///  Enums problemlos weil sie verschiedene Namen haben.
+///
+///  Prefix MTV3_ um Symbol-Kollision mit MessageType (alt) zu vermeiden.
+///  In Welle 2 wird Prefix entfernt + Enum auf MessageType umbenannt.
+class MessageTypeV3 extends $pb.ProtobufEnum {
+  static const MessageTypeV3 MTV3_TEXT = MessageTypeV3._(0, _omitEnumNames ? '' : 'MTV3_TEXT');
+  static const MessageTypeV3 MTV3_MEDIA_INLINE = MessageTypeV3._(1, _omitEnumNames ? '' : 'MTV3_MEDIA_INLINE');
+  static const MessageTypeV3 MTV3_MEDIA_ANNOUNCE = MessageTypeV3._(2, _omitEnumNames ? '' : 'MTV3_MEDIA_ANNOUNCE');
+  static const MessageTypeV3 MTV3_MEDIA_REQUEST = MessageTypeV3._(3, _omitEnumNames ? '' : 'MTV3_MEDIA_REQUEST');
+  static const MessageTypeV3 MTV3_MEDIA_CHUNK = MessageTypeV3._(4, _omitEnumNames ? '' : 'MTV3_MEDIA_CHUNK');
+  static const MessageTypeV3 MTV3_MEDIA_COMPLETE = MessageTypeV3._(5, _omitEnumNames ? '' : 'MTV3_MEDIA_COMPLETE');
+  static const MessageTypeV3 MTV3_MEDIA_REJECT = MessageTypeV3._(6, _omitEnumNames ? '' : 'MTV3_MEDIA_REJECT');
+  static const MessageTypeV3 MTV3_REACTION = MessageTypeV3._(7, _omitEnumNames ? '' : 'MTV3_REACTION');
+  static const MessageTypeV3 MTV3_REPLY = MessageTypeV3._(8, _omitEnumNames ? '' : 'MTV3_REPLY');
+  static const MessageTypeV3 MTV3_EDIT = MessageTypeV3._(9, _omitEnumNames ? '' : 'MTV3_EDIT');
+  static const MessageTypeV3 MTV3_DELETE = MessageTypeV3._(10, _omitEnumNames ? '' : 'MTV3_DELETE');
+  static const MessageTypeV3 MTV3_TYPING_INDICATOR = MessageTypeV3._(15, _omitEnumNames ? '' : 'MTV3_TYPING_INDICATOR');
+  static const MessageTypeV3 MTV3_READ_RECEIPT = MessageTypeV3._(16, _omitEnumNames ? '' : 'MTV3_READ_RECEIPT');
+  static const MessageTypeV3 MTV3_DELIVERY_RECEIPT = MessageTypeV3._(17, _omitEnumNames ? '' : 'MTV3_DELIVERY_RECEIPT');
+  static const MessageTypeV3 MTV3_VOICE_MESSAGE = MessageTypeV3._(22, _omitEnumNames ? '' : 'MTV3_VOICE_MESSAGE');
+  static const MessageTypeV3 MTV3_RESTORE_BROADCAST = MessageTypeV3._(30, _omitEnumNames ? '' : 'MTV3_RESTORE_BROADCAST');
+  static const MessageTypeV3 MTV3_RESTORE_RESPONSE = MessageTypeV3._(31, _omitEnumNames ? '' : 'MTV3_RESTORE_RESPONSE');
+  static const MessageTypeV3 MTV3_IDENTITY_DELETED = MessageTypeV3._(32, _omitEnumNames ? '' : 'MTV3_IDENTITY_DELETED');
+  static const MessageTypeV3 MTV3_PROFILE_UPDATE = MessageTypeV3._(33, _omitEnumNames ? '' : 'MTV3_PROFILE_UPDATE');
+  static const MessageTypeV3 MTV3_KEY_ROTATION_BROADCAST = MessageTypeV3._(34, _omitEnumNames ? '' : 'MTV3_KEY_ROTATION_BROADCAST');
+  static const MessageTypeV3 MTV3_KEY_ROTATION_ACK = MessageTypeV3._(38, _omitEnumNames ? '' : 'MTV3_KEY_ROTATION_ACK');
+  static const MessageTypeV3 MTV3_GUARDIAN_SHARE_STORE = MessageTypeV3._(35, _omitEnumNames ? '' : 'MTV3_GUARDIAN_SHARE_STORE');
+  static const MessageTypeV3 MTV3_GUARDIAN_RESTORE_REQUEST = MessageTypeV3._(36, _omitEnumNames ? '' : 'MTV3_GUARDIAN_RESTORE_REQUEST');
+  static const MessageTypeV3 MTV3_GUARDIAN_RESTORE_RESPONSE = MessageTypeV3._(37, _omitEnumNames ? '' : 'MTV3_GUARDIAN_RESTORE_RESPONSE');
+  static const MessageTypeV3 MTV3_CONTACT_REQUEST = MessageTypeV3._(40, _omitEnumNames ? '' : 'MTV3_CONTACT_REQUEST');
+  static const MessageTypeV3 MTV3_CONTACT_REQUEST_RESPONSE = MessageTypeV3._(41, _omitEnumNames ? '' : 'MTV3_CONTACT_REQUEST_RESPONSE');
+  static const MessageTypeV3 MTV3_GROUP_CREATE = MessageTypeV3._(50, _omitEnumNames ? '' : 'MTV3_GROUP_CREATE');
+  static const MessageTypeV3 MTV3_GROUP_INVITE = MessageTypeV3._(51, _omitEnumNames ? '' : 'MTV3_GROUP_INVITE');
+  static const MessageTypeV3 MTV3_GROUP_LEAVE = MessageTypeV3._(52, _omitEnumNames ? '' : 'MTV3_GROUP_LEAVE');
+  static const MessageTypeV3 MTV3_GROUP_KEY_UPDATE = MessageTypeV3._(53, _omitEnumNames ? '' : 'MTV3_GROUP_KEY_UPDATE');
+  static const MessageTypeV3 MTV3_CHANNEL_CREATE = MessageTypeV3._(60, _omitEnumNames ? '' : 'MTV3_CHANNEL_CREATE');
+  static const MessageTypeV3 MTV3_CHANNEL_POST = MessageTypeV3._(61, _omitEnumNames ? '' : 'MTV3_CHANNEL_POST');
+  static const MessageTypeV3 MTV3_CHANNEL_INVITE = MessageTypeV3._(62, _omitEnumNames ? '' : 'MTV3_CHANNEL_INVITE');
+  static const MessageTypeV3 MTV3_CHANNEL_LEAVE = MessageTypeV3._(63, _omitEnumNames ? '' : 'MTV3_CHANNEL_LEAVE');
+  static const MessageTypeV3 MTV3_CHANNEL_ROLE_UPDATE = MessageTypeV3._(64, _omitEnumNames ? '' : 'MTV3_CHANNEL_ROLE_UPDATE');
+  static const MessageTypeV3 MTV3_CHANNEL_BAD_BADGE_REPORT = MessageTypeV3._(65, _omitEnumNames ? '' : 'MTV3_CHANNEL_BAD_BADGE_REPORT');
+  static const MessageTypeV3 MTV3_CHANNEL_JURY_VOTE = MessageTypeV3._(66, _omitEnumNames ? '' : 'MTV3_CHANNEL_JURY_VOTE');
+  static const MessageTypeV3 MTV3_CHANNEL_MOD_DECISION = MessageTypeV3._(67, _omitEnumNames ? '' : 'MTV3_CHANNEL_MOD_DECISION');
+  static const MessageTypeV3 MTV3_CHANNEL_SUBSCRIBE_PROBE = MessageTypeV3._(68, _omitEnumNames ? '' : 'MTV3_CHANNEL_SUBSCRIBE_PROBE');
+  static const MessageTypeV3 MTV3_CALL_INVITE = MessageTypeV3._(70, _omitEnumNames ? '' : 'MTV3_CALL_INVITE');
+  static const MessageTypeV3 MTV3_CALL_ANSWER = MessageTypeV3._(71, _omitEnumNames ? '' : 'MTV3_CALL_ANSWER');
+  static const MessageTypeV3 MTV3_CALL_REJECT = MessageTypeV3._(72, _omitEnumNames ? '' : 'MTV3_CALL_REJECT');
+  static const MessageTypeV3 MTV3_CALL_HANGUP = MessageTypeV3._(73, _omitEnumNames ? '' : 'MTV3_CALL_HANGUP');
+  static const MessageTypeV3 MTV3_ICE_CANDIDATE = MessageTypeV3._(74, _omitEnumNames ? '' : 'MTV3_ICE_CANDIDATE');
+  static const MessageTypeV3 MTV3_CALL_REJOIN = MessageTypeV3._(75, _omitEnumNames ? '' : 'MTV3_CALL_REJOIN');
+  static const MessageTypeV3 MTV3_CALL_AUDIO = MessageTypeV3._(76, _omitEnumNames ? '' : 'MTV3_CALL_AUDIO');
+  static const MessageTypeV3 MTV3_CALL_VIDEO = MessageTypeV3._(77, _omitEnumNames ? '' : 'MTV3_CALL_VIDEO');
+  static const MessageTypeV3 MTV3_CALL_GROUP_AUDIO = MessageTypeV3._(78, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_AUDIO');
+  static const MessageTypeV3 MTV3_CALL_GROUP_VIDEO = MessageTypeV3._(79, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_VIDEO');
+  static const MessageTypeV3 MTV3_CALL_GROUP_LEAVE = MessageTypeV3._(80, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_LEAVE');
+  static const MessageTypeV3 MTV3_CALL_GROUP_KEY_ROTATE = MessageTypeV3._(81, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_KEY_ROTATE');
+  static const MessageTypeV3 MTV3_CALL_RTT_PING = MessageTypeV3._(82, _omitEnumNames ? '' : 'MTV3_CALL_RTT_PING');
+  static const MessageTypeV3 MTV3_CALL_RTT_PONG = MessageTypeV3._(83, _omitEnumNames ? '' : 'MTV3_CALL_RTT_PONG');
+  static const MessageTypeV3 MTV3_CALL_TREE_UPDATE = MessageTypeV3._(84, _omitEnumNames ? '' : 'MTV3_CALL_TREE_UPDATE');
+  static const MessageTypeV3 MTV3_CALL_KEYFRAME_REQUEST = MessageTypeV3._(85, _omitEnumNames ? '' : 'MTV3_CALL_KEYFRAME_REQUEST');
+  static const MessageTypeV3 MTV3_CHANNEL_INDEX_EXCHANGE = MessageTypeV3._(90, _omitEnumNames ? '' : 'MTV3_CHANNEL_INDEX_EXCHANGE');
+  static const MessageTypeV3 MTV3_CHANNEL_JOIN_REQUEST = MessageTypeV3._(91, _omitEnumNames ? '' : 'MTV3_CHANNEL_JOIN_REQUEST');
+  static const MessageTypeV3 MTV3_CHANNEL_REPORT = MessageTypeV3._(92, _omitEnumNames ? '' : 'MTV3_CHANNEL_REPORT');
+  static const MessageTypeV3 MTV3_PEER_LIST_PUSH = MessageTypeV3._(100, _omitEnumNames ? '' : 'MTV3_PEER_LIST_PUSH');
+  static const MessageTypeV3 MTV3_PEER_LIST_SUMMARY = MessageTypeV3._(101, _omitEnumNames ? '' : 'MTV3_PEER_LIST_SUMMARY');
+  static const MessageTypeV3 MTV3_PEER_LIST_WANT = MessageTypeV3._(102, _omitEnumNames ? '' : 'MTV3_PEER_LIST_WANT');
+  static const MessageTypeV3 MTV3_PEER_KEY_REQUEST = MessageTypeV3._(103, _omitEnumNames ? '' : 'MTV3_PEER_KEY_REQUEST');
+  static const MessageTypeV3 MTV3_PEER_KEY_RESPONSE = MessageTypeV3._(104, _omitEnumNames ? '' : 'MTV3_PEER_KEY_RESPONSE');
+  static const MessageTypeV3 MTV3_DHT_PING = MessageTypeV3._(110, _omitEnumNames ? '' : 'MTV3_DHT_PING');
+  static const MessageTypeV3 MTV3_DHT_PONG = MessageTypeV3._(111, _omitEnumNames ? '' : 'MTV3_DHT_PONG');
+  static const MessageTypeV3 MTV3_DHT_FIND_NODE = MessageTypeV3._(112, _omitEnumNames ? '' : 'MTV3_DHT_FIND_NODE');
+  static const MessageTypeV3 MTV3_DHT_FIND_NODE_RESPONSE = MessageTypeV3._(113, _omitEnumNames ? '' : 'MTV3_DHT_FIND_NODE_RESPONSE');
+  static const MessageTypeV3 MTV3_DHT_STORE = MessageTypeV3._(114, _omitEnumNames ? '' : 'MTV3_DHT_STORE');
+  static const MessageTypeV3 MTV3_DHT_STORE_RESPONSE = MessageTypeV3._(115, _omitEnumNames ? '' : 'MTV3_DHT_STORE_RESPONSE');
+  static const MessageTypeV3 MTV3_DHT_FIND_VALUE = MessageTypeV3._(116, _omitEnumNames ? '' : 'MTV3_DHT_FIND_VALUE');
+  static const MessageTypeV3 MTV3_DHT_FIND_VALUE_RESPONSE = MessageTypeV3._(117, _omitEnumNames ? '' : 'MTV3_DHT_FIND_VALUE_RESPONSE');
+  static const MessageTypeV3 MTV3_FRAGMENT_STORE = MessageTypeV3._(120, _omitEnumNames ? '' : 'MTV3_FRAGMENT_STORE');
+  static const MessageTypeV3 MTV3_FRAGMENT_STORE_ACK = MessageTypeV3._(121, _omitEnumNames ? '' : 'MTV3_FRAGMENT_STORE_ACK');
+  static const MessageTypeV3 MTV3_FRAGMENT_RETRIEVE = MessageTypeV3._(122, _omitEnumNames ? '' : 'MTV3_FRAGMENT_RETRIEVE');
+  static const MessageTypeV3 MTV3_FRAGMENT_RETRIEVE_RESPONSE = MessageTypeV3._(123, _omitEnumNames ? '' : 'MTV3_FRAGMENT_RETRIEVE_RESPONSE');
+  static const MessageTypeV3 MTV3_FRAGMENT_DELETE = MessageTypeV3._(124, _omitEnumNames ? '' : 'MTV3_FRAGMENT_DELETE');
+  static const MessageTypeV3 MTV3_PEER_STORE = MessageTypeV3._(130, _omitEnumNames ? '' : 'MTV3_PEER_STORE');
+  static const MessageTypeV3 MTV3_PEER_STORE_ACK = MessageTypeV3._(131, _omitEnumNames ? '' : 'MTV3_PEER_STORE_ACK');
+  static const MessageTypeV3 MTV3_PEER_RETRIEVE = MessageTypeV3._(132, _omitEnumNames ? '' : 'MTV3_PEER_RETRIEVE');
+  static const MessageTypeV3 MTV3_PEER_RETRIEVE_RESPONSE = MessageTypeV3._(133, _omitEnumNames ? '' : 'MTV3_PEER_RETRIEVE_RESPONSE');
+  static const MessageTypeV3 MTV3_CHAT_CONFIG_UPDATE = MessageTypeV3._(140, _omitEnumNames ? '' : 'MTV3_CHAT_CONFIG_UPDATE');
+  static const MessageTypeV3 MTV3_CHAT_CONFIG_RESPONSE = MessageTypeV3._(141, _omitEnumNames ? '' : 'MTV3_CHAT_CONFIG_RESPONSE');
+  static const MessageTypeV3 MTV3_ROUTE_UPDATE = MessageTypeV3._(150, _omitEnumNames ? '' : 'MTV3_ROUTE_UPDATE');
+  static const MessageTypeV3 MTV3_REACHABILITY_QUERY = MessageTypeV3._(151, _omitEnumNames ? '' : 'MTV3_REACHABILITY_QUERY');
+  static const MessageTypeV3 MTV3_REACHABILITY_RESPONSE = MessageTypeV3._(152, _omitEnumNames ? '' : 'MTV3_REACHABILITY_RESPONSE');
+  static const MessageTypeV3 MTV3_RELAY_FORWARD = MessageTypeV3._(153, _omitEnumNames ? '' : 'MTV3_RELAY_FORWARD');
+  static const MessageTypeV3 MTV3_RELAY_ACK = MessageTypeV3._(154, _omitEnumNames ? '' : 'MTV3_RELAY_ACK');
+  static const MessageTypeV3 MTV3_HOLE_PUNCH_REQUEST = MessageTypeV3._(160, _omitEnumNames ? '' : 'MTV3_HOLE_PUNCH_REQUEST');
+  static const MessageTypeV3 MTV3_HOLE_PUNCH_NOTIFY = MessageTypeV3._(161, _omitEnumNames ? '' : 'MTV3_HOLE_PUNCH_NOTIFY');
+  static const MessageTypeV3 MTV3_HOLE_PUNCH_PING = MessageTypeV3._(162, _omitEnumNames ? '' : 'MTV3_HOLE_PUNCH_PING');
+  static const MessageTypeV3 MTV3_HOLE_PUNCH_PONG = MessageTypeV3._(163, _omitEnumNames ? '' : 'MTV3_HOLE_PUNCH_PONG');
+  static const MessageTypeV3 MTV3_IDENTITY_AUTH_PUBLISH = MessageTypeV3._(170, _omitEnumNames ? '' : 'MTV3_IDENTITY_AUTH_PUBLISH');
+  static const MessageTypeV3 MTV3_IDENTITY_AUTH_RETRIEVE = MessageTypeV3._(171, _omitEnumNames ? '' : 'MTV3_IDENTITY_AUTH_RETRIEVE');
+  static const MessageTypeV3 MTV3_IDENTITY_AUTH_RESPONSE = MessageTypeV3._(172, _omitEnumNames ? '' : 'MTV3_IDENTITY_AUTH_RESPONSE');
+  static const MessageTypeV3 MTV3_IDENTITY_LIVE_PUBLISH = MessageTypeV3._(173, _omitEnumNames ? '' : 'MTV3_IDENTITY_LIVE_PUBLISH');
+  static const MessageTypeV3 MTV3_IDENTITY_LIVE_RETRIEVE = MessageTypeV3._(174, _omitEnumNames ? '' : 'MTV3_IDENTITY_LIVE_RETRIEVE');
+  static const MessageTypeV3 MTV3_IDENTITY_LIVE_RESPONSE = MessageTypeV3._(175, _omitEnumNames ? '' : 'MTV3_IDENTITY_LIVE_RESPONSE');
+  static const MessageTypeV3 MTV3_IDENTITY_KEM_PUBLISH = MessageTypeV3._(176, _omitEnumNames ? '' : 'MTV3_IDENTITY_KEM_PUBLISH');
+  static const MessageTypeV3 MTV3_IDENTITY_KEM_RETRIEVE = MessageTypeV3._(177, _omitEnumNames ? '' : 'MTV3_IDENTITY_KEM_RETRIEVE');
+  static const MessageTypeV3 MTV3_IDENTITY_KEM_RESPONSE = MessageTypeV3._(178, _omitEnumNames ? '' : 'MTV3_IDENTITY_KEM_RESPONSE');
+  static const MessageTypeV3 MTV3_TWIN_SYNC = MessageTypeV3._(180, _omitEnumNames ? '' : 'MTV3_TWIN_SYNC');
+  static const MessageTypeV3 MTV3_DEVICE_PAIR_REQUEST = MessageTypeV3._(181, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_REQUEST');
+  static const MessageTypeV3 MTV3_DEVICE_PAIR_APPROVE = MessageTypeV3._(182, _omitEnumNames ? '' : 'MTV3_DEVICE_PAIR_APPROVE');
+  static const MessageTypeV3 MTV3_DEVICE_REVOCATION = MessageTypeV3._(183, _omitEnumNames ? '' : 'MTV3_DEVICE_REVOCATION');
+  static const MessageTypeV3 MTV3_CALENDAR_INVITE = MessageTypeV3._(190, _omitEnumNames ? '' : 'MTV3_CALENDAR_INVITE');
+  static const MessageTypeV3 MTV3_CALENDAR_RSVP = MessageTypeV3._(191, _omitEnumNames ? '' : 'MTV3_CALENDAR_RSVP');
+  static const MessageTypeV3 MTV3_CALENDAR_UPDATE = MessageTypeV3._(192, _omitEnumNames ? '' : 'MTV3_CALENDAR_UPDATE');
+  static const MessageTypeV3 MTV3_CALENDAR_DELETE = MessageTypeV3._(193, _omitEnumNames ? '' : 'MTV3_CALENDAR_DELETE');
+  static const MessageTypeV3 MTV3_FREE_BUSY_REQUEST = MessageTypeV3._(194, _omitEnumNames ? '' : 'MTV3_FREE_BUSY_REQUEST');
+  static const MessageTypeV3 MTV3_FREE_BUSY_RESPONSE = MessageTypeV3._(195, _omitEnumNames ? '' : 'MTV3_FREE_BUSY_RESPONSE');
+  static const MessageTypeV3 MTV3_POLL_CREATE = MessageTypeV3._(200, _omitEnumNames ? '' : 'MTV3_POLL_CREATE');
+  static const MessageTypeV3 MTV3_POLL_VOTE = MessageTypeV3._(201, _omitEnumNames ? '' : 'MTV3_POLL_VOTE');
+  static const MessageTypeV3 MTV3_POLL_VOTE_ANONYMOUS = MessageTypeV3._(202, _omitEnumNames ? '' : 'MTV3_POLL_VOTE_ANONYMOUS');
+  static const MessageTypeV3 MTV3_POLL_UPDATE = MessageTypeV3._(203, _omitEnumNames ? '' : 'MTV3_POLL_UPDATE');
+  static const MessageTypeV3 MTV3_POLL_SNAPSHOT = MessageTypeV3._(204, _omitEnumNames ? '' : 'MTV3_POLL_SNAPSHOT');
+  static const MessageTypeV3 MTV3_POLL_REVOKE = MessageTypeV3._(205, _omitEnumNames ? '' : 'MTV3_POLL_REVOKE');
+  static const MessageTypeV3 MTV3_WHITEBOARD_STROKE = MessageTypeV3._(210, _omitEnumNames ? '' : 'MTV3_WHITEBOARD_STROKE');
+  static const MessageTypeV3 MTV3_WHITEBOARD_PAGE = MessageTypeV3._(211, _omitEnumNames ? '' : 'MTV3_WHITEBOARD_PAGE');
+  static const MessageTypeV3 MTV3_FILE_EXCHANGE = MessageTypeV3._(212, _omitEnumNames ? '' : 'MTV3_FILE_EXCHANGE');
+  static const MessageTypeV3 MTV3_CLIPBOARD_EXCHANGE = MessageTypeV3._(213, _omitEnumNames ? '' : 'MTV3_CLIPBOARD_EXCHANGE');
+  static const MessageTypeV3 MTV3_SCREEN_SHARE_FRAME = MessageTypeV3._(214, _omitEnumNames ? '' : 'MTV3_SCREEN_SHARE_FRAME');
+  static const MessageTypeV3 MTV3_CALL_CHAT = MessageTypeV3._(215, _omitEnumNames ? '' : 'MTV3_CALL_CHAT');
+  static const MessageTypeV3 MTV3_REMOTE_CONTROL_INPUT = MessageTypeV3._(216, _omitEnumNames ? '' : 'MTV3_REMOTE_CONTROL_INPUT');
+
+  static const $core.List<MessageTypeV3> values = <MessageTypeV3> [
+    MTV3_TEXT,
+    MTV3_MEDIA_INLINE,
+    MTV3_MEDIA_ANNOUNCE,
+    MTV3_MEDIA_REQUEST,
+    MTV3_MEDIA_CHUNK,
+    MTV3_MEDIA_COMPLETE,
+    MTV3_MEDIA_REJECT,
+    MTV3_REACTION,
+    MTV3_REPLY,
+    MTV3_EDIT,
+    MTV3_DELETE,
+    MTV3_TYPING_INDICATOR,
+    MTV3_READ_RECEIPT,
+    MTV3_DELIVERY_RECEIPT,
+    MTV3_VOICE_MESSAGE,
+    MTV3_RESTORE_BROADCAST,
+    MTV3_RESTORE_RESPONSE,
+    MTV3_IDENTITY_DELETED,
+    MTV3_PROFILE_UPDATE,
+    MTV3_KEY_ROTATION_BROADCAST,
+    MTV3_KEY_ROTATION_ACK,
+    MTV3_GUARDIAN_SHARE_STORE,
+    MTV3_GUARDIAN_RESTORE_REQUEST,
+    MTV3_GUARDIAN_RESTORE_RESPONSE,
+    MTV3_CONTACT_REQUEST,
+    MTV3_CONTACT_REQUEST_RESPONSE,
+    MTV3_GROUP_CREATE,
+    MTV3_GROUP_INVITE,
+    MTV3_GROUP_LEAVE,
+    MTV3_GROUP_KEY_UPDATE,
+    MTV3_CHANNEL_CREATE,
+    MTV3_CHANNEL_POST,
+    MTV3_CHANNEL_INVITE,
+    MTV3_CHANNEL_LEAVE,
+    MTV3_CHANNEL_ROLE_UPDATE,
+    MTV3_CHANNEL_BAD_BADGE_REPORT,
+    MTV3_CHANNEL_JURY_VOTE,
+    MTV3_CHANNEL_MOD_DECISION,
+    MTV3_CHANNEL_SUBSCRIBE_PROBE,
+    MTV3_CALL_INVITE,
+    MTV3_CALL_ANSWER,
+    MTV3_CALL_REJECT,
+    MTV3_CALL_HANGUP,
+    MTV3_ICE_CANDIDATE,
+    MTV3_CALL_REJOIN,
+    MTV3_CALL_AUDIO,
+    MTV3_CALL_VIDEO,
+    MTV3_CALL_GROUP_AUDIO,
+    MTV3_CALL_GROUP_VIDEO,
+    MTV3_CALL_GROUP_LEAVE,
+    MTV3_CALL_GROUP_KEY_ROTATE,
+    MTV3_CALL_RTT_PING,
+    MTV3_CALL_RTT_PONG,
+    MTV3_CALL_TREE_UPDATE,
+    MTV3_CALL_KEYFRAME_REQUEST,
+    MTV3_CHANNEL_INDEX_EXCHANGE,
+    MTV3_CHANNEL_JOIN_REQUEST,
+    MTV3_CHANNEL_REPORT,
+    MTV3_PEER_LIST_PUSH,
+    MTV3_PEER_LIST_SUMMARY,
+    MTV3_PEER_LIST_WANT,
+    MTV3_PEER_KEY_REQUEST,
+    MTV3_PEER_KEY_RESPONSE,
+    MTV3_DHT_PING,
+    MTV3_DHT_PONG,
+    MTV3_DHT_FIND_NODE,
+    MTV3_DHT_FIND_NODE_RESPONSE,
+    MTV3_DHT_STORE,
+    MTV3_DHT_STORE_RESPONSE,
+    MTV3_DHT_FIND_VALUE,
+    MTV3_DHT_FIND_VALUE_RESPONSE,
+    MTV3_FRAGMENT_STORE,
+    MTV3_FRAGMENT_STORE_ACK,
+    MTV3_FRAGMENT_RETRIEVE,
+    MTV3_FRAGMENT_RETRIEVE_RESPONSE,
+    MTV3_FRAGMENT_DELETE,
+    MTV3_PEER_STORE,
+    MTV3_PEER_STORE_ACK,
+    MTV3_PEER_RETRIEVE,
+    MTV3_PEER_RETRIEVE_RESPONSE,
+    MTV3_CHAT_CONFIG_UPDATE,
+    MTV3_CHAT_CONFIG_RESPONSE,
+    MTV3_ROUTE_UPDATE,
+    MTV3_REACHABILITY_QUERY,
+    MTV3_REACHABILITY_RESPONSE,
+    MTV3_RELAY_FORWARD,
+    MTV3_RELAY_ACK,
+    MTV3_HOLE_PUNCH_REQUEST,
+    MTV3_HOLE_PUNCH_NOTIFY,
+    MTV3_HOLE_PUNCH_PING,
+    MTV3_HOLE_PUNCH_PONG,
+    MTV3_IDENTITY_AUTH_PUBLISH,
+    MTV3_IDENTITY_AUTH_RETRIEVE,
+    MTV3_IDENTITY_AUTH_RESPONSE,
+    MTV3_IDENTITY_LIVE_PUBLISH,
+    MTV3_IDENTITY_LIVE_RETRIEVE,
+    MTV3_IDENTITY_LIVE_RESPONSE,
+    MTV3_IDENTITY_KEM_PUBLISH,
+    MTV3_IDENTITY_KEM_RETRIEVE,
+    MTV3_IDENTITY_KEM_RESPONSE,
+    MTV3_TWIN_SYNC,
+    MTV3_DEVICE_PAIR_REQUEST,
+    MTV3_DEVICE_PAIR_APPROVE,
+    MTV3_DEVICE_REVOCATION,
+    MTV3_CALENDAR_INVITE,
+    MTV3_CALENDAR_RSVP,
+    MTV3_CALENDAR_UPDATE,
+    MTV3_CALENDAR_DELETE,
+    MTV3_FREE_BUSY_REQUEST,
+    MTV3_FREE_BUSY_RESPONSE,
+    MTV3_POLL_CREATE,
+    MTV3_POLL_VOTE,
+    MTV3_POLL_VOTE_ANONYMOUS,
+    MTV3_POLL_UPDATE,
+    MTV3_POLL_SNAPSHOT,
+    MTV3_POLL_REVOKE,
+    MTV3_WHITEBOARD_STROKE,
+    MTV3_WHITEBOARD_PAGE,
+    MTV3_FILE_EXCHANGE,
+    MTV3_CLIPBOARD_EXCHANGE,
+    MTV3_SCREEN_SHARE_FRAME,
+    MTV3_CALL_CHAT,
+    MTV3_REMOTE_CONTROL_INPUT,
+  ];
+
+  static final $core.Map<$core.int, MessageTypeV3> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static MessageTypeV3? valueOf($core.int value) => _byValue[value];
+
+  const MessageTypeV3._($core.int v, $core.String n) : super(v, n);
 }
 
 

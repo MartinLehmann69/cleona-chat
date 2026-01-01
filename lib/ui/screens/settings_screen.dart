@@ -299,7 +299,7 @@ class SettingsScreen extends StatelessWidget {
             children: [
               SectionRow(
                 label: locale.get('version_label'),
-                value: '1.0.0 (Architecture v2.0)',
+                value: '1.0.0 (Architecture v3.0)',
               ),
               SectionRow(
                 label: locale.get('encryption_label'),
@@ -1066,9 +1066,15 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
                     : _selectedLanguage.toUpperCase()),
                 trailing: DropdownButton<String>(
                   value: _selectedLanguage,
-                  items: ['auto', 'de', 'en', 'es', 'hu', 'sv'].map((l) =>
-                    DropdownMenuItem(value: l, child: Text(l == 'auto' ? locale.get('language_auto') : l.toUpperCase()))
-                  ).toList(),
+                  items: VoiceTranscriptionConfig.production()
+                      .supportedLanguages
+                      .map((l) => DropdownMenuItem(
+                            value: l,
+                            child: Text(l == 'auto'
+                                ? locale.get('language_auto')
+                                : l.toUpperCase()),
+                          ))
+                      .toList(),
                   onChanged: (v) {
                     if (v != null) {
                       setState(() => _selectedLanguage = v);

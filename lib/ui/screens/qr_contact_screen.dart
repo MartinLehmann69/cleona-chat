@@ -1,6 +1,8 @@
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr/qr.dart' as qr_lib;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
@@ -28,8 +30,9 @@ class QrShowScreen extends StatelessWidget {
     // Build ContactSeed URI: own private + public addresses,
     // confirmed peers from various subnets.
     // Deduplicate by address:port (same NAT endpoint = same routing value).
+    final freshCutoff = DateTime.now().subtract(const Duration(minutes: 30));
     final validPeers = service.peerSummaries
-        .where((p) => p.address.isNotEmpty && p.port > 0)
+        .where((p) => p.address.isNotEmpty && p.port > 0 && p.lastSeen.isAfter(freshCutoff))
         .toList();
     final peers = <dynamic>[];
     final seenEndpoints = <String>{};
@@ -52,18 +55,52 @@ class QrShowScreen extends StatelessWidget {
     if (service.publicIp != null && service.publicPort != null) {
       ownAddrs.add('${service.publicIp}:${service.publicPort}');
     }
+    final seedPeerList = peers.map((p) {
+      // Sort addresses: public IPv4 first (reachable from mobile/CGNAT),
+      // then private IPv4 (LAN), then IPv6.
+      final sorted = List<String>.from(p.allAddresses);
+      sorted.sort((a, b) {
+        final aScore = _addressPriority(a);
+        final bScore = _addressPriority(b);
+        return aScore.compareTo(bScore);
+      });
+      return SeedPeer(
+        nodeIdHex: p.nodeIdHex,
+        addresses: sorted.isNotEmpty
+            ? sorted.take(3).toList()
+            : ['${p.address}:${p.port}'],
+      );
+    }).toList();
+
+    // §8.1.1 rev2: QR includes dxk/dmk (DHT fallback unreliable for
+    // cross-network scans). Compact binary + zstd keeps QR manageable.
     final seed = ContactSeed(
       nodeIdHex: qrNodeIdHex,
       displayName: qrDisplayName,
       ownAddresses: ownAddrs,
-      // 1 address per peer for QR (keeps URI scannable, ~500 chars for 4 peers)
-      seedPeers: peers.map((p) => SeedPeer(
-        nodeIdHex: p.nodeIdHex,
-        addresses: ['${p.address}:${p.port}'],
-      )).toList(),
+      seedPeers: seedPeerList,
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+      deviceIdHex: service.deviceNodeIdHex,
+      deviceX25519Pk: service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk,
     );
-    final uri = seed.toUri();
+    final qrBytes = seed.toQrBytes();
+    final qrCode = qr_lib.QrCode.fromUint8List(
+      data: qrBytes,
+      errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
+    );
+
+    final shareSeed = ContactSeed(
+      nodeIdHex: qrNodeIdHex,
+      displayName: qrDisplayName,
+      ownAddresses: ownAddrs,
+      seedPeers: seedPeerList,
+      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+      deviceIdHex: service.deviceNodeIdHex,
+      deviceX25519Pk: service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk,
+    );
+    final shareUri = shareSeed.toUri();
 
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('qr_my_code'))),
@@ -92,11 +129,9 @@ class QrShowScreen extends StatelessWidget {
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: QrImageView(
-                  data: uri,
-                  version: QrVersions.auto,
-                  errorCorrectionLevel: QrErrorCorrectLevel.L,
-                  size: 280,
+                child: QrImageView.withQr(
+                  qr: qrCode,
+                  size: 400,
                   backgroundColor: Colors.white,
                 ),
               ),
@@ -110,7 +145,7 @@ class QrShowScreen extends StatelessWidget {
                 icon: const Icon(Icons.copy, size: 16),
                 label: Text(locale.get('copy')),
                 onPressed: () {
-                  Clipboard.setData(ClipboardData(text: uri));
+                  Clipboard.setData(ClipboardData(text: shareUri));
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text(locale.get('copied_to_clipboard'))),
                   );
@@ -159,15 +194,34 @@ class _QrScanScreenState extends State<QrScanScreen> {
         Expanded(
           child: MobileScanner(
             onDetect: (capture) {
-              if (_scannedSeed != null) return; // Already scanned
+              if (_scannedSeed != null) return;
               for (final barcode in capture.barcodes) {
-                final data = barcode.rawValue;
-                if (data == null) continue;
-                debugPrint('[QR-SCAN] Raw data (${data.length} chars): $data');
-                final seed = ContactSeed.fromUri(data);
+                ContactSeed? seed;
+
+                // Binary format (compact QR with KEM keys)
+                final rawBytes = barcode.rawBytes;
+                if (rawBytes != null && rawBytes.isNotEmpty) {
+                  seed = ContactSeed.fromQrBytes(Uint8List.fromList(rawBytes));
+                  if (seed != null) {
+                    debugPrint('[QR-SCAN] Binary format: ${rawBytes.length} bytes, '
+                        'target=${seed.nodeIdHex.substring(0, 8)}, '
+                        'did=${seed.deviceIdHex?.substring(0, 8) ?? "<legacy>"}, '
+                        'dxk=${seed.deviceX25519Pk != null}, dmk=${seed.deviceMlKemPk != null}');
+                  }
+                }
+
+                // Fallback: legacy URI format
+                if (seed == null) {
+                  final data = barcode.rawValue;
+                  if (data != null) {
+                    seed = ContactSeed.fromUri(data);
+                    if (seed != null) {
+                      debugPrint('[QR-SCAN] URI format: target=${seed.nodeIdHex.substring(0, 8)}');
+                    }
+                  }
+                }
+
                 if (seed != null) {
-                  debugPrint('[QR-SCAN] Parsed: target=${seed.nodeIdHex.substring(0, 8)}, '
-                      'ownAddrs=${seed.ownAddresses.length}, seedPeers=${seed.seedPeers.length}');
                   for (final sp in seed.seedPeers) {
                     debugPrint('[QR-SCAN]   Seed: ${sp.nodeIdHex.substring(0, 8)} @ ${sp.addresses}');
                   }
@@ -319,14 +373,28 @@ class _QrScanScreenState extends State<QrScanScreen> {
     try {
       // Register target + seed peers in routing table, then wait for PONGs
       // so relay candidates are confirmed before sending the CR.
+      // Welle 5 §8.1.1: First-Contact-CR carries the recipient's Device-KEM
+      // pubkeys (dxk/dmk) and the recipient's deviceId so the daemon can
+      // build an InfrastructureFrame KEM-encapped under the correct device.
+      final dxk = seed.deviceX25519Pk;
+      final dmk = seed.deviceMlKemPk;
+      final dxkB64 = dxk != null ? base64.encode(dxk) : null;
+      final dmkB64 = dmk != null ? base64.encode(dmk) : null;
       widget.service.addPeersFromContactSeed(
         seed.nodeIdHex,
         seed.ownAddresses,
         seed.seedPeers.map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses)).toList(),
+        targetDeviceIdHex: seed.deviceIdHex,
+        targetDxkB64: dxkB64,
+        targetDmkB64: dmkB64,
       );
       await Future.delayed(const Duration(seconds: 3));
-
-      final success = await widget.service.sendContactRequest(seed.nodeIdHex);
+      final success = await widget.service.sendContactRequest(
+        seed.nodeIdHex,
+        seedDeviceIdHex: seed.deviceIdHex,
+        seedDxkB64: dxkB64,
+        seedDmkB64: dmkB64,
+      );
       if (mounted) {
         if (success) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -357,14 +425,38 @@ bool _isPrivateIp(String ip) {
     return lower.startsWith('fe80:') || lower.startsWith('fc') ||
            lower.startsWith('fd') || lower == '::1';
   }
-  return ip.startsWith('10.') ||
-      ip.startsWith('192.168.') ||
-      ip.startsWith('172.16.') || ip.startsWith('172.17.') ||
-      ip.startsWith('172.18.') || ip.startsWith('172.19.') ||
-      ip.startsWith('172.2') || ip.startsWith('172.3') ||
-      ip.startsWith('192.0.0.') ||
-      (ip.startsWith('100.') && (int.tryParse(ip.split('.')[1]) ?? 0) >= 64 &&
-          (int.tryParse(ip.split('.')[1]) ?? 0) <= 127);
+  if (ip.startsWith('10.')) return true;
+  if (ip.startsWith('192.168.')) return true;
+  if (ip.startsWith('172.')) {
+    final second = int.tryParse(ip.split('.')[1]);
+    if (second != null && second >= 16 && second <= 31) return true;
+  }
+  if (ip.startsWith('192.0.0.')) return true;
+  if (ip.startsWith('100.')) {
+    final second = int.tryParse(ip.split('.')[1]) ?? 0;
+    if (second >= 64 && second <= 127) return true;
+  }
+  if (ip.startsWith('127.')) return true;
+  return false;
+}
+
+/// Address priority for QR seed peers: lower = higher priority.
+/// Public IPv4 and global IPv6 first (reachable from CGNAT/mobile),
+/// then private/link-local.
+int _addressPriority(String addrPort) {
+  final addr = addrPort.startsWith('[')
+      ? addrPort.substring(1, addrPort.indexOf(']'))
+      : addrPort.split(':').first;
+  if (addr.contains(':')) {
+    final lower = addr.toLowerCase();
+    if (lower.startsWith('fe80:') || lower.startsWith('fc') ||
+        lower.startsWith('fd') || lower == '::1') {
+      return 2; // Link-local/private IPv6
+    }
+    return 0; // Global IPv6 (same priority as public IPv4)
+  }
+  if (_isPrivateIp(addr)) return 2; // Private IPv4
+  return 0; // Public IPv4
 }
 
 /// Manual URI input screen (fallback when camera scanner is open).

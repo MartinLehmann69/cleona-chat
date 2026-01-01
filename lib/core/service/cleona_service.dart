@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:image/image.dart' as img;
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/per_message_kem.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
@@ -13,11 +16,16 @@ import 'package:cleona/core/dht/channel_index.dart';
 import 'package:cleona/core/dht/mailbox_store.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/identity_resolution/identity_publisher.dart';
+import 'package:cleona/core/identity_resolution/identity_resolver.dart' show ResolvedDevice;
+import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/compression.dart';
 import 'package:cleona/core/network/ack_tracker.dart';
+import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
 import 'package:cleona/core/network/peer_info.dart';
+import 'package:cleona/core/network/peer_message_store.dart';
+import 'package:cleona/core/network/v3_frame_codec.dart';
+import 'package:cleona/core/network/sender_identity_snapshot.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/erasure/reed_solomon.dart';
@@ -56,6 +64,24 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 // Re-export types so existing imports still work
 export 'package:cleona/core/service/service_types.dart';
+
+/// Outcome of [CleonaService.handleIncomingApplicationPacket]. Drives the
+/// multi-identity dispatch loop in `service_daemon.onApplicationFramePayload`
+/// (§2.4 step [9] try-loop, §3.1 daemon-global deviceID).
+enum AppFrameDispatchOutcome {
+  /// KEM-decap + sig-verify + handle all succeeded — no retry needed.
+  delivered,
+
+  /// KEM-decap with this identity's User-KEM-SK failed. The frame may be
+  /// addressed to another hosted identity on this daemon — caller MUST try
+  /// the remaining services.
+  notForThisIdentity,
+
+  /// KEM-decap succeeded (frame WAS for this identity) but a later step
+  /// failed (sig invalid, sender pubkey miss, recipientUserId mismatch,
+  /// parse error). No retry — drop is final.
+  droppedAfterDecap,
+}
 
 /// Central orchestrator: wires node, contacts, messaging, and manages state.
 /// Now takes a shared CleonaNode + IdentityContext instead of creating its own node.
@@ -157,7 +183,15 @@ class CleonaService implements ICleonaService {
   // State
   @override
   final Map<String, Conversation> conversations = {};
-  final Set<String> _processedMessageIds = {};
+
+  /// Receive-side dedup for V3 ApplicationFrame: bounded LRU keyed on
+  /// inner.messageId-hex. Catches the same logical message arriving via
+  /// multiple paths (Direct + Reed-Solomon reassembly + S&F mutual peer)
+  /// and prevents double-dispatch / double-DELIVERY_RECEIPT-emit.
+  /// Insertion order is preserved by `LinkedHashSet`; eviction is FIFO
+  /// when the cap is reached.
+  static const int _processedMessageIdsCap = 4096;
+  final LinkedHashSet<String> _processedMessageIds = LinkedHashSet<String>();
 
   // Callbacks for GUI
   @override
@@ -176,6 +210,9 @@ class CleonaService implements ICleonaService {
   void Function(CallInfo call, String reason)? onCallRejected;
   @override
   void Function(CallInfo call)? onCallEnded;
+
+  /// IPC push: immediate read-receipt notification (bypasses state_changed debounce).
+  void Function(String conversationId, String messageId)? onReadReceiptReceived;
 
   /// Android: post a system notification for incoming messages (set by Flutter app).
   Future<void> Function(String title, String body, String conversationId)? onPostNotificationAndroid;
@@ -380,6 +417,8 @@ class CleonaService implements ICleonaService {
 
     // Init call manager
     callManager = CallManager(identity: identity, node: node, contacts: _contacts, profileDir: profileDir);
+    callManager.sendViaUser = (recipientUserId, type, payload) =>
+        sendToUser(recipientUserId: recipientUserId, messageType: type, payload: payload);
     callManager.onIncomingCall = (session) {
       onIncomingCall?.call(session.toCallInfo());
       onStateChanged?.call();
@@ -422,8 +461,8 @@ class CleonaService implements ICleonaService {
       groups: _groups,
       profileDir: profileDir,
     );
-    groupCallManager.sendEncrypted = _sendKemEncryptedForGroupCall;
-    groupCallManager.sendDirect = _sendDirectForGroupCall;
+    groupCallManager.sendViaUser = (recipientUserId, type, payload) =>
+        sendToUser(recipientUserId: recipientUserId, messageType: type, payload: payload);
     groupCallManager.onIncomingGroupCall = (info) {
       onIncomingGroupCall?.call(info);
       onStateChanged?.call();
@@ -642,13 +681,26 @@ class CleonaService implements ICleonaService {
 
     // RUDP Light: downgrade message status on ACK timeout.
     node.ackTracker.onAckTimeout = _handleAckTimeout;
+    // Wire FRAGMENT_STORE_ACK observer for proactive-push reliability tracking
+    // (Architecture §3.5).
+    node.onFragmentStoreAck = onProactivePushAcked;
+
+    // §5.1 Layer 3: offline cascade when all DV routes are exhausted.
+    node.onMessageRetryExhausted = _handleRetryExhausted;
 
     // Track end-to-end reachability per contact (used to stop CR-Response retry).
     // AckTracker callback provides the deviceNodeId of the recipient (Phase 2
     // routing). Contacts are keyed by userId with deviceNodeIds as aliases —
     // resolve deviceNodeId → userId so the retry loop (which iterates userId
     // keys) finds the ACK.
-    node.ackTracker.onAckReceived = (_, recipientHex) {
+    //
+    // §3.4: cleona_node has already wired its DV-bridge handler in start().
+    // Preserve it and chain — both layers need the same event but for
+    // different state (DV-routing vs. contact reachability).
+    final prevAckReceived = node.ackTracker.onAckReceived;
+    node.ackTracker.onAckReceived = (msgIdHex, recipientHex, wasDirect) {
+      prevAckReceived?.call(msgIdHex, recipientHex, wasDirect);
+
       final now = DateTime.now();
       _contactLastAckedAt[recipientHex] = now;
       _staleWarningWrittenFor.remove(recipientHex);
@@ -669,21 +721,42 @@ class CleonaService implements ICleonaService {
     // reset uptime every time a second/third identity comes up.
     await notificationSound.init(identity.profileDir);
 
-    // §2.2.4: 2D-DHT Identity Publisher pro Identität.
+    // §2.2.4: 2D-DHT Identity Publisher pro Identität. The publisher needs
+    // access to the local IdentityDhtHandler so it can self-store every
+    // record it publishes — without that self-store, a 2-node setup stalls
+    // because the publisher itself ranks among the k-closest replicators
+    // for its own dht-keys (and Kademlia retrieve probes us first), but we
+    // would have nothing to answer with.
     _identityPublisher = IdentityPublisher(
       identity: identity,
       routingTable: node.routingTable,
       sender: _IdentityPublisherSender(node),
+      dhtHandler: node.identityDhtHandler,
     );
     _identityPublisher!.setForeground(_isAppResumed);
     _identityPublisher!.setAddressProvider(() => node.currentSelfAddresses());
+    // Welle 5 (§3.5b + §4.3): publisher braucht die Device-KEM-Pubkeys, um
+    // den DeviceKemRecord zu signen und ueber `kem-key = SHA-256("kem" ||
+    // userId || deviceId)` ins 2D-DHT zu replizieren. Quelle ist das
+    // node-eigene Device-KEM-Keypair (locally generated, NICHT seed-derived
+    // per §3.6 #5).
+    _identityPublisher!.setDeviceKemPkProvider(() => (
+          x25519Pk: node.deviceKem.x25519PublicKey,
+          mlKemPk: node.deviceKem.mlKemPublicKey,
+        ));
     // Wake parked cold-start retry as soon as new peers join the routing table.
     // Without this hook the publisher only ever re-checks every 60s after
     // initial timeout — meaning a daemon that started before any peer was
     // known (Bootstrap-Restart, Cold-Start) would not republish until the
     // 20h auth-refresh tick.
-    void onPeerAdded(PeerInfo _) {
+    void onPeerAdded(PeerInfo peer) {
       _identityPublisher?.onPeerJoined();
+      // Architecture §3.5 (V3.1.75): no re-push on reachability events. The
+      // 3-attempt push budget per (fragment, owner) is consumed in one
+      // contiguous retry window starting at the initial store-with-known-owner
+      // trigger. Recovery for owners that come online later happens via the
+      // owner's FRAGMENT_RETRIEVE startup poll (§3.3.6), not via sender-side
+      // re-pushes.
     }
     node.routingTable.addOnPeerAddedListener(onPeerAdded);
     _publisherPeerAddedListener = onPeerAdded;
@@ -776,705 +849,20 @@ class CleonaService implements ICleonaService {
   }
 
   /// Legacy: Full start creating its own node. Used by headless mode / in-process fallback.
-  Future<void> start({List<String> bootstrapPeers = const []}) async {
+  Future<void> start() async {
     await startService();
   }
 
   /// Legacy alias.
-  Future<void> startQuick({List<String> bootstrapPeers = const []}) async {
+  Future<void> startQuick() async {
     await startService();
   }
 
   // ── Message Handling ───────────────────────────────────────────────
-
-  /// Called when a message is received for this identity.
-  void handleMessage(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    // Decompress non-encrypted payloads (e.g. CONTACT_REQUEST, FRAGMENT_STORE)
-    // For encrypted messages (TEXT), decompression happens after decryption
-    if (envelope.compression == proto.CompressionType.ZSTD &&
-        envelope.encryptedPayload.isNotEmpty &&
-        !envelope.hasKemHeader()) {
-      try {
-        envelope.encryptedPayload = ZstdCompression.instance.decompress(
-          Uint8List.fromList(envelope.encryptedPayload),
-        );
-      } catch (e) {
-        _log.debug('Zstd decompress failed: $e');
-        return;
-      }
-    }
-
-    final msgIdHex = bytesToHex(Uint8List.fromList(envelope.messageId));
-
-    // Dedup: check persisted messages
-    if (_processedMessageIds.contains(msgIdHex) && msgIdHex.isNotEmpty) {
-      final dedupType = envelope.messageType;
-      if (dedupType == proto.MessageType.CONTACT_REQUEST || dedupType == proto.MessageType.CONTACT_REQUEST_RESPONSE) {
-        _log.debug('DEDUP: dropped ${dedupType.name} msgId=${msgIdHex.substring(0, 8)} (already processed)');
-      }
-      return;
-    }
-
-    final type = envelope.messageType;
-
-    // Count user-visible incoming messages for network stats
-    if (_isUserVisibleMessage(type)) {
-      node.statsCollector.addMessageReceived();
-    }
-
-    // Reduced-Mode Gate (sec-h5 §8.2): User has skipped UpdateRequiredScreen
-    // into limited mode. Drop user-message types silently; infrastructure
-    // (DHT, peer-list-push, presence, ACKs, contact establishment, calls)
-    // continues so DHT participation and re-update flow are unaffected.
-    if (_reducedMode && _isUserMessage(type)) {
-      _log.warn('receive blocked: reducedMode active for ${type.name}');
-      return;
-    }
-
-    // KEX Gate (Architecture 5.6.2): Only process encrypted content messages
-    // if the sender is an accepted contact or member of a shared group/channel.
-    // Infrastructure, discovery, and contact establishment are always allowed.
-    if (!_isKexGateExempt(type)) {
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      if (!_isKnownSender(senderHex)) {
-        _log.debug('KEX Gate: dropped ${type.name} from unknown sender ${senderHex.length > 8 ? senderHex.substring(0, 8) : senderHex}');
-        return;
-      }
-    }
-
-    // §26 Phase 3: Learn sender's deviceNodeId from every incoming message.
-    _learnDeviceNodeId(envelope);
-
-    switch (type) {
-      case proto.MessageType.TEXT:
-        _handleTextMessage(envelope);
-        break;
-      case proto.MessageType.CONTACT_REQUEST:
-        _handleContactRequest(envelope);
-        break;
-      case proto.MessageType.CONTACT_REQUEST_RESPONSE:
-        _handleContactResponse(envelope);
-        break;
-      case proto.MessageType.TYPING_INDICATOR:
-      case proto.MessageType.READ_RECEIPT:
-      case proto.MessageType.DELIVERY_RECEIPT:
-        _handleEphemeral(envelope);
-        break;
-      case proto.MessageType.FRAGMENT_STORE:
-        _handleFragmentStore(envelope, from, fromPort);
-        break;
-      case proto.MessageType.FRAGMENT_RETRIEVE:
-        _handleFragmentRetrieve(envelope, from, fromPort);
-        break;
-      case proto.MessageType.FRAGMENT_DELETE:
-        _handleFragmentDelete(envelope);
-        break;
-      case proto.MessageType.MESSAGE_EDIT:
-        _handleMessageEdit(envelope);
-        break;
-      case proto.MessageType.MESSAGE_DELETE:
-        _handleMessageDelete(envelope);
-        break;
-      case proto.MessageType.MEDIA_ANNOUNCEMENT:
-        _handleMediaAnnouncement(envelope);
-        break;
-      case proto.MessageType.MEDIA_ACCEPT:
-        _handleMediaAccept(envelope);
-        break;
-      case proto.MessageType.IMAGE:
-      case proto.MessageType.FILE:
-      case proto.MessageType.VIDEO:
-      case proto.MessageType.VOICE_MESSAGE:
-        _handleMediaContent(envelope);
-        break;
-      case proto.MessageType.GROUP_INVITE:
-        _handleGroupInvite(envelope);
-        break;
-      case proto.MessageType.GROUP_LEAVE:
-        _handleGroupLeave(envelope);
-        break;
-      case proto.MessageType.CHANNEL_INVITE:
-        _handleChannelInvite(envelope);
-        break;
-      case proto.MessageType.CHANNEL_LEAVE:
-        _handleChannelLeave(envelope);
-        break;
-      case proto.MessageType.CHANNEL_ROLE_UPDATE:
-        _handleChannelRoleUpdate(envelope);
-        break;
-      case proto.MessageType.CHANNEL_POST:
-        _handleChannelPost(envelope);
-        break;
-      case proto.MessageType.EMOJI_REACTION:
-        _handleEmojiReaction(envelope);
-        break;
-      case proto.MessageType.PROFILE_UPDATE:
-        _handleProfileUpdate(envelope);
-        break;
-      case proto.MessageType.CHAT_CONFIG_UPDATE:
-      case proto.MessageType.CHAT_CONFIG_RESPONSE:
-        _handleChatConfigUpdate(envelope);
-        break;
-      case proto.MessageType.IDENTITY_DELETED:
-        _handleIdentityDeleted(envelope);
-        break;
-      case proto.MessageType.RESTORE_BROADCAST:
-        _handleRestoreBroadcast(envelope);
-        break;
-      case proto.MessageType.RESTORE_RESPONSE:
-        _handleRestoreResponse(envelope);
-        break;
-      case proto.MessageType.GUARDIAN_SHARE_STORE:
-        _handleGuardianShareStore(envelope);
-        break;
-      case proto.MessageType.GUARDIAN_RESTORE_REQUEST:
-        _handleGuardianRestoreRequest(envelope);
-        break;
-      case proto.MessageType.GUARDIAN_RESTORE_RESPONSE:
-        guardianService.handleRestoreResponse(envelope);
-        break;
-      case proto.MessageType.CALL_INVITE:
-        // Route to group or 1:1 call manager.
-        // CALL_INVITE may be KEM-encrypted (group calls use sendEncrypted).
-        // Decrypt first to probe isGroupCall, then dispatch.
-        _handleCallInviteDispatch(envelope);
-        notificationSound.startRingtone();
-        notificationSound.vibrate(VibrationType.call);
-        break;
-      case proto.MessageType.CALL_ANSWER:
-        notificationSound.stopRingtone();
-        notificationSound.stopRingback();
-        notificationSound.playConnected();
-        if (groupCallManager.currentGroupCall != null) {
-          groupCallManager.handleGroupCallAnswer(envelope);
-        } else {
-          callManager.handleCallAnswer(envelope);
-        }
-        break;
-      case proto.MessageType.CALL_REJECT:
-        notificationSound.stopRingtone();
-        notificationSound.stopRingback();
-        if (groupCallManager.currentGroupCall != null) {
-          groupCallManager.handleGroupCallReject(envelope);
-        } else {
-          callManager.handleCallReject(envelope);
-        }
-        break;
-      case proto.MessageType.CALL_HANGUP:
-        notificationSound.stopRingtone();
-        notificationSound.stopRingback();
-        if (groupCallManager.currentGroupCall != null) {
-          groupCallManager.handleGroupCallHangup(envelope);
-        } else {
-          callManager.handleCallHangup(envelope);
-        }
-        break;
-      case proto.MessageType.CALL_AUDIO:
-        _handleCallAudio(envelope);
-        break;
-      case proto.MessageType.CALL_VIDEO:
-        _handleCallVideo(envelope);
-        break;
-      case proto.MessageType.CALL_KEYFRAME_REQUEST:
-        _handleKeyframeRequest(envelope);
-        break;
-      // Group Calls (Phase 3c)
-      case proto.MessageType.CALL_GROUP_AUDIO:
-        _handleGroupCallAudio(envelope);
-        break;
-      case proto.MessageType.CALL_GROUP_VIDEO:
-        _handleGroupCallVideo(envelope);
-        break;
-      case proto.MessageType.CALL_GROUP_LEAVE:
-        groupCallManager.handleGroupCallLeave(envelope);
-        break;
-      case proto.MessageType.CALL_GROUP_KEY_ROTATE:
-        // KEM-encrypted — decrypt before dispatching
-        if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-          try {
-            var decrypted = PerMessageKem.decrypt(
-              kemHeader: envelope.kemHeader,
-              ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-              ourX25519Sk: identity.x25519SecretKey,
-              ourMlKemSk: identity.mlKemSecretKey,
-            );
-            if (envelope.compression == proto.CompressionType.ZSTD) {
-              decrypted = ZstdCompression.instance.decompress(decrypted);
-            }
-            groupCallManager.handleGroupCallKeyRotate(envelope, decrypted);
-          } on KemVersionRejectedException catch (e) {
-            _warnKemVersionRejected('GROUP_KEY_ROTATE', e);
-            return;
-          } catch (e) {
-            _log.debug('GROUP_KEY_ROTATE decrypt failed: $e');
-          }
-        } else {
-          groupCallManager.handleGroupCallKeyRotate(envelope, null);
-        }
-        break;
-      case proto.MessageType.CALL_RTT_PING:
-        groupCallManager.handleCallRttPing(envelope);
-        break;
-      case proto.MessageType.CALL_RTT_PONG:
-        groupCallManager.handleCallRttPong(envelope);
-        break;
-      case proto.MessageType.CALL_TREE_UPDATE:
-        groupCallManager.handleCallTreeUpdate(envelope);
-        break;
-      case proto.MessageType.CALL_REJOIN:
-        groupCallManager.handleCallRejoin(envelope);
-        break;
-      case proto.MessageType.CHANNEL_JOIN_REQUEST:
-        _handleChannelJoinRequest(envelope);
-        break;
-      case proto.MessageType.CHANNEL_INDEX_EXCHANGE:
-        _handleChannelIndexExchange(envelope);
-        break;
-      case proto.MessageType.CHANNEL_REPORT:
-        _handleIncomingChannelReport(envelope);
-        break;
-      case proto.MessageType.JURY_REQUEST:
-        _handleIncomingJuryRequest(envelope);
-        break;
-      case proto.MessageType.JURY_VOTE_MSG:
-        _handleIncomingJuryVote(envelope);
-        break;
-      case proto.MessageType.JURY_RESULT:
-        _handleIncomingJuryResult(envelope);
-        break;
-      // Multi-Device (§26)
-      case proto.MessageType.TWIN_ANNOUNCE:
-        _handleTwinAnnounce(envelope);
-        break;
-      case proto.MessageType.TWIN_SYNC:
-        _handleTwinSync(envelope);
-        break;
-      case proto.MessageType.DEVICE_REVOKED:
-        _handleDeviceRevokedBroadcast(envelope);
-        break;
-      case proto.MessageType.KEY_ROTATION_BROADCAST:
-        _handleKeyRotationBroadcast(envelope);
-        break;
-      case proto.MessageType.KEY_ROTATION_ACK:
-        _handleKeyRotationAck(envelope);
-        break;
-      // Calendar (§23)
-      case proto.MessageType.CALENDAR_INVITE:
-        _handleCalendarInvite(envelope);
-        break;
-      case proto.MessageType.CALENDAR_RSVP:
-        _handleCalendarRsvp(envelope);
-        break;
-      case proto.MessageType.CALENDAR_UPDATE:
-        _handleCalendarUpdate(envelope);
-        break;
-      case proto.MessageType.CALENDAR_DELETE:
-        _handleCalendarDelete(envelope);
-        break;
-      case proto.MessageType.FREE_BUSY_REQUEST:
-        _handleFreeBusyRequest(envelope);
-        break;
-      case proto.MessageType.FREE_BUSY_RESPONSE:
-        _handleFreeBusyResponse(envelope);
-        break;
-      // Polls (§24)
-      case proto.MessageType.POLL_CREATE:
-        _handlePollCreate(envelope);
-        break;
-      case proto.MessageType.POLL_VOTE:
-        _handlePollVote(envelope);
-        break;
-      case proto.MessageType.POLL_UPDATE:
-        _handlePollUpdate(envelope);
-        break;
-      case proto.MessageType.POLL_SNAPSHOT:
-        _handlePollSnapshot(envelope);
-        break;
-      case proto.MessageType.POLL_VOTE_ANONYMOUS:
-        _handlePollVoteAnonymous(envelope);
-        break;
-      case proto.MessageType.POLL_VOTE_REVOKE:
-        _handlePollVoteRevoke(envelope);
-        break;
-      default:
-        _log.debug('Unhandled message type: $type');
-    }
-
-    // RUDP Light: auto-send DELIVERY_RECEIPT for ACK-worthy message types.
-    // V3.1: If message arrived via relay (from=0.0.0.0), send receipt via relay too.
-    if (AckTracker.isAckWorthy(type) && envelope.senderId.isNotEmpty && envelope.messageId.isNotEmpty) {
-      final viaRelay = from.address == '0.0.0.0';
-      _sendDeliveryReceipt(Uint8List.fromList(envelope.senderId), Uint8List.fromList(envelope.messageId),
-          preferRelay: viaRelay);
-    }
-
-    if (msgIdHex.isNotEmpty) {
-      _processedMessageIds.add(msgIdHex);
-    }
-  }
-
-  /// §26 Phase 3: Learn sender's deviceNodeId from incoming messages.
-  /// Passively builds the per-contact device list from senderDeviceNodeId.
-  void _learnDeviceNodeId(proto.MessageEnvelope envelope) {
-    if (envelope.senderDeviceNodeId.isEmpty) return;
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final contact = _contacts[senderHex];
-    if (contact == null || contact.status != 'accepted') return;
-    final deviceNodeIdHex = bytesToHex(Uint8List.fromList(envelope.senderDeviceNodeId));
-    if (contact.deviceNodeIds.add(deviceNodeIdHex)) {
-      _saveContacts();
-      _log.debug('Learned deviceNodeId ${deviceNodeIdHex.substring(0, 8)} for ${contact.displayName}');
-    }
-  }
-
-  /// Message types exempt from KEX Gate (infrastructure, contact establishment, recovery).
-  static bool _isKexGateExempt(proto.MessageType type) {
-    switch (type) {
-      // Contact establishment — by definition from unknown senders
-      case proto.MessageType.CONTACT_REQUEST:
-      case proto.MessageType.CONTACT_REQUEST_RESPONSE:
-      // Transport-layer ACKs — must always arrive
-      case proto.MessageType.DELIVERY_RECEIPT:
-      case proto.MessageType.READ_RECEIPT:
-      case proto.MessageType.TYPING_INDICATOR:
-      // DHT infrastructure — no sender relationship required
-      case proto.MessageType.FRAGMENT_STORE:
-      case proto.MessageType.FRAGMENT_RETRIEVE:
-      case proto.MessageType.FRAGMENT_DELETE:
-      // Recovery — from old device or guardians
-      case proto.MessageType.RESTORE_BROADCAST:
-      case proto.MessageType.RESTORE_RESPONSE:
-      case proto.MessageType.GUARDIAN_SHARE_STORE:
-      case proto.MessageType.GUARDIAN_RESTORE_REQUEST:
-      case proto.MessageType.GUARDIAN_RESTORE_RESPONSE:
-      // Public channel operations — from unknown subscribers
-      case proto.MessageType.CHANNEL_JOIN_REQUEST:
-      case proto.MessageType.CHANNEL_INDEX_EXCHANGE:
-      // Moderation — jury members may not be contacts
-      case proto.MessageType.CHANNEL_REPORT:
-      case proto.MessageType.JURY_REQUEST:
-      case proto.MessageType.JURY_VOTE_MSG:
-      case proto.MessageType.JURY_RESULT:
-      // Multi-Device (§26) — twin messages come from our own Node-ID
-      case proto.MessageType.TWIN_ANNOUNCE:
-      case proto.MessageType.TWIN_SYNC:
-      // Key rotation broadcast — from a contact who rotated keys (need to accept with old key)
-      case proto.MessageType.KEY_ROTATION_BROADCAST:
-      case proto.MessageType.KEY_ROTATION_ACK:
-      // Device revoked broadcast — from a contact notifying about removed device
-      case proto.MessageType.DEVICE_REVOKED:
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  /// Check if a sender is known: accepted contact OR member of any group/channel.
-  bool _isKnownSender(String senderHex) {
-    // 1. Accepted contact?
-    final contact = _contacts[senderHex];
-    if (contact != null && contact.status == 'accepted') return true;
-
-    // 2. Member of any group?
-    for (final group in _groups.values) {
-      if (group.members.containsKey(senderHex)) return true;
-    }
-
-    // 3. Member of any channel?
-    for (final channel in _channels.values) {
-      if (channel.members.containsKey(senderHex)) return true;
-    }
-
-    return false;
-  }
-
-  void _handleTextMessage(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt if encrypted
-    String text;
-    if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-      try {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        // Decompress after decryption
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        text = utf8.decode(decrypted);
-      } on KemVersionRejectedException catch (e) {
-        _warnKemVersionRejected('TEXT', e);
-        return;
-      } catch (e) {
-        _log.error('Decryption failed: $e');
-        return;
-      }
-    } else {
-      text = utf8.decode(envelope.encryptedPayload);
-    }
-
-    final msgId = bytesToHex(Uint8List.fromList(envelope.messageId));
-
-    // Determine conversation: group or DM
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-
-    // Extract reply/quote fields
-    final replyToMsgId = envelope.replyToMessageId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.replyToMessageId))
-        : null;
-
-    final msg = UiMessage(
-      id: msgId,
-      conversationId: conversationId,
-      senderNodeIdHex: senderHex,
-      text: text,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(envelope.timestamp.toInt()),
-      type: proto.MessageType.TEXT,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-      readAt: DateTime.now(), // Incoming messages are read on receipt
-      replyToMessageId: replyToMsgId,
-      replyToText: envelope.replyToText.isNotEmpty ? envelope.replyToText : null,
-      replyToSender: envelope.replyToSender.isNotEmpty ? envelope.replyToSender : null,
-    );
-
-    // Extract sender-side link preview (recipient makes NO network request)
-    if (envelope.hasLinkPreview() && envelope.linkPreview.url.isNotEmpty) {
-      final lp = envelope.linkPreview;
-      msg.linkPreviewUrl = lp.url;
-      msg.linkPreviewTitle = lp.title.isNotEmpty ? lp.title : null;
-      msg.linkPreviewDescription = lp.description.isNotEmpty ? lp.description : null;
-      msg.linkPreviewSiteName = lp.siteName.isNotEmpty ? lp.siteName : null;
-      if (lp.thumbnail.isNotEmpty) {
-        msg.linkPreviewThumbnailBase64 = base64Encode(lp.thumbnail);
-      }
-    }
-
-    final isChannel = groupIdHex != null && _channels.containsKey(groupIdHex);
-    final isGroup = groupIdHex != null && !isChannel;
-    _addMessageToConversation(conversationId, msg, isGroup: isGroup, isChannel: isChannel);
-    if (!_shouldSuppressNotification(conversationId, msg.timestamp.millisecondsSinceEpoch)) {
-      notificationSound.playMessageSound();
-      notificationSound.vibrate(VibrationType.message);
-      final textSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-      _postAndroidNotification(textSenderName, text.length > 100 ? '${text.substring(0, 100)}...' : text, conversationId);
-      _lastNotifiedAt[conversationId] = DateTime.now();
-    }
-    // Badge update happens inside _addMessageToConversation — single source of truth.
-
-    _log.info('TEXT from ${senderHex.substring(0, 8)}: ${text.length > 50 ? text.substring(0, 50) : text}');
-  }
-
-  void _handleContactRequest(proto.MessageEnvelope envelope) {
-    try {
-      final cr = proto.ContactRequestMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-      // Multi-Identity guard: only process CRs addressed to THIS identity.
-      // Without this, a CR to AllyCat could be processed by Alice's service
-      // on the same node, resulting in Alice responding instead of AllyCat.
-      // Accept both userId and deviceNodeId: senders with pre-V3.1.44 contacts
-      // may have stored our deviceNodeId instead of userId.
-      if (envelope.recipientId.isNotEmpty) {
-        final recipientHex = bytesToHex(Uint8List.fromList(envelope.recipientId));
-        if (recipientHex != identity.userIdHex &&
-            recipientHex != identity.nodeIdHex) {
-          return; // Not for this identity
-        }
-      }
-
-      // Previously deleted contact sends new CR: allow re-contact (delete ≠ block).
-      if (_deletedContacts.contains(senderHex)) {
-        _deletedContacts.remove(senderHex);
-        _saveContacts();
-        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} re-requesting — allowed');
-      }
-
-      // Already accepted contact sends new CR: update keys and re-send acceptance.
-      // This handles the case where the remote side deleted us and re-added.
-      final existing = _contacts[senderHex];
-      if (existing != null && existing.status == 'accepted') {
-        existing.displayName = cr.displayName;
-        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
-        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-        existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
-        if (cr.profilePicture.isNotEmpty) {
-          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-        }
-        _saveContacts();
-        _log.info('Re-contact from accepted ${cr.displayName} — sending acceptance response');
-        // Re-send acceptance so the remote side knows we still have them.
-        // Not awaited intentionally: sendEnvelope is ACK-tracked by AckTracker,
-        // and the CR retry timer handles failures — no need to block here.
-        acceptContactRequest(senderHex);
-        return;
-      }
-      if (existing != null && existing.status == 'pending_outgoing') {
-        // Bidirectional CR: we sent them a CR AND they sent us one.
-        // Auto-accept: both sides want to connect.
-        existing.displayName = cr.displayName;
-        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
-        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-        existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
-        if (cr.profilePicture.isNotEmpty) {
-          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-        }
-        _saveContacts();
-        _log.info('Bidirectional CR from ${cr.displayName} — auto-accepting');
-        acceptContactRequest(senderHex);
-        return;
-      }
-
-      final contact = ContactInfo(
-        nodeId: Uint8List.fromList(envelope.senderId),
-        displayName: cr.displayName,
-        ed25519Pk: Uint8List.fromList(cr.ed25519PublicKey),
-        x25519Pk: Uint8List.fromList(cr.x25519PublicKey),
-        mlKemPk: Uint8List.fromList(cr.mlKemPublicKey),
-        mlDsaPk: Uint8List.fromList(cr.mlDsaPublicKey),
-        status: 'pending',
-        message: cr.message,
-        profilePictureBase64: cr.profilePicture.isNotEmpty
-            ? base64Encode(cr.profilePicture)
-            : null,
-      );
-
-      // Detect stale contact: if an existing accepted contact has the same
-      // display name but different nodeId, the sender likely reinstalled.
-      // Mark the old conversation with a system message so the user knows
-      // to use the new contact (old ID is unreachable).
-      for (final entry in _contacts.entries) {
-        if (entry.key == senderHex) continue; // Same contact — skip
-        final old = entry.value;
-        if (old.status != 'accepted') continue;
-        if (old.displayName != cr.displayName) continue;
-        // Same name, different identity → probable reinstall
-        final oldConv = conversations[entry.key];
-        if (oldConv != null) {
-          final systemMsg = UiMessage(
-            id: bytesToHex(SodiumFFI().randomBytes(16)),
-            conversationId: entry.key,
-            senderNodeIdHex: '',
-            text: '${cr.displayName} appears to have a new identity. '
-                'Messages in this conversation may not be delivered. '
-                'Please use the new contact request instead.',
-            isOutgoing: false,
-            timestamp: DateTime.now(),
-            type: proto.MessageType.IDENTITY_DELETED,
-            status: MessageStatus.delivered,
-          );
-          oldConv.messages.add(systemMsg);
-          _log.info('Stale contact detected: ${cr.displayName} has new identity '
-              '${senderHex.substring(0, 8)}, old was ${entry.key.substring(0, 8)}');
-        }
-      }
-
-      _contacts[senderHex] = contact;
-      _saveContacts();
-      _saveConversations();
-
-      onContactRequestReceived?.call(senderHex, cr.displayName);
-      onStateChanged?.call();
-      _log.info('Contact request from ${cr.displayName} (${senderHex.substring(0, 8)})');
-    } catch (e) {
-      _log.error('Contact request parse error: $e');
-    }
-  }
-
-  void _handleContactResponse(proto.MessageEnvelope envelope) {
-    try {
-      final resp = proto.ContactRequestResponse.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-      // Multi-Identity guard: only accept responses addressed to THIS identity.
-      // Accept both userId and deviceNodeId (backward compat with pre-V3.1.44 contacts).
-      if (envelope.recipientId.isNotEmpty) {
-        final recipientHex = bytesToHex(Uint8List.fromList(envelope.recipientId));
-        if (recipientHex != identity.userIdHex &&
-            recipientHex != identity.nodeIdHex) {
-          return; // Not for this identity
-        }
-      }
-
-      // Previously deleted contact responds: allow re-contact (delete ≠ block).
-      if (_deletedContacts.contains(senderHex)) {
-        _deletedContacts.remove(senderHex);
-        _saveContacts();
-        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} responding — allowed');
-      }
-
-      if (resp.accepted) {
-        // Validate: we must have a pending outgoing CR to this sender.
-        // Without this check, a response from a wrong identity (e.g. Alice
-        // responding to a CR addressed to AllyCat) would create a ghost contact.
-        final existing = _contacts[senderHex];
-        if (existing == null || (existing.status != 'pending_outgoing' && existing.status != 'accepted')) {
-          _log.warn('CR-Response from ${senderHex.substring(0, 8)} but no pending CR — ignoring');
-          return;
-        }
-
-        // Dedup on status transition: if the contact was already 'accepted',
-        // this is a sender-side retry (e.g. sender restarted, lost in-memory
-        // ACK-state, retried CR-Response). Don't flood the chat with duplicate
-        // "accepted your CR" system messages or re-fire the onContactAccepted
-        // callback — just refresh the keys in case they changed.
-        final wasAlreadyAccepted = existing.status == 'accepted';
-
-        final picBase64 = resp.profilePicture.isNotEmpty
-            ? base64Encode(resp.profilePicture)
-            : null;
-        existing.status = 'accepted';
-        existing.acceptedAt ??= DateTime.now();
-        _crRetryCountPerContact.remove(nodeIdHex);
-        _staleWarningWrittenFor.remove(nodeIdHex);
-        existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
-        existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
-        existing.mlDsaPk = Uint8List.fromList(resp.mlDsaPublicKey);
-        existing.displayName = resp.displayName;
-        if (picBase64 != null) existing.profilePictureBase64 = picBase64;
-        _saveContacts();
-
-        if (wasAlreadyAccepted) {
-          _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
-          onStateChanged?.call();
-          return;
-        }
-
-        // Create conversation with system message so the contact appears
-        // immediately in the "Aktuell" tab (not only in "Kontakte" tab).
-        final systemMsg = UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: senderHex,
-          senderNodeIdHex: '',
-          text: '${resp.displayName} accepted your contact request.',
-          isOutgoing: false,
-          timestamp: DateTime.now(),
-          type: proto.MessageType.IDENTITY_DELETED, // system message type
-          status: MessageStatus.delivered,
-        );
-        _addMessageToConversation(senderHex, systemMsg);
-        _saveConversations();
-
-        onContactAccepted?.call(senderHex);
-        _log.info('Contact accepted by ${resp.displayName}');
-      } else {
-        _log.info('Contact rejected by ${senderHex.substring(0, 8)}: ${resp.rejectionReason}');
-      }
-      onStateChanged?.call();
-    } catch (e) {
-      _log.error('Contact response parse error: $e');
-    }
-  }
+  //
+  // V3 receive routes via `handleApplicationFrame` (User-KEM-decap) and
+  // `handleIncoming*Infra` (Device-KEM-decap), both wired in
+  // `service_daemon.dart`.
 
   /// Tracks when each contact last sent a typing indicator.
   final Map<String, DateTime> _typingTimestamps = {};
@@ -1486,109 +874,17 @@ class CleonaService implements ICleonaService {
     return DateTime.now().difference(ts).inSeconds < 5;
   }
 
-  void _handleEphemeral(proto.MessageEnvelope envelope) {
-    final type = envelope.messageType;
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final conv = conversations[conversationId];
-
-    if (type == proto.MessageType.DELIVERY_RECEIPT) {
-      _handleDeliveryReceipt(envelope, conversationId);
-    }
-    if (type == proto.MessageType.READ_RECEIPT) {
-      _handleReadReceipt(envelope);
-    }
-    if (type == proto.MessageType.TYPING_INDICATOR) {
-      // Enforce: ignore typing indicators if disabled for this chat
-      if (conv != null && !conv.config.typingIndicators) return;
-      // Parse TypingIndicator protobuf (with backward compat for empty payload)
-      bool isTyping = true;
-      try {
-        if (envelope.encryptedPayload.isNotEmpty) {
-          final indicator = proto.TypingIndicator.fromBuffer(envelope.encryptedPayload);
-          isTyping = indicator.isTyping;
-        }
-      } catch (_) {
-        // Backward compat: empty/unparseable payload = is_typing=true
-      }
-      if (isTyping) {
-        _typingTimestamps[senderHex] = DateTime.now();
-      } else {
-        _typingTimestamps.remove(senderHex);
-      }
-      onStateChanged?.call();
-    }
-  }
-
-  /// Handle DELIVERY_RECEIPT: mark outgoing message as delivered in UI.
-  void _handleDeliveryReceipt(proto.MessageEnvelope envelope, String conversationId) {
-    try {
-      final receipt = proto.DeliveryReceipt.fromBuffer(envelope.encryptedPayload);
-      final msgIdHex = bytesToHex(Uint8List.fromList(receipt.messageId));
-      final conv = conversations[conversationId];
-      if (conv == null) return;
-      for (final msg in conv.messages) {
-        if (msg.id == msgIdHex && msg.isOutgoing && msg.status == MessageStatus.sent) {
-          msg.status = MessageStatus.delivered;
-          onStateChanged?.call();
-          break;
-        }
-      }
-    } catch (_) {}
-  }
-
   /// RUDP Light: ACK timeout — downgrade message status from "sent" to "queued".
-  void _handleAckTimeout(String messageIdHex, String recipientNodeIdHex) {
+  void _handleAckTimeout(String messageIdHex, String recipientUserIdHex) {
     for (final conv in conversations.values) {
       for (final msg in conv.messages) {
         if (msg.id == messageIdHex && msg.isOutgoing && msg.status == MessageStatus.sent) {
           msg.status = MessageStatus.queued;
           _log.info('ACK timeout for ${messageIdHex.substring(0, 8)} to '
-              '${recipientNodeIdHex.substring(0, 8)} — status downgraded to queued');
+              '${recipientUserIdHex.substring(0, 8)} — status downgraded to queued');
           onStateChanged?.call();
           return;
         }
-      }
-    }
-  }
-
-  /// Handle READ_RECEIPT: mark outgoing message as read, set readAt for expiry.
-  void _handleReadReceipt(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Parse ReadReceipt protobuf (with backward compat for raw bytes)
-    String msgIdHex;
-    DateTime readAt;
-    try {
-      final receipt = proto.ReadReceipt.fromBuffer(envelope.encryptedPayload);
-      if (receipt.messageId.isEmpty) return;
-      msgIdHex = bytesToHex(Uint8List.fromList(receipt.messageId));
-      readAt = receipt.readAt > 0
-          ? DateTime.fromMillisecondsSinceEpoch(receipt.readAt.toInt())
-          : DateTime.now();
-    } catch (_) {
-      // Backward compat: old nodes may send raw message ID bytes
-      if (envelope.encryptedPayload.isEmpty) return;
-      msgIdHex = bytesToHex(Uint8List.fromList(envelope.encryptedPayload));
-      readAt = DateTime.now();
-    }
-
-    // Find the conversation (DM or group)
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final conv = conversations[conversationId];
-    if (conv == null) return;
-
-    for (final msg in conv.messages) {
-      if (msg.id == msgIdHex && msg.isOutgoing) {
-        msg.status = MessageStatus.read;
-        msg.readAt ??= readAt;
-        break;
       }
     }
   }
@@ -1621,9 +917,14 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  void _handleFragmentStore(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+  /// FRAGMENT_STORE handler (Architecture §5.4 + §23.3 InfraFrame). Stores
+  /// the fragment in the local mailbox; if storage succeeds, sends a
+  /// FRAGMENT_STORE_ACK back to the sender's device. If the fragment
+  /// targets our own mailbox, triggers reassembly; otherwise, if we know
+  /// the mailbox owner, kicks off a proactive push (§3.5).
+  void _handleFragmentStore(Uint8List payload, Uint8List senderDeviceId) {
     try {
-      final frag = proto.FragmentStore.fromBuffer(envelope.encryptedPayload);
+      final frag = proto.FragmentStore.fromBuffer(payload);
       final stored = mailboxStore.storeFragment(StoredFragment(
         mailboxId: Uint8List.fromList(frag.mailboxId),
         messageId: Uint8List.fromList(frag.messageId),
@@ -1634,31 +935,22 @@ class CleonaService implements ICleonaService {
         originalSize: frag.originalSize,
       ));
 
-      // Send ACK
       if (stored) {
-        final ack = identity.createSignedEnvelope(
-          proto.MessageType.FRAGMENT_STORE_ACK,
-          (proto.FragmentStoreAck()
-                ..messageId = frag.messageId
-                ..fragmentIndex = frag.fragmentIndex)
-              .writeToBuffer(),
-          recipientId: Uint8List.fromList(envelope.senderId),
+        final ackPayload = (proto.FragmentStoreAck()
+              ..messageId = frag.messageId
+              ..fragmentIndex = frag.fragmentIndex)
+            .writeToBuffer();
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK,
+          innerPayload: Uint8List.fromList(ackPayload),
+          recipientDeviceId: senderDeviceId,
         );
-        if (from.address != '0.0.0.0') {
-          node.transport.sendUdp(ack, from, fromPort);
-        } else {
-          // Came via relay — send ACK via cascade (uses learned relay route)
-          node.sendEnvelope(ack, Uint8List.fromList(envelope.senderId));
-        }
       }
 
-      // Check if this fragment is for our mailbox before reassembly
       final mailboxId = Uint8List.fromList(frag.mailboxId);
       if (_isOurMailbox(mailboxId)) {
         _tryReassemble(Uint8List.fromList(frag.messageId));
       } else if (stored) {
-        // Proactive fragment push (Architecture 3.5):
-        // If we know the mailbox owner, forward the fragment immediately.
         _proactivePush(frag, mailboxId);
       }
     } catch (e) {
@@ -1667,61 +959,127 @@ class CleonaService implements ICleonaService {
   }
 
   /// Proactive fragment push: forward a stored fragment to the mailbox owner
-  /// if we know their address. This converts pull-based delivery (polling)
-  /// to push-based (< 1s latency). Per Architecture Section 3.5.
+  /// if we know their address. Push-based delivery (< 1s latency) replaces
+  /// polling for online recipients. Per Architecture Section 3.5.
   /// Checks both contacts AND routing table peers (PeerExchange provides PKs).
   void _proactivePush(proto.FragmentStore frag, Uint8List mailboxId) {
-    final sodium = SodiumFFI();
+    final ownerNodeId = _findMailboxOwner(mailboxId);
+    if (ownerNodeId == null) return;
+    _attemptPush(frag, mailboxId, ownerNodeId);
+  }
 
-    // Collect all known ed25519 PKs: from contacts + routing table peers
-    final candidates = <({Uint8List nodeId, Uint8List ed25519Pk})>[];
+  /// Resolve mailboxId to ownerNodeId via contacts + routing table.
+  Uint8List? _findMailboxOwner(Uint8List mailboxId) {
+    final sodium = SodiumFFI();
+    final seen = <String>{};
+
+    bool tryCandidate(Uint8List nodeId, Uint8List ed25519Pk) {
+      final candidateMailbox = sodium.sha256(Uint8List.fromList(
+        [...utf8.encode('mailbox'), ...ed25519Pk],
+      ));
+      return _bytesEqual(mailboxId, candidateMailbox);
+    }
 
     for (final contact in _contacts.values) {
-      if (contact.ed25519Pk != null) {
-        candidates.add((nodeId: contact.nodeId, ed25519Pk: contact.ed25519Pk!));
+      if (contact.ed25519Pk == null) continue;
+      final hex = bytesToHex(contact.nodeId);
+      if (!seen.add(hex)) continue;
+      if (tryCandidate(contact.nodeId, contact.ed25519Pk!)) {
+        return contact.nodeId;
       }
     }
     for (final peer in node.routingTable.allPeers) {
-      if (peer.ed25519PublicKey != null && peer.ed25519PublicKey!.isNotEmpty) {
-        candidates.add((nodeId: peer.nodeId, ed25519Pk: peer.ed25519PublicKey!));
+      if (peer.ed25519PublicKey == null || peer.ed25519PublicKey!.isEmpty) continue;
+      final hex = bytesToHex(peer.nodeId);
+      if (!seen.add(hex)) continue;
+      if (tryCandidate(peer.nodeId, peer.ed25519PublicKey!)) {
+        return peer.nodeId;
       }
     }
+    return null;
+  }
 
-    for (final candidate in candidates) {
-      final candidateMailbox = sodium.sha256(Uint8List.fromList(
-        [...utf8.encode('mailbox'), ...candidate.ed25519Pk],
-      ));
-      if (!_bytesEqual(mailboxId, candidateMailbox)) continue;
+  /// Single push attempt with retry-on-no-ACK.
+  /// Idempotent per (mailboxId, messageId, fragmentIndex, ownerNodeId):
+  /// reuses the FragmentPushState retryTimer to avoid concurrent chains.
+  /// Architecture §3.5 Push reliability: up to 3 attempts (initial + 2 retries),
+  /// backoffs 500 ms / 2 s. Cancelled on FRAGMENT_STORE_ACK.
+  void _attemptPush(proto.FragmentStore frag, Uint8List mailboxId, Uint8List ownerNodeId) {
+    final storeKey = '${bytesToHex(mailboxId)}:'
+        '${bytesToHex(Uint8List.fromList(frag.messageId))}:'
+        '${frag.fragmentIndex}';
 
-      // Found the owner — check if they're reachable
-      final peer = node.routingTable.getPeer(candidate.nodeId);
-      if (peer == null) continue;
+    final state = mailboxStore.pushStateFor(storeKey, ownerNodeId);
+    if (state == null) return;        // fragment already evicted
+    if (state.pushAcked) return;      // owner already received
+    if (state.attempts >= MailboxStore.maxPushAttempts) return;
 
-      // Forward using our own senderId (not the original sender's)
-      // to prevent falsely updating lastSeen on the recipient.
-      final pushEnvelope = identity.createSignedEnvelope(
-        proto.MessageType.FRAGMENT_STORE,
-        frag.writeToBuffer(),
-        recipientId: candidate.nodeId,
-      );
-
-      // V3: UDP only — fragments are pushed via UDP
-      final targets = peer.allConnectionTargets();
-      for (final addr in targets.take(3)) {
-        try {
-          node.transport.sendUdp(pushEnvelope, InternetAddress(addr.ip), addr.port);
-        } catch (_) {}
-      }
-
-      _log.debug('Proactive push: fragment ${frag.fragmentIndex} to '
-          '${bytesToHex(candidate.nodeId).substring(0, 8)}');
+    final peer = node.routingTable.getPeer(ownerNodeId);
+    if (peer == null) {
+      // Owner not currently in routing table; skip this attempt.
+      // Architecture §3.5: no re-push on reachability — the budget is
+      // consumed in one contiguous window. If the owner reappears later,
+      // recovery is via their FRAGMENT_RETRIEVE startup poll (§3.3.6).
       return;
+    }
+
+    state.cancelRetry();
+    mailboxStore.recordPushAttempt(storeKey, ownerNodeId);
+    final attemptNum = state.attempts;
+
+    // V3 proactive push: notify owner via InfrastructureFrame
+    // (MTV3_FRAGMENT_STORE) targeted at their deviceId. Fire-and-forget;
+    // ACK arrives via FRAGMENT_STORE_ACK → onProactivePushAcked() which
+    // cancels the retry timer. Architecture §3.5 push-pacing.
+    final fragBytes = Uint8List.fromList(frag.writeToBuffer());
+    unawaited(node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+      innerPayload: fragBytes,
+      recipientDeviceId: ownerNodeId,
+    ).then((sent) {
+      if (sent) {
+        _log.debug('Proactive push sent: attempt $attemptNum/'
+            '${MailboxStore.maxPushAttempts} frag=${frag.fragmentIndex} '
+            'owner=${bytesToHex(ownerNodeId).substring(0, 8)} '
+            'targets=${peer.allConnectionTargets().length}');
+      } else {
+        _log.debug('Proactive push send failed (no DV-route or KEM-PK): '
+            'attempt $attemptNum frag=${frag.fragmentIndex} '
+            'owner=${bytesToHex(ownerNodeId).substring(0, 8)}');
+      }
+    }, onError: (Object e, StackTrace st) {
+      _log.warn('Proactive push exception: attempt $attemptNum '
+          'frag=${frag.fragmentIndex} '
+          'owner=${bytesToHex(ownerNodeId).substring(0, 8)} err=$e');
+    }));
+
+    if (attemptNum >= MailboxStore.maxPushAttempts) return;
+
+    // Backoff after attempt 1 → 500ms; after attempt 2 → 2s.
+    final backoff = attemptNum == 1
+        ? const Duration(milliseconds: 500)
+        : const Duration(seconds: 2);
+    state.retryTimer = Timer(backoff, () {
+      _attemptPush(frag, mailboxId, ownerNodeId);
+    });
+  }
+
+  /// Called by Node when a FRAGMENT_STORE_ACK is observed for a push we issued.
+  /// Marks the corresponding push as completed and cancels its retry timer.
+  void onProactivePushAcked(Uint8List messageId, int fragmentIndex) {
+    final storeKey = mailboxStore.markPushAcked(messageId, fragmentIndex);
+    if (storeKey != null) {
+      _log.debug('Proactive push ACKed: frag=$fragmentIndex msg=${bytesToHex(messageId).substring(0, 8)}');
     }
   }
 
-  void _handleFragmentRetrieve(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+  /// FRAGMENT_RETRIEVE handler (Architecture §5.4 + §23.3 InfraFrame).
+  /// Looks up fragments stored for [req.mailboxId] in the local mailbox
+  /// and forwards each one back to [senderDeviceId] as a fresh
+  /// FRAGMENT_STORE via the DV cascade.
+  void _handleFragmentRetrieve(Uint8List payload, Uint8List senderDeviceId) {
     try {
-      final req = proto.FragmentRetrieve.fromBuffer(envelope.encryptedPayload);
+      final req = proto.FragmentRetrieve.fromBuffer(payload);
       final mailboxId = Uint8List.fromList(req.mailboxId);
       final fragments = mailboxStore.retrieveFragments(mailboxId);
 
@@ -1734,26 +1092,47 @@ class CleonaService implements ICleonaService {
           ..requiredFragments = frag.requiredFragments
           ..fragmentData = frag.data
           ..originalSize = frag.originalSize;
-
-        final env = identity.createSignedEnvelope(
-          proto.MessageType.FRAGMENT_STORE,
-          fragStore.writeToBuffer(),
-          recipientId: Uint8List.fromList(envelope.senderId),
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
+          recipientDeviceId: senderDeviceId,
         );
-        if (from.address != '0.0.0.0') {
-          node.transport.sendUdp(env, from, fromPort);
-        } else {
-          node.sendEnvelope(env, Uint8List.fromList(envelope.senderId));
-        }
       }
+      final resp = proto.FragmentRetrieveResponse()
+        ..mailboxId = req.mailboxId
+        ..fragmentCount = fragments.length;
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE,
+        innerPayload: Uint8List.fromList(resp.writeToBuffer()),
+        recipientDeviceId: senderDeviceId,
+      );
+      _log.info('FRAGMENT_RETRIEVE: sent ${fragments.length} fragments + response '
+          'to ${bytesToHex(senderDeviceId).substring(0, 8)}');
     } catch (e) {
       _log.debug('Fragment retrieve error: $e');
     }
   }
 
-  void _handleFragmentDelete(proto.MessageEnvelope envelope) {
+  void handleIncomingFragmentRetrieveResponseInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
     try {
-      final del = proto.FragmentDelete.fromBuffer(envelope.encryptedPayload);
+      final resp = proto.FragmentRetrieveResponse.fromBuffer(frame.payload);
+      _log.info('FRAGMENT_RETRIEVE_RESPONSE from '
+          '${bytesToHex(senderDeviceId).substring(0, 8)}: '
+          '${resp.fragmentCount} fragments');
+    } catch (e) {
+      _log.debug('Fragment retrieve response error: $e');
+    }
+  }
+
+  /// FRAGMENT_DELETE handler (Architecture §5.4 + §23.3 InfraFrame).
+  /// Mailbox-owner explicitly evicts a reassembled fragment-bundle; no
+  /// reply, no ACK.
+  void _handleFragmentDelete(Uint8List payload) {
+    try {
+      final del = proto.FragmentDelete.fromBuffer(payload);
       mailboxStore.deleteFragments(
         Uint8List.fromList(del.mailboxId),
         Uint8List.fromList(del.messageId),
@@ -1764,22 +1143,31 @@ class CleonaService implements ICleonaService {
   // Pending media: maps messageIdHex -> local file path (sender keeps file until accepted)
   final Map<String, String> _pendingMediaSends = {};
 
+  // Receiver-side Stage-2 reassembly buffer. Keyed by mediaIdHex (the original
+  // MEDIA_ANNOUNCE messageId). Holds the partial chunk-array; finalised by
+  // MEDIA_COMPLETE → file write + UiMessage state-bump to completed.
+  final Map<String, _MediaChunkBuffer> _mediaChunkBuffers = {};
+
   /// Send a media file (image, file, etc.) to a contact or group.
   /// Two-Stage: sends MEDIA_ANNOUNCEMENT first, actual content on MEDIA_ACCEPT.
   @override
   Future<UiMessage?> sendMediaMessage(String conversationId, String filePath) async {
+    _log.info('sendMediaMessage: convId=$conversationId path=$filePath');
     if (_reducedMode) {
       _log.warn('sendMediaMessage blocked: reducedMode active');
       return null;
     }
     final file = File(filePath);
-    if (!file.existsSync()) return null;
+    if (!file.existsSync()) {
+      _log.warn('sendMediaMessage: file does not exist at $filePath');
+      return null;
+    }
 
     final audioBytes = await file.readAsBytes();
     final filename = filePath.split('/').last;
     final mimeType = _guessMimeType(filename);
     final fileSize = audioBytes.length;
-    final isVoice = _msgTypeFromMime(mimeType) == proto.MessageType.VOICE_MESSAGE;
+    final isVoice = _isVoiceFromMime(mimeType);
     final isGroup = _groups.containsKey(conversationId);
 
     if (!isGroup) _maybeWriteStaleContactWarning(conversationId);
@@ -1801,7 +1189,12 @@ class CleonaService implements ICleonaService {
     }
 
     // ── Show message in UI IMMEDIATELY (optimistic update) ──
-    final tempId = bytesToHex(SodiumFFI().randomBytes(16));
+    // Optimistic UI msg.id is the wire messageId so DELIVERY_RECEIPT
+    // (which carries inner.messageId) can match this local message and
+    // upgrade `sent → delivered` in `_handleDeliveryReceiptV3`. Mirrors
+    // the alignment pattern from `sendTextMessage` (commit 145e24d).
+    final messageIdBytes = SodiumFFI().randomBytes(16);
+    final tempId = bytesToHex(messageIdBytes);
     final msg = UiMessage(
       id: tempId,
       conversationId: conversationId,
@@ -1853,10 +1246,43 @@ class CleonaService implements ICleonaService {
     final sodium = SodiumFFI();
     final contentHash = sodium.sha256(audioBytes);
 
-    // Generate thumbnail for images
+    // Generate thumbnail for images. Architecture §3.4.1: "compressed thumbnail
+    // (max 100 KB)". Earlier versions used `bytes.sublist(0, 100*1024)` which
+    // produced TRUNCATED image bytes (header + partial data) — receiver's
+    // Image.memory then crashed with "Codec failed to produce an image" on every
+    // image > 100KB. Now: real decode → resize to 320×320 max → JPEG-encode at
+    // q=70. Falls back to original bytes if decode fails or already small enough.
     Uint8List? thumbnail;
     if (mimeType.startsWith('image/') && bytes.isNotEmpty) {
-      thumbnail = bytes.length <= 100 * 1024 ? bytes : Uint8List.fromList(bytes.sublist(0, 100 * 1024));
+      if (bytes.length <= 100 * 1024) {
+        // Already small — use original bytes (likely valid as-is).
+        thumbnail = bytes;
+      } else {
+        try {
+          final decoded = img.decodeImage(bytes);
+          if (decoded != null) {
+            // Maintain aspect ratio, fit into 320×320.
+            final resized = img.copyResize(
+              decoded,
+              width: decoded.width >= decoded.height ? 320 : null,
+              height: decoded.height > decoded.width ? 320 : null,
+              interpolation: img.Interpolation.linear,
+            );
+            final encoded = Uint8List.fromList(img.encodeJpg(resized, quality: 70));
+            // Cap final at 100KB for §3.4.1 compliance — drop quality if needed.
+            thumbnail = encoded.length <= 100 * 1024
+                ? encoded
+                : Uint8List.fromList(img.encodeJpg(resized, quality: 50));
+            // If even q=50 is over 100KB (very rare), drop thumbnail entirely
+            // rather than ship invalid bytes.
+            if (thumbnail.length > 100 * 1024) thumbnail = null;
+          }
+        } catch (e) {
+          _log.warn('Thumbnail generation failed for $filename: $e — '
+              'shipping no thumbnail rather than truncated bytes');
+          thumbnail = null;
+        }
+      }
     }
 
     // Build MEDIA_ANNOUNCEMENT metadata
@@ -1886,121 +1312,99 @@ class CleonaService implements ICleonaService {
           .toList();
     } else {
       final contact = _contacts[conversationId];
-      if (contact == null || contact.status != 'accepted') return null;
+      if (contact == null || contact.status != 'accepted') {
+        _log.warn('sendMediaMessage: cannot send to non-accepted contact convId=$conversationId '
+            'contact=${contact != null ? "exists status=${contact.status}" : "MISSING"} '
+            '(contacts loaded: ${_contacts.length})');
+        return null;
+      }
       recipients = [contact];
     }
 
-    // ── Encrypt and send ──
+    // V3 send path. Inline (≤256KB) → MTV3_MEDIA_INLINE with the raw
+    // content as payload + ContentMetadata on the frame. Two-Stage (>256KB)
+    // → MTV3_MEDIA_ANNOUNCE with empty payload (metadata in frame), Stage-2
+    // (MEDIA_REQUEST/CHUNK/COMPLETE) is wired in C4 (bulk + S&F + mailbox).
+    final twoStage = fileSize > 256 * 1024;
+    _log.info('[E2E media-send-path-v3] mode=${twoStage ? "two-stage-announce-only" : "inline"} '
+        'fileSize=$fileSize recipients=${recipients.length} convId=${conversationId.substring(0, 8)}');
     String? firstMsgId;
-    if (fileSize <= 256 * 1024) {
+    if (!twoStage) {
       for (final recipient in recipients) {
         if (recipient.x25519Pk == null || recipient.mlKemPk == null) continue;
-
-        var payload = bytes;
-        var compression = proto.CompressionType.NONE;
-        if (payload.length >= 64) {
-          try {
-            final compressed = ZstdCompression.instance.compress(payload);
-            if (compressed.length < payload.length) {
-              payload = compressed;
-              compression = proto.CompressionType.ZSTD;
-            }
-          } catch (_) {}
-        }
-
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: recipient.x25519Pk!,
-          recipientMlKemPk: recipient.mlKemPk!,
+        final ok = await sendToUser(
+          recipientUserId: recipient.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_MEDIA_INLINE,
+          payload: bytes,
+          contentMetadata: metadata,
+          messageId: messageIdBytes,
         );
-
-        final msgType = _msgTypeFromMime(mimeType);
-        final envelope = identity.createSignedEnvelope(
-          msgType,
-          ciphertext,
-          recipientId: recipient.nodeId,
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        envelope.compression = compression;
-        envelope.contentMetadata = metadata;
-        if (isGroup) envelope.groupId = hexToBytes(conversationId);
-
-        firstMsgId ??= bytesToHex(Uint8List.fromList(envelope.messageId));
-        await node.sendEnvelope(envelope, recipient.nodeId);
-        node.statsCollector.addMessageSent();
-        _storeErasureCodedBackup(envelope, _contacts[bytesToHex(recipient.nodeId)], recipientNodeId: recipient.nodeId);
+        if (ok) node.statsCollector.addMessageSent();
       }
+      firstMsgId = tempId;
     } else {
-      // Two-Stage: send MEDIA_ANNOUNCEMENT only
+      // Two-Stage Stage 1: announce only — content stays pending until
+      // receiver triggers MEDIA_REQUEST. V3 trägt die Metadata strukturiert
+      // im frame.contentMetadata, der Payload bleibt leer.
       for (final recipient in recipients) {
         if (recipient.x25519Pk == null || recipient.mlKemPk == null) continue;
-
-        var payload = Uint8List.fromList(announcementBytes);
-        var compression = proto.CompressionType.NONE;
-        if (payload.length >= 64) {
-          try {
-            final compressed = ZstdCompression.instance.compress(payload);
-            if (compressed.length < payload.length) {
-              payload = compressed;
-              compression = proto.CompressionType.ZSTD;
-            }
-          } catch (_) {}
-        }
-
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: recipient.x25519Pk!,
-          recipientMlKemPk: recipient.mlKemPk!,
+        await sendToUser(
+          recipientUserId: recipient.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
+          payload: Uint8List(0),
+          contentMetadata: metadata,
+          messageId: messageIdBytes,
         );
-
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.MEDIA_ANNOUNCEMENT,
-          ciphertext,
-          recipientId: recipient.nodeId,
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        envelope.compression = compression;
-        envelope.contentMetadata = metadata;
-        if (isGroup) envelope.groupId = hexToBytes(conversationId);
-
-        firstMsgId ??= bytesToHex(Uint8List.fromList(envelope.messageId));
-        node.sendEnvelope(envelope, recipient.nodeId);
       }
+      firstMsgId = tempId;
+      // Touch announcementBytes so the unused-local lint stays quiet —
+      // keeps the helper available for the C4 fallback path.
+      // ignore: unnecessary_statements
+      announcementBytes;
     }
 
-    // Store pending media for two-stage delivery
-    if (fileSize > 256 * 1024 && firstMsgId != null) {
+    // Store pending media for two-stage delivery (C4 will look this up
+    // when the receiver sends MEDIA_REQUEST).
+    if (twoStage) {
       _pendingMediaSends[firstMsgId] = persistentPath;
     }
 
     // Update message with final ID and status
-    if (firstMsgId != null) msg.id = firstMsgId;
+    msg.id = firstMsgId;
     final thumbnailB64 = thumbnail != null ? base64Encode(thumbnail) : null;
     msg.thumbnailBase64 = thumbnailB64;
     msg.status = MessageStatus.sent;
     _saveConversations();
     onStateChanged?.call();
 
-    _log.info('Media sent: $filename ($fileSize bytes) to $conversationId');
+    _log.info('[E2E media-send-done] msgId=${msg.id.substring(0, 8)} '
+        'filename=$filename size=$fileSize recipient=${conversationId.substring(0, 8)} '
+        'mode=${twoStage ? "two-stage (announcement only)" : "inline (full content)"}');
     return msg;
   }
 
   /// Accept a media download (Two-Stage: send MEDIA_ACCEPT).
   @override
   Future<bool> acceptMediaDownload(String conversationId, String messageId) async {
+    _log.info('[E2E media-accept-send] msgId=${messageId.substring(0, 8)} convId=${conversationId.substring(0, 8)}');
     final conv = conversations[conversationId];
-    if (conv == null) return false;
+    if (conv == null) {
+      _log.warn('[E2E media-accept-send] ABORT: conversation not found');
+      return false;
+    }
 
     // Enforce allowDownloads policy
     if (!conv.config.allowDownloads) {
-      _log.warn('Download blocked: allowDownloads=false for $conversationId');
+      _log.warn('[E2E media-accept-send] BLOCKED: allowDownloads=false for $conversationId');
       return false;
     }
 
     final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
-    if (msg == null || msg.mediaState != MediaDownloadState.announced) return false;
+    if (msg == null || msg.mediaState != MediaDownloadState.announced) {
+      _log.warn('[E2E media-accept-send] ABORT: msg=${msg != null ? "exists state=${msg.mediaState.name}" : "MISSING"} '
+          '(expected mediaState=announced)');
+      return false;
+    }
 
     // For now, just mark as downloading (the actual content delivery is handled
     // when we receive the IMAGE/FILE response from sender)
@@ -2008,291 +1412,24 @@ class CleonaService implements ICleonaService {
     onStateChanged?.call();
     _saveConversations();
 
-    // Send MEDIA_ACCEPT to the original sender
-    final senderNodeId = hexToBytes(msg.senderNodeIdHex);
+    // Send V3 MEDIA_REQUEST to the original sender. Payload = original
+    // messageId bytes (16 bytes). Sender (C4 — see _handleMediaRequestV3)
+    // looks up _pendingMediaSends[msgIdHex] and starts the bulk push.
     final contact = _contacts[msg.senderNodeIdHex];
-    if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) return false;
-
-    // The accept message references the original messageId
-    final acceptPayload = Uint8List.fromList(hexToBytes(messageId));
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: acceptPayload,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
+    if (contact == null ||
+        contact.x25519Pk == null ||
+        contact.mlKemPk == null) {
+      _log.warn('[E2E media-accept-send-v3] ABORT: contact=${contact != null ? "exists" : "MISSING"}');
+      return false;
+    }
+    final ok = await sendToUser(
+      recipientUserId: contact.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_MEDIA_REQUEST,
+      payload: Uint8List.fromList(hexToBytes(messageId)),
     );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.MEDIA_ACCEPT,
-      ciphertext,
-      recipientId: senderNodeId,
-    );
-    envelope.kemHeader = kemHeader;
-    node.sendEnvelope(envelope, senderNodeId);
-
-    _log.info('Media download accepted for $messageId');
-    return true;
-  }
-
-  void _handleMediaAnnouncement(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    Uint8List payload;
-    try {
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('MEDIA_ANNOUNCEMENT', e);
-      return;
-    } catch (e) {
-      _log.error('MEDIA_ANNOUNCEMENT decrypt failed: $e');
-      return;
-    }
-
-    final metadata = proto.ContentMetadata.fromBuffer(payload);
-    final msgId = bytesToHex(Uint8List.fromList(envelope.messageId));
-    final groupIdHex = envelope.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(envelope.groupId)) : null;
-    final conversationId = groupIdHex ?? senderHex;
-
-    final thumbnailB64 = metadata.thumbnail.isNotEmpty ? base64Encode(metadata.thumbnail) : null;
-
-    final msg = UiMessage(
-      id: msgId,
-      conversationId: conversationId,
-      senderNodeIdHex: senderHex,
-      text: metadata.filename,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(envelope.timestamp.toInt()),
-      type: _msgTypeFromMime(metadata.mimeType),
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-      mimeType: metadata.mimeType,
-      fileSize: metadata.fileSize.toInt(),
-      filename: metadata.filename,
-      thumbnailBase64: thumbnailB64,
-      mediaState: MediaDownloadState.announced,
-    );
-
-    _addMessageToConversation(conversationId, msg, isGroup: groupIdHex != null);
-    _log.info('Media announcement from ${senderHex.substring(0, 8)}: ${metadata.filename} (${metadata.fileSize} bytes)');
-
-    // Auto-accept if below threshold (Architecture 3.4.3)
-    if (_mediaSettings.shouldAutoDownload(metadata.mimeType, metadata.fileSize.toInt())) {
-      acceptMediaDownload(conversationId, msgId);
-    }
-  }
-
-  void _handleMediaContent(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt file content
-    Uint8List fileData;
-    try {
-      _log.debug('Media decrypt: hasKem=${envelope.hasKemHeader()} '
-          'kemPkLen=${envelope.hasKemHeader() ? envelope.kemHeader.ephemeralX25519Pk.length : 0} '
-          'compression=${envelope.compression} payloadLen=${envelope.encryptedPayload.length}');
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        fileData = decrypted;
-      } else {
-        fileData = Uint8List.fromList(envelope.encryptedPayload);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected(envelope.messageType.name, e);
-      return;
-    } catch (e) {
-      _log.error('Media content decrypt failed: $e');
-      return;
-    }
-
-    final msgId = bytesToHex(Uint8List.fromList(envelope.messageId));
-    final groupIdHex = envelope.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(envelope.groupId)) : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final metadata = envelope.contentMetadata;
-
-    // Voice messages: try to parse VoicePayload (audio + transcript)
-    Uint8List actualFileData = fileData;
-    String? transcriptText;
-    String? transcriptLanguage;
-    double? transcriptConfidence;
-
-    if (envelope.messageType == proto.MessageType.VOICE_MESSAGE) {
-      try {
-        final voicePayload = proto.VoicePayload.fromBuffer(fileData);
-        if (voicePayload.audioData.isNotEmpty) {
-          // New format: VoicePayload wrapper
-          actualFileData = Uint8List.fromList(voicePayload.audioData);
-          if (voicePayload.transcriptText.isNotEmpty) {
-            transcriptText = voicePayload.transcriptText;
-            transcriptLanguage = voicePayload.transcriptLanguage;
-            transcriptConfidence = voicePayload.transcriptConfidence.toDouble();
-            _log.info('Voice received with transcript: "${transcriptText.length > 40 ? '${transcriptText.substring(0, 40)}...' : transcriptText}"');
-          }
-        }
-        // If audioData is empty, the parse "succeeded" on raw audio bytes
-        // (protobuf accepts anything) — treat as raw audio.
-      } catch (_) {
-        // Parse failed — old client sent raw audio bytes, no VoicePayload wrapper.
-      }
-    }
-
-    // Save file to media directory
-    final mediaDir = Directory('$profileDir/media');
-    if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
-    final filename = metadata.filename.isNotEmpty ? metadata.filename : 'file_$msgId';
-    final savePath = '${mediaDir.path}/$filename';
-    File(savePath).writeAsBytesSync(actualFileData);
-
-    final thumbnailB64 = metadata.thumbnail.isNotEmpty ? base64Encode(metadata.thumbnail) : null;
-    // For images: use the image data itself as thumbnail if small
-    final effectiveThumbnail = thumbnailB64 ?? (metadata.mimeType.startsWith('image/') && actualFileData.length <= 100 * 1024 ? base64Encode(actualFileData) : null);
-
-    final msg = UiMessage(
-      id: msgId,
-      conversationId: conversationId,
-      senderNodeIdHex: senderHex,
-      text: filename,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(envelope.timestamp.toInt()),
-      type: envelope.messageType,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-      filePath: savePath,
-      mimeType: metadata.mimeType,
-      fileSize: actualFileData.length,
-      filename: filename,
-      thumbnailBase64: effectiveThumbnail,
-      mediaState: MediaDownloadState.completed,
-      transcriptText: transcriptText,
-      transcriptLanguage: transcriptLanguage,
-      transcriptConfidence: transcriptConfidence,
-    );
-
-    _addMessageToConversation(conversationId, msg, isGroup: groupIdHex != null);
-    if (!_shouldSuppressNotification(conversationId, msg.timestamp.millisecondsSinceEpoch)) {
-      notificationSound.playMessageSound();
-      notificationSound.vibrate(VibrationType.message);
-      final mediaSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-      final mediaTypeLabel = metadata.mimeType.startsWith('image/') ? '📷 Bild'
-          : metadata.mimeType.startsWith('video/') ? '🎬 Video'
-          : metadata.mimeType.startsWith('audio/') ? '🎵 Audio'
-          : '📎 Datei';
-      _postAndroidNotification(mediaSenderName, mediaTypeLabel, conversationId);
-      _lastNotifiedAt[conversationId] = DateTime.now();
-    }
-    // Badge update happens inside _addMessageToConversation — single source of truth.
-    _log.info('Media received: $filename (${actualFileData.length} bytes) from ${senderHex.substring(0, 8)}');
-
-    // Local transcription fallback: if voice message has no transcript, transcribe locally
-    if (envelope.messageType == proto.MessageType.VOICE_MESSAGE && transcriptText == null) {
-      _voiceTranscription?.enqueueTranscription(
-        messageId: msgId,
-        audioFilePath: savePath,
-      );
-    }
-  }
-
-  void _handleMediaAccept(proto.MessageEnvelope envelope) {
-    // Sender receives MEDIA_ACCEPT → send the actual file content
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    Uint8List payload;
-    try {
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        payload = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('MEDIA_ACCEPT', e);
-      return;
-    } catch (e) {
-      _log.error('MEDIA_ACCEPT decrypt failed: $e');
-      return;
-    }
-
-    final originalMsgId = bytesToHex(payload);
-    final filePath = _pendingMediaSends[originalMsgId];
-    if (filePath == null) {
-      _log.warn('No pending media for $originalMsgId');
-      return;
-    }
-
-    final file = File(filePath);
-    if (!file.existsSync()) {
-      _log.warn('Pending media file not found: $filePath');
-      _pendingMediaSends.remove(originalMsgId);
-      return;
-    }
-
-    // Send the actual content to the requester
-    final contact = _contacts[senderHex];
-    if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) return;
-
-    final fileBytes = file.readAsBytesSync();
-    final filename = filePath.split('/').last;
-    final mimeType = _guessMimeType(filename);
-
-    var data = Uint8List.fromList(fileBytes);
-    var compression = proto.CompressionType.NONE;
-    if (data.length >= 64) {
-      try {
-        final compressed = ZstdCompression.instance.compress(data);
-        if (compressed.length < data.length) {
-          data = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {}
-    }
-
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: data,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
-    );
-
-    final msgType = _msgTypeFromMime(mimeType);
-    final contentEnvelope = identity.createSignedEnvelope(
-      msgType,
-      ciphertext,
-      recipientId: contact.nodeId,
-      compress: false,
-    );
-    contentEnvelope.kemHeader = kemHeader;
-    contentEnvelope.compression = compression;
-    contentEnvelope.contentMetadata = proto.ContentMetadata()
-      ..mimeType = mimeType
-      ..fileSize = Int64(fileBytes.length)
-      ..filename = filename;
-
-    node.sendEnvelope(contentEnvelope, contact.nodeId);
-    node.statsCollector.addMessageSent();
-    // Erasure-coded backup for offline delivery (Architecture 3.4.2)
-    _storeErasureCodedBackup(contentEnvelope, contact);
-    _log.info('Media content sent to ${senderHex.substring(0, 8)}: $filename (+ erasure backup)');
+    _log.info('[E2E media-accept-send-v3] msgId=${messageId.substring(0, 8)} '
+        'sender=${msg.senderNodeIdHex.substring(0, 8)} → MEDIA_REQUEST sendToUser ok=$ok');
+    return ok;
   }
 
   String _guessMimeType(String filename) {
@@ -2321,49 +1458,59 @@ class CleonaService implements ICleonaService {
   }
 
   /// Maps MIME type to the correct MessageType.
-  proto.MessageType _msgTypeFromMime(String mimeType) {
-    if (mimeType.startsWith('image/')) return proto.MessageType.IMAGE;
-    if (mimeType.startsWith('audio/')) return proto.MessageType.VOICE_MESSAGE;
-    if (mimeType.startsWith('video/')) return proto.MessageType.VIDEO;
-    return proto.MessageType.FILE;
+  ///
+  /// V3 has no media-subtype enum — `MTV3_MEDIA_INLINE` covers
+  /// image/video/audio/file uniformly. This helper produces the
+  /// UI-side [UiMessageType] tag for the chat-card row only; the wire
+  /// layer always emits `MTV3_MEDIA_INLINE`.
+  /// For voice-vs-non-voice branching see [_isVoiceFromMime].
+  UiMessageType _msgTypeFromMime(String mimeType) {
+    if (mimeType.startsWith('image/')) return UiMessageType.image;
+    if (mimeType.startsWith('audio/')) return UiMessageType.voiceMessage;
+    if (mimeType.startsWith('video/')) return UiMessageType.video;
+    return UiMessageType.file;
   }
 
-  /// Whether this message type carries user-authored content that must be
-  /// dropped while reduced-mode (sec-h5 §8.2 / T11) is active. Returning
+  /// True iff [mimeType] denotes a voice/audio recording (audio/*).
+  /// V3 send-paths use this for transcription/voice-payload branching.
+  bool _isVoiceFromMime(String mimeType) => mimeType.startsWith('audio/');
+
+  /// Whether this V3 message type carries user-authored content that must
+  /// be dropped while reduced-mode (sec-h5 §8.2 / T11) is active. Returning
   /// false means the type is infrastructure / DHT / signaling and should
   /// keep flowing even when the local user has skipped a hard-block update.
   ///
-  /// Mirrors the user-initiated send-paths gated in T11. Note that GIF
-  /// rides on the IMAGE/VIDEO content path and is not a separate enum,
-  /// and that REACTION is `EMOJI_REACTION` in the proto.
-  static bool _isUserMessage(proto.MessageType type) {
+  /// Mirrors the user-initiated send-paths gated in T11. V3 collapses
+  /// IMAGE/VIDEO/GIF/FILE into `MTV3_MEDIA_INLINE`; voice has its own
+  /// `MTV3_VOICE_MESSAGE`. `MTV3_MEDIA_REQUEST` carries
+  /// request-the-upload semantics. `MTV3_REPLY` is classified as
+  /// user-content.
+  static bool _isUserMessage(proto.MessageTypeV3 type) {
     switch (type) {
-      case proto.MessageType.TEXT:
-      case proto.MessageType.IMAGE:
-      case proto.MessageType.VIDEO:
-      case proto.MessageType.GIF:
-      case proto.MessageType.FILE:
-      case proto.MessageType.VOICE_MESSAGE:
-      case proto.MessageType.MEDIA_ANNOUNCEMENT:
-      case proto.MessageType.MEDIA_ACCEPT:
-      case proto.MessageType.MEDIA_REJECT:
-      case proto.MessageType.MEDIA_CHUNK:
-      case proto.MessageType.EMOJI_REACTION:
-      case proto.MessageType.MESSAGE_EDIT:
-      case proto.MessageType.MESSAGE_DELETE:
-      case proto.MessageType.CHANNEL_POST:
-      case proto.MessageType.CALENDAR_INVITE:
-      case proto.MessageType.CALENDAR_RSVP:
-      case proto.MessageType.CALENDAR_UPDATE:
-      case proto.MessageType.CALENDAR_DELETE:
-      case proto.MessageType.FREE_BUSY_REQUEST:
-      case proto.MessageType.FREE_BUSY_RESPONSE:
-      case proto.MessageType.POLL_CREATE:
-      case proto.MessageType.POLL_VOTE:
-      case proto.MessageType.POLL_VOTE_ANONYMOUS:
-      case proto.MessageType.POLL_VOTE_REVOKE:
-      case proto.MessageType.POLL_UPDATE:
-      case proto.MessageType.POLL_SNAPSHOT:
+      case proto.MessageTypeV3.MTV3_TEXT:
+      case proto.MessageTypeV3.MTV3_MEDIA_INLINE:
+      case proto.MessageTypeV3.MTV3_VOICE_MESSAGE:
+      case proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
+      case proto.MessageTypeV3.MTV3_MEDIA_REQUEST:
+      case proto.MessageTypeV3.MTV3_MEDIA_REJECT:
+      case proto.MessageTypeV3.MTV3_MEDIA_CHUNK:
+      case proto.MessageTypeV3.MTV3_REACTION:
+      case proto.MessageTypeV3.MTV3_REPLY:
+      case proto.MessageTypeV3.MTV3_EDIT:
+      case proto.MessageTypeV3.MTV3_DELETE:
+      case proto.MessageTypeV3.MTV3_CHANNEL_POST:
+      case proto.MessageTypeV3.MTV3_CALENDAR_INVITE:
+      case proto.MessageTypeV3.MTV3_CALENDAR_RSVP:
+      case proto.MessageTypeV3.MTV3_CALENDAR_UPDATE:
+      case proto.MessageTypeV3.MTV3_CALENDAR_DELETE:
+      case proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST:
+      case proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE:
+      case proto.MessageTypeV3.MTV3_POLL_CREATE:
+      case proto.MessageTypeV3.MTV3_POLL_VOTE:
+      case proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS:
+      case proto.MessageTypeV3.MTV3_POLL_REVOKE:
+      case proto.MessageTypeV3.MTV3_POLL_UPDATE:
+      case proto.MessageTypeV3.MTV3_POLL_SNAPSHOT:
         return true;
       default:
         return false;
@@ -2373,236 +1520,13 @@ class CleonaService implements ICleonaService {
   /// Test-only accessor for the private user-message classifier.
   /// Used by `test/smoke/smoke_reduced_mode.dart`. Not for production callers —
   /// the gate is enforced inside [handleMessage], not at call sites.
-  static bool isUserMessageForTest(proto.MessageType type) => _isUserMessage(type);
+  static bool isUserMessageForTest(proto.MessageTypeV3 type) => _isUserMessage(type);
 
-  /// Whether this message type represents user-visible content (for stats counting).
-  static bool _isUserVisibleMessage(proto.MessageType type) {
-    switch (type) {
-      case proto.MessageType.TEXT:
-      case proto.MessageType.IMAGE:
-      case proto.MessageType.GIF:
-      case proto.MessageType.FILE:
-      case proto.MessageType.VIDEO:
-      case proto.MessageType.VOICE_MESSAGE:
-      case proto.MessageType.CHANNEL_POST:
-      // Two-stage media: user sees a chat placeholder the moment the
-      // announcement arrives, long before (or without) the content pull.
-      case proto.MessageType.MEDIA_ANNOUNCEMENT:
-      // Edits/deletes/reactions modify visible content; user perceives
-      // them as "received messages" in the Network-Stats sense.
-      case proto.MessageType.MESSAGE_EDIT:
-      case proto.MessageType.MESSAGE_DELETE:
-      case proto.MessageType.EMOJI_REACTION:
-        return true;
-      default:
-        return false;
-    }
-  }
 
   /// Default edit window: 15 minutes.
   static const int _defaultEditWindowMs = 60 * 60 * 1000; // 1 hour
 
-  void _handleMessageEdit(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    proto.MessageEdit editMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      editMsg = proto.MessageEdit.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('MESSAGE_EDIT', e);
-      return;
-    } catch (e) {
-      _log.error('MESSAGE_EDIT decrypt/parse failed: $e');
-      return;
-    }
-
-    final originalMsgId = bytesToHex(Uint8List.fromList(editMsg.originalMessageId));
-
-    // Find the original message — group or DM conversation
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final conv = conversations[conversationId];
-    if (conv == null) return;
-
-    final msgIndex = conv.messages.indexWhere((m) => m.id == originalMsgId);
-    if (msgIndex < 0) return;
-
-    final original = conv.messages[msgIndex];
-
-    // Dual-Enforcement: verify sender is original author
-    if (original.senderNodeIdHex != senderHex) {
-      _log.warn('Edit rejected: sender ${senderHex.substring(0, 8)} is not author');
-      return;
-    }
-
-    // Dual-Enforcement: check edit window (per-chat config or default)
-    final chatEditWindowMs = conv.config.editWindowMs ?? _defaultEditWindowMs;
-    // editWindowMs == 0 means editing disabled; null config → use default
-    if (chatEditWindowMs > 0) {
-      final ageMs = DateTime.now().millisecondsSinceEpoch - original.timestamp.millisecondsSinceEpoch;
-      if (ageMs > chatEditWindowMs) {
-        _log.warn('Edit rejected: message too old (${ageMs}ms > ${chatEditWindowMs}ms)');
-        return;
-      }
-    } else if (chatEditWindowMs == 0) {
-      _log.warn('Edit rejected: editing disabled for this conversation');
-      return;
-    }
-    // chatEditWindowMs < 0 would mean unlimited (not enforced here)
-
-    // Apply edit
-    original.text = editMsg.newText;
-    original.editedAt = DateTime.fromMillisecondsSinceEpoch(editMsg.editTimestamp.toInt());
-
-    onStateChanged?.call();
-    _saveConversations();
-    _log.info('Message edited by ${senderHex.substring(0, 8)}: $originalMsgId');
-  }
-
-  void _handleMessageDelete(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    proto.MessageDelete deleteMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      deleteMsg = proto.MessageDelete.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('MESSAGE_DELETE', e);
-      return;
-    } catch (e) {
-      _log.error('MESSAGE_DELETE decrypt/parse failed: $e');
-      return;
-    }
-
-    final targetMsgId = bytesToHex(Uint8List.fromList(deleteMsg.messageId));
-
-    // Find the message — group or DM conversation
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final conv = conversations[conversationId];
-    if (conv == null) return;
-
-    final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
-    if (msgIndex < 0) return;
-
-    final original = conv.messages[msgIndex];
-
-    // Verify sender is original author
-    if (original.senderNodeIdHex != senderHex) {
-      _log.warn('Delete rejected: sender ${senderHex.substring(0, 8)} is not author');
-      return;
-    }
-
-    // Apply deletion (keep placeholder, clear text)
-    original.text = '';
-    original.isDeleted = true;
-
-    onStateChanged?.call();
-    _saveConversations();
-    _log.info('Message deleted by ${senderHex.substring(0, 8)}: $targetMsgId');
-  }
-
   // ── Emoji Reactions (Architecture Section 14.3) ──────────────────────
-
-  void _handleEmojiReaction(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    proto.EmojiReaction reaction;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      reaction = proto.EmojiReaction.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('EMOJI_REACTION', e);
-      return;
-    } catch (e) {
-      _log.error('EMOJI_REACTION decrypt/parse failed: $e');
-      return;
-    }
-
-    final targetMsgId = bytesToHex(Uint8List.fromList(reaction.messageId));
-    final emoji = reaction.emoji;
-    if (emoji.isEmpty) return;
-
-    // Find the message — group or DM conversation
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-    final conversationId = groupIdHex ?? senderHex;
-    final conv = conversations[conversationId];
-    if (conv == null) return;
-
-    final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
-    if (msgIndex < 0) return;
-
-    final msg = conv.messages[msgIndex];
-
-    if (reaction.remove) {
-      // Remove reaction
-      msg.reactions[emoji]?.remove(senderHex);
-      if (msg.reactions[emoji]?.isEmpty ?? false) {
-        msg.reactions.remove(emoji);
-      }
-      _log.debug('Reaction removed: $emoji on ${targetMsgId.substring(0, 8)} by ${senderHex.substring(0, 8)}');
-    } else {
-      // Add reaction
-      msg.reactions.putIfAbsent(emoji, () => {});
-      msg.reactions[emoji]!.add(senderHex);
-      _log.debug('Reaction added: $emoji on ${targetMsgId.substring(0, 8)} by ${senderHex.substring(0, 8)}');
-    }
-
-    onStateChanged?.call();
-    _saveConversations();
-  }
 
   /// Send an emoji reaction to a message.
   @override
@@ -2639,68 +1563,33 @@ class CleonaService implements ICleonaService {
       ..remove = remove;
     final basePayload = Uint8List.fromList(reaction.writeToBuffer());
 
-    // Group or DM?
+    // V3: pairwise fan-out via sendToUser. Group-Conversation-ID auf der
+    // Wire-Side wandert mit C4-Groups; bis dahin landet die Reaction beim
+    // Empfänger als DM-Reaction auf seinem Sender-Tab.
     final group = _groups[conversationId];
     if (group != null) {
+      final groupIdBytes = hexToBytes(conversationId);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
-        final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex,
-            memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
-        if (x25519Pk == null || mlKemPk == null) continue;
-
-        var payload = Uint8List.fromList(basePayload);
-        var compression = proto.CompressionType.NONE;
-        if (payload.length >= 64) {
-          try {
-            final compressed = ZstdCompression.instance.compress(payload);
-            if (compressed.length < payload.length) {
-              payload = compressed;
-              compression = proto.CompressionType.ZSTD;
-            }
-          } catch (_) {}
-        }
-
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: x25519Pk,
-          recipientMlKemPk: mlKemPk,
+        await sendToUser(
+          recipientUserId: hexToBytes(member.nodeIdHex),
+          messageType: proto.MessageTypeV3.MTV3_REACTION,
+          payload: basePayload,
+          groupId: groupIdBytes,
         );
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.EMOJI_REACTION, ciphertext,
-          recipientId: hexToBytes(member.nodeIdHex), compress: false);
-        envelope.kemHeader = kemHeader;
-        envelope.compression = compression;
-        envelope.groupId = hexToBytes(conversationId);
-        node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
       }
     } else {
-      // DM
       final contact = _contacts[conversationId];
-      if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) return;
-
-      var payload = Uint8List.fromList(basePayload);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
+      if (contact == null ||
+          contact.x25519Pk == null ||
+          contact.mlKemPk == null) {
+        return;
       }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      await sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_REACTION,
+        payload: basePayload,
       );
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.EMOJI_REACTION, ciphertext,
-        recipientId: contact.nodeId, compress: false);
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-      await node.sendEnvelope(envelope, contact.nodeId);
     }
 
     onStateChanged?.call();
@@ -2709,206 +1598,29 @@ class CleonaService implements ICleonaService {
   }
 
   /// Broadcast IDENTITY_DELETED to all accepted contacts before deletion.
-  void broadcastIdentityDeleted() {
+  /// V3: per-contact sendToUser fan-out; KEM/Sig handled inside sendToUser.
+  Future<void> broadcastIdentityDeleted() async {
     final notification = proto.IdentityDeletedNotification()
       ..identityEd25519Pk = identity.ed25519PublicKey
       ..deletedAtMs = Int64(DateTime.now().millisecondsSinceEpoch)
       ..displayName = displayName;
     final payload = Uint8List.fromList(notification.writeToBuffer());
     var sent = 0;
-
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-
       try {
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: contact.x25519Pk!,
-          recipientMlKemPk: contact.mlKemPk!,
+        final ok = await sendToUser(
+          recipientUserId: contact.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_IDENTITY_DELETED,
+          payload: payload,
         );
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.IDENTITY_DELETED,
-          ciphertext,
-          recipientId: contact.nodeId,
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        node.sendEnvelope(envelope, contact.nodeId);
-        sent++;
+        if (ok) sent++;
       } catch (e) {
         _log.debug('IDENTITY_DELETED send to ${contact.displayName} failed: $e');
       }
     }
     _log.info('IDENTITY_DELETED broadcast sent to $sent contacts');
-  }
-
-  /// Handle IDENTITY_DELETED: contact notifies us their identity is being deleted.
-  void _handleIdentityDeleted(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    proto.IdentityDeletedNotification notification;
-    try {
-      final payload = _decryptPayload(envelope);
-      notification = proto.IdentityDeletedNotification.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('IDENTITY_DELETED', e);
-      return;
-    } catch (e) {
-      _log.error('IDENTITY_DELETED decrypt/parse failed: $e');
-      return;
-    }
-
-    final contact = _contacts[senderHex];
-    if (contact == null) {
-      _log.debug('IDENTITY_DELETED from unknown sender ${senderHex.substring(0, 8)}');
-      return;
-    }
-
-    final displayName = notification.displayName.isNotEmpty
-        ? notification.displayName
-        : contact.displayName;
-    _log.info('Identity deleted: "$displayName" (${senderHex.substring(0, 8)})');
-
-    // Add system message to conversation. Routed through
-    // _addMessageToConversation so the badge counter and the system Launcher-
-    // Badge stay in sync (#U15 — direct conv.messages.add bypassed both).
-    if (conversations.containsKey(senderHex)) {
-      final systemMsg = UiMessage(
-        id: bytesToHex(Uint8List.fromList(envelope.messageId)),
-        conversationId: senderHex,
-        senderNodeIdHex: '',
-        text: '$displayName has deleted their identity.',
-        isOutgoing: false,
-        timestamp: DateTime.now(),
-        type: proto.MessageType.IDENTITY_DELETED,
-        status: MessageStatus.delivered,
-      );
-      _addMessageToConversation(senderHex, systemMsg);
-    }
-
-    // Mark contact as deleted (prevents re-import)
-    _deletedContacts.add(senderHex);
-
-    // Remove from groups/channels
-    for (final group in _groups.values) {
-      group.members.remove(senderHex);
-    }
-    for (final channel in _channels.values) {
-      channel.members.remove(senderHex);
-    }
-
-    // Remove contact
-    _contacts.remove(senderHex);
-    _saveContacts();
-    _saveGroups();
-    _saveChannels();
-
-    onStateChanged?.call();
-  }
-
-  void _handleProfileUpdate(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    Uint8List payload;
-    try {
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('PROFILE_UPDATE', e);
-      return;
-    } catch (e) {
-      _log.error('PROFILE_UPDATE decrypt failed: $e');
-      return;
-    }
-
-    try {
-      final profile = proto.ProfileData.fromBuffer(payload);
-      final contact = _contacts[senderHex];
-      if (contact == null) return;
-
-      if (profile.profilePicture.isNotEmpty) {
-        contact.profilePictureBase64 = base64Encode(profile.profilePicture);
-      } else {
-        contact.profilePictureBase64 = null; // Picture removed
-      }
-
-      // Update description if present
-      if (profile.description.isNotEmpty) {
-        contact.message = profile.description;
-      } else {
-        contact.message = null;
-      }
-
-      // Handle display name change
-      if (profile.displayName.isNotEmpty && profile.displayName != contact.displayName) {
-        if (contact.localAlias != null) {
-          // User has a local alias → store as pending, don't auto-override
-          contact.pendingNameChange = profile.displayName;
-          _log.info('Contact ${contact.effectiveName} changed name to "${profile.displayName}" (pending, local alias active)');
-        } else {
-          // No local alias → update directly
-          final oldName = contact.displayName;
-          contact.displayName = profile.displayName;
-          // Update conversation displayName
-          final conv = conversations[senderHex];
-          if (conv != null) {
-            conv.displayName = profile.displayName;
-          }
-          _log.info('Contact renamed: "$oldName" → "${profile.displayName}"');
-        }
-      }
-
-      // Update conversation profile picture
-      final conv = conversations[senderHex];
-      if (conv != null) {
-        conv.profilePictureBase64 = contact.profilePictureBase64;
-      }
-
-      _saveContacts();
-      onStateChanged?.call();
-      _log.info('Profile update from ${contact.effectiveName}');
-    } catch (e) {
-      _log.error('PROFILE_UPDATE parse error: $e');
-    }
-  }
-
-  // ── Guardian Handlers ──────────────────────────────────────────────
-
-  void _handleGuardianShareStore(proto.MessageEnvelope envelope) {
-    try {
-      final payload = _decryptPayload(envelope);
-      guardianService.handleShareStore(envelope, payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('GUARDIAN_SHARE_STORE', e);
-    } catch (e) {
-      _log.error('GUARDIAN_SHARE_STORE handler failed: $e');
-    }
-  }
-
-  void _handleGuardianRestoreRequest(proto.MessageEnvelope envelope) {
-    try {
-      final payload = _decryptPayload(envelope);
-      guardianService.handleRestoreRequest(envelope, payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('GUARDIAN_RESTORE_REQUEST', e);
-    } catch (e) {
-      _log.error('GUARDIAN_RESTORE_REQUEST handler failed: $e');
-    }
   }
 
   // ── Fragment Ownership Check ────────────────────────────────────────
@@ -2937,8 +1649,43 @@ class CleonaService implements ICleonaService {
     return true;
   }
 
+  /// First-CR §8.1.1 backward-compat picker. Filters `resolved` to devices
+  /// that carry a complete Device-KEM (X25519 + ML-KEM) and returns the
+  /// candidate with the freshest `deviceKemPublishedAtMs`. When `preferred`
+  /// is supplied (legacy ContactSeed `did`), candidates matching that
+  /// deviceNodeId win over fresher non-matching ones — but only if at least
+  /// one match has KEM material; otherwise the filter falls back to "any
+  /// device with KEM". Returns `null` when no resolved device carries
+  /// KEM material at all.
+  static ResolvedDevice? firstCrPickDeviceKem(
+      List<ResolvedDevice> resolved, Uint8List? preferred) {
+    var withKem = resolved
+        .where((d) => d.deviceX25519Pk != null && d.deviceMlKemPk != null)
+        .toList();
+    if (withKem.isEmpty) return null;
+    if (preferred != null) {
+      final byId = withKem
+          .where((d) =>
+              _bytesEqual(Uint8List.fromList(d.deviceNodeId), preferred))
+          .toList();
+      if (byId.isNotEmpty) withKem = byId;
+    }
+    withKem.sort((a, b) =>
+        (b.deviceKemPublishedAtMs ?? 0).compareTo(a.deviceKemPublishedAtMs ?? 0));
+    return withKem.first;
+  }
+
   // ── Fragment Reassembly ────────────────────────────────────────────
 
+  /// Reed-Solomon reassembly (Architecture §5.4). Once K=7 of N=10 fragments
+  /// for a given `messageId` are present in the mailbox store, decode the
+  /// canonical `NetworkPacketV3` wire bytes and re-inject them through the
+  /// node's reassembly entrypoint. Outer-Sig-Verify, KEM-Decap and
+  /// Inner-Sig-Verify run there identically to a UDP-received packet.
+  ///
+  /// Multi-device: fragments are *not* deleted after a successful local
+  /// reassembly. Sibling devices of the same user polling the same mailbox
+  /// need them too; expiry is via the 7-day DHT TTL.
   void _tryReassemble(Uint8List messageId) {
     final fragments = mailboxStore.getFragmentsForMessage(messageId);
     if (fragments.isEmpty) return;
@@ -2946,7 +1693,6 @@ class CleonaService implements ICleonaService {
     final first = fragments.first;
     if (fragments.length < first.requiredFragments) return;
 
-    // Build fragment map
     final fragMap = <int, Uint8List>{};
     for (final f in fragments) {
       fragMap[f.fragmentIndex] = f.data;
@@ -2955,14 +1701,7 @@ class CleonaService implements ICleonaService {
     try {
       final rs = ReedSolomon();
       final data = rs.decode(fragMap, first.originalSize);
-
-      // Parse as MessageEnvelope
-      final envelope = proto.MessageEnvelope.fromBuffer(data);
-      handleMessage(envelope, InternetAddress.loopbackIPv4, 0);
-
-      // Multi-device: do NOT delete fragments after reassembly.
-      // A second device polling the same mailbox needs them too.
-      // Fragments expire naturally via TTL (7 days).
+      node.dispatchReassembledPacket(data);
       _log.info('Reassembled message ${bytesToHex(messageId).substring(0, 8)}');
     } catch (e) {
       _log.debug('Reassembly failed for ${bytesToHex(messageId).substring(0, 8)}: $e');
@@ -2986,8 +1725,10 @@ class CleonaService implements ICleonaService {
     );
     final fallbackMailboxId = sodium.sha256(fallbackInput);
 
-    // Request fragments from all recent peers
-    final peers = node.routingTable.allPeers;
+    // Request fragments from confirmed peers only (§4.4).
+    final peers = node.routingTable.allPeers
+        .where((p) => node.isPeerConfirmed(p.nodeIdHex))
+        .toList();
     for (final peer in peers) {
       // Primary mailbox
       _requestFragments(peer, primaryMailboxId);
@@ -2999,18 +1740,21 @@ class CleonaService implements ICleonaService {
   }
 
   void _requestFragments(PeerInfo peer, Uint8List mailboxId) {
+    // V3 (Architecture §23.3): FRAGMENT_RETRIEVE is an infrastructure
+    // message — route via DV cascade as InfrastructureFrame.
     final req = proto.FragmentRetrieve()..mailboxId = mailboxId;
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.FRAGMENT_RETRIEVE,
-      req.writeToBuffer(),
-      recipientId: peer.nodeId,
+    node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE,
+      innerPayload: Uint8List.fromList(req.writeToBuffer()),
+      recipientDeviceId: Uint8List.fromList(peer.nodeId),
     );
-    node.sendEnvelope(envelope, peer.nodeId);
   }
 
   /// Poll known peers for Store-and-Forward messages (startup + network change).
   void _pollStoredMessages() {
-    final peers = node.routingTable.allPeers;
+    final peers = node.routingTable.allPeers
+        .where((p) => node.isPeerConfirmed(p.nodeIdHex))
+        .toList();
     var sent = 0;
     for (final peer in peers) {
       _requestStoredMessages(peer);
@@ -3023,13 +1767,14 @@ class CleonaService implements ICleonaService {
 
   /// Send a single PEER_RETRIEVE to one peer.
   void _requestStoredMessages(PeerInfo peer) {
+    // V3 (Architecture §23.3): PEER_RETRIEVE is an infrastructure message —
+    // route via DV cascade as InfrastructureFrame.
     final retrieve = proto.PeerRetrieve()..requesterNodeId = identity.nodeId;
-    final env = identity.createSignedEnvelope(
-      proto.MessageType.PEER_RETRIEVE,
-      retrieve.writeToBuffer(),
-      recipientId: peer.nodeId,
+    node.sendInfraTo(
+      messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE,
+      innerPayload: Uint8List.fromList(retrieve.writeToBuffer()),
+      recipientDeviceId: Uint8List.fromList(peer.nodeId),
     );
-    node.sendEnvelope(env, peer.nodeId);
   }
 
   /// #U1 fix: poll only peers that joined the routing table since the last
@@ -3046,7 +1791,8 @@ class CleonaService implements ICleonaService {
       [...utf8.encode('mailbox-nid'), ...identity.nodeId],
     ));
     final newPeers = node.routingTable.allPeers
-        .where((p) => _startupPolledPeers.add(p.nodeIdHex))
+        .where((p) => node.isPeerConfirmed(p.nodeIdHex) &&
+            _startupPolledPeers.add(p.nodeIdHex))
         .toList();
     if (newPeers.isEmpty) return;
     for (final peer in newPeers) {
@@ -3063,28 +1809,31 @@ class CleonaService implements ICleonaService {
 
   /// Send a text message to a contact.
   @override
-  Future<UiMessage?> sendTextMessage(String recipientNodeIdHex, String text, {String? forwardedFrom, String? replyToMessageId, String? replyToText, String? replyToSender}) async {
+  Future<UiMessage?> sendTextMessage(String recipientUserIdHex, String text, {String? forwardedFrom, String? replyToMessageId, String? replyToText, String? replyToSender}) async {
     if (_reducedMode) {
       _log.warn('sendTextMessage blocked: reducedMode active');
       return null;
     }
-    final contact = _contacts[recipientNodeIdHex];
+    final contact = _contacts[recipientUserIdHex];
     if (contact == null || contact.status != 'accepted') {
-      _log.warn('Cannot send to non-accepted contact: $recipientNodeIdHex');
+      _log.warn('Cannot send to non-accepted contact: $recipientUserIdHex (contact=${contact != null}, status=${contact?.status})');
       return null;
     }
 
-    _maybeWriteStaleContactWarning(recipientNodeIdHex);
+    _maybeWriteStaleContactWarning(recipientUserIdHex);
 
-    // Show message in UI immediately (optimistic update)
-    final tempId = bytesToHex(SodiumFFI().randomBytes(16));
+    // Optimistic UI msg.id is the wire messageId so DELIVERY_RECEIPT
+    // (which carries inner.messageId) can match this local message and
+    // upgrade `sent → delivered` in `_handleDeliveryReceiptV3`.
+    final messageIdBytes = SodiumFFI().randomBytes(16);
+    final messageIdHex = bytesToHex(messageIdBytes);
     final msg = UiMessage(
-      id: tempId,
-      conversationId: recipientNodeIdHex,
+      id: messageIdHex,
+      conversationId: recipientUserIdHex,
       senderNodeIdHex: identity.userIdHex,
       text: text,
       timestamp: DateTime.now(),
-      type: proto.MessageType.TEXT,
+      type: UiMessageType.text,
       status: MessageStatus.sending,
       isOutgoing: true,
       forwardedFrom: forwardedFrom,
@@ -3092,52 +1841,26 @@ class CleonaService implements ICleonaService {
       replyToText: replyToText,
       replyToSender: replyToSender,
     );
-    _addMessageToConversation(recipientNodeIdHex, msg);
+    _addMessageToConversation(recipientUserIdHex, msg);
 
     // Yield to let UI repaint before heavy crypto work
     await Future.delayed(Duration.zero);
 
-    var payload = Uint8List.fromList(utf8.encode(text));
+    // V3 sender path: build TextMessageV3 sub-message, hand to sendToUser
+    // which does Inner-build/User-Sign/zstd/KEM-encrypt + Outer-build/
+    // Device-Sign + per-device fan-out. Reply-fields and the sender-side
+    // link-preview are wire-tagged on TextMessageV3 itself.
 
-    // Compress before encryption (encrypted data is incompressible)
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
-      try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {}
-    }
-
-    // Encrypt with Per-Message KEM
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: payload,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
-    );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.TEXT,
-      ciphertext,
-      recipientId: contact.nodeId,
-      compress: false, // Already compressed before encryption
-    );
-    envelope.kemHeader = kemHeader;
-    envelope.compression = compression;
-    if (replyToMessageId != null) {
-      envelope.replyToMessageId = hexToBytes(replyToMessageId);
-      if (replyToText != null) envelope.replyToText = replyToText.length > 200 ? replyToText.substring(0, 200) : replyToText;
-      if (replyToSender != null) envelope.replyToSender = replyToSender;
-    }
-
-    // Sender-side link preview (non-blocking, best-effort)
+    // Sender-side link preview. We fetch up-front (HTTPS-only, SSRF-guarded
+    // by LinkPreviewFetcher) and embed the result in TextMessageV3 so the
+    // receiver can render the card WITHOUT making any network request —
+    // this is the privacy-safe receiver-MUST-NOT-fetch invariant from the
+    // architecture (Messaging feature-list in CLAUDE.md).
+    proto.LinkPreview? wirePreview;
     if (_linkPreviewSettings.enabled && extractFirstUrl(text) != null) {
       try {
         final preview = await _linkPreviewFetcher.fetchPreview(text);
         if (preview != null) {
-          envelope.linkPreview = preview.toProto();
           msg.linkPreviewUrl = preview.url;
           msg.linkPreviewTitle = preview.title;
           msg.linkPreviewDescription = preview.description;
@@ -3145,6 +1868,7 @@ class CleonaService implements ICleonaService {
           if (preview.thumbnail != null) {
             msg.linkPreviewThumbnailBase64 = base64Encode(preview.thumbnail!);
           }
+          wirePreview = preview.toProto();
           onStateChanged?.call();
         }
       } catch (e) {
@@ -3152,24 +1876,46 @@ class CleonaService implements ICleonaService {
       }
     }
 
-    // Direct send (PoW runs in isolate via computeAsync)
-    final sent = await node.sendEnvelope(envelope, contact.nodeId);
+    final tm = proto.TextMessageV3()
+      ..text = text
+      ..formatHint = 'plain';
+    if (wirePreview != null) {
+      tm.linkPreview = wirePreview;
+    }
+    if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
+      try {
+        tm.replyToMessageId = hexToBytes(replyToMessageId);
+      } catch (_) {
+        // Non-hex (legacy) replyToMessageId — log + skip wire-tag, local-only.
+        _log.debug(
+            'sendTextMessage: replyToMessageId not hex — wire-tag dropped');
+      }
+      if (replyToText != null && replyToText.isNotEmpty) {
+        // Bound the snippet so we don't bloat the frame.
+        tm.replyToSnippet = replyToText.length > 120
+            ? '${replyToText.substring(0, 120)}…'
+            : replyToText;
+      }
+    }
+    final sent = await sendToUser(
+      recipientUserId: contact.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_TEXT,
+      payload: tm.writeToBuffer(),
+      messageId: messageIdBytes,
+    );
     node.statsCollector.addMessageSent();
 
-    // Update message with real ID and status
-    final realMsgId = bytesToHex(Uint8List.fromList(envelope.messageId));
-    msg.id = realMsgId;
     msg.status = sent ? MessageStatus.sent : MessageStatus.queued;
     onStateChanged?.call();
 
-    // Erasure-coded backup (non-blocking)
-    _storeErasureCodedBackup(envelope, contact);
-
     // Twin-Sync: notify other devices about sent message (§26)
     _sendTwinSync(proto.TwinSyncType.MESSAGE_SENT, Uint8List.fromList(utf8.encode(jsonEncode({
-      'conversationId': recipientNodeIdHex,
+      'conversationId': recipientUserIdHex,
       'text': text,
-      'messageId': realMsgId,
+      // V3: per-device fan-out generates messageIds inside sendToUser; for
+      // twin-sync we use the optimistic temp-ID — twin receivers just dedup
+      // on (conversationId, text, timestamp) anyway.
+      'messageId': msg.id,
       'timestamp': msg.timestamp.millisecondsSinceEpoch,
     }))));
 
@@ -3205,94 +1951,50 @@ class CleonaService implements ICleonaService {
     // Cannot edit deleted messages
     if (original.isDeleted) return false;
 
-    // Build edit payload
+    // Build edit payload (V3: identical sub-message; only the wrapping
+    // changes — sendToUser handles compress/KEM/sign per device).
     final editMsg = proto.MessageEdit()
       ..originalMessageId = hexToBytes(messageId)
       ..newText = newText
       ..editTimestamp = Int64(DateTime.now().millisecondsSinceEpoch);
+    final basePayload = Uint8List.fromList(editMsg.writeToBuffer());
 
-    var basePayload = Uint8List.fromList(editMsg.writeToBuffer());
+    // Wire messageId == originalMessageId. Receiver-side dedup is then
+    // idempotent (re-applying the same edit is a no-op), and the sender's
+    // `_handleDeliveryReceiptV3` lookup can locate the original UiMessage
+    // by the receipt's messageId. Status stays at delivered/read (edits
+    // mutate an existing bubble; no `sent → delivered` transition required).
+    final wireMessageId = hexToBytes(messageId);
 
-    // Group or DM?
+    // Group or DM? V3 keeps pairwise fan-out (one sendToUser per member).
+    // ApplicationFrameV3.group_id (Field 17) carries the conversation tag so
+    // receivers dispatch the EDIT to the matching group/channel tab.
     final group = _groups[conversationId];
     bool anySent = false;
 
     if (group != null) {
-      // Pairwise fan-out to all group members
+      final groupIdBytes = hexToBytes(conversationId);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
-        final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
-        if (x25519Pk == null || mlKemPk == null) continue;
-
-        var payload = Uint8List.fromList(basePayload);
-        var compression = proto.CompressionType.NONE;
-        if (payload.length >= 64) {
-          try {
-            final compressed = ZstdCompression.instance.compress(payload);
-            if (compressed.length < payload.length) {
-              payload = compressed;
-              compression = proto.CompressionType.ZSTD;
-            }
-          } catch (_) {}
-        }
-
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: x25519Pk,
-          recipientMlKemPk: mlKemPk,
+        final ok = await sendToUser(
+          recipientUserId: hexToBytes(member.nodeIdHex),
+          messageType: proto.MessageTypeV3.MTV3_EDIT,
+          payload: basePayload,
+          groupId: groupIdBytes,
+          messageId: wireMessageId,
         );
-
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.MESSAGE_EDIT,
-          ciphertext,
-          recipientId: hexToBytes(member.nodeIdHex),
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        envelope.compression = compression;
-        envelope.groupId = hexToBytes(conversationId);
-
-        // Fire-and-forget: don't await — edit is applied locally
-        node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
-        anySent = true;
+        if (ok) anySent = true;
       }
     } else {
-      // DM
       final contact = _contacts[conversationId];
       if (contact == null || contact.status != 'accepted') return false;
-
-      var payload = Uint8List.fromList(basePayload);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
-      }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      final sent = await sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_EDIT,
+        payload: basePayload,
+        messageId: wireMessageId,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.MESSAGE_EDIT,
-        ciphertext,
-        recipientId: contact.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      final sent = await node.sendEnvelope(envelope, contact.nodeId);
-      if (sent) {
-        anySent = true;
-        _storeErasureCodedBackup(envelope, contact);
-      }
+      if (sent) anySent = true;
     }
 
     if (anySent) {
@@ -3335,93 +2037,44 @@ class CleonaService implements ICleonaService {
     // Already deleted
     if (original.isDeleted) return false;
 
-    // Build delete payload
+    // Build delete payload (V3 wraps via sendToUser).
     final deleteMsg = proto.MessageDelete()
       ..messageId = hexToBytes(messageId)
       ..deletedAt = Int64(DateTime.now().millisecondsSinceEpoch);
+    final basePayload = Uint8List.fromList(deleteMsg.writeToBuffer());
 
-    var basePayload = Uint8List.fromList(deleteMsg.writeToBuffer());
+    // Wire messageId == target messageId. Same rationale as `editMessage`:
+    // receiver dedup stays idempotent, and the sender's DELIVERY_RECEIPT
+    // handler can find the local UiMessage via the receipt's messageId.
+    final wireMessageId = hexToBytes(messageId);
 
-    // Group or DM?
     final group = _groups[conversationId];
     bool anySent = false;
 
     if (group != null) {
-      // Pairwise fan-out to all group members
+      // Pairwise fan-out per member (V3 keeps the same model).
+      final groupIdBytes = hexToBytes(conversationId);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
-        final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
-        if (x25519Pk == null || mlKemPk == null) continue;
-
-        var payload = Uint8List.fromList(basePayload);
-        var compression = proto.CompressionType.NONE;
-        if (payload.length >= 64) {
-          try {
-            final compressed = ZstdCompression.instance.compress(payload);
-            if (compressed.length < payload.length) {
-              payload = compressed;
-              compression = proto.CompressionType.ZSTD;
-            }
-          } catch (_) {}
-        }
-
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payload,
-          recipientX25519Pk: x25519Pk,
-          recipientMlKemPk: mlKemPk,
+        final ok = await sendToUser(
+          recipientUserId: hexToBytes(member.nodeIdHex),
+          messageType: proto.MessageTypeV3.MTV3_DELETE,
+          payload: basePayload,
+          groupId: groupIdBytes,
+          messageId: wireMessageId,
         );
-
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.MESSAGE_DELETE,
-          ciphertext,
-          recipientId: hexToBytes(member.nodeIdHex),
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        envelope.compression = compression;
-        envelope.groupId = hexToBytes(conversationId);
-
-        // Fire-and-forget: don't await — delete is applied locally
-        node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
-        anySent = true;
+        if (ok) anySent = true;
       }
     } else {
-      // DM
       final contact = _contacts[conversationId];
       if (contact == null || contact.status != 'accepted') return false;
-
-      var payload = Uint8List.fromList(basePayload);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
-      }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      final sent = await sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_DELETE,
+        payload: basePayload,
+        messageId: wireMessageId,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.MESSAGE_DELETE,
-        ciphertext,
-        recipientId: contact.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      final sent = await node.sendEnvelope(envelope, contact.nodeId);
-      if (sent) {
-        anySent = true;
-        _storeErasureCodedBackup(envelope, contact);
-      }
+      if (sent) anySent = true;
     }
 
     if (anySent) {
@@ -3598,8 +2251,10 @@ class CleonaService implements ICleonaService {
     return result;
   }
 
-  /// Send a CHAT_CONFIG_UPDATE message to a contact.
-  void _sendChatConfigUpdate(ContactInfo contact, String conversationId, ChatConfig config, {required bool isRequest, bool accepted = false, String? groupIdHex}) {
+  /// Send a CHAT_CONFIG_UPDATE message to a contact (V3).
+  void _sendChatConfigUpdate(ContactInfo contact, String conversationId,
+      ChatConfig config,
+      {required bool isRequest, bool accepted = false, String? groupIdHex}) {
     final configMsg = proto.ChatConfigUpdate()
       ..conversationId = conversationId
       ..allowDownloads = config.allowDownloads
@@ -3614,163 +2269,12 @@ class CleonaService implements ICleonaService {
     if (config.expiryDurationMs != null) {
       configMsg.expiryDurationMs = Int64(config.expiryDurationMs!);
     }
-
-    var payload = Uint8List.fromList(configMsg.writeToBuffer());
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
-      try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {}
-    }
-
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: payload,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
+    sendToUser(
+      recipientUserId: contact.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE,
+      payload: Uint8List.fromList(configMsg.writeToBuffer()),
+      groupId: groupIdHex != null ? hexToBytes(groupIdHex) : null,
     );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CHAT_CONFIG_UPDATE,
-      ciphertext,
-      recipientId: contact.nodeId,
-      compress: false,
-    );
-    envelope.kemHeader = kemHeader;
-    envelope.compression = compression;
-    if (groupIdHex != null) {
-      envelope.groupId = hexToBytes(groupIdHex);
-    }
-
-    node.sendEnvelope(envelope, contact.nodeId);
-  }
-
-  /// Handle incoming CHAT_CONFIG_UPDATE from a peer.
-  void _handleChatConfigUpdate(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt payload
-    proto.ChatConfigUpdate configMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      configMsg = proto.ChatConfigUpdate.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('CHAT_CONFIG_UPDATE', e);
-      return;
-    } catch (e) {
-      _log.error('CHAT_CONFIG_UPDATE decrypt/parse failed: $e');
-      return;
-    }
-
-    final newConfig = ChatConfig(
-      allowDownloads: configMsg.allowDownloads,
-      allowForwarding: configMsg.allowForwarding,
-      editWindowMs: configMsg.hasEditWindowMs() ? configMsg.editWindowMs.toInt() : null,
-      expiryDurationMs: configMsg.hasExpiryDurationMs() ? configMsg.expiryDurationMs.toInt() : null,
-      readReceipts: configMsg.readReceipts,
-      typingIndicators: configMsg.typingIndicators,
-    );
-
-    // Check if this is a group config update
-    final groupIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : null;
-
-    if (groupIdHex != null) {
-      // Group or channel config: apply directly (sender must be owner or admin)
-      final group = _groups[groupIdHex];
-      final channel = _channels[groupIdHex];
-      if (group != null) {
-        final senderMember = group.members[senderHex];
-        if (senderMember == null) return;
-        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
-          _log.warn('Group config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
-          return;
-        }
-        final conv = conversations[groupIdHex];
-        if (conv != null) {
-          conv.config = newConfig;
-          _saveConversations();
-        }
-        onStateChanged?.call();
-        _log.info('Group config updated by ${senderMember.displayName} for "${group.name}"');
-        return;
-      }
-      if (channel != null) {
-        final senderMember = channel.members[senderHex];
-        if (senderMember == null) return;
-        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
-          _log.warn('Channel config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
-          return;
-        }
-        final conv = conversations[groupIdHex];
-        if (conv != null) {
-          conv.config = newConfig;
-          _saveConversations();
-        }
-        onStateChanged?.call();
-        _log.info('Channel config updated by ${senderMember.displayName} for "${channel.name}"');
-        return;
-      }
-      // Unknown group/channel — buffer config for when GROUP_INVITE arrives
-      _pendingGroupConfigs[groupIdHex] = (config: newConfig, senderHex: senderHex);
-      _log.info('Buffered config for unknown group/channel ${groupIdHex.substring(0, 8)} from ${senderHex.substring(0, 8)}');
-      return;
-    }
-
-    // DM config: handle proposal/response
-    if (configMsg.isRequest) {
-      // Peer proposes new config — store as pending, do NOT apply yet
-      final conv = conversations[senderHex] ?? conversations.putIfAbsent(
-        senderHex,
-        () => Conversation(id: senderHex, displayName: _contacts[senderHex]?.displayName ?? ''),
-      );
-      conv.pendingConfigProposal = newConfig;
-      conv.pendingConfigProposer = senderHex;
-      conv.unreadCount++;
-      _updateBadgeCount();
-      _saveConversations();
-      onStateChanged?.call();
-      _log.info('DM config proposal received from ${_contacts[senderHex]?.displayName ?? senderHex.substring(0, 8)} — awaiting accept/reject');
-    } else if (configMsg.accepted) {
-      // Peer accepted our proposal — NOW apply the config on our side
-      final conv = conversations[senderHex];
-      if (conv != null && conv.pendingConfigProposal != null) {
-        conv.config = conv.pendingConfigProposal!;
-        conv.pendingConfigProposal = null;
-        conv.pendingConfigProposer = null;
-        _saveConversations();
-      }
-      onStateChanged?.call();
-      _log.info('DM config accepted by ${senderHex.substring(0, 8)}');
-    } else {
-      // Peer rejected our proposal — clear pending
-      final conv = conversations[senderHex];
-      if (conv != null) {
-        conv.pendingConfigProposal = null;
-        conv.pendingConfigProposer = null;
-        _saveConversations();
-      }
-      onStateChanged?.call();
-      _log.info('DM config rejected by ${senderHex.substring(0, 8)}');
-    }
   }
 
   /// Resolve best available encryption keys for a group/channel member.
@@ -3815,24 +2319,51 @@ class CleonaService implements ICleonaService {
 
   /// Store erasure-coded backup of an envelope on DHT peers near the recipient's mailbox.
   /// Works with ContactInfo (uses ed25519Pk for mailbox) or plain nodeId (fallback).
-  Future<void> _storeErasureCodedBackup(proto.MessageEnvelope envelope, ContactInfo? contact, {Uint8List? recipientNodeId}) async {
+  /// Reed-Solomon offline-delivery (Architecture §5.4): split the canonical
+  /// `NetworkPacketV3` wire bytes [packetBytes] into N=10 fragments (K=7
+  /// reassemble threshold) and FRAGMENT_STORE them onto the K=10 closest
+  /// DHT replicators of the recipient's mailbox.
+  ///
+  /// The recipient mailbox is keyed by the user's Ed25519 pubkey for
+  /// AppFrame payloads (`recipientUserEd25519Pk` non-null); for InfraFrame
+  /// payloads where the recipient is a specific device (RESTORE_BROADCAST,
+  /// Emergency KEY_ROTATION_BROADCAST), the mailbox derives from the
+  /// recipient's user node-ID via the `mailbox-nid` salt, since the
+  /// recipient may not have published its Device-KEM-PK yet at offline-time.
+  /// [messageId] is the packet's end-to-end identifier (16-byte UUID v4),
+  /// used by the receiver's reassembly buffer to gather all 10 fragments
+  /// of the same logical send.
+  ///
+  /// Fire-and-forget: errors are logged at debug, callers don't await
+  /// individual FRAGMENT_STORE ACKs (they will arrive asynchronously via
+  /// the standard InfraFrame receive path).
+  Future<void> _distributeErasureFragments({
+    required Uint8List packetBytes,
+    required Uint8List messageId,
+    Uint8List? recipientUserEd25519Pk,
+    Uint8List? recipientUserNodeId,
+  }) async {
     try {
-      final rs = ReedSolomon();
-      final data = envelope.writeToBuffer();
-      final fragments = rs.encode(Uint8List.fromList(data));
-
-      // Compute mailbox ID
       final sodium = SodiumFFI();
-      Uint8List mailboxId;
-      if (contact?.ed25519Pk != null && contact!.ed25519Pk!.isNotEmpty) {
-        mailboxId = sodium.sha256(Uint8List.fromList([...utf8.encode('mailbox'), ...contact.ed25519Pk!]));
+      final Uint8List mailboxId;
+      if (recipientUserEd25519Pk != null && recipientUserEd25519Pk.isNotEmpty) {
+        mailboxId = sodium.sha256(Uint8List.fromList(
+            [...utf8.encode('mailbox'), ...recipientUserEd25519Pk]));
+      } else if (recipientUserNodeId != null && recipientUserNodeId.isNotEmpty) {
+        mailboxId = sodium.sha256(Uint8List.fromList(
+            [...utf8.encode('mailbox-nid'), ...recipientUserNodeId]));
       } else {
-        final nodeId = contact?.nodeId ?? recipientNodeId!;
-        mailboxId = sodium.sha256(Uint8List.fromList([...utf8.encode('mailbox-nid'), ...nodeId]));
+        _log.debug('Erasure offline-delivery skipped: no recipient pk/node-id');
+        return;
       }
 
-      final messageId = Uint8List.fromList(envelope.messageId);
+      final rs = ReedSolomon();
+      final fragments = rs.encode(packetBytes);
       final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
+      if (peers.isEmpty) {
+        _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
+        return;
+      }
 
       for (var i = 0; i < fragments.length; i++) {
         final fragStore = proto.FragmentStore()
@@ -3842,35 +2373,128 @@ class CleonaService implements ICleonaService {
           ..totalFragments = fragments.length
           ..requiredFragments = ReedSolomon.defaultK
           ..fragmentData = fragments[i]
-          ..originalSize = data.length;
-
-        final fragEnv = identity.createSignedEnvelope(
-          proto.MessageType.FRAGMENT_STORE,
-          fragStore.writeToBuffer(),
+          ..originalSize = packetBytes.length;
+        final targetPeer = peers[i % peers.length];
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
+          recipientDeviceId: Uint8List.fromList(targetPeer.nodeId),
         );
-
-        // Send to the peer at index i % peerCount
-        if (peers.isNotEmpty) {
-          final targetPeer = peers[i % peers.length];
-          node.sendEnvelope(fragEnv, targetPeer.nodeId);
-        }
       }
     } catch (e) {
-      _log.debug('Erasure backup failed: $e');
+      _log.debug('Erasure offline-delivery failed: $e');
     }
+  }
+
+  // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
+
+  void _handleRetryExhausted(
+      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) {
+    _log.info('Offline cascade for message $messageIdHex '
+        '→ ${_hexShort(recipientUserId)}');
+    final recipientHex = bytesToHex(recipientUserId);
+    final contact = _contacts[recipientHex];
+
+    // §5.4: Erasure-coded backup on DHT
+    final fragmentBundleId =
+        SodiumFFI().sha256(serializedPacket).sublist(0, 16);
+    _distributeErasureFragments(
+      packetBytes: serializedPacket,
+      messageId: fragmentBundleId,
+      recipientUserEd25519Pk: contact?.ed25519Pk,
+      recipientUserNodeId: recipientUserId,
+    );
+
+    // §5.5: S&F copy on mutual peers
+    _storeSafOnMutualPeers(
+      recipientUserId: recipientUserId,
+      wrappedEnvelope: serializedPacket,
+      storeId: SodiumFFI().randomBytes(16),
+    );
+  }
+
+  /// §5.5: Store a complete message copy on up to 3 mutual peers.
+  void _storeSafOnMutualPeers({
+    required Uint8List recipientUserId,
+    required Uint8List wrappedEnvelope,
+    required Uint8List storeId,
+  }) {
+    final mutuals = _findMutualPeerDeviceIds(recipientUserId, limit: 3);
+    if (mutuals.isEmpty) {
+      _log.debug('S&F: no mutual peers for ${_hexShort(recipientUserId)}');
+      return;
+    }
+    final peerStore = proto.PeerStore()
+      ..recipientNodeId = recipientUserId
+      ..wrappedEnvelope = wrappedEnvelope
+      ..storeId = storeId
+      ..ttlMs = Int64(PeerMessageStore.defaultTtlMs);
+    final payload = Uint8List.fromList(peerStore.writeToBuffer());
+    for (final mutualDeviceId in mutuals) {
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_PEER_STORE,
+        innerPayload: payload,
+        recipientDeviceId: mutualDeviceId,
+      );
+    }
+    _log.info('S&F: stored on ${mutuals.length} mutual peers '
+        'for ${_hexShort(recipientUserId)}');
+  }
+
+  /// §5.5: Find contacts that are likely mutual peers (both sender and
+  /// recipient know them). Heuristic: accepted contacts with a known
+  /// deviceNodeId in the routing table (i.e. online and reachable).
+  /// Excludes the recipient itself.
+  List<Uint8List> _findMutualPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
+    final recipientHex = bytesToHex(recipientUserId);
+    final candidates = <(Uint8List, int)>[];
+    for (final entry in _contacts.entries) {
+      if (entry.key == recipientHex) continue;
+      final c = entry.value;
+      if (c.status != 'accepted') continue;
+      if (c.deviceNodeIds.isEmpty) continue;
+      for (final devHex in c.deviceNodeIds) {
+        final devBytes = hexToBytes(devHex);
+        final peer = node.routingTable.getPeer(devBytes);
+        if (peer == null) continue;
+        final routes = node.dvRouting.routesTo(devHex);
+        final aliveCount = routes.where((r) => r.isAlive).length;
+        if (aliveCount > 0) {
+          candidates.add((devBytes, aliveCount));
+          break;
+        }
+      }
+    }
+    candidates.sort((a, b) => b.$2.compareTo(a.$2));
+    return candidates.take(limit).map((c) => c.$1).toList();
   }
 
   /// Add peers from a scanned ContactSeed QR code to the routing table.
   /// This ensures the target node and its seed peers are reachable before sending a CR.
+  ///
+  /// Welle 5/6 (§8.1.1): when [targetDeviceIdHex] + Device-KEM keys are
+  /// supplied (newer ContactSeed-URIs include them), the target peer is
+  /// indexed by its Device-Node-ID instead of User-ID, and a direct
+  /// DV-route is registered. This is what unblocks `sendToDevice` for the
+  /// First-CR InfraFrame — without it, `cascade exhausted (routes=0)`
+  /// because DV-routing keys on Device-IDs while legacy seeds added the
+  /// peer under the User-ID. [targetDxkB64] / [targetDmkB64] are accepted
+  /// for forward-compat with a future DKR-cache and ignored for now (the
+  /// Device-KEM keys are still passed inline in `send_contact_request`).
   @override
   void addPeersFromContactSeed(
     String targetNodeIdHex,
     List<String> targetAddresses,
-    List<({String nodeIdHex, List<String> addresses})> seedPeers,
-  ) {
+    List<({String nodeIdHex, List<String> addresses})> seedPeers, {
+    String? targetDeviceIdHex,
+    String? targetDxkB64,
+    String? targetDmkB64,
+  }) {
     // Add the target node itself — always, even without addresses.
     // Without addresses the Three-Layer Cascade will relay via seed peers.
-    final targetNodeId = hexToBytes(targetNodeIdHex);
+    final targetUserId = hexToBytes(targetNodeIdHex);
+    final hasDeviceId = targetDeviceIdHex != null && targetDeviceIdHex.isNotEmpty;
+    final routingNodeId = hasDeviceId ? hexToBytes(targetDeviceIdHex) : targetUserId;
     final addresses = <PeerAddress>[];
     for (final addr in targetAddresses) {
       final parsed = _parseAddrString(addr);
@@ -3878,34 +2502,89 @@ class CleonaService implements ICleonaService {
         addresses.add(PeerAddress(ip: parsed.$1, port: parsed.$2));
       }
     }
-    final targetPeer = PeerInfo(nodeId: targetNodeId, addresses: addresses)
+    final targetPeer = PeerInfo(nodeId: routingNodeId, addresses: addresses)
+      ..userId = hasDeviceId ? targetUserId : null
       ..isProtectedSeed = true; // Survive Doze pruning (§27)
     node.routingTable.addPeer(targetPeer);
-    _log.info('QR seed: added target ${targetNodeIdHex.substring(0, 8)} with ${addresses.length} addresses (protected)');
+    if (hasDeviceId) {
+      // Do NOT add the target as a DV direct-neighbor here. If the target
+      // is reachable (same LAN), the PING below will get a PONG which
+      // establishes the direct route naturally. If the target is NOT
+      // reachable (cross-network/CGNAT), a premature direct-neighbor entry
+      // causes sendToDevice to fire-and-forget via UDP to the unreachable
+      // private IP — which "succeeds" locally and prevents the relay
+      // cascade from ever trying Bootstrap as relay.
+      //
+      // Welle 5/6 (§4.3 / §3.5b): prime the DeviceKemRecord cache so
+      // `_buildInfraPacket → _lookupDeviceKemPk` hits the canonical path [1]
+      // for this device. The seed-derived record carries no User-Sig (we
+      // don't hold the contact's user-Ed25519-Sk yet), but handleKemPublish
+      // does not verify — the wire-layer does that on a real
+      // IDENTITY_KEM_PUBLISH. sequenceNumber=0 means a real publish will
+      // strictly supersede this seed.
+      if (targetDxkB64 != null && targetDmkB64 != null) {
+        try {
+          final dxk = base64Decode(targetDxkB64);
+          final dmk = base64Decode(targetDmkB64);
+          final primed = DeviceKemRecord(
+            userId: targetUserId,
+            deviceId: routingNodeId,
+            deviceX25519Pk: dxk,
+            deviceMlKemPk: dmk,
+            ttlSeconds: 24 * 3600,
+            sequenceNumber: 0,
+            publishedAtMs: DateTime.now().millisecondsSinceEpoch,
+            userEd25519Pk: Uint8List(0),
+            ed25519Sig: Uint8List(0),
+          );
+          node.identityDhtHandler.handleKemPublish(primed);
+        } catch (e) {
+          _log.warn('QR seed: malformed dxk/dmk — DKR cache not primed: $e');
+        }
+      }
+      _log.info('QR seed: added target user=${targetNodeIdHex.substring(0, 8)} '
+          'device=${targetDeviceIdHex.substring(0, 8)} '
+          'with ${addresses.length} addresses + DKR cache (protected, no DV-neighbor)');
+    } else {
+      _log.info('QR seed: added target ${targetNodeIdHex.substring(0, 8)} '
+          'with ${addresses.length} addresses (protected, legacy URI)');
+    }
+
+    // Ping the target's own addresses — the target was added to the routing
+    // table above but no PONG cycle was kicked off (unlike seed peers below).
+    for (final addr in addresses) {
+      node.sendPing(addr.ip, addr.port);
+    }
 
     // Add seed peers (bootstrap, mutual contacts, etc.)
     for (final sp in seedPeers) {
       final peerNodeId = hexToBytes(sp.nodeIdHex);
-      final addresses = <PeerAddress>[];
+      final spAddresses = <PeerAddress>[];
       for (final addr in sp.addresses) {
         final parsed = _parseAddrString(addr);
         if (parsed != null) {
-          // High initial score — these peers were recommended by the contact as reachable.
-          addresses.add(PeerAddress(ip: parsed.$1, port: parsed.$2)..score = 0.95);
+          spAddresses.add(PeerAddress(ip: parsed.$1, port: parsed.$2)..score = 0.95);
         }
       }
-      if (addresses.isNotEmpty) {
-        final seedPeer = PeerInfo(nodeId: peerNodeId, addresses: addresses)
+      if (spAddresses.isNotEmpty) {
+        final seedPeer = PeerInfo(nodeId: peerNodeId, addresses: spAddresses)
           ..isProtectedSeed = true; // Survive Doze pruning (§27)
         node.routingTable.addPeer(seedPeer);
-        _log.info('QR seed: added peer ${sp.nodeIdHex.substring(0, 8)} with ${addresses.length} addresses (protected)');
+        // Seed peers must be DV neighbors so they can serve as default gateway
+        // for the First-CR when no direct route to the target exists yet.
+        node.dvRouting.addDirectNeighbor(peerNodeId, ConnectionType.publicUdp);
+        _log.info('QR seed: added peer ${sp.nodeIdHex.substring(0, 8)} with ${spAddresses.length} addresses + DV neighbor (protected)');
         // Ping seed peer to establish connection
-        for (final addr in addresses) {
+        for (final addr in spAddresses) {
           node.sendPing(addr.ip, addr.port);
         }
       }
     }
 
+    // Elect default gateway now that seed peers are DV neighbors — ensures
+    // sendToDevice has a last-resort relay path for the First-CR even if
+    // no PONG has arrived yet.
+    node.dvRouting.updateDefaultGateway();
   }
 
   /// Parse address string: "1.2.3.4:5678" (IPv4) or "[2001:db8::1]:5678" (IPv6).
@@ -3946,11 +2625,28 @@ class CleonaService implements ICleonaService {
       return false;
     }
 
-    // Send PING to the address — if a node is listening there,
-    // it will respond with PONG, which registers it in our routing table
-    // and triggers PeerExchange (standard Kademlia bootstrap flow).
-    node.sendPing(ip, port);
-    _log.info('Manual peer entry: PING sent to $ip:$port');
+    // V3 path (post-Welle 3): the InfrastructureFrame BOOT-pipeline (§2.4.1a)
+    // requires the recipient's deviceId — without it `_sendPing` silently
+    // drops because no addressee can be encoded in the frame header. Manual
+    // peer entry by definition supplies only an (ip, port) pair, so we use
+    // the LAN-Discovery wire format instead: a 38-byte unicast probe to the
+    // recipient's discovery socket. The receiver's `LocalDiscovery._onEvent`
+    // registers us via the standard discovery callback, after which V3
+    // BOOT-bonding can proceed in both directions.
+    //
+    // The discovery port (41338) is well-known protocol-wide. The user-
+    // supplied `port` is usually the daemon's *data* port — we send the
+    // probe to discoveryPort regardless. If the user knows the recipient
+    // binds discovery on a non-standard port, they can override by sending
+    // a SECOND probe to the supplied port; we cover that fallback so manual
+    // entry remains operator-friendly across uncommon topologies.
+    node.localDiscovery.sendUnicastDiscovery(ip);
+    if (port != LocalDiscovery.discoveryPort) {
+      node.localDiscovery.sendUnicastDiscovery(ip, port);
+    }
+    _log.info('Manual peer entry: LAN-Discovery probe sent to $ip '
+        '(discoveryPort=${LocalDiscovery.discoveryPort}'
+        '${port != LocalDiscovery.discoveryPort ? ", fallback=$port" : ""})');
     return true;
   }
 
@@ -3958,11 +2654,15 @@ class CleonaService implements ICleonaService {
   /// If the contact already exists as "accepted", re-sends CR with fresh keys
   /// so the remote side can re-establish the relationship (e.g. after data loss).
   @override
-  Future<bool> sendContactRequest(String recipientNodeIdHex, {String message = ''}) async {
-    final existing = _contacts[recipientNodeIdHex];
+  Future<bool> sendContactRequest(String recipientUserIdHex,
+      {String message = '',
+      String? seedDeviceIdHex,
+      String? seedDxkB64,
+      String? seedDmkB64}) async {
+    final existing = _contacts[recipientUserIdHex];
     final isReContact = existing != null && existing.status == 'accepted';
 
-    final recipientNodeId = hexToBytes(recipientNodeIdHex);
+    final recipientUserId = hexToBytes(recipientUserIdHex);
 
     final cr = proto.ContactRequestMsg()
       ..displayName = displayName
@@ -3974,36 +2674,131 @@ class CleonaService implements ICleonaService {
     if (_profilePictureBase64 != null) {
       cr.profilePicture = base64Decode(_profilePictureBase64!);
     }
+    final crBytes = Uint8List.fromList(cr.writeToBuffer());
 
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CONTACT_REQUEST,
-      cr.writeToBuffer(),
-      recipientId: recipientNodeId,
-    );
-
-    if (isReContact) {
-      // Re-contact: send CR with fresh keys but keep "accepted" status.
-      // Remote side handles this in _handleContactRequest as "re-contact from accepted".
-      _log.info('Re-contact to accepted ${existing.displayName} — sending CR with fresh keys');
-    } else {
-      // New contact: store as pending
-      _contacts[recipientNodeIdHex] = ContactInfo(
-        nodeId: recipientNodeId,
+    if (!isReContact) {
+      _contacts[recipientUserIdHex] = ContactInfo(
+        nodeId: recipientUserId,
         displayName: 'Pending...',
         status: 'pending_outgoing',
+        message: message.isEmpty ? null : message,
+        seedDeviceIdHex: seedDeviceIdHex,
+        seedDxkB64: seedDxkB64,
+        seedDmkB64: seedDmkB64,
       );
       _saveContacts();
+    } else {
+      _log.info(
+          'Re-contact to accepted ${existing.displayName} — sending CR with fresh keys');
     }
 
-    _log.info('Sending CONTACT_REQUEST to ${recipientNodeIdHex.substring(0, 8)} '
-        '(envelope size: ${envelope.writeToBuffer().length} bytes)');
-    final sent = await node.sendEnvelope(envelope, recipientNodeId);
-    _log.info('CONTACT_REQUEST sendEnvelope result: $sent');
+    // V3 path: re-contact (recipient KEM pubkeys already known) — sendToUser.
+    if (isReContact &&
+        existing.x25519Pk != null &&
+        existing.mlKemPk != null) {
+      final ok = await sendToUser(
+        recipientUserId: recipientUserId,
+        messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST,
+        payload: crBytes,
+      );
+      _log.info('CONTACT_REQUEST (re-contact V3) sendToUser ok=$ok');
+      return true;
+    }
 
-    // Erasure-coded backup on DHT peers (offline delivery)
-    _storeErasureCodedBackup(envelope, null, recipientNodeId: recipientNodeId);
+    // First-contact CR (Welle 5 §8.1.1 First-CR-Bootstrap): wrap a
+    // User-signed ApplicationFrameV3 (recipientUserId=Bob, payload=CR) into
+    // an InfrastructureFrame whose KEM-encap subject is the recipient's
+    // *Device*-KEM-PK (NOT User-KEM-PK — Alice doesn't have that yet, the
+    // CR is what bootstraps the User-KEM exchange). The Device-KEM-PK pair
+    // is delivered out-of-band via the ContactSeed `dxk`/`dmk` parameters.
+    //
+    // §8.1.1 Backward-compat: legacy ContactSeed-URIs predate Welle 5 and
+    // carry only `did` (or nothing). When `dxk`/`dmk` are missing the sender
+    // falls back to a synchronous 2D-DHT lookup of the recipient's
+    // DeviceKemRecord (§4.3 step 4b) via `IdentityResolver.resolve(userId)`.
+    // If a specific `did` was supplied, the resolver result is filtered to
+    // that device; otherwise the freshest published Device-KEM is picked.
+    Uint8List dxk;
+    Uint8List dmk;
+    Uint8List recipientDeviceId;
+    final hasFullSeed = seedDeviceIdHex != null &&
+        seedDeviceIdHex.isNotEmpty &&
+        seedDxkB64 != null &&
+        seedDmkB64 != null;
+    if (hasFullSeed) {
+      try {
+        dxk = base64Decode(seedDxkB64);
+        dmk = base64Decode(seedDmkB64);
+        recipientDeviceId = hexToBytes(seedDeviceIdHex);
+      } catch (e) {
+        _log.warn('CONTACT_REQUEST drop: malformed seed parameters: $e');
+        return false;
+      }
+    } else {
+      _log.info('CONTACT_REQUEST V3 First-CR: ContactSeed lacks dxk/dmk — '
+          'falling back to 2D-DHT DeviceKemRecord lookup for '
+          '${recipientUserIdHex.substring(0, 8)} (§8.1.1 backward-compat)');
+      final resolved = await node.identityResolver.resolve(recipientUserId);
+      Uint8List? preferred;
+      if (seedDeviceIdHex != null && seedDeviceIdHex.isNotEmpty) {
+        try {
+          preferred = hexToBytes(seedDeviceIdHex);
+        } catch (_) {/* malformed did — drop the prefer hint */}
+      }
+      final picked = firstCrPickDeviceKem(resolved, preferred);
+      if (picked == null) {
+        _log.warn('CONTACT_REQUEST drop (V3 first-contact): no DeviceKemRecord '
+            'in 2D-DHT for ${recipientUserIdHex.substring(0, 8)} — recipient '
+            'must publish IDENTITY_KEM_PUBLISH first, or sender must re-scan '
+            'a fresh ContactSeed-URI with dxk/dmk');
+        return false;
+      }
+      dxk = Uint8List.fromList(picked.deviceX25519Pk!);
+      dmk = Uint8List.fromList(picked.deviceMlKemPk!);
+      recipientDeviceId = Uint8List.fromList(picked.deviceNodeId);
+      _log.info('CONTACT_REQUEST V3 First-CR: 2D-DHT fallback resolved '
+          'device ${bytesToHex(recipientDeviceId).substring(0, 8)} for '
+          '${recipientUserIdHex.substring(0, 8)} '
+          '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
+    }
 
-    // Always return true — delivery via relay/S&F may succeed even if direct fails.
+    // Build inner ApplicationFrameV3, User-signed. Sender pubkeys are
+    // carried in the CR payload itself so the receiver can verify even
+    // before any contact-registry entry exists (§8.1.1 trust-bootstrap).
+    final innerFrame = proto.ApplicationFrameV3()
+      ..version = 1
+      ..senderUserId = identity.userId
+      ..recipientUserId = recipientUserId
+      ..messageType = proto.MessageTypeV3.MTV3_CONTACT_REQUEST
+      ..messageId = SodiumFFI().randomBytes(16)
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..payload = crBytes;
+    final signedInnerBytes = V3FrameCodec.signApplicationFrameInner(
+      inner: innerFrame,
+      senderUserEd25519Sk: identity.ed25519SecretKey,
+      senderUserMlDsaSk: identity.mlDsaSecretKey,
+    );
+
+    // Build InfrastructureFrame with §8.1.1-relaxed selector
+    // (MTV3_CONTACT_REQUEST), KEM-encapped under the recipient's
+    // Device-KEM-PK pair from the seed.
+    final packet = V3FrameCodec.buildInfrastructureFrame(
+      recipientDeviceId: recipientDeviceId,
+      senderDeviceId: node.primaryIdentity.deviceNodeId,
+      senderDeviceKeys: node.deviceKeyPair,
+      messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST,
+      payload: signedInnerBytes,
+      recipientDeviceX25519Pk: dxk,
+      recipientDeviceMlKemPk: dmk,
+    );
+    final ok = await node.sendToDevice(packet, recipientDeviceId);
+    _log.info('CONTACT_REQUEST V3 First-CR-Bootstrap to '
+        '${recipientUserIdHex.substring(0, 8)} (device='
+        '${bytesToHex(recipientDeviceId).substring(0, 8)}) sendToDevice ok=$ok');
+    // First-contact CRs are persisted as pending_outgoing and retried by
+    // _retryPendingContactRequests regardless of the initial send result.
+    // Return true so the UI shows "sent" rather than "failed" — the retry
+    // timer handles delivery even when the routing table isn't warm yet.
     return true;
   }
 
@@ -4034,7 +2829,7 @@ class CleonaService implements ICleonaService {
         text: 'Contact request from ${contact.displayName} accepted.',
         isOutgoing: false,
         timestamp: DateTime.now(),
-        type: proto.MessageType.IDENTITY_DELETED, // system message type
+        type: UiMessageType.identityDeleted, // system message type
         status: MessageStatus.delivered,
       );
       _addMessageToConversation(nodeIdHex, systemMsg);
@@ -4052,17 +2847,27 @@ class CleonaService implements ICleonaService {
       resp.profilePicture = base64Decode(_profilePictureBase64!);
     }
 
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CONTACT_REQUEST_RESPONSE,
-      resp.writeToBuffer(),
-      recipientId: contact.nodeId,
-    );
-
     onContactAccepted?.call(nodeIdHex);
     onStateChanged?.call();
-    final sent = await node.sendEnvelope(envelope, contact.nodeId);
-    // Erasure-coded backup for offline delivery
-    _storeErasureCodedBackup(envelope, contact);
+
+    // V3 (Architecture §23.3): at this point we know the recipient's KEM
+    // pubkeys (received with the incoming CR and stored on the contact
+    // record), so the response goes through sendToUser. A CR_RESPONSE
+    // without KEM pubkeys cannot reach a V3 receiver, so we drop with a
+    // warning rather than emit something the receiver cannot decap.
+    bool sent;
+    if (contact.x25519Pk != null && contact.mlKemPk != null) {
+      sent = await sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE,
+        payload: Uint8List.fromList(resp.writeToBuffer()),
+      );
+      _log.info('CONTACT_REQUEST_RESPONSE V3 sendToUser ok=$sent');
+    } else {
+      sent = false;
+      _log.warn('CONTACT_REQUEST_RESPONSE drop: contact ${nodeIdHex.substring(0, 8)} '
+          'has no KEM pubkeys — CR-handshake incomplete');
+    }
 
     // Twin-Sync: notify other devices about accepted contact (§26)
     _sendTwinSync(proto.TwinSyncType.CONTACT_ADDED, Uint8List.fromList(utf8.encode(jsonEncode({
@@ -4072,6 +2877,7 @@ class CleonaService implements ICleonaService {
       if (contact.x25519Pk != null) 'x25519Pk': bytesToHex(contact.x25519Pk!),
       if (contact.mlKemPk != null) 'mlKemPk': bytesToHex(contact.mlKemPk!),
       if (contact.mlDsaPk != null) 'mlDsaPk': bytesToHex(contact.mlDsaPk!),
+      if (contact.deviceNodeIds.isNotEmpty) 'deviceNodeIds': contact.deviceNodeIds.toList(),
     }))));
 
     return sent;
@@ -4128,48 +2934,6 @@ class CleonaService implements ICleonaService {
     onStateChanged?.call();
   }
 
-  void _sendDeliveryReceipt(Uint8List recipientId, Uint8List messageId, {bool preferRelay = false}) {
-    final receipt = proto.DeliveryReceipt()
-      ..messageId = messageId
-      ..deliveredAt = Int64(DateTime.now().millisecondsSinceEpoch);
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.DELIVERY_RECEIPT,
-      receipt.writeToBuffer(),
-      recipientId: recipientId,
-    );
-
-    if (preferRelay) {
-      // V3.1 "Reply via same path": message came via relay, so send receipt
-      // via the SAME specific relay. Direct to LAN IPs may fail (AP isolation).
-      final recipientHex = bytesToHex(recipientId);
-      final peer = node.routingTable.getPeer(recipientId);
-
-      // Use the learned specific relay route (e.g. via Bootstrap)
-      if (peer != null && peer.relayViaNodeId != null) {
-        final relayPeer = node.routingTable.getPeer(peer.relayViaNodeId!);
-        if (relayPeer != null) {
-          _log.debug('DELIVERY_RECEIPT via specific relay ${relayPeer.nodeIdHex.substring(0, 8)} for ${recipientHex.substring(0, 8)}');
-          node.sendViaNextHopPublic(envelope, recipientId, relayPeer);
-          return;
-        }
-      }
-
-      // Fallback: DV next-hop relay
-      final route = node.dvRouting.bestRouteTo(recipientHex);
-      if (route != null && !route.isDirect && route.nextHop != null) {
-        final nextHopPeer = node.routingTable.getPeer(route.nextHop!);
-        if (nextHopPeer != null) {
-          _log.debug('DELIVERY_RECEIPT via DV relay ${nextHopPeer.nodeIdHex.substring(0, 8)} for ${recipientHex.substring(0, 8)}');
-          node.sendViaNextHopPublic(envelope, recipientId, nextHopPeer);
-          return;
-        }
-      }
-    }
-
-    node.sendEnvelope(envelope, recipientId);
-  }
-
   // ── Stale contact sender-side warning ──────────────────────────────
   //
   // V3.1.50 added receiver-side detection: when a reinstalled contact sends
@@ -4209,7 +2973,7 @@ class CleonaService implements ICleonaService {
           'Ask them to send you a new contact request.',
       isOutgoing: false,
       timestamp: now,
-      type: proto.MessageType.IDENTITY_DELETED,
+      type: UiMessageType.identityDeleted,
       status: MessageStatus.delivered,
     );
     // Route through _addMessageToConversation so badge + Launcher counter
@@ -4228,7 +2992,7 @@ class CleonaService implements ICleonaService {
         .toList();
 
     for (final entry in pending) {
-      final recipientNodeId = entry.value.nodeId;
+      final recipientUserId = entry.value.nodeId;
       // Exponential backoff: 10s, 20s, 40s, 80s, 160s, 320s, capped at 600s.
       // ML-DSA signing + erasure-coded backup per retry is expensive — without
       // backoff we'd flood unreachable contacts with CR + erasure writes every 10s
@@ -4239,28 +3003,41 @@ class CleonaService implements ICleonaService {
       final lastRetry = _lastCrRetryPerContact[entry.key];
       if (lastRetry != null && now.difference(lastRetry).inSeconds < backoffSec) continue;
 
-      // Only retry if peer is in routing table (known peer)
-      if (node.routingTable.getPeer(recipientNodeId) == null) continue;
+      // Only retry if peer is in routing table (known peer).
+      // DV routing only carries deviceNodeIds — the userId secondary index
+      // is often empty for first-CR contacts. Fall back to the persisted
+      // seedDeviceIdHex from the QR/ContactSeed.
+      final seedDevId = entry.value.seedDeviceIdHex;
+      if (node.routingTable.getPeer(recipientUserId) == null &&
+          node.routingTable.getPeerByUserId(recipientUserId) == null &&
+          (seedDevId == null || node.routingTable.getPeer(hexToBytes(seedDevId)) == null)) continue;
 
-      final cr = proto.ContactRequestMsg()
-        ..displayName = displayName
-        ..ed25519PublicKey = identity.ed25519PublicKey
-        ..mlDsaPublicKey = identity.mlDsaPublicKey
-        ..x25519PublicKey = identity.x25519PublicKey
-        ..mlKemPublicKey = identity.mlKemPublicKey;
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CONTACT_REQUEST,
-        cr.writeToBuffer(),
-        recipientId: recipientNodeId,
-      );
-
-      node.sendEnvelope(envelope, recipientNodeId);
-      // Also store erasure-coded backup for offline delivery
-      _storeErasureCodedBackup(envelope, null, recipientNodeId: recipientNodeId);
+      // Welle 5 Teil 4 Wave 2: First-CR retry replays sendContactRequest with
+      // the persisted ContactSeed bundle (§8.1.1). Without seed (legacy
+      // pre-Wave-2 contacts) the retry stays a no-op and the user has to
+      // re-scan the QR.
+      final ci = entry.value;
       _lastCrRetryPerContact[entry.key] = now;
       _crRetryCountPerContact[entry.key] = count + 1;
-      _log.debug('CR retry to ${entry.key.substring(0, 8)} (attempt ${count + 1}, backoff ${backoffSec}s)');
+      if (ci.seedDeviceIdHex == null ||
+          ci.seedDxkB64 == null ||
+          ci.seedDmkB64 == null) {
+        _log.debug(
+            'CR retry skipped for ${entry.key.substring(0, 8)} (attempt '
+            '${count + 1}): no persisted ContactSeed (legacy contact) — '
+            're-scan QR to resend');
+        continue;
+      }
+      unawaited(sendContactRequest(
+        entry.key,
+        message: ci.message ?? '',
+        seedDeviceIdHex: ci.seedDeviceIdHex,
+        seedDxkB64: ci.seedDxkB64,
+        seedDmkB64: ci.seedDmkB64,
+      ));
+      _log.info(
+          'CR retry replayed for ${entry.key.substring(0, 8)} (attempt '
+          '${count + 1}, backoff ${backoffSec}s)');
     }
 
     // V3.1: Also retry CR-Response for recently accepted contacts.
@@ -4282,7 +3059,9 @@ class CleonaService implements ICleonaService {
 
       // Only retry if we have their keys (received their CR)
       if (contact.ed25519Pk == null) continue;
-      if (node.routingTable.getPeer(contact.nodeId) == null) continue;
+      // contact.nodeId is the USER nodeId; peer may be indexed under DEVICE nodeId
+      if (node.routingTable.getPeer(contact.nodeId) == null &&
+          node.routingTable.getPeerByUserId(contact.nodeId) == null) continue;
 
       // Stop retrying once delivery to this contact is ACK-confirmed.
       // Primary check: any DELIVERY_RECEIPT from this contact since acceptance
@@ -4307,13 +3086,21 @@ class CleonaService implements ICleonaService {
         ..mlKemPublicKey = identity.mlKemPublicKey
         ..displayName = displayName;
 
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CONTACT_REQUEST_RESPONSE,
-        resp.writeToBuffer(),
-        recipientId: contact.nodeId,
-      );
-
-      node.sendEnvelope(envelope, contact.nodeId);
+      // V3: by retry time we have the contact's KEM pubkeys (CR was already
+      // received and accepted) — sendToUser handles the rest.
+      if (contact.x25519Pk != null && contact.mlKemPk != null) {
+        sendToUser(
+          recipientUserId: contact.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE,
+          payload: Uint8List.fromList(resp.writeToBuffer()),
+        );
+      } else {
+        // Defensive: should be unreachable — accepted contacts always have
+        // KEM pubkeys (CR carried them). A missing-pks contact at retry
+        // time is a data-integrity issue.
+        _log.warn('CR-Response retry skipped for ${entry.key.substring(0, 8)}: '
+            'accepted contact lacks KEM pubkeys (data corruption?)');
+      }
       _lastCrRetryPerContact[entry.key] = now;
       _log.debug('CR-Response retry to ${entry.key.substring(0, 8)}');
     }
@@ -4409,39 +3196,53 @@ class CleonaService implements ICleonaService {
   void markConversationRead(String conversationId) {
     final conv = conversations[conversationId];
     if (conv == null) return;
-    if (conv.unreadCount == 0) return;
 
-    conv.unreadCount = 0;
-    onCancelNotificationAndroid?.call(conversationId);
-    _updateBadgeCount();
+    final hadUnread = conv.unreadCount > 0;
+    if (hadUnread) {
+      conv.unreadCount = 0;
+      onCancelNotificationAndroid?.call(conversationId);
+      _updateBadgeCount();
+    }
 
-    // Send READ_RECEIPTs for unread incoming messages (if readReceipts enabled)
-    if (!conv.config.readReceipts) return;
+    // Send READ_RECEIPTs for unread incoming messages (if readReceipts enabled).
+    // Runs regardless of unreadCount — messages may have status != read even
+    // when the badge counter was already cleared.
+    if (!conv.config.readReceipts) {
+      if (hadUnread) {
+        _saveConversations();
+        onStateChanged?.call();
+      }
+      return;
+    }
 
+    var sentReceipts = false;
     for (final msg in conv.messages) {
       if (!msg.isOutgoing && msg.status != MessageStatus.read) {
         msg.status = MessageStatus.read;
-        // Send receipt to original sender
-        final senderNodeId = hexToBytes(msg.senderNodeIdHex);
+        sentReceipts = true;
+        if (msg.senderNodeIdHex.isEmpty) continue;
+        final senderUserId = hexToBytes(msg.senderNodeIdHex);
         final receipt = proto.ReadReceipt()
           ..messageId = hexToBytes(msg.id)
           ..readAt = Int64(DateTime.now().millisecondsSinceEpoch);
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.READ_RECEIPT,
-          receipt.writeToBuffer(),
-          recipientId: senderNodeId,
+        sendToUser(
+          recipientUserId: senderUserId,
+          messageType: proto.MessageTypeV3.MTV3_READ_RECEIPT,
+          payload: receipt.writeToBuffer(),
         );
-        node.sendEnvelope(envelope, senderNodeId);
       }
     }
 
-    _saveConversations();
-    onStateChanged?.call();
+    if (hadUnread || sentReceipts) {
+      _saveConversations();
+      onStateChanged?.call();
+    }
 
-    // Twin-Sync: notify other devices that this conversation was read (§26)
-    _sendTwinSync(proto.TwinSyncType.TWIN_READ_RECEIPT, Uint8List.fromList(utf8.encode(jsonEncode({
-      'conversationId': conversationId,
-    }))));
+    if (sentReceipts) {
+      _sendTwinSync(proto.TwinSyncType.TWIN_READ_RECEIPT, Uint8List.fromList(utf8.encode(jsonEncode({
+        'conversationId': conversationId,
+      }))));
+    }
   }
 
   @override
@@ -4504,20 +3305,19 @@ class CleonaService implements ICleonaService {
     final indicator = proto.TypingIndicator()
       ..conversationId = conversationId
       ..isTyping = true;
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.TYPING_INDICATOR,
-      indicator.writeToBuffer(),
-      recipientId: contact.nodeId,
+    sendToUser(
+      recipientUserId: contact.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_TYPING_INDICATOR,
+      payload: indicator.writeToBuffer(),
     );
-    node.sendEnvelope(envelope, contact.nodeId);
   }
 
   // ── Mutual Peer Selection (Architecture Section 3.3.7) ─────────
 
   /// Compute set of nodeIdHex that the recipient is likely to know.
   /// Sources: shared contacts (bidirectional) + shared group members.
-  Set<String> _computeMutualPeerIds(Uint8List recipientNodeId) {
-    final recipientHex = bytesToHex(recipientNodeId);
+  Set<String> _computeMutualPeerIds(Uint8List recipientUserId) {
+    final recipientHex = bytesToHex(recipientUserId);
     final mutual = <String>{};
 
     // Source 1: Our accepted contacts — the recipient likely knows them too
@@ -4603,12 +3403,12 @@ class CleonaService implements ICleonaService {
     _saveConversations();
 
     // Send GROUP_INVITE to each member (pairwise encrypted)
-    final invite = proto.GroupInvite()
+    final invite = proto.GroupInviteV3()
       ..groupId = groupId
       ..groupName = name
       ..inviterId = identity.nodeId;
     for (final m in members.values) {
-      invite.members.add(proto.GroupMember()
+      invite.members.add(proto.GroupMemberV3()
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role
@@ -4617,41 +3417,22 @@ class CleonaService implements ICleonaService {
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
 
-    final inviteBytes = invite.writeToBuffer();
+    final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
+    // V3: pairwise sendToUser with groupId for receiver-side conversation routing.
     for (final m in members.values) {
-      if (m.nodeIdHex == identity.userIdHex) continue; // Don't send to self
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex, memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
+      if (m.nodeIdHex == identity.userIdHex) continue;
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex,
+          memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      var payload = Uint8List.fromList(inviteBytes);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
+      final ok = await sendToUser(
+        recipientUserId: hexToBytes(m.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_GROUP_INVITE,
+        payload: inviteBytes,
+        groupId: groupId,
+      );
+      if (!ok) {
+        _log.warn('GROUP_INVITE: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName}) — S&F path not yet implemented');
       }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
-      );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.GROUP_INVITE,
-        ciphertext,
-        recipientId: hexToBytes(m.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      // Fire-and-forget: don't await — group is already saved locally
-      node.sendEnvelope(envelope, hexToBytes(m.nodeIdHex));
     }
 
     onStateChanged?.call();
@@ -4668,62 +3449,70 @@ class CleonaService implements ICleonaService {
     final group = _groups[groupIdHex];
     if (group == null) return null;
 
-    var payload = Uint8List.fromList(utf8.encode(text));
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
+    // V3 group fan-out: TextMessageV3 sub-message + sendToUser per member.
+    // ApplicationFrameV3.group_id (Field 17) carries the conversation tag so
+    // receivers dispatch into the matching group tab.
+    final tm = proto.TextMessageV3()
+      ..text = text
+      ..formatHint = 'plain';
+    proto.LinkPreview? wirePreview;
+    String? previewUrl, previewTitle, previewDescription, previewSiteName, previewThumbnailBase64;
+    if (_linkPreviewSettings.enabled && extractFirstUrl(text) != null) {
       try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
+        final preview = await _linkPreviewFetcher.fetchPreview(text);
+        if (preview != null) {
+          wirePreview = preview.toProto();
+          previewUrl = preview.url;
+          previewTitle = preview.title;
+          previewDescription = preview.description;
+          previewSiteName = preview.siteName;
+          if (preview.thumbnail != null) previewThumbnailBase64 = base64Encode(preview.thumbnail!);
         }
-      } catch (_) {}
+      } catch (e) {
+        _log.debug('Link preview fetch failed: $e');
+      }
     }
+    if (wirePreview != null) tm.linkPreview = wirePreview;
+    final basePayload = tm.writeToBuffer();
+    final groupIdBytes = hexToBytes(groupIdHex);
+    bool anySent = false;
 
-    String? firstMsgId;
-
-    // Fan-out: send to each member pairwise
     for (final member in group.members.values) {
       if (member.nodeIdHex == identity.userIdHex) continue;
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
-      if (x25519Pk == null || mlKemPk == null) continue;
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      final ok = await sendToUser(
+        recipientUserId: hexToBytes(member.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_TEXT,
+        payload: basePayload,
+        groupId: groupIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.TEXT,
-        ciphertext,
-        recipientId: hexToBytes(member.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-      envelope.groupId = hexToBytes(groupIdHex);
-
-      firstMsgId ??= bytesToHex(Uint8List.fromList(envelope.messageId));
-
-      // Fire-and-forget: don't await — optimistic UI
-      node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
+      if (ok) anySent = true;
     }
 
-    if (firstMsgId == null) return null;
+    if (!anySent) return null;
     node.statsCollector.addMessageSent();
 
-    // Create single UI message
+    // Optimistic UI message — V3 generates per-device messageIds inside
+    // sendToUser; for the local single UI bubble we use a fresh random id
+    // (DELIVERY_RECEIPT keys on per-user msgId so the local bubble cannot
+    // be matched 1:1 — that's the C4-Groups follow-up).
+    final localId = bytesToHex(SodiumFFI().randomBytes(16));
     final msg = UiMessage(
-      id: firstMsgId,
+      id: localId,
       conversationId: groupIdHex,
       senderNodeIdHex: identity.userIdHex,
       text: text,
       timestamp: DateTime.now(),
-      type: proto.MessageType.TEXT,
+      type: UiMessageType.text,
       status: MessageStatus.sent,
       isOutgoing: true,
     );
+    if (previewUrl != null) {
+      msg.linkPreviewUrl = previewUrl;
+      msg.linkPreviewTitle = previewTitle;
+      msg.linkPreviewDescription = previewDescription;
+      msg.linkPreviewSiteName = previewSiteName;
+      msg.linkPreviewThumbnailBase64 = previewThumbnailBase64;
+    }
 
     _addMessageToConversation(groupIdHex, msg, isGroup: true);
     return msg;
@@ -4749,31 +3538,23 @@ class CleonaService implements ICleonaService {
 
     // Broadcast updated group (without us) to remaining members
     if (group.members.isNotEmpty) {
-      _broadcastGroupUpdate(group);
+      await _broadcastGroupUpdate(group);
     }
 
-    // Also send GROUP_LEAVE so members know we left (fire-and-forget)
+    // V3 GROUP_LEAVE fan-out
     final leaveMsg = proto.GroupLeave()..groupId = hexToBytes(groupIdHex);
-    final leaveBytes = leaveMsg.writeToBuffer();
+    final leaveBytes = Uint8List.fromList(leaveMsg.writeToBuffer());
+    final groupIdBytes = hexToBytes(groupIdHex);
     for (final member in group.members.values) {
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex,
+          memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(leaveBytes),
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      sendToUser(
+        recipientUserId: hexToBytes(member.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_GROUP_LEAVE,
+        payload: leaveBytes,
+        groupId: groupIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.GROUP_LEAVE,
-        ciphertext,
-        recipientId: hexToBytes(member.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-
-      node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
     }
 
     _groups.remove(groupIdHex);
@@ -4812,7 +3593,7 @@ class CleonaService implements ICleonaService {
     // Send GROUP_INVITE to new member AND broadcast updated member list to
     // existing members — otherwise their local state stays stale and they
     // can't target the new member for role changes, messages, etc.
-    _broadcastGroupUpdate(group);
+    await _broadcastGroupUpdate(group);
 
     // System message
     final sysMsg = UiMessage(
@@ -4821,7 +3602,7 @@ class CleonaService implements ICleonaService {
       senderNodeIdHex: '',
       text: '${contact.displayName} wurde eingeladen',
       timestamp: DateTime.now(),
-      type: proto.MessageType.GROUP_INVITE,
+      type: UiMessageType.groupInvite,
       status: MessageStatus.delivered,
       isOutgoing: false,
     );
@@ -4846,7 +3627,7 @@ class CleonaService implements ICleonaService {
     _saveGroups();
 
     // Broadcast updated member list to all remaining members
-    _broadcastGroupUpdate(group);
+    await _broadcastGroupUpdate(group);
 
     // System message
     final sysMsg = UiMessage(
@@ -4855,7 +3636,7 @@ class CleonaService implements ICleonaService {
       senderNodeIdHex: '',
       text: '$memberName wurde entfernt',
       timestamp: DateTime.now(),
-      type: proto.MessageType.GROUP_LEAVE,
+      type: UiMessageType.groupLeave,
       status: MessageStatus.delivered,
       isOutgoing: false,
     );
@@ -4868,7 +3649,7 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<bool> setMemberRole(String entityIdHex, String memberNodeIdHex, String role) async {
-    // Dual-mode: works for both groups and channels (Architecture v2.2 Section 10.2)
+    // Dual-mode: works for both groups and channels (Architecture v3.0 Section 10.2)
     final group = _groups[entityIdHex];
     final channel = _channels[entityIdHex];
     if (group == null && channel == null) return false;
@@ -4899,7 +3680,7 @@ class CleonaService implements ICleonaService {
       }
 
       _saveGroups();
-      _broadcastGroupUpdate(group);
+      await _broadcastGroupUpdate(group);
       _broadcastRoleUpdate(entityIdHex, memberNodeIdHex, role, group.members);
 
       final sysMsg = UiMessage(
@@ -4908,7 +3689,7 @@ class CleonaService implements ICleonaService {
         senderNodeIdHex: '',
         text: '${member.displayName}: $oldRole → $role',
         timestamp: DateTime.now(),
-        type: proto.MessageType.CHANNEL_ROLE_UPDATE,
+        type: UiMessageType.channelRoleUpdate,
         status: MessageStatus.delivered,
         isOutgoing: false,
       );
@@ -4940,7 +3721,7 @@ class CleonaService implements ICleonaService {
         senderNodeIdHex: '',
         text: '${member.displayName}: $oldRole → $role',
         timestamp: DateTime.now(),
-        type: proto.MessageType.CHANNEL_ROLE_UPDATE,
+        type: UiMessageType.channelRoleUpdate,
         status: MessageStatus.delivered,
         isOutgoing: false,
       );
@@ -4953,7 +3734,7 @@ class CleonaService implements ICleonaService {
   }
 
   /// Broadcast CHANNEL_ROLE_UPDATE to all members of a group or channel.
-  /// Architecture v2.2: "must be sent to ALL members, not just the affected member"
+  /// Architecture v3.0: "must be sent to ALL members, not just the affected member"
   void _broadcastRoleUpdate(String entityIdHex, String targetIdHex, String newRole,
       Map<String, dynamic> members) {
     final roleUpdate = proto.ChannelRoleUpdate()
@@ -4961,55 +3742,34 @@ class CleonaService implements ICleonaService {
       ..targetId = hexToBytes(targetIdHex)
       ..newRole = newRole;
 
-    final roleBytes = roleUpdate.writeToBuffer();
+    final roleBytes = Uint8List.fromList(roleUpdate.writeToBuffer());
+    final entityIdBytes = hexToBytes(entityIdHex);
     for (final entry in members.entries) {
       final mHex = entry.key;
       if (mHex == identity.userIdHex) continue;
       final m = entry.value;
       final (x25519Pk, mlKemPk) = _resolveMemberKeys(mHex,
-          memberX25519Pk: m.x25519Pk as Uint8List?, memberMlKemPk: m.mlKemPk as Uint8List?);
+          memberX25519Pk: m.x25519Pk as Uint8List?,
+          memberMlKemPk: m.mlKemPk as Uint8List?);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      var payload = Uint8List.fromList(roleBytes);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
-      }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      sendToUser(
+        recipientUserId: hexToBytes(mHex),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE,
+        payload: roleBytes,
+        groupId: entityIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_ROLE_UPDATE,
-        ciphertext,
-        recipientId: hexToBytes(mHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      node.sendEnvelope(envelope, hexToBytes(mHex));
     }
   }
 
   /// Broadcast updated group member list to all members via GROUP_INVITE.
-  void _broadcastGroupUpdate(GroupInfo group) {
+  Future<void> _broadcastGroupUpdate(GroupInfo group) async {
     final groupId = hexToBytes(group.groupIdHex);
-    final invite = proto.GroupInvite()
+    final invite = proto.GroupInviteV3()
       ..groupId = groupId
       ..groupName = group.name
       ..inviterId = identity.nodeId;
     for (final m in group.members.values) {
-      invite.members.add(proto.GroupMember()
+      invite.members.add(proto.GroupMemberV3()
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role
@@ -5018,41 +3778,21 @@ class CleonaService implements ICleonaService {
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
 
-    final inviteBytes = invite.writeToBuffer();
+    final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
     for (final m in group.members.values) {
       if (m.nodeIdHex == identity.userIdHex) continue;
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex, memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex,
+          memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      var payload = Uint8List.fromList(inviteBytes);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
+      final ok = await sendToUser(
+        recipientUserId: hexToBytes(m.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_GROUP_INVITE,
+        payload: inviteBytes,
+        groupId: groupId,
+      );
+      if (!ok) {
+        _log.warn('GROUP_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
       }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
-      );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.GROUP_INVITE,
-        ciphertext,
-        recipientId: hexToBytes(m.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      // Fire-and-forget: don't await — broadcast is best-effort
-      node.sendEnvelope(envelope, hexToBytes(m.nodeIdHex));
     }
     _log.info('Broadcast group update for "${group.name}" to ${group.members.length - 1} members');
   }
@@ -5074,163 +3814,6 @@ class CleonaService implements ICleonaService {
       default:
         return false;
     }
-  }
-
-  void _handleGroupInvite(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    proto.GroupInvite invite;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      invite = proto.GroupInvite.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('GROUP_INVITE', e);
-      return;
-    } catch (e) {
-      _log.error('GROUP_INVITE decrypt/parse failed: $e');
-      return;
-    }
-
-    final groupIdHex = bytesToHex(Uint8List.fromList(invite.groupId));
-
-    // Build members map
-    final members = <String, GroupMemberInfo>{};
-    for (final m in invite.members) {
-      final nid = bytesToHex(Uint8List.fromList(m.nodeId));
-      members[nid] = GroupMemberInfo(
-        nodeIdHex: nid,
-        displayName: m.displayName,
-        role: m.role,
-        ed25519Pk: m.ed25519PublicKey.isEmpty ? null : Uint8List.fromList(m.ed25519PublicKey),
-        x25519Pk: m.x25519PublicKey.isEmpty ? null : Uint8List.fromList(m.x25519PublicKey),
-        mlKemPk: m.mlKemPublicKey.isEmpty ? null : Uint8List.fromList(m.mlKemPublicKey),
-      );
-    }
-
-    // Determine owner
-    final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
-    final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
-
-    final group = GroupInfo(
-      groupIdHex: groupIdHex,
-      name: invite.groupName,
-      description: invite.groupDescription,
-      pictureBase64: invite.groupPicture.isNotEmpty ? base64Encode(invite.groupPicture) : null,
-      ownerNodeIdHex: ownerHex,
-      members: members,
-    );
-
-    final isUpdate = _groups.containsKey(groupIdHex);
-    _groups[groupIdHex] = group;
-    _saveGroups();
-
-    // Create conversation (or update existing)
-    final conv = conversations.putIfAbsent(groupIdHex, () => Conversation(
-      id: groupIdHex,
-      displayName: invite.groupName,
-      isGroup: true,
-      profilePictureBase64: group.pictureBase64,
-    ));
-    conv.displayName = invite.groupName;
-    _saveConversations();
-
-    if (!isUpdate) {
-      onGroupInviteReceived?.call(groupIdHex, invite.groupName);
-      _log.info('Group invite received: "${invite.groupName}" from ${senderHex.substring(0, 8)}');
-    } else {
-      _log.info('Group updated: "${invite.groupName}" from ${senderHex.substring(0, 8)}');
-    }
-
-    // Apply any pending config that arrived before the GROUP_INVITE
-    final pendingConfig = _pendingGroupConfigs.remove(groupIdHex);
-    if (pendingConfig != null) {
-      final senderMember = group.members[pendingConfig.senderHex];
-      if (senderMember != null && (senderMember.role == 'owner' || senderMember.role == 'admin')) {
-        conv.config = pendingConfig.config;
-        _saveConversations();
-        _log.info('Applied buffered config for "${invite.groupName}" from ${pendingConfig.senderHex.substring(0, 8)}');
-      }
-    }
-
-    onStateChanged?.call();
-  }
-
-  void _handleGroupLeave(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    proto.GroupLeave leaveMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      leaveMsg = proto.GroupLeave.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('GROUP_LEAVE', e);
-      return;
-    } catch (e) {
-      _log.error('GROUP_LEAVE decrypt/parse failed: $e');
-      return;
-    }
-
-    final groupIdHex = bytesToHex(Uint8List.fromList(leaveMsg.groupId));
-    final group = _groups[groupIdHex];
-    if (group == null) return;
-
-    final memberName = group.members[senderHex]?.displayName ?? senderHex.substring(0, 8);
-    final wasOwner = group.ownerNodeIdHex == senderHex;
-    group.members.remove(senderHex);
-
-    // If the owner left, transfer ownership to first admin or first member
-    if (wasOwner && group.members.isNotEmpty) {
-      final newOwner = group.members.values.where((m) => m.role == 'admin').firstOrNull
-          ?? group.members.values.first;
-      newOwner.role = 'owner';
-      group.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Owner left, transferred to ${newOwner.displayName}');
-    }
-    _saveGroups();
-
-    // Add system message
-    final sysMsg = UiMessage(
-      id: bytesToHex(SodiumFFI().randomBytes(16)),
-      conversationId: groupIdHex,
-      senderNodeIdHex: '',
-      text: '$memberName hat die Gruppe verlassen',
-      timestamp: DateTime.now(),
-      type: proto.MessageType.GROUP_LEAVE,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-    );
-    _addMessageToConversation(groupIdHex, sysMsg, isGroup: true);
-    _log.info('$memberName left group "${group.name}"');
   }
 
   // ── Channels ────────────────────────────────────────────────────
@@ -5361,46 +3944,45 @@ class CleonaService implements ICleonaService {
       return null;
     }
 
-    var payload = Uint8List.fromList(utf8.encode(text));
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
+    // V3 CHANNEL_POST: TextMessageV3 sub-message + sendToUser per member with
+    // groupId so receivers route to the channel tab.
+    final tm = proto.TextMessageV3()
+      ..text = text
+      ..formatHint = 'plain';
+    proto.LinkPreview? wirePreview;
+    String? previewUrl, previewTitle, previewDescription, previewSiteName, previewThumbnailBase64;
+    if (_linkPreviewSettings.enabled && extractFirstUrl(text) != null) {
       try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
+        final preview = await _linkPreviewFetcher.fetchPreview(text);
+        if (preview != null) {
+          wirePreview = preview.toProto();
+          previewUrl = preview.url;
+          previewTitle = preview.title;
+          previewDescription = preview.description;
+          previewSiteName = preview.siteName;
+          if (preview.thumbnail != null) previewThumbnailBase64 = base64Encode(preview.thumbnail!);
         }
-      } catch (_) {}
+      } catch (e) {
+        _log.debug('Link preview fetch failed: $e');
+      }
     }
+    if (wirePreview != null) tm.linkPreview = wirePreview;
+    final basePayload = Uint8List.fromList(tm.writeToBuffer());
+    final channelIdBytes = hexToBytes(channelIdHex);
 
     String? firstMsgId;
 
-    // Fan-out: send to each member pairwise (same as groups)
     for (final member in channel.members.values) {
       if (member.nodeIdHex == identity.userIdHex) continue;
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex,
+          memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      sendToUser(
+        recipientUserId: hexToBytes(member.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_POST,
+        payload: basePayload,
+        groupId: channelIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_POST,
-        ciphertext,
-        recipientId: hexToBytes(member.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-      envelope.groupId = hexToBytes(channelIdHex); // reuse groupId field for channel routing
-
-      firstMsgId ??= bytesToHex(Uint8List.fromList(envelope.messageId));
-
-      // Fire-and-forget: don't await — optimistic UI
-      node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
     }
 
     // If no other members received the post, generate a local message ID
@@ -5415,10 +3997,17 @@ class CleonaService implements ICleonaService {
       senderNodeIdHex: identity.userIdHex,
       text: text,
       timestamp: DateTime.now(),
-      type: proto.MessageType.CHANNEL_POST,
+      type: UiMessageType.channelPost,
       status: MessageStatus.sent,
       isOutgoing: true,
     );
+    if (previewUrl != null) {
+      msg.linkPreviewUrl = previewUrl;
+      msg.linkPreviewTitle = previewTitle;
+      msg.linkPreviewDescription = previewDescription;
+      msg.linkPreviewSiteName = previewSiteName;
+      msg.linkPreviewThumbnailBase64 = previewThumbnailBase64;
+    }
 
     _addMessageToConversation(channelIdHex, msg, isChannel: true);
     return msg;
@@ -5447,28 +4036,20 @@ class CleonaService implements ICleonaService {
       _broadcastChannelUpdate(channel);
     }
 
-    // Send CHANNEL_LEAVE so members know we left (fire-and-forget)
+    // V3 CHANNEL_LEAVE fan-out
     final leaveMsg = proto.ChannelLeave()..channelId = hexToBytes(channelIdHex);
-    final leaveBytes = leaveMsg.writeToBuffer();
+    final leaveBytes = Uint8List.fromList(leaveMsg.writeToBuffer());
+    final channelIdBytes = hexToBytes(channelIdHex);
     for (final member in channel.members.values) {
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex, memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex,
+          memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(leaveBytes),
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      sendToUser(
+        recipientUserId: hexToBytes(member.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_LEAVE,
+        payload: leaveBytes,
+        groupId: channelIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_LEAVE,
-        ciphertext,
-        recipientId: hexToBytes(member.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-
-      node.sendEnvelope(envelope, hexToBytes(member.nodeIdHex));
     }
 
     _channels.remove(channelIdHex);
@@ -5513,7 +4094,7 @@ class CleonaService implements ICleonaService {
       senderNodeIdHex: '',
       text: '${contact.displayName} wurde eingeladen',
       timestamp: DateTime.now(),
-      type: proto.MessageType.CHANNEL_INVITE,
+      type: UiMessageType.channelInvite,
       status: MessageStatus.delivered,
       isOutgoing: false,
     );
@@ -5546,7 +4127,7 @@ class CleonaService implements ICleonaService {
       senderNodeIdHex: '',
       text: '$memberName wurde entfernt',
       timestamp: DateTime.now(),
-      type: proto.MessageType.CHANNEL_LEAVE,
+      type: UiMessageType.channelLeave,
       status: MessageStatus.delivered,
       isOutgoing: false,
     );
@@ -5559,47 +4140,16 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<bool> setChannelRole(String channelIdHex, String memberNodeIdHex, String role) async {
-    final channel = _channels[channelIdHex];
-    if (channel == null) return false;
-    if (!['owner', 'admin', 'subscriber'].contains(role)) return false;
-
-    // Only owner can change roles
-    if (channel.ownerNodeIdHex != identity.userIdHex) return false;
-    if (memberNodeIdHex == identity.userIdHex) return false;
-
-    final member = channel.members[memberNodeIdHex];
-    if (member == null) return false;
-
-    final oldRole = member.role;
-    member.role = role;
-
-    // If promoting to owner, demote self to admin
-    if (role == 'owner') {
-      channel.members[identity.userIdHex]?.role = 'admin';
-      channel.ownerNodeIdHex = memberNodeIdHex;
-    }
-
-    _saveChannels();
-
-    // Broadcast updated member list
-    _broadcastChannelUpdate(channel);
-
-    // System message
-    final sysMsg = UiMessage(
-      id: bytesToHex(SodiumFFI().randomBytes(16)),
-      conversationId: channelIdHex,
-      senderNodeIdHex: '',
-      text: '${member.displayName}: $oldRole → $role',
-      timestamp: DateTime.now(),
-      type: proto.MessageType.CHANNEL_INVITE,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-    );
-    _addMessageToConversation(channelIdHex, sysMsg, isChannel: true);
-
-    onStateChanged?.call();
-    _log.info('Channel role changed: ${member.displayName} $oldRole -> $role in "${channel.name}"');
-    return true;
+    // B-31: delegate to the dual-mode setMemberRole. It broadcasts the atomic
+    // MTV3_CHANNEL_ROLE_UPDATE — the receiver patches only the one member's role +
+    // ownerNodeIdHex (_handleChannelRoleUpdateV3). The previous body broadcast a
+    // CHANNEL_INVITE (full member-list rebuild via _broadcastChannelUpdate), which
+    // races on the receiver: after an ownership transfer the freshly-promoted
+    // owner's node could fire its first role change before the INVITE rebuilt its
+    // local channel, so its owner-guard rejected the change (gui-40 40b.17).
+    // Both GUI in-process callers (home_screen, chat_screen) and the IPC path now
+    // share this atomic route.
+    return setMemberRole(channelIdHex, memberNodeIdHex, role);
   }
 
   /// Broadcast updated channel member list to all members via CHANNEL_INVITE.
@@ -5614,7 +4164,7 @@ class CleonaService implements ICleonaService {
       ..language = channel.language;
     if (channel.description != null) invite.channelDescription = channel.description!;
     for (final m in channel.members.values) {
-      invite.members.add(proto.GroupMember() // reuse GroupMember proto
+      invite.members.add(proto.GroupMemberV3() // reuse GroupMemberV3 proto
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role
@@ -5623,41 +4173,18 @@ class CleonaService implements ICleonaService {
         ..mlKemPublicKey = m.mlKemPk ?? Uint8List(0));
     }
 
-    final inviteBytes = invite.writeToBuffer();
+    final inviteBytes = Uint8List.fromList(invite.writeToBuffer());
     for (final m in channel.members.values) {
       if (m.nodeIdHex == identity.userIdHex) continue;
-      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex, memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
+      final (x25519Pk, mlKemPk) = _resolveMemberKeys(m.nodeIdHex,
+          memberX25519Pk: m.x25519Pk, memberMlKemPk: m.mlKemPk);
       if (x25519Pk == null || mlKemPk == null) continue;
-
-      var payload = Uint8List.fromList(inviteBytes);
-      var compression = proto.CompressionType.NONE;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            payload = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
-      }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: x25519Pk,
-        recipientMlKemPk: mlKemPk,
+      sendToUser(
+        recipientUserId: hexToBytes(m.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_INVITE,
+        payload: inviteBytes,
+        groupId: channelId,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_INVITE,
-        ciphertext,
-        recipientId: hexToBytes(m.nodeIdHex),
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      // Fire-and-forget: don't await — broadcast is best-effort
-      node.sendEnvelope(envelope, hexToBytes(m.nodeIdHex));
     }
     _log.info('Broadcast channel update for "${channel.name}" to ${channel.members.length - 1} members');
   }
@@ -6031,36 +4558,6 @@ class CleonaService implements ICleonaService {
     return true;
   }
 
-  // ── Decrypt helper ─────────────────────────────────────────────
-
-  /// Decrypt an incoming KEM-encrypted envelope. Returns null on failure.
-  _DecryptedEnvelope? _decryptEnvelope(proto.MessageEnvelope envelope) {
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      return _DecryptedEnvelope(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected(envelope.messageType.name, e);
-      return null;
-    } catch (e) {
-      _log.debug('Decrypt failed for ${envelope.messageType}: $e');
-      return null;
-    }
-  }
-
   // ── Channel Index Gossip ──────────────────────────────────────
 
   /// Send channel index to up to 3 random connected peers.
@@ -6093,22 +4590,31 @@ class CleonaService implements ICleonaService {
       }
     }
 
-    final payload = exchangeMsg.writeToBuffer();
+    // V3 channel-index gossip rides InfrastructureFrame: recipients are
+    // arbitrary routing-table peers (NOT necessarily contacts), and there
+    // is no inner User-Sig requirement — receivers treat the entries as
+    // gossip and trust nothing. Device-KEM-Decap at the recipient gates
+    // delivery to addressed devices; HMAC + Outer-Device-Sig per §3.5
+    // protect the wire. Architecture §10.2 + §2.3.5.
+    final payload = Uint8List.fromList(exchangeMsg.writeToBuffer());
     for (final peer in targets) {
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_INDEX_EXCHANGE,
-        Uint8List.fromList(payload),
-        recipientId: peer.nodeId,
-      );
-      node.sendEnvelope(envelope, peer.nodeId);
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE,
+        innerPayload: payload,
+        recipientDeviceId: peer.nodeId,
+      ));
     }
-    _log.debug('Channel index gossip: sent ${entries.length} entries to ${targets.length} peers');
   }
 
   /// Handle incoming channel index exchange from a peer.
-  void _handleChannelIndexExchange(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the raw `ChannelIndexExchange` proto bytes
+  /// from the InfrastructureFrame body (gossip-style, untrusted by design
+  /// — handler only merges entries into `_channelIndex`). No sender
+  /// argument needed — the entry payload is self-describing per channel.
+  void _handleChannelIndexExchange(Uint8List payload) {
     try {
-      final exchange = proto.ChannelIndexExchange.fromBuffer(envelope.encryptedPayload);
+      final exchange = proto.ChannelIndexExchange.fromBuffer(payload);
       var added = 0;
       for (final e in exchange.entries) {
         final entry = ChannelIndexEntry(
@@ -6146,12 +4652,14 @@ class CleonaService implements ICleonaService {
   // ── Channel Join Request (Owner-Seite) ────────────────────────
 
   /// Handle incoming join request for a public channel we own.
-  void _handleChannelJoinRequest(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// `ChannelJoinRequest` proto bytes (V3 inner User-Sig + outer
+  /// Device-Sig + KEM-decap chain verified upstream). [senderUserId] is
+  /// the requesting peer's user-id (`frame.senderUserId`).
+  void _handleChannelJoinRequest(Uint8List payload, Uint8List senderUserId) {
     try {
-      final decrypted = _decryptEnvelope(envelope);
-      if (decrypted == null) return;
-
-      final joinReq = proto.ChannelJoinRequest.fromBuffer(decrypted.payload);
+      final joinReq = proto.ChannelJoinRequest.fromBuffer(payload);
       final channelIdHex = bytesToHex(Uint8List.fromList(joinReq.channelId));
       final channel = _channels[channelIdHex];
       if (channel == null || !channel.isPublic) {
@@ -6162,7 +4670,7 @@ class CleonaService implements ICleonaService {
       // Only owner processes join requests
       if (channel.ownerNodeIdHex != identity.userIdHex) return;
 
-      final requesterNodeIdHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+      final requesterNodeIdHex = bytesToHex(senderUserId);
 
       // Already a member?
       if (channel.members.containsKey(requesterNodeIdHex)) {
@@ -6213,7 +4721,7 @@ class CleonaService implements ICleonaService {
 
     // Include full member list
     for (final m in channel.members.values) {
-      final gm = proto.GroupMember()
+      final gm = proto.GroupMemberV3()
         ..nodeId = hexToBytes(m.nodeIdHex)
         ..displayName = m.displayName
         ..role = m.role;
@@ -6223,26 +4731,16 @@ class CleonaService implements ICleonaService {
       invite.members.add(gm);
     }
 
-    // Encrypt and send
+    // V3: sendToUser handles KEM/Sig + per-device fan-out.
     final (x25519Pk, mlKemPk) = _resolveMemberKeys(memberNodeIdHex,
         memberX25519Pk: memberInfo.x25519Pk, memberMlKemPk: memberInfo.mlKemPk);
     if (x25519Pk == null || mlKemPk == null) return;
-
-    final payload = invite.writeToBuffer();
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: Uint8List.fromList(payload),
-      recipientX25519Pk: x25519Pk,
-      recipientMlKemPk: mlKemPk,
+    await sendToUser(
+      recipientUserId: hexToBytes(memberNodeIdHex),
+      messageType: proto.MessageTypeV3.MTV3_CHANNEL_INVITE,
+      payload: Uint8List.fromList(invite.writeToBuffer()),
+      groupId: hexToBytes(channel.channelIdHex),
     );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CHANNEL_INVITE,
-      ciphertext,
-      recipientId: hexToBytes(memberNodeIdHex),
-    );
-    envelope.kemHeader = kemHeader;
-
-    await node.sendEnvelope(envelope, hexToBytes(memberNodeIdHex));
   }
 
   @override
@@ -6281,31 +4779,24 @@ class CleonaService implements ICleonaService {
       onStateChanged?.call();
     }
 
-    // Send join request to owner
-    final ownerNodeId = hexToBytes(entry.ownerNodeIdHex);
+    // Send join request to channel owner via V3 sendToUser. Owner is
+    // (per §10.2) a contact for any public channel we discovered, so
+    // sendToUser handles per-device fan-out + KEM/Sig.
     final ownerContact = _contacts[entry.ownerNodeIdHex];
     if (ownerContact?.x25519Pk != null && ownerContact?.mlKemPk != null) {
       final joinReq = proto.ChannelJoinRequest()
-        ..channelId = hexToBytes(channelIdHex)
+        ..channelId = hexToBytes(entry.channelIdHex)
         ..displayName = displayName
         ..ed25519Pk = identity.ed25519PublicKey
         ..x25519Pk = identity.x25519PublicKey
         ..mlKemPk = identity.mlKemPublicKey;
-
-      final payload = joinReq.writeToBuffer();
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(payload),
-        recipientX25519Pk: ownerContact!.x25519Pk!,
-        recipientMlKemPk: ownerContact.mlKemPk!,
-      );
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.CHANNEL_JOIN_REQUEST,
-        ciphertext,
-        recipientId: ownerNodeId,
-      );
-      envelope.kemHeader = kemHeader;
-      await node.sendEnvelope(envelope, ownerNodeId);
-      _log.info('Sent join request for public channel "${entry.name}" to owner');
+      unawaited(sendToUser(
+        recipientUserId: hexToBytes(entry.ownerNodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST,
+        payload: Uint8List.fromList(joinReq.writeToBuffer()),
+      ));
+      _log.info('CHANNEL_JOIN_REQUEST sent for "${entry.name}" to owner '
+          '${entry.ownerNodeIdHex.substring(0, 8)}');
     } else {
       _log.info('Joined public channel "${entry.name}" locally — owner keys not yet known');
     }
@@ -6536,34 +5027,29 @@ class CleonaService implements ICleonaService {
     }
 
     if (juror.x25519Pk == null || juror.mlKemPk == null) return;
-
-    final payload = juryReq.writeToBuffer();
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: Uint8List.fromList(payload),
-      recipientX25519Pk: juror.x25519Pk!,
-      recipientMlKemPk: juror.mlKemPk!,
+    // V3: JURY_REQUEST routes via CHANNEL_JURY_VOTE (V3 enum has no
+    // JURY_REQUEST — same Sub-Message-Bump TODO as Channel-Join).
+    sendToUser(
+      recipientUserId: hexToBytes(juror.nodeIdHex),
+      messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
+      payload: Uint8List.fromList(juryReq.writeToBuffer()),
+      groupId: hexToBytes(session.channelIdHex),
     );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.JURY_REQUEST,
-      ciphertext,
-      recipientId: hexToBytes(juror.nodeIdHex),
-    );
-    envelope.kemHeader = kemHeader;
-    node.sendEnvelope(envelope, hexToBytes(juror.nodeIdHex));
   }
 
   /// Handle incoming JuryRequest (we've been selected as juror).
-  void _handleIncomingJuryRequest(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// `JuryRequestMsg` proto bytes (V3 receive pipeline). [senderUserId]
+  /// is the jury initiator's user-id (`frame.senderUserId`) — recorded
+  /// as `requesterNodeIdHex` for the vote-back routing.
+  void _handleIncomingJuryRequest(Uint8List payload, Uint8List senderUserId) {
     try {
-      final decrypted = _decryptEnvelope(envelope);
-      if (decrypted == null) return;
-
-      final msg = proto.JuryRequestMsg.fromBuffer(decrypted.payload);
+      final msg = proto.JuryRequestMsg.fromBuffer(payload);
       final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
       final reportId = bytesToHex(Uint8List.fromList(msg.reportId));
       final channelIdHex = bytesToHex(Uint8List.fromList(msg.channelId));
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+      final senderHex = bytesToHex(senderUserId);
 
       final request = JuryRequest(
         juryId: juryId,
@@ -6605,21 +5091,12 @@ class CleonaService implements ICleonaService {
           ..reportId = hexToBytes(reportId)
           ..vote = vote
           ..reason = reason ?? '';
-
-        final payload = voteMsg.writeToBuffer();
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: Uint8List.fromList(payload),
-          recipientX25519Pk: contact!.x25519Pk!,
-          recipientMlKemPk: contact.mlKemPk!,
+        await sendToUser(
+          recipientUserId: hexToBytes(request.requesterNodeIdHex!),
+          messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
+          payload: Uint8List.fromList(voteMsg.writeToBuffer()),
+          groupId: hexToBytes(request.channelIdHex),
         );
-
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.JURY_VOTE_MSG,
-          ciphertext,
-          recipientId: hexToBytes(request.requesterNodeIdHex!),
-        );
-        envelope.kemHeader = kemHeader;
-        await node.sendEnvelope(envelope, hexToBytes(request.requesterNodeIdHex!));
       }
     }
 
@@ -6628,14 +5105,16 @@ class CleonaService implements ICleonaService {
   }
 
   /// Handle incoming jury vote (we initiated this jury).
-  void _handleIncomingJuryVote(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// `JuryVoteMsg` proto bytes (V3 receive pipeline). [senderUserId] is
+  /// the voter's user-id (`frame.senderUserId`) — recorded in the
+  /// session's vote map.
+  void _handleIncomingJuryVote(Uint8List payload, Uint8List senderUserId) {
     try {
-      final decrypted = _decryptEnvelope(envelope);
-      if (decrypted == null) return;
-
-      final msg = proto.JuryVoteMsg.fromBuffer(decrypted.payload);
+      final msg = proto.JuryVoteMsg.fromBuffer(payload);
       final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
-      final voterHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+      final voterHex = bytesToHex(senderUserId);
 
       final session = _activeSessions[juryId];
       if (session == null) return;
@@ -6768,35 +5247,31 @@ class CleonaService implements ICleonaService {
       ..votesAbstain = abstain
       ..newBadBadgeLevel = channel?.badBadgeLevel ?? 0;
 
-    final payload = resultMsg.writeToBuffer();
+    final payload = Uint8List.fromList(resultMsg.writeToBuffer());
+    final channelIdBytes = hexToBytes(session.channelIdHex);
 
     for (final jurorId in session.jurorNodeIds) {
       final contact = _contacts[jurorId];
       if (contact?.x25519Pk == null || contact?.mlKemPk == null) continue;
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(payload),
-        recipientX25519Pk: contact!.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      sendToUser(
+        recipientUserId: hexToBytes(jurorId),
+        messageType: proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION,
+        payload: payload,
+        groupId: channelIdBytes,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.JURY_RESULT,
-        ciphertext,
-        recipientId: hexToBytes(jurorId),
-      );
-      envelope.kemHeader = kemHeader;
-      node.sendEnvelope(envelope, hexToBytes(jurorId));
     }
   }
 
   /// Handle incoming jury result (we were a juror).
-  void _handleIncomingJuryResult(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// `JuryResultMsg` proto bytes (V3 receive pipeline). The handler only
+  /// removes the local pending entry and logs the tally — no sender
+  /// argument is needed (sender authenticity is already enforced by the
+  /// V3 outer Device-Sig + inner User-Sig chain).
+  void _handleIncomingJuryResult(Uint8List payload) {
     try {
-      final decrypted = _decryptEnvelope(envelope);
-      if (decrypted == null) return;
-
-      final msg = proto.JuryResultMsg.fromBuffer(decrypted.payload);
+      final msg = proto.JuryResultMsg.fromBuffer(payload);
       final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
 
       // Remove from pending requests
@@ -6811,15 +5286,17 @@ class CleonaService implements ICleonaService {
   }
 
   /// Handle incoming channel report (forwarded from reporter).
-  void _handleIncomingChannelReport(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// `ChannelReportMsg` proto bytes (V3 receive pipeline). [senderUserId]
+  /// is the reporter's user-id (`frame.senderUserId`) — recorded as
+  /// `reporterNodeIdHex` on the stored `ChannelReport`.
+  void _handleIncomingChannelReport(Uint8List payload, Uint8List senderUserId) {
     try {
-      final decrypted = _decryptEnvelope(envelope);
-      if (decrypted == null) return;
-
-      final msg = proto.ChannelReportMsg.fromBuffer(decrypted.payload);
+      final msg = proto.ChannelReportMsg.fromBuffer(payload);
       final channelIdHex = bytesToHex(Uint8List.fromList(msg.channelId));
       final reportId = bytesToHex(Uint8List.fromList(msg.reportId));
-      final reporterHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+      final reporterHex = bytesToHex(senderUserId);
 
       // Store the report
       final report = ChannelReport(
@@ -6863,357 +5340,6 @@ class CleonaService implements ICleonaService {
       default:
         return false;
     }
-  }
-
-  void _handleChannelInvite(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    proto.ChannelInvite invite;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      invite = proto.ChannelInvite.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('CHANNEL_INVITE', e);
-      return;
-    } catch (e) {
-      _log.error('CHANNEL_INVITE decrypt/parse failed: $e');
-      return;
-    }
-
-    final channelIdHex = bytesToHex(Uint8List.fromList(invite.channelId));
-
-    // Build members map from the repeated GroupMember field
-    final members = <String, ChannelMemberInfo>{};
-    for (final m in invite.members) {
-      final nid = bytesToHex(Uint8List.fromList(m.nodeId));
-      members[nid] = ChannelMemberInfo(
-        nodeIdHex: nid,
-        displayName: m.displayName,
-        role: m.role,
-        ed25519Pk: m.ed25519PublicKey.isEmpty ? null : Uint8List.fromList(m.ed25519PublicKey),
-        x25519Pk: m.x25519PublicKey.isEmpty ? null : Uint8List.fromList(m.x25519PublicKey),
-        mlKemPk: m.mlKemPublicKey.isEmpty ? null : Uint8List.fromList(m.mlKemPublicKey),
-      );
-    }
-
-    // Determine owner
-    final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
-    final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
-
-    final channel = ChannelInfo(
-      channelIdHex: channelIdHex,
-      name: invite.channelName,
-      description: invite.channelDescription.isNotEmpty ? invite.channelDescription : null,
-      pictureBase64: invite.channelPicture.isNotEmpty ? base64Encode(invite.channelPicture) : null,
-      ownerNodeIdHex: ownerHex,
-      members: members,
-      isPublic: invite.isPublic,
-      isAdult: invite.isAdult,
-      language: invite.language.isNotEmpty ? invite.language : 'de',
-    );
-
-    final isUpdate = _channels.containsKey(channelIdHex);
-    _channels[channelIdHex] = channel;
-    _saveChannels();
-
-    // Create conversation (or update existing)
-    final conv = conversations.putIfAbsent(channelIdHex, () => Conversation(
-      id: channelIdHex,
-      displayName: invite.channelName,
-      isChannel: true,
-      profilePictureBase64: channel.pictureBase64,
-    ));
-    conv.displayName = invite.channelName;
-    _saveConversations();
-
-    if (!isUpdate) {
-      onChannelInviteReceived?.call(channelIdHex, invite.channelName);
-      _log.info('Channel invite received: "${invite.channelName}" from ${senderHex.substring(0, 8)}');
-    } else {
-      _log.info('Channel updated: "${invite.channelName}" from ${senderHex.substring(0, 8)}');
-    }
-
-    // Apply any pending config that arrived before the CHANNEL_INVITE
-    final pendingConfig = _pendingGroupConfigs.remove(channelIdHex);
-    if (pendingConfig != null) {
-      final senderMember = channel.members[pendingConfig.senderHex];
-      if (senderMember != null && (senderMember.role == 'owner' || senderMember.role == 'admin')) {
-        conv.config = pendingConfig.config;
-        _saveConversations();
-        _log.info('Applied buffered config for channel "${invite.channelName}" from ${pendingConfig.senderHex.substring(0, 8)}');
-      }
-    }
-
-    onStateChanged?.call();
-  }
-
-  void _handleChannelLeave(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    proto.ChannelLeave leaveMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      leaveMsg = proto.ChannelLeave.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('CHANNEL_LEAVE', e);
-      return;
-    } catch (e) {
-      _log.error('CHANNEL_LEAVE decrypt/parse failed: $e');
-      return;
-    }
-
-    final channelIdHex = bytesToHex(Uint8List.fromList(leaveMsg.channelId));
-    final channel = _channels[channelIdHex];
-    if (channel == null) return;
-
-    final memberName = channel.members[senderHex]?.displayName ?? senderHex.substring(0, 8);
-    final wasOwner = channel.ownerNodeIdHex == senderHex;
-    channel.members.remove(senderHex);
-
-    // If the owner left, transfer ownership
-    if (wasOwner && channel.members.isNotEmpty) {
-      final newOwner = channel.members.values.where((m) => m.role == 'admin').firstOrNull
-          ?? channel.members.values.first;
-      newOwner.role = 'owner';
-      channel.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Channel owner left, transferred to ${newOwner.displayName}');
-    }
-    _saveChannels();
-
-    // Add system message
-    final sysMsg = UiMessage(
-      id: bytesToHex(SodiumFFI().randomBytes(16)),
-      conversationId: channelIdHex,
-      senderNodeIdHex: '',
-      text: '$memberName hat den Channel verlassen',
-      timestamp: DateTime.now(),
-      type: proto.MessageType.CHANNEL_LEAVE,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-    );
-    _addMessageToConversation(channelIdHex, sysMsg, isChannel: true);
-    _log.info('$memberName left channel "${channel.name}"');
-  }
-
-  /// Handle CHANNEL_ROLE_UPDATE (type 73): update member role in channel or group.
-  /// Architecture v2.2 Section 10.2: sent to ALL members, handler checks both
-  /// channelManager and groupManager. Only owner/admin may change roles.
-  void _handleChannelRoleUpdate(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Decrypt
-    proto.ChannelRoleUpdate roleMsg;
-    try {
-      Uint8List payload;
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } else {
-        payload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-      roleMsg = proto.ChannelRoleUpdate.fromBuffer(payload);
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('CHANNEL_ROLE_UPDATE', e);
-      return;
-    } catch (e) {
-      _log.error('CHANNEL_ROLE_UPDATE decrypt/parse failed: $e');
-      return;
-    }
-
-    final entityIdHex = bytesToHex(Uint8List.fromList(roleMsg.channelId));
-    final targetIdHex = bytesToHex(Uint8List.fromList(roleMsg.targetId));
-    final newRole = roleMsg.newRole;
-
-    // Check both channels and groups (Architecture v2.2: dual-mode handler)
-    final channel = _channels[entityIdHex];
-    final group = _groups[entityIdHex];
-
-    if (channel != null) {
-      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
-      final senderMember = channel.members[senderHex];
-      if (senderMember == null || senderMember.role != 'owner') {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in channel $entityIdHex');
-        return;
-      }
-
-      final target = channel.members[targetIdHex];
-      if (target == null) {
-        _log.warn('CHANNEL_ROLE_UPDATE: target $targetIdHex not a member of channel $entityIdHex');
-        return;
-      }
-
-      final oldRole = target.role;
-      target.role = newRole;
-
-      // Handle ownership transfer
-      if (newRole == 'owner') {
-        // Demote previous owner to admin
-        final prevOwner = channel.members[channel.ownerNodeIdHex];
-        if (prevOwner != null) prevOwner.role = 'admin';
-        channel.ownerNodeIdHex = targetIdHex;
-      }
-
-      _saveChannels();
-
-      final sysMsg = UiMessage(
-        id: bytesToHex(SodiumFFI().randomBytes(16)),
-        conversationId: entityIdHex,
-        senderNodeIdHex: '',
-        text: '${target.displayName}: $oldRole → $newRole',
-        timestamp: DateTime.now(),
-        type: proto.MessageType.CHANNEL_ROLE_UPDATE,
-        status: MessageStatus.delivered,
-        isOutgoing: false,
-      );
-      _addMessageToConversation(entityIdHex, sysMsg, isChannel: true);
-      _log.info('Channel role update: ${target.displayName} $oldRole → $newRole in "${channel.name}"');
-
-    } else if (group != null) {
-      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
-      final senderMember = group.members[senderHex];
-      if (senderMember == null || senderMember.role != 'owner') {
-        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in group $entityIdHex');
-        return;
-      }
-
-      final target = group.members[targetIdHex];
-      if (target == null) {
-        _log.warn('CHANNEL_ROLE_UPDATE: target $targetIdHex not a member of group $entityIdHex');
-        return;
-      }
-
-      final oldRole = target.role;
-      target.role = newRole;
-
-      if (newRole == 'owner') {
-        final prevOwner = group.members[group.ownerNodeIdHex];
-        if (prevOwner != null) prevOwner.role = 'admin';
-        group.ownerNodeIdHex = targetIdHex;
-      }
-
-      _saveGroups();
-
-      final sysMsg = UiMessage(
-        id: bytesToHex(SodiumFFI().randomBytes(16)),
-        conversationId: entityIdHex,
-        senderNodeIdHex: '',
-        text: '${target.displayName}: $oldRole → $newRole',
-        timestamp: DateTime.now(),
-        type: proto.MessageType.CHANNEL_ROLE_UPDATE,
-        status: MessageStatus.delivered,
-        isOutgoing: false,
-      );
-      _addMessageToConversation(entityIdHex, sysMsg);
-      _log.info('Group role update: ${target.displayName} $oldRole → $newRole in "${group.name}"');
-
-    } else {
-      _log.debug('CHANNEL_ROLE_UPDATE: entity $entityIdHex not found (not a member)');
-    }
-
-    onStateChanged?.call();
-  }
-
-  void _handleChannelPost(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-
-    // Route to channel via groupId field
-    final channelIdHex = envelope.groupId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.groupId))
-        : '';
-    if (channelIdHex.isEmpty) return;
-
-    final channel = _channels[channelIdHex];
-    if (channel == null) {
-      _log.warn('CHANNEL_POST for unknown channel $channelIdHex');
-      return;
-    }
-
-    // Verify sender is owner or admin
-    final senderMember = channel.members[senderHex];
-    if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
-      _log.warn('CHANNEL_POST from unauthorized sender $senderHex');
-      return;
-    }
-
-    // Decrypt
-    Uint8List decryptedPayload;
-    try {
-      if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        decryptedPayload = decrypted;
-      } else {
-        decryptedPayload = Uint8List.fromList(envelope.encryptedPayload);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('CHANNEL_POST', e);
-      return;
-    } catch (e) {
-      _log.error('CHANNEL_POST decrypt failed: $e');
-      return;
-    }
-
-    final text = utf8.decode(decryptedPayload, allowMalformed: true);
-    final msgId = bytesToHex(Uint8List.fromList(envelope.messageId));
-
-    final msg = UiMessage(
-      id: msgId,
-      conversationId: channelIdHex,
-      senderNodeIdHex: senderHex,
-      text: text,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(envelope.timestamp.toInt()),
-      type: proto.MessageType.CHANNEL_POST,
-      status: MessageStatus.delivered,
-      isOutgoing: false,
-    );
-
-    _addMessageToConversation(channelIdHex, msg, isChannel: true);
-    _log.debug('Channel post received in "${channel.name}" from ${senderMember.displayName}');
   }
 
   // ── Profile Picture ─────────────────────────────────────────────
@@ -7493,40 +5619,16 @@ class CleonaService implements ICleonaService {
       profileData.description = _profileDescription!;
     }
 
-    var payload = Uint8List.fromList(profileData.writeToBuffer());
+    final payload = Uint8List.fromList(profileData.writeToBuffer());
 
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-
-      var compression = proto.CompressionType.NONE;
-      var toEncrypt = payload;
-      if (payload.length >= 64) {
-        try {
-          final compressed = ZstdCompression.instance.compress(payload);
-          if (compressed.length < payload.length) {
-            toEncrypt = compressed;
-            compression = proto.CompressionType.ZSTD;
-          }
-        } catch (_) {}
-      }
-
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: toEncrypt,
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_PROFILE_UPDATE,
+        payload: payload,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.PROFILE_UPDATE,
-        ciphertext,
-        recipientId: contact.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      envelope.compression = compression;
-
-      node.sendEnvelope(envelope, contact.nodeId);
     }
   }
 
@@ -7766,121 +5868,8 @@ class CleonaService implements ICleonaService {
     _groupVideoReceiver = null;
   }
 
-  void _handleGroupCallVideo(proto.MessageEnvelope envelope) {
-    // Forward to GroupCallManager for tree relay
-    groupCallManager.handleGroupCallVideo(envelope);
-
-    // Forward to GroupVideoReceiver for decoding
-    if (_groupVideoReceiver != null) {
-      try {
-        final video = proto.GroupCallVideo.fromBuffer(envelope.encryptedPayload);
-        final senderHex = bytesToHex(Uint8List.fromList(video.senderNodeId));
-        if (senderHex != identity.userIdHex) {
-          _groupVideoReceiver!.addFrame(
-            senderHex, Uint8List.fromList(video.videoFrameData));
-        }
-      } catch (e) {
-        _log.debug('Group video parse failed: $e');
-      }
-    }
-  }
-
   /// Callback: group video I420 frame decoded (UI converts to RGBA).
   void Function(String senderHex, Uint8List i420, int width, int height)? onGroupVideoI420Frame;
-
-  /// Dispatch CALL_INVITE: decrypt KEM if needed, then route to group or 1:1.
-  void _handleCallInviteDispatch(proto.MessageEnvelope envelope) {
-    Uint8List payload = Uint8List.fromList(envelope.encryptedPayload);
-
-    // Decrypt KEM-encrypted invites (group calls use sendEncrypted)
-    if (envelope.hasKemHeader() && envelope.kemHeader.ephemeralX25519Pk.isNotEmpty) {
-      try {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: payload,
-          ourX25519Sk: identity.x25519SecretKey,
-          ourMlKemSk: identity.mlKemSecretKey,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        payload = decrypted;
-      } on KemVersionRejectedException catch (e) {
-        _warnKemVersionRejected('CALL_INVITE', e);
-        return;
-      } catch (e) {
-        _log.debug('CALL_INVITE KEM decrypt failed: $e');
-        // Fall through to 1:1 handler (may be unencrypted)
-      }
-    }
-
-    try {
-      final invite = proto.CallInvite.fromBuffer(payload);
-      if (invite.isGroupCall) {
-        // Replace encryptedPayload with decrypted for downstream handler
-        envelope.encryptedPayload = payload;
-        groupCallManager.handleGroupCallInvite(envelope, payload);
-      } else {
-        // 1:1 calls — handler uses raw (unencrypted) payload
-        envelope.encryptedPayload = payload;
-        callManager.handleCallInvite(envelope);
-      }
-    } catch (_) {
-      callManager.handleCallInvite(envelope);
-    }
-  }
-
-  void _handleGroupCallAudio(proto.MessageEnvelope envelope) {
-    // Forward to GroupCallManager for tree relay
-    groupCallManager.handleGroupCallAudio(envelope);
-
-    // Forward to AudioMixer for playback
-    if (_audioMixer != null) {
-      try {
-        final audio = proto.GroupCallAudio.fromBuffer(envelope.encryptedPayload);
-        final senderHex = bytesToHex(Uint8List.fromList(audio.senderNodeId));
-        if (senderHex != identity.userIdHex) {
-          _audioMixer!.addFrame(senderHex, Uint8List.fromList(audio.encryptedAudio));
-        }
-      } catch (e) {
-        _log.debug('Group audio parse failed: $e');
-      }
-    }
-  }
-
-  /// Send KEM-encrypted message to a single recipient (used by GroupCallManager).
-  Future<bool> _sendKemEncryptedForGroupCall(
-      String recipientHex, proto.MessageType type, Uint8List payload) async {
-    final (x25519Pk, mlKemPk) = _resolveMemberKeys(recipientHex);
-    if (x25519Pk == null || mlKemPk == null) return false;
-
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: payload,
-      recipientX25519Pk: x25519Pk,
-      recipientMlKemPk: mlKemPk,
-    );
-
-    final envelope = identity.createSignedEnvelope(
-      type,
-      ciphertext,
-      recipientId: hexToBytes(recipientHex),
-      compress: false,
-    );
-    envelope.kemHeader = kemHeader;
-
-    return await node.sendEnvelope(envelope, hexToBytes(recipientHex));
-  }
-
-  /// Send unencrypted (call-key-encrypted) envelope directly.
-  void _sendDirectForGroupCall(
-      String recipientHex, proto.MessageType type, Uint8List payload) {
-    final envelope = identity.createSignedEnvelope(
-      type,
-      payload,
-      recipientId: hexToBytes(recipientHex),
-    );
-    node.sendEnvelope(envelope, hexToBytes(recipientHex));
-  }
 
   // ── Audio Engine ──────────────────────────────────────────────────
 
@@ -7938,23 +5927,14 @@ class CleonaService implements ICleonaService {
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
     session.framesSent++;
     final peerNodeId = hexToBytes(session.peerNodeIdHex);
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CALL_AUDIO,
-      encryptedFrame,
-      recipientId: peerNodeId,
-    );
 
-    // Plan §D2: Per-call route cache. On first frame, resolve the peer once
-    // via the routing table and stash the PeerInfo on the session. Subsequent
-    // frames reuse it. The DV-Routing onRouteDown handler invalidates this
-    // cache so a stale entry can't survive a path drop.
-    //
-    // API note (deviation from plan): the plan referenced
-    // `routingTable.findBestRoute(...)` + `node.sendEnvelopeViaPeer(...)` —
-    // those names don't exist. Actual APIs are `routingTable.getPeer(nodeId)`
-    // (with `getPeerByUserId(...)` fallback for §26 multi-device userId
-    // routing) and `node.sendEnvelope(envelope, peer.nodeId)`. The savings
-    // come from skipping the dual XOR+bucket lookup on every audio frame.
+    // Per-call route cache: keep the resolved PeerInfo on the session so the
+    // routing-table XOR+bucket lookup runs at most once per call. The
+    // DV-Routing onRouteDown handler invalidates this cache. The cache lives
+    // on as a structural optimization; the V3 send-path itself runs through
+    // sendToUser which orchestrates resolveUserToDevices + per-device
+    // dispatch (the inner KEM is unavoidable today; §4.4.5 fast-path
+    // skip-KEM/skip-zstd/skip-ML-DSA optimisation lands later).
     if (session.cachedRoute == null) {
       final peer = node.routingTable.getPeer(peerNodeId) ??
           node.routingTable.getPeerByUserId(peerNodeId);
@@ -7964,41 +5944,25 @@ class CleonaService implements ICleonaService {
       }
     }
 
-    // Fire-and-forget UDP, no ACK needed for audio.
-    final dest = session.cachedRoute?.nodeId ?? peerNodeId;
-    node.sendEnvelope(envelope, dest);
+    // Fire-and-forget; live audio tolerates frame loss.
+    unawaited(sendToUser(
+      recipientUserId: peerNodeId,
+      messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
+      payload: encryptedFrame,
+    ));
   }
 
-  void _handleCallAudio(proto.MessageEnvelope envelope) {
-    if (_audioEngine == null || !_audioEngine!.isRunning) return;
-    callManager.currentCall?.framesReceived++;
-    _audioEngine!.playFrame(Uint8List.fromList(envelope.encryptedPayload));
-  }
-
-  void _handleCallVideo(proto.MessageEnvelope envelope) {
-    final session = callManager.currentCall;
-    if (session == null || session.state != CallState.inCall) return;
-    session.videoFramesReceived++;
-    // Notify listeners (VideoEngine will decode + display)
-    onVideoFrameReceived?.call(Uint8List.fromList(envelope.encryptedPayload));
-  }
-
-  void _handleKeyframeRequest(proto.MessageEnvelope envelope) {
-    // Notify VideoEngine to force next frame as keyframe
-    onKeyframeRequested?.call();
-  }
-
+  /// Ask the remote video sender to emit a keyframe on the next encode.
+  /// Signal-only message (empty payload) on the V3 ApplicationFrame path —
+  /// ack-less by design (handled receiver-side as a hint, not a guarantee).
   void sendKeyframeRequest() {
     final session = callManager.currentCall;
     if (session == null || session.state != CallState.inCall) return;
-    final request = proto.KeyframeRequest()
-      ..callId = session.callId;
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.CALL_KEYFRAME_REQUEST,
-      request.writeToBuffer(),
-      recipientId: hexToBytes(session.peerNodeIdHex),
+    sendToUser(
+      recipientUserId: hexToBytes(session.peerNodeIdHex),
+      messageType: proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST,
+      payload: Uint8List(0),
     );
-    node.sendEnvelope(envelope, hexToBytes(session.peerNodeIdHex));
   }
 
   /// Callbacks for video frame events (set by VideoEngine)
@@ -8008,12 +5972,14 @@ class CleonaService implements ICleonaService {
   // ── Network Change ─────────────────────────────────────────────────
 
   @override
-  Future<void> onNetworkChanged() async {
-    await node.onNetworkChanged();
-    // Re-poll mailbox after network change (erasure fragments on DHT).
-    _pollMailbox();
-    // Also poll Store-and-Forward peers (they may hold messages for us).
-    _pollStoredMessages();
+  Future<void> onNetworkChanged({bool triggerNodeReset = true}) async {
+    // The node-side reset is global (transport, NAT, DV, discovery) — running
+    // it once per identity on a multi-identity daemon multiplies the work and
+    // floods the log with N+1 "ignored" lines per polling tick. Daemon-style
+    // callers already trigger `node.onNetworkChanged()` directly and pass
+    // `false` here; single-service callers (legacy in-process path) keep the
+    // default and rely on this forward.
+    if (triggerNodeReset) await node.onNetworkChanged();
     // §2.2.4: Liveness-Republish bei Adress-Wechsel (debounced 5s im Publisher)
     _identityPublisher?.onAddressesChanged();
   }
@@ -8083,22 +6049,27 @@ class CleonaService implements ICleonaService {
 
   /// Sync contact + channel member IDs to the DV routing table's tier registry.
   /// Called after loading contacts/channels and after any membership change.
+  /// §3.1: registers deviceIds (not userIds) — routing operates on devices.
   void _syncTierRegistration() {
     final dv = node.dvRouting;
-    // Contacts: register all accepted contacts
+    final contactDeviceIds = <String>{};
     for (final entry in _contacts.entries) {
       if (entry.value.status == 'accepted') {
-        dv.registerContact(entry.key);
-      } else {
-        dv.unregisterContact(entry.key);
+        contactDeviceIds.addAll(entry.value.deviceNodeIds);
       }
     }
-    // Channels: register all channel members
+    dv.replaceContactIds(contactDeviceIds);
+
+    final channelDeviceIds = <String>{};
     for (final channel in _channels.values) {
       for (final memberHex in channel.members.keys) {
-        dv.registerChannelMember(memberHex);
+        final contact = _contacts[memberHex];
+        if (contact != null) {
+          channelDeviceIds.addAll(contact.deviceNodeIds);
+        }
       }
     }
+    dv.replaceChannelMemberIds(channelDeviceIds);
   }
 
   void _loadConversations() {
@@ -8586,21 +6557,13 @@ class CleonaService implements ICleonaService {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
       try {
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: revokePayload,
-          recipientX25519Pk: contact.x25519Pk!,
-          recipientMlKemPk: contact.mlKemPk!,
+        sendToUser(
+          recipientUserId: contact.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_DEVICE_REVOCATION,
+          payload: revokePayload,
         );
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.DEVICE_REVOKED,
-          ciphertext,
-          recipientId: contact.nodeId,
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        node.sendEnvelope(envelope, contact.nodeId);
       } catch (e) {
-        _log.warn('Failed to send DEVICE_REVOKED to ${contact.displayName}: $e');
+        _log.warn('Failed to send DEVICE_REVOCATION to ${contact.displayName}: $e');
       }
     }
 
@@ -8659,6 +6622,12 @@ class CleonaService implements ICleonaService {
   @override
   String get nodeIdHex => identity.userIdHex;
   @override
+  String get deviceNodeIdHex => identity.deviceNodeIdHex;
+  @override
+  Uint8List get deviceX25519Pk => node.deviceKem.x25519PublicKey;
+  @override
+  Uint8List get deviceMlKemPk => node.deviceKem.mlKemPublicKey;
+  @override
   int get peerCount => node.routingTable.peerCount;
   @override
   int get confirmedPeerCount => node.confirmedPeerIds.length;
@@ -8689,8 +6658,9 @@ class CleonaService implements ICleonaService {
   @override
   List<PeerSummary> get peerSummaries {
     final confirmed = node.confirmedPeerIds;
+    final dvReachable = node.dvRouting.allDestinations;
     return node.routingTable.allPeers
-        .where((p) => confirmed.contains(p.nodeIdHex))
+        .where((p) => confirmed.contains(p.nodeIdHex) || dvReachable.contains(p.nodeIdHex))
         .where((p) => p.publicIp.isNotEmpty || p.localIp.isNotEmpty || p.addresses.isNotEmpty)
         .map((p) {
       // Collect addresses: local + public IPv4 + IPv6 global (§27)
@@ -8705,19 +6675,29 @@ class CleonaService implements ICleonaService {
         final key = '${p.publicIp}:${p.publicPort}';
         if (seen.add(key)) addrs.add(key);
       }
-      // Include IPv6 global addresses from the multi-address list
+      // Include public IPv4 + IPv6 global addresses from the multi-address list
+      // (covers addresses learned via IDENTITY_LIVE_PUBLISH, not just direct observation)
       for (final addr in p.addresses) {
-        if (addr.type == PeerAddressType.ipv6Global) {
-          final key = '[${addr.ip}]:${addr.port}';
+        if (addr.type == PeerAddressType.ipv4Public ||
+            addr.type == PeerAddressType.ipv6Global) {
+          final key = addr.ip.contains(':')
+              ? '[${addr.ip}]:${addr.port}'
+              : '${addr.ip}:${addr.port}';
           if (seen.add(key)) addrs.add(key);
         }
       }
       // Primary address: prefer IPv6 global > public IPv4 > local IPv4
+      // Check both legacy publicIp field AND multi-address list for public IPv4
       final ipv6Addr = p.addresses.where((a) => a.type == PeerAddressType.ipv6Global).toList();
+      final pubV4Addr = p.addresses.where((a) => a.type == PeerAddressType.ipv4Public).toList();
+      final effectivePublicIp = p.publicIp.isNotEmpty ? p.publicIp
+          : pubV4Addr.isNotEmpty ? pubV4Addr.first.ip : '';
+      final effectivePublicPort = p.publicPort > 0 ? p.publicPort
+          : pubV4Addr.isNotEmpty ? pubV4Addr.first.port : 0;
       final primaryIp = ipv6Addr.isNotEmpty ? ipv6Addr.first.ip
-          : p.publicIp.isNotEmpty ? p.publicIp : p.localIp;
+          : effectivePublicIp.isNotEmpty ? effectivePublicIp : p.localIp;
       final primaryPort = ipv6Addr.isNotEmpty ? ipv6Addr.first.port
-          : p.publicPort > 0 ? p.publicPort : p.localPort;
+          : effectivePublicPort > 0 ? effectivePublicPort : p.localPort;
       return PeerSummary(
         nodeIdHex: p.nodeIdHex,
         address: primaryIp,
@@ -8779,6 +6759,9 @@ class CleonaService implements ICleonaService {
       'notificationSettings': notificationSound.settings.toJson(),
       'devices': _devices.values.map((d) => d.toJson()).toList(),
       'localDeviceId': _localDeviceId,
+      'deviceNodeIdHex': deviceNodeIdHex,
+      'deviceX25519PkB64': base64Encode(deviceX25519Pk),
+      'deviceMlKemPkB64': base64Encode(deviceMlKemPk),
     };
   }
 
@@ -8915,6 +6898,10 @@ class CleonaService implements ICleonaService {
   /// Async: ML-KEM keygen runs in background isolate (ANR fix).
   Future<void> _performKeyRotation() async {
     await identity.rotateKemKeys();
+    // §5.11 — periodic 120 s peer-exchange tick is gone; rotations are an
+    // event the mesh learns about explicitly. Push our refreshed PeerInfo
+    // (carries new KEM PK) to every known peer once.
+    node.broadcastAddressUpdate();
 
     // Build KEY_ROTATION message
     final rotationMsg = proto.KeyRotation()
@@ -8927,26 +6914,15 @@ class CleonaService implements ICleonaService {
     rotationMsg.signature = SodiumFFI().signEd25519(dataToSign, identity.ed25519SecretKey);
 
     // Broadcast to all accepted contacts
+    final payload = Uint8List.fromList(rotationMsg.writeToBuffer());
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-
-      final payload = rotationMsg.writeToBuffer();
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(payload),
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
+      sendToUser(
+        recipientUserId: contact.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
+        payload: payload,
       );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.KEY_ROTATION_BROADCAST,
-        ciphertext,
-        recipientId: contact.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-
-      node.sendEnvelope(envelope, contact.nodeId);
     }
 
     _log.info('Key rotation complete, broadcast to ${acceptedContacts.length} contacts');
@@ -8988,31 +6964,54 @@ class CleonaService implements ICleonaService {
     broadcast.newSignatureEd25519 =
         sodium.signEd25519(dataToSign, newEd25519.secretKey); // NEW key
 
-    // 3. Send KEY_ROTATION_BROADCAST to all contacts (signed with OLD identity)
+    // 3. Send KEY_ROTATION_BROADCAST to all contacts (signed with OLD identity).
+    //    Welle 6 §7.4 Variant (b) — Emergency-flavor MUST go on the
+    //    InfrastructureFrame path: KEM-encap under each contact's
+    //    Device-KEM-PK, Outer Device-Sig under the unchanged Device-Sig keys
+    //    (rotation-stable per §3.5b). The dual-sig in the body is the inner
+    //    authentication subject. Every recipient device gets its own frame
+    //    (per-device fan-out via 2D-DHT auth-manifest).
     final payloadBytes = Uint8List.fromList(broadcast.writeToBuffer());
     // Paket C: captured BEFORE `rotateIdentityFull` overwrites identity.userId,
-    // so retries can keep using the pre-rotation hex as envelope.senderId and
-    // the offline receiver's `_contacts[senderHex]` lookup still hits.
+    // so the retry timer can address contacts under the pre-rotation hex.
+    // (Currently informational on the InfraFrame path — the routing key is
+    // recipientDeviceId, not envelope.senderId — but kept for symmetry with
+    // the persisted retry state.)
     final oldUserIdHex = identity.userIdHex;
     final sentToHex = <String>[];
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
-      if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-
       try {
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: payloadBytes,
-          recipientX25519Pk: contact.x25519Pk!,
-          recipientMlKemPk: contact.mlKemPk!,
-        );
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.KEY_ROTATION_BROADCAST,
-          ciphertext,
-          recipientId: contact.nodeId,
-          compress: false,
-        );
-        envelope.kemHeader = kemHeader;
-        node.sendEnvelope(envelope, contact.nodeId);
+        final resolved = await node.identityResolver.resolve(contact.nodeId);
+        if (resolved.isEmpty) {
+          _log.warn('KEY_ROTATION_BROADCAST: no devices resolved for '
+              '${contact.displayName} '
+              '(${bytesToHex(contact.nodeId).substring(0, 8)}) — skipped, '
+              'retry timer will pick this up');
+          // Still register for retry so an offline contact eventually receives
+          // the rotation when their AuthManifest becomes reachable again.
+          sentToHex.add(bytesToHex(contact.nodeId));
+          continue;
+        }
+        var anyOk = false;
+        for (final dev in resolved) {
+          final ok = await node.sendInfraTo(
+            messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
+            innerPayload: payloadBytes,
+            recipientDeviceId: dev.deviceNodeId,
+          );
+          anyOk = anyOk || ok;
+        }
+        if (anyOk) {
+          _log.info('KEY_ROTATION_BROADCAST (Emergency, InfraFrame) sent to '
+              '${contact.displayName} '
+              '(${bytesToHex(contact.nodeId).substring(0, 8)}) — '
+              '${resolved.length} device(s)');
+        } else {
+          _log.warn('KEY_ROTATION_BROADCAST: all ${resolved.length} device(s) '
+              'sends failed for ${contact.displayName} — registering for '
+              'retry');
+        }
         sentToHex.add(bytesToHex(contact.nodeId));
       } catch (e) {
         _log.warn('Failed to send KEY_ROTATION_BROADCAST to '
@@ -9044,6 +7043,12 @@ class CleonaService implements ICleonaService {
       newMlKemSk: newMlKem.secretKey,
     );
 
+    // §5.11 — periodic peer-exchange tick is gone. After full identity
+    // rotation, push refreshed PeerInfo (carries new Ed25519/ML-DSA + KEM
+    // PKs) to every known peer once so transit/non-contact peers can heal
+    // their stale-PK caches without waiting for the §5.12 cold-path 1 h tick.
+    node.broadcastAddressUpdate();
+
     // 6. Initialize ACK tracking + persisted retry state (§26.6.2 Paket C).
     // The retry manager stores `payloadBytes` (the dual-signed inner
     // broadcast) so we can re-send to contacts that have not ACKed without
@@ -9062,14 +7067,16 @@ class CleonaService implements ICleonaService {
   }
 
   /// Handle incoming KEY_ROTATION from a contact.
-  void _handleKeyRotation(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+  /// Periodic KEM-only key rotation (§7.4 Variant a). [payload] is the
+  /// already-decrypted+authenticated `KeyRotation` proto bytes (V3 inner
+  /// User-Sig + outer Device-Sig + KEM-decap chain verified upstream).
+  /// [senderUserId] is the rotating peer's user-id (frame.senderUserId).
+  void _handleKeyRotation(Uint8List payload, Uint8List senderUserId) {
+    final senderHex = bytesToHex(senderUserId);
     final contact = _contacts[senderHex];
     if (contact == null || contact.status != 'accepted') return;
 
-    // Decrypt
     try {
-      var payload = _decryptPayload(envelope);
       final rotation = proto.KeyRotation.fromBuffer(payload);
 
       // Verify signature (signed with sender's ed25519 key)
@@ -9116,8 +7123,7 @@ class CleonaService implements ICleonaService {
       _saveChannels();
 
       // Update routing table
-      final peerNodeId = Uint8List.fromList(envelope.senderId);
-      final peer = node.routingTable.getPeer(peerNodeId);
+      final peer = node.routingTable.getPeer(senderUserId);
       if (peer != null) {
         peer.x25519PublicKey = contact.x25519Pk!;
         peer.mlKemPublicKey = contact.mlKemPk!;
@@ -9152,21 +7158,14 @@ class CleonaService implements ICleonaService {
 
     final syncBytes = Uint8List.fromList(syncEnvelope.writeToBuffer());
 
-    // Encrypt with own public key — we are both sender and recipient
+    // V3: TWIN_SYNC fan-out to our own user-id resolves all our authorized
+    // device-ids — kanonischer Multi-Device-Use-Case for sendToUser.
     try {
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: syncBytes,
-        recipientX25519Pk: identity.x25519PublicKey,
-        recipientMlKemPk: identity.mlKemPublicKey,
+      sendToUser(
+        recipientUserId: identity.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC,
+        payload: syncBytes,
       );
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.TWIN_SYNC,
-        ciphertext,
-        recipientId: identity.nodeId, // To our own Node-ID
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      node.sendEnvelope(envelope, identity.nodeId);
       _log.debug('TWIN_SYNC($syncType) sent to ${_devices.length - 1} twins');
     } catch (e) {
       _log.warn('Failed to send TWIN_SYNC: $e');
@@ -9187,21 +7186,20 @@ class CleonaService implements ICleonaService {
 
     final payload = Uint8List.fromList(record.writeToBuffer());
 
+    // V3: no MTV3_TWIN_ANNOUNCE — wrapped as TWIN_SYNC sub-type DEVICE_ANNOUNCE.
     try {
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: payload,
-        recipientX25519Pk: identity.x25519PublicKey,
-        recipientMlKemPk: identity.mlKemPublicKey,
+      final wrapper = proto.TwinSyncEnvelope()
+        ..syncId = SodiumFFI().randomBytes(16)
+        ..deviceId = hexToBytes(_localDeviceId)
+        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
+        ..syncType = proto.TwinSyncType.DEVICE_ANNOUNCE
+        ..payload = payload;
+      sendToUser(
+        recipientUserId: identity.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC,
+        payload: Uint8List.fromList(wrapper.writeToBuffer()),
       );
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.TWIN_ANNOUNCE,
-        ciphertext,
-        recipientId: identity.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-      node.sendEnvelope(envelope, identity.nodeId);
-      _log.info('TWIN_ANNOUNCE sent for device $_localDeviceId');
+      _log.info('TWIN_ANNOUNCE (V3 TWIN_SYNC/DEVICE_ANNOUNCE) sent for $_localDeviceId');
     } catch (e) {
       _log.warn('Failed to send TWIN_ANNOUNCE: $e');
     }
@@ -9218,50 +7216,6 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  /// Handle incoming TWIN_ANNOUNCE: register a new twin device.
-  void _handleTwinAnnounce(proto.MessageEnvelope envelope) {
-    try {
-      final payload = _decryptPayload(envelope);
-      final record = proto.DeviceRecord.fromBuffer(payload);
-      final deviceIdHex = bytesToHex(Uint8List.fromList(record.deviceId));
-
-      if (deviceIdHex == _localDeviceId) return; // Ignore our own announce
-
-      // §26 Phase 4: extract deviceNodeId from announce
-      final devNodeIdHex = record.deviceNodeId.isNotEmpty
-          ? bytesToHex(Uint8List.fromList(record.deviceNodeId))
-          : null;
-
-      final now = DateTime.now();
-      if (_devices.containsKey(deviceIdHex)) {
-        // Update existing device
-        _devices[deviceIdHex]!.lastSeen = now;
-        _devices[deviceIdHex]!.deviceName = record.deviceName;
-        if (devNodeIdHex != null) _devices[deviceIdHex]!.deviceNodeIdHex = devNodeIdHex;
-      } else {
-        // Register new twin device
-        _devices[deviceIdHex] = DeviceRecord(
-          deviceId: deviceIdHex,
-          deviceName: record.deviceName,
-          platform: _detectPlatformFromProto(record.platform),
-          firstSeen: now,
-          lastSeen: now,
-          deviceNodeIdHex: devNodeIdHex,
-        );
-        _log.info('New twin device registered: $deviceIdHex (${record.deviceName})');
-      }
-      _saveDevices();
-      _notifyDevicesChanged();
-
-      // Send our own announce back so the new device knows about us
-      _sendTwinAnnounce();
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('TWIN_ANNOUNCE', e);
-    } catch (e) {
-      _log.error('TWIN_ANNOUNCE processing failed: $e');
-    }
-  }
-
   static String _detectPlatformFromProto(proto.DevicePlatform p) {
     switch (p) {
       case proto.DevicePlatform.PLATFORM_ANDROID: return 'android';
@@ -9273,70 +7227,6 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  /// Handle incoming TWIN_SYNC: apply local action from another twin device.
-  void _handleTwinSync(proto.MessageEnvelope envelope) {
-    try {
-      final payload = _decryptPayload(envelope);
-      final sync = proto.TwinSyncEnvelope.fromBuffer(payload);
-      final syncIdHex = bytesToHex(Uint8List.fromList(sync.syncId));
-      final deviceIdHex = bytesToHex(Uint8List.fromList(sync.deviceId));
-
-      // Deduplication: syncId seen within 7-day TTL window → silent drop.
-      if (_processedSyncIds.containsKey(syncIdHex)) return;
-      _processedSyncIds[syncIdHex] = DateTime.now().millisecondsSinceEpoch;
-
-      // Update device lastSeen
-      if (_devices.containsKey(deviceIdHex)) {
-        _devices[deviceIdHex]!.lastSeen = DateTime.now();
-      }
-
-      _log.debug('TWIN_SYNC(${sync.syncType}) from device ${deviceIdHex.substring(0, 8)}');
-
-      switch (sync.syncType) {
-        case proto.TwinSyncType.CONTACT_ADDED:
-          _handleTwinContactAdded(sync.payload);
-          break;
-        case proto.TwinSyncType.CONTACT_DELETED:
-          _handleTwinContactDeleted(sync.payload);
-          break;
-        case proto.TwinSyncType.MESSAGE_SENT:
-          _handleTwinMessageSent(sync.payload);
-          break;
-        case proto.TwinSyncType.MESSAGE_EDITED:
-          _handleTwinMessageEdited(sync.payload);
-          break;
-        case proto.TwinSyncType.MESSAGE_DELETED:
-          _handleTwinMessageDeleted(sync.payload);
-          break;
-        case proto.TwinSyncType.TWIN_READ_RECEIPT:
-          _handleTwinReadReceipt(sync.payload);
-          break;
-        case proto.TwinSyncType.GROUP_CREATED:
-          _handleTwinGroupCreated(sync.payload);
-          break;
-        case proto.TwinSyncType.PROFILE_CHANGED:
-          _handleTwinProfileChanged(sync.payload);
-          break;
-        case proto.TwinSyncType.SETTINGS_CHANGED:
-          _handleTwinSettingsChanged(sync.payload);
-          break;
-        case proto.TwinSyncType.DEVICE_RENAMED:
-          _handleTwinDeviceRenamed(sync.payload);
-          break;
-        case proto.TwinSyncType.TWIN_DEVICE_REVOKED:
-          _handleTwinDeviceRevoked(sync.payload);
-          break;
-        default:
-          _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
-      }
-      _saveDevices(); // Persist dedup IDs
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('TWIN_SYNC', e);
-    } catch (e) {
-      _log.error('TWIN_SYNC processing failed: $e');
-    }
-  }
-
   // ── Twin-Sync sub-handlers ─────────────────────────────────────────
 
   void _handleTwinContactAdded(List<int> payload) {
@@ -9345,7 +7235,7 @@ class CleonaService implements ICleonaService {
       final nodeIdHex = json['nodeId'] as String;
       if (_contacts.containsKey(nodeIdHex)) return; // Already known
 
-      _contacts[nodeIdHex] = ContactInfo(
+      final contact = ContactInfo(
         nodeId: hexToBytes(nodeIdHex),
         displayName: json['displayName'] as String? ?? '',
         ed25519Pk: json['ed25519Pk'] != null ? hexToBytes(json['ed25519Pk'] as String) : null,
@@ -9355,6 +7245,11 @@ class CleonaService implements ICleonaService {
         status: 'accepted',
         acceptedAt: DateTime.now(),
       );
+      final twinDeviceIds = json['deviceNodeIds'];
+      if (twinDeviceIds is List) {
+        contact.deviceNodeIds.addAll(twinDeviceIds.cast<String>());
+      }
+      _contacts[nodeIdHex] = contact;
       _saveContacts();
       _log.info('Twin-synced contact added: ${json['displayName']}');
       onStateChanged?.call();
@@ -9398,7 +7293,7 @@ class CleonaService implements ICleonaService {
         senderNodeIdHex: identity.userIdHex,
         text: text,
         timestamp: timestamp,
-        type: proto.MessageType.TEXT,
+        type: UiMessageType.text,
         status: MessageStatus.sent,
         isOutgoing: true,
       );
@@ -9542,6 +7437,10 @@ class CleonaService implements ICleonaService {
           newMlKemPk: pqKeys.mlKem.publicKey,
           newMlKemSk: pqKeys.mlKem.secretKey,
         );
+        // §5.11 — same as the originating-device path: push refreshed
+        // PeerInfo to all known peers so the mesh heals stale-PK caches
+        // without waiting for the §5.12 cold-path 1 h tick.
+        node.broadcastAddressUpdate();
         _log.info('Emergency key rotation applied from twin. '
             'New Node-ID: ${identity.userIdHex.substring(0, 16)}...');
         onStateChanged?.call();
@@ -9586,83 +7485,36 @@ class CleonaService implements ICleonaService {
     }
   }
 
-  /// Handle DEVICE_REVOKED broadcast from a contact (§26.6.1).
-  /// Contact notifies us that one of their devices has been deregistered.
-  /// §26 Phase 4: removes the specific deviceNodeId from routing table + contact.
-  void _handleDeviceRevokedBroadcast(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final contact = _contacts[senderHex];
-    if (contact == null || contact.status != 'accepted') return;
-
-    try {
-      final payload = _decryptPayload(envelope);
-      final revokedDevice = proto.DeviceRecord.fromBuffer(payload);
-      final deviceIdShort = bytesToHex(Uint8List.fromList(revokedDevice.deviceId)).substring(0, 8);
-
-      // §26 Phase 4: remove by deviceNodeId (preferred, precise)
-      if (revokedDevice.deviceNodeId.isNotEmpty) {
-        final revokedNodeId = Uint8List.fromList(revokedDevice.deviceNodeId);
-        final revokedNodeIdHex = bytesToHex(revokedNodeId);
-        final removed = node.routingTable.removePeerByNodeId(revokedNodeId);
-        contact.deviceNodeIds.remove(revokedNodeIdHex);
-        _saveContacts();
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
-            'device $deviceIdShort, routing entry ${removed ? "removed" : "not found"} '
-            '(deviceNodeId ${revokedNodeIdHex.substring(0, 8)})');
-        return;
-      }
-
-      // Fallback: remove by addresses (pre-Phase-4 peers without deviceNodeId)
-      final revokedAddresses = revokedDevice.addresses
-          .map((a) => '${a.ip}:${a.port}')
-          .toSet();
-
-      if (revokedAddresses.isEmpty) {
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
-            'device $deviceIdShort revoked (no deviceNodeId or addresses to prune)');
-        return;
-      }
-
-      final peer = node.routingTable.getPeerByUserId(contact.nodeId);
-      if (peer != null) {
-        final beforeCount = peer.addresses.length;
-        peer.addresses.removeWhere(
-            (a) => revokedAddresses.contains('${a.ip}:${a.port}'));
-        final removed = beforeCount - peer.addresses.length;
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
-            'removed $removed/${revokedAddresses.length} addresses (fallback)');
-      } else {
-        _log.debug('DEVICE_REVOKED from ${contact.displayName}: '
-            'no PeerInfo in routing table');
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('DEVICE_REVOKED', e);
-    } catch (e) {
-      _log.error('DEVICE_REVOKED processing failed: $e');
-    }
-  }
-
   /// Handle KEY_ROTATION_BROADCAST from a contact.
   /// Dispatches between periodic KEM rotation (legacy KeyRotation format)
   /// and emergency full rotation (KeyRotationBroadcast with dual-signature).
-  void _handleKeyRotationBroadcast(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+  /// KEY_ROTATION_BROADCAST handler (§7.4). [payload] is the already-
+  /// decrypted+authenticated `KeyRotationBroadcast` proto bytes (V3 inner
+  /// User-Sig + outer Device-Sig + KEM-decap chain verified upstream;
+  /// for the Emergency variant on InfraFrame the inner dual-sig in the
+  /// body is the canonical authenticator). [senderUserId] is the
+  /// rotating peer's user-id (frame.senderUserId on AppFrame, or the
+  /// inferred old-userId via `_findSenderUserIdForKeyRotation` on
+  /// InfraFrame).
+  ///
+  /// Discriminator (defence in depth — wire-path bridges already enforce
+  /// it upstream): dual-sig populated → Emergency, single-sig → Periodic.
+  void _handleKeyRotationBroadcast(Uint8List payload, Uint8List senderUserId) {
+    final senderHex = bytesToHex(senderUserId);
     final contact = _contacts[senderHex];
     if (contact == null || contact.status != 'accepted') return;
 
     try {
-      final payload = _decryptPayload(envelope);
-
-      // Discriminator: KeyRotationBroadcast has dual signatures (fields 5+6).
-      // Periodic KEM rotation uses KeyRotation (no fields 5+6 → empty when
-      // parsed as KeyRotationBroadcast).
       final broadcast = proto.KeyRotationBroadcast.fromBuffer(payload);
       if (broadcast.oldSignatureEd25519.isNotEmpty &&
           broadcast.newSignatureEd25519.isNotEmpty) {
-        _handleEmergencyKeyRotation(envelope, contact, senderHex, broadcast);
+        _handleEmergencyKeyRotation(senderUserId, contact, senderHex, broadcast);
       } else {
-        // Periodic KEM rotation — delegate to legacy handler
-        _handleKeyRotation(envelope);
+        // Periodic KEM rotation — delegate to legacy handler. Re-serialize
+        // the parsed body so the periodic handler parses a clean
+        // KeyRotation proto (the body is wire-compatible since the dual-
+        // sig fields are absent).
+        _handleKeyRotation(payload, senderUserId);
       }
     } on KemVersionRejectedException catch (e) {
       _warnKemVersionRejected('KEY_ROTATION_BROADCAST', e);
@@ -9674,7 +7526,7 @@ class CleonaService implements ICleonaService {
   /// Emergency full key rotation (§26.6.2): dual-signature verification,
   /// ALL keys updated, Node-ID re-keyed across contacts/groups/channels.
   void _handleEmergencyKeyRotation(
-    proto.MessageEnvelope envelope,
+    Uint8List senderUserId,
     ContactInfo contact,
     String senderHex,
     proto.KeyRotationBroadcast broadcast,
@@ -9792,25 +7644,29 @@ class CleonaService implements ICleonaService {
         _saveConversations();
       }
 
-      // Update routing table: copy old peer's addresses to new peer entry
-      final oldPeer = node.routingTable.getPeer(Uint8List.fromList(envelope.senderId));
+      // Update routing table: copy old peer's addresses to new peer entry.
+      // Architecture §17.3: KEY_ROTATION_BROADCAST is authenticated with the
+      // old key (verified upstream), so the new key is firstParty.
+      final oldPeer = node.routingTable.getPeer(senderUserId);
       if (oldPeer != null) {
-        node.routingTable.removePeer(Uint8List.fromList(envelope.senderId));
+        node.routingTable.removePeer(senderUserId);
         node.routingTable.addPeer(PeerInfo(
           nodeId: newNodeId,
           addresses: oldPeer.addresses,
           ed25519PublicKey: newEd25519Pk,
           x25519PublicKey: newX25519Pk,
           mlKemPublicKey: newMlKemPk,
+          pkSource: PkSource.firstParty,
         ));
       }
     } else {
-      // Node-ID unchanged — update keys in-place
+      // Node-ID unchanged — update keys in-place. firstParty per §17.3.
       final peer = node.routingTable.getPeer(contact.nodeId);
       if (peer != null) {
         peer.ed25519PublicKey = newEd25519Pk;
         peer.x25519PublicKey = newX25519Pk;
         peer.mlKemPublicKey = newMlKemPk;
+        peer.pkSource = PkSource.firstParty;
       }
       for (final group in _groups.values) {
         final member = group.members[senderHex];
@@ -9834,72 +7690,40 @@ class CleonaService implements ICleonaService {
 
     _saveContacts();
 
-    // Send KEY_ROTATION_ACK back to contact (at new Node-ID)
-    try {
-      final ackEnvelope = identity.createSignedEnvelope(
-        proto.MessageType.KEY_ROTATION_ACK,
-        Uint8List(0),
-        recipientId: newNodeId,
-        compress: false,
-      );
-      node.sendEnvelope(ackEnvelope, newNodeId);
-    } catch (e) {
-      _log.warn('Failed to send KEY_ROTATION_ACK: $e');
-    }
+    // §26.6.2 Send KEY_ROTATION_ACK back to the rotator at their new
+    // Node-ID. Pure ACK — empty payload. V3 inner User-Sig + outer Device-
+    // Sig + KEM-decap chain provides Paket-C-F2 forge defence.
+    unawaited(sendToUser(
+      recipientUserId: newNodeId,
+      messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK,
+      payload: Uint8List(0),
+    ));
 
     _log.info('Emergency key rotation from ${contact.displayName}: '
         'all keys updated, Node-ID ${senderHex.substring(0, 8)} → ${newNodeIdHex.substring(0, 8)}');
     onStateChanged?.call();
   }
 
-  /// Handle KEY_ROTATION_ACK from a contact (§26.6.2).
-  /// Removes the contact from the persisted pending-retry set.
-  ///
-  /// Paket C F2: the outer envelope Ed25519 signature is verified against
-  /// the contact's stored pubkey. Without this, an attacker who knows a
-  /// contact's nodeId could forge an ACK with that contact's senderId,
-  /// silently suppressing retries to the real contact and stranding them
-  /// on the old keys forever.
-  void _handleKeyRotationAck(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final contact = _contacts[senderHex];
-    if (contact == null || contact.ed25519Pk == null) {
-      _log.warn('KEY_ROTATION_ACK from unknown sender ${senderHex.substring(0, 8)} — dropped');
-      return;
-    }
-    if (!_verifyOuterEd25519(envelope, contact.ed25519Pk!)) {
-      _log.warn('KEY_ROTATION_ACK signature INVALID from ${senderHex.substring(0, 8)} — dropped');
+  /// V3 handler for MTV3_KEY_ROTATION_ACK (§26.6.2). Pure ACK — frame.payload
+  /// is empty. Auth is the §23.3 inner User-Sig + outer Device-Sig + KEM-
+  /// decap chain (verified upstream by the V3 receive pipeline), providing
+  /// Paket-C-F2 forge defence.
+  void _handleKeyRotationAckV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+    if (!_contacts.containsKey(senderHex)) {
+      _log.warn('KEY_ROTATION_ACK V3 from unknown sender ${senderHex.substring(0, 8)} — dropped');
       return;
     }
     _keyRotationRetry.markAcked(senderHex);
     final acked = _keyRotationRetry.ackedCount;
     final pending = _keyRotationRetry.pendingCount;
     final expired = _keyRotationRetry.expiredCount;
-    _log.info('KEY_ROTATION_ACK from ${senderHex.substring(0, 8)} '
+    _log.info('KEY_ROTATION_ACK V3 from ${senderHex.substring(0, 8)} '
         '(acked=$acked pending=$pending expired=$expired)');
     if (pending == 0 && acked > 0) {
       _log.info('All still-reachable contacts acknowledged key rotation');
     }
     _emitKeyRotationRetryEvents();
-  }
-
-  /// Verify `envelope.signatureEd25519` against [pubkey]. Reconstructs the
-  /// exact byte sequence the sender signed: envelope serialized WITHOUT
-  /// any signature fields and WITHOUT PoW (PoW is added after signing in
-  /// `cleona_node.dart`). Used for the KEY_ROTATION_ACK path (§26.6.2 F2);
-  /// other handlers rely on inner-payload authentication.
-  bool _verifyOuterEd25519(proto.MessageEnvelope envelope, Uint8List pubkey) {
-    if (envelope.signatureEd25519.isEmpty) return false;
-    final stripped = envelope.clone()
-      ..clearSignatureEd25519()
-      ..clearSignatureMlDsa()
-      ..clearPow();
-    final bytes = stripped.writeToBuffer();
-    return SodiumFFI().verifyEd25519(
-      bytes,
-      Uint8List.fromList(envelope.signatureEd25519),
-      pubkey,
-    );
   }
 
   /// §26.6.2 Paket C: called from the 24h retry timer (and once at daemon
@@ -9916,53 +7740,75 @@ class CleonaService implements ICleonaService {
     }
     final now = DateTime.now().millisecondsSinceEpoch;
     final due = _keyRotationRetry.duePending(now: now);
-    // Paket C F1: offline receiver still has us under the pre-rotation
-    // userId. Force envelope.senderId to the old hex so the receiver's
-    // `_contacts[senderHex]` lookup hits and the inner dual-signature path
-    // actually runs. Falls back to current userId if the state was loaded
-    // from a pre-fix persisted file without oldUserIdHex.
-    final oldSenderId = due.oldUserIdHex.isNotEmpty
-        ? hexToBytes(due.oldUserIdHex)
-        : null;
+    // Welle 6 §7.4: Emergency KEY_ROTATION_BROADCAST migrates to the
+    // InfrastructureFrame path. Per-device fan-out via the IdentityResolver
+    // — the Outer Device-Sig signs under the post-rotation Device-Sig-Keys
+    // (rotation-stable per §3.5b), and the dual-sig in the inner body is
+    // the only authentication subject the receiver checks against.
+    // Note: the legacy `oldUserIdHex` from `due` is no longer wired into the
+    // wire (the InfraFrame envelope has no senderUserId field), but the
+    // receiver looks up the contact-record by ed25519Pk-derived old keys
+    // already cached locally — so the F1 correlation still works.
 
     for (final hex in due.contacts) {
       final contact = _contacts[hex];
-      if (contact == null ||
-          contact.status != 'accepted' ||
-          contact.x25519Pk == null ||
-          contact.mlKemPk == null) {
+      if (contact == null || contact.status != 'accepted') {
         // Contact removed / invalid — just count it as an attempt so it will
         // eventually expire instead of being retried every tick forever.
         _keyRotationRetry.markAttempt(hex, now: now);
         continue;
       }
-      try {
-        final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-          plaintext: due.broadcastBytes,
-          recipientX25519Pk: contact.x25519Pk!,
-          recipientMlKemPk: contact.mlKemPk!,
-        );
-        final envelope = identity.createSignedEnvelope(
-          proto.MessageType.KEY_ROTATION_BROADCAST,
-          ciphertext,
-          recipientId: contact.nodeId,
-          compress: false,
-          senderIdOverride: oldSenderId,
-        );
-        envelope.kemHeader = kemHeader;
-        node.sendEnvelope(envelope, contact.nodeId);
-        _keyRotationRetry.markAttempt(hex, now: now);
-        _log.info('KEY_ROTATION_BROADCAST retry to '
-            '${hex.substring(0, 8)} (${contact.displayName})');
-      } catch (e) {
-        _log.warn('Retry KEY_ROTATION_BROADCAST to '
-            '${hex.substring(0, 8)} failed: $e');
-        // Still count attempt so we do not loop forever on permanent failure.
-        _keyRotationRetry.markAttempt(hex, now: now);
-      }
+      // Resolve the recipient's authorized device-set on each retry. The
+      // 2D-DHT may have grown new devices since the last attempt, and the
+      // local DeviceKemRecord cache may have warmed up — both are normal
+      // catch-up patterns for an offline contact coming back online.
+      unawaited(_retryKeyRotationToContact(hex, contact, due.broadcastBytes,
+          now: now));
     }
 
     _emitKeyRotationRetryEvents();
+  }
+
+  Future<void> _retryKeyRotationToContact(
+    String hex,
+    ContactInfo contact,
+    Uint8List broadcastBytes, {
+    required int now,
+  }) async {
+    try {
+      final resolved = await node.identityResolver.resolve(contact.nodeId);
+      if (resolved.isEmpty) {
+        _log.debug('KEY_ROTATION_BROADCAST retry: no devices resolved for '
+            '${hex.substring(0, 8)} (${contact.displayName}) — '
+            'will retry on next tick');
+        _keyRotationRetry.markAttempt(hex, now: now);
+        return;
+      }
+      var anyOk = false;
+      for (final dev in resolved) {
+        final ok = await node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
+          innerPayload: broadcastBytes,
+          recipientDeviceId: dev.deviceNodeId,
+        );
+        anyOk = anyOk || ok;
+      }
+      _keyRotationRetry.markAttempt(hex, now: now);
+      if (anyOk) {
+        _log.info('KEY_ROTATION_BROADCAST retry (InfraFrame) to '
+            '${hex.substring(0, 8)} (${contact.displayName}) — '
+            '${resolved.length} device(s)');
+      } else {
+        _log.debug('KEY_ROTATION_BROADCAST retry: all ${resolved.length} '
+            'device(s) sends failed for ${hex.substring(0, 8)} — '
+            'will retry on next tick');
+      }
+    } catch (e) {
+      _log.warn('Retry KEY_ROTATION_BROADCAST to '
+          '${hex.substring(0, 8)} failed: $e');
+      // Still count attempt so we do not loop forever on permanent failure.
+      _keyRotationRetry.markAttempt(hex, now: now);
+    }
   }
 
   /// Drain new `expired` transitions into IPC events. Idempotent — if there
@@ -9983,303 +7829,35 @@ class CleonaService implements ICleonaService {
 
   // ── Calendar (§23) ──────────────────────────────────────────────────
 
-  /// Send an encrypted payload to a single contact (encrypt + sign + deliver).
+  /// Send an encrypted payload to a single contact (V3 sendToUser path).
+  /// `messageType` is already a V3 `MessageTypeV3` — KEM/Sig/zstd are
+  /// handled inside `sendToUser`. Used by the Calendar/Polls/Free-Busy
+  /// cluster.
   Future<void> _sendEncryptedPayload(
-    Uint8List recipientNodeId,
-    proto.MessageType messageType,
-    Uint8List payload,
-  ) async {
-    final recipientHex = bytesToHex(recipientNodeId);
+    Uint8List recipientUserId,
+    proto.MessageTypeV3 messageType,
+    Uint8List payload, {
+    Uint8List? groupId,
+  }) async {
+    final recipientHex = bytesToHex(recipientUserId);
     final contact = _contacts[recipientHex];
     if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) {
       _log.warn('Cannot send $messageType to $recipientHex: missing keys');
       return;
     }
-
-    var compression = proto.CompressionType.NONE;
-    if (payload.length >= 64) {
-      try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          payload = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {}
-    }
-
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: payload,
-      recipientX25519Pk: contact.x25519Pk!,
-      recipientMlKemPk: contact.mlKemPk!,
+    await sendToUser(
+      recipientUserId: recipientUserId,
+      messageType: messageType,
+      payload: payload,
+      groupId: groupId,
     );
-
-    final envelope = identity.createSignedEnvelope(
-      messageType,
-      ciphertext,
-      recipientId: contact.nodeId,
-      compress: false,
-    );
-    envelope.kemHeader = kemHeader;
-    envelope.compression = compression;
-
-    await node.sendEnvelope(envelope, contact.nodeId);
-    _storeErasureCodedBackup(envelope, contact, recipientNodeId: contact.nodeId);
     node.statsCollector.addMessageSent();
   }
 
   /// Handle incoming CALENDAR_INVITE from a group event creator.
-  void _handleCalendarInvite(proto.MessageEnvelope envelope) {
-    try {
-      final invite = proto.CalendarInviteMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final eventIdHex = bytesToHex(Uint8List.fromList(invite.eventId));
-
-      // Create local calendar event from invite
-      final event = CalendarEvent(
-        eventId: eventIdHex,
-        identityId: identity.userIdHex,
-        title: invite.title,
-        description: invite.description.isNotEmpty ? invite.description : null,
-        location: invite.location.isNotEmpty ? invite.location : null,
-        startTime: invite.startTime.toInt(),
-        endTime: invite.endTime.toInt(),
-        allDay: invite.allDay,
-        timeZone: invite.timeZone.isNotEmpty ? invite.timeZone : 'UTC',
-        recurrenceRule: invite.recurrenceRule.isNotEmpty ? invite.recurrenceRule : null,
-        hasCall: invite.hasCall,
-        groupId: invite.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(invite.groupId)) : null,
-        category: EventCategory.values[invite.category.value.clamp(0, EventCategory.values.length - 1)],
-        reminders: invite.reminders.map((r) => r.minutesBefore).toList(),
-        createdBy: senderHex,
-      );
-      calendarManager.createEvent(event);
-
-      // Add system message to group chat if it's a group event
-      if (event.groupId != null && conversations.containsKey(event.groupId)) {
-        final senderName = _contacts[senderHex]?.displayName ?? invite.createdByName;
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName hat einen Termin erstellt: ${event.title}',
-          timestamp: DateTime.now(),
-          type: proto.MessageType.CALENDAR_INVITE,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('Received calendar invite: ${event.title} from ${senderHex.substring(0, 8)}');
-      onCalendarInviteReceived?.call(senderHex, eventIdHex, event.title);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle CALENDAR_INVITE: $e');
-    }
-  }
-
-  /// Handle incoming CALENDAR_RSVP from a group event participant.
-  void _handleCalendarRsvp(proto.MessageEnvelope envelope) {
-    try {
-      final rsvp = proto.CalendarRsvpMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final eventIdHex = bytesToHex(Uint8List.fromList(rsvp.eventId));
-
-      final status = RsvpStatus.values[rsvp.response.value.clamp(0, RsvpStatus.values.length - 1)];
-      calendarManager.setRsvp(eventIdHex, senderHex, status);
-
-      // System message in group chat
-      final event = calendarManager.events[eventIdHex];
-      if (event?.groupId != null && conversations.containsKey(event!.groupId)) {
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        final statusText = switch (status) {
-          RsvpStatus.accepted => 'hat zugesagt',
-          RsvpStatus.declined => 'hat abgesagt',
-          RsvpStatus.tentative => 'hat vorläufig zugesagt',
-          RsvpStatus.proposeNewTime => 'schlägt eine andere Zeit vor',
-        };
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName $statusText',
-          timestamp: DateTime.now(),
-          type: proto.MessageType.CALENDAR_RSVP,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('RSVP for $eventIdHex from ${senderHex.substring(0, 8)}: $status');
-      onCalendarRsvpReceived?.call(eventIdHex, senderHex, status);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle CALENDAR_RSVP: $e');
-    }
-  }
-
-  /// Handle incoming CALENDAR_UPDATE from the event creator.
-  void _handleCalendarUpdate(proto.MessageEnvelope envelope) {
-    try {
-      final update = proto.CalendarUpdateMsg.fromBuffer(envelope.encryptedPayload);
-      final eventIdHex = bytesToHex(Uint8List.fromList(update.eventId));
-
-      final event = calendarManager.events[eventIdHex];
-      if (event == null) {
-        _log.debug('CALENDAR_UPDATE for unknown event $eventIdHex');
-        return;
-      }
-
-      calendarManager.updateEvent(eventIdHex,
-        title: update.title.isNotEmpty ? update.title : null,
-        description: update.description.isNotEmpty ? update.description : null,
-        location: update.location.isNotEmpty ? update.location : null,
-        startTime: update.startTime.toInt() > 0 ? update.startTime.toInt() : null,
-        endTime: update.endTime.toInt() > 0 ? update.endTime.toInt() : null,
-        allDay: update.allDay,
-        hasCall: update.hasCall,
-        cancelled: update.cancelled,
-        reminders: update.reminders.isNotEmpty
-            ? update.reminders.map((r) => r.minutesBefore).toList()
-            : null,
-      );
-
-      if (event.groupId != null && conversations.containsKey(event.groupId)) {
-        final action = update.cancelled ? 'hat den Termin abgesagt' : 'hat den Termin geändert';
-        final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName $action: ${event.title}',
-          timestamp: DateTime.now(),
-          type: proto.MessageType.CALENDAR_UPDATE,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('Calendar event updated: $eventIdHex');
-      onCalendarEventUpdated?.call(eventIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle CALENDAR_UPDATE: $e');
-    }
-  }
-
-  /// Handle incoming CALENDAR_DELETE from the event creator.
-  void _handleCalendarDelete(proto.MessageEnvelope envelope) {
-    try {
-      final del = proto.CalendarDeleteMsg.fromBuffer(envelope.encryptedPayload);
-      final eventIdHex = bytesToHex(Uint8List.fromList(del.eventId));
-
-      final event = calendarManager.events[eventIdHex];
-      if (event != null && event.groupId != null) {
-        final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName hat den Termin gelöscht: ${event.title}',
-          timestamp: DateTime.now(),
-          type: proto.MessageType.CALENDAR_DELETE,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      calendarManager.deleteEvent(eventIdHex);
-      _log.info('Calendar event deleted: $eventIdHex');
-      onCalendarEventUpdated?.call(eventIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle CALENDAR_DELETE: $e');
-    }
-  }
-
-  /// Handle incoming FREE_BUSY_REQUEST — auto-respond with filtered availability.
-  Future<void> _handleFreeBusyRequest(proto.MessageEnvelope envelope) async {
-    try {
-      final req = proto.FreeBusyRequestMsg.fromBuffer(envelope.encryptedPayload);
-      final querierHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final requestIdBytes = Uint8List.fromList(req.requestId);
-
-      // Only respond to accepted contacts (KEX Gate already filtered, but double-check)
-      if (_contacts[querierHex]?.status != 'accepted') {
-        _log.debug('FREE_BUSY_REQUEST from non-contact ${querierHex.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      // Generate response — cross-identity merge handled by IPC daemon layer
-      final blocks = calendarManager.generateFreeBusyResponse(
-        queryStart: req.queryStart.toInt(),
-        queryEnd: req.queryEnd.toInt(),
-        querierNodeIdHex: querierHex,
-      );
-
-      // Build response proto
-      final response = proto.FreeBusyResponseMsg()
-        ..requestId = requestIdBytes;
-      for (final block in blocks) {
-        response.blocks.add(proto.FreeBusyBlock()
-          ..start = Int64(block.start)
-          ..end = Int64(block.end)
-          ..level = proto.FreeBusyLevel.valueOf(block.level.index) ?? proto.FreeBusyLevel.FB_TIME_ONLY
-          ..title = block.title ?? ''
-          ..location = block.location ?? '');
-      }
-
-      // Send response
-      await _sendEncryptedPayload(
-        Uint8List.fromList(envelope.senderId),
-        proto.MessageType.FREE_BUSY_RESPONSE,
-        response.writeToBuffer(),
-      );
-
-      _log.info('Sent FREE_BUSY_RESPONSE to ${querierHex.substring(0, 8)} '
-          '(${blocks.length} blocks)');
-    } catch (e) {
-      _log.warn('Failed to handle FREE_BUSY_REQUEST: $e');
-    }
-  }
-
   /// Pending Free/Busy query results, keyed by requestId hex.
   final Map<String, List<FreeBusyBlockResult>> _freeBusyResults = {};
   final Map<String, void Function(List<FreeBusyBlockResult>)> _freeBusyCallbacks = {};
-
-  /// Handle incoming FREE_BUSY_RESPONSE.
-  void _handleFreeBusyResponse(proto.MessageEnvelope envelope) {
-    try {
-      final resp = proto.FreeBusyResponseMsg.fromBuffer(envelope.encryptedPayload);
-      final requestIdHex = bytesToHex(Uint8List.fromList(resp.requestId));
-
-      final blocks = <FreeBusyBlockResult>[];
-      for (final b in resp.blocks) {
-        blocks.add(FreeBusyBlockResult(
-          start: b.start.toInt(),
-          end: b.end.toInt(),
-          level: FreeBusyLevel.values[b.level.value.clamp(0, FreeBusyLevel.values.length - 1)],
-          title: b.title.isNotEmpty ? b.title : null,
-          location: b.location.isNotEmpty ? b.location : null,
-        ));
-      }
-
-      // Accumulate responses
-      _freeBusyResults.putIfAbsent(requestIdHex, () => []).addAll(blocks);
-
-      // Notify callback if registered
-      final cb = _freeBusyCallbacks[requestIdHex];
-      if (cb != null) {
-        cb(_freeBusyResults[requestIdHex]!);
-      }
-
-      _log.info('Received FREE_BUSY_RESPONSE for $requestIdHex '
-          '(${blocks.length} blocks)');
-    } catch (e) {
-      _log.warn('Failed to handle FREE_BUSY_RESPONSE: $e');
-    }
-  }
 
   @override
   Future<String> createCalendarEvent(CalendarEvent event) async {
@@ -10299,7 +7877,7 @@ class CleonaService implements ICleonaService {
     String? title, String? description, String? location,
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
-    bool? taskCompleted, int? taskPriority,
+    bool? taskCompleted, int? taskPriority, bool? cancelled,
   }) async {
     if (_reducedMode) {
       _log.warn('updateCalendarEvent blocked: reducedMode active');
@@ -10310,6 +7888,7 @@ class CleonaService implements ICleonaService {
       startTime: startTime, endTime: endTime, allDay: allDay,
       hasCall: hasCall, reminders: reminders, recurrenceRule: recurrenceRule,
       taskCompleted: taskCompleted, taskPriority: taskPriority,
+      cancelled: cancelled,
     );
     if (ok) {
       final evt = calendarManager.events[eventIdHex];
@@ -10374,7 +7953,7 @@ class CleonaService implements ICleonaService {
       if (memberHex == identity.userIdHex) continue;
       await _sendEncryptedPayload(
         hexToBytes(memberHex),
-        proto.MessageType.CALENDAR_INVITE,
+        proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
         Uint8List.fromList(payload),
       );
     }
@@ -10415,7 +7994,7 @@ class CleonaService implements ICleonaService {
       if (memberHex == identity.userIdHex) continue;
       await _sendEncryptedPayload(
         hexToBytes(memberHex),
-        proto.MessageType.CALENDAR_RSVP,
+        proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
         Uint8List.fromList(payload),
       );
     }
@@ -10458,7 +8037,7 @@ class CleonaService implements ICleonaService {
       if (memberHex == identity.userIdHex) continue;
       await _sendEncryptedPayload(
         hexToBytes(memberHex),
-        proto.MessageType.CALENDAR_UPDATE,
+        proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
         Uint8List.fromList(payload),
       );
     }
@@ -10488,7 +8067,7 @@ class CleonaService implements ICleonaService {
       if (memberHex == identity.userIdHex) continue;
       await _sendEncryptedPayload(
         hexToBytes(memberHex),
-        proto.MessageType.CALENDAR_DELETE,
+        proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
         Uint8List.fromList(payload),
       );
     }
@@ -10514,7 +8093,7 @@ class CleonaService implements ICleonaService {
 
     await _sendEncryptedPayload(
       hexToBytes(contactNodeIdHex),
-      proto.MessageType.FREE_BUSY_REQUEST,
+      proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST,
       req.writeToBuffer(),
     );
 
@@ -10674,279 +8253,9 @@ class CleonaService implements ICleonaService {
 
   // ── Handlers ──────────────────────────────────────────────────────────
 
-  void _handlePollCreate(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollCreateMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final poll = _decodePollCreate(msg, senderHex: senderHex);
-
-      // Must reference a known group or channel, otherwise silently drop.
-      if (_pollRecipients(poll.groupId) == null) {
-        _log.debug('POLL_CREATE for unknown entity ${poll.groupId.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      if (pollManager.polls.containsKey(poll.pollId)) {
-        _log.debug('Duplicate POLL_CREATE ${poll.pollId.substring(0, 8)}');
-        return;
-      }
-      pollManager.createPoll(poll);
-
-      if (conversations.containsKey(poll.groupId)) {
-        final name = _contacts[senderHex]?.displayName ?? msg.createdByName;
-        _addMessageToConversation(poll.groupId, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: poll.groupId,
-          senderNodeIdHex: senderHex,
-          text: '$name: ${poll.question}',
-          timestamp: DateTime.fromMillisecondsSinceEpoch(poll.createdAt),
-          type: proto.MessageType.POLL_CREATE,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-          pollId: poll.pollId,
-        ), isGroup: _groups.containsKey(poll.groupId), isChannel: _channels.containsKey(poll.groupId));
-      }
-
-      onPollCreated?.call(poll.pollId, poll.groupId, poll.question);
-      onStateChanged?.call();
-      _log.info('Received POLL_CREATE ${poll.pollId.substring(0, 8)} from ${senderHex.substring(0, 8)}');
-    } catch (e) {
-      _log.warn('Failed to handle POLL_CREATE: $e');
-    }
-  }
-
-  void _handlePollVote(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollVoteMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) {
-        _log.debug('POLL_VOTE for unknown poll $pollIdHex');
-        return;
-      }
-      if (poll.settings.anonymous) {
-        _log.warn('Ignoring non-anonymous POLL_VOTE on anonymous poll $pollIdHex');
-        return;
-      }
-      final record = _decodePollVote(msg, voterIdHex: senderHex, anonymous: false);
-      if (pollManager.recordVote(record)) {
-        onPollTallyUpdated?.call(pollIdHex);
-        onStateChanged?.call();
-
-        // Channel mode: creator re-broadcasts a snapshot so subscribers see totals.
-        if (_channels.containsKey(poll.groupId) &&
-            poll.createdByHex == identity.userIdHex) {
-          _broadcastPollSnapshot(poll);
-        }
-      }
-    } catch (e) {
-      _log.warn('Failed to handle POLL_VOTE: $e');
-    }
-  }
-
-  void _handlePollUpdate(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollUpdateMsg.fromBuffer(envelope.encryptedPayload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      // Permission: creator or group/channel admin/owner.
-      final group = _groups[poll.groupId];
-      final channel = _channels[poll.groupId];
-      final role = group?.members[senderHex]?.role ?? channel?.members[senderHex]?.role;
-      final isCreator = senderHex == poll.createdByHex;
-      final isAdmin = role == 'owner' || role == 'admin';
-      if (!isCreator && !isAdmin) {
-        _log.warn('POLL_UPDATE from non-privileged ${senderHex.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      switch (msg.action) {
-        case proto.PollAction.POLL_ACTION_CLOSE:
-          pollManager.closePoll(pollIdHex);
-          break;
-        case proto.PollAction.POLL_ACTION_REOPEN:
-          pollManager.reopenPoll(pollIdHex);
-          break;
-        case proto.PollAction.POLL_ACTION_ADD_OPTIONS:
-          pollManager.addOptions(
-              pollIdHex,
-              msg.addedOptions
-                  .map((o) => PollOption(
-                        optionId: -1,
-                        label: o.label,
-                        dateStart: o.dateStart.toInt() == 0 ? null : o.dateStart.toInt(),
-                        dateEnd: o.dateEnd.toInt() == 0 ? null : o.dateEnd.toInt(),
-                      ))
-                  .toList());
-          break;
-        case proto.PollAction.POLL_ACTION_REMOVE_OPTIONS:
-          pollManager.removeOptions(pollIdHex, msg.removedOptions.toList());
-          break;
-        case proto.PollAction.POLL_ACTION_EXTEND_DEADLINE:
-          pollManager.extendDeadline(pollIdHex, msg.newDeadline.toInt());
-          break;
-        case proto.PollAction.POLL_ACTION_DELETE:
-          pollManager.deletePoll(pollIdHex);
-          break;
-        default:
-          break;
-      }
-      onPollStateChanged?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle POLL_UPDATE: $e');
-    }
-  }
-
-  void _handlePollSnapshot(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollSnapshotMsg.fromBuffer(envelope.encryptedPayload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      // Only the creator may publish authoritative snapshots.
-      if (senderHex != poll.createdByHex) {
-        _log.warn('POLL_SNAPSHOT from non-creator, ignoring');
-        return;
-      }
-
-      final optionCounts = <int, int>{};
-      final dateCounts = <int, Map<DateAvailability, int>>{};
-      for (final oc in msg.optionCounts) {
-        if (oc.yesCount + oc.maybeCount + oc.noCount > 0) {
-          dateCounts[oc.optionId] = {
-            DateAvailability.yes: oc.yesCount,
-            DateAvailability.maybe: oc.maybeCount,
-            DateAvailability.no: oc.noCount,
-          };
-        } else {
-          optionCounts[oc.optionId] = oc.count;
-        }
-      }
-
-      poll.cachedSnapshot = PollSnapshotCache(
-        pollId: pollIdHex,
-        totalVotes: msg.totalVotes,
-        optionCounts: optionCounts,
-        dateCounts: dateCounts,
-        scaleAverage: msg.scaleAverage,
-        scaleCount: msg.scaleCount,
-        closed: msg.closed,
-        snapshotAt: msg.snapshotAt.toInt(),
-      );
-      if (msg.closed && !poll.closed) poll.closed = true;
-      poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-      pollManager.save();
-
-      onPollTallyUpdated?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle POLL_SNAPSHOT: $e');
-    }
-  }
-
-  void _handlePollVoteAnonymous(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollVoteAnonymousMsg.fromBuffer(envelope.encryptedPayload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-      if (!poll.settings.anonymous) {
-        _log.warn('POLL_VOTE_ANONYMOUS for non-anonymous poll, dropping');
-        return;
-      }
-
-      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
-      final keyImage = Uint8List.fromList(msg.keyImage);
-      final keyImageHex = bytesToHex(keyImage);
-      final payload = Uint8List.fromList(msg.encryptedChoice);
-
-      // Context domain-separates polls so the same voter can participate in
-      // multiple anonymous polls without linkage across them.
-      final context = hexToBytes(pollIdHex);
-      final valid = LinkableRingSignature.verify(
-        message: payload,
-        context: context,
-        keyImage: keyImage,
-        ringMembers: ring,
-        signature: Uint8List.fromList(msg.ringSignature),
-      );
-      if (!valid) {
-        _log.warn('Ring signature invalid for poll $pollIdHex, dropping');
-        return;
-      }
-
-      final seen = _anonymousKeyImages.putIfAbsent(pollIdHex, () => {});
-      if (seen.contains(keyImageHex) && !poll.settings.allowVoteChange) {
-        _log.debug('Duplicate key image for $pollIdHex, dropping');
-        return;
-      }
-      seen.add(keyImageHex);
-
-      final voteMsg = proto.PollVoteMsg.fromBuffer(payload);
-      final record = _decodePollVote(voteMsg, voterIdHex: keyImageHex, anonymous: true);
-      // Override voter identifiers so UI never surfaces identity.
-      record.voterName = '';
-      pollManager.recordVote(PollVoteRecord(
-        pollId: record.pollId,
-        voterIdHex: keyImageHex,
-        voterName: '',
-        selectedOptions: record.selectedOptions,
-        dateResponses: record.dateResponses,
-        scaleValue: record.scaleValue,
-        freeText: record.freeText,
-        votedAt: record.votedAt,
-        anonymous: true,
-      ));
-      onPollTallyUpdated?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Failed to handle POLL_VOTE_ANONYMOUS: $e');
-    }
-  }
-
-  void _handlePollVoteRevoke(proto.MessageEnvelope envelope) {
-    try {
-      final msg = proto.PollVoteRevokeMsg.fromBuffer(envelope.encryptedPayload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
-      final keyImage = Uint8List.fromList(msg.keyImage);
-      final keyImageHex = bytesToHex(keyImage);
-      final context = hexToBytes(pollIdHex);
-      final marker = Uint8List.fromList('revoke'.codeUnits);
-      final valid = LinkableRingSignature.verify(
-        message: marker,
-        context: context,
-        keyImage: keyImage,
-        ringMembers: ring,
-        signature: Uint8List.fromList(msg.ringSignature),
-      );
-      if (!valid) {
-        _log.warn('Revoke signature invalid for poll $pollIdHex, dropping');
-        return;
-      }
-      if (pollManager.revokeAnonymousVote(pollIdHex, keyImageHex)) {
-        _anonymousKeyImages[pollIdHex]?.remove(keyImageHex);
-        onPollTallyUpdated?.call(pollIdHex);
-        onStateChanged?.call();
-      }
-    } catch (e) {
-      _log.warn('Failed to handle POLL_VOTE_REVOKE: $e');
-    }
-  }
-
   // ── Senders ──────────────────────────────────────────────────────────
 
-  Future<void> _fanoutToEntity(String entityIdHex, proto.MessageType type, List<int> payload) async {
+  Future<void> _fanoutToEntity(String entityIdHex, proto.MessageTypeV3 type, List<int> payload) async {
     final recipients = _pollRecipients(entityIdHex);
     if (recipients == null) return;
     for (final memberHex in recipients) {
@@ -10960,7 +8269,7 @@ class CleonaService implements ICleonaService {
 
   Future<void> _sendPollCreate(Poll poll) async {
     final payload = _encodePollCreate(poll).writeToBuffer();
-    await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_CREATE, payload);
+    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_CREATE, payload);
     _log.info('Sent POLL_CREATE ${poll.pollId.substring(0, 8)} to entity ${poll.groupId.substring(0, 8)}');
   }
 
@@ -10973,11 +8282,11 @@ class CleonaService implements ICleonaService {
         poll.createdByHex != identity.userIdHex) {
       await _sendEncryptedPayload(
         hexToBytes(poll.createdByHex),
-        proto.MessageType.POLL_VOTE,
+        proto.MessageTypeV3.MTV3_POLL_VOTE,
         Uint8List.fromList(payload),
       );
     } else {
-      await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_VOTE, payload);
+      await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_VOTE, payload);
     }
   }
 
@@ -11005,7 +8314,7 @@ class CleonaService implements ICleonaService {
     }
 
     final payload = msg.writeToBuffer();
-    await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_VOTE_ANONYMOUS, payload);
+    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS, payload);
   }
 
   Future<void> _sendPollVoteRevoke(Poll poll, Uint8List keyImage) async {
@@ -11030,7 +8339,7 @@ class CleonaService implements ICleonaService {
       msg.ringMembers.add(pk);
     }
 
-    await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_VOTE_REVOKE, msg.writeToBuffer());
+    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_REVOKE, msg.writeToBuffer());
   }
 
   Future<void> _sendPollUpdate(Poll poll, proto.PollAction action,
@@ -11054,7 +8363,7 @@ class CleonaService implements ICleonaService {
     if (removedOptions != null) msg.removedOptions.addAll(removedOptions);
     if (newDeadline != null) msg.newDeadline = Int64(newDeadline);
 
-    await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_UPDATE, msg.writeToBuffer());
+    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_UPDATE, msg.writeToBuffer());
   }
 
   Future<void> _broadcastPollSnapshot(Poll poll) async {
@@ -11081,7 +8390,7 @@ class CleonaService implements ICleonaService {
           ..count = entry.value);
       }
     }
-    await _fanoutToEntity(poll.groupId, proto.MessageType.POLL_SNAPSHOT, msg.writeToBuffer());
+    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_SNAPSHOT, msg.writeToBuffer());
   }
 
   void _startPollDeadlineTimer() {
@@ -11151,7 +8460,7 @@ class CleonaService implements ICleonaService {
         senderNodeIdHex: identity.userIdHex,
         text: '$displayName: ${poll.question}',
         timestamp: DateTime.fromMillisecondsSinceEpoch(poll.createdAt),
-        type: proto.MessageType.POLL_CREATE,
+        type: UiMessageType.pollCreate,
         status: MessageStatus.delivered,
         isOutgoing: true,
         pollId: poll.pollId,
@@ -11397,11 +8706,17 @@ class CleonaService implements ICleonaService {
   /// We check if the sender's old_node_id matches one of our contacts,
   /// verify the signature with the old key, then send back our contact list
   /// and recent messages progressively.
-  void _handleRestoreBroadcast(proto.MessageEnvelope envelope) {
+  /// RESTORE_BROADCAST handler (Architecture §6.3 + §23.3 InfraFrame).
+  /// [payload] is the plain `RestoreBroadcast` proto (NOT KEM-encrypted —
+  /// the recovering peer's user-keys just changed, so the recipient cannot
+  /// run the standard inner User-Sig path; the inner old-Ed25519 sig in
+  /// the body is the canonical authenticity check). Sender lookup keys
+  /// off `rb.oldNodeId` so no separate sender argument is needed.
+  void _handleRestoreBroadcast(Uint8List payload) {
     try {
       // RestoreBroadcast is NOT encrypted (sender has new keys, we don't know them yet)
       // but it IS signed with the OLD key to prove ownership
-      final rb = proto.RestoreBroadcast.fromBuffer(envelope.encryptedPayload);
+      final rb = proto.RestoreBroadcast.fromBuffer(payload);
       final oldNodeIdHex = bytesToHex(Uint8List.fromList(rb.oldNodeId));
       final newNodeIdHex = bytesToHex(Uint8List.fromList(rb.newNodeId));
 
@@ -11521,7 +8836,7 @@ class CleonaService implements ICleonaService {
   }
 
   /// Send RestoreResponse to a recovering contact.
-  void _sendRestoreResponse(ContactInfo recipient, int phase) {
+  Future<void> _sendRestoreResponse(ContactInfo recipient, int phase) async {
     if (recipient.x25519Pk == null || recipient.mlKemPk == null) return;
 
     final response = proto.RestoreResponse()..phase = phase;
@@ -11647,40 +8962,47 @@ class CleonaService implements ICleonaService {
             ..recipientId = identity.nodeId
             ..conversationId = convId
             ..timestamp = Int64(msg.timestamp.millisecondsSinceEpoch)
-            ..messageType = msg.type
+            ..uiMessageType = msg.type.wireValue
             ..payload = utf8.encode(msg.text));
         }
       }
     }
 
-    final payload = response.writeToBuffer();
-    final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-      plaintext: Uint8List.fromList(payload),
-      recipientX25519Pk: recipient.x25519Pk!,
-      recipientMlKemPk: recipient.mlKemPk!,
+    // V3 (Architecture §23.3 + §6.3): RESTORE_RESPONSE rides as an
+    // ApplicationFrameV3 via sendToUser. The codec handles per-message KEM
+    // (X25519 + ML-KEM-768) on the inner frame, so we hand it the raw
+    // RestoreResponse protobuf as payload (no pre-encryption). Receiver-
+    // side `_handleRestoreResponseV3` is wired by Cluster C4.
+    //
+    // Spec-note: RESTORE flow uses recipient.nodeId from the old contact
+    // list and `recipient.x25519Pk`/`mlKemPk` are pre-rotation. sendToUser
+    // resolves recipient → devices via 2D-DHT and uses the KEM pubkeys on
+    // the contact record — best-effort. If the recipient already rotated,
+    // the resolve may return new device-IDs whose decap-SK doesn't match
+    // the contact-cached User-KEM-PK, and the receiver silently drops.
+    // That matches §2.4.1 [10'] semantics; the broadcaster's retry on
+    // RESTORE_BROADCAST will eventually reach a freshly-keyed device.
+    final ok = await sendToUser(
+      recipientUserId: recipient.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_RESTORE_RESPONSE,
+      payload: Uint8List.fromList(response.writeToBuffer()),
     );
-
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.RESTORE_RESPONSE,
-      ciphertext,
-      recipientId: recipient.nodeId,
-      compress: false,
-    );
-    envelope.kemHeader = kemHeader;
-
-    node.sendEnvelope(envelope, recipient.nodeId);
-    _storeErasureCodedBackup(envelope, recipient);
 
     _log.info('Sent RestoreResponse phase $phase to ${recipient.displayName} '
-        '(${phase == 1 ? '${response.contacts.length} contacts' : '${response.messages.length} messages'})');
+        '(${phase == 1 ? '${response.contacts.length} contacts' : '${response.messages.length} messages'}) ok=$ok');
   }
 
   /// Handle incoming RESTORE_RESPONSE: restore contacts and messages.
-  void _handleRestoreResponse(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the already-decrypted+authenticated
+  /// RestoreResponse proto bytes (KEM-decap + inner User-Sig + outer
+  /// Device-Sig already verified by the V3 receive pipeline).
+  /// [senderUserId] is the recovering peer's user-id from the inbound
+  /// ApplicationFrame.
+  void _handleRestoreResponse(Uint8List payload, Uint8List senderUserId, Uint8List senderDeviceId) {
     try {
-      final payload = _decryptPayload(envelope);
       final response = proto.RestoreResponse.fromBuffer(payload);
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
+      final senderHex = bytesToHex(senderUserId);
       var contactsRestored = 0;
       var messagesRestored = 0;
 
@@ -11706,6 +9028,13 @@ class CleonaService implements ICleonaService {
             acceptedAt: DateTime.now(),
           );
           contactsRestored++;
+        }
+        // §3.1 A-5: the A-2 central fix ran before this handler but
+        // _contacts was still empty at that point. Now that contacts are
+        // restored, record the sender's deviceNodeId.
+        final senderContact = _contacts[senderHex];
+        if (senderContact != null) {
+          senderContact.deviceNodeIds.add(bytesToHex(senderDeviceId));
         }
         if (contactsRestored > 0) _saveContacts();
 
@@ -11789,7 +9118,7 @@ class CleonaService implements ICleonaService {
             senderNodeIdHex: senderIdHex,
             text: text,
             timestamp: DateTime.fromMillisecondsSinceEpoch(stored.timestamp.toInt()),
-            type: proto.MessageType.TEXT,
+            type: UiMessageType.text,
             status: MessageStatus.delivered,
             isOutgoing: isOutgoing,
           );
@@ -11846,22 +9175,81 @@ class CleonaService implements ICleonaService {
     final broadcastBytes = rb.writeToBuffer();
     var sent = 0;
 
-    // Send to all old contacts (unencrypted but signed)
+    // V3.0 Welle 6 §6.3: per-recipient-DEVICE fanout via InfrastructureFrame
+    // path. The recovering peer's User-Sig-Keys just changed, so we cannot
+    // sign an ApplicationFrame; the InfrastructureFrame Outer-Sig under the
+    // (rotation-stable) Device-Sig-Keys carries routing-authenticity, and
+    // the inner old-Ed25519-sig in the RestoreBroadcast body proves we
+    // controlled the previous User-Identity. KEM-encrypt under each
+    // recipient's Device-KEM-PK (§3.5b) — looked up via 2D-DHT
+    // (IdentityResolver). One RestoreBroadcast InfrastructureFrame per
+    // *device* of each accepted contact.
+    //
+    // Erasure-coded offline-delivery (§5.4 + §6.3.1 step 4): the canonical
+    // NetworkPacket built for the contact's first-resolved device is
+    // fragmented onto the K=10 closest DHT replicators of the contact's
+    // user-mailbox. Per §5.4 InfraFrame KEM is device-PK-keyed, so the
+    // encoded blob can only reach that one device; sibling devices of the
+    // same contact recover via subsequent Direct-Send retries or via S&F
+    // (§5.5).
     for (final contact in oldContacts) {
       if (contact.status != 'accepted') continue;
 
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.RESTORE_BROADCAST,
-        broadcastBytes,
-        recipientId: contact.nodeId,
-      );
+      final resolved =
+          await node.identityResolver.resolve(contact.nodeId);
+      if (resolved.isEmpty) {
+        _log.debug('Restore broadcast: no devices resolved for '
+            '${contact.nodeIdHex.substring(0, 8)} — skipping (no canonical '
+            'packet possible without device-set)');
+        continue;
+      }
 
-      node.sendEnvelope(envelope, contact.nodeId);
-      _storeErasureCodedBackup(envelope, contact);
-      sent++;
+      var anyDeviceSent = false;
+      proto.NetworkPacketV3? canonicalPacket;
+      for (var i = 0; i < resolved.length; i++) {
+        final device = resolved[i];
+        final deviceId = Uint8List.fromList(device.deviceNodeId);
+        if (i == 0) {
+          canonicalPacket = node.buildInfraPacket(
+            messageType: proto.MessageTypeV3.MTV3_RESTORE_BROADCAST,
+            innerPayload: broadcastBytes,
+            recipientDeviceId: deviceId,
+          );
+          if (canonicalPacket != null) {
+            final ok = await node.sendToDevice(canonicalPacket, deviceId);
+            if (ok) anyDeviceSent = true;
+            _log.debug('Restore broadcast → ${contact.nodeIdHex.substring(0, 8)} '
+                'device=${bytesToHex(deviceId).substring(0, 8)} ok=$ok '
+                '(canonical)');
+          }
+        } else {
+          final ok = await node.sendInfraTo(
+            messageType: proto.MessageTypeV3.MTV3_RESTORE_BROADCAST,
+            innerPayload: broadcastBytes,
+            recipientDeviceId: deviceId,
+          );
+          if (ok) anyDeviceSent = true;
+          _log.debug('Restore broadcast → ${contact.nodeIdHex.substring(0, 8)} '
+              'device=${bytesToHex(deviceId).substring(0, 8)} ok=$ok');
+        }
+      }
+
+      if (canonicalPacket != null) {
+        final canonicalBytes =
+            node.serializePacketForOfflineDelivery(canonicalPacket);
+        final fragmentBundleId =
+            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+        await _distributeErasureFragments(
+          packetBytes: canonicalBytes,
+          messageId: Uint8List.fromList(fragmentBundleId),
+          recipientUserNodeId: contact.nodeId,
+        );
+      }
+
+      if (anyDeviceSent) sent++;
     }
 
-    _log.info('Restore broadcast sent to $sent contacts');
+    _log.info('Restore broadcast sent to $sent contacts (V3 InfrastructureFrame)');
 
     // Aggressive mailbox polling: 10 polls à 3s to catch RestoreResponses quickly
     _startAggressivePolling();
@@ -11897,47 +9285,6 @@ class CleonaService implements ICleonaService {
         _log.info('Aggressive restore polling complete');
       }
     });
-  }
-
-  /// Decrypt envelope payload with fallback to previous keys.
-  Uint8List _decryptPayload(proto.MessageEnvelope envelope) {
-    if (!envelope.hasKemHeader() || envelope.kemHeader.ephemeralX25519Pk.isEmpty) {
-      return Uint8List.fromList(envelope.encryptedPayload);
-    }
-
-    // Try current keys first
-    try {
-      var decrypted = PerMessageKem.decrypt(
-        kemHeader: envelope.kemHeader,
-        ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-        ourX25519Sk: identity.x25519SecretKey,
-        ourMlKemSk: identity.mlKemSecretKey,
-      );
-      if (envelope.compression == proto.CompressionType.ZSTD) {
-        decrypted = ZstdCompression.instance.decompress(decrypted);
-      }
-      return decrypted;
-    } on KemVersionRejectedException {
-      // Version rejected (legacy/future/0) — do NOT try previous keys.
-      // Version mismatch is a protocol rejection, not a crypto failure.
-      rethrow;
-    } catch (_) {
-      // Try previous keys (for transit messages during rotation)
-      if (identity.previousX25519Sk != null && identity.previousMlKemSk != null) {
-        var decrypted = PerMessageKem.decrypt(
-          kemHeader: envelope.kemHeader,
-          ciphertext: Uint8List.fromList(envelope.encryptedPayload),
-          ourX25519Sk: identity.previousX25519Sk!,
-          ourMlKemSk: identity.previousMlKemSk!,
-        );
-        if (envelope.compression == proto.CompressionType.ZSTD) {
-          decrypted = ZstdCompression.instance.decompress(decrypted);
-        }
-        _log.debug('Decrypted with previous keys (rotation fallback)');
-        return decrypted;
-      }
-      rethrow;
-    }
   }
 
   // ── Voice Transcription ─────────────────────────────────────────────
@@ -12131,7 +9478,9 @@ class CleonaService implements ICleonaService {
     final entries = IdentityDhtRegistry.buildIdentityEntries(identities);
 
     registry.storeInDht(entries, nextIndex, (mailboxId, fragmentIndex, fragmentData) {
-      // Store via FRAGMENT_STORE to closest DHT peers
+      // Store via FRAGMENT_STORE to closest DHT peers.
+      // V3 (Architecture §23.3): FRAGMENT_STORE is an infrastructure
+      // message — route via DV cascade as InfrastructureFrame.
       final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
       for (final peer in peers) {
         final store = proto.FragmentStore()
@@ -12141,12 +9490,11 @@ class CleonaService implements ICleonaService {
           ..messageId = mailboxId // Use registry key as message ID
           ..totalFragments = 10
           ..originalSize = fragmentData.length;
-        final env = identity.createSignedEnvelope(
-          proto.MessageType.FRAGMENT_STORE,
-          store.writeToBuffer(),
-          recipientId: peer.nodeId,
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+          innerPayload: Uint8List.fromList(store.writeToBuffer()),
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
         );
-        node.sendEnvelope(env, peer.nodeId);
       }
     });
   }
@@ -12156,12 +9504,3888 @@ class CleonaService implements ICleonaService {
   void _warnKemVersionRejected(String context, KemVersionRejectedException e) {
     _log.warn('KEM version rejected for $context (version=${e.receivedVersion}, drop)');
   }
-}
 
-/// Simple wrapper for decrypted payload.
-class _DecryptedEnvelope {
-  final Uint8List payload;
-  _DecryptedEnvelope(this.payload);
+  // ──────────────────────────── V3 Send/Receive (§2.6 + §5) ────────────────────────────
+  //
+  // V3.0 layered-frames pipeline entry points.
+
+  /// High-level V3 send API (Architecture v3.0 §2.6, sender steps 1-12):
+  ///   resolve user → fan-out to devices → build inner → user-sign → zstd →
+  ///   KEM-encrypt → wrap KEM → build outer → device-sign → PoW → tag → wire
+  ///
+  /// Returns true iff at least one device-leg of the recipient fan-out was
+  /// dispatched successfully via the node. The codec produces the inner KEM
+  /// bytes here; the outer wrap (Device-Sig + PoW + network_tag + send) lives
+  /// in [CleonaNode.sendToDevice].
+  ///
+  /// Offline fallback (S&F + Mailbox) is a TODO — `false` is returned so
+  /// callers can decide their queue-vs-drop policy explicitly.
+  Future<bool> sendToUser({
+    required Uint8List recipientUserId,
+    required proto.MessageTypeV3 messageType,
+    required Uint8List payload,
+    Uint8List? senderUserId,
+    Uint8List? groupId,
+    Uint8List? messageId,
+    proto.ContentMetadata? contentMetadata,
+    proto.EditMetadata? editMetadata,
+    proto.ExpiryMetadata? expiryMetadata,
+    proto.ErasureCodingMetadata? erasureMetadata,
+  }) async {
+    // 1. Sender identity: this CleonaService is bound to a single
+    //    IdentityContext (see ipc_server `_resolveService` per-request
+    //    routing). Cross-identity sends therefore go through the matching
+    //    service instance, not via a `senderUserId` override on a foreign
+    //    service. The legacy override parameter is kept for callers that
+    //    still pass it explicitly, but it MUST equal `identity.userId` —
+    //    a mismatch indicates a router-bug at the call-site.
+    final effectiveSenderUserId = senderUserId ?? identity.userId;
+    assert(_constantTimeEq(effectiveSenderUserId, identity.userId),
+        'sendToUser: senderUserId mismatch for service-bound identity '
+        '${identity.userIdHex.substring(0, 8)} — fix the call-site');
+
+    // 2. Resolve KEM-pubkeys for the recipient user from the contact store.
+    //    The Inner ApplicationFrame is KEM-encrypted under the recipient User
+    //    keypair (X25519 + ML-KEM-768). Both keys live on the contact record;
+    //    callers that haven't completed the CR exchange cannot reach this
+    //    user yet — drop with a TODO log.
+    final recipientHex = bytesToHex(recipientUserId);
+    final contact = _contacts[recipientHex];
+    if (contact == null ||
+        contact.x25519Pk == null ||
+        contact.mlKemPk == null) {
+      _log.warn('sendToUser: no KEM pubkeys for ${recipientHex.length >= 8 ? recipientHex.substring(0, 8) : recipientHex} '
+          '(contact=${contact != null}, x25519=${contact?.x25519Pk != null}, mlKem=${contact?.mlKemPk != null})');
+      return false;
+    }
+
+    // 3. Resolve recipient → list of authorized device-IDs (Architecture
+    //    §2.6.2 — Identity-Resolution via 2D-DHT auth-manifest).
+    List<Uint8List> deviceIds;
+    try {
+      deviceIds = await node.resolveUserToDevices(recipientUserId);
+    } catch (e) {
+      _log.warn('sendToUser: resolveUserToDevices threw $e — drop');
+      return false;
+    }
+    // DHT may time out before the routing table is warm (e.g. shortly after
+    // a CR-ACCEPT). Fall back to the device IDs we saw in the CR handshake.
+    if (deviceIds.isEmpty && contact.deviceNodeIds.isNotEmpty) {
+      _log.debug('sendToUser: DHT empty, falling back to contact.deviceNodeIds '
+          'for ${_hexShort(recipientUserId)}');
+      deviceIds = contact.deviceNodeIds.map(hexToBytes).toList(growable: false);
+    }
+    if (deviceIds.isEmpty) {
+      // §5.1 Layer 1 empty → skip Layer 2, go directly to Layer 3.
+      _log.info('sendToUser: no devices for ${_hexShort(recipientUserId)}'
+          ' — triggering offline cascade (S&F + Erasure)');
+      final effectiveMessageId = (messageId != null && messageId.isNotEmpty)
+          ? messageId
+          : SodiumFFI().randomBytes(16);
+      final inner = proto.ApplicationFrameV3()
+        ..recipientUserId = recipientUserId
+        ..senderUserId = effectiveSenderUserId
+        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+        ..messageId = effectiveMessageId
+        ..messageType = messageType
+        ..payload = payload;
+      if (groupId != null && groupId.isNotEmpty) inner.groupId = groupId;
+      if (contentMetadata != null) inner.contentMetadata = contentMetadata;
+      if (editMetadata != null) inner.editMetadata = editMetadata;
+      if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
+      if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
+      final kemBytes = V3FrameCodec.buildAndEncryptInner(
+        inner: inner,
+        senderUserEd25519Sk: identity.ed25519SecretKey,
+        senderUserMlDsaSk: identity.mlDsaSecretKey,
+        recipientUserX25519Pk: contact.x25519Pk!,
+        recipientUserMlKemPk: contact.mlKemPk!,
+      );
+      final outer = V3FrameCodec.buildOuter(
+        nextHopDeviceId: recipientUserId,
+        senderDeviceId: node.primaryIdentity.deviceNodeId,
+        deviceKeys: node.deviceKeyPair,
+        innerPayload: kemBytes,
+        payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
+        applicationFlavor: true,
+        skipPoW: true,
+      );
+      final canonicalBytes = node.serializePacketForOfflineDelivery(outer);
+      final fragmentBundleId =
+          SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+      await _distributeErasureFragments(
+        packetBytes: canonicalBytes,
+        messageId: fragmentBundleId,
+        recipientUserEd25519Pk: contact.ed25519Pk,
+        recipientUserNodeId: recipientUserId,
+      );
+      _storeSafOnMutualPeers(
+        recipientUserId: recipientUserId,
+        wrappedEnvelope: canonicalBytes,
+        storeId: SodiumFFI().randomBytes(16),
+      );
+      return false;
+    }
+
+    // 4. Per-device fan-out. The Inner ApplicationFrameV3 is identical for
+    //    every device of a given recipient user (recipient pubkeys are the
+    //    User-Keypair, not the Device-Keypair). The Outer NetworkPacketV3
+    //    differs per device (nextHopDeviceId + Device-Sig binding to that
+    //    routing target). Re-encrypt the Inner per device because the codec
+    //    mutates sig fields and KEM nonces, then re-build+sign the Outer.
+    //
+    //    The first successfully built outer is captured as the canonical
+    //    erasure-source for §5.4 Reed-Solomon offline-delivery: AppFrame
+    //    KEM is User-PK-keyed, so any per-device packet decapsulates with
+    //    the same User-KEM-SK — one fragment-bundle suffices for all of
+    //    the recipient's devices polling the same user-mailbox.
+    int dispatched = 0;
+    final senderDeviceId = node.deviceKeyPair.ed25519PublicKey;
+    // Note: senderDeviceId on the wire is sha256(secret + ed25519_pk). For now
+    // the routing layer keys peers by deviceNodeId from primaryIdentity, so
+    // reuse that — multi-tab unification is a Welle-3 follow-up.
+    final myDeviceNodeId = node.primaryIdentity.deviceNodeId;
+    // Inner messageId (16-byte UUID v4): identifies the logical message
+    // end-to-end, identical across all devices of the same recipient (the
+    // KEM-ciphertext varies per device, the inner frame including this ID
+    // does not). Receiver-side dedup, DELIVERY_RECEIPT correlation and
+    // edit/delete-by-ID all key on this. Caller may pre-supply for UI-id
+    // alignment (e.g. sender's optimistic msg.id == wire messageId hex).
+    final effectiveMessageId = (messageId != null && messageId.isNotEmpty)
+        ? messageId
+        : SodiumFFI().randomBytes(16);
+    proto.NetworkPacketV3? canonicalPacket;
+    for (final deviceId in deviceIds) {
+      try {
+        final inner = proto.ApplicationFrameV3()
+          ..recipientUserId = recipientUserId
+          ..senderUserId = effectiveSenderUserId
+          ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+          ..messageId = effectiveMessageId
+          ..messageType = messageType
+          ..payload = payload;
+        if (groupId != null && groupId.isNotEmpty) inner.groupId = groupId;
+        if (contentMetadata != null) inner.contentMetadata = contentMetadata;
+        if (editMetadata != null) inner.editMetadata = editMetadata;
+        if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
+        if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
+
+        final kemBytes = V3FrameCodec.buildAndEncryptInner(
+          inner: inner,
+          senderUserEd25519Sk: identity.ed25519SecretKey,
+          senderUserMlDsaSk: identity.mlDsaSecretKey,
+          recipientUserX25519Pk: contact.x25519Pk!,
+          recipientUserMlKemPk: contact.mlKemPk!,
+        );
+
+        // Outer is application-flavor (hybrid Device-Sig). PoW skipped for now
+        // and re-evaluated in Welle 3 once the LAN-detection helper is wired
+        // through the codec — Architecture §2.4 sender step 10 allows the
+        // skip on infrastructure / LAN destinations.
+        final outer = V3FrameCodec.buildOuter(
+          nextHopDeviceId: deviceId,
+          senderDeviceId: myDeviceNodeId,
+          deviceKeys: node.deviceKeyPair,
+          innerPayload: kemBytes,
+          payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
+          applicationFlavor: true,
+          skipPoW: true,
+        );
+
+        canonicalPacket ??= outer;
+
+        final ok = await node.sendToDevice(outer, deviceId);
+        if (ok) dispatched++;
+      } catch (e) {
+        _log.warn('sendToUser: per-device fan-out failed for '
+            '${_hexShort(deviceId)}: $e (continuing)');
+      }
+    }
+    // Suppress the unused-warning when senderDeviceId becomes load-bearing
+    // post-Welle-3; leaving the binding so Welle-3 wiring is a one-line edit.
+    // ignore: unnecessary_statements
+    senderDeviceId;
+
+    // RUDP-Light (Architecture §2.4.5): register the pending ACK with the
+    // tracker once at least one device-leg of the fan-out was dispatched.
+    // The tracker keys on `(messageIdHex, recipientUserHex)` and times out
+    // after `computeTimeout(baseRtt)` — on receipt it fires `onAckReceived`
+    // (DV-bridge → confirmRoute), on 3× consecutive timeout per route it
+    // fires `onRouteDown` (markRouteDown + Poison Reverse). `wasDirect` is
+    // computed at receipt time from the source address.
+    //
+    // V3.0 has no local re-send park (`onRetryNeeded` consumer in cleona_node
+    // forwards to `onMessageRetryExhausted`, which the offline cascade —
+    // S&F + Reed-Solomon — picks up). So we deliberately pass empty
+    // `usedAddresses` and null `serializedPacket`: the AckTracker only
+    // does timeout-bookkeeping + DV-bridge for V3 sends, not local retry.
+    // Address-success crediting still happens in the inbound path
+    // (`_onEnvelopeReceived → _touchPeer`) — see ack_tracker.dart:178.
+    if (dispatched > 0 &&
+        AckTracker.isAckWorthyV3(messageType) &&
+        !_constantTimeEq(recipientUserId, identity.userId)) {
+      final messageIdHex = bytesToHex(effectiveMessageId);
+      final recipientHex = bytesToHex(recipientUserId);
+      final baseRtt = node.dhtRpc.getRtt(recipientUserId);
+      final timeout = AckTracker.computeTimeout(baseRtt);
+      // Fire-and-forget — completer resolves on receipt or timeout, but
+      // the resolution path is already wired through the tracker callbacks
+      // (onAckReceived / onAckTimeout / onRouteDown).
+      final canonicalBytes = canonicalPacket != null
+          ? node.serializePacketForOfflineDelivery(canonicalPacket)
+          : null;
+      unawaited(node.ackTracker.trackSend(
+        messageIdHex,
+        recipientHex,
+        const <PeerAddress>[],
+        timeout,
+        serializedPacket: canonicalBytes,
+        recipientUserId: recipientUserId,
+      ));
+    }
+
+    // §5.4 Erasure-coded offline-delivery: the sender places fragments
+    // push-based on send-failure, not on every send (storage efficiency
+    // stays bounded). When at least one device accepted the direct send,
+    // the message is considered delivered and erasure-distribution is
+    // skipped — the recipient will receive the inner ApplicationFrame
+    // through the standard receive pipeline.
+    if (dispatched == 0 && canonicalPacket != null) {
+      final canonicalBytes =
+          node.serializePacketForOfflineDelivery(canonicalPacket);
+      final fragmentBundleId =
+          SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+      await _distributeErasureFragments(
+        packetBytes: canonicalBytes,
+        messageId: Uint8List.fromList(fragmentBundleId),
+        recipientUserEd25519Pk: contact.ed25519Pk,
+        recipientUserNodeId: recipientUserId,
+      );
+    }
+
+    return dispatched > 0;
+  }
+
+  /// Welle 5 Teil 4 §8.1.1 First-CR-Bootstrap receive-side. Called by the
+  /// daemon when an `InfrastructureFrameV3` with `messageType=
+  /// MTV3_CONTACT_REQUEST` was decapped against this device's
+  /// Device-KEM-SK and routed (by recipientDeviceId) to the identity that
+  /// owns this device-id. The InfrastructureFrame's payload is a
+  /// User-signed `ApplicationFrameV3` whose `senderUserId` corresponds to
+  /// pubkeys carried *in plaintext inside the CR payload* — that is the
+  /// §8.1.1 trust-bootstrap (the recipient cannot do contact-registry
+  /// lookup because the CR is what creates the contact).
+  ///
+  /// Verify path: parse inner ApplicationFrameV3, parse its
+  /// ContactRequestMsg payload, extract `(ed25519_pk, ml_dsa_pk)`, run the
+  /// User-Sig verify against those — then dispatch through the normal
+  /// [handleApplicationFrame] flow (identity-resolution + state mutation
+  /// downstream are unchanged).
+  Future<void> handleIncomingFirstContactRequest(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    proto.ApplicationFrameV3 inner;
+    try {
+      inner = proto.ApplicationFrameV3.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.debug('First-CR drop: ApplicationFrameV3 parse failed: $e');
+      return;
+    }
+    if (inner.messageType != proto.MessageTypeV3.MTV3_CONTACT_REQUEST) {
+      _log.debug('First-CR drop: inner messageType is ${inner.messageType.name}, '
+          'expected MTV3_CONTACT_REQUEST');
+      return;
+    }
+    if (Uint8List.fromList(inner.recipientUserId).length != identity.userId.length ||
+        !_constantTimeEq(Uint8List.fromList(inner.recipientUserId), identity.userId)) {
+      _log.debug('First-CR drop: recipientUserId mismatch '
+          '(packet=${bytesToHex(Uint8List.fromList(inner.recipientUserId)).substring(0, 8)}, '
+          'us=${identity.userIdHex.substring(0, 8)})');
+      return;
+    }
+    proto.ContactRequestMsg cr;
+    try {
+      cr = proto.ContactRequestMsg.fromBuffer(inner.payload);
+    } catch (e) {
+      _log.debug('First-CR drop: ContactRequestMsg parse failed: $e');
+      return;
+    }
+    if (cr.ed25519PublicKey.isEmpty || cr.mlDsaPublicKey.isEmpty) {
+      _log.debug('First-CR drop: CR payload missing sender pubkeys');
+      return;
+    }
+
+    // User-Sig-verify against the pubkeys carried in the CR (§8.1.1
+    // trust-bootstrap). Mirrors V3FrameCodec.decryptAndVerifyInner step 5.
+    final edSig = Uint8List.fromList(inner.userEd25519Sig);
+    final mlSig = Uint8List.fromList(inner.userMlDsaSig);
+    inner.clearUserEd25519Sig();
+    inner.clearUserMlDsaSig();
+    final signedBytes = inner.writeToBuffer();
+    inner.userEd25519Sig = edSig;
+    inner.userMlDsaSig = mlSig;
+    if (!SodiumFFI().verifyEd25519(
+        signedBytes, edSig, Uint8List.fromList(cr.ed25519PublicKey))) {
+      _log.debug('First-CR drop: Ed25519 user-sig invalid');
+      return;
+    }
+    if (!OqsFFI().mlDsaVerify(
+        signedBytes, mlSig, Uint8List.fromList(cr.mlDsaPublicKey))) {
+      _log.debug('First-CR drop: ML-DSA user-sig invalid');
+      return;
+    }
+
+    await handleApplicationFrame(
+      frame: inner,
+      senderDeviceId: senderDeviceId,
+      sourceAddr: sourceAddr,
+      sourcePort: sourcePort,
+      // §2.4.0: attach the inner-claimed senderUserId to the snapshot so
+      // bridge-layer F4-Gate (§8.1) can compare against the contact-store
+      // entry. Outer-Sig in First-CR is verified-or-bootstrap depending on
+      // whether we have prior infra exchange with the sender device.
+      snapshot: snapshot.withSenderUserId(
+          Uint8List.fromList(inner.senderUserId)),
+    );
+  }
+
+  /// Welle 6 §6.3 receive-side. Called by the daemon when an
+  /// `InfrastructureFrameV3` with `messageType=MTV3_RESTORE_BROADCAST` was
+  /// decapped against this device's Device-KEM-SK and routed (by
+  /// recipientDeviceId) to the identity that owns this device-id.
+  ///
+  /// The InfrastructureFrame's payload is a plain `RestoreBroadcast` proto
+  /// (NOT an ApplicationFrame wrap) carrying an old-Ed25519 inner signature
+  /// over the body — that is the §6.3 trust-bootstrap (the recipient cannot
+  /// run the standard User-Sig path because the recovering peer's user-keys
+  /// just changed). Forwards the raw body bytes to `_handleRestoreBroadcast`
+  /// which keys off `rb.oldNodeId` for the contact lookup and verifies the
+  /// inner old-Ed25519 sig against the contact's stored pubkey.
+  Future<void> handleIncomingRestoreBroadcastInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    // §2.4.0 / §8.1 — log the outer-sig status so live-debug can correlate
+    // bootstrap-pass cases. Restore is a special case: the inner old-Ed25519
+    // sig (verified in `_handleRestoreBroadcast` against the OLD
+    // contact.ed25519Pk) is the canonical authenticity check, so a
+    // bootstrap-skipped Outer-Sig is plausible (the recovering peer is on a
+    // fresh device). Don't drop on `skippedBootstrap`.
+    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
+      _log.warn('RESTORE_BROADCAST V3 Infra: outerSig='
+          '${snapshot.outerSigStatus.name} from device='
+          '${bytesToHex(senderDeviceId).substring(0, 8)} — '
+          'inner old-Ed25519 sig is the trust anchor (§6.3)');
+    }
+    _handleRestoreBroadcast(Uint8List.fromList(frame.payload));
+  }
+
+  /// Welle 6 §7.4 receive-side. Called by the daemon when an
+  /// `InfrastructureFrameV3` with `messageType=MTV3_KEY_ROTATION_BROADCAST`
+  /// was decapped against this device's Device-KEM-SK.
+  ///
+  /// The InfrastructureFrame path is reserved for the **Emergency variant**
+  /// (dual-sig in body — `oldSignatureEd25519` AND `newSignatureEd25519`).
+  /// Periodic KEM-only rotation continues on the ApplicationFrame path
+  /// because no signature key changes there.
+  ///
+  /// Receiver enforces the Emergency-discriminator by parsing the inner
+  /// `KeyRotationBroadcast` body and asserting both sig fields are
+  /// populated. Frames missing either sig are dropped — they belong on the
+  /// ApplicationFrame path, not here.
+  ///
+  /// Body filled in Welle 6 (Subagent C).
+  ///
+  /// Wire-layer: parses [frame.payload] as a `KeyRotationBroadcast` proto
+  /// (NOT an ApplicationFrame wrap — the InfrastructureFrame.payload IS the
+  /// signed broadcast body, per §2.3.5 + §7.4). Enforces the
+  /// Emergency-discriminator: both `oldSignatureEd25519` AND
+  /// `newSignatureEd25519` must be populated. Single-sig (Periodic) rotations
+  /// belong on the ApplicationFrame path and are dropped here as a
+  /// cross-layer-abuse defence.
+  ///
+  /// Inner-auth is the dual-sig itself. Outer-Sig status (`verified` vs.
+  /// `skippedBootstrap`) is informational only — the receiver MUST NOT
+  /// accept a rotation without dual-sig verification regardless of the
+  /// outer status, and the inner dual-sig dispatcher below enforces that.
+  /// We therefore proceed even on `skippedBootstrap`, matching the spec
+  /// note in §2.4.0 + §7.4.
+  Future<void> handleIncomingKeyRotationBroadcastInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    proto.KeyRotationBroadcast broadcast;
+    try {
+      broadcast = proto.KeyRotationBroadcast.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.debug('handleIncomingKeyRotationBroadcastInfra drop: '
+          'KeyRotationBroadcast parse failed: $e '
+          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
+      return;
+    }
+
+    // Discriminator: InfrastructureFrame path is reserved for the
+    // Emergency variant. A frame missing either sig was either a Periodic
+    // rotation that picked the wrong wire path (sender bug), or an
+    // attacker trying to launder a single-sig past the dual-sig gate.
+    if (broadcast.oldSignatureEd25519.isEmpty ||
+        broadcast.newSignatureEd25519.isEmpty) {
+      _log.warn('handleIncomingKeyRotationBroadcastInfra drop: missing '
+          'dual-sig (oldSig=${broadcast.oldSignatureEd25519.length}b '
+          'newSig=${broadcast.newSignatureEd25519.length}b) — the '
+          'InfrastructureFrame path is reserved for the Emergency variant; '
+          'periodic single-sig rotation belongs on the ApplicationFrame '
+          'path '
+          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
+      return;
+    }
+
+    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
+      // Inform-and-proceed: the dual-sig in the body is cryptographically
+      // sufficient. The dispatcher below will refuse if either sig fails
+      // to verify — that is the only authentication subject for this
+      // messageType (§7.4 Variant b).
+      _log.info('handleIncomingKeyRotationBroadcastInfra: outer-sig '
+          '${snapshot.outerSigStatus.name} (proceeding — dual-sig in body '
+          'is the authoritative inner-auth per §7.4)');
+    }
+
+    // §2.3.5 InfrastructureFrame has no senderUserId field — the handler
+    // keys `_contacts` by senderHex. Locate the matching contact by
+    // scanning whose stored ed25519Pk verifies the inner old-sig in the
+    // broadcast body.
+    final inferredSenderUserId = _findSenderUserIdForKeyRotation(broadcast);
+    if (inferredSenderUserId.isEmpty) {
+      _log.warn('handleIncomingKeyRotationBroadcastInfra drop: cannot '
+          'locate matching contact via old-sig verification '
+          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
+      return;
+    }
+    _handleKeyRotationBroadcast(
+        Uint8List.fromList(frame.payload), inferredSenderUserId);
+  }
+
+  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
+  /// with `messageType=MTV3_GUARDIAN_SHARE_STORE` was decapped against this
+  /// device's Device-KEM-SK and routed to the identity owning this device.
+  ///
+  /// The InfrastructureFrame's payload is the plain `GuardianShareStore`
+  /// proto (no inner KEM wrap — the frame-level Device-KEM encap is the
+  /// only confidentiality layer). Forward the raw body bytes directly to
+  /// `guardianService.handleShareStore`.
+  Future<void> handleIncomingGuardianShareStoreInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
+      _log.info('GUARDIAN_SHARE_STORE V3 Infra: outer-sig '
+          '${snapshot.outerSigStatus.name} from device='
+          '${bytesToHex(senderDeviceId).substring(0, 8)} — proceeding '
+          '(payload is the §6.2 share, recipient validates by storing)');
+    }
+    guardianService.handleShareStore(Uint8List.fromList(frame.payload));
+  }
+
+  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
+  /// with `messageType=MTV3_GUARDIAN_RESTORE_REQUEST` was decapped.
+  /// `guardianService.handleRestoreRequest` silently ignores the request if
+  /// we don't hold a share for the named owner — so a broadcast fan-out
+  /// from a triggering guardian arriving at non-guardian contacts is
+  /// correctly absorbed.
+  Future<void> handleIncomingGuardianRestoreRequestInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
+      _log.info('GUARDIAN_RESTORE_REQUEST V3 Infra: outer-sig '
+          '${snapshot.outerSigStatus.name} from device='
+          '${bytesToHex(senderDeviceId).substring(0, 8)} — proceeding '
+          '(non-share holders ignore in handleRestoreRequest)');
+    }
+    guardianService.handleRestoreRequest(Uint8List.fromList(frame.payload));
+  }
+
+  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
+  /// with `messageType=MTV3_GUARDIAN_RESTORE_RESPONSE` arrives directly
+  /// (NOT via DHT-fragment-retrieve — that path stores raw
+  /// GuardianRestoreResponse bytes inside FragmentStore.fragmentData and is
+  /// fetched separately). This direct path covers the future case where a
+  /// confirming guardian sends the response point-to-point to the
+  /// recovering owner once they come online.
+  Future<void> handleIncomingGuardianRestoreResponseInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    guardianService.handleRestoreResponse(Uint8List.fromList(frame.payload));
+  }
+
+  /// V3 InfraFrame route for FRAGMENT_STORE — Reed-Solomon erasure-coded
+  /// fragment delivery + S&F mailbox push (Architecture §5.4 + §23.3).
+  void handleIncomingFragmentStoreInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    _handleFragmentStore(Uint8List.fromList(frame.payload), senderDeviceId);
+  }
+
+  /// V3 InfraFrame route for FRAGMENT_RETRIEVE — request a mailbox dump
+  /// from a peer holding our fragments. The peer responds with a series
+  /// of FRAGMENT_STORE InfraFrames targeted at [senderDeviceId].
+  void handleIncomingFragmentRetrieveInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    _handleFragmentRetrieve(Uint8List.fromList(frame.payload), senderDeviceId);
+  }
+
+  /// V3 InfraFrame route for FRAGMENT_DELETE — explicit fragment-eviction
+  /// signal from the mailbox owner once they've pulled and reassembled.
+  void handleIncomingFragmentDeleteInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    _handleFragmentDelete(Uint8List.fromList(frame.payload));
+  }
+
+  // ── §5.5 Store-and-Forward InfraFrame Handlers ──────────────────────
+
+  void handleIncomingPeerStoreInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    try {
+      final store = proto.PeerStore.fromBuffer(frame.payload);
+      final recipientUserId = Uint8List.fromList(store.recipientNodeId);
+      final storeIdHex = bytesToHex(Uint8List.fromList(store.storeId));
+      final ttlMs = store.ttlMs.toInt();
+      final stored = node.peerMessageStore.storeMessage(
+        recipientUserId: recipientUserId,
+        wrappedEnvelope: Uint8List.fromList(store.wrappedEnvelope),
+        storeIdHex: storeIdHex,
+        ttlMs: ttlMs > 0 ? ttlMs : PeerMessageStore.defaultTtlMs,
+      );
+      final ack = proto.PeerStoreAck()
+        ..storeId = store.storeId
+        ..accepted = stored;
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_PEER_STORE_ACK,
+        innerPayload: Uint8List.fromList(ack.writeToBuffer()),
+        recipientDeviceId: senderDeviceId,
+      );
+    } catch (e) {
+      _log.debug('PEER_STORE error: $e');
+    }
+  }
+
+  void handleIncomingPeerRetrieveInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    try {
+      final retrieve = proto.PeerRetrieve.fromBuffer(frame.payload);
+      final requesterUserId = Uint8List.fromList(retrieve.requesterNodeId);
+      final envelopes = node.peerMessageStore.retrieveMessages(requesterUserId);
+      final response = proto.PeerRetrieveResponse()
+        ..storedEnvelopes.addAll(envelopes)
+        ..remaining = 0;
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE,
+        innerPayload: Uint8List.fromList(response.writeToBuffer()),
+        recipientDeviceId: senderDeviceId,
+      );
+      _log.info('PEER_RETRIEVE: sent ${envelopes.length} stored messages '
+          'to ${bytesToHex(senderDeviceId).substring(0, 8)}');
+    } catch (e) {
+      _log.debug('PEER_RETRIEVE error: $e');
+    }
+  }
+
+  void handleIncomingPeerRetrieveResponseInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    try {
+      final response = proto.PeerRetrieveResponse.fromBuffer(frame.payload);
+      var injected = 0;
+      for (final envelope in response.storedEnvelopes) {
+        try {
+          node.dispatchReassembledPacket(Uint8List.fromList(envelope));
+          injected++;
+        } catch (e) {
+          _log.debug('S&F re-inject failed: $e');
+        }
+      }
+      if (injected > 0) {
+        _log.info('S&F pull: re-injected $injected messages from '
+            '${bytesToHex(senderDeviceId).substring(0, 8)}');
+      }
+    } catch (e) {
+      _log.debug('PEER_RETRIEVE_RESPONSE error: $e');
+    }
+  }
+
+  /// Welle 6 §7.4 path-discriminator. Returns true iff [broadcast] carries
+  /// the Emergency-variant dual-sig (both `oldSignatureEd25519` and
+  /// `newSignatureEd25519` populated). Receivers use this to enforce the
+  /// path constraint: Emergency belongs on the InfrastructureFrame path,
+  /// Periodic on the ApplicationFrame path. Public so smoke tests can
+  /// assert the discriminator behaviour without spinning up a full service.
+  static bool isEmergencyKeyRotationBody(
+      proto.KeyRotationBroadcast broadcast) {
+    return broadcast.oldSignatureEd25519.isNotEmpty &&
+        broadcast.newSignatureEd25519.isNotEmpty;
+  }
+
+  /// Welle 6 §7.4: locate the contact whose stored `ed25519Pk` verifies the
+  /// `oldSignatureEd25519` field on a KeyRotationBroadcast. The
+  /// InfrastructureFrame carries no senderUserId, so we cannot trust any
+  /// claimed identity — the only sound lookup is "which of my known
+  /// contacts could have signed this?". Returns the contact's userId
+  /// (= nodeId) on hit, or empty bytes on miss.
+  Uint8List _findSenderUserIdForKeyRotation(
+      proto.KeyRotationBroadcast broadcast) {
+    final dataToVerify = (proto.KeyRotationBroadcast()
+          ..newEd25519Pk = broadcast.newEd25519Pk
+          ..newMlDsaPk = broadcast.newMlDsaPk
+          ..newX25519Pk = broadcast.newX25519Pk
+          ..newMlKemPk = broadcast.newMlKemPk)
+        .writeToBuffer();
+    final oldSig = Uint8List.fromList(broadcast.oldSignatureEd25519);
+    final sodium = SodiumFFI();
+    for (final contact in _contacts.values) {
+      if (contact.status != 'accepted') continue;
+      final pk = contact.ed25519Pk;
+      if (pk == null) continue;
+      try {
+        if (sodium.verifyEd25519(dataToVerify, oldSig, pk)) {
+          return Uint8List.fromList(contact.nodeId);
+        }
+      } catch (_) {/* keep scanning */}
+    }
+    return Uint8List(0);
+  }
+
+  /// Welle 5 Teil 4 (§2.4 receiver): entry point for raw V3 application
+  /// packets routed to *this* identity by the daemon dispatcher
+  /// (`service_daemon._onAppPacketDispatch`). Performs inner KEM-decap with
+  /// this identity's User-KEM-private-keys, User-Sig-verify against the
+  /// sender's contact-registry pubkeys, and forwards to
+  /// [handleApplicationFrame] on success.
+  ///
+  /// Drop policy follows §2.4 [9-13]: silent drop on every Inner-verify
+  /// failure. Sender-pubkey-miss = "unknown contact" → KEX-Gate (§8.2).
+  /// Logged at debug; no error response on the wire.
+  ///
+  /// Returns an [AppFrameDispatchOutcome] so the multi-identity dispatcher
+  /// (§2.4 step [9] try-loop, §3.1 daemon-global deviceID) can decide
+  /// whether to try the next hosted identity. KEM-decap-failure means the
+  /// frame was not addressed to this identity's User-KEM keypair — the
+  /// caller MUST try other hosted identities. Any failure after a successful
+  /// KEM-decap is final (the frame WAS for this identity but failed verify).
+  Future<AppFrameDispatchOutcome> handleIncomingApplicationPacket(
+    proto.NetworkPacketV3 packet,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) async {
+    final result = V3FrameCodec.decryptAndVerifyInner(
+      innerPayload: Uint8List.fromList(packet.payload),
+      ourUserX25519Sk: identity.x25519SecretKey,
+      ourUserMlKemSk: identity.mlKemSecretKey,
+      lookupUserEd25519Pk: (senderUserId) {
+        final c = _contacts[bytesToHex(senderUserId)];
+        return c?.ed25519Pk ?? Uint8List(0);
+      },
+      lookupUserMlDsaPk: (senderUserId) {
+        final c = _contacts[bytesToHex(senderUserId)];
+        return c?.mlDsaPk ?? Uint8List(0);
+      },
+      // §8.1.1 Trust-Bootstrap: when the sender is not yet in `_contacts`
+      // (first CR / response to our CR before the contact transitioned to
+      // `accepted`), the body carries the sender's User-Pubkeys inline.
+      // Without this fallback the verify drops with `userSigInvalid` and
+      // mutual contact-setup deadlocks (§8.1.1 explicitly allows the
+      // pubkeys-from-body trust-bootstrap for these two message types).
+      trustBootstrapPubkeys: (frame) {
+        try {
+          if (frame.messageType == proto.MessageTypeV3.MTV3_CONTACT_REQUEST) {
+            final cr = proto.ContactRequestMsg.fromBuffer(frame.payload);
+            if (cr.ed25519PublicKey.isNotEmpty && cr.mlDsaPublicKey.isNotEmpty) {
+              return (
+                edPk: Uint8List.fromList(cr.ed25519PublicKey),
+                mlDsaPk: Uint8List.fromList(cr.mlDsaPublicKey),
+              );
+            }
+          } else if (frame.messageType ==
+              proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE) {
+            final crr = proto.ContactRequestResponse.fromBuffer(frame.payload);
+            if (crr.ed25519PublicKey.isNotEmpty && crr.mlDsaPublicKey.isNotEmpty) {
+              return (
+                edPk: Uint8List.fromList(crr.ed25519PublicKey),
+                mlDsaPk: Uint8List.fromList(crr.mlDsaPublicKey),
+              );
+            }
+          }
+        } catch (_) {/* malformed body — keep silent drop */}
+        return null;
+      },
+    );
+    final frame = result.frame;
+    if (frame == null) {
+      // Distinguish "frame not for this identity" (KEM-decap failed → try
+      // next hosted identity) from "decap succeeded but verify failed"
+      // (final drop, no retry). Per §2.4 step [9] + Edit 2.
+      final isKemMiss = result.error == InnerVerifyError.kemDecapFailed ||
+          result.error == InnerVerifyError.kemVersionRejected;
+      if (isKemMiss) {
+        return AppFrameDispatchOutcome.notForThisIdentity;
+      }
+      _log.debug('V3 APP drop: ${result.error?.name ?? "unknown"} '
+          'from device=${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)}');
+      return AppFrameDispatchOutcome.droppedAfterDecap;
+    }
+
+    // §2.4 step [14] (Edit 3): cross-validate Inner.recipientUserId against
+    // the identity that successfully decapped. Defence-in-depth — should
+    // never trigger for legitimate frames since both PKs derive from the
+    // same User-Master-Seed.
+    final inboundRecipient = Uint8List.fromList(frame.recipientUserId);
+    if (!_constantTimeEq(inboundRecipient, identity.userId)) {
+      _log.warn('V3 APP drop: KEM-decap succeeded under '
+          '${identity.userIdHex.substring(0, 8)} but Inner.recipientUserId '
+          '= ${bytesToHex(inboundRecipient).substring(0, 8)} (identity mismatch)');
+      return AppFrameDispatchOutcome.droppedAfterDecap;
+    }
+
+    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+    await handleApplicationFrame(
+      frame: frame,
+      senderDeviceId: senderDeviceId,
+      sourceAddr: sourceAddr,
+      sourcePort: sourcePort,
+      snapshot: snapshot.withSenderUserId(
+          Uint8List.fromList(frame.senderUserId)),
+    );
+    return AppFrameDispatchOutcome.delivered;
+  }
+
+  /// V3 receive-side dispatcher (Architecture v3.0 §2.6, receiver step 13).
+  /// Called by the node after the outer Device-Sig has been verified, the
+  /// inner KEM has been decrypted, and the User-Sig has been verified. The
+  /// frame is trusted at this point — this method only routes to subsystem-
+  /// specific handlers.
+  ///
+  /// Each handler dispatches to the subsystem-specific business logic.
+  Future<void> handleApplicationFrame({
+    required proto.ApplicationFrameV3 frame,
+    required Uint8List senderDeviceId,
+    required InternetAddress sourceAddr,
+    required int sourcePort,
+    required SenderIdentitySnapshot snapshot,
+  }) async {
+    // Receive-side dedup (Architecture §5.8 RUDP-Light): drop duplicate
+    // frames silently. The same logical message can arrive via Direct +
+    // Reed-Solomon reassembly + S&F mutual peer; without dedup the user
+    // sees the message thrice and the sender gets three DELIVERY_RECEIPTs.
+    // Inner.messageId is set by `sendToUser` (16-byte UUID v4); empty
+    // messageIds fall through (transitional path until all senders are
+    // wired — receipt-emit just won't happen for those).
+    if (frame.messageId.isNotEmpty) {
+      final msgIdHex = bytesToHex(Uint8List.fromList(frame.messageId));
+      if (_processedMessageIds.contains(msgIdHex)) {
+        _log.debug('handleApplicationFrame: duplicate ${frame.messageType.name} '
+            'msgId=${msgIdHex.substring(0, 8)} — dropped');
+        return;
+      }
+      _processedMessageIds.add(msgIdHex);
+      while (_processedMessageIds.length > _processedMessageIdsCap) {
+        _processedMessageIds.remove(_processedMessageIds.first);
+      }
+    }
+
+    // §3.1 A-2: refresh sender's known deviceNodeId on every incoming
+    // ApplicationFrame so sendToUser's contact.deviceNodeIds fallback
+    // stays warm without relying on DHT resolution.
+    final senderUserHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+    final senderContact = _contacts[senderUserHex];
+    if (senderContact != null) {
+      final senderDeviceHex = bytesToHex(senderDeviceId);
+      if (!senderContact.deviceNodeIds.contains(senderDeviceHex)) {
+        senderContact.deviceNodeIds.add(senderDeviceHex);
+        _saveContacts();
+      }
+    }
+
+    switch (frame.messageType) {
+      // Messaging — Cluster C2
+      case proto.MessageTypeV3.MTV3_TEXT:
+        _handleTextV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_INLINE:
+        _handleMediaInlineV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
+        _handleMediaAnnounceV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_REQUEST:
+        // Fire-and-forget: chunk-stream may take a while; the dispatch loop
+        // mustn't block on it.
+        unawaited(_handleMediaRequestV3(frame, senderDeviceId, snapshot));
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_CHUNK:
+        _handleMediaChunkV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_COMPLETE:
+        _handleMediaCompleteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_MEDIA_REJECT:
+        _handleMediaRejectV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_REACTION:
+        _handleReactionV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_REPLY:
+        _handleReplyV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_EDIT:
+        _handleEditV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_DELETE:
+        _handleDeleteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_VOICE_MESSAGE:
+        _handleVoiceMessageV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Layer-Replies (ephemeral, ACK) — Cluster C1
+      case proto.MessageTypeV3.MTV3_TYPING_INDICATOR:
+        _handleTypingIndicatorV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_READ_RECEIPT:
+        _handleReadReceiptV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT:
+        _handleDeliveryReceiptV3(frame, senderDeviceId, snapshot,
+            sourceAddr: sourceAddr);
+        break;
+
+      // Recovery / Identity / Profile — Cluster C4
+      case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+        _handleRestoreBroadcastV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_RESTORE_RESPONSE:
+        _handleRestoreResponseV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_DELETED:
+        _handleIdentityDeletedV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_PROFILE_UPDATE:
+        _handleProfileUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+        _handleKeyRotationBroadcastV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK:
+        _handleKeyRotationAckV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Contact-Request — Cluster C4
+      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
+        _handleContactRequestV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE:
+        _handleContactRequestResponseV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Groups — Cluster C4
+      case proto.MessageTypeV3.MTV3_GROUP_CREATE:
+        _handleGroupCreateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_GROUP_INVITE:
+        _handleGroupInviteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_GROUP_LEAVE:
+        _handleGroupLeaveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_GROUP_KEY_UPDATE:
+        _handleGroupKeyUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Channels — Cluster C4
+      case proto.MessageTypeV3.MTV3_CHANNEL_CREATE:
+        _handleChannelCreateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_POST:
+        _handleChannelPostV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_INVITE:
+        _handleChannelInviteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_LEAVE:
+        _handleChannelLeaveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE:
+        _handleChannelRoleUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_BAD_BADGE_REPORT:
+        _handleChannelBadBadgeReportV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE:
+        _handleChannelJuryVoteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION:
+        _handleChannelModDecisionV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_SUBSCRIBE_PROBE:
+        _handleChannelSubscribeProbeV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST:
+        _handleChannelJoinRequestV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHANNEL_REPORT:
+        _handleChannelReportV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Calls — Cluster C3
+      case proto.MessageTypeV3.MTV3_CALL_INVITE:
+        _handleCallInviteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_ANSWER:
+        _handleCallAnswerV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_REJECT:
+        _handleCallRejectV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_HANGUP:
+        _handleCallHangupV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_ICE_CANDIDATE:
+        _handleIceCandidateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_REJOIN:
+        _handleCallRejoinV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_AUDIO:
+        _handleCallAudioV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_VIDEO:
+        _handleCallVideoV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
+        // Signal-only: ask our video encoder to force the next frame as a
+        // keyframe. Empty payload by design.
+        onKeyframeRequested?.call();
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO:
+        _handleCallGroupAudioV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO:
+        _handleCallGroupVideoV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_GROUP_LEAVE:
+        _handleCallGroupLeaveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE:
+        _handleCallGroupKeyRotateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_RTT_PING:
+        _handleCallRttPingV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_RTT_PONG:
+        _handleCallRttPongV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_TREE_UPDATE:
+        _handleCallTreeUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Wave 2B.3: PEER_LIST_*, DHT_*, ROUTE_UPDATE, REACHABILITY_*, HOLE_PUNCH_*
+      // are §2.3.5 InfrastructureFrames handled in cleona_node.dart's
+      // `_dispatchInfrastructureFrameLocal`. They never arrive as
+      // ApplicationFrames on the wire — the V3 hard-cut routes them as
+      // InfrastructureFrames — so cases here would be unreachable.
+      //
+      // FRAGMENT_* and PEER_STORE_* carry encrypted user-content and are
+      // handled by service-layer Infra-hooks in service_daemon.dart
+      // (handleIncomingFragmentStoreInfra etc.). They are not dispatched
+      // through this ApplicationFrame switch either.
+
+      // Chat-Config — Cluster C4
+      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE:
+        _handleChatConfigUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_RESPONSE:
+        _handleChatConfigResponseV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // (ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_* — see comment
+      //  on Wave 2B.3 above; all dispatched in cleona_node.dart.)
+
+      // Identity-Resolution (§2.2.4) — Cluster C4
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:
+        _handleIdentityAuthPublishV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE:
+        _handleIdentityAuthRetrieveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE:
+        _handleIdentityAuthResponseV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH:
+        _handleIdentityLivePublishV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE:
+        _handleIdentityLiveRetrieveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
+        _handleIdentityLiveResponseV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Multi-Device — Cluster C4
+      case proto.MessageTypeV3.MTV3_TWIN_SYNC:
+        _handleTwinSyncV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_REQUEST:
+        _handleDevicePairRequestV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_APPROVE:
+        _handleDevicePairApproveV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_DEVICE_REVOCATION:
+        _handleDeviceRevocationV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Calendar — Cluster C4
+      case proto.MessageTypeV3.MTV3_CALENDAR_INVITE:
+        _handleCalendarInviteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALENDAR_RSVP:
+        _handleCalendarRsvpV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALENDAR_UPDATE:
+        _handleCalendarUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALENDAR_DELETE:
+        _handleCalendarDeleteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST:
+        _handleFreeBusyRequestV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE:
+        _handleFreeBusyResponseV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // Polls — Cluster C4
+      case proto.MessageTypeV3.MTV3_POLL_CREATE:
+        _handlePollCreateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_POLL_VOTE:
+        _handlePollVoteV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS:
+        _handlePollVoteAnonymousV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_POLL_UPDATE:
+        _handlePollUpdateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_POLL_SNAPSHOT:
+        _handlePollSnapshotV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_POLL_REVOKE:
+        _handlePollRevokeV3(frame, senderDeviceId, snapshot);
+        break;
+
+      // In-Call Collaboration (§25, geplant) — Cluster C3
+      case proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE:
+        _handleWhiteboardStrokeV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE:
+        _handleWhiteboardPageV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_FILE_EXCHANGE:
+        _handleFileExchangeV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CLIPBOARD_EXCHANGE:
+        _handleClipboardExchangeV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME:
+        _handleScreenShareFrameV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_CHAT:
+        _handleCallChatV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_REMOTE_CONTROL_INPUT:
+        _handleRemoteControlInputV3(frame, senderDeviceId, snapshot);
+        break;
+
+      default:
+        _log.warn('handleApplicationFrame: unhandled type ${frame.messageType}');
+    }
+
+    if (_isUserMessage(frame.messageType)) {
+      node.statsCollector.addMessageReceived();
+    }
+
+    // Auto-DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light): for ack-worthy
+    // ApplicationFrame types, emit a receipt back to the sender's UserID
+    // with the inner messageId. The sender's `_handleDeliveryReceiptV3`
+    // upgrades the matching outgoing UiMessage from `sent` to `delivered`.
+    // Skipped when:
+    //   - messageId empty (sender hasn't been migrated to set inner.messageId),
+    //   - senderUserId empty,
+    //   - sender is ourselves (loopback / self-send won't have a contact).
+    if (AckTracker.isAckWorthyV3(frame.messageType) &&
+        frame.messageId.isNotEmpty &&
+        frame.senderUserId.isNotEmpty) {
+      final senderUserId = Uint8List.fromList(frame.senderUserId);
+      if (!_constantTimeEq(senderUserId, identity.userId)) {
+        _sendDeliveryReceiptV3(
+          recipientUserId: senderUserId,
+          messageId: Uint8List.fromList(frame.messageId),
+        );
+      }
+    }
+  }
+
+  /// Emit a V3 DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light) for a
+  /// successfully received ApplicationFrame. Fire-and-forget — receipt
+  /// loss is tolerable (sender's AckTracker times out and triggers its
+  /// own retry / route-down logic).
+  void _sendDeliveryReceiptV3({
+    required Uint8List recipientUserId,
+    required Uint8List messageId,
+  }) {
+    final receipt = proto.DeliveryReceipt()
+      ..messageId = messageId
+      ..deliveredAt = Int64(DateTime.now().millisecondsSinceEpoch);
+    sendToUser(
+      recipientUserId: recipientUserId,
+      messageType: proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
+      payload: receipt.writeToBuffer(),
+    );
+  }
+
+  // ──────────────────────────── V3 Handler Stubs ────────────────────────────
+  // All handlers are intentional NO-OPs that log "TODO V3 handler not migrated".
+  // Migration order: C1 (layer-replies) → C2 (messaging) → C3 (calls) → C4 (rest).
+  // Per Architecture-Regel #1: explicit TODO is the spec, NOT silent fallback.
+
+  // C1 — Layer-Replies (V3 migration of _handleDeliveryReceipt /
+  // _handleReadReceipt / _handleEphemeral-typing). The V3 frame has no
+  // groupId field — group fan-out for these ephemeral types lands with
+  // C4-Groups; here the conversation lookup is DM-style on
+  // bytesToHex(senderUserId), with the TypingIndicator carrying a
+  // conversationId field for forward-compat.
+  //
+  // The V3-Neuerung: senderDeviceId is now available for per-device ACK
+  // bookkeeping. The C1 cluster does not yet track per-device ACKs
+  // (AckTracker is keyed by recipient nodeId / route, not by device); the
+  // parameter is accepted and logged for traceability so future Welle-3
+  // wiring is a one-line edit.
+
+  /// V3 DELIVERY_RECEIPT: sender side marks the outgoing message as
+  /// `delivered`. Conversation lookup is on senderUserId-hex (DM); group
+  /// receipts are deferred to C4-Groups.
+  void _handleDeliveryReceiptV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot,
+      {InternetAddress? sourceAddr}) {
+    try {
+      final receipt = proto.DeliveryReceipt.fromBuffer(frame.payload);
+      if (receipt.messageId.isEmpty) return;
+      final msgIdHex = bytesToHex(Uint8List.fromList(receipt.messageId));
+      final conversationId =
+          bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      // Bridge to AckTracker (RUDP-Light §2.4.5): consume the pending entry
+      // registered by `sendToUser` so the route-failure / route-down logic
+      // (3× consecutive timeout → markRouteDown + Poison Reverse) and the
+      // address-success bookkeeping can fire. `wasDirect` heuristic:
+      // relay-delivered receipts arrive with from=0.0.0.0
+      // (no source address known), direct UDP receipts carry the recipient's
+      // real address. confirmRoute (DV) only fires for direct receipts.
+      final wasDirect =
+          sourceAddr != null && sourceAddr.address != '0.0.0.0';
+      // §3.1 B-1: pass senderDeviceId (deviceId) so the ACK→DV bridge
+      // operates on routing-layer IDs, not identity-layer IDs.
+      node.ackTracker.handleAck(
+          msgIdHex, bytesToHex(senderDeviceId), wasDirect: wasDirect);
+
+      final conv = conversations[conversationId];
+      if (conv == null) return;
+      for (final msg in conv.messages) {
+        if (msg.id == msgIdHex &&
+            msg.isOutgoing &&
+            msg.status == MessageStatus.sent) {
+          msg.status = MessageStatus.delivered;
+          onStateChanged?.call();
+          break;
+        }
+      }
+    } catch (e) {
+      _log.warn('handleDeliveryReceiptV3: parse fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} '
+          'device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// V3 READ_RECEIPT: mark outgoing as `read` and stamp readAt for expiry.
+  /// Conversation lookup is DM-style (senderUserId-hex). Backward-compat
+  /// with raw-message-ID payloads is dropped in V3 — V3 senders always
+  /// emit a structured ReadReceipt protobuf.
+  void _handleReadReceiptV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final receipt = proto.ReadReceipt.fromBuffer(frame.payload);
+      if (receipt.messageId.isEmpty) return;
+      final msgIdHex = bytesToHex(Uint8List.fromList(receipt.messageId));
+      final readAt = receipt.readAt > 0
+          ? DateTime.fromMillisecondsSinceEpoch(receipt.readAt.toInt())
+          : DateTime.now();
+      final conversationId =
+          bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final conv = conversations[conversationId];
+      if (conv == null) return;
+      for (final msg in conv.messages) {
+        if (msg.id == msgIdHex && msg.isOutgoing) {
+          msg.status = MessageStatus.read;
+          msg.readAt ??= readAt;
+          onReadReceiptReceived?.call(conversationId, msgIdHex);
+          break;
+        }
+      }
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('handleReadReceiptV3: parse fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} '
+          'device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// V3 TYPING_INDICATOR: animate typing dots in UI. Per-chat config
+  /// (`typingIndicators`) gates the indicator on the receiver side.
+  /// V3-Neuerung: empty/unparseable payload no longer treated as
+  /// is_typing=true — V3 senders always send a structured TypingIndicator.
+  void _handleTypingIndicatorV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      // Parse first so that the convId-from-payload (group support) lands
+      // even when the per-DM conversation hasn't materialised yet.
+      bool isTyping = true;
+      String convIdFromPayload = '';
+      if (frame.payload.isNotEmpty) {
+        final indicator = proto.TypingIndicator.fromBuffer(frame.payload);
+        isTyping = indicator.isTyping;
+        convIdFromPayload = indicator.conversationId;
+      }
+      final conversationId =
+          convIdFromPayload.isNotEmpty ? convIdFromPayload : senderHex;
+      final conv = conversations[conversationId];
+      // Per-chat opt-out: receiver suppresses indicator if disabled.
+      if (conv != null && !conv.config.typingIndicators) return;
+
+      if (isTyping) {
+        _typingTimestamps[senderHex] = DateTime.now();
+      } else {
+        _typingTimestamps.remove(senderHex);
+      }
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('handleTypingIndicatorV3: parse fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} '
+          'device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  // C2 — Messaging
+  //
+  // Pattern (parallel zur C1-Migration in _handleDeliveryReceiptV3 etc.):
+  //   - Inner-KEM-Decrypt + User-Sig-Verify hat das Frame VOR Aufruf bereits
+  //     bestanden (cleona_node.dart). Hier nur frame.payload parsen +
+  //     UI-State updaten + Notifications.
+  //   - Multi-Identity / Group-Fanout: ApplicationFrameV3.group_id (Field 17)
+  //     trägt die Group/Channel-Conversation-ID für Pairwise-Fan-out (jeder
+  //     Member kriegt seinen eigenen sendToUser-Call mit identischem
+  //     group_id). Receiver liest frame.groupId und dispatcht in den passenden
+  //     Group/Channel-Tab; leer = DM auf Sender-Hex.
+
+  /// V3 TEXT: TextMessageV3-payload. Reply-fields (replyToMessageId +
+  /// replyToSnippet) live on the proto sub-message. Link-Preview travels
+  /// in `tm.linkPreview` (sender-side only — the receiver renders the card
+  /// from the embedded data and MUST NOT issue a network request).
+  void _handleTextV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
+      // V3: ApplicationFrameV3.group_id (Field 17) trägt die Group/Channel-
+      // Conversation-ID für Pairwise-Fan-out. Leer = DM auf Sender-Hex.
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+
+      // Reply metadata: hex-encode the wire bytes; resolve sender display-
+      // name from the local conversation (best-effort; UI falls back to the
+      // snippet text if the original bubble is no longer retained).
+      String? replyToMessageId;
+      String? replyToText;
+      String? replyToSender;
+      if (tm.replyToMessageId.isNotEmpty) {
+        replyToMessageId =
+            bytesToHex(Uint8List.fromList(tm.replyToMessageId));
+        if (tm.replyToSnippet.isNotEmpty) replyToText = tm.replyToSnippet;
+        final origConv = conversations[conversationId];
+        if (origConv != null) {
+          final orig = origConv.messages
+              .where((m) => m.id == replyToMessageId)
+              .firstOrNull;
+          if (orig != null) {
+            replyToSender = _contacts[orig.senderNodeIdHex]?.displayName ??
+                orig.senderNodeIdHex.substring(0, 8);
+            // If the snippet on the wire was empty (older sender or trimmed),
+            // fall back to the text we still have locally.
+            replyToText ??= orig.text.length > 200
+                ? orig.text.substring(0, 200)
+                : orig.text;
+          }
+        }
+      }
+
+      final msg = UiMessage(
+        id: msgId,
+        conversationId: conversationId,
+        senderNodeIdHex: senderHex,
+        text: tm.text,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+        type: UiMessageType.text,
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+        readAt: DateTime.now(),
+        replyToMessageId: replyToMessageId,
+        replyToText: replyToText,
+        replyToSender: replyToSender,
+      );
+
+      // Link preview from sender (Architecture §2.3.4). We trust the
+      // sender-supplied data and DO NOT fetch — empty url means no preview.
+      if (tm.hasLinkPreview() && tm.linkPreview.url.isNotEmpty) {
+        final lp = tm.linkPreview;
+        msg.linkPreviewUrl = lp.url;
+        msg.linkPreviewTitle = lp.title.isNotEmpty ? lp.title : null;
+        msg.linkPreviewDescription =
+            lp.description.isNotEmpty ? lp.description : null;
+        msg.linkPreviewSiteName =
+            lp.siteName.isNotEmpty ? lp.siteName : null;
+        if (lp.thumbnail.isNotEmpty) {
+          msg.linkPreviewThumbnailBase64 = base64Encode(lp.thumbnail);
+        }
+      }
+
+      final isChannel = _channels.containsKey(conversationId);
+      final isGroup = _groups.containsKey(conversationId);
+      _addMessageToConversation(conversationId, msg,
+          isGroup: isGroup, isChannel: isChannel);
+      if (!_shouldSuppressNotification(
+          conversationId, msg.timestamp.millisecondsSinceEpoch)) {
+        notificationSound.playMessageSound();
+        notificationSound.vibrate(VibrationType.message);
+        final senderName =
+            _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+        _postAndroidNotification(
+            senderName,
+            tm.text.length > 100 ? '${tm.text.substring(0, 100)}...' : tm.text,
+            conversationId);
+        _lastNotifiedAt[conversationId] = DateTime.now();
+      }
+      _log.info(
+          'TEXT-V3 from ${senderHex.substring(0, 8)} (device=${_hexShort(senderDeviceId)}): '
+          '${tm.text.length > 50 ? tm.text.substring(0, 50) : tm.text}');
+    } catch (e) {
+      _log.warn('handleTextV3: parse fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_INLINE: ≤256KB inline payload (raw bytes oder VoicePayload-
+  /// proto je nach MIME). frame.contentMetadata trägt MIME, filename, size.
+  void _handleMediaInlineV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+      final metadata = frame.contentMetadata;
+
+      // Voice: VoicePayload-Wrapper.
+      Uint8List actualFileData = Uint8List.fromList(frame.payload);
+      String? transcriptText;
+      String? transcriptLanguage;
+      double? transcriptConfidence;
+      final isVoice = metadata.mimeType.startsWith('audio/');
+      if (isVoice) {
+        try {
+          final voicePayload = proto.VoicePayload.fromBuffer(frame.payload);
+          if (voicePayload.audioData.isNotEmpty) {
+            actualFileData = Uint8List.fromList(voicePayload.audioData);
+            if (voicePayload.transcriptText.isNotEmpty) {
+              transcriptText = voicePayload.transcriptText;
+              transcriptLanguage = voicePayload.transcriptLanguage;
+              transcriptConfidence = voicePayload.transcriptConfidence.toDouble();
+            }
+          }
+        } catch (_) {/* raw audio bytes */}
+      }
+
+      final mediaDir = Directory('$profileDir/media');
+      if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
+      final filename =
+          metadata.filename.isNotEmpty ? metadata.filename : 'file_$msgId';
+      final savePath = '${mediaDir.path}/$filename';
+      File(savePath).writeAsBytesSync(actualFileData);
+
+      final thumbnailB64 =
+          metadata.thumbnail.isNotEmpty ? base64Encode(metadata.thumbnail) : null;
+      final effectiveThumbnail = thumbnailB64 ??
+          (metadata.mimeType.startsWith('image/') &&
+                  actualFileData.length <= 100 * 1024
+              ? base64Encode(actualFileData)
+              : null);
+
+      final msg = UiMessage(
+        id: msgId,
+        conversationId: conversationId,
+        senderNodeIdHex: senderHex,
+        text: filename,
+        timestamp:
+            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+        type: _msgTypeFromMime(metadata.mimeType),
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+        filePath: savePath,
+        mimeType: metadata.mimeType,
+        fileSize: actualFileData.length,
+        filename: filename,
+        thumbnailBase64: effectiveThumbnail,
+        mediaState: MediaDownloadState.completed,
+        transcriptText: transcriptText,
+        transcriptLanguage: transcriptLanguage,
+        transcriptConfidence: transcriptConfidence,
+      );
+
+      final isGroup = _groups.containsKey(conversationId);
+      _addMessageToConversation(conversationId, msg, isGroup: isGroup);
+      if (!_shouldSuppressNotification(
+          conversationId, msg.timestamp.millisecondsSinceEpoch)) {
+        notificationSound.playMessageSound();
+        notificationSound.vibrate(VibrationType.message);
+        final senderName =
+            _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+        final label = metadata.mimeType.startsWith('image/')
+            ? '📷 Bild'
+            : metadata.mimeType.startsWith('video/')
+                ? '🎬 Video'
+                : metadata.mimeType.startsWith('audio/')
+                    ? '🎵 Audio'
+                    : '📎 Datei';
+        _postAndroidNotification(senderName, label, conversationId);
+        _lastNotifiedAt[conversationId] = DateTime.now();
+      }
+      _log.info(
+          '[E2E media-inline-v3-recv] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} msgId=${msgId.substring(0, 8)} '
+          'filename=$filename size=${actualFileData.length} mime=${metadata.mimeType}');
+
+      // Local transcription fallback for voice without source-side transcript.
+      if (isVoice && transcriptText == null) {
+        _voiceTranscription?.enqueueTranscription(
+          messageId: msgId,
+          audioFilePath: savePath,
+        );
+      }
+    } catch (e) {
+      _log.warn('handleMediaInlineV3: failed: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_ANNOUNCE: Stage-1 announcement of >256KB media. Receiver
+  /// either auto-accepts (size+mime policy) or shows a placeholder for
+  /// manual click. payload is empty (metadata lives in frame.contentMetadata).
+  void _handleMediaAnnounceV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+      final metadata = frame.contentMetadata;
+
+      final thumbnailB64 = metadata.thumbnail.isNotEmpty
+          ? base64Encode(metadata.thumbnail)
+          : null;
+
+      final msg = UiMessage(
+        id: msgId,
+        conversationId: conversationId,
+        senderNodeIdHex: senderHex,
+        text: metadata.filename,
+        timestamp:
+            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+        type: _msgTypeFromMime(metadata.mimeType),
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+        mimeType: metadata.mimeType,
+        fileSize: metadata.fileSize.toInt(),
+        filename: metadata.filename,
+        thumbnailBase64: thumbnailB64,
+        mediaState: MediaDownloadState.announced,
+      );
+
+      final isGroup = _groups.containsKey(conversationId);
+      _addMessageToConversation(conversationId, msg, isGroup: isGroup);
+      _log.info(
+          '[E2E media-announce-v3-recv] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} msgId=${msgId.substring(0, 8)} '
+          'filename=${metadata.filename} size=${metadata.fileSize} '
+          'mime=${metadata.mimeType}');
+
+      // Auto-accept policy per Architecture §3.4.3. Fires the same V3
+      // MEDIA_REQUEST path the manual UI click uses.
+      final autoOk = _mediaSettings.shouldAutoDownload(
+          metadata.mimeType, metadata.fileSize.toInt());
+      if (autoOk) {
+        _log.info(
+            'media-announce-v3 auto-accept: triggering MEDIA_REQUEST for '
+            'msgId=${msgId.substring(0, 8)}');
+        unawaited(acceptMediaDownload(conversationId, msgId));
+      }
+    } catch (e) {
+      _log.warn('handleMediaAnnounceV3: failed: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_REQUEST: Stage-2 trigger — receiver asks the sender to push
+  /// the actual content. payload carries the original message_id (16 bytes)
+  /// the requester wants. Sender looks up the pending file and emits a
+  /// MediaChunkV3 stream (≤32KB per chunk) + a final MediaCompleteV3 with
+  /// SHA-256 of the assembled bytes.
+  Future<void> _handleMediaRequestV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) async {
+    try {
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      // V3-payload: opaque bytes = original message_id we should ship.
+      final originalMsgIdBytes = Uint8List.fromList(frame.payload);
+      final originalMsgId = bytesToHex(originalMsgIdBytes);
+      final filePath = _pendingMediaSends[originalMsgId];
+      _log.info(
+          '[E2E media-request-v3-recv] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} '
+          'wantsMsgId=${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId} '
+          'pending=${filePath != null}');
+      if (filePath == null) {
+        _log.warn(
+            'media-request-v3: no pending media for ${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId}');
+        return;
+      }
+      final file = File(filePath);
+      if (!file.existsSync()) {
+        _log.warn('media-request-v3: pending file vanished: $filePath');
+        _pendingMediaSends.remove(originalMsgId);
+        return;
+      }
+
+      final fileBytes = file.readAsBytesSync();
+      final contentHash = SodiumFFI().sha256(fileBytes);
+
+      // Chunk into ≤32KB pieces. Each chunk is its own ApplicationFrameV3
+      // shipped via sendToUser → per-chunk KEM-encrypted (Spec §5.7 Stage 2).
+      const chunkSize = 32 * 1024;
+      final totalChunks = (fileBytes.length + chunkSize - 1) ~/ chunkSize;
+      final recipientUserId = Uint8List.fromList(frame.senderUserId);
+
+      _log.info(
+          '[E2E media-stage2-send-v3] msgId=${originalMsgId.substring(0, 8)} '
+          'recipient=${senderHex.substring(0, 8)} size=${fileBytes.length} '
+          'chunks=$totalChunks');
+
+      for (var idx = 0; idx < totalChunks; idx++) {
+        final start = idx * chunkSize;
+        final end = (start + chunkSize > fileBytes.length)
+            ? fileBytes.length
+            : start + chunkSize;
+        final chunkData = fileBytes.sublist(start, end);
+        final chunk = proto.MediaChunkV3()
+          ..mediaId = originalMsgIdBytes
+          ..chunkIndex = idx
+          ..totalChunks = totalChunks
+          ..data = chunkData;
+        final ok = await sendToUser(
+          recipientUserId: recipientUserId,
+          messageType: proto.MessageTypeV3.MTV3_MEDIA_CHUNK,
+          payload: Uint8List.fromList(chunk.writeToBuffer()),
+        );
+        if (!ok) {
+          _log.warn(
+              'media-request-v3: chunk $idx/$totalChunks send FAILED — abort');
+          return;
+        }
+      }
+
+      final complete = proto.MediaCompleteV3()
+        ..mediaId = originalMsgIdBytes
+        ..contentHash = contentHash
+        ..totalSize = Int64(fileBytes.length);
+      final okComplete = await sendToUser(
+        recipientUserId: recipientUserId,
+        messageType: proto.MessageTypeV3.MTV3_MEDIA_COMPLETE,
+        payload: Uint8List.fromList(complete.writeToBuffer()),
+      );
+      _log.info(
+          '[E2E media-stage2-send-done-v3] msgId=${originalMsgId.substring(0, 8)} '
+          'complete-ok=$okComplete');
+
+      // Sender finished — clear pending entry. (Receiver-side hash-check
+      // protects against truncation; we don't keep retries here.)
+      if (okComplete) _pendingMediaSends.remove(originalMsgId);
+    } catch (e, st) {
+      _log.warn('handleMediaRequestV3: failed: $e\n$st '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_CHUNK: receiver buffers the chunk in `_mediaChunkBuffers`
+  /// keyed by mediaIdHex. Reassembly + file-write happens in the matching
+  /// MEDIA_COMPLETE handler.
+  void _handleMediaChunkV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final chunk = proto.MediaChunkV3.fromBuffer(frame.payload);
+      final mediaIdHex = bytesToHex(Uint8List.fromList(chunk.mediaId));
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      final buf = _mediaChunkBuffers.putIfAbsent(
+          mediaIdHex, () => _MediaChunkBuffer(chunk.totalChunks));
+      if (buf.totalChunks != chunk.totalChunks) {
+        _log.warn(
+            'media-chunk-v3: totalChunks mismatch for $mediaIdHex '
+            '(buf=${buf.totalChunks} chunk=${chunk.totalChunks}) — '
+            'dropping chunk');
+        return;
+      }
+      if (chunk.chunkIndex >= buf.totalChunks) {
+        _log.warn(
+            'media-chunk-v3: out-of-bounds index ${chunk.chunkIndex}/${buf.totalChunks} '
+            'for $mediaIdHex — drop');
+        return;
+      }
+      buf.chunks[chunk.chunkIndex] = Uint8List.fromList(chunk.data);
+      _log.debug(
+          '[E2E media-chunk-v3-recv] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} mediaId=${mediaIdHex.substring(0, 8)} '
+          'idx=${chunk.chunkIndex}/${buf.totalChunks} bytes=${chunk.data.length}');
+    } catch (e) {
+      _log.warn('handleMediaChunkV3: parse fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_COMPLETE: assemble buffered chunks, hash-check, write file,
+  /// bump the matching UiMessage to MediaDownloadState.completed.
+  void _handleMediaCompleteV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final complete = proto.MediaCompleteV3.fromBuffer(frame.payload);
+      final mediaIdHex = bytesToHex(Uint8List.fromList(complete.mediaId));
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+
+      final buf = _mediaChunkBuffers.remove(mediaIdHex);
+      if (buf == null) {
+        _log.warn(
+            'media-complete-v3: no chunk-buffer for ${mediaIdHex.substring(0, 8)} — drop');
+        return;
+      }
+      if (!buf.isComplete) {
+        final missing = <int>[];
+        for (var i = 0; i < buf.chunks.length; i++) {
+          if (buf.chunks[i] == null) missing.add(i);
+        }
+        _log.warn(
+            'media-complete-v3: incomplete buffer for ${mediaIdHex.substring(0, 8)} '
+            '— missing=${missing.length}/${buf.totalChunks}');
+        return;
+      }
+      final assembled = buf.assemble();
+      if (complete.totalSize.toInt() != 0 &&
+          complete.totalSize.toInt() != assembled.length) {
+        _log.warn(
+            'media-complete-v3: size mismatch for ${mediaIdHex.substring(0, 8)} '
+            '(expected=${complete.totalSize} got=${assembled.length})');
+        return;
+      }
+      final localHash = SodiumFFI().sha256(assembled);
+      final wantHash = Uint8List.fromList(complete.contentHash);
+      if (wantHash.isNotEmpty && !_bytesEqual(localHash, wantHash)) {
+        _log.warn(
+            'media-complete-v3: hash mismatch for ${mediaIdHex.substring(0, 8)}'
+            ' — drop reassembled bytes');
+        return;
+      }
+
+      // Locate the announced UiMessage so we can read filename/mime and bump
+      // the mediaState. The MEDIA_ANNOUNCE handler stored the bubble keyed
+      // by msgId (= mediaId) in the same conversation.
+      final conv = conversations[conversationId];
+      UiMessage? msg;
+      if (conv != null) {
+        final idx = conv.messages.indexWhere((m) => m.id == mediaIdHex);
+        if (idx >= 0) msg = conv.messages[idx];
+      }
+      final filename =
+          msg?.filename ?? 'file_$mediaIdHex';
+      final mediaDir = Directory('$profileDir/media');
+      if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
+      final savePath = '${mediaDir.path}/$filename';
+      File(savePath).writeAsBytesSync(assembled);
+
+      if (msg != null) {
+        msg.filePath = savePath;
+        msg.fileSize = assembled.length;
+        msg.mediaState = MediaDownloadState.completed;
+        if (msg.mimeType?.startsWith('image/') == true &&
+            msg.thumbnailBase64 == null &&
+            assembled.length <= 100 * 1024) {
+          msg.thumbnailBase64 = base64Encode(assembled);
+        }
+        onStateChanged?.call();
+        _saveConversations();
+      }
+
+      _log.info(
+          '[E2E media-stage2-recv-done-v3] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} mediaId=${mediaIdHex.substring(0, 8)} '
+          'bytes=${assembled.length} path=$savePath');
+    } catch (e, st) {
+      _log.warn('handleMediaCompleteV3: failed: $e\n$st '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3 MEDIA_REJECT: receiver declined the announce; sender clears pending.
+  void _handleMediaRejectV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final originalMsgId = bytesToHex(Uint8List.fromList(frame.payload));
+      final removed = _pendingMediaSends.remove(originalMsgId) != null;
+      _log.info(
+          '[E2E media-reject-v3-recv] from=${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)} '
+          'msgId=${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId} '
+          'pending-cleared=$removed');
+    } catch (e) {
+      _log.warn('handleMediaRejectV3: failed: $e');
+    }
+  }
+
+  /// V3 REACTION: EmojiReaction proto in frame.payload. Add/remove emoji
+  /// on the target message. Conversation-Lookup ist DM-style auf Sender-Hex
+  /// (Group-Fanout siehe Klassen-Header-TODO).
+  void _handleReactionV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final reaction = proto.EmojiReaction.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final targetMsgId =
+          bytesToHex(Uint8List.fromList(reaction.messageId));
+      final emoji = reaction.emoji;
+      if (emoji.isEmpty) return;
+
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+      final conv = conversations[conversationId];
+      if (conv == null) return;
+      _log.debug('_handleReactionV3: emoji=$emoji targetMsgId=${targetMsgId.substring(0, 8)} conv.messages.length=${conv.messages.length}');
+      final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
+      if (msgIndex < 0) return;
+      final msg = conv.messages[msgIndex];
+
+      if (reaction.remove) {
+        msg.reactions[emoji]?.remove(senderHex);
+        if (msg.reactions[emoji]?.isEmpty ?? false) {
+          msg.reactions.remove(emoji);
+        }
+      } else {
+        msg.reactions.putIfAbsent(emoji, () => {});
+        msg.reactions[emoji]!.add(senderHex);
+      }
+      onStateChanged?.call();
+      _saveConversations();
+      _log.debug(
+          'REACTION-V3 ${reaction.remove ? "removed" : "added"}: $emoji on '
+          '${targetMsgId.substring(0, 8)} by ${senderHex.substring(0, 8)} '
+          'device=${_hexShort(senderDeviceId)}');
+    } catch (e) {
+      _log.warn('handleReactionV3: parse fail: $e');
+    }
+  }
+
+  /// V3 REPLY: bisher gibt es kein eigenes ReplyMessageV3-Sub-Schema. Reply
+  /// reist als TEXT mit reply_to_* in ContentMetadata. Bis Spec §5 ein
+  /// ReplyMessageV3 definiert ist behandeln wir REPLY identisch zu TEXT —
+  /// die reply-Felder werden aus ContentMetadata herausgezogen wenn vorhanden.
+  void _handleReplyV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+
+      // TODO C4: reply_to_message_id / reply_to_text / reply_to_sender
+      // brauchen ein ReplyMetadataV3-Feld. ContentMetadata hat heute keinen
+      // Reply-Slot — bis die Spec klärt landet REPLY ohne Reply-Banner.
+      final msg = UiMessage(
+        id: msgId,
+        conversationId: conversationId,
+        senderNodeIdHex: senderHex,
+        text: tm.text,
+        timestamp:
+            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+        type: UiMessageType.text,
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+        readAt: DateTime.now(),
+      );
+      final isChannel = _channels.containsKey(conversationId);
+      final isGroup = _groups.containsKey(conversationId);
+      _addMessageToConversation(conversationId, msg,
+          isGroup: isGroup, isChannel: isChannel);
+      _log.info(
+          'REPLY-V3 (treated as TEXT — Reply-Schema TODO C4) '
+          'from ${senderHex.substring(0, 8)} device=${_hexShort(senderDeviceId)}');
+    } catch (e) {
+      _log.warn('handleReplyV3: parse fail: $e');
+    }
+  }
+
+  /// V3 EDIT: MessageEdit proto in payload + EditMetadata as standard frame
+  /// field. Dual-Enforcement (sender == author + edit-window).
+  void _handleEditV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final editMsg = proto.MessageEdit.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final originalMsgId =
+          bytesToHex(Uint8List.fromList(editMsg.originalMessageId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+      final conv = conversations[conversationId];
+      if (conv == null) return;
+      final msgIndex =
+          conv.messages.indexWhere((m) => m.id == originalMsgId);
+      if (msgIndex < 0) return;
+      final original = conv.messages[msgIndex];
+
+      // Dual-Enforcement: only original author can edit.
+      if (original.senderNodeIdHex != senderHex) {
+        _log.warn(
+            'EDIT-V3 rejected: sender ${senderHex.substring(0, 8)} != author '
+            '(device=${_hexShort(senderDeviceId)})');
+        return;
+      }
+
+      // Edit-Window check (per-chat config).
+      final chatEditWindowMs =
+          conv.config.editWindowMs ?? _defaultEditWindowMs;
+      if (chatEditWindowMs == 0) {
+        _log.warn('EDIT-V3 rejected: editing disabled for $conversationId');
+        return;
+      }
+      if (chatEditWindowMs > 0) {
+        final ageMs = DateTime.now().millisecondsSinceEpoch -
+            original.timestamp.millisecondsSinceEpoch;
+        if (ageMs > chatEditWindowMs) {
+          _log.warn('EDIT-V3 rejected: too old (${ageMs}ms > ${chatEditWindowMs}ms)');
+          return;
+        }
+      }
+
+      original.text = editMsg.newText;
+      original.editedAt = DateTime.fromMillisecondsSinceEpoch(
+          editMsg.editTimestamp.toInt());
+      onStateChanged?.call();
+      _saveConversations();
+      _log.info(
+          'EDIT-V3 by ${senderHex.substring(0, 8)} on $originalMsgId');
+    } catch (e) {
+      _log.warn('handleEditV3: parse fail: $e');
+    }
+  }
+
+  /// V3 DELETE: MessageDelete proto in payload. Soft-delete (clear text +
+  /// mark isDeleted).
+  void _handleDeleteV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final deleteMsg = proto.MessageDelete.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final targetMsgId =
+          bytesToHex(Uint8List.fromList(deleteMsg.messageId));
+      final conversationId = frame.groupId.isNotEmpty
+          ? bytesToHex(Uint8List.fromList(frame.groupId))
+          : senderHex;
+      final conv = conversations[conversationId];
+      if (conv == null) return;
+      final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
+      if (msgIndex < 0) return;
+      final original = conv.messages[msgIndex];
+
+      if (original.senderNodeIdHex != senderHex) {
+        _log.warn(
+            'DELETE-V3 rejected: sender ${senderHex.substring(0, 8)} != author '
+            '(device=${_hexShort(senderDeviceId)})');
+        return;
+      }
+      original.text = '';
+      original.isDeleted = true;
+      onStateChanged?.call();
+      _saveConversations();
+      _log.info('DELETE-V3 by ${senderHex.substring(0, 8)} on $targetMsgId');
+    } catch (e) {
+      _log.warn('handleDeleteV3: parse fail: $e');
+    }
+  }
+
+  /// V3 VOICE_MESSAGE: alias for MEDIA_INLINE with audio MIME — share the
+  /// same code path. The dedicated message type exists so receivers can
+  /// route voice through transcription pipelines without sniffing MIME.
+  void _handleVoiceMessageV3(
+      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // Sender muss sicherstellen dass contentMetadata.mimeType audio/* ist.
+    // Falls leer: Default audio/aac (Architecture §5).
+    if (frame.contentMetadata.mimeType.isEmpty) {
+      frame.contentMetadata.mimeType = 'audio/aac';
+    }
+    _handleMediaInlineV3(frame, senderDeviceId, snapshot);
+  }
+
+  // C3 — Calls (Architecture §10 + §10.5; live-frame skip-verify §4.4.5/§10.4.5)
+  //
+  // Setup-class (INVITE/ANSWER/REJECT/HANGUP/REJOIN/GROUP_LEAVE/GROUP_KEY_ROTATE):
+  //   inner User-Sig already verified upstream; frame.payload is the parsed
+  //   sub-message bytes. Dispatch routes to 1:1 (callManager) vs group
+  //   (groupCallManager) — for ANSWER/REJECT/HANGUP the rule is: if a
+  //   group call is currently active, the frame belongs to it.
+  //
+  // Live-frame class (GROUP_AUDIO/VIDEO, RTT_PING/PONG, TREE_UPDATE):
+  //   sender skipped ML-DSA + zstd per §4.4.5; AES-GCM under call_key carries
+  //   pro-frame authenticity. Receive side just dispatches into relay/RTT/tree
+  //   machinery.
+  void _handleCallInviteV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    proto.CallInvite invite;
+    try {
+      invite = proto.CallInvite.fromBuffer(f.payload);
+    } catch (e) {
+      _log.warn('CALL_INVITE V3: payload parse failed: $e');
+      return;
+    }
+    if (invite.isGroupCall) {
+      groupCallManager.handleGroupCallInviteV3(f, sd, s);
+    } else {
+      callManager.handleCallInviteV3(f, sd, s);
+    }
+    notificationSound.startRingtone();
+    notificationSound.vibrate(VibrationType.call);
+  }
+
+  void _handleCallAnswerV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    notificationSound.stopRingtone();
+    notificationSound.stopRingback();
+    notificationSound.playConnected();
+    if (groupCallManager.currentGroupCall != null) {
+      groupCallManager.handleGroupCallAnswerV3(f, sd, s);
+    } else {
+      callManager.handleCallAnswerV3(f, sd, s);
+    }
+  }
+
+  void _handleCallRejectV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    notificationSound.stopRingtone();
+    notificationSound.stopRingback();
+    if (groupCallManager.currentGroupCall != null) {
+      groupCallManager.handleGroupCallRejectV3(f, sd, s);
+    } else {
+      callManager.handleCallRejectV3(f, sd, s);
+    }
+  }
+
+  void _handleCallHangupV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    notificationSound.stopRingtone();
+    notificationSound.stopRingback();
+    if (groupCallManager.currentGroupCall != null) {
+      groupCallManager.handleGroupCallHangupV3(f, sd, s);
+    } else {
+      callManager.handleCallHangupV3(f, sd, s);
+    }
+  }
+
+  // ICE_CANDIDATE: MTV3 enum exists, but no live handler or send-path.
+  // Reserved for a future ICE/NAT-traversal wave.
+  void _handleIceCandidateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    _log.debug('ICE_CANDIDATE V3: not wired yet — drop');
+  }
+
+  void _handleCallRejoinV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    groupCallManager.handleCallRejoinV3(f, sd, s);
+  }
+
+  void _handleCallAudioV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    if (_audioEngine == null || !_audioEngine!.isRunning) return;
+    callManager.currentCall?.framesReceived++;
+    _audioEngine!.playFrame(Uint8List.fromList(f.payload));
+  }
+
+  void _handleCallVideoV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    final session = callManager.currentCall;
+    if (session == null || session.state != CallState.inCall) return;
+    session.videoFramesReceived++;
+    onVideoFrameReceived?.call(Uint8List.fromList(f.payload));
+  }
+
+  void _handleCallGroupAudioV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    // Tree relay
+    groupCallManager.handleGroupCallAudioV3(f, sd, s);
+    // Local mix for playback
+    if (_audioMixer != null) {
+      try {
+        final audio = proto.GroupCallAudio.fromBuffer(f.payload);
+        final senderHex = bytesToHex(Uint8List.fromList(audio.senderNodeId));
+        if (senderHex != identity.userIdHex) {
+          _audioMixer!.addFrame(senderHex, Uint8List.fromList(audio.encryptedAudio));
+        }
+      } catch (e) {
+        _log.debug('Group audio V3 parse failed: $e');
+      }
+    }
+  }
+
+  void _handleCallGroupVideoV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    // Tree relay
+    groupCallManager.handleGroupCallVideoV3(f, sd, s);
+    // Local decode for display
+    if (_groupVideoReceiver != null) {
+      try {
+        final video = proto.GroupCallVideo.fromBuffer(f.payload);
+        final senderHex = bytesToHex(Uint8List.fromList(video.senderNodeId));
+        if (senderHex != identity.userIdHex) {
+          _groupVideoReceiver!.addFrame(senderHex, Uint8List.fromList(video.videoFrameData));
+        }
+      } catch (e) {
+        _log.debug('Group video V3 parse failed: $e');
+      }
+    }
+  }
+
+  void _handleCallGroupLeaveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    groupCallManager.handleGroupCallLeaveV3(f, sd, s);
+  }
+
+  void _handleCallGroupKeyRotateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    // V3-Pipeline liefert frame.payload bereits klartext.
+    groupCallManager.handleGroupCallKeyRotateV3(f, sd, s);
+  }
+
+  void _handleCallRttPingV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    groupCallManager.handleCallRttPingV3(f, sd, s);
+  }
+
+  void _handleCallRttPongV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    groupCallManager.handleCallRttPongV3(f, sd, s);
+  }
+
+  void _handleCallTreeUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+    groupCallManager.handleCallTreeUpdateV3(f, sd, s);
+  }
+  void _handleWhiteboardStrokeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: WHITEBOARD_STROKE (C3)');
+  void _handleWhiteboardPageV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: WHITEBOARD_PAGE (C3)');
+  void _handleFileExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: FILE_EXCHANGE (C3)');
+  void _handleClipboardExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: CLIPBOARD_EXCHANGE (C3)');
+  void _handleScreenShareFrameV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: SCREEN_SHARE_FRAME (C3)');
+  void _handleCallChatV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: CALL_CHAT (C3)');
+  void _handleRemoteControlInputV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: REMOTE_CONTROL_INPUT (C3)');
+
+  // C4 — Recovery / Identity / Profile / CR / Groups / Channels / DHT /
+  //       Fragments / Peer-Store / Chat-Config / Routing / Hole-Punch /
+  //       Identity-Resolution / Multi-Device / Calendar / Polls
+  void _handleRestoreBroadcastV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      // V3.0 Welle 6: RESTORE_BROADCAST migrated to InfrastructureFrame
+      // (§2.3.5 selector + §6.3). An inbound ApplicationFrame with this
+      // messageType is a protocol violation — drop.
+      _log.warn('RESTORE_BROADCAST on ApplicationFrame path is invalid '
+          'since V3.0 Welle 6 (§2.3.5) — dropping. sender='
+          '${bytesToHex(sd).substring(0, 8)}');
+  void _handleRestoreResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    _handleRestoreResponse(
+      Uint8List.fromList(frame.payload),
+      Uint8List.fromList(frame.senderUserId),
+      senderDeviceId,
+    );
+  }
+  void _handleIdentityDeletedV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // The inner payload is the IdentityDeletedNotification protobuf,
+    // already decrypted + authenticated by the V3 pipeline (outer-sig +
+    // inner user-sig + KEM-decap).
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    proto.IdentityDeletedNotification notification;
+    try {
+      notification = proto.IdentityDeletedNotification.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('IDENTITY_DELETED parse failed: $e');
+      return;
+    }
+
+    final contact = _contacts[senderHex];
+    if (contact == null) {
+      _log.debug('IDENTITY_DELETED from unknown sender ${senderHex.substring(0, 8)}');
+      return;
+    }
+
+    final displayName = notification.displayName.isNotEmpty
+        ? notification.displayName
+        : contact.displayName;
+    _log.info('Identity deleted: "$displayName" (${senderHex.substring(0, 8)})');
+
+    // Add system message to conversation. Routed through
+    // _addMessageToConversation so the badge counter and the system Launcher-
+    // Badge stay in sync (#U15 — direct conv.messages.add bypassed both).
+    if (conversations.containsKey(senderHex)) {
+      final systemMsg = UiMessage(
+        id: bytesToHex(Uint8List.fromList(frame.messageId)),
+        conversationId: senderHex,
+        senderNodeIdHex: '',
+        text: '$displayName has deleted their identity.',
+        isOutgoing: false,
+        timestamp: DateTime.now(),
+        type: UiMessageType.identityDeleted,
+        status: MessageStatus.delivered,
+      );
+      _addMessageToConversation(senderHex, systemMsg);
+    }
+
+    // Mark contact as deleted (prevents re-import)
+    _deletedContacts.add(senderHex);
+
+    // Remove from groups/channels
+    for (final group in _groups.values) {
+      group.members.remove(senderHex);
+    }
+    for (final channel in _channels.values) {
+      channel.members.remove(senderHex);
+    }
+
+    // Remove contact
+    _contacts.remove(senderHex);
+    _saveContacts();
+    _saveGroups();
+    _saveChannels();
+
+    onStateChanged?.call();
+  }
+  void _handleProfileUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // Inner payload is the ProfileData protobuf, already decrypted +
+    // authenticated by the V3 pipeline.
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    try {
+      final profile = proto.ProfileData.fromBuffer(frame.payload);
+      final contact = _contacts[senderHex];
+      if (contact == null) return;
+
+      if (profile.profilePicture.isNotEmpty) {
+        contact.profilePictureBase64 = base64Encode(profile.profilePicture);
+      } else {
+        contact.profilePictureBase64 = null; // Picture removed
+      }
+
+      // Update description if present
+      if (profile.description.isNotEmpty) {
+        contact.message = profile.description;
+      } else {
+        contact.message = null;
+      }
+
+      // Handle display name change
+      if (profile.displayName.isNotEmpty && profile.displayName != contact.displayName) {
+        if (contact.localAlias != null) {
+          // User has a local alias → store as pending, don't auto-override
+          contact.pendingNameChange = profile.displayName;
+          _log.info('Contact ${contact.effectiveName} changed name to "${profile.displayName}" (pending, local alias active)');
+        } else {
+          // No local alias → update directly
+          final oldName = contact.displayName;
+          contact.displayName = profile.displayName;
+          // Update conversation displayName
+          final conv = conversations[senderHex];
+          if (conv != null) {
+            conv.displayName = profile.displayName;
+          }
+          _log.info('Contact renamed: "$oldName" → "${profile.displayName}"');
+        }
+      }
+
+      // Update conversation profile picture
+      final conv = conversations[senderHex];
+      if (conv != null) {
+        conv.profilePictureBase64 = contact.profilePictureBase64;
+      }
+
+      _saveContacts();
+      onStateChanged?.call();
+      _log.info('Profile update from ${contact.effectiveName}');
+    } catch (e) {
+      _log.error('PROFILE_UPDATE parse error: $e');
+    }
+  }
+  void _handleKeyRotationBroadcastV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // V3-direct: inner payload is the KeyRotationBroadcast (Periodic
+    // variant) protobuf, already decrypted + authenticated by the V3
+    // pipeline.
+    //
+    // Welle 6 §7.4 path-discriminator: the ApplicationFrame path is
+    // reserved for the **Periodic** flavor (KEM-only, single sig in body
+    // — Ed25519/ML-DSA do not change). The **Emergency** flavor (dual-sig
+    // in body) belongs on the InfrastructureFrame path. Early-detect
+    // dual-sig here and drop — emitting a warn so a sender bug becomes
+    // observable rather than silently bypassing the §7.4 wire-path
+    // constraint.
+    proto.KeyRotationBroadcast? earlyParse;
+    try {
+      earlyParse = proto.KeyRotationBroadcast.fromBuffer(frame.payload);
+    } catch (_) {
+      // If the body does not parse the downstream handler will fail in
+      // the same way — let it produce its own error log.
+    }
+    if (earlyParse != null &&
+        earlyParse.oldSignatureEd25519.isNotEmpty &&
+        earlyParse.newSignatureEd25519.isNotEmpty) {
+      _log.warn('_handleKeyRotationBroadcastV3 drop: dual-sig present on '
+          'ApplicationFrame path — Emergency variant must arrive via '
+          'InfrastructureFrame (§7.4 / Welle 6) '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} '
+          'device=${_hexShort(senderDeviceId)})');
+      return;
+    }
+    _handleKeyRotationBroadcast(
+      Uint8List.fromList(frame.payload),
+      Uint8List.fromList(frame.senderUserId),
+    );
+  }
+  void _handleContactRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    _log.debug('_handleContactRequestV3 from device ${bytesToHex(senderDeviceId).substring(0, 8)}');
+    _log.info('_handleContactRequestV3 ENTER for ${identity.userIdHex.substring(0, 8)}');
+    try {
+      final cr = proto.ContactRequestMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      // Multi-Identity guard: only process CRs addressed to THIS identity.
+      // Without this, a CR to AllyCat could be processed by Alice's service
+      // on the same node, resulting in Alice responding instead of AllyCat.
+      // Accept both userId and deviceNodeId: senders with pre-V3.1.44 contacts
+      // may have stored our deviceNodeId instead of userId.
+      if (frame.recipientUserId.isNotEmpty) {
+        final recipientHex = bytesToHex(Uint8List.fromList(frame.recipientUserId));
+        if (recipientHex != identity.userIdHex &&
+            recipientHex != identity.nodeIdHex) {
+          return; // Not for this identity
+        }
+      }
+
+      // Previously deleted contact sends new CR: allow re-contact (delete ≠ block).
+      if (_deletedContacts.contains(senderHex)) {
+        _deletedContacts.remove(senderHex);
+        _saveContacts();
+        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} re-requesting — allowed');
+      }
+
+      // Already accepted contact sends new CR: update keys and re-send acceptance.
+      // This handles the case where the remote side deleted us and re-added.
+      //
+      // F4-Gate (§8.1, V3.0 Welle 6): the auto-overwrite of stored pubkeys
+      // requires a verified outer Device-Sig (`snapshot.isOuterVerified`).
+      // On V3 paths where the snapshot reports `skippedBootstrap`, we DO NOT
+      // auto-replace keys — the CR falls through to the standard inbound CR
+      // path (Inbox tab) so the user explicitly confirms the new keys.
+      final existing = _contacts[senderHex];
+      final allowAutoOverwrite = snapshot.isOuterVerified;
+      if (existing != null && existing.status == 'accepted' && allowAutoOverwrite) {
+        existing.displayName = cr.displayName;
+        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
+        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
+        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
+        existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
+        if (cr.profilePicture.isNotEmpty) {
+          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+        }
+        // Refresh device ID so sendToUser → deviceNodeIds fallback stays warm.
+        if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
+          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+        }
+        _saveContacts();
+        _log.info('Re-contact from accepted ${cr.displayName} — sending acceptance response');
+        // Re-send acceptance so the remote side knows we still have them.
+        // Not awaited intentionally: sendEnvelope is ACK-tracked by AckTracker,
+        // and the CR retry timer handles failures — no need to block here.
+        acceptContactRequest(senderHex);
+        return;
+      }
+      if (existing != null && existing.status == 'accepted' && !allowAutoOverwrite) {
+        // F4-Gate triggered: status==accepted, but outer-sig was not verified.
+        // Do not auto-overwrite. Treat as fresh inbound CR — fall through to
+        // the regular pending-CR creation below, which surfaces it in the
+        // Inbox tab for explicit user confirmation.
+        _log.warn('F4-Gate: skipping auto-overwrite for ${cr.displayName} '
+            '(${senderHex.substring(0, 8)}) — outerSigStatus='
+            '${snapshot.outerSigStatus.name}, requires explicit user accept');
+      }
+      if (existing != null && existing.status == 'pending_outgoing') {
+        // Bidirectional CR: we sent them a CR AND they sent us one.
+        // Auto-accept: both sides want to connect.
+        existing.displayName = cr.displayName;
+        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
+        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
+        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
+        existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
+        if (cr.profilePicture.isNotEmpty) {
+          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+        }
+        // Store device ID so sendToUser → deviceNodeIds fallback works on accept.
+        if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
+          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+        }
+        _saveContacts();
+        _log.info('Bidirectional CR from ${cr.displayName} — auto-accepting');
+        acceptContactRequest(senderHex);
+        return;
+      }
+
+      final contact = ContactInfo(
+        nodeId: Uint8List.fromList(frame.senderUserId),
+        displayName: cr.displayName,
+        ed25519Pk: Uint8List.fromList(cr.ed25519PublicKey),
+        x25519Pk: Uint8List.fromList(cr.x25519PublicKey),
+        mlKemPk: Uint8List.fromList(cr.mlKemPublicKey),
+        mlDsaPk: Uint8List.fromList(cr.mlDsaPublicKey),
+        status: 'pending',
+        message: cr.message,
+        profilePictureBase64: cr.profilePicture.isNotEmpty
+            ? base64Encode(cr.profilePicture)
+            : null,
+      );
+
+      // Detect stale contact: if an existing accepted contact has the same
+      // display name but different nodeId, the sender likely reinstalled.
+      // Mark the old conversation with a system message so the user knows
+      // to use the new contact (old ID is unreachable).
+      for (final entry in _contacts.entries) {
+        if (entry.key == senderHex) continue; // Same contact — skip
+        final old = entry.value;
+        if (old.status != 'accepted') continue;
+        if (old.displayName != cr.displayName) continue;
+        // Same name, different identity → probable reinstall
+        final oldConv = conversations[entry.key];
+        if (oldConv != null) {
+          final systemMsg = UiMessage(
+            id: bytesToHex(SodiumFFI().randomBytes(16)),
+            conversationId: entry.key,
+            senderNodeIdHex: '',
+            text: '${cr.displayName} appears to have a new identity. '
+                'Messages in this conversation may not be delivered. '
+                'Please use the new contact request instead.',
+            isOutgoing: false,
+            timestamp: DateTime.now(),
+            type: UiMessageType.identityDeleted,
+            status: MessageStatus.delivered,
+          );
+          oldConv.messages.add(systemMsg);
+          _log.info('Stale contact detected: ${cr.displayName} has new identity '
+              '${senderHex.substring(0, 8)}, old was ${entry.key.substring(0, 8)}');
+        }
+      }
+
+      // Store sender's device ID so acceptContactRequest → sendToUser can reach
+      // them immediately even before the DHT auth-manifest is warm (§2.6.2).
+      contact.deviceNodeIds.add(bytesToHex(senderDeviceId));
+      _contacts[senderHex] = contact;
+      _saveContacts();
+      _saveConversations();
+      _log.info('CR from ${cr.displayName} (${senderHex.substring(0, 8)}) → pending');
+
+      onContactRequestReceived?.call(senderHex, cr.displayName);
+      onStateChanged?.call();
+      _log.info('Contact request from ${cr.displayName} (${senderHex.substring(0, 8)})');
+    } catch (e) {
+      _log.error('Contact request parse error: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+  void _handleContactRequestResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final resp = proto.ContactRequestResponse.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      // Multi-Identity guard: only accept responses addressed to THIS identity.
+      // Accept both userId and deviceNodeId (backward compat with pre-V3.1.44 contacts).
+      if (frame.recipientUserId.isNotEmpty) {
+        final recipientHex = bytesToHex(Uint8List.fromList(frame.recipientUserId));
+        if (recipientHex != identity.userIdHex &&
+            recipientHex != identity.nodeIdHex) {
+          return; // Not for this identity
+        }
+      }
+
+      // Previously deleted contact responds: allow re-contact (delete ≠ block).
+      if (_deletedContacts.contains(senderHex)) {
+        _deletedContacts.remove(senderHex);
+        _saveContacts();
+        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} responding — allowed');
+      }
+
+      if (resp.accepted) {
+        // Validate: we must have a pending outgoing CR to this sender.
+        // Without this check, a response from a wrong identity (e.g. Alice
+        // responding to a CR addressed to AllyCat) would create a ghost contact.
+        final existing = _contacts[senderHex];
+        if (existing == null || (existing.status != 'pending_outgoing' && existing.status != 'accepted')) {
+          _log.warn('CR-Response from ${senderHex.substring(0, 8)} but no pending CR — ignoring');
+          return;
+        }
+
+        // Dedup on status transition: if the contact was already 'accepted',
+        // this is a sender-side retry (e.g. sender restarted, lost in-memory
+        // ACK-state, retried CR-Response). Don't flood the chat with duplicate
+        // "accepted your CR" system messages or re-fire the onContactAccepted
+        // callback — just refresh the keys in case they changed.
+        final wasAlreadyAccepted = existing.status == 'accepted';
+
+        final picBase64 = resp.profilePicture.isNotEmpty
+            ? base64Encode(resp.profilePicture)
+            : null;
+        existing.status = 'accepted';
+        existing.acceptedAt ??= DateTime.now();
+        _crRetryCountPerContact.remove(senderHex);
+        _staleWarningWrittenFor.remove(senderHex);
+        // First-CR ContactSeed bootstrap is over once we have the recipient's
+        // User-KEM pubkeys (filled below). Clear the seed bundle so re-contact
+        // uses the User-KEM pair directly and stale Device-KEM pubkeys don't
+        // outlive their TTL on disk.
+        existing.seedDeviceIdHex = null;
+        existing.seedDxkB64 = null;
+        existing.seedDmkB64 = null;
+        existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
+        existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
+        existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
+        existing.mlDsaPk = Uint8List.fromList(resp.mlDsaPublicKey);
+        existing.displayName = resp.displayName;
+        if (picBase64 != null) existing.profilePictureBase64 = picBase64;
+        // Store sender's device ID so sendToUser can reach them immediately
+        // even before the DHT auth-manifest is warm (§2.6.2 bootstrapping).
+        existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+        _saveContacts();
+
+        if (wasAlreadyAccepted) {
+          _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
+          onStateChanged?.call();
+          return;
+        }
+
+        // Create conversation with system message so the contact appears
+        // immediately in the "Aktuell" tab (not only in "Kontakte" tab).
+        final systemMsg = UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: senderHex,
+          senderNodeIdHex: '',
+          text: '${resp.displayName} accepted your contact request.',
+          isOutgoing: false,
+          timestamp: DateTime.now(),
+          type: UiMessageType.identityDeleted, // system message type
+          status: MessageStatus.delivered,
+        );
+        _addMessageToConversation(senderHex, systemMsg);
+        _saveConversations();
+
+        onContactAccepted?.call(senderHex);
+        _log.info('Contact accepted by ${resp.displayName}');
+      } else {
+        _log.info('Contact rejected by ${senderHex.substring(0, 8)}: ${resp.rejectionReason}');
+      }
+      onStateChanged?.call();
+    } catch (e) {
+      _log.error('Contact response parse error: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+  void _handleGroupCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // GROUP_CREATE shares the GROUP_INVITE payload schema and processing path.
+    _handleGroupInviteV3(frame, senderDeviceId, snapshot);
+  }
+  void _handleGroupInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    proto.GroupInviteV3 invite;
+    try {
+      invite = proto.GroupInviteV3.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('GROUP_INVITE parse failed: $e');
+      return;
+    }
+
+    final groupIdHex = bytesToHex(Uint8List.fromList(invite.groupId));
+
+    // Build members map
+    final members = <String, GroupMemberInfo>{};
+    for (final m in invite.members) {
+      final nid = bytesToHex(Uint8List.fromList(m.nodeId));
+      members[nid] = GroupMemberInfo(
+        nodeIdHex: nid,
+        displayName: m.displayName,
+        role: m.role,
+        ed25519Pk: m.ed25519PublicKey.isEmpty ? null : Uint8List.fromList(m.ed25519PublicKey),
+        x25519Pk: m.x25519PublicKey.isEmpty ? null : Uint8List.fromList(m.x25519PublicKey),
+        mlKemPk: m.mlKemPublicKey.isEmpty ? null : Uint8List.fromList(m.mlKemPublicKey),
+      );
+    }
+
+    // Determine owner
+    final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
+    final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
+
+    final group = GroupInfo(
+      groupIdHex: groupIdHex,
+      name: invite.groupName,
+      description: invite.groupDescription,
+      pictureBase64: invite.groupPicture.isNotEmpty ? base64Encode(invite.groupPicture) : null,
+      ownerNodeIdHex: ownerHex,
+      members: members,
+    );
+
+    final isUpdate = _groups.containsKey(groupIdHex);
+    _groups[groupIdHex] = group;
+    _saveGroups();
+
+    // Create conversation (or update existing)
+    final conv = conversations.putIfAbsent(groupIdHex, () => Conversation(
+      id: groupIdHex,
+      displayName: invite.groupName,
+      isGroup: true,
+      profilePictureBase64: group.pictureBase64,
+    ));
+    conv.displayName = invite.groupName;
+    _saveConversations();
+
+    if (!isUpdate) {
+      onGroupInviteReceived?.call(groupIdHex, invite.groupName);
+      _log.info('Group invite received: "${invite.groupName}" from ${senderHex.substring(0, 8)}');
+    } else {
+      _log.info('Group updated: "${invite.groupName}" from ${senderHex.substring(0, 8)}');
+    }
+
+    // Apply any pending config that arrived before the GROUP_INVITE
+    final pendingConfig = _pendingGroupConfigs.remove(groupIdHex);
+    if (pendingConfig != null) {
+      final senderMember = group.members[pendingConfig.senderHex];
+      if (senderMember != null && (senderMember.role == 'owner' || senderMember.role == 'admin')) {
+        conv.config = pendingConfig.config;
+        _saveConversations();
+        _log.info('Applied buffered config for "${invite.groupName}" from ${pendingConfig.senderHex.substring(0, 8)}');
+      }
+    }
+
+    onStateChanged?.call();
+  }
+
+  void _handleGroupLeaveV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    proto.GroupLeave leaveMsg;
+    try {
+      leaveMsg = proto.GroupLeave.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('GROUP_LEAVE parse failed: $e');
+      return;
+    }
+
+    final groupIdHex = bytesToHex(Uint8List.fromList(leaveMsg.groupId));
+    final group = _groups[groupIdHex];
+    if (group == null) return;
+
+    final memberName = group.members[senderHex]?.displayName ?? senderHex.substring(0, 8);
+    final wasOwner = group.ownerNodeIdHex == senderHex;
+    group.members.remove(senderHex);
+
+    // If the owner left, transfer ownership to first admin or first member
+    if (wasOwner && group.members.isNotEmpty) {
+      final newOwner = group.members.values.where((m) => m.role == 'admin').firstOrNull
+          ?? group.members.values.first;
+      newOwner.role = 'owner';
+      group.ownerNodeIdHex = newOwner.nodeIdHex;
+      _log.info('Owner left, transferred to ${newOwner.displayName}');
+    }
+    _saveGroups();
+
+    // Add system message
+    final sysMsg = UiMessage(
+      id: bytesToHex(SodiumFFI().randomBytes(16)),
+      conversationId: groupIdHex,
+      senderNodeIdHex: '',
+      text: '$memberName hat die Gruppe verlassen',
+      timestamp: DateTime.now(),
+      type: UiMessageType.groupLeave,
+      status: MessageStatus.delivered,
+      isOutgoing: false,
+    );
+    _addMessageToConversation(groupIdHex, sysMsg, isGroup: true);
+    _log.info('$memberName left group "${group.name}"');
+  }
+  void _handleGroupKeyUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: GROUP_KEY_UPDATE (C4)');
+  void _handleChannelCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // CHANNEL_CREATE shares the CHANNEL_INVITE payload schema and processing path.
+    _handleChannelInviteV3(frame, senderDeviceId, snapshot);
+  }
+  void _handleChannelPostV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // Route to channel via groupId field
+    final channelIdHex = frame.groupId.isNotEmpty
+        ? bytesToHex(Uint8List.fromList(frame.groupId))
+        : '';
+    if (channelIdHex.isEmpty) return;
+
+    final channel = _channels[channelIdHex];
+    if (channel == null) {
+      _log.warn('CHANNEL_POST for unknown channel $channelIdHex');
+      return;
+    }
+
+    // Verify sender is owner or admin
+    final senderMember = channel.members[senderHex];
+    if (senderMember == null || (senderMember.role != 'owner' && senderMember.role != 'admin')) {
+      _log.warn('CHANNEL_POST from unauthorized sender $senderHex');
+      return;
+    }
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    final text = utf8.decode(frame.payload, allowMalformed: true);
+    final msgId = bytesToHex(Uint8List.fromList(frame.messageId));
+
+    final msg = UiMessage(
+      id: msgId,
+      conversationId: channelIdHex,
+      senderNodeIdHex: senderHex,
+      text: text,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+      type: UiMessageType.channelPost,
+      status: MessageStatus.delivered,
+      isOutgoing: false,
+    );
+
+    _addMessageToConversation(channelIdHex, msg, isChannel: true);
+    _log.debug('Channel post received in "${channel.name}" from ${senderMember.displayName}');
+  }
+
+  void _handleChannelInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    proto.ChannelInvite invite;
+    try {
+      invite = proto.ChannelInvite.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('CHANNEL_INVITE parse failed: $e');
+      return;
+    }
+
+    final channelIdHex = bytesToHex(Uint8List.fromList(invite.channelId));
+
+    // Build members map from the repeated GroupMemberV3 field
+    final members = <String, ChannelMemberInfo>{};
+    for (final m in invite.members) {
+      final nid = bytesToHex(Uint8List.fromList(m.nodeId));
+      members[nid] = ChannelMemberInfo(
+        nodeIdHex: nid,
+        displayName: m.displayName,
+        role: m.role,
+        ed25519Pk: m.ed25519PublicKey.isEmpty ? null : Uint8List.fromList(m.ed25519PublicKey),
+        x25519Pk: m.x25519PublicKey.isEmpty ? null : Uint8List.fromList(m.x25519PublicKey),
+        mlKemPk: m.mlKemPublicKey.isEmpty ? null : Uint8List.fromList(m.mlKemPublicKey),
+      );
+    }
+
+    // Determine owner
+    final inviterHex = bytesToHex(Uint8List.fromList(invite.inviterId));
+    final ownerHex = members.values.where((m) => m.role == 'owner').firstOrNull?.nodeIdHex ?? inviterHex;
+
+    final channel = ChannelInfo(
+      channelIdHex: channelIdHex,
+      name: invite.channelName,
+      description: invite.channelDescription.isNotEmpty ? invite.channelDescription : null,
+      pictureBase64: invite.channelPicture.isNotEmpty ? base64Encode(invite.channelPicture) : null,
+      ownerNodeIdHex: ownerHex,
+      members: members,
+      isPublic: invite.isPublic,
+      isAdult: invite.isAdult,
+      language: invite.language.isNotEmpty ? invite.language : 'de',
+    );
+
+    final isUpdate = _channels.containsKey(channelIdHex);
+    _channels[channelIdHex] = channel;
+    _saveChannels();
+
+    // Create conversation (or update existing)
+    final conv = conversations.putIfAbsent(channelIdHex, () => Conversation(
+      id: channelIdHex,
+      displayName: invite.channelName,
+      isChannel: true,
+      profilePictureBase64: channel.pictureBase64,
+    ));
+    conv.displayName = invite.channelName;
+    _saveConversations();
+
+    if (!isUpdate) {
+      onChannelInviteReceived?.call(channelIdHex, invite.channelName);
+      _log.info('Channel invite received: "${invite.channelName}" from ${senderHex.substring(0, 8)}');
+    } else {
+      _log.info('Channel updated: "${invite.channelName}" from ${senderHex.substring(0, 8)}');
+    }
+
+    // Apply any pending config that arrived before the CHANNEL_INVITE
+    final pendingConfig = _pendingGroupConfigs.remove(channelIdHex);
+    if (pendingConfig != null) {
+      final senderMember = channel.members[pendingConfig.senderHex];
+      if (senderMember != null && (senderMember.role == 'owner' || senderMember.role == 'admin')) {
+        conv.config = pendingConfig.config;
+        _saveConversations();
+        _log.info('Applied buffered config for channel "${invite.channelName}" from ${pendingConfig.senderHex.substring(0, 8)}');
+      }
+    }
+
+    onStateChanged?.call();
+  }
+
+  void _handleChannelLeaveV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    proto.ChannelLeave leaveMsg;
+    try {
+      leaveMsg = proto.ChannelLeave.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('CHANNEL_LEAVE parse failed: $e');
+      return;
+    }
+
+    final channelIdHex = bytesToHex(Uint8List.fromList(leaveMsg.channelId));
+    final channel = _channels[channelIdHex];
+    if (channel == null) return;
+
+    final memberName = channel.members[senderHex]?.displayName ?? senderHex.substring(0, 8);
+    final wasOwner = channel.ownerNodeIdHex == senderHex;
+    channel.members.remove(senderHex);
+
+    // If the owner left, transfer ownership
+    if (wasOwner && channel.members.isNotEmpty) {
+      final newOwner = channel.members.values.where((m) => m.role == 'admin').firstOrNull
+          ?? channel.members.values.first;
+      newOwner.role = 'owner';
+      channel.ownerNodeIdHex = newOwner.nodeIdHex;
+      _log.info('Channel owner left, transferred to ${newOwner.displayName}');
+    }
+    _saveChannels();
+
+    // Add system message
+    final sysMsg = UiMessage(
+      id: bytesToHex(SodiumFFI().randomBytes(16)),
+      conversationId: channelIdHex,
+      senderNodeIdHex: '',
+      text: '$memberName hat den Channel verlassen',
+      timestamp: DateTime.now(),
+      type: UiMessageType.channelLeave,
+      status: MessageStatus.delivered,
+      isOutgoing: false,
+    );
+    _addMessageToConversation(channelIdHex, sysMsg, isChannel: true);
+    _log.info('$memberName left channel "${channel.name}"');
+  }
+
+  /// Handle CHANNEL_ROLE_UPDATE (type 73): update member role in channel or group.
+  /// Architecture v3.0 Section 10.2: sent to ALL members, handler checks both
+  /// channelManager and groupManager. Only owner/admin may change roles.
+  void _handleChannelRoleUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    // V3 payload is already plaintext (decrypted+authenticated by pipeline).
+    proto.ChannelRoleUpdate roleMsg;
+    try {
+      roleMsg = proto.ChannelRoleUpdate.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('CHANNEL_ROLE_UPDATE parse failed: $e');
+      return;
+    }
+
+    final entityIdHex = bytesToHex(Uint8List.fromList(roleMsg.channelId));
+    final targetIdHex = bytesToHex(Uint8List.fromList(roleMsg.targetId));
+    final newRole = roleMsg.newRole;
+
+    // Check both channels and groups (Architecture v3.0: dual-mode handler)
+    final channel = _channels[entityIdHex];
+    final group = _groups[entityIdHex];
+
+    if (channel != null) {
+      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
+      final senderMember = channel.members[senderHex];
+      if (senderMember == null || senderMember.role != 'owner') {
+        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in channel $entityIdHex');
+        return;
+      }
+
+      final target = channel.members[targetIdHex];
+      if (target == null) {
+        _log.warn('CHANNEL_ROLE_UPDATE: target $targetIdHex not a member of channel $entityIdHex');
+        return;
+      }
+
+      final oldRole = target.role;
+      target.role = newRole;
+
+      // Handle ownership transfer
+      if (newRole == 'owner') {
+        // Demote previous owner to admin
+        final prevOwner = channel.members[channel.ownerNodeIdHex];
+        if (prevOwner != null) prevOwner.role = 'admin';
+        channel.ownerNodeIdHex = targetIdHex;
+      }
+
+      _saveChannels();
+
+      final sysMsg = UiMessage(
+        id: bytesToHex(SodiumFFI().randomBytes(16)),
+        conversationId: entityIdHex,
+        senderNodeIdHex: '',
+        text: '${target.displayName}: $oldRole → $newRole',
+        timestamp: DateTime.now(),
+        type: UiMessageType.channelRoleUpdate,
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+      );
+      _addMessageToConversation(entityIdHex, sysMsg, isChannel: true);
+      _log.info('Channel role update: ${target.displayName} $oldRole → $newRole in "${channel.name}"');
+
+    } else if (group != null) {
+      // Verify sender is owner — only Owner can change roles (Architecture §10.2).
+      final senderMember = group.members[senderHex];
+      if (senderMember == null || senderMember.role != 'owner') {
+        _log.warn('CHANNEL_ROLE_UPDATE rejected: $senderHex is not owner in group $entityIdHex');
+        return;
+      }
+
+      final target = group.members[targetIdHex];
+      if (target == null) {
+        _log.warn('CHANNEL_ROLE_UPDATE: target $targetIdHex not a member of group $entityIdHex');
+        return;
+      }
+
+      final oldRole = target.role;
+      target.role = newRole;
+
+      if (newRole == 'owner') {
+        final prevOwner = group.members[group.ownerNodeIdHex];
+        if (prevOwner != null) prevOwner.role = 'admin';
+        group.ownerNodeIdHex = targetIdHex;
+      }
+
+      _saveGroups();
+
+      final sysMsg = UiMessage(
+        id: bytesToHex(SodiumFFI().randomBytes(16)),
+        conversationId: entityIdHex,
+        senderNodeIdHex: '',
+        text: '${target.displayName}: $oldRole → $newRole',
+        timestamp: DateTime.now(),
+        type: UiMessageType.channelRoleUpdate,
+        status: MessageStatus.delivered,
+        isOutgoing: false,
+      );
+      _addMessageToConversation(entityIdHex, sysMsg);
+      _log.info('Group role update: ${target.displayName} $oldRole → $newRole in "${group.name}"');
+
+    } else {
+      _log.debug('CHANNEL_ROLE_UPDATE: entity $entityIdHex not found (not a member)');
+    }
+
+    onStateChanged?.call();
+  }
+  void _handleChannelBadBadgeReportV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: CHANNEL_BAD_BADGE_REPORT (C4)');
+
+  /// V3-direct handler for MTV3_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
+  /// Owner-bound AppFrame; payload is the `ChannelJoinRequest` proto
+  /// already decrypted+authenticated by the V3 receive pipeline.
+  void _handleChannelJoinRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    _handleChannelJoinRequest(
+      Uint8List.fromList(frame.payload),
+      Uint8List.fromList(frame.senderUserId),
+    );
+  }
+
+  /// V3-direct handler for MTV3_CHANNEL_REPORT (Wave 2B.3, §10.2). No
+  /// active V3 sender today (reportChannel mutates local state only) —
+  /// handler in place so future moderator-fanout can land without a
+  /// silent drop. Payload is the `ChannelReportMsg` proto already
+  /// decrypted+authenticated by the V3 receive pipeline.
+  void _handleChannelReportV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    _handleIncomingChannelReport(
+      Uint8List.fromList(frame.payload),
+      Uint8List.fromList(frame.senderUserId),
+    );
+  }
+
+  /// V3-direct InfraFrame handler for MTV3_CHANNEL_INDEX_EXCHANGE (Wave
+  /// 2B.3, §10.2). Gossip-style channel-index distribution to non-contact
+  /// peers; payload is untrusted by design — handler just merges entries
+  /// into `_channelIndex`. No KEM-decap and no inner User-Sig (public
+  /// gossip on the InfraFrame path); the outer Device-Sig is the only
+  /// authenticator and is verified upstream by the V3 receive pipeline.
+  void handleIncomingChannelIndexExchangeInfra(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    _handleChannelIndexExchange(Uint8List.fromList(frame.payload));
+  }
+  /// V3-direct dispatcher for MTV3_CHANNEL_JURY_VOTE. The wire-type is
+  /// overloaded by the V3 sender (cleona_service Z.~5023) — it carries
+  /// either a `JuryRequestMsg` (initiator → juror, "you've been selected")
+  /// or a `JuryVoteMsg` (juror → initiator, "here's my vote"). Both
+  /// proto-bodies share the leading `juryId` field, so we early-parse as
+  /// `JuryVoteMsg` and discriminate by initiator-side state: if we hold an
+  /// `_activeSessions[juryId]` entry, this incoming frame is a vote-back
+  /// for that session; otherwise it's a fresh request to participate.
+  void _handleChannelJuryVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final payload = Uint8List.fromList(frame.payload);
+      final senderUserId = Uint8List.fromList(frame.senderUserId);
+      final voteCandidate = proto.JuryVoteMsg.fromBuffer(payload);
+      final juryIdHex = bytesToHex(Uint8List.fromList(voteCandidate.juryId));
+      if (_activeSessions.containsKey(juryIdHex)) {
+        _handleIncomingJuryVote(payload, senderUserId);
+      } else {
+        _handleIncomingJuryRequest(payload, senderUserId);
+      }
+    } catch (e) {
+      _log.warn('_handleChannelJuryVoteV3: dispatch fail: $e '
+          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+    }
+  }
+
+  /// V3-direct handler for MTV3_CHANNEL_MOD_DECISION (jury verdict
+  /// broadcast). Payload is the `JuryResultMsg` proto already
+  /// decrypted+authenticated by the V3 receive pipeline. The handler is
+  /// sender-agnostic (only updates local state from the result tally), so
+  /// no senderUserId is forwarded.
+  void _handleChannelModDecisionV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    _handleIncomingJuryResult(Uint8List.fromList(frame.payload));
+  }
+  void _handleChannelSubscribeProbeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: CHANNEL_SUBSCRIBE_PROBE (C4)');
+  // Wave 2B.3: PEER_LIST_*, DHT_*, FRAGMENT_*, PEER_STORE_* dead-stub
+  // declarations removed. PEER_LIST_*/DHT_* are §2.3.5 Infrastructure types
+  // dispatched in cleona_node.dart's `_dispatchInfrastructureFrameLocal`.
+  // FRAGMENT_*/PEER_STORE_* are dispatched via the service-layer Infra hook
+  // (service_daemon.dart `node.onInfrastructureFramePayload`) into
+  // `handleIncomingFragmentStoreInfra` etc.
+  void _handleChatConfigUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // V3 direct: the inner payload is the ChatConfigUpdate protobuf,
+    // already decrypted + authenticated by the V3 pipeline.
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+    proto.ChatConfigUpdate configMsg;
+    try {
+      configMsg = proto.ChatConfigUpdate.fromBuffer(frame.payload);
+    } catch (e) {
+      _log.error('CHAT_CONFIG_UPDATE parse failed: $e');
+      return;
+    }
+
+    final newConfig = ChatConfig(
+      allowDownloads: configMsg.allowDownloads,
+      allowForwarding: configMsg.allowForwarding,
+      editWindowMs: configMsg.hasEditWindowMs() ? configMsg.editWindowMs.toInt() : null,
+      expiryDurationMs: configMsg.hasExpiryDurationMs() ? configMsg.expiryDurationMs.toInt() : null,
+      readReceipts: configMsg.readReceipts,
+      typingIndicators: configMsg.typingIndicators,
+    );
+
+    // Check if this is a group config update
+    final groupIdHex = frame.groupId.isNotEmpty
+        ? bytesToHex(Uint8List.fromList(frame.groupId))
+        : null;
+
+    if (groupIdHex != null) {
+      // Group or channel config: apply directly (sender must be owner or admin)
+      final group = _groups[groupIdHex];
+      final channel = _channels[groupIdHex];
+      if (group != null) {
+        final senderMember = group.members[senderHex];
+        if (senderMember == null) return;
+        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
+          _log.warn('Group config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
+          return;
+        }
+        final conv = conversations[groupIdHex];
+        if (conv != null) {
+          conv.config = newConfig;
+          _saveConversations();
+        }
+        onStateChanged?.call();
+        _log.info('Group config updated by ${senderMember.displayName} for "${group.name}"');
+        return;
+      }
+      if (channel != null) {
+        final senderMember = channel.members[senderHex];
+        if (senderMember == null) return;
+        if (senderMember.role != 'owner' && senderMember.role != 'admin') {
+          _log.warn('Channel config rejected: ${senderHex.substring(0, 8)} is ${senderMember.role}');
+          return;
+        }
+        final conv = conversations[groupIdHex];
+        if (conv != null) {
+          conv.config = newConfig;
+          _saveConversations();
+        }
+        onStateChanged?.call();
+        _log.info('Channel config updated by ${senderMember.displayName} for "${channel.name}"');
+        return;
+      }
+      // Unknown group/channel — buffer config for when GROUP_INVITE arrives
+      _pendingGroupConfigs[groupIdHex] = (config: newConfig, senderHex: senderHex);
+      _log.info('Buffered config for unknown group/channel ${groupIdHex.substring(0, 8)} from ${senderHex.substring(0, 8)}');
+      return;
+    }
+
+    // DM config: handle proposal/response
+    if (configMsg.isRequest) {
+      // Peer proposes new config — store as pending, do NOT apply yet
+      final conv = conversations[senderHex] ?? conversations.putIfAbsent(
+        senderHex,
+        () => Conversation(id: senderHex, displayName: _contacts[senderHex]?.displayName ?? ''),
+      );
+      conv.pendingConfigProposal = newConfig;
+      conv.pendingConfigProposer = senderHex;
+      conv.unreadCount++;
+      _updateBadgeCount();
+      _saveConversations();
+      onStateChanged?.call();
+      _log.info('DM config proposal received from ${_contacts[senderHex]?.displayName ?? senderHex.substring(0, 8)} — awaiting accept/reject');
+    } else if (configMsg.accepted) {
+      // Peer accepted our proposal — NOW apply the config on our side
+      final conv = conversations[senderHex];
+      if (conv != null && conv.pendingConfigProposal != null) {
+        conv.config = conv.pendingConfigProposal!;
+        conv.pendingConfigProposal = null;
+        conv.pendingConfigProposer = null;
+        _saveConversations();
+      }
+      onStateChanged?.call();
+      _log.info('DM config accepted by ${senderHex.substring(0, 8)}');
+    } else {
+      // Peer rejected our proposal — clear pending
+      final conv = conversations[senderHex];
+      if (conv != null) {
+        conv.pendingConfigProposal = null;
+        conv.pendingConfigProposer = null;
+        _saveConversations();
+      }
+      onStateChanged?.call();
+      _log.info('DM config rejected by ${senderHex.substring(0, 8)}');
+    }
+  }
+  void _handleChatConfigResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: CHAT_CONFIG_RESPONSE (C4)');
+  // Wave 2B.3: ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_*
+  // dead-stub declarations removed — all dispatched in cleona_node.dart
+  // (`_dispatchInfrastructureFrameLocal`, see Wave 2B.3 section). RELAY_*
+  // remains on the KEM-path with §5.5 logic (out of Wave 2B.3 scope).
+  void _handleIdentityAuthPublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_PUBLISH (C4)');
+  void _handleIdentityAuthRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_RETRIEVE (C4)');
+  void _handleIdentityAuthResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_RESPONSE (C4)');
+  void _handleIdentityLivePublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_PUBLISH (C4)');
+  void _handleIdentityLiveRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_RETRIEVE (C4)');
+  void _handleIdentityLiveResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_RESPONSE (C4)');
+  void _handleTwinSyncV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // The inner payload is the TwinSyncEnvelope protobuf, already
+    // decrypted + authenticated by the V3 pipeline. Sub-handlers operate
+    // on raw payload bytes.
+    try {
+      final sync = proto.TwinSyncEnvelope.fromBuffer(frame.payload);
+      final syncIdHex = bytesToHex(Uint8List.fromList(sync.syncId));
+      final deviceIdHex = bytesToHex(Uint8List.fromList(sync.deviceId));
+
+      // Deduplication: syncId seen within 7-day TTL window → silent drop.
+      if (_processedSyncIds.containsKey(syncIdHex)) return;
+      _processedSyncIds[syncIdHex] = DateTime.now().millisecondsSinceEpoch;
+
+      // Update device lastSeen
+      if (_devices.containsKey(deviceIdHex)) {
+        _devices[deviceIdHex]!.lastSeen = DateTime.now();
+      }
+
+      _log.debug('TWIN_SYNC(${sync.syncType}) from device ${deviceIdHex.substring(0, 8)}');
+
+      switch (sync.syncType) {
+        case proto.TwinSyncType.CONTACT_ADDED:
+          _handleTwinContactAdded(sync.payload);
+          break;
+        case proto.TwinSyncType.CONTACT_DELETED:
+          _handleTwinContactDeleted(sync.payload);
+          break;
+        case proto.TwinSyncType.MESSAGE_SENT:
+          _handleTwinMessageSent(sync.payload);
+          break;
+        case proto.TwinSyncType.MESSAGE_EDITED:
+          _handleTwinMessageEdited(sync.payload);
+          break;
+        case proto.TwinSyncType.MESSAGE_DELETED:
+          _handleTwinMessageDeleted(sync.payload);
+          break;
+        case proto.TwinSyncType.TWIN_READ_RECEIPT:
+          _handleTwinReadReceipt(sync.payload);
+          break;
+        case proto.TwinSyncType.GROUP_CREATED:
+          _handleTwinGroupCreated(sync.payload);
+          break;
+        case proto.TwinSyncType.PROFILE_CHANGED:
+          _handleTwinProfileChanged(sync.payload);
+          break;
+        case proto.TwinSyncType.SETTINGS_CHANGED:
+          _handleTwinSettingsChanged(sync.payload);
+          break;
+        case proto.TwinSyncType.DEVICE_RENAMED:
+          _handleTwinDeviceRenamed(sync.payload);
+          break;
+        case proto.TwinSyncType.TWIN_DEVICE_REVOKED:
+          _handleTwinDeviceRevoked(sync.payload);
+          break;
+        case proto.TwinSyncType.DEVICE_ANNOUNCE:
+          // §26 Multi-Device: V3 carries TWIN_ANNOUNCE as TWIN_SYNC sub-type.
+          // sync.payload is the inner DeviceRecord proto.
+          //
+          // Reciprocal-announce only on the new-device branch — sending it on
+          // every announce creates an A→B→A→B amplification loop because
+          // each side keeps updating lastSeen and re-announcing.
+          // Convergence in two rounds: A announces, B registers + reciprocates,
+          // A receives B's announce, A registers (new for A), A reciprocates
+          // once more, B updates lastSeen and stops.
+          try {
+            final record = proto.DeviceRecord.fromBuffer(sync.payload);
+            final announcedHex = bytesToHex(Uint8List.fromList(record.deviceId));
+            if (announcedHex == _localDeviceId) break; // ignore self-loop
+
+            final devNodeIdHex = record.deviceNodeId.isNotEmpty
+                ? bytesToHex(Uint8List.fromList(record.deviceNodeId))
+                : null;
+
+            final now = DateTime.now();
+            final isNew = !_devices.containsKey(announcedHex);
+            if (isNew) {
+              _devices[announcedHex] = DeviceRecord(
+                deviceId: announcedHex,
+                deviceName: record.deviceName,
+                platform: _detectPlatformFromProto(record.platform),
+                firstSeen: now,
+                lastSeen: now,
+                deviceNodeIdHex: devNodeIdHex,
+              );
+              _log.info('New twin device registered: $announcedHex (${record.deviceName})');
+            } else {
+              _devices[announcedHex]!.lastSeen = now;
+              _devices[announcedHex]!.deviceName = record.deviceName;
+              if (devNodeIdHex != null) {
+                _devices[announcedHex]!.deviceNodeIdHex = devNodeIdHex;
+              }
+            }
+            _notifyDevicesChanged();
+            if (isNew) _sendTwinAnnounce();
+          } catch (e) {
+            _log.error('DEVICE_ANNOUNCE processing failed: $e');
+          }
+          break;
+        default:
+          _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
+      }
+      _saveDevices(); // Persist dedup IDs
+    } catch (e) {
+      _log.error('TWIN_SYNC processing failed: $e');
+    }
+  }
+  void _handleDevicePairRequestV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: DEVICE_PAIR_REQUEST (C4)');
+  void _handleDevicePairApproveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
+      _log.warn('TODO V3 handler not migrated: DEVICE_PAIR_APPROVE (C4)');
+  void _handleDeviceRevocationV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    // V3 direct: inner payload is the DeviceRecord protobuf, already
+    // decrypted + authenticated by the V3 pipeline. §26 authorization check
+    // preserved: only accepted contacts may revoke their own devices for us.
+    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+    final contact = _contacts[senderHex];
+    if (contact == null || contact.status != 'accepted') return;
+
+    try {
+      final revokedDevice = proto.DeviceRecord.fromBuffer(frame.payload);
+      final deviceIdShort = bytesToHex(Uint8List.fromList(revokedDevice.deviceId)).substring(0, 8);
+
+      // §26 Phase 4: remove by deviceNodeId (preferred, precise)
+      if (revokedDevice.deviceNodeId.isNotEmpty) {
+        final revokedNodeId = Uint8List.fromList(revokedDevice.deviceNodeId);
+        final revokedNodeIdHex = bytesToHex(revokedNodeId);
+        final removed = node.routingTable.removePeerByNodeId(revokedNodeId);
+        contact.deviceNodeIds.remove(revokedNodeIdHex);
+        _saveContacts();
+        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
+            'device $deviceIdShort, routing entry ${removed ? "removed" : "not found"} '
+            '(deviceNodeId ${revokedNodeIdHex.substring(0, 8)})');
+        return;
+      }
+
+      // Fallback: remove by addresses (pre-Phase-4 peers without deviceNodeId)
+      final revokedAddresses = revokedDevice.addresses
+          .map((a) => '${a.ip}:${a.port}')
+          .toSet();
+
+      if (revokedAddresses.isEmpty) {
+        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
+            'device $deviceIdShort revoked (no deviceNodeId or addresses to prune)');
+        return;
+      }
+
+      final peer = node.routingTable.getPeerByUserId(contact.nodeId);
+      if (peer != null) {
+        final beforeCount = peer.addresses.length;
+        peer.addresses.removeWhere(
+            (a) => revokedAddresses.contains('${a.ip}:${a.port}'));
+        final removed = beforeCount - peer.addresses.length;
+        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
+            'removed $removed/${revokedAddresses.length} addresses (fallback)');
+      } else {
+        _log.debug('DEVICE_REVOKED from ${contact.displayName}: '
+            'no PeerInfo in routing table');
+      }
+    } catch (e) {
+      _log.error('DEVICE_REVOKED processing failed: $e');
+    }
+  }
+  /// Handle incoming CALENDAR_INVITE — V3-direct.
+  void _handleCalendarInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final invite = proto.CalendarInviteMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final eventIdHex = bytesToHex(Uint8List.fromList(invite.eventId));
+
+      // Create local calendar event from invite
+      final event = CalendarEvent(
+        eventId: eventIdHex,
+        identityId: identity.userIdHex,
+        title: invite.title,
+        description: invite.description.isNotEmpty ? invite.description : null,
+        location: invite.location.isNotEmpty ? invite.location : null,
+        startTime: invite.startTime.toInt(),
+        endTime: invite.endTime.toInt(),
+        allDay: invite.allDay,
+        timeZone: invite.timeZone.isNotEmpty ? invite.timeZone : 'UTC',
+        recurrenceRule: invite.recurrenceRule.isNotEmpty ? invite.recurrenceRule : null,
+        hasCall: invite.hasCall,
+        groupId: invite.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(invite.groupId)) : null,
+        category: EventCategory.values[invite.category.value.clamp(0, EventCategory.values.length - 1)],
+        reminders: invite.reminders.map((r) => r.minutesBefore).toList(),
+        createdBy: senderHex,
+      );
+      calendarManager.createEvent(event);
+
+      // Add system message to group chat if it's a group event
+      if (event.groupId != null && conversations.containsKey(event.groupId)) {
+        final senderName = _contacts[senderHex]?.displayName ?? invite.createdByName;
+        _addMessageToConversation(event.groupId!, UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: event.groupId!,
+          senderNodeIdHex: '',
+          text: '$senderName hat einen Termin erstellt: ${event.title}',
+          timestamp: DateTime.now(),
+          type: UiMessageType.calendarInvite,
+          status: MessageStatus.delivered,
+          isOutgoing: false,
+        ), isGroup: true);
+      }
+
+      _log.info('Received calendar invite: ${event.title} from ${senderHex.substring(0, 8)}');
+      onCalendarInviteReceived?.call(senderHex, eventIdHex, event.title);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handleCalendarInviteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// Handle incoming CALENDAR_RSVP from a group event participant — V3-direct.
+  void _handleCalendarRsvpV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final rsvp = proto.CalendarRsvpMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final eventIdHex = bytesToHex(Uint8List.fromList(rsvp.eventId));
+
+      final status = RsvpStatus.values[rsvp.response.value.clamp(0, RsvpStatus.values.length - 1)];
+      calendarManager.setRsvp(eventIdHex, senderHex, status);
+
+      // System message in group chat
+      final event = calendarManager.events[eventIdHex];
+      if (event?.groupId != null && conversations.containsKey(event!.groupId)) {
+        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+        final statusText = switch (status) {
+          RsvpStatus.accepted => 'hat zugesagt',
+          RsvpStatus.declined => 'hat abgesagt',
+          RsvpStatus.tentative => 'hat vorläufig zugesagt',
+          RsvpStatus.proposeNewTime => 'schlägt eine andere Zeit vor',
+        };
+        _addMessageToConversation(event.groupId!, UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: event.groupId!,
+          senderNodeIdHex: '',
+          text: '$senderName $statusText',
+          timestamp: DateTime.now(),
+          type: UiMessageType.calendarRsvp,
+          status: MessageStatus.delivered,
+          isOutgoing: false,
+        ), isGroup: true);
+      }
+
+      _log.info('RSVP for $eventIdHex from ${senderHex.substring(0, 8)}: $status');
+      onCalendarRsvpReceived?.call(eventIdHex, senderHex, status);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handleCalendarRsvpV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// Handle incoming CALENDAR_UPDATE from the event creator — V3-direct.
+  void _handleCalendarUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final update = proto.CalendarUpdateMsg.fromBuffer(frame.payload);
+      final eventIdHex = bytesToHex(Uint8List.fromList(update.eventId));
+
+      final event = calendarManager.events[eventIdHex];
+      if (event == null) {
+        _log.debug('CALENDAR_UPDATE for unknown event $eventIdHex');
+        return;
+      }
+
+      calendarManager.updateEvent(eventIdHex,
+        title: update.title.isNotEmpty ? update.title : null,
+        description: update.description.isNotEmpty ? update.description : null,
+        location: update.location.isNotEmpty ? update.location : null,
+        startTime: update.startTime.toInt() > 0 ? update.startTime.toInt() : null,
+        endTime: update.endTime.toInt() > 0 ? update.endTime.toInt() : null,
+        allDay: update.allDay,
+        hasCall: update.hasCall,
+        cancelled: update.cancelled,
+        reminders: update.reminders.isNotEmpty
+            ? update.reminders.map((r) => r.minutesBefore).toList()
+            : null,
+      );
+
+      if (event.groupId != null && conversations.containsKey(event.groupId)) {
+        final action = update.cancelled ? 'hat den Termin abgesagt' : 'hat den Termin geändert';
+        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+        _addMessageToConversation(event.groupId!, UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: event.groupId!,
+          senderNodeIdHex: '',
+          text: '$senderName $action: ${event.title}',
+          timestamp: DateTime.now(),
+          type: UiMessageType.calendarUpdate,
+          status: MessageStatus.delivered,
+          isOutgoing: false,
+        ), isGroup: true);
+      }
+
+      _log.info('Calendar event updated: $eventIdHex');
+      onCalendarEventUpdated?.call(eventIdHex);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handleCalendarUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// Handle incoming CALENDAR_DELETE from the event creator — V3-direct.
+  void _handleCalendarDeleteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final del = proto.CalendarDeleteMsg.fromBuffer(frame.payload);
+      final eventIdHex = bytesToHex(Uint8List.fromList(del.eventId));
+
+      final event = calendarManager.events[eventIdHex];
+      if (event != null && event.groupId != null) {
+        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+        _addMessageToConversation(event.groupId!, UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: event.groupId!,
+          senderNodeIdHex: '',
+          text: '$senderName hat den Termin gelöscht: ${event.title}',
+          timestamp: DateTime.now(),
+          type: UiMessageType.calendarDelete,
+          status: MessageStatus.delivered,
+          isOutgoing: false,
+        ), isGroup: true);
+      }
+
+      calendarManager.deleteEvent(eventIdHex);
+      _log.info('Calendar event deleted: $eventIdHex');
+      onCalendarEventUpdated?.call(eventIdHex);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handleCalendarDeleteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// Handle incoming FREE_BUSY_REQUEST — auto-respond with filtered availability. V3-direct.
+  Future<void> _handleFreeBusyRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) async {
+    try {
+      final req = proto.FreeBusyRequestMsg.fromBuffer(frame.payload);
+      final querierHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final requestIdBytes = Uint8List.fromList(req.requestId);
+
+      // Only respond to accepted contacts (KEX Gate already filtered, but double-check)
+      if (_contacts[querierHex]?.status != 'accepted') {
+        _log.debug('FREE_BUSY_REQUEST from non-contact ${querierHex.substring(0, 8)}, ignoring');
+        return;
+      }
+
+      // Generate response — cross-identity merge handled by IPC daemon layer
+      final blocks = calendarManager.generateFreeBusyResponse(
+        queryStart: req.queryStart.toInt(),
+        queryEnd: req.queryEnd.toInt(),
+        querierNodeIdHex: querierHex,
+      );
+
+      // Build response proto
+      final response = proto.FreeBusyResponseMsg()
+        ..requestId = requestIdBytes;
+      for (final block in blocks) {
+        response.blocks.add(proto.FreeBusyBlock()
+          ..start = Int64(block.start)
+          ..end = Int64(block.end)
+          ..level = proto.FreeBusyLevel.valueOf(block.level.index) ?? proto.FreeBusyLevel.FB_TIME_ONLY
+          ..title = block.title ?? ''
+          ..location = block.location ?? '');
+      }
+
+      // Send response
+      await _sendEncryptedPayload(
+        Uint8List.fromList(frame.senderUserId),
+        proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE,
+        response.writeToBuffer(),
+      );
+
+      _log.info('Sent FREE_BUSY_RESPONSE to ${querierHex.substring(0, 8)} '
+          '(${blocks.length} blocks)');
+    } catch (e) {
+      _log.warn('_handleFreeBusyRequestV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  /// Handle incoming FREE_BUSY_RESPONSE — V3-direct.
+  void _handleFreeBusyResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final resp = proto.FreeBusyResponseMsg.fromBuffer(frame.payload);
+      final requestIdHex = bytesToHex(Uint8List.fromList(resp.requestId));
+
+      final blocks = <FreeBusyBlockResult>[];
+      for (final b in resp.blocks) {
+        blocks.add(FreeBusyBlockResult(
+          start: b.start.toInt(),
+          end: b.end.toInt(),
+          level: FreeBusyLevel.values[b.level.value.clamp(0, FreeBusyLevel.values.length - 1)],
+          title: b.title.isNotEmpty ? b.title : null,
+          location: b.location.isNotEmpty ? b.location : null,
+        ));
+      }
+
+      // Accumulate responses
+      _freeBusyResults.putIfAbsent(requestIdHex, () => []).addAll(blocks);
+
+      // Notify callback if registered
+      final cb = _freeBusyCallbacks[requestIdHex];
+      if (cb != null) {
+        cb(_freeBusyResults[requestIdHex]!);
+      }
+
+      _log.info('Received FREE_BUSY_RESPONSE for $requestIdHex '
+          '(${blocks.length} blocks)');
+    } catch (e) {
+      _log.warn('_handleFreeBusyResponseV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+  void _handlePollCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollCreateMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final poll = _decodePollCreate(msg, senderHex: senderHex);
+
+      // Must reference a known group or channel, otherwise silently drop.
+      if (_pollRecipients(poll.groupId) == null) {
+        _log.debug('POLL_CREATE for unknown entity ${poll.groupId.substring(0, 8)}, ignoring');
+        return;
+      }
+
+      if (pollManager.polls.containsKey(poll.pollId)) {
+        _log.debug('Duplicate POLL_CREATE ${poll.pollId.substring(0, 8)}');
+        return;
+      }
+      pollManager.createPoll(poll);
+
+      if (conversations.containsKey(poll.groupId)) {
+        final name = _contacts[senderHex]?.displayName ?? msg.createdByName;
+        _addMessageToConversation(poll.groupId, UiMessage(
+          id: bytesToHex(SodiumFFI().randomBytes(16)),
+          conversationId: poll.groupId,
+          senderNodeIdHex: senderHex,
+          text: '$name: ${poll.question}',
+          timestamp: DateTime.fromMillisecondsSinceEpoch(poll.createdAt),
+          type: UiMessageType.pollCreate,
+          status: MessageStatus.delivered,
+          isOutgoing: false,
+          pollId: poll.pollId,
+        ), isGroup: _groups.containsKey(poll.groupId), isChannel: _channels.containsKey(poll.groupId));
+      }
+
+      onPollCreated?.call(poll.pollId, poll.groupId, poll.question);
+      onStateChanged?.call();
+      _log.info('Received POLL_CREATE ${poll.pollId.substring(0, 8)} from ${senderHex.substring(0, 8)}');
+    } catch (e) {
+      _log.warn('_handlePollCreateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  void _handlePollVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollVoteMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
+      final poll = pollManager.polls[pollIdHex];
+      if (poll == null) {
+        _log.debug('POLL_VOTE for unknown poll $pollIdHex');
+        return;
+      }
+      if (poll.settings.anonymous) {
+        _log.warn('Ignoring non-anonymous POLL_VOTE on anonymous poll $pollIdHex');
+        return;
+      }
+      final record = _decodePollVote(msg, voterIdHex: senderHex, anonymous: false);
+      if (pollManager.recordVote(record)) {
+        onPollTallyUpdated?.call(pollIdHex);
+        onStateChanged?.call();
+
+        // Channel mode: creator re-broadcasts a snapshot so subscribers see totals.
+        if (_channels.containsKey(poll.groupId) &&
+            poll.createdByHex == identity.userIdHex) {
+          _broadcastPollSnapshot(poll);
+        }
+      }
+    } catch (e) {
+      _log.warn('_handlePollVoteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  void _handlePollVoteAnonymousV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollVoteAnonymousMsg.fromBuffer(frame.payload);
+      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
+      final poll = pollManager.polls[pollIdHex];
+      if (poll == null) return;
+      if (!poll.settings.anonymous) {
+        _log.warn('POLL_VOTE_ANONYMOUS for non-anonymous poll, dropping');
+        return;
+      }
+
+      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
+      final keyImage = Uint8List.fromList(msg.keyImage);
+      final keyImageHex = bytesToHex(keyImage);
+      final payload = Uint8List.fromList(msg.encryptedChoice);
+
+      // Context domain-separates polls so the same voter can participate in
+      // multiple anonymous polls without linkage across them.
+      final context = hexToBytes(pollIdHex);
+      final valid = LinkableRingSignature.verify(
+        message: payload,
+        context: context,
+        keyImage: keyImage,
+        ringMembers: ring,
+        signature: Uint8List.fromList(msg.ringSignature),
+      );
+      if (!valid) {
+        _log.warn('Ring signature invalid for poll $pollIdHex, dropping');
+        return;
+      }
+
+      final seen = _anonymousKeyImages.putIfAbsent(pollIdHex, () => {});
+      if (seen.contains(keyImageHex) && !poll.settings.allowVoteChange) {
+        _log.debug('Duplicate key image for $pollIdHex, dropping');
+        return;
+      }
+      seen.add(keyImageHex);
+
+      final voteMsg = proto.PollVoteMsg.fromBuffer(payload);
+      final record = _decodePollVote(voteMsg, voterIdHex: keyImageHex, anonymous: true);
+      // Override voter identifiers so UI never surfaces identity.
+      record.voterName = '';
+      pollManager.recordVote(PollVoteRecord(
+        pollId: record.pollId,
+        voterIdHex: keyImageHex,
+        voterName: '',
+        selectedOptions: record.selectedOptions,
+        dateResponses: record.dateResponses,
+        scaleValue: record.scaleValue,
+        freeText: record.freeText,
+        votedAt: record.votedAt,
+        anonymous: true,
+      ));
+      onPollTallyUpdated?.call(pollIdHex);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handlePollVoteAnonymousV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  void _handlePollUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollUpdateMsg.fromBuffer(frame.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
+      final poll = pollManager.polls[pollIdHex];
+      if (poll == null) return;
+
+      // Permission: creator or group/channel admin/owner.
+      final group = _groups[poll.groupId];
+      final channel = _channels[poll.groupId];
+      final role = group?.members[senderHex]?.role ?? channel?.members[senderHex]?.role;
+      final isCreator = senderHex == poll.createdByHex;
+      final isAdmin = role == 'owner' || role == 'admin';
+      if (!isCreator && !isAdmin) {
+        _log.warn('POLL_UPDATE from non-privileged ${senderHex.substring(0, 8)}, ignoring');
+        return;
+      }
+
+      switch (msg.action) {
+        case proto.PollAction.POLL_ACTION_CLOSE:
+          pollManager.closePoll(pollIdHex);
+          break;
+        case proto.PollAction.POLL_ACTION_REOPEN:
+          pollManager.reopenPoll(pollIdHex);
+          break;
+        case proto.PollAction.POLL_ACTION_ADD_OPTIONS:
+          pollManager.addOptions(
+              pollIdHex,
+              msg.addedOptions
+                  .map((o) => PollOption(
+                        optionId: -1,
+                        label: o.label,
+                        dateStart: o.dateStart.toInt() == 0 ? null : o.dateStart.toInt(),
+                        dateEnd: o.dateEnd.toInt() == 0 ? null : o.dateEnd.toInt(),
+                      ))
+                  .toList());
+          break;
+        case proto.PollAction.POLL_ACTION_REMOVE_OPTIONS:
+          pollManager.removeOptions(pollIdHex, msg.removedOptions.toList());
+          break;
+        case proto.PollAction.POLL_ACTION_EXTEND_DEADLINE:
+          pollManager.extendDeadline(pollIdHex, msg.newDeadline.toInt());
+          break;
+        case proto.PollAction.POLL_ACTION_DELETE:
+          pollManager.deletePoll(pollIdHex);
+          break;
+        default:
+          break;
+      }
+      onPollStateChanged?.call(pollIdHex);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handlePollUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  void _handlePollSnapshotV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollSnapshotMsg.fromBuffer(frame.payload);
+      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
+      final poll = pollManager.polls[pollIdHex];
+      if (poll == null) return;
+
+      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      // Only the creator may publish authoritative snapshots.
+      if (senderHex != poll.createdByHex) {
+        _log.warn('POLL_SNAPSHOT from non-creator, ignoring');
+        return;
+      }
+
+      final optionCounts = <int, int>{};
+      final dateCounts = <int, Map<DateAvailability, int>>{};
+      for (final oc in msg.optionCounts) {
+        if (oc.yesCount + oc.maybeCount + oc.noCount > 0) {
+          dateCounts[oc.optionId] = {
+            DateAvailability.yes: oc.yesCount,
+            DateAvailability.maybe: oc.maybeCount,
+            DateAvailability.no: oc.noCount,
+          };
+        } else {
+          optionCounts[oc.optionId] = oc.count;
+        }
+      }
+
+      poll.cachedSnapshot = PollSnapshotCache(
+        pollId: pollIdHex,
+        totalVotes: msg.totalVotes,
+        optionCounts: optionCounts,
+        dateCounts: dateCounts,
+        scaleAverage: msg.scaleAverage,
+        scaleCount: msg.scaleCount,
+        closed: msg.closed,
+        snapshotAt: msg.snapshotAt.toInt(),
+      );
+      if (msg.closed && !poll.closed) poll.closed = true;
+      poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
+      pollManager.save();
+
+      onPollTallyUpdated?.call(pollIdHex);
+      onStateChanged?.call();
+    } catch (e) {
+      _log.warn('_handlePollSnapshotV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+
+  void _handlePollRevokeV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+    try {
+      final msg = proto.PollVoteRevokeMsg.fromBuffer(frame.payload);
+      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
+      final poll = pollManager.polls[pollIdHex];
+      if (poll == null) return;
+
+      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
+      final keyImage = Uint8List.fromList(msg.keyImage);
+      final keyImageHex = bytesToHex(keyImage);
+      final context = hexToBytes(pollIdHex);
+      final marker = Uint8List.fromList('revoke'.codeUnits);
+      final valid = LinkableRingSignature.verify(
+        message: marker,
+        context: context,
+        keyImage: keyImage,
+        ringMembers: ring,
+        signature: Uint8List.fromList(msg.ringSignature),
+      );
+      if (!valid) {
+        _log.warn('Revoke signature invalid for poll $pollIdHex, dropping');
+        return;
+      }
+      if (pollManager.revokeAnonymousVote(pollIdHex, keyImageHex)) {
+        _anonymousKeyImages[pollIdHex]?.remove(keyImageHex);
+        onPollTallyUpdated?.call(pollIdHex);
+        onStateChanged?.call();
+      }
+    } catch (e) {
+      _log.warn('_handlePollRevokeV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+    }
+  }
+  // ──────────────────────────── V3 Helpers ────────────────────────────
+
+  /// Constant-time byte equality (for userId compare in sender-override path).
+  static bool _constantTimeEq(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    var diff = 0;
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+  }
+
+  /// Short hex prefix for log lines (8 chars / 4 bytes).
+  static String _hexShort(Uint8List bytes) {
+    final n = bytes.length < 4 ? bytes.length : 4;
+    final sb = StringBuffer();
+    for (var i = 0; i < n; i++) {
+      sb.write(bytes[i].toRadixString(16).padLeft(2, '0'));
+    }
+    return sb.toString();
+  }
 }
 
 /// Internal state for an active jury session we initiated.
@@ -12187,15 +13411,51 @@ class _JurySession {
   });
 }
 
-/// §2.2.4: Adapter zwischen `IdentityPublisher.sender.send(envelope, peer)` und
-/// dem CleonaNode's public `sendEnvelopeToPeer`. Fire-and-forget — der Publisher
-/// behandelt Fehler selbst (broadcast an K closest, wenn einer fehlschlägt
-/// reicht's wenn andere ankommen).
-class _IdentityPublisherSender {
+/// §2.2.4: V3-direct adapter (Welle 2A). IdentityPublisher hands us a
+/// `(MessageTypeV3, payload, peer)` triple; we forward straight to
+/// `CleonaNode.sendInfraTo`, which wraps in InfrastructureFrameV3 with the
+/// proper Outer Device-Sig + KEM-AEAD per §2.3.5. Fire-and-forget — the
+/// publisher broadcasts to K closest replicators and tolerates per-peer
+/// failure (replication factor covers it).
+class _IdentityPublisherSender implements IdentityPublisherSender {
   final CleonaNode _node;
   _IdentityPublisherSender(this._node);
 
-  Future<void> send(proto.MessageEnvelope envelope, PeerInfo peer) async {
-    await _node.sendEnvelopeToPeer(envelope, peer);
+  @override
+  Future<void> send(proto.MessageTypeV3 messageType, Uint8List payload,
+      PeerInfo peer) async {
+    await _node.sendInfraTo(
+      messageType: messageType,
+      innerPayload: payload,
+      recipientDeviceId: Uint8List.fromList(peer.nodeId),
+    );
+  }
+}
+
+/// Stage-2 reassembly buffer for incoming MEDIA_CHUNK frames.
+/// Holds chunks indexed by chunk_index until MEDIA_COMPLETE arrives,
+/// at which point the receiver concatenates them, hash-checks against
+/// the COMPLETE-payload, writes the file, and bumps the UiMessage's
+/// mediaState to completed.
+class _MediaChunkBuffer {
+  final int totalChunks;
+  final List<Uint8List?> chunks;
+  final DateTime createdAt;
+  _MediaChunkBuffer(this.totalChunks)
+      : chunks = List<Uint8List?>.filled(totalChunks, null),
+        createdAt = DateTime.now();
+
+  bool get isComplete => chunks.every((c) => c != null);
+
+  Uint8List assemble() {
+    final total = chunks.fold<int>(0, (a, c) => a + (c?.length ?? 0));
+    final out = Uint8List(total);
+    var off = 0;
+    for (final c in chunks) {
+      if (c == null) continue;
+      out.setRange(off, off + c.length, c);
+      off += c.length;
+    }
+    return out;
   }
 }

@@ -133,31 +133,55 @@ class RateLimiter {
   }
 
   /// Check by hex string (convenience for pre-computed sender hex).
-  bool allowPacketHex(String senderHex, int packetSize) {
+  ///
+  /// [checkPacketCount] — when false, the per-source and global packet-count
+  /// limits are skipped.
+  ///
+  /// [checkSourceLimits] — when false, all per-source limits (packet count +
+  /// byte budget) are skipped; only the global total-byte limit applies. Set to
+  /// false for KEM-encrypted frames (PAYLOAD_INFRASTRUCTURE_FRAME and
+  /// PAYLOAD_APPLICATION_FRAME): they are expensive to forge (KEM cost), so the
+  /// natural rate limit is CPU-bound. PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME is
+  /// plaintext and cheap — it is the only type that should consume per-source
+  /// quota.
+  bool allowPacketHex(String senderHex, int packetSize, {
+    bool checkPacketCount = true,
+    bool checkSourceLimits = true,
+  }) {
     _resetTotalIfExpired();
 
-    if (_totalPackets >= maxTotalPackets || _totalBytes + packetSize > maxTotalBytes) {
+    if (checkPacketCount && _totalPackets >= maxTotalPackets) {
+      _droppedPackets++;
+      return false;
+    }
+    if (_totalBytes + packetSize > maxTotalBytes) {
       _droppedPackets++;
       return false;
     }
 
-    var bucket = _sources[senderHex];
-    if (bucket == null) {
-      _evictIfNeeded();
-      bucket = _SourceBucket();
-      _sources[senderHex] = bucket;
+    if (checkSourceLimits) {
+      var bucket = _sources[senderHex];
+      if (bucket == null) {
+        _evictIfNeeded();
+        bucket = _SourceBucket();
+        _sources[senderHex] = bucket;
+      }
+
+      if (bucket.isExpired(window)) bucket.reset();
+
+      if (checkPacketCount && bucket.packets >= maxPacketsPerSource) {
+        _droppedPackets++;
+        return false;
+      }
+      if (bucket.bytes + packetSize > maxBytesPerSource) {
+        _droppedPackets++;
+        return false;
+      }
+
+      bucket.packets++;
+      bucket.bytes += packetSize;
     }
 
-    if (bucket.isExpired(window)) bucket.reset();
-
-    if (bucket.packets >= maxPacketsPerSource ||
-        bucket.bytes + packetSize > maxBytesPerSource) {
-      _droppedPackets++;
-      return false;
-    }
-
-    bucket.packets++;
-    bucket.bytes += packetSize;
     _totalPackets++;
     _totalBytes += packetSize;
     return true;

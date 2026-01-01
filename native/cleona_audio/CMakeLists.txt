@@ -5,11 +5,19 @@ project(cleona_audio C)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 find_package(SpeexDSP REQUIRED)
 
-add_library(cleona_audio SHARED
-  cleona_audio.c
-  cleona_audio_ring.c
-  miniaudio_impl.c
-)
+if(CLEONA_IOS_STATIC)
+  add_library(cleona_audio STATIC
+    cleona_audio.c
+    cleona_audio_ring.c
+    miniaudio_impl.c
+  )
+else()
+  add_library(cleona_audio SHARED
+    cleona_audio.c
+    cleona_audio_ring.c
+    miniaudio_impl.c
+  )
+endif()
 
 target_include_directories(cleona_audio PRIVATE
   ${CMAKE_CURRENT_LIST_DIR}
@@ -23,6 +31,20 @@ target_link_libraries(cleona_audio PRIVATE
 # Linux: link pthread, math, dl
 if(UNIX AND NOT APPLE AND NOT ANDROID)
   target_link_libraries(cleona_audio PRIVATE pthread m dl)
+endif()
+
+# Apple (iOS / macOS): Core Audio via AudioToolbox + AVFoundation frameworks.
+# miniaudio detects the platform and uses the coreaudio backend automatically.
+if(APPLE)
+  target_link_libraries(cleona_audio PRIVATE
+    "-framework AudioToolbox"
+    "-framework CoreFoundation"
+  )
+  if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries(cleona_audio PRIVATE "-framework AVFAudio")
+  else()
+    target_link_libraries(cleona_audio PRIVATE "-framework CoreAudio")
+  endif()
 endif()
 
 # Windows: WASAPI is via ole32 + winmm. MSVC needs /std:c17 (or /std:c11 with

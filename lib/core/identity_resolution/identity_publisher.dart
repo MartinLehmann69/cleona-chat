@@ -24,19 +24,35 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/device_kem_record.dart';
+import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
+import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:meta/meta.dart';
+
+/// Sender contract for IdentityPublisher (Welle 2A V3-direct refactor).
+///
+/// Concrete implementation in `cleona_service.dart::_IdentityPublisherSender`
+/// delegates to `CleonaNode.sendInfraTo(...)`. Tests provide their own
+/// in-memory mocks. The contract takes the V3 message type and inner
+/// payload bytes; serialization to `NetworkPacketV3` happens downstream.
+abstract class IdentityPublisherSender {
+  Future<void> send(
+      proto.MessageTypeV3 messageType, Uint8List payload, PeerInfo peer);
+}
 
 /// Pro Identitaet ein Instance. Owns Auth + Liveness Publish-Schedule.
 class IdentityPublisher {
   final IdentityContext identity;
   final RoutingTable routingTable;
 
-  /// In Phase 5 typisiert (CleonaNode/EnvelopeSender). Skeleton akzeptiert
-  /// jeden Sender mit `Future<void> send(MessageEnvelope, dynamic)`-Signatur.
-  final dynamic sender;
+  /// V3-direct sender contract (Welle 2A): `(MessageTypeV3, payload, peer)`.
+  /// Production wiring is `_IdentityPublisherSender` in cleona_service.dart;
+  /// tests inject simple in-memory recorders.
+  final IdentityPublisherSender sender;
 
   // Adaptive TTL config
   static const Duration foregroundLiveTtl = Duration(minutes: 15);
@@ -44,8 +60,20 @@ class IdentityPublisher {
   static const Duration authTtl = Duration(hours: 24);
   static const Duration authRefreshInterval = Duration(hours: 20);
 
+  // Device-KEM-Record (Welle 5, §3.5b + §4.3): selbe Cadence wie Auth
+  // (24h TTL, 20h Refresh). KEM-PK aendert sich nur bei Device-Key-Reset
+  // (Multi-Year), Republish dient nur DHT-Replikat-Refresh.
+  static const Duration deviceKemTtl = Duration(hours: 24);
+  static const Duration deviceKemRefreshInterval = Duration(hours: 20);
+
   // K=10 closest. effectiveK = min(K, peerCount) at publish time.
   static const int targetK = 10;
+  // Soft preference: wait this long for peerCount to reach `peerThreshold`
+  // before publishing. After `coldStartTimeout`, publish with whatever peers
+  // we have (>=1) and re-publish on every peer-join until threshold is hit.
+  // peerThreshold is no longer a hard gate — small networks (LAN, 2-node
+  // tests) MUST be able to publish AuthManifest/DeviceKemRecord, otherwise
+  // identity resolution stalls indefinitely (§3.4/§3.5b/§4.3).
   static const int peerThreshold = 5;
   static const Duration coldStartTimeout = Duration(seconds: 30);
   static const Duration coldStartRetry = Duration(seconds: 60);
@@ -55,7 +83,12 @@ class IdentityPublisher {
   bool _running = false;
   Timer? _liveTimer;
   Timer? _authTimer;
+  Timer? _kemTimer;
   Timer? _coldStartRetryTimer;
+  // True once the initial coldStartTimeout window has elapsed. Switches the
+  // peer-join wakeup gate from "peerThreshold reached" to "any peer
+  // available" — see `onPeerJoined()` and `_waitForPeersThenPublish()`.
+  bool _coldStartTimedOut = false;
   DateTime? _lastPublishedAt;
   List<proto.PeerAddressProto> _lastPublishedAddrs =
       const <proto.PeerAddressProto>[];
@@ -71,11 +104,52 @@ class IdentityPublisher {
   /// injizieren koennen ohne Transport/NAT zu instanziieren.
   List<proto.PeerAddressProto> Function()? _addressProviderHook;
 
+  /// Welle 5 (§3.5b): liefert die Device-KEM-Pubkeys (X25519 + ML-KEM-768)
+  /// fuer den DeviceKemRecord-Publish. Kommt in Welle 5 Teil 2 aus
+  /// `lib/core/crypto/device_kem.dart` (Subagent A) — bis dahin Hook-injiziert.
+  /// Returnt `null` wenn der Caller den KEM-Keypair noch nicht initialisiert
+  /// hat; Publisher skipped dann den DeviceKemRecord-Publish.
+  ({Uint8List x25519Pk, Uint8List mlKemPk})? Function()? _deviceKemPkProvider;
+
+  /// Diagnostic logger for publish lifecycle (cold-start window, peer-join
+  /// re-publish triggers, KEM-publish dispatch). Goes to the per-identity
+  /// log so multi-identity setups are individually observable.
+  ///
+  /// 2026-05-08 diagnostic wave: switched from `late final` to constructor-
+  /// initialised so the per-identity buffer entry exists immediately, even
+  /// if no other code path on this publisher ever fires `_log.{info,warn,…}`.
+  /// Without this, a missing publisher log line is ambiguous between
+  /// "publisher never started" and "publisher started but logger was
+  /// lazy-uninitialised". Eager init removes the second branch.
+  final CLogger _log;
+
+  /// Local DHT-Handler — receives a self-store of every published record so
+  /// own-publishes are retrievable by the local resolver and by any peer
+  /// asking via `MTV3_IDENTITY_*_RETRIEVE`. Without this, the publisher
+  /// only sends records to the k-closest *other* peers; in a 2-node setup
+  /// where the publisher itself IS the closest peer to the dht-key, no
+  /// node would have the record stored after the publish (replicators ask
+  /// us, we don't have it because we never stored our own — the §4.3
+  /// "publish goes to k-closest peers" semantics implicitly include the
+  /// publisher when it ranks among the k-closest, which Kademlia does by
+  /// convention; making the self-store explicit avoids the silent gap).
+  final IdentityDhtHandler? dhtHandler;
+
   IdentityPublisher({
     required this.identity,
     required this.routingTable,
     required this.sender,
-  });
+    this.dhtHandler,
+  }) : _log = CLogger.get('publisher', profileDir: identity.profileDir) {
+    // 2026-05-08 diagnostic wave: emit an "alive" marker at construction
+    // time so every newly-instantiated publisher leaves a trace in the
+    // per-identity log. This is the topmost diagnostic — if THIS line is
+    // missing for an identity, the publisher object was never created
+    // (cleona_service.dart:705 path skipped or threw silently).
+    _log.info('IdentityPublisher constructed for "${identity.displayName}" '
+        '(userId=${bytesToHex(identity.userId).substring(0, 8)}, '
+        'deviceNodeId=${bytesToHex(identity.deviceNodeId).substring(0, 8)})');
+  }
 
   void setForeground(bool foreground) {
     _foreground = foreground;
@@ -95,6 +169,9 @@ class IdentityPublisher {
   /// abgeschlossen ist (oder die Wait-Phase mit Cold-Start-Retry geparkt
   /// wurde — dann Future kommt zurueck, der Retry laeuft im Hintergrund).
   Future<void> start() async {
+    // 2026-05-08 diagnostic wave: trace start() entry + state.
+    _log.info('start() called: _running=$_running, '
+        'peerCount=${routingTable.peerCount}, threshold=$peerThreshold');
     if (_running) return;
     _running = true;
     await _waitForPeersThenPublish();
@@ -104,24 +181,61 @@ class IdentityPublisher {
     _running = false;
     _liveTimer?.cancel();
     _authTimer?.cancel();
+    _kemTimer?.cancel();
     _coldStartRetryTimer?.cancel();
     _addressFlapDebounceTimer?.cancel();
+    _coldStartTimedOut = false;
   }
 
   /// Wird von CleonaNode/Discovery aufgerufen wenn ein neuer Peer in die
   /// Routing-Table kommt. Weckt einen geparkten Cold-Start sofort auf, sobald
-  /// peerThreshold erreicht ist.
+  /// peerThreshold erreicht ist — oder nach abgelaufenem coldStartTimeout
+  /// auch mit einem einzigen verfuegbaren Peer (small-network fallback).
+  ///
+  /// Nach erfolgtem Erst-Publish: triggert ein Re-Publish solange peerCount
+  /// noch unter peerThreshold ist, damit jeder neue Peer eine Replica
+  /// abbekommt — die `findClosestPeers(targetK)`-Auswahl haengt von der
+  /// aktuellen Routing-Table ab; ohne Re-Publish bliebe ein spaeter
+  /// dazustossender Peer ohne lokale Replica.
   void onPeerJoined() {
     if (!_running) return;
-    if (routingTable.peerCount >= peerThreshold &&
-        _coldStartRetryTimer != null) {
-      _coldStartRetryTimer?.cancel();
-      _coldStartRetryTimer = null;
-      Future.microtask(_publishAuthAndStartLiveness);
-      return;
+    // 2026-05-08 diagnostic wave: every peer-join hits this path. Trace
+    // the gating decision so we can correlate Bootstrap-peer-arrival
+    // timestamps in `[node]` with the publisher's wakeup decision in
+    // `[publisher]`.
+    _log.info('onPeerJoined: peerCount=${routingTable.peerCount}, '
+        'retryTimerParked=${_coldStartRetryTimer != null}, '
+        'coldStartTimedOut=$_coldStartTimedOut, '
+        'lastPublishedAt=${_lastPublishedAt != null}');
+    if (_coldStartRetryTimer != null) {
+      // Cold-start retry-loop is parked. Wake it up if we now have enough
+      // peers OR (small-network fallback) we have at least 1 peer and the
+      // initial cold-start window has already elapsed.
+      final reachedThreshold = routingTable.peerCount >= peerThreshold;
+      final smallNetworkReady = routingTable.peerCount >= 1 &&
+          _coldStartTimedOut;
+      if (reachedThreshold || smallNetworkReady) {
+        _log.info('onPeerJoined: waking parked retry — '
+            'reachedThreshold=$reachedThreshold, '
+            'smallNetworkReady=$smallNetworkReady');
+        _coldStartRetryTimer?.cancel();
+        _coldStartRetryTimer = null;
+        Future.microtask(_publishAuthAndStartLiveness);
+        return;
+      }
+    } else if (_lastPublishedAt != null &&
+        routingTable.peerCount > 0 &&
+        routingTable.peerCount <= peerThreshold) {
+      // Already published once but still under threshold — re-publish so the
+      // newly-joined peer ends up in `findClosestPeers(targetK)` selection
+      // and gets its own replica. Skip-on-no-change in `_publishLivenessNow`
+      // protects against churn; AuthManifest/DeviceKem republish goes through
+      // the regular refresh timers, but we kick a Liveness-burst now.
+      Future.microtask(() => _publishLivenessNow(forceBypassSkip: true));
     }
     // Cold-Start-Wait laeuft synchron in `_waitForPeersThenPublish` — der
-    // sieht den Threshold-Hit von selbst beim naechsten 100ms-Tick.
+    // sieht den Threshold-Hit (oder den Small-Network-Fallback) selbst
+    // beim naechsten 100ms-Tick.
   }
 
   /// Wird vom NetworkChangeHandler aufgerufen wenn lokale Adressen wechseln
@@ -158,14 +272,54 @@ class IdentityPublisher {
     _addressProviderHook = hook;
   }
 
+  /// Welle 5 (§3.5b): injiziert die Device-KEM-Pubkeys-Quelle fuer
+  /// `_publishDeviceKemNow()`. CleonaService verdrahtet das in Welle 5 Teil 2
+  /// gegen `DeviceKem.x25519Pk + DeviceKem.mlKemPk` (Subagent-A-Klasse).
+  /// Wenn nicht gesetzt, wird der DeviceKemRecord-Publish silent geskippt.
+  void setDeviceKemPkProvider(
+      ({Uint8List x25519Pk, Uint8List mlKemPk})? Function() hook) {
+    _deviceKemPkProvider = hook;
+  }
+
+  /// Test-Hook: triggert `_publishDeviceKemNow()` direkt aus Smoke-Tests.
+  @visibleForTesting
+  Future<void> publishDeviceKemNowForTest() async => _publishDeviceKemNow();
+
   Future<void> _waitForPeersThenPublish() async {
+    // 2026-05-08 diagnostic wave: trace each entry into the cold-start
+    // state machine + the branch decision so the WinVM/AVM "publisher
+    // never publishes" investigation can pinpoint exactly which branch
+    // is taken (or where the await hangs).
+    _log.info('_waitForPeersThenPublish entry: peerCount='
+        '${routingTable.peerCount}, threshold=$peerThreshold, '
+        'coldStartTimedOut=$_coldStartTimedOut');
+    // §3.4/§3.5b — Small-network semantics: publish as soon as ANY peer is
+    // available. `peerThreshold` is no longer a hard gate (waiting for it
+    // would stall identity resolution indefinitely on small LANs / 2-node
+    // test setups, as the old code did). Instead:
+    //
+    //   1. If at least 1 peer is reachable → publish now. The selection
+    //      `findClosestPeers(targetK)` returns `min(K, available)` peers,
+    //      so a single-peer publish is well-defined.
+    //   2. Subsequent peer-joins trigger a re-publish via `onPeerJoined()`
+    //      until `peerCount >= peerThreshold`, ensuring late-arriving peers
+    //      also receive a replica (so the eventual K-closest set is fully
+    //      populated even if the publisher started from cold-zero).
+    //   3. Discovery-burst grace: brief 1-second poll loop lets the
+    //      multicast-discovery burst (up to ~5 peers in <1s on a healthy
+    //      LAN, see lan_discovery.dart§burstInterval=2s) land before the
+    //      first publish, avoiding 5 micro-publishes when one suffices.
+    //   4. If after `coldStartTimeout` (30s) still no peer is reachable
+    //      → schedule a retry timer; `onPeerJoined()` also wakes us.
     if (routingTable.peerCount >= peerThreshold) {
+      _log.info('threshold path: peerCount >= threshold at entry');
       await _publishAuthAndStartLiveness();
       return;
     }
-    // Wait up to coldStartTimeout for peers to appear.
-    final deadline = DateTime.now().add(coldStartTimeout);
-    while (DateTime.now().isBefore(deadline)) {
+    // Phase 1: short discovery-burst grace.
+    const Duration burstGrace = Duration(seconds: 1);
+    final burstDeadline = DateTime.now().add(burstGrace);
+    while (DateTime.now().isBefore(burstDeadline)) {
       await Future<void>.delayed(const Duration(milliseconds: 100));
       if (!_running) return;
       if (routingTable.peerCount >= peerThreshold) {
@@ -173,8 +327,32 @@ class IdentityPublisher {
         return;
       }
     }
-    // Still no peers — schedule retry. Concurrent `onPeerJoined()` may also
-    // wake us up earlier (it cancels this timer and triggers publish).
+    // After the grace period: publish if any peer is present.
+    if (routingTable.peerCount >= 1) {
+      _log.info('post-burst path: peerCount >= 1 after grace');
+      _coldStartTimedOut = true;
+      await _publishAuthAndStartLiveness();
+      return;
+    }
+    // Phase 2: still zero peers. Wait the longer cold-start window for
+    // someone — anyone — to appear.
+    _log.info('phase-2 entry: zero peers after burst, '
+        'waiting up to ${(coldStartTimeout - burstGrace).inSeconds}s');
+    final deadline = DateTime.now().add(coldStartTimeout - burstGrace);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      if (!_running) return;
+      if (routingTable.peerCount >= 1) {
+        _log.info('phase-2 wakeup: peer arrived during cold-start window');
+        _coldStartTimedOut = true;
+        await _publishAuthAndStartLiveness();
+        return;
+      }
+    }
+    // Cold-start window fully elapsed and still nobody. Schedule retry.
+    _log.info('cold-start window elapsed with 0 peers — scheduling retry '
+        'in ${coldStartRetry.inSeconds}s');
+    _coldStartTimedOut = true;
     _coldStartRetryTimer = Timer(coldStartRetry, () {
       _coldStartRetryTimer = null;
       if (!_running) return;
@@ -184,6 +362,8 @@ class IdentityPublisher {
 
   Future<void> _publishAuthAndStartLiveness() async {
     if (!_running) return;
+    _log.info('publish-cycle starting (peerCount=${routingTable.peerCount}, '
+        'coldStartTimedOut=$_coldStartTimedOut)');
     final seq = identity.bumpAuthManifestSeq();
     await identity.persistIdentityResolutionState();
     final manifest = AuthManifest.sign(
@@ -200,20 +380,32 @@ class IdentityPublisher {
     // gilt nur das Refresh-Tempo, der Bootstrap-Publish soll noch JETZT raus,
     // sonst entsteht ein Adress-Loch zwischen Start und erstem Tick.
     await _publishLivenessNow();
+    // Welle 5 (§3.5b + §4.3): Device-KEM-Record gleich mit publishen — derselbe
+    // Trust-Anchor (User-Master-Ed25519-Sig), aber eigener Key-Space ("kem").
+    // Skipped wenn Provider nicht gesetzt (Subagent-A-Wiring noch offen).
+    await _publishDeviceKemNow();
+    _scheduleDeviceKemRefresh();
   }
 
   Future<void> _broadcastAuthManifest(AuthManifest m) async {
+    // Self-store first so the local DhtHandler can answer RETRIEVE requests
+    // immediately — including those from peers who learned of us via
+    // discovery and want to pick us as their k-closest replicator. Without
+    // this, a 2-node setup stalls because the only candidate replicator (us)
+    // doesn't have the record we just published.
+    dhtHandler?.handleAuthPublish(m);
     final authKey = _authKey(identity.userId);
-    final closest = routingTable.findClosestPeers(authKey, count: targetK);
-    final payload = m.toProto().writeToBuffer();
+    final closest = routingTable.findClosestPeers(authKey,
+        count: targetK);
+    final payload = Uint8List.fromList(m.toProto().writeToBuffer());
     for (final peer in closest) {
-      final envelope = proto.MessageEnvelope()
-        ..messageType = proto.MessageType.IDENTITY_AUTH_PUBLISH
-        ..encryptedPayload = payload
-        ..senderId = identity.userId
-        ..senderDeviceNodeId = identity.deviceNodeId;
+      // V3-direct: sender (CleonaNode.sendInfraTo) wraps in
+      // InfrastructureFrameV3 with Outer Device-Sig + KEM-AEAD. The §2.3.5
+      // selector (cleona_node.isInfrastructureMessageTypeV3) lists
+      // MTV3_IDENTITY_AUTH_PUBLISH so the infra path applies.
       try {
-        await sender.send(envelope, peer);
+        await sender.send(
+            proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH, payload, peer);
       } catch (_) {
         // Fire-and-forget; replication factor toleriert einzelne Fehler.
       }
@@ -255,17 +447,16 @@ class IdentityPublisher {
       sequenceNumber: seq,
     );
 
+    // Self-store: see `_broadcastAuthManifest` for rationale.
+    dhtHandler?.handleLivePublish(r);
     final liveKey = _liveKey(identity.userId, identity.deviceNodeId);
-    final closest = routingTable.findClosestPeers(liveKey, count: targetK);
-    final payload = r.toProto().writeToBuffer();
+    final closest = routingTable.findClosestPeers(liveKey,
+        count: targetK);
+    final payload = Uint8List.fromList(r.toProto().writeToBuffer());
     for (final peer in closest) {
-      final envelope = proto.MessageEnvelope()
-        ..messageType = proto.MessageType.IDENTITY_LIVE_PUBLISH
-        ..encryptedPayload = payload
-        ..senderId = identity.userId
-        ..senderDeviceNodeId = identity.deviceNodeId;
       try {
-        await sender.send(envelope, peer);
+        await sender.send(
+            proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH, payload, peer);
       } catch (_) {
         // Fire-and-forget.
       }
@@ -305,6 +496,76 @@ class IdentityPublisher {
   }
 
   // ---- DHT-Key-Derivation ----------------------------------------------
+
+  // ── Device-KEM-Record (Welle 5, §3.5b + §4.3) ──────────────────────
+
+  void _scheduleDeviceKemRefresh() {
+    _kemTimer?.cancel();
+    _kemTimer = Timer(deviceKemRefreshInterval, () async {
+      if (!_running) return;
+      await _publishDeviceKemNow();
+      _scheduleDeviceKemRefresh(); // self-rescheduling
+    });
+  }
+
+  Future<void> _publishDeviceKemNow() async {
+    if (!_running) return;
+    final provider = _deviceKemPkProvider;
+    if (provider == null) {
+      _log.warn('DeviceKem publish skipped: provider not set');
+      return;
+    }
+    final kemPks = provider();
+    if (kemPks == null) {
+      _log.warn('DeviceKem publish skipped: KEM keypair not initialized');
+      return;
+    }
+
+    final seq = identity.bumpDeviceKemSeq();
+    await identity.persistIdentityResolutionState();
+    final record = DeviceKemRecord.sign(
+      userId: identity.userId,
+      deviceId: identity.deviceNodeId,
+      deviceX25519Pk: kemPks.x25519Pk,
+      deviceMlKemPk: kemPks.mlKemPk,
+      userEd25519Sk: identity.ed25519SecretKey,
+      userEd25519Pk: identity.ed25519PublicKey,
+      ttlSeconds: deviceKemTtl.inSeconds,
+      sequenceNumber: seq,
+    );
+
+    // Self-store: see `_broadcastAuthManifest` for rationale.
+    dhtHandler?.handleKemPublish(record);
+    final kemKey = _kemKey(identity.userId, identity.deviceNodeId);
+    final closest = routingTable.findClosestPeers(kemKey,
+        count: targetK);
+    final payload = Uint8List.fromList(record.toProto().writeToBuffer());
+    _log.info('DeviceKem publish: targets=${closest.length} peers '
+        '(routingTable.peerCount=${routingTable.peerCount}, targetK=$targetK)');
+    var sent = 0;
+    var failed = 0;
+    for (final peer in closest) {
+      try {
+        await sender.send(
+            proto.MessageTypeV3.MTV3_IDENTITY_KEM_PUBLISH, payload, peer);
+        sent++;
+      } catch (e) {
+        // Fire-and-forget; replication factor toleriert einzelne Fehler.
+        failed++;
+      }
+    }
+    _log.info('DeviceKem publish complete: $sent ok, $failed failed');
+  }
+
+  /// `kem-key = SHA-256("kem" || userId || deviceId)`. Eigener Key-Space,
+  /// independent von "auth"+userId und "live"+userId+deviceId. Strikt §4.3 +
+  /// `proto/cleona.proto::DeviceKemRecordV3`-Comment.
+  Uint8List _kemKey(Uint8List userId, Uint8List deviceId) {
+    final combined = Uint8List(userId.length + deviceId.length);
+    combined.setRange(0, userId.length, userId);
+    combined.setRange(userId.length, combined.length, deviceId);
+    return _hashWithPrefix('kem', combined);
+  }
 
   /// `auth-key = SHA-256("auth" || userId)`. Replicas finden den Manifest
   /// ueber findClosestPeers(authKey).

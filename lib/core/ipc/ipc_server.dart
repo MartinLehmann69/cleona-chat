@@ -7,6 +7,7 @@ import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart' show hexToBytes;
+import 'package:cleona/core/network/peer_reputation.dart' show PeerReputation;
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/archive_config.dart';
@@ -141,6 +142,17 @@ class IpcServer {
         data: {
           'conversationId': conversationId,
           'message': message.toJson(),
+        },
+        identityId: identityId,
+      ));
+    };
+
+    service.onReadReceiptReceived = (conversationId, messageId) {
+      _broadcastEvent(IpcEvent(
+        event: 'read_receipt',
+        data: {
+          'conversationId': conversationId,
+          'messageId': messageId,
         },
         identityId: identityId,
       ));
@@ -686,6 +698,11 @@ class IpcServer {
               state['publicIp'] = service.publicIp;
               state['publicPort'] = service.publicPort;
             }
+            // Welle 5/6: device identity bits for ContactSeed-URI generation
+            // (avoids 2D-DHT DeviceKemRecord lookup for First-CR — §8.1.1).
+            state['deviceNodeIdHex'] = service.deviceNodeIdHex;
+            state['deviceX25519PkB64'] = base64Encode(service.deviceX25519Pk);
+            state['deviceMlKemPkB64'] = base64Encode(service.deviceMlKemPk);
             _sendResponse(client, IpcResponse(
               id: req.id,
               success: true,
@@ -957,7 +974,13 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recipientId'));
             break;
           }
-          final success = await service.sendContactRequest(recipientId);
+          final success = await service.sendContactRequest(
+            recipientId,
+            message: (req.params['message'] as String?) ?? '',
+            seedDeviceIdHex: req.params['seedDeviceIdHex'] as String?,
+            seedDxkB64: req.params['seedDxkB64'] as String?,
+            seedDmkB64: req.params['seedDmkB64'] as String?,
+          );
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: success,
@@ -980,7 +1003,14 @@ class IpcServer {
               addresses: (m['addresses'] as List?)?.cast<String>() ?? <String>[],
             );
           }).toList();
-          service.addPeersFromContactSeed(targetHex, targetAddrs, seedPeers);
+          service.addPeersFromContactSeed(
+            targetHex,
+            targetAddrs,
+            seedPeers,
+            targetDeviceIdHex: req.params['targetDeviceIdHex'] as String?,
+            targetDxkB64: req.params['targetDxkB64'] as String?,
+            targetDmkB64: req.params['targetDmkB64'] as String?,
+          );
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
@@ -1446,9 +1476,14 @@ class IpcServer {
 
         case 'set_moderation_config':
           final preset = req.params['preset'] as String? ?? 'production';
-          _moderationConfig = preset == 'test'
-              ? ModerationConfig.test()
-              : ModerationConfig.production();
+          switch (preset) {
+            case 'test':
+              _moderationConfig = ModerationConfig.test();
+            case 'lab':
+              _moderationConfig = ModerationConfig.lab();
+            default:
+              _moderationConfig = ModerationConfig.production();
+          }
           // Propagate to all services
           for (final service in _services.values) {
             service.moderationConfig = _moderationConfig;
@@ -1855,6 +1890,32 @@ class IpcServer {
           }
           break;
 
+        case 'trigger_self_restore_broadcast':
+          // Welle 6 §6.3 self-trigger variant: post-restore the daemon
+          // already holds the (regenerated, HD-Wallet-derived) User-Sig-Keys
+          // identical to the pre-wipe ones, so the GUI can fire-and-forget
+          // without re-supplying old-Sk via IPC. oldContacts come from the
+          // current `_contacts` registry (populated during the post-restore
+          // re-seeding step). Used by the live-verify scaffolding and any
+          // future GUI flow where the pre-wipe Sk was not preserved out of
+          // process. The legacy `restore_broadcast` case below stays for
+          // GUI flows that DO snapshot the pre-wipe Sk.
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final ok = await service.sendRestoreBroadcast(
+              oldEd25519Sk: service.identity.ed25519SecretKey,
+              oldEd25519Pk: service.identity.ed25519PublicKey,
+              oldNodeId: service.identity.userId,
+              oldContacts: service.acceptedContacts,
+            );
+            _sendResponse(client, IpcResponse(id: req.id, success: ok));
+          }
+          break;
+
         case 'restore_broadcast':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -2111,12 +2172,48 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
             break;
           }
-          final rep = service.node.reputationManager.getReputation(repNodeIdHex);
+          // V3.1.65 Multi-Device (§26): reputation is recorded per
+          // device-node-id (cleona_node.dart `recordGood(senderHex)` uses
+          // `senderDeviceId`), but callers usually pass a *user* nodeId
+          // (e.g. `state.nodeIdHex == identity.userIdHex`). Resolve to the
+          // contact's known devices and aggregate. Direct device-id lookups
+          // (no contact match) still work via the `directHit` fall-through.
+          // Fix B-10 (gui-36 36.05).
+          final repMgr = service.node.reputationManager;
+          final directHit = repMgr.getReputation(repNodeIdHex);
+          final contactByUserId = service.getContact(repNodeIdHex);
+          final repsToAggregate = <PeerReputation>[];
+          if (directHit != null) repsToAggregate.add(directHit);
+          if (contactByUserId != null) {
+            for (final devHex in contactByUserId.deviceNodeIds) {
+              final r = repMgr.getReputation(devHex);
+              if (r != null && !identical(r, directHit)) repsToAggregate.add(r);
+            }
+          }
+          if (repsToAggregate.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'score': 0.5,
+              'goodActions': 0,
+              'badActions': 0,
+              'isBanned': false,
+            }));
+            break;
+          }
+          var aggGood = 0;
+          var aggBad = 0;
+          var aggBanned = false;
+          for (final r in repsToAggregate) {
+            aggGood += r.goodActions;
+            aggBad += r.badActions;
+            aggBanned = aggBanned || r.isBanned;
+          }
+          final aggTotal = aggGood + aggBad;
+          final aggScore = aggTotal == 0 ? 0.5 : aggGood / aggTotal;
           _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'score': rep?.score ?? 0.5,
-            'goodActions': rep?.goodActions ?? 0,
-            'badActions': rep?.badActions ?? 0,
-            'isBanned': rep?.isBanned ?? false,
+            'score': aggScore,
+            'goodActions': aggGood,
+            'badActions': aggBad,
+            'isBanned': aggBanned,
           }));
           break;
 
@@ -2306,6 +2403,16 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
+        case 'test_play_message_sound':
+          final svcSound = _resolveService(client, req);
+          if (svcSound == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          await svcSound.notificationSound.playMessageSound();
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
         case 'get_seed_phrase':
           final cleonaDir = socketPath.substring(0, socketPath.lastIndexOf(Platform.isWindows ? '\\' : '/'));
           final identityMgr = IdentityManager(baseDir: cleonaDir);
@@ -2358,6 +2465,7 @@ class IpcServer {
             recurrenceRule: updates['recurrenceRule'] as String?,
             taskCompleted: updates['taskCompleted'] as bool?,
             taskPriority: updates['taskPriority'] as int?,
+            cancelled: updates['cancelled'] as bool?,
           );
           _sendResponse(client, IpcResponse(id: req.id, success: ok));
           break;

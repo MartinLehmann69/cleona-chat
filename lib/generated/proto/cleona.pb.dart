@@ -18,378 +18,6 @@ import 'cleona.pbenum.dart';
 
 export 'cleona.pbenum.dart';
 
-class MessageEnvelope extends $pb.GeneratedMessage {
-  factory MessageEnvelope({
-    $core.int? version,
-    $core.List<$core.int>? senderId,
-    $core.List<$core.int>? recipientId,
-    $fixnum.Int64? timestamp,
-    MessageType? messageType,
-    $core.List<$core.int>? encryptedPayload,
-    $core.List<$core.int>? signatureEd25519,
-    $core.List<$core.int>? signatureMlDsa,
-    ContentMetadata? contentMetadata,
-    EditMetadata? editMetadata,
-    ExpiryMetadata? expiryMetadata,
-    ErasureCodingMetadata? erasureMetadata,
-    ProofOfWork? pow,
-    PerMessageKem? kemHeader,
-    CompressionType? compression,
-    $core.String? networkTag,
-    $core.List<$core.int>? messageId,
-    $core.List<$core.int>? groupId,
-    $core.List<$core.int>? replyToMessageId,
-    $core.String? replyToText,
-    $core.String? replyToSender,
-    LinkPreview? linkPreview,
-    $core.List<$core.int>? senderDeviceNodeId,
-  }) {
-    final $result = create();
-    if (version != null) {
-      $result.version = version;
-    }
-    if (senderId != null) {
-      $result.senderId = senderId;
-    }
-    if (recipientId != null) {
-      $result.recipientId = recipientId;
-    }
-    if (timestamp != null) {
-      $result.timestamp = timestamp;
-    }
-    if (messageType != null) {
-      $result.messageType = messageType;
-    }
-    if (encryptedPayload != null) {
-      $result.encryptedPayload = encryptedPayload;
-    }
-    if (signatureEd25519 != null) {
-      $result.signatureEd25519 = signatureEd25519;
-    }
-    if (signatureMlDsa != null) {
-      $result.signatureMlDsa = signatureMlDsa;
-    }
-    if (contentMetadata != null) {
-      $result.contentMetadata = contentMetadata;
-    }
-    if (editMetadata != null) {
-      $result.editMetadata = editMetadata;
-    }
-    if (expiryMetadata != null) {
-      $result.expiryMetadata = expiryMetadata;
-    }
-    if (erasureMetadata != null) {
-      $result.erasureMetadata = erasureMetadata;
-    }
-    if (pow != null) {
-      $result.pow = pow;
-    }
-    if (kemHeader != null) {
-      $result.kemHeader = kemHeader;
-    }
-    if (compression != null) {
-      $result.compression = compression;
-    }
-    if (networkTag != null) {
-      $result.networkTag = networkTag;
-    }
-    if (messageId != null) {
-      $result.messageId = messageId;
-    }
-    if (groupId != null) {
-      $result.groupId = groupId;
-    }
-    if (replyToMessageId != null) {
-      $result.replyToMessageId = replyToMessageId;
-    }
-    if (replyToText != null) {
-      $result.replyToText = replyToText;
-    }
-    if (replyToSender != null) {
-      $result.replyToSender = replyToSender;
-    }
-    if (linkPreview != null) {
-      $result.linkPreview = linkPreview;
-    }
-    if (senderDeviceNodeId != null) {
-      $result.senderDeviceNodeId = senderDeviceNodeId;
-    }
-    return $result;
-  }
-  MessageEnvelope._() : super();
-  factory MessageEnvelope.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory MessageEnvelope.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MessageEnvelope', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.int>(1, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
-    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'recipientId', $pb.PbFieldType.OY)
-    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
-    ..e<MessageType>(5, _omitFieldNames ? '' : 'messageType', $pb.PbFieldType.OE, defaultOrMaker: MessageType.TEXT, valueOf: MessageType.valueOf, enumValues: MessageType.values)
-    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'encryptedPayload', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'signatureEd25519', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'signatureMlDsa', $pb.PbFieldType.OY)
-    ..aOM<ContentMetadata>(9, _omitFieldNames ? '' : 'contentMetadata', subBuilder: ContentMetadata.create)
-    ..aOM<EditMetadata>(10, _omitFieldNames ? '' : 'editMetadata', subBuilder: EditMetadata.create)
-    ..aOM<ExpiryMetadata>(11, _omitFieldNames ? '' : 'expiryMetadata', subBuilder: ExpiryMetadata.create)
-    ..aOM<ErasureCodingMetadata>(12, _omitFieldNames ? '' : 'erasureMetadata', subBuilder: ErasureCodingMetadata.create)
-    ..aOM<ProofOfWork>(13, _omitFieldNames ? '' : 'pow', subBuilder: ProofOfWork.create)
-    ..aOM<PerMessageKem>(14, _omitFieldNames ? '' : 'kemHeader', subBuilder: PerMessageKem.create)
-    ..e<CompressionType>(16, _omitFieldNames ? '' : 'compression', $pb.PbFieldType.OE, defaultOrMaker: CompressionType.NONE, valueOf: CompressionType.valueOf, enumValues: CompressionType.values)
-    ..aOS(17, _omitFieldNames ? '' : 'networkTag')
-    ..a<$core.List<$core.int>>(18, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(19, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(20, _omitFieldNames ? '' : 'replyToMessageId', $pb.PbFieldType.OY)
-    ..aOS(21, _omitFieldNames ? '' : 'replyToText')
-    ..aOS(22, _omitFieldNames ? '' : 'replyToSender')
-    ..aOM<LinkPreview>(23, _omitFieldNames ? '' : 'linkPreview', subBuilder: LinkPreview.create)
-    ..a<$core.List<$core.int>>(24, _omitFieldNames ? '' : 'senderDeviceNodeId', $pb.PbFieldType.OY)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  MessageEnvelope clone() => MessageEnvelope()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  MessageEnvelope copyWith(void Function(MessageEnvelope) updates) => super.copyWith((message) => updates(message as MessageEnvelope)) as MessageEnvelope;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static MessageEnvelope create() => MessageEnvelope._();
-  MessageEnvelope createEmptyInstance() => create();
-  static $pb.PbList<MessageEnvelope> createRepeated() => $pb.PbList<MessageEnvelope>();
-  @$core.pragma('dart2js:noInline')
-  static MessageEnvelope getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MessageEnvelope>(create);
-  static MessageEnvelope? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.int get version => $_getIZ(0);
-  @$pb.TagNumber(1)
-  set version($core.int v) { $_setUnsignedInt32(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasVersion() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearVersion() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.List<$core.int> get senderId => $_getN(1);
-  @$pb.TagNumber(2)
-  set senderId($core.List<$core.int> v) { $_setBytes(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasSenderId() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearSenderId() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.List<$core.int> get recipientId => $_getN(2);
-  @$pb.TagNumber(3)
-  set recipientId($core.List<$core.int> v) { $_setBytes(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasRecipientId() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearRecipientId() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $fixnum.Int64 get timestamp => $_getI64(3);
-  @$pb.TagNumber(4)
-  set timestamp($fixnum.Int64 v) { $_setInt64(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasTimestamp() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearTimestamp() => clearField(4);
-
-  @$pb.TagNumber(5)
-  MessageType get messageType => $_getN(4);
-  @$pb.TagNumber(5)
-  set messageType(MessageType v) { setField(5, v); }
-  @$pb.TagNumber(5)
-  $core.bool hasMessageType() => $_has(4);
-  @$pb.TagNumber(5)
-  void clearMessageType() => clearField(5);
-
-  @$pb.TagNumber(6)
-  $core.List<$core.int> get encryptedPayload => $_getN(5);
-  @$pb.TagNumber(6)
-  set encryptedPayload($core.List<$core.int> v) { $_setBytes(5, v); }
-  @$pb.TagNumber(6)
-  $core.bool hasEncryptedPayload() => $_has(5);
-  @$pb.TagNumber(6)
-  void clearEncryptedPayload() => clearField(6);
-
-  @$pb.TagNumber(7)
-  $core.List<$core.int> get signatureEd25519 => $_getN(6);
-  @$pb.TagNumber(7)
-  set signatureEd25519($core.List<$core.int> v) { $_setBytes(6, v); }
-  @$pb.TagNumber(7)
-  $core.bool hasSignatureEd25519() => $_has(6);
-  @$pb.TagNumber(7)
-  void clearSignatureEd25519() => clearField(7);
-
-  @$pb.TagNumber(8)
-  $core.List<$core.int> get signatureMlDsa => $_getN(7);
-  @$pb.TagNumber(8)
-  set signatureMlDsa($core.List<$core.int> v) { $_setBytes(7, v); }
-  @$pb.TagNumber(8)
-  $core.bool hasSignatureMlDsa() => $_has(7);
-  @$pb.TagNumber(8)
-  void clearSignatureMlDsa() => clearField(8);
-
-  @$pb.TagNumber(9)
-  ContentMetadata get contentMetadata => $_getN(8);
-  @$pb.TagNumber(9)
-  set contentMetadata(ContentMetadata v) { setField(9, v); }
-  @$pb.TagNumber(9)
-  $core.bool hasContentMetadata() => $_has(8);
-  @$pb.TagNumber(9)
-  void clearContentMetadata() => clearField(9);
-  @$pb.TagNumber(9)
-  ContentMetadata ensureContentMetadata() => $_ensure(8);
-
-  @$pb.TagNumber(10)
-  EditMetadata get editMetadata => $_getN(9);
-  @$pb.TagNumber(10)
-  set editMetadata(EditMetadata v) { setField(10, v); }
-  @$pb.TagNumber(10)
-  $core.bool hasEditMetadata() => $_has(9);
-  @$pb.TagNumber(10)
-  void clearEditMetadata() => clearField(10);
-  @$pb.TagNumber(10)
-  EditMetadata ensureEditMetadata() => $_ensure(9);
-
-  @$pb.TagNumber(11)
-  ExpiryMetadata get expiryMetadata => $_getN(10);
-  @$pb.TagNumber(11)
-  set expiryMetadata(ExpiryMetadata v) { setField(11, v); }
-  @$pb.TagNumber(11)
-  $core.bool hasExpiryMetadata() => $_has(10);
-  @$pb.TagNumber(11)
-  void clearExpiryMetadata() => clearField(11);
-  @$pb.TagNumber(11)
-  ExpiryMetadata ensureExpiryMetadata() => $_ensure(10);
-
-  @$pb.TagNumber(12)
-  ErasureCodingMetadata get erasureMetadata => $_getN(11);
-  @$pb.TagNumber(12)
-  set erasureMetadata(ErasureCodingMetadata v) { setField(12, v); }
-  @$pb.TagNumber(12)
-  $core.bool hasErasureMetadata() => $_has(11);
-  @$pb.TagNumber(12)
-  void clearErasureMetadata() => clearField(12);
-  @$pb.TagNumber(12)
-  ErasureCodingMetadata ensureErasureMetadata() => $_ensure(11);
-
-  @$pb.TagNumber(13)
-  ProofOfWork get pow => $_getN(12);
-  @$pb.TagNumber(13)
-  set pow(ProofOfWork v) { setField(13, v); }
-  @$pb.TagNumber(13)
-  $core.bool hasPow() => $_has(12);
-  @$pb.TagNumber(13)
-  void clearPow() => clearField(13);
-  @$pb.TagNumber(13)
-  ProofOfWork ensurePow() => $_ensure(12);
-
-  @$pb.TagNumber(14)
-  PerMessageKem get kemHeader => $_getN(13);
-  @$pb.TagNumber(14)
-  set kemHeader(PerMessageKem v) { setField(14, v); }
-  @$pb.TagNumber(14)
-  $core.bool hasKemHeader() => $_has(13);
-  @$pb.TagNumber(14)
-  void clearKemHeader() => clearField(14);
-  @$pb.TagNumber(14)
-  PerMessageKem ensureKemHeader() => $_ensure(13);
-
-  @$pb.TagNumber(16)
-  CompressionType get compression => $_getN(14);
-  @$pb.TagNumber(16)
-  set compression(CompressionType v) { setField(16, v); }
-  @$pb.TagNumber(16)
-  $core.bool hasCompression() => $_has(14);
-  @$pb.TagNumber(16)
-  void clearCompression() => clearField(16);
-
-  @$pb.TagNumber(17)
-  $core.String get networkTag => $_getSZ(15);
-  @$pb.TagNumber(17)
-  set networkTag($core.String v) { $_setString(15, v); }
-  @$pb.TagNumber(17)
-  $core.bool hasNetworkTag() => $_has(15);
-  @$pb.TagNumber(17)
-  void clearNetworkTag() => clearField(17);
-
-  @$pb.TagNumber(18)
-  $core.List<$core.int> get messageId => $_getN(16);
-  @$pb.TagNumber(18)
-  set messageId($core.List<$core.int> v) { $_setBytes(16, v); }
-  @$pb.TagNumber(18)
-  $core.bool hasMessageId() => $_has(16);
-  @$pb.TagNumber(18)
-  void clearMessageId() => clearField(18);
-
-  @$pb.TagNumber(19)
-  $core.List<$core.int> get groupId => $_getN(17);
-  @$pb.TagNumber(19)
-  set groupId($core.List<$core.int> v) { $_setBytes(17, v); }
-  @$pb.TagNumber(19)
-  $core.bool hasGroupId() => $_has(17);
-  @$pb.TagNumber(19)
-  void clearGroupId() => clearField(19);
-
-  @$pb.TagNumber(20)
-  $core.List<$core.int> get replyToMessageId => $_getN(18);
-  @$pb.TagNumber(20)
-  set replyToMessageId($core.List<$core.int> v) { $_setBytes(18, v); }
-  @$pb.TagNumber(20)
-  $core.bool hasReplyToMessageId() => $_has(18);
-  @$pb.TagNumber(20)
-  void clearReplyToMessageId() => clearField(20);
-
-  @$pb.TagNumber(21)
-  $core.String get replyToText => $_getSZ(19);
-  @$pb.TagNumber(21)
-  set replyToText($core.String v) { $_setString(19, v); }
-  @$pb.TagNumber(21)
-  $core.bool hasReplyToText() => $_has(19);
-  @$pb.TagNumber(21)
-  void clearReplyToText() => clearField(21);
-
-  @$pb.TagNumber(22)
-  $core.String get replyToSender => $_getSZ(20);
-  @$pb.TagNumber(22)
-  set replyToSender($core.String v) { $_setString(20, v); }
-  @$pb.TagNumber(22)
-  $core.bool hasReplyToSender() => $_has(20);
-  @$pb.TagNumber(22)
-  void clearReplyToSender() => clearField(22);
-
-  @$pb.TagNumber(23)
-  LinkPreview get linkPreview => $_getN(21);
-  @$pb.TagNumber(23)
-  set linkPreview(LinkPreview v) { setField(23, v); }
-  @$pb.TagNumber(23)
-  $core.bool hasLinkPreview() => $_has(21);
-  @$pb.TagNumber(23)
-  void clearLinkPreview() => clearField(23);
-  @$pb.TagNumber(23)
-  LinkPreview ensureLinkPreview() => $_ensure(21);
-
-  @$pb.TagNumber(24)
-  $core.List<$core.int> get senderDeviceNodeId => $_getN(22);
-  @$pb.TagNumber(24)
-  set senderDeviceNodeId($core.List<$core.int> v) { $_setBytes(22, v); }
-  @$pb.TagNumber(24)
-  $core.bool hasSenderDeviceNodeId() => $_has(22);
-  @$pb.TagNumber(24)
-  void clearSenderDeviceNodeId() => clearField(24);
-}
-
 class ContentMetadata extends $pb.GeneratedMessage {
   factory ContentMetadata({
     $core.String? mimeType,
@@ -956,98 +584,6 @@ class ProofOfWork extends $pb.GeneratedMessage {
   void clearHash() => clearField(3);
 }
 
-class PerMessageKem extends $pb.GeneratedMessage {
-  factory PerMessageKem({
-    $core.List<$core.int>? ephemeralX25519Pk,
-    $core.List<$core.int>? mlKemCiphertext,
-    $core.List<$core.int>? aesNonce,
-    $core.int? version,
-  }) {
-    final $result = create();
-    if (ephemeralX25519Pk != null) {
-      $result.ephemeralX25519Pk = ephemeralX25519Pk;
-    }
-    if (mlKemCiphertext != null) {
-      $result.mlKemCiphertext = mlKemCiphertext;
-    }
-    if (aesNonce != null) {
-      $result.aesNonce = aesNonce;
-    }
-    if (version != null) {
-      $result.version = version;
-    }
-    return $result;
-  }
-  PerMessageKem._() : super();
-  factory PerMessageKem.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory PerMessageKem.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
-
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PerMessageKem', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
-    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'ephemeralX25519Pk', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'mlKemCiphertext', $pb.PbFieldType.OY)
-    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'aesNonce', $pb.PbFieldType.OY)
-    ..a<$core.int>(4, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
-    ..hasRequiredFields = false
-  ;
-
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
-  'Will be removed in next major version')
-  PerMessageKem clone() => PerMessageKem()..mergeFromMessage(this);
-  @$core.Deprecated(
-  'Using this can add significant overhead to your binary. '
-  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
-  'Will be removed in next major version')
-  PerMessageKem copyWith(void Function(PerMessageKem) updates) => super.copyWith((message) => updates(message as PerMessageKem)) as PerMessageKem;
-
-  $pb.BuilderInfo get info_ => _i;
-
-  @$core.pragma('dart2js:noInline')
-  static PerMessageKem create() => PerMessageKem._();
-  PerMessageKem createEmptyInstance() => create();
-  static $pb.PbList<PerMessageKem> createRepeated() => $pb.PbList<PerMessageKem>();
-  @$core.pragma('dart2js:noInline')
-  static PerMessageKem getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PerMessageKem>(create);
-  static PerMessageKem? _defaultInstance;
-
-  @$pb.TagNumber(1)
-  $core.List<$core.int> get ephemeralX25519Pk => $_getN(0);
-  @$pb.TagNumber(1)
-  set ephemeralX25519Pk($core.List<$core.int> v) { $_setBytes(0, v); }
-  @$pb.TagNumber(1)
-  $core.bool hasEphemeralX25519Pk() => $_has(0);
-  @$pb.TagNumber(1)
-  void clearEphemeralX25519Pk() => clearField(1);
-
-  @$pb.TagNumber(2)
-  $core.List<$core.int> get mlKemCiphertext => $_getN(1);
-  @$pb.TagNumber(2)
-  set mlKemCiphertext($core.List<$core.int> v) { $_setBytes(1, v); }
-  @$pb.TagNumber(2)
-  $core.bool hasMlKemCiphertext() => $_has(1);
-  @$pb.TagNumber(2)
-  void clearMlKemCiphertext() => clearField(2);
-
-  @$pb.TagNumber(3)
-  $core.List<$core.int> get aesNonce => $_getN(2);
-  @$pb.TagNumber(3)
-  set aesNonce($core.List<$core.int> v) { $_setBytes(2, v); }
-  @$pb.TagNumber(3)
-  $core.bool hasAesNonce() => $_has(2);
-  @$pb.TagNumber(3)
-  void clearAesNonce() => clearField(3);
-
-  @$pb.TagNumber(4)
-  $core.int get version => $_getIZ(3);
-  @$pb.TagNumber(4)
-  set version($core.int v) { $_setUnsignedInt32(3, v); }
-  @$pb.TagNumber(4)
-  $core.bool hasVersion() => $_has(3);
-  @$pb.TagNumber(4)
-  void clearVersion() => clearField(4);
-}
-
 class PeerInfoProto extends $pb.GeneratedMessage {
   factory PeerInfoProto({
     $core.List<$core.int>? nodeId,
@@ -1067,6 +603,9 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     $core.List<$core.int>? x25519PublicKey,
     $core.List<$core.int>? mlKemPublicKey,
     $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceEd25519PublicKey,
+    $core.List<$core.int>? deviceMlDsaPublicKey,
+    $core.List<$core.int>? keyFingerprint,
   }) {
     final $result = create();
     if (nodeId != null) {
@@ -1120,6 +659,15 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     if (userId != null) {
       $result.userId = userId;
     }
+    if (deviceEd25519PublicKey != null) {
+      $result.deviceEd25519PublicKey = deviceEd25519PublicKey;
+    }
+    if (deviceMlDsaPublicKey != null) {
+      $result.deviceMlDsaPublicKey = deviceMlDsaPublicKey;
+    }
+    if (keyFingerprint != null) {
+      $result.keyFingerprint = keyFingerprint;
+    }
     return $result;
   }
   PeerInfoProto._() : super();
@@ -1144,6 +692,9 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(15, _omitFieldNames ? '' : 'x25519PublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(16, _omitFieldNames ? '' : 'mlKemPublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(17, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(18, _omitFieldNames ? '' : 'deviceEd25519PublicKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(19, _omitFieldNames ? '' : 'deviceMlDsaPublicKey', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(20, _omitFieldNames ? '' : 'keyFingerprint', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -1314,6 +865,38 @@ class PeerInfoProto extends $pb.GeneratedMessage {
   $core.bool hasUserId() => $_has(16);
   @$pb.TagNumber(17)
   void clearUserId() => clearField(17);
+
+  /// §17.3 Welle 3 — Device-Sig PK (per-device, persisted in device_keys.json).
+  /// Distinct from ed25519_public_key/ml_dsa_public_key (User-Sig, identity-wide):
+  /// outer NetworkPacketV3 device_sig is signed with the Device-Sig keypair, so
+  /// verifyOuterDeviceSig must use *these* fields, not the User-Sig PKs above.
+  /// Empty/absent = receiver falls back to lenient-bootstrap path until learned.
+  @$pb.TagNumber(18)
+  $core.List<$core.int> get deviceEd25519PublicKey => $_getN(17);
+  @$pb.TagNumber(18)
+  set deviceEd25519PublicKey($core.List<$core.int> v) { $_setBytes(17, v); }
+  @$pb.TagNumber(18)
+  $core.bool hasDeviceEd25519PublicKey() => $_has(17);
+  @$pb.TagNumber(18)
+  void clearDeviceEd25519PublicKey() => clearField(18);
+
+  @$pb.TagNumber(19)
+  $core.List<$core.int> get deviceMlDsaPublicKey => $_getN(18);
+  @$pb.TagNumber(19)
+  set deviceMlDsaPublicKey($core.List<$core.int> v) { $_setBytes(18, v); }
+  @$pb.TagNumber(19)
+  $core.bool hasDeviceMlDsaPublicKey() => $_has(18);
+  @$pb.TagNumber(19)
+  void clearDeviceMlDsaPublicKey() => clearField(19);
+
+  @$pb.TagNumber(20)
+  $core.List<$core.int> get keyFingerprint => $_getN(19);
+  @$pb.TagNumber(20)
+  set keyFingerprint($core.List<$core.int> v) { $_setBytes(19, v); }
+  @$pb.TagNumber(20)
+  $core.bool hasKeyFingerprint() => $_has(19);
+  @$pb.TagNumber(20)
+  void clearKeyFingerprint() => clearField(20);
 }
 
 class PeerAddressProto extends $pb.GeneratedMessage {
@@ -1468,6 +1051,7 @@ class DhtPing extends $pb.GeneratedMessage {
   factory DhtPing({
     $core.List<$core.int>? senderId,
     $fixnum.Int64? timestamp,
+    $core.bool? pkRecoveryHint,
   }) {
     final $result = create();
     if (senderId != null) {
@@ -1475,6 +1059,9 @@ class DhtPing extends $pb.GeneratedMessage {
     }
     if (timestamp != null) {
       $result.timestamp = timestamp;
+    }
+    if (pkRecoveryHint != null) {
+      $result.pkRecoveryHint = pkRecoveryHint;
     }
     return $result;
   }
@@ -1485,6 +1072,7 @@ class DhtPing extends $pb.GeneratedMessage {
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DhtPing', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'pkRecoveryHint')
     ..hasRequiredFields = false
   ;
 
@@ -1526,6 +1114,20 @@ class DhtPing extends $pb.GeneratedMessage {
   $core.bool hasTimestamp() => $_has(1);
   @$pb.TagNumber(2)
   void clearTimestamp() => clearField(2);
+
+  /// Welle 5.12 Stage-2 hot-path heal hint (§5.10.2 / §5.12). When true, the
+  /// ping is a Stale-PK recovery probe — the responder MUST answer with the
+  /// normal DHT_PONG *and* an unsolicited firstParty PEER_LIST_PUSH carrying
+  /// its own PeerInfo (current signing keys), so the prober heals the cached
+  /// PK in 1 RTT instead of waiting for a periodic peer exchange.
+  @$pb.TagNumber(3)
+  $core.bool get pkRecoveryHint => $_getBF(2);
+  @$pb.TagNumber(3)
+  set pkRecoveryHint($core.bool v) { $_setBool(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasPkRecoveryHint() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearPkRecoveryHint() => clearField(3);
 }
 
 class DhtPong extends $pb.GeneratedMessage {
@@ -2141,10 +1743,18 @@ class PeerListWant extends $pb.GeneratedMessage {
 class PeerListPush extends $pb.GeneratedMessage {
   factory PeerListPush({
     $core.Iterable<PeerInfoProto>? peers,
+    $core.Iterable<$core.int>? hopsFromSender,
+    $core.Iterable<$core.int>? costFromSender,
   }) {
     final $result = create();
     if (peers != null) {
       $result.peers.addAll(peers);
+    }
+    if (hopsFromSender != null) {
+      $result.hopsFromSender.addAll(hopsFromSender);
+    }
+    if (costFromSender != null) {
+      $result.costFromSender.addAll(costFromSender);
     }
     return $result;
   }
@@ -2154,6 +1764,8 @@ class PeerListPush extends $pb.GeneratedMessage {
 
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PeerListPush', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..pc<PeerInfoProto>(1, _omitFieldNames ? '' : 'peers', $pb.PbFieldType.PM, subBuilder: PeerInfoProto.create)
+    ..p<$core.int>(2, _omitFieldNames ? '' : 'hopsFromSender', $pb.PbFieldType.KU3)
+    ..p<$core.int>(3, _omitFieldNames ? '' : 'costFromSender', $pb.PbFieldType.KU3)
     ..hasRequiredFields = false
   ;
 
@@ -2177,6 +1789,95 @@ class PeerListPush extends $pb.GeneratedMessage {
   @$core.pragma('dart2js:noInline')
   static PeerListPush getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PeerListPush>(create);
   static PeerListPush? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<PeerInfoProto> get peers => $_getList(0);
+
+  /// Parallel-Index zu `peers`. Pusher's Distance-Vector-Sicht zu peer[i]:
+  ///   hops_from_sender[i] = hop-count (0 = self-broadcast)
+  ///   cost_from_sender[i] = aggregierter cost-Sum (0 = self-broadcast)
+  /// Backwards-Compat: leer beide Listen → Empfänger fällt auf "nur-Cache"-Pfad
+  /// zurück (bisheriges Verhalten). Wenn vorhanden, MÜSSEN beide Listen genau
+  /// gleich lang wie `peers` sein, sonst silent drop des betroffenen Eintrags
+  /// mit WARN-Log.
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get hopsFromSender => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get costFromSender => $_getList(2);
+}
+
+class PeerKeyRequest extends $pb.GeneratedMessage {
+  factory PeerKeyRequest() => create();
+  PeerKeyRequest._() : super();
+  factory PeerKeyRequest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PeerKeyRequest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PeerKeyRequest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PeerKeyRequest clone() => PeerKeyRequest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PeerKeyRequest copyWith(void Function(PeerKeyRequest) updates) => super.copyWith((message) => updates(message as PeerKeyRequest)) as PeerKeyRequest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PeerKeyRequest create() => PeerKeyRequest._();
+  PeerKeyRequest createEmptyInstance() => create();
+  static $pb.PbList<PeerKeyRequest> createRepeated() => $pb.PbList<PeerKeyRequest>();
+  @$core.pragma('dart2js:noInline')
+  static PeerKeyRequest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PeerKeyRequest>(create);
+  static PeerKeyRequest? _defaultInstance;
+}
+
+class PeerKeyResponse extends $pb.GeneratedMessage {
+  factory PeerKeyResponse({
+    $core.Iterable<PeerInfoProto>? peers,
+  }) {
+    final $result = create();
+    if (peers != null) {
+      $result.peers.addAll(peers);
+    }
+    return $result;
+  }
+  PeerKeyResponse._() : super();
+  factory PeerKeyResponse.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PeerKeyResponse.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PeerKeyResponse', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..pc<PeerInfoProto>(1, _omitFieldNames ? '' : 'peers', $pb.PbFieldType.PM, subBuilder: PeerInfoProto.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PeerKeyResponse clone() => PeerKeyResponse()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PeerKeyResponse copyWith(void Function(PeerKeyResponse) updates) => super.copyWith((message) => updates(message as PeerKeyResponse)) as PeerKeyResponse;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PeerKeyResponse create() => PeerKeyResponse._();
+  PeerKeyResponse createEmptyInstance() => create();
+  static $pb.PbList<PeerKeyResponse> createRepeated() => $pb.PbList<PeerKeyResponse>();
+  @$core.pragma('dart2js:noInline')
+  static PeerKeyResponse getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PeerKeyResponse>(create);
+  static PeerKeyResponse? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<PeerInfoProto> get peers => $_getList(0);
@@ -2684,12 +2385,12 @@ class GroupCreate extends $pb.GeneratedMessage {
   void clearPicture() => clearField(5);
 }
 
-class GroupInvite extends $pb.GeneratedMessage {
-  factory GroupInvite({
+class GroupInviteV3 extends $pb.GeneratedMessage {
+  factory GroupInviteV3({
     $core.List<$core.int>? groupId,
     $core.String? groupName,
     $core.List<$core.int>? inviterId,
-    $core.Iterable<GroupMember>? members,
+    $core.Iterable<GroupMemberV3>? members,
     $core.List<$core.int>? groupPicture,
     $core.String? groupDescription,
   }) {
@@ -2714,15 +2415,15 @@ class GroupInvite extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  GroupInvite._() : super();
-  factory GroupInvite.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory GroupInvite.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  GroupInviteV3._() : super();
+  factory GroupInviteV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupInviteV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupInvite', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupInviteV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
     ..aOS(2, _omitFieldNames ? '' : 'groupName')
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'inviterId', $pb.PbFieldType.OY)
-    ..pc<GroupMember>(4, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
+    ..pc<GroupMemberV3>(4, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMemberV3.create)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'groupPicture', $pb.PbFieldType.OY)
     ..aOS(6, _omitFieldNames ? '' : 'groupDescription')
     ..hasRequiredFields = false
@@ -2732,22 +2433,22 @@ class GroupInvite extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  GroupInvite clone() => GroupInvite()..mergeFromMessage(this);
+  GroupInviteV3 clone() => GroupInviteV3()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  GroupInvite copyWith(void Function(GroupInvite) updates) => super.copyWith((message) => updates(message as GroupInvite)) as GroupInvite;
+  GroupInviteV3 copyWith(void Function(GroupInviteV3) updates) => super.copyWith((message) => updates(message as GroupInviteV3)) as GroupInviteV3;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static GroupInvite create() => GroupInvite._();
-  GroupInvite createEmptyInstance() => create();
-  static $pb.PbList<GroupInvite> createRepeated() => $pb.PbList<GroupInvite>();
+  static GroupInviteV3 create() => GroupInviteV3._();
+  GroupInviteV3 createEmptyInstance() => create();
+  static $pb.PbList<GroupInviteV3> createRepeated() => $pb.PbList<GroupInviteV3>();
   @$core.pragma('dart2js:noInline')
-  static GroupInvite getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupInvite>(create);
-  static GroupInvite? _defaultInstance;
+  static GroupInviteV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupInviteV3>(create);
+  static GroupInviteV3? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get groupId => $_getN(0);
@@ -2777,7 +2478,7 @@ class GroupInvite extends $pb.GeneratedMessage {
   void clearInviterId() => clearField(3);
 
   @$pb.TagNumber(4)
-  $core.List<GroupMember> get members => $_getList(3);
+  $core.List<GroupMemberV3> get members => $_getList(3);
 
   @$pb.TagNumber(5)
   $core.List<$core.int> get groupPicture => $_getN(4);
@@ -2798,8 +2499,8 @@ class GroupInvite extends $pb.GeneratedMessage {
   void clearGroupDescription() => clearField(6);
 }
 
-class GroupMember extends $pb.GeneratedMessage {
-  factory GroupMember({
+class GroupMemberV3 extends $pb.GeneratedMessage {
+  factory GroupMemberV3({
     $core.List<$core.int>? nodeId,
     $core.String? displayName,
     $core.String? role,
@@ -2828,11 +2529,11 @@ class GroupMember extends $pb.GeneratedMessage {
     }
     return $result;
   }
-  GroupMember._() : super();
-  factory GroupMember.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
-  factory GroupMember.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+  GroupMemberV3._() : super();
+  factory GroupMemberV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupMemberV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
 
-  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupMember', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupMemberV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'nodeId', $pb.PbFieldType.OY)
     ..aOS(2, _omitFieldNames ? '' : 'displayName')
     ..aOS(3, _omitFieldNames ? '' : 'role')
@@ -2846,22 +2547,22 @@ class GroupMember extends $pb.GeneratedMessage {
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
   'Will be removed in next major version')
-  GroupMember clone() => GroupMember()..mergeFromMessage(this);
+  GroupMemberV3 clone() => GroupMemberV3()..mergeFromMessage(this);
   @$core.Deprecated(
   'Using this can add significant overhead to your binary. '
   'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
   'Will be removed in next major version')
-  GroupMember copyWith(void Function(GroupMember) updates) => super.copyWith((message) => updates(message as GroupMember)) as GroupMember;
+  GroupMemberV3 copyWith(void Function(GroupMemberV3) updates) => super.copyWith((message) => updates(message as GroupMemberV3)) as GroupMemberV3;
 
   $pb.BuilderInfo get info_ => _i;
 
   @$core.pragma('dart2js:noInline')
-  static GroupMember create() => GroupMember._();
-  GroupMember createEmptyInstance() => create();
-  static $pb.PbList<GroupMember> createRepeated() => $pb.PbList<GroupMember>();
+  static GroupMemberV3 create() => GroupMemberV3._();
+  GroupMemberV3 createEmptyInstance() => create();
+  static $pb.PbList<GroupMemberV3> createRepeated() => $pb.PbList<GroupMemberV3>();
   @$core.pragma('dart2js:noInline')
-  static GroupMember getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupMember>(create);
-  static GroupMember? _defaultInstance;
+  static GroupMemberV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupMemberV3>(create);
+  static GroupMemberV3? _defaultInstance;
 
   @$pb.TagNumber(1)
   $core.List<$core.int> get nodeId => $_getN(0);
@@ -3313,7 +3014,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
     $core.List<$core.int>? welcomeMessage,
     $core.List<$core.int>? channelPicture,
     $core.String? channelDescription,
-    $core.Iterable<GroupMember>? members,
+    $core.Iterable<GroupMemberV3>? members,
     $core.bool? isPublic,
     $core.bool? isAdult,
     $core.String? language,
@@ -3366,7 +3067,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'welcomeMessage', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'channelPicture', $pb.PbFieldType.OY)
     ..aOS(7, _omitFieldNames ? '' : 'channelDescription')
-    ..pc<GroupMember>(8, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMember.create)
+    ..pc<GroupMemberV3>(8, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: GroupMemberV3.create)
     ..aOB(9, _omitFieldNames ? '' : 'isPublic')
     ..aOB(10, _omitFieldNames ? '' : 'isAdult')
     ..aOS(11, _omitFieldNames ? '' : 'language')
@@ -3458,7 +3159,7 @@ class ChannelInvite extends $pb.GeneratedMessage {
   void clearChannelDescription() => clearField(7);
 
   @$pb.TagNumber(8)
-  $core.List<GroupMember> get members => $_getList(7);
+  $core.List<GroupMemberV3> get members => $_getList(7);
 
   @$pb.TagNumber(9)
   $core.bool get isPublic => $_getBF(8);
@@ -4695,7 +4396,7 @@ class StoredMessage extends $pb.GeneratedMessage {
     $core.List<$core.int>? recipientId,
     $core.String? conversationId,
     $fixnum.Int64? timestamp,
-    MessageType? messageType,
+    $core.int? uiMessageType,
     $core.List<$core.int>? payload,
   }) {
     final $result = create();
@@ -4714,8 +4415,8 @@ class StoredMessage extends $pb.GeneratedMessage {
     if (timestamp != null) {
       $result.timestamp = timestamp;
     }
-    if (messageType != null) {
-      $result.messageType = messageType;
+    if (uiMessageType != null) {
+      $result.uiMessageType = uiMessageType;
     }
     if (payload != null) {
       $result.payload = payload;
@@ -4732,7 +4433,7 @@ class StoredMessage extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'recipientId', $pb.PbFieldType.OY)
     ..aOS(4, _omitFieldNames ? '' : 'conversationId')
     ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
-    ..e<MessageType>(6, _omitFieldNames ? '' : 'messageType', $pb.PbFieldType.OE, defaultOrMaker: MessageType.TEXT, valueOf: MessageType.valueOf, enumValues: MessageType.values)
+    ..a<$core.int>(6, _omitFieldNames ? '' : 'uiMessageType', $pb.PbFieldType.O3)
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
@@ -4803,14 +4504,18 @@ class StoredMessage extends $pb.GeneratedMessage {
   @$pb.TagNumber(5)
   void clearTimestamp() => clearField(5);
 
+  /// V3 (2026-05-05 Wave 7): UI-tag carrying `UiMessageType.wireValue` (sequential
+  /// 0..N, see lib/core/service/service_types.dart). Detached from the V2
+  /// `MessageType` wire enum so RESTORE_RESPONSE no longer drags V2-numbering
+  /// into the inner-frame payload.
   @$pb.TagNumber(6)
-  MessageType get messageType => $_getN(5);
+  $core.int get uiMessageType => $_getIZ(5);
   @$pb.TagNumber(6)
-  set messageType(MessageType v) { setField(6, v); }
+  set uiMessageType($core.int v) { $_setSignedInt32(5, v); }
   @$pb.TagNumber(6)
-  $core.bool hasMessageType() => $_has(5);
+  $core.bool hasUiMessageType() => $_has(5);
   @$pb.TagNumber(6)
-  void clearMessageType() => clearField(6);
+  void clearUiMessageType() => clearField(6);
 
   @$pb.TagNumber(7)
   $core.List<$core.int> get payload => $_getN(6);
@@ -5082,6 +4787,70 @@ class FragmentRetrieve extends $pb.GeneratedMessage {
   $core.bool hasMailboxId() => $_has(0);
   @$pb.TagNumber(1)
   void clearMailboxId() => clearField(1);
+}
+
+class FragmentRetrieveResponse extends $pb.GeneratedMessage {
+  factory FragmentRetrieveResponse({
+    $core.List<$core.int>? mailboxId,
+    $core.int? fragmentCount,
+  }) {
+    final $result = create();
+    if (mailboxId != null) {
+      $result.mailboxId = mailboxId;
+    }
+    if (fragmentCount != null) {
+      $result.fragmentCount = fragmentCount;
+    }
+    return $result;
+  }
+  FragmentRetrieveResponse._() : super();
+  factory FragmentRetrieveResponse.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory FragmentRetrieveResponse.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'FragmentRetrieveResponse', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'mailboxId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'fragmentCount', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  FragmentRetrieveResponse clone() => FragmentRetrieveResponse()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  FragmentRetrieveResponse copyWith(void Function(FragmentRetrieveResponse) updates) => super.copyWith((message) => updates(message as FragmentRetrieveResponse)) as FragmentRetrieveResponse;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static FragmentRetrieveResponse create() => FragmentRetrieveResponse._();
+  FragmentRetrieveResponse createEmptyInstance() => create();
+  static $pb.PbList<FragmentRetrieveResponse> createRepeated() => $pb.PbList<FragmentRetrieveResponse>();
+  @$core.pragma('dart2js:noInline')
+  static FragmentRetrieveResponse getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<FragmentRetrieveResponse>(create);
+  static FragmentRetrieveResponse? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get mailboxId => $_getN(0);
+  @$pb.TagNumber(1)
+  set mailboxId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasMailboxId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearMailboxId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get fragmentCount => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set fragmentCount($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFragmentCount() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFragmentCount() => clearField(2);
 }
 
 class FragmentDelete extends $pb.GeneratedMessage {
@@ -7492,6 +7261,7 @@ class RelayForward extends $pb.GeneratedMessage {
     $core.List<$core.int>? originNodeId,
     $fixnum.Int64? createdAtMs,
     $core.int? ttl,
+    $core.List<$core.int>? originUserId,
   }) {
     final $result = create();
     if (relayId != null) {
@@ -7521,6 +7291,9 @@ class RelayForward extends $pb.GeneratedMessage {
     if (ttl != null) {
       $result.ttl = ttl;
     }
+    if (originUserId != null) {
+      $result.originUserId = originUserId;
+    }
     return $result;
   }
   RelayForward._() : super();
@@ -7537,6 +7310,7 @@ class RelayForward extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'originNodeId', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(8, _omitFieldNames ? '' : 'createdAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..a<$core.int>(9, _omitFieldNames ? '' : 'ttl', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'originUserId', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -7635,6 +7409,15 @@ class RelayForward extends $pb.GeneratedMessage {
   $core.bool hasTtl() => $_has(8);
   @$pb.TagNumber(9)
   void clearTtl() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get originUserId => $_getN(9);
+  @$pb.TagNumber(10)
+  set originUserId($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasOriginUserId() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearOriginUserId() => clearField(10);
 }
 
 class RelayAck extends $pb.GeneratedMessage {
@@ -8774,6 +8557,185 @@ class MediaChunk extends $pb.GeneratedMessage {
   $core.bool hasOriginalRecipientId() => $_has(4);
   @$pb.TagNumber(5)
   void clearOriginalRecipientId() => clearField(5);
+}
+
+///  ── Two-Stage Media Stage-2 (V3) ────────────────────────────────────
+///
+///  MEDIA_ANNOUNCE (Stage 1) carries metadata + thumbnail. The receiver
+///  then asks for the actual content via MTV3_MEDIA_REQUEST (payload =
+///  original messageId bytes). The sender splits the file into
+///  MediaChunkV3 frames, each shipped as its own ApplicationFrameV3
+///  (per-chunk KEM-encrypted via sendToUser), and finalises with a
+///  MediaCompleteV3 carrying the SHA-256 of the assembled bytes for
+///  receiver-side integrity-check. Architecture §5.7 + §1797.
+class MediaChunkV3 extends $pb.GeneratedMessage {
+  factory MediaChunkV3({
+    $core.List<$core.int>? mediaId,
+    $core.int? chunkIndex,
+    $core.int? totalChunks,
+    $core.List<$core.int>? data,
+  }) {
+    final $result = create();
+    if (mediaId != null) {
+      $result.mediaId = mediaId;
+    }
+    if (chunkIndex != null) {
+      $result.chunkIndex = chunkIndex;
+    }
+    if (totalChunks != null) {
+      $result.totalChunks = totalChunks;
+    }
+    if (data != null) {
+      $result.data = data;
+    }
+    return $result;
+  }
+  MediaChunkV3._() : super();
+  factory MediaChunkV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory MediaChunkV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaChunkV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'mediaId', $pb.PbFieldType.OY)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'chunkIndex', $pb.PbFieldType.OU3)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'totalChunks', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'data', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  MediaChunkV3 clone() => MediaChunkV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  MediaChunkV3 copyWith(void Function(MediaChunkV3) updates) => super.copyWith((message) => updates(message as MediaChunkV3)) as MediaChunkV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static MediaChunkV3 create() => MediaChunkV3._();
+  MediaChunkV3 createEmptyInstance() => create();
+  static $pb.PbList<MediaChunkV3> createRepeated() => $pb.PbList<MediaChunkV3>();
+  @$core.pragma('dart2js:noInline')
+  static MediaChunkV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaChunkV3>(create);
+  static MediaChunkV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get mediaId => $_getN(0);
+  @$pb.TagNumber(1)
+  set mediaId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasMediaId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearMediaId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get chunkIndex => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set chunkIndex($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasChunkIndex() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearChunkIndex() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get totalChunks => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set totalChunks($core.int v) { $_setUnsignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTotalChunks() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTotalChunks() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get data => $_getN(3);
+  @$pb.TagNumber(4)
+  set data($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasData() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearData() => clearField(4);
+}
+
+class MediaCompleteV3 extends $pb.GeneratedMessage {
+  factory MediaCompleteV3({
+    $core.List<$core.int>? mediaId,
+    $core.List<$core.int>? contentHash,
+    $fixnum.Int64? totalSize,
+  }) {
+    final $result = create();
+    if (mediaId != null) {
+      $result.mediaId = mediaId;
+    }
+    if (contentHash != null) {
+      $result.contentHash = contentHash;
+    }
+    if (totalSize != null) {
+      $result.totalSize = totalSize;
+    }
+    return $result;
+  }
+  MediaCompleteV3._() : super();
+  factory MediaCompleteV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory MediaCompleteV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'MediaCompleteV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'mediaId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'contentHash', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'totalSize', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  MediaCompleteV3 clone() => MediaCompleteV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  MediaCompleteV3 copyWith(void Function(MediaCompleteV3) updates) => super.copyWith((message) => updates(message as MediaCompleteV3)) as MediaCompleteV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static MediaCompleteV3 create() => MediaCompleteV3._();
+  MediaCompleteV3 createEmptyInstance() => create();
+  static $pb.PbList<MediaCompleteV3> createRepeated() => $pb.PbList<MediaCompleteV3>();
+  @$core.pragma('dart2js:noInline')
+  static MediaCompleteV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<MediaCompleteV3>(create);
+  static MediaCompleteV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get mediaId => $_getN(0);
+  @$pb.TagNumber(1)
+  set mediaId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasMediaId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearMediaId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get contentHash => $_getN(1);
+  @$pb.TagNumber(2)
+  set contentHash($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasContentHash() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearContentHash() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get totalSize => $_getI64(2);
+  @$pb.TagNumber(3)
+  set totalSize($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTotalSize() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTotalSize() => clearField(3);
 }
 
 class CallRttPing extends $pb.GeneratedMessage {
@@ -12583,6 +12545,1712 @@ class IdentityLiveRetrieveRequest extends $pb.GeneratedMessage {
   $core.bool hasDeviceNodeId() => $_has(1);
   @$pb.TagNumber(2)
   void clearDeviceNodeId() => clearField(2);
+}
+
+/// Welle 5 (§4.3): pull DeviceKemRecordV3 from K=10 closest replicators per
+/// (userId, deviceId). Storage-Key SHA-256("kem" || user_id || device_id).
+class IdentityKemRetrieveRequest extends $pb.GeneratedMessage {
+  factory IdentityKemRetrieveRequest({
+    $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceId,
+    $fixnum.Int64? minimumSeq,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (deviceId != null) {
+      $result.deviceId = deviceId;
+    }
+    if (minimumSeq != null) {
+      $result.minimumSeq = minimumSeq;
+    }
+    return $result;
+  }
+  IdentityKemRetrieveRequest._() : super();
+  factory IdentityKemRetrieveRequest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory IdentityKemRetrieveRequest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'IdentityKemRetrieveRequest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'minimumSeq', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  IdentityKemRetrieveRequest clone() => IdentityKemRetrieveRequest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  IdentityKemRetrieveRequest copyWith(void Function(IdentityKemRetrieveRequest) updates) => super.copyWith((message) => updates(message as IdentityKemRetrieveRequest)) as IdentityKemRetrieveRequest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static IdentityKemRetrieveRequest create() => IdentityKemRetrieveRequest._();
+  IdentityKemRetrieveRequest createEmptyInstance() => create();
+  static $pb.PbList<IdentityKemRetrieveRequest> createRepeated() => $pb.PbList<IdentityKemRetrieveRequest>();
+  @$core.pragma('dart2js:noInline')
+  static IdentityKemRetrieveRequest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<IdentityKemRetrieveRequest>(create);
+  static IdentityKemRetrieveRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get deviceId => $_getN(1);
+  @$pb.TagNumber(2)
+  set deviceId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get minimumSeq => $_getI64(2);
+  @$pb.TagNumber(3)
+  set minimumSeq($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasMinimumSeq() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearMinimumSeq() => clearField(3);
+}
+
+///  ── Outer Layer (NetworkPacket) — was Relays sehen ──────────────────────
+///
+///  Subjekt der Sigs = Device-Keypair (NICHT User-Keypair). Application-Frames
+///  hybrid (Ed25519+ML-DSA), Infrastructure-Frames (DHT-Pings, RTT, Hole-Punch)
+///  nur Ed25519 zur Bandwidth-Schonung — deviceMlDsaSig dann leer.
+class NetworkPacketV3 extends $pb.GeneratedMessage {
+  factory NetworkPacketV3({
+    $core.int? version,
+    $core.int? flags,
+    $core.List<$core.int>? nextHopDeviceId,
+    $core.List<$core.int>? senderDeviceId,
+    $fixnum.Int64? timestampMs,
+    $core.int? ttl,
+    $core.int? hopCount,
+    $core.List<$core.int>? networkTag,
+    ProofOfWork? pow,
+    $core.List<$core.int>? deviceEd25519Sig,
+    $core.List<$core.int>? deviceMlDsaSig,
+    PayloadTypeV3? payloadType,
+    $core.List<$core.int>? payload,
+  }) {
+    final $result = create();
+    if (version != null) {
+      $result.version = version;
+    }
+    if (flags != null) {
+      $result.flags = flags;
+    }
+    if (nextHopDeviceId != null) {
+      $result.nextHopDeviceId = nextHopDeviceId;
+    }
+    if (senderDeviceId != null) {
+      $result.senderDeviceId = senderDeviceId;
+    }
+    if (timestampMs != null) {
+      $result.timestampMs = timestampMs;
+    }
+    if (ttl != null) {
+      $result.ttl = ttl;
+    }
+    if (hopCount != null) {
+      $result.hopCount = hopCount;
+    }
+    if (networkTag != null) {
+      $result.networkTag = networkTag;
+    }
+    if (pow != null) {
+      $result.pow = pow;
+    }
+    if (deviceEd25519Sig != null) {
+      $result.deviceEd25519Sig = deviceEd25519Sig;
+    }
+    if (deviceMlDsaSig != null) {
+      $result.deviceMlDsaSig = deviceMlDsaSig;
+    }
+    if (payloadType != null) {
+      $result.payloadType = payloadType;
+    }
+    if (payload != null) {
+      $result.payload = payload;
+    }
+    return $result;
+  }
+  NetworkPacketV3._() : super();
+  factory NetworkPacketV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory NetworkPacketV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'NetworkPacketV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'flags', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'nextHopDeviceId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'senderDeviceId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'timestampMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.int>(6, _omitFieldNames ? '' : 'ttl', $pb.PbFieldType.OU3)
+    ..a<$core.int>(7, _omitFieldNames ? '' : 'hopCount', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'networkTag', $pb.PbFieldType.OY)
+    ..aOM<ProofOfWork>(9, _omitFieldNames ? '' : 'pow', subBuilder: ProofOfWork.create)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'deviceEd25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'deviceMlDsaSig', $pb.PbFieldType.OY)
+    ..e<PayloadTypeV3>(12, _omitFieldNames ? '' : 'payloadType', $pb.PbFieldType.OE, defaultOrMaker: PayloadTypeV3.PAYLOAD_APPLICATION_FRAME, valueOf: PayloadTypeV3.valueOf, enumValues: PayloadTypeV3.values)
+    ..a<$core.List<$core.int>>(13, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  NetworkPacketV3 clone() => NetworkPacketV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  NetworkPacketV3 copyWith(void Function(NetworkPacketV3) updates) => super.copyWith((message) => updates(message as NetworkPacketV3)) as NetworkPacketV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static NetworkPacketV3 create() => NetworkPacketV3._();
+  NetworkPacketV3 createEmptyInstance() => create();
+  static $pb.PbList<NetworkPacketV3> createRepeated() => $pb.PbList<NetworkPacketV3>();
+  @$core.pragma('dart2js:noInline')
+  static NetworkPacketV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<NetworkPacketV3>(create);
+  static NetworkPacketV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get version => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set version($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasVersion() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearVersion() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get flags => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set flags($core.int v) { $_setUnsignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFlags() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFlags() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get nextHopDeviceId => $_getN(2);
+  @$pb.TagNumber(3)
+  set nextHopDeviceId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasNextHopDeviceId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearNextHopDeviceId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get senderDeviceId => $_getN(3);
+  @$pb.TagNumber(4)
+  set senderDeviceId($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasSenderDeviceId() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSenderDeviceId() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get timestampMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set timestampMs($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasTimestampMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTimestampMs() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.int get ttl => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set ttl($core.int v) { $_setUnsignedInt32(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasTtl() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearTtl() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.int get hopCount => $_getIZ(6);
+  @$pb.TagNumber(7)
+  set hopCount($core.int v) { $_setUnsignedInt32(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasHopCount() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearHopCount() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get networkTag => $_getN(7);
+  @$pb.TagNumber(8)
+  set networkTag($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasNetworkTag() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearNetworkTag() => clearField(8);
+
+  @$pb.TagNumber(9)
+  ProofOfWork get pow => $_getN(8);
+  @$pb.TagNumber(9)
+  set pow(ProofOfWork v) { setField(9, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasPow() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearPow() => clearField(9);
+  @$pb.TagNumber(9)
+  ProofOfWork ensurePow() => $_ensure(8);
+
+  /// Sigs (Subjekt = Device-Keypair)
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get deviceEd25519Sig => $_getN(9);
+  @$pb.TagNumber(10)
+  set deviceEd25519Sig($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasDeviceEd25519Sig() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearDeviceEd25519Sig() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.List<$core.int> get deviceMlDsaSig => $_getN(10);
+  @$pb.TagNumber(11)
+  set deviceMlDsaSig($core.List<$core.int> v) { $_setBytes(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasDeviceMlDsaSig() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearDeviceMlDsaSig() => clearField(11);
+
+  /// Payload-Discriminator
+  @$pb.TagNumber(12)
+  PayloadTypeV3 get payloadType => $_getN(11);
+  @$pb.TagNumber(12)
+  set payloadType(PayloadTypeV3 v) { setField(12, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasPayloadType() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearPayloadType() => clearField(12);
+
+  @$pb.TagNumber(13)
+  $core.List<$core.int> get payload => $_getN(12);
+  @$pb.TagNumber(13)
+  set payload($core.List<$core.int> v) { $_setBytes(12, v); }
+  @$pb.TagNumber(13)
+  $core.bool hasPayload() => $_has(12);
+  @$pb.TagNumber(13)
+  void clearPayload() => clearField(13);
+}
+
+///  ── Inner Layer (ApplicationFrame) — KEM-encrypted unter recipient-User-PK ─
+///
+///  Wird im NetworkPacketV3.payload als KEM-Ciphertext via PerMessageKemV3 transportiert.
+///  Subjekt der Sigs = User-Keypair (für Identity-Authentifizierung End-to-End).
+class ApplicationFrameV3 extends $pb.GeneratedMessage {
+  factory ApplicationFrameV3({
+    $core.int? version,
+    $core.List<$core.int>? recipientUserId,
+    $core.List<$core.int>? senderUserId,
+    $fixnum.Int64? timestampMs,
+    $core.List<$core.int>? messageId,
+    MessageTypeV3? messageType,
+    $core.List<$core.int>? payload,
+    $core.List<$core.int>? userEd25519Sig,
+    $core.List<$core.int>? userMlDsaSig,
+    ContentMetadata? contentMetadata,
+    EditMetadata? editMetadata,
+    ExpiryMetadata? expiryMetadata,
+    ErasureCodingMetadata? erasureMetadata,
+    CompressionType? compression,
+    $core.List<$core.int>? groupId,
+  }) {
+    final $result = create();
+    if (version != null) {
+      $result.version = version;
+    }
+    if (recipientUserId != null) {
+      $result.recipientUserId = recipientUserId;
+    }
+    if (senderUserId != null) {
+      $result.senderUserId = senderUserId;
+    }
+    if (timestampMs != null) {
+      $result.timestampMs = timestampMs;
+    }
+    if (messageId != null) {
+      $result.messageId = messageId;
+    }
+    if (messageType != null) {
+      $result.messageType = messageType;
+    }
+    if (payload != null) {
+      $result.payload = payload;
+    }
+    if (userEd25519Sig != null) {
+      $result.userEd25519Sig = userEd25519Sig;
+    }
+    if (userMlDsaSig != null) {
+      $result.userMlDsaSig = userMlDsaSig;
+    }
+    if (contentMetadata != null) {
+      $result.contentMetadata = contentMetadata;
+    }
+    if (editMetadata != null) {
+      $result.editMetadata = editMetadata;
+    }
+    if (expiryMetadata != null) {
+      $result.expiryMetadata = expiryMetadata;
+    }
+    if (erasureMetadata != null) {
+      $result.erasureMetadata = erasureMetadata;
+    }
+    if (compression != null) {
+      $result.compression = compression;
+    }
+    if (groupId != null) {
+      $result.groupId = groupId;
+    }
+    return $result;
+  }
+  ApplicationFrameV3._() : super();
+  factory ApplicationFrameV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ApplicationFrameV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ApplicationFrameV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'recipientUserId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'senderUserId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'timestampMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
+    ..e<MessageTypeV3>(6, _omitFieldNames ? '' : 'messageType', $pb.PbFieldType.OE, defaultOrMaker: MessageTypeV3.MTV3_TEXT, valueOf: MessageTypeV3.valueOf, enumValues: MessageTypeV3.values)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'userEd25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'userMlDsaSig', $pb.PbFieldType.OY)
+    ..aOM<ContentMetadata>(12, _omitFieldNames ? '' : 'contentMetadata', subBuilder: ContentMetadata.create)
+    ..aOM<EditMetadata>(13, _omitFieldNames ? '' : 'editMetadata', subBuilder: EditMetadata.create)
+    ..aOM<ExpiryMetadata>(14, _omitFieldNames ? '' : 'expiryMetadata', subBuilder: ExpiryMetadata.create)
+    ..aOM<ErasureCodingMetadata>(15, _omitFieldNames ? '' : 'erasureMetadata', subBuilder: ErasureCodingMetadata.create)
+    ..e<CompressionType>(16, _omitFieldNames ? '' : 'compression', $pb.PbFieldType.OE, defaultOrMaker: CompressionType.NONE, valueOf: CompressionType.valueOf, enumValues: CompressionType.values)
+    ..a<$core.List<$core.int>>(17, _omitFieldNames ? '' : 'groupId', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ApplicationFrameV3 clone() => ApplicationFrameV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ApplicationFrameV3 copyWith(void Function(ApplicationFrameV3) updates) => super.copyWith((message) => updates(message as ApplicationFrameV3)) as ApplicationFrameV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ApplicationFrameV3 create() => ApplicationFrameV3._();
+  ApplicationFrameV3 createEmptyInstance() => create();
+  static $pb.PbList<ApplicationFrameV3> createRepeated() => $pb.PbList<ApplicationFrameV3>();
+  @$core.pragma('dart2js:noInline')
+  static ApplicationFrameV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ApplicationFrameV3>(create);
+  static ApplicationFrameV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get version => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set version($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasVersion() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearVersion() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get recipientUserId => $_getN(1);
+  @$pb.TagNumber(2)
+  set recipientUserId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasRecipientUserId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecipientUserId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get senderUserId => $_getN(2);
+  @$pb.TagNumber(3)
+  set senderUserId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSenderUserId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSenderUserId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get timestampMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set timestampMs($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTimestampMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTimestampMs() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.int> get messageId => $_getN(4);
+  @$pb.TagNumber(5)
+  set messageId($core.List<$core.int> v) { $_setBytes(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasMessageId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearMessageId() => clearField(5);
+
+  @$pb.TagNumber(6)
+  MessageTypeV3 get messageType => $_getN(5);
+  @$pb.TagNumber(6)
+  set messageType(MessageTypeV3 v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasMessageType() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearMessageType() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get payload => $_getN(6);
+  @$pb.TagNumber(7)
+  set payload($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasPayload() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearPayload() => clearField(7);
+
+  /// Sigs (Subjekt = User-Keypair) — End-to-End-Identity-Authenticity
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get userEd25519Sig => $_getN(7);
+  @$pb.TagNumber(10)
+  set userEd25519Sig($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasUserEd25519Sig() => $_has(7);
+  @$pb.TagNumber(10)
+  void clearUserEd25519Sig() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.List<$core.int> get userMlDsaSig => $_getN(8);
+  @$pb.TagNumber(11)
+  set userMlDsaSig($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasUserMlDsaSig() => $_has(8);
+  @$pb.TagNumber(11)
+  void clearUserMlDsaSig() => clearField(11);
+
+  /// Optionale Metadata (reuse existierender Sub-Messages)
+  @$pb.TagNumber(12)
+  ContentMetadata get contentMetadata => $_getN(9);
+  @$pb.TagNumber(12)
+  set contentMetadata(ContentMetadata v) { setField(12, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasContentMetadata() => $_has(9);
+  @$pb.TagNumber(12)
+  void clearContentMetadata() => clearField(12);
+  @$pb.TagNumber(12)
+  ContentMetadata ensureContentMetadata() => $_ensure(9);
+
+  @$pb.TagNumber(13)
+  EditMetadata get editMetadata => $_getN(10);
+  @$pb.TagNumber(13)
+  set editMetadata(EditMetadata v) { setField(13, v); }
+  @$pb.TagNumber(13)
+  $core.bool hasEditMetadata() => $_has(10);
+  @$pb.TagNumber(13)
+  void clearEditMetadata() => clearField(13);
+  @$pb.TagNumber(13)
+  EditMetadata ensureEditMetadata() => $_ensure(10);
+
+  @$pb.TagNumber(14)
+  ExpiryMetadata get expiryMetadata => $_getN(11);
+  @$pb.TagNumber(14)
+  set expiryMetadata(ExpiryMetadata v) { setField(14, v); }
+  @$pb.TagNumber(14)
+  $core.bool hasExpiryMetadata() => $_has(11);
+  @$pb.TagNumber(14)
+  void clearExpiryMetadata() => clearField(14);
+  @$pb.TagNumber(14)
+  ExpiryMetadata ensureExpiryMetadata() => $_ensure(11);
+
+  @$pb.TagNumber(15)
+  ErasureCodingMetadata get erasureMetadata => $_getN(12);
+  @$pb.TagNumber(15)
+  set erasureMetadata(ErasureCodingMetadata v) { setField(15, v); }
+  @$pb.TagNumber(15)
+  $core.bool hasErasureMetadata() => $_has(12);
+  @$pb.TagNumber(15)
+  void clearErasureMetadata() => clearField(15);
+  @$pb.TagNumber(15)
+  ErasureCodingMetadata ensureErasureMetadata() => $_ensure(12);
+
+  @$pb.TagNumber(16)
+  CompressionType get compression => $_getN(13);
+  @$pb.TagNumber(16)
+  set compression(CompressionType v) { setField(16, v); }
+  @$pb.TagNumber(16)
+  $core.bool hasCompression() => $_has(13);
+  @$pb.TagNumber(16)
+  void clearCompression() => clearField(16);
+
+  /// Conversation routing — empty for DM; set for group/channel pairwise fan-out.
+  /// Receiver dispatches to the matching group/channel conversation. Calendar/Polls
+  /// payload-internal group_ids are semantically distinct (linked-event association).
+  @$pb.TagNumber(17)
+  $core.List<$core.int> get groupId => $_getN(14);
+  @$pb.TagNumber(17)
+  set groupId($core.List<$core.int> v) { $_setBytes(14, v); }
+  @$pb.TagNumber(17)
+  $core.bool hasGroupId() => $_has(14);
+  @$pb.TagNumber(17)
+  void clearGroupId() => clearField(17);
+}
+
+///  ── KEM-Header v3 (Sec H-5 v2) ──────────────────────────────────────────
+///
+///  Trägt den ApplicationFrameV3-Ciphertext + KEM-Material. Steht im
+///  NetworkPacketV3.payload (mit payload_type = PAYLOAD_APPLICATION_FRAME).
+class PerMessageKemV3 extends $pb.GeneratedMessage {
+  factory PerMessageKemV3({
+    $core.List<$core.int>? x25519Ciphertext,
+    $core.List<$core.int>? mlKemCiphertext,
+    $core.List<$core.int>? aeadCiphertext,
+    $core.List<$core.int>? aeadNonce,
+    $core.int? version,
+  }) {
+    final $result = create();
+    if (x25519Ciphertext != null) {
+      $result.x25519Ciphertext = x25519Ciphertext;
+    }
+    if (mlKemCiphertext != null) {
+      $result.mlKemCiphertext = mlKemCiphertext;
+    }
+    if (aeadCiphertext != null) {
+      $result.aeadCiphertext = aeadCiphertext;
+    }
+    if (aeadNonce != null) {
+      $result.aeadNonce = aeadNonce;
+    }
+    if (version != null) {
+      $result.version = version;
+    }
+    return $result;
+  }
+  PerMessageKemV3._() : super();
+  factory PerMessageKemV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PerMessageKemV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PerMessageKemV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'x25519Ciphertext', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'mlKemCiphertext', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'aeadCiphertext', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'aeadNonce', $pb.PbFieldType.OY)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PerMessageKemV3 clone() => PerMessageKemV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PerMessageKemV3 copyWith(void Function(PerMessageKemV3) updates) => super.copyWith((message) => updates(message as PerMessageKemV3)) as PerMessageKemV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PerMessageKemV3 create() => PerMessageKemV3._();
+  PerMessageKemV3 createEmptyInstance() => create();
+  static $pb.PbList<PerMessageKemV3> createRepeated() => $pb.PbList<PerMessageKemV3>();
+  @$core.pragma('dart2js:noInline')
+  static PerMessageKemV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PerMessageKemV3>(create);
+  static PerMessageKemV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get x25519Ciphertext => $_getN(0);
+  @$pb.TagNumber(1)
+  set x25519Ciphertext($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasX25519Ciphertext() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearX25519Ciphertext() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get mlKemCiphertext => $_getN(1);
+  @$pb.TagNumber(2)
+  set mlKemCiphertext($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMlKemCiphertext() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMlKemCiphertext() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get aeadCiphertext => $_getN(2);
+  @$pb.TagNumber(3)
+  set aeadCiphertext($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasAeadCiphertext() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAeadCiphertext() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get aeadNonce => $_getN(3);
+  @$pb.TagNumber(4)
+  set aeadNonce($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasAeadNonce() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAeadNonce() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get version => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set version($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasVersion() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearVersion() => clearField(5);
+}
+
+///  ── Infrastructure-Frame V3 (Device-targeted Inner Layer, §2.3.5) ───────
+///
+///  Drittes Inner-Frame-Subjekt (neben ApplicationFrameV3 und ONION_LAYER).
+///  KEM-encrypted unter recipient-Device-KEM-PK (X25519+ML-KEM-768 hybrid v2),
+///  nicht unter recipient-User-PK. Wird verwendet für DHT-Operations, Routing-
+///  Probes, NAT-Traversal, Reachability — alles was AN EIN GERAET adressiert
+///  ist, nicht an eine User-Identity.
+///
+///  KEINE User-Sig-Felder: das Outer Device-Sig (auf NetworkPacketV3) liefert
+///  die Routing-Authenticity. Es gibt kein UserID-Subjekt das End-to-End
+///  authentifiziert werden muesste.
+///
+///  Selektor-Liste: nur MessageTypes aus der §2.3.5 Infrastructure-Whitelist
+///  (DHT_*, IDENTITY_AUTH_*, IDENTITY_LIVE_*, FRAGMENT_*, PEER_*, PEER_LIST_*,
+///   ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_*, DELIVERY_RECEIPT).
+///  Mirror: isInfrastructureMessageTypeV3() Predicate (commit 940dfa1).
+///
+///  Special-case CONTACT_REQUEST (First-CR-Bootstrap, §8.1.1): traegt eine
+///  vollstaendige user-signed ApplicationFrameV3 als Sub-Payload, weil der
+///  Sender bei First-Contact noch keinen User-KEM-PK des Empfaengers kennt.
+class InfrastructureFrameV3 extends $pb.GeneratedMessage {
+  factory InfrastructureFrameV3({
+    $core.int? version,
+    $core.List<$core.int>? recipientDeviceId,
+    $core.List<$core.int>? senderDeviceId,
+    $fixnum.Int64? timestampMs,
+    $core.List<$core.int>? messageId,
+    MessageTypeV3? messageType,
+    $core.List<$core.int>? payload,
+  }) {
+    final $result = create();
+    if (version != null) {
+      $result.version = version;
+    }
+    if (recipientDeviceId != null) {
+      $result.recipientDeviceId = recipientDeviceId;
+    }
+    if (senderDeviceId != null) {
+      $result.senderDeviceId = senderDeviceId;
+    }
+    if (timestampMs != null) {
+      $result.timestampMs = timestampMs;
+    }
+    if (messageId != null) {
+      $result.messageId = messageId;
+    }
+    if (messageType != null) {
+      $result.messageType = messageType;
+    }
+    if (payload != null) {
+      $result.payload = payload;
+    }
+    return $result;
+  }
+  InfrastructureFrameV3._() : super();
+  factory InfrastructureFrameV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory InfrastructureFrameV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'InfrastructureFrameV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'recipientDeviceId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'senderDeviceId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'timestampMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
+    ..e<MessageTypeV3>(6, _omitFieldNames ? '' : 'messageType', $pb.PbFieldType.OE, defaultOrMaker: MessageTypeV3.MTV3_TEXT, valueOf: MessageTypeV3.valueOf, enumValues: MessageTypeV3.values)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  InfrastructureFrameV3 clone() => InfrastructureFrameV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  InfrastructureFrameV3 copyWith(void Function(InfrastructureFrameV3) updates) => super.copyWith((message) => updates(message as InfrastructureFrameV3)) as InfrastructureFrameV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static InfrastructureFrameV3 create() => InfrastructureFrameV3._();
+  InfrastructureFrameV3 createEmptyInstance() => create();
+  static $pb.PbList<InfrastructureFrameV3> createRepeated() => $pb.PbList<InfrastructureFrameV3>();
+  @$core.pragma('dart2js:noInline')
+  static InfrastructureFrameV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<InfrastructureFrameV3>(create);
+  static InfrastructureFrameV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get version => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set version($core.int v) { $_setUnsignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasVersion() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearVersion() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get recipientDeviceId => $_getN(1);
+  @$pb.TagNumber(2)
+  set recipientDeviceId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasRecipientDeviceId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearRecipientDeviceId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get senderDeviceId => $_getN(2);
+  @$pb.TagNumber(3)
+  set senderDeviceId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSenderDeviceId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSenderDeviceId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get timestampMs => $_getI64(3);
+  @$pb.TagNumber(4)
+  set timestampMs($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTimestampMs() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTimestampMs() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.int> get messageId => $_getN(4);
+  @$pb.TagNumber(5)
+  set messageId($core.List<$core.int> v) { $_setBytes(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasMessageId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearMessageId() => clearField(5);
+
+  @$pb.TagNumber(6)
+  MessageTypeV3 get messageType => $_getN(5);
+  @$pb.TagNumber(6)
+  set messageType(MessageTypeV3 v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasMessageType() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearMessageType() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get payload => $_getN(6);
+  @$pb.TagNumber(7)
+  set payload($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasPayload() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearPayload() => clearField(7);
+}
+
+///  ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────
+///
+///  V2 packte Text als raw UTF-8 in encrypted_payload. V3 wickelt jeden
+///  Payload-Typ in eine eigene proto-Message — gibt uns Versions-Felder pro
+///  Typ und ein klares Schema für künftige Extensions (formatHint etc.).
+class TextMessageV3 extends $pb.GeneratedMessage {
+  factory TextMessageV3({
+    $core.String? text,
+    $core.String? formatHint,
+    $core.List<$core.int>? replyToMessageId,
+    $core.String? replyToSnippet,
+    LinkPreview? linkPreview,
+  }) {
+    final $result = create();
+    if (text != null) {
+      $result.text = text;
+    }
+    if (formatHint != null) {
+      $result.formatHint = formatHint;
+    }
+    if (replyToMessageId != null) {
+      $result.replyToMessageId = replyToMessageId;
+    }
+    if (replyToSnippet != null) {
+      $result.replyToSnippet = replyToSnippet;
+    }
+    if (linkPreview != null) {
+      $result.linkPreview = linkPreview;
+    }
+    return $result;
+  }
+  TextMessageV3._() : super();
+  factory TextMessageV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory TextMessageV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'TextMessageV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aOS(1, _omitFieldNames ? '' : 'text')
+    ..aOS(2, _omitFieldNames ? '' : 'formatHint')
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'replyToMessageId', $pb.PbFieldType.OY)
+    ..aOS(4, _omitFieldNames ? '' : 'replyToSnippet')
+    ..aOM<LinkPreview>(5, _omitFieldNames ? '' : 'linkPreview', subBuilder: LinkPreview.create)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  TextMessageV3 clone() => TextMessageV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  TextMessageV3 copyWith(void Function(TextMessageV3) updates) => super.copyWith((message) => updates(message as TextMessageV3)) as TextMessageV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static TextMessageV3 create() => TextMessageV3._();
+  TextMessageV3 createEmptyInstance() => create();
+  static $pb.PbList<TextMessageV3> createRepeated() => $pb.PbList<TextMessageV3>();
+  @$core.pragma('dart2js:noInline')
+  static TextMessageV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<TextMessageV3>(create);
+  static TextMessageV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.String get text => $_getSZ(0);
+  @$pb.TagNumber(1)
+  set text($core.String v) { $_setString(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasText() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearText() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get formatHint => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set formatHint($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFormatHint() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFormatHint() => clearField(2);
+
+  /// Reply / Quote (V3 reply schema). Empty when this is not a reply.
+  /// - reply_to_message_id: 16-byte messageId of the quoted bubble. Receivers
+  ///   can resolve it locally (it lives in the same conversation) to render
+  ///   the inline-quote header. UI falls back to reply_to_snippet if the
+  ///   referenced message is not retained locally.
+  /// - reply_to_snippet:    short text excerpt sender renders at compose-time.
+  ///   Bounded to ~120 chars by sender-side trimming.
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get replyToMessageId => $_getN(2);
+  @$pb.TagNumber(3)
+  set replyToMessageId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasReplyToMessageId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearReplyToMessageId() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get replyToSnippet => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set replyToSnippet($core.String v) { $_setString(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasReplyToSnippet() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearReplyToSnippet() => clearField(4);
+
+  /// Sender-side link preview (Architecture §2.3.4). Sender fetches the
+  /// preview (HTTPS-only, SSRF-guarded) and embeds the result so the
+  /// receiver renders it WITHOUT performing any network request — the
+  /// receiver-MUST-NOT-fetch invariant is what makes link previews
+  /// privacy-safe. Empty when the message has no URL or fetch failed.
+  @$pb.TagNumber(5)
+  LinkPreview get linkPreview => $_getN(4);
+  @$pb.TagNumber(5)
+  set linkPreview(LinkPreview v) { setField(5, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasLinkPreview() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearLinkPreview() => clearField(5);
+  @$pb.TagNumber(5)
+  LinkPreview ensureLinkPreview() => $_ensure(4);
+}
+
+///  ── Identity-Resolution V3 (§4.3) ───────────────────────────────────────
+///
+///  AuthManifestV3 erweitert AuthManifestProto (alt) um die User-Pubkeys,
+///  damit Receiver die Sig OHNE separaten Identity-Lookup verifizieren kann.
+///  Spec: Appendix A.5 AuthManifest.
+class AuthManifestV3 extends $pb.GeneratedMessage {
+  factory AuthManifestV3({
+    $core.List<$core.int>? userId,
+    $core.Iterable<$core.List<$core.int>>? authorizedDeviceIds,
+    $fixnum.Int64? ttlSeconds,
+    $fixnum.Int64? sequenceNumber,
+    $fixnum.Int64? publishedAtMs,
+    $core.List<$core.int>? ed25519Sig,
+    $core.List<$core.int>? mlDsaSig,
+    $core.List<$core.int>? userEd25519Pk,
+    $core.List<$core.int>? userMlDsaPk,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (authorizedDeviceIds != null) {
+      $result.authorizedDeviceIds.addAll(authorizedDeviceIds);
+    }
+    if (ttlSeconds != null) {
+      $result.ttlSeconds = ttlSeconds;
+    }
+    if (sequenceNumber != null) {
+      $result.sequenceNumber = sequenceNumber;
+    }
+    if (publishedAtMs != null) {
+      $result.publishedAtMs = publishedAtMs;
+    }
+    if (ed25519Sig != null) {
+      $result.ed25519Sig = ed25519Sig;
+    }
+    if (mlDsaSig != null) {
+      $result.mlDsaSig = mlDsaSig;
+    }
+    if (userEd25519Pk != null) {
+      $result.userEd25519Pk = userEd25519Pk;
+    }
+    if (userMlDsaPk != null) {
+      $result.userMlDsaPk = userMlDsaPk;
+    }
+    return $result;
+  }
+  AuthManifestV3._() : super();
+  factory AuthManifestV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory AuthManifestV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'AuthManifestV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'authorizedDeviceIds', $pb.PbFieldType.PY)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'ttlSeconds', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'sequenceNumber', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'publishedAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'mlDsaSig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'userEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'userMlDsaPk', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  AuthManifestV3 clone() => AuthManifestV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  AuthManifestV3 copyWith(void Function(AuthManifestV3) updates) => super.copyWith((message) => updates(message as AuthManifestV3)) as AuthManifestV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static AuthManifestV3 create() => AuthManifestV3._();
+  AuthManifestV3 createEmptyInstance() => create();
+  static $pb.PbList<AuthManifestV3> createRepeated() => $pb.PbList<AuthManifestV3>();
+  @$core.pragma('dart2js:noInline')
+  static AuthManifestV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AuthManifestV3>(create);
+  static AuthManifestV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.List<$core.int>> get authorizedDeviceIds => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get ttlSeconds => $_getI64(2);
+  @$pb.TagNumber(3)
+  set ttlSeconds($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTtlSeconds() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTtlSeconds() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get sequenceNumber => $_getI64(3);
+  @$pb.TagNumber(4)
+  set sequenceNumber($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasSequenceNumber() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSequenceNumber() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get publishedAtMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set publishedAtMs($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasPublishedAtMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearPublishedAtMs() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get ed25519Sig => $_getN(5);
+  @$pb.TagNumber(6)
+  set ed25519Sig($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasEd25519Sig() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearEd25519Sig() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get mlDsaSig => $_getN(6);
+  @$pb.TagNumber(7)
+  set mlDsaSig($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasMlDsaSig() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearMlDsaSig() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get userEd25519Pk => $_getN(7);
+  @$pb.TagNumber(8)
+  set userEd25519Pk($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasUserEd25519Pk() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearUserEd25519Pk() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get userMlDsaPk => $_getN(8);
+  @$pb.TagNumber(9)
+  set userMlDsaPk($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasUserMlDsaPk() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearUserMlDsaPk() => clearField(9);
+}
+
+class LivenessRecordV3 extends $pb.GeneratedMessage {
+  factory LivenessRecordV3({
+    $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceNodeId,
+    $core.Iterable<PeerAddressProto>? addresses,
+    $fixnum.Int64? ttlSeconds,
+    $fixnum.Int64? sequenceNumber,
+    $fixnum.Int64? publishedAtMs,
+    $core.List<$core.int>? ed25519Sig,
+    $core.List<$core.int>? deviceEd25519Pk,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (deviceNodeId != null) {
+      $result.deviceNodeId = deviceNodeId;
+    }
+    if (addresses != null) {
+      $result.addresses.addAll(addresses);
+    }
+    if (ttlSeconds != null) {
+      $result.ttlSeconds = ttlSeconds;
+    }
+    if (sequenceNumber != null) {
+      $result.sequenceNumber = sequenceNumber;
+    }
+    if (publishedAtMs != null) {
+      $result.publishedAtMs = publishedAtMs;
+    }
+    if (ed25519Sig != null) {
+      $result.ed25519Sig = ed25519Sig;
+    }
+    if (deviceEd25519Pk != null) {
+      $result.deviceEd25519Pk = deviceEd25519Pk;
+    }
+    return $result;
+  }
+  LivenessRecordV3._() : super();
+  factory LivenessRecordV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory LivenessRecordV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'LivenessRecordV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceNodeId', $pb.PbFieldType.OY)
+    ..pc<PeerAddressProto>(3, _omitFieldNames ? '' : 'addresses', $pb.PbFieldType.PM, subBuilder: PeerAddressProto.create)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'ttlSeconds', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'sequenceNumber', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(6, _omitFieldNames ? '' : 'publishedAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'deviceEd25519Pk', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  LivenessRecordV3 clone() => LivenessRecordV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  LivenessRecordV3 copyWith(void Function(LivenessRecordV3) updates) => super.copyWith((message) => updates(message as LivenessRecordV3)) as LivenessRecordV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static LivenessRecordV3 create() => LivenessRecordV3._();
+  LivenessRecordV3 createEmptyInstance() => create();
+  static $pb.PbList<LivenessRecordV3> createRepeated() => $pb.PbList<LivenessRecordV3>();
+  @$core.pragma('dart2js:noInline')
+  static LivenessRecordV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<LivenessRecordV3>(create);
+  static LivenessRecordV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get deviceNodeId => $_getN(1);
+  @$pb.TagNumber(2)
+  set deviceNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceNodeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceNodeId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<PeerAddressProto> get addresses => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get ttlSeconds => $_getI64(3);
+  @$pb.TagNumber(4)
+  set ttlSeconds($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTtlSeconds() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTtlSeconds() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get sequenceNumber => $_getI64(4);
+  @$pb.TagNumber(5)
+  set sequenceNumber($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasSequenceNumber() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSequenceNumber() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get publishedAtMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set publishedAtMs($fixnum.Int64 v) { $_setInt64(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasPublishedAtMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearPublishedAtMs() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get ed25519Sig => $_getN(6);
+  @$pb.TagNumber(7)
+  set ed25519Sig($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasEd25519Sig() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearEd25519Sig() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get deviceEd25519Pk => $_getN(7);
+  @$pb.TagNumber(8)
+  set deviceEd25519Pk($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasDeviceEd25519Pk() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearDeviceEd25519Pk() => clearField(8);
+}
+
+///  ── DeviceKemRecord V3 (2D-DHT, Welle 5, §4.3) ──────────────────────────
+///
+///  Dritter 2D-DHT-Record neben AuthManifestV3 und LivenessRecordV3. Traegt
+///  die Device-KEM-Pubkeys (X25519 + ML-KEM-768), die fuer das KEM-Encap auf
+///  InfrastructureFrameV3 (und spaeter ONION_LAYER) gebraucht werden.
+///
+///  Lifecycle-Trennung: KEM-PK aendert sich nur bei Device-Key-Reset (Multi-
+///  Year-Cadence), Liveness flippt alle 15min. Separate Records vermeiden
+///  unnoetigen DHT-Traffic durch das Zusammen-Republish.
+///
+///  Trust-Anchor: signed by user master Ed25519 key (gleiche Chain wie
+///  AuthManifestV3 — der User vouches fuer die Device-KEM-PK seines
+///  authorisierten Geraets).
+///
+///  Storage-Key: SHA-256("kem" || user_id || device_id) — eigener Key-Space,
+///  independent von "auth"+userId und "live"+userId+deviceId.
+class DeviceKemRecordV3 extends $pb.GeneratedMessage {
+  factory DeviceKemRecordV3({
+    $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceId,
+    $core.List<$core.int>? deviceX25519Pk,
+    $core.List<$core.int>? deviceMlKemPk,
+    $fixnum.Int64? ttlSeconds,
+    $fixnum.Int64? sequenceNumber,
+    $fixnum.Int64? publishedAtMs,
+    $core.List<$core.int>? ed25519Sig,
+    $core.List<$core.int>? userEd25519Pk,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (deviceId != null) {
+      $result.deviceId = deviceId;
+    }
+    if (deviceX25519Pk != null) {
+      $result.deviceX25519Pk = deviceX25519Pk;
+    }
+    if (deviceMlKemPk != null) {
+      $result.deviceMlKemPk = deviceMlKemPk;
+    }
+    if (ttlSeconds != null) {
+      $result.ttlSeconds = ttlSeconds;
+    }
+    if (sequenceNumber != null) {
+      $result.sequenceNumber = sequenceNumber;
+    }
+    if (publishedAtMs != null) {
+      $result.publishedAtMs = publishedAtMs;
+    }
+    if (ed25519Sig != null) {
+      $result.ed25519Sig = ed25519Sig;
+    }
+    if (userEd25519Pk != null) {
+      $result.userEd25519Pk = userEd25519Pk;
+    }
+    return $result;
+  }
+  DeviceKemRecordV3._() : super();
+  factory DeviceKemRecordV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory DeviceKemRecordV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DeviceKemRecordV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'deviceX25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'deviceMlKemPk', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(5, _omitFieldNames ? '' : 'ttlSeconds', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(6, _omitFieldNames ? '' : 'sequenceNumber', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'publishedAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'userEd25519Pk', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  DeviceKemRecordV3 clone() => DeviceKemRecordV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  DeviceKemRecordV3 copyWith(void Function(DeviceKemRecordV3) updates) => super.copyWith((message) => updates(message as DeviceKemRecordV3)) as DeviceKemRecordV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static DeviceKemRecordV3 create() => DeviceKemRecordV3._();
+  DeviceKemRecordV3 createEmptyInstance() => create();
+  static $pb.PbList<DeviceKemRecordV3> createRepeated() => $pb.PbList<DeviceKemRecordV3>();
+  @$core.pragma('dart2js:noInline')
+  static DeviceKemRecordV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<DeviceKemRecordV3>(create);
+  static DeviceKemRecordV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get deviceId => $_getN(1);
+  @$pb.TagNumber(2)
+  set deviceId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get deviceX25519Pk => $_getN(2);
+  @$pb.TagNumber(3)
+  set deviceX25519Pk($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasDeviceX25519Pk() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearDeviceX25519Pk() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get deviceMlKemPk => $_getN(3);
+  @$pb.TagNumber(4)
+  set deviceMlKemPk($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasDeviceMlKemPk() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearDeviceMlKemPk() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get ttlSeconds => $_getI64(4);
+  @$pb.TagNumber(5)
+  set ttlSeconds($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasTtlSeconds() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTtlSeconds() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get sequenceNumber => $_getI64(5);
+  @$pb.TagNumber(6)
+  set sequenceNumber($fixnum.Int64 v) { $_setInt64(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasSequenceNumber() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSequenceNumber() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $fixnum.Int64 get publishedAtMs => $_getI64(6);
+  @$pb.TagNumber(7)
+  set publishedAtMs($fixnum.Int64 v) { $_setInt64(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasPublishedAtMs() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearPublishedAtMs() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get ed25519Sig => $_getN(7);
+  @$pb.TagNumber(8)
+  set ed25519Sig($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasEd25519Sig() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearEd25519Sig() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get userEd25519Pk => $_getN(8);
+  @$pb.TagNumber(9)
+  set userEd25519Pk($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasUserEd25519Pk() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearUserEd25519Pk() => clearField(9);
+}
+
+///  ── PeerListEntry V3 (§5.x PEER_LIST_PUSH) ──────────────────────────────
+///
+///  Ersetzt PeerInfoProto in den V3-PEER_LIST_*-Frames. Schmaler weil
+///  Identity-Felder (Pubkeys, User-ID) jetzt aus 2D-DHT-Resolver kommen.
+class PeerListEntryV3 extends $pb.GeneratedMessage {
+  factory PeerListEntryV3({
+    $core.List<$core.int>? deviceId,
+    $core.Iterable<PeerAddressProto>? addresses,
+    $fixnum.Int64? lastSeenMs,
+    $fixnum.Int64? ageHours,
+    ConnectionTypeProto? connectionType,
+  }) {
+    final $result = create();
+    if (deviceId != null) {
+      $result.deviceId = deviceId;
+    }
+    if (addresses != null) {
+      $result.addresses.addAll(addresses);
+    }
+    if (lastSeenMs != null) {
+      $result.lastSeenMs = lastSeenMs;
+    }
+    if (ageHours != null) {
+      $result.ageHours = ageHours;
+    }
+    if (connectionType != null) {
+      $result.connectionType = connectionType;
+    }
+    return $result;
+  }
+  PeerListEntryV3._() : super();
+  factory PeerListEntryV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory PeerListEntryV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'PeerListEntryV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'deviceId', $pb.PbFieldType.OY)
+    ..pc<PeerAddressProto>(2, _omitFieldNames ? '' : 'addresses', $pb.PbFieldType.PM, subBuilder: PeerAddressProto.create)
+    ..a<$fixnum.Int64>(3, _omitFieldNames ? '' : 'lastSeenMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..a<$fixnum.Int64>(4, _omitFieldNames ? '' : 'ageHours', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..e<ConnectionTypeProto>(5, _omitFieldNames ? '' : 'connectionType', $pb.PbFieldType.OE, defaultOrMaker: ConnectionTypeProto.CT_LAN_SAME_SUBNET, valueOf: ConnectionTypeProto.valueOf, enumValues: ConnectionTypeProto.values)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  PeerListEntryV3 clone() => PeerListEntryV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  PeerListEntryV3 copyWith(void Function(PeerListEntryV3) updates) => super.copyWith((message) => updates(message as PeerListEntryV3)) as PeerListEntryV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static PeerListEntryV3 create() => PeerListEntryV3._();
+  PeerListEntryV3 createEmptyInstance() => create();
+  static $pb.PbList<PeerListEntryV3> createRepeated() => $pb.PbList<PeerListEntryV3>();
+  @$core.pragma('dart2js:noInline')
+  static PeerListEntryV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<PeerListEntryV3>(create);
+  static PeerListEntryV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get deviceId => $_getN(0);
+  @$pb.TagNumber(1)
+  set deviceId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasDeviceId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearDeviceId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<PeerAddressProto> get addresses => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get lastSeenMs => $_getI64(2);
+  @$pb.TagNumber(3)
+  set lastSeenMs($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasLastSeenMs() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearLastSeenMs() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get ageHours => $_getI64(3);
+  @$pb.TagNumber(4)
+  set ageHours($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasAgeHours() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearAgeHours() => clearField(4);
+
+  @$pb.TagNumber(5)
+  ConnectionTypeProto get connectionType => $_getN(4);
+  @$pb.TagNumber(5)
+  set connectionType(ConnectionTypeProto v) { setField(5, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasConnectionType() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearConnectionType() => clearField(5);
+}
+
+///  ── RelayForward V3 ─────────────────────────────────────────────────────
+///
+///  Inhaltlich nahe an RelayForward (alt), aber:
+///    - wrappedPacket = NetworkPacketV3 (statt MessageEnvelope)
+///    - origin_device_id ersetzt origin_node_id (Begriffshygiene)
+///    - kein origin_user_id mehr (User-Identity steckt im Inner Frame)
+class RelayForwardV3 extends $pb.GeneratedMessage {
+  factory RelayForwardV3({
+    $core.List<$core.int>? relayId,
+    $core.List<$core.int>? finalRecipientId,
+    $core.List<$core.int>? wrappedPacket,
+    $core.int? hopCount,
+    $core.int? maxHops,
+    $core.int? ttl,
+    $core.List<$core.int>? originDeviceId,
+    $fixnum.Int64? createdAtMs,
+    $core.Iterable<$core.List<$core.int>>? visited,
+  }) {
+    final $result = create();
+    if (relayId != null) {
+      $result.relayId = relayId;
+    }
+    if (finalRecipientId != null) {
+      $result.finalRecipientId = finalRecipientId;
+    }
+    if (wrappedPacket != null) {
+      $result.wrappedPacket = wrappedPacket;
+    }
+    if (hopCount != null) {
+      $result.hopCount = hopCount;
+    }
+    if (maxHops != null) {
+      $result.maxHops = maxHops;
+    }
+    if (ttl != null) {
+      $result.ttl = ttl;
+    }
+    if (originDeviceId != null) {
+      $result.originDeviceId = originDeviceId;
+    }
+    if (createdAtMs != null) {
+      $result.createdAtMs = createdAtMs;
+    }
+    if (visited != null) {
+      $result.visited.addAll(visited);
+    }
+    return $result;
+  }
+  RelayForwardV3._() : super();
+  factory RelayForwardV3.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory RelayForwardV3.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RelayForwardV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'relayId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'finalRecipientId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'wrappedPacket', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'hopCount', $pb.PbFieldType.OU3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'maxHops', $pb.PbFieldType.OU3)
+    ..a<$core.int>(6, _omitFieldNames ? '' : 'ttl', $pb.PbFieldType.OU3)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'originDeviceId', $pb.PbFieldType.OY)
+    ..a<$fixnum.Int64>(8, _omitFieldNames ? '' : 'createdAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..p<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'visited', $pb.PbFieldType.PY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  RelayForwardV3 clone() => RelayForwardV3()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  RelayForwardV3 copyWith(void Function(RelayForwardV3) updates) => super.copyWith((message) => updates(message as RelayForwardV3)) as RelayForwardV3;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static RelayForwardV3 create() => RelayForwardV3._();
+  RelayForwardV3 createEmptyInstance() => create();
+  static $pb.PbList<RelayForwardV3> createRepeated() => $pb.PbList<RelayForwardV3>();
+  @$core.pragma('dart2js:noInline')
+  static RelayForwardV3 getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RelayForwardV3>(create);
+  static RelayForwardV3? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get relayId => $_getN(0);
+  @$pb.TagNumber(1)
+  set relayId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasRelayId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearRelayId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get finalRecipientId => $_getN(1);
+  @$pb.TagNumber(2)
+  set finalRecipientId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFinalRecipientId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFinalRecipientId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get wrappedPacket => $_getN(2);
+  @$pb.TagNumber(3)
+  set wrappedPacket($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasWrappedPacket() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearWrappedPacket() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get hopCount => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set hopCount($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasHopCount() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearHopCount() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get maxHops => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set maxHops($core.int v) { $_setUnsignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasMaxHops() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearMaxHops() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.int get ttl => $_getIZ(5);
+  @$pb.TagNumber(6)
+  set ttl($core.int v) { $_setUnsignedInt32(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasTtl() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearTtl() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get originDeviceId => $_getN(6);
+  @$pb.TagNumber(7)
+  set originDeviceId($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasOriginDeviceId() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearOriginDeviceId() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $fixnum.Int64 get createdAtMs => $_getI64(7);
+  @$pb.TagNumber(8)
+  set createdAtMs($fixnum.Int64 v) { $_setInt64(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasCreatedAtMs() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearCreatedAtMs() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.List<$core.int>> get visited => $_getList(8);
 }
 
 

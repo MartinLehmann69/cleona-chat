@@ -13,178 +13,6 @@ import 'dart:convert' as $convert;
 import 'dart:core' as $core;
 import 'dart:typed_data' as $typed_data;
 
-@$core.Deprecated('Use messageTypeDescriptor instead')
-const MessageType$json = {
-  '1': 'MessageType',
-  '2': [
-    {'1': 'TEXT', '2': 0},
-    {'1': 'IMAGE', '2': 1},
-    {'1': 'VIDEO', '2': 2},
-    {'1': 'GIF', '2': 3},
-    {'1': 'EMOJI_REACTION', '2': 4},
-    {'1': 'MEDIA_ANNOUNCEMENT', '2': 5},
-    {'1': 'MEDIA_ACCEPT', '2': 6},
-    {'1': 'MEDIA_REJECT', '2': 7},
-    {'1': 'MESSAGE_EDIT', '2': 8},
-    {'1': 'MESSAGE_EXPIRE_CONFIG', '2': 9},
-    {'1': 'RESTORE_BROADCAST', '2': 13},
-    {'1': 'RESTORE_RESPONSE', '2': 14},
-    {'1': 'TYPING_INDICATOR', '2': 15},
-    {'1': 'READ_RECEIPT', '2': 16},
-    {'1': 'GROUP_CREATE', '2': 17},
-    {'1': 'GROUP_INVITE', '2': 18},
-    {'1': 'GROUP_LEAVE', '2': 19},
-    {'1': 'GROUP_KEY_UPDATE', '2': 20},
-    {'1': 'MESSAGE_DELETE', '2': 21},
-    {'1': 'VOICE_MESSAGE', '2': 22},
-    {'1': 'FILE', '2': 23},
-    {'1': 'CALL_INVITE', '2': 30},
-    {'1': 'CALL_ANSWER', '2': 31},
-    {'1': 'CALL_REJECT', '2': 32},
-    {'1': 'CALL_HANGUP', '2': 33},
-    {'1': 'ICE_CANDIDATE', '2': 34},
-    {'1': 'CALL_REJOIN', '2': 35},
-    {'1': 'CALL_AUDIO', '2': 36},
-    {'1': 'PEER_LIST_SUMMARY', '2': 50},
-    {'1': 'PEER_LIST_WANT', '2': 51},
-    {'1': 'PEER_LIST_PUSH', '2': 52},
-    {'1': 'CONTACT_REQUEST', '2': 62},
-    {'1': 'CONTACT_REQUEST_RESPONSE', '2': 63},
-    {'1': 'CHANNEL_CREATE', '2': 70},
-    {'1': 'CHANNEL_POST', '2': 71},
-    {'1': 'CHANNEL_INVITE', '2': 72},
-    {'1': 'CHANNEL_ROLE_UPDATE', '2': 73},
-    {'1': 'CHANNEL_LEAVE', '2': 74},
-    {'1': 'CHANNEL_JOIN_REQUEST', '2': 75},
-    {'1': 'CHANNEL_REPORT', '2': 76},
-    {'1': 'CHANNEL_REPORT_RESPONSE', '2': 77},
-    {'1': 'JURY_REQUEST', '2': 78},
-    {'1': 'JURY_VOTE_MSG', '2': 79},
-    {'1': 'JURY_RESULT', '2': 88},
-    {'1': 'CHANNEL_INDEX_EXCHANGE', '2': 89},
-    {'1': 'DHT_PING', '2': 80},
-    {'1': 'DHT_PONG', '2': 81},
-    {'1': 'DHT_FIND_NODE', '2': 82},
-    {'1': 'DHT_FIND_NODE_RESPONSE', '2': 83},
-    {'1': 'DHT_STORE', '2': 84},
-    {'1': 'DHT_STORE_RESPONSE', '2': 85},
-    {'1': 'DHT_FIND_VALUE', '2': 86},
-    {'1': 'DHT_FIND_VALUE_RESPONSE', '2': 87},
-    {'1': 'FRAGMENT_STORE', '2': 90},
-    {'1': 'FRAGMENT_STORE_ACK', '2': 91},
-    {'1': 'FRAGMENT_RETRIEVE', '2': 92},
-    {'1': 'FRAGMENT_DELETE', '2': 93},
-    {'1': 'DELIVERY_RECEIPT', '2': 94},
-    {'1': 'CHAT_CONFIG_UPDATE', '2': 100},
-    {'1': 'CHAT_CONFIG_RESPONSE', '2': 101},
-    {'1': 'IDENTITY_DELETED', '2': 102},
-    {'1': 'PROFILE_UPDATE', '2': 103},
-    {'1': 'GUARDIAN_SHARE_STORE', '2': 104},
-    {'1': 'GUARDIAN_RESTORE_REQUEST', '2': 105},
-    {'1': 'GUARDIAN_RESTORE_RESPONSE', '2': 106},
-    {'1': 'RELAY_FORWARD', '2': 110},
-    {'1': 'RELAY_ACK', '2': 111},
-    {'1': 'REACHABILITY_QUERY', '2': 112},
-    {'1': 'REACHABILITY_RESPONSE', '2': 113},
-    {'1': 'PEER_STORE', '2': 114},
-    {'1': 'PEER_STORE_ACK', '2': 115},
-    {'1': 'PEER_RETRIEVE', '2': 116},
-    {'1': 'PEER_RETRIEVE_RESPONSE', '2': 117},
-    {'1': 'ROUTE_UPDATE', '2': 120},
-    {'1': 'HOLE_PUNCH_REQUEST', '2': 121},
-    {'1': 'HOLE_PUNCH_NOTIFY', '2': 122},
-    {'1': 'HOLE_PUNCH_PING', '2': 123},
-    {'1': 'HOLE_PUNCH_PONG', '2': 124},
-    {'1': 'MEDIA_CHUNK', '2': 125},
-    {'1': 'TWIN_ANNOUNCE', '2': 130},
-    {'1': 'TWIN_SYNC', '2': 131},
-    {'1': 'DEVICE_REVOKED', '2': 132},
-    {'1': 'KEY_ROTATION_BROADCAST', '2': 133},
-    {'1': 'KEY_ROTATION_ACK', '2': 134},
-    {'1': 'CALENDAR_INVITE', '2': 140},
-    {'1': 'CALENDAR_RSVP', '2': 141},
-    {'1': 'CALENDAR_UPDATE', '2': 142},
-    {'1': 'CALENDAR_DELETE', '2': 143},
-    {'1': 'FREE_BUSY_REQUEST', '2': 144},
-    {'1': 'FREE_BUSY_RESPONSE', '2': 145},
-    {'1': 'POLL_CREATE', '2': 146},
-    {'1': 'POLL_VOTE', '2': 147},
-    {'1': 'POLL_UPDATE', '2': 148},
-    {'1': 'POLL_SNAPSHOT', '2': 149},
-    {'1': 'POLL_VOTE_ANONYMOUS', '2': 150},
-    {'1': 'POLL_VOTE_REVOKE', '2': 151},
-    {'1': 'IDENTITY_AUTH_PUBLISH', '2': 152},
-    {'1': 'IDENTITY_AUTH_RETRIEVE', '2': 153},
-    {'1': 'IDENTITY_AUTH_RESPONSE', '2': 154},
-    {'1': 'IDENTITY_LIVE_PUBLISH', '2': 155},
-    {'1': 'IDENTITY_LIVE_RETRIEVE', '2': 156},
-    {'1': 'IDENTITY_LIVE_RESPONSE', '2': 157},
-    {'1': 'CALL_RTT_PING', '2': 37},
-    {'1': 'CALL_RTT_PONG', '2': 38},
-    {'1': 'CALL_TREE_UPDATE', '2': 39},
-    {'1': 'CALL_VIDEO', '2': 40},
-    {'1': 'CALL_KEYFRAME_REQUEST', '2': 41},
-    {'1': 'CALL_GROUP_AUDIO', '2': 42},
-    {'1': 'CALL_GROUP_LEAVE', '2': 43},
-    {'1': 'CALL_GROUP_KEY_ROTATE', '2': 44},
-    {'1': 'CALL_GROUP_VIDEO', '2': 45},
-  ],
-  '4': [
-    {'1': 10, '2': 10},
-    {'1': 11, '2': 11},
-    {'1': 12, '2': 12},
-    {'1': 60, '2': 60},
-    {'1': 61, '2': 61},
-  ],
-};
-
-/// Descriptor for `MessageType`. Decode as a `google.protobuf.EnumDescriptorProto`.
-final $typed_data.Uint8List messageTypeDescriptor = $convert.base64Decode(
-    'CgtNZXNzYWdlVHlwZRIICgRURVhUEAASCQoFSU1BR0UQARIJCgVWSURFTxACEgcKA0dJRhADEh'
-    'IKDkVNT0pJX1JFQUNUSU9OEAQSFgoSTUVESUFfQU5OT1VOQ0VNRU5UEAUSEAoMTUVESUFfQUND'
-    'RVBUEAYSEAoMTUVESUFfUkVKRUNUEAcSEAoMTUVTU0FHRV9FRElUEAgSGQoVTUVTU0FHRV9FWF'
-    'BJUkVfQ09ORklHEAkSFQoRUkVTVE9SRV9CUk9BRENBU1QQDRIUChBSRVNUT1JFX1JFU1BPTlNF'
-    'EA4SFAoQVFlQSU5HX0lORElDQVRPUhAPEhAKDFJFQURfUkVDRUlQVBAQEhAKDEdST1VQX0NSRU'
-    'FURRAREhAKDEdST1VQX0lOVklURRASEg8KC0dST1VQX0xFQVZFEBMSFAoQR1JPVVBfS0VZX1VQ'
-    'REFURRAUEhIKDk1FU1NBR0VfREVMRVRFEBUSEQoNVk9JQ0VfTUVTU0FHRRAWEggKBEZJTEUQFx'
-    'IPCgtDQUxMX0lOVklURRAeEg8KC0NBTExfQU5TV0VSEB8SDwoLQ0FMTF9SRUpFQ1QQIBIPCgtD'
-    'QUxMX0hBTkdVUBAhEhEKDUlDRV9DQU5ESURBVEUQIhIPCgtDQUxMX1JFSk9JThAjEg4KCkNBTE'
-    'xfQVVESU8QJBIVChFQRUVSX0xJU1RfU1VNTUFSWRAyEhIKDlBFRVJfTElTVF9XQU5UEDMSEgoO'
-    'UEVFUl9MSVNUX1BVU0gQNBITCg9DT05UQUNUX1JFUVVFU1QQPhIcChhDT05UQUNUX1JFUVVFU1'
-    'RfUkVTUE9OU0UQPxISCg5DSEFOTkVMX0NSRUFURRBGEhAKDENIQU5ORUxfUE9TVBBHEhIKDkNI'
-    'QU5ORUxfSU5WSVRFEEgSFwoTQ0hBTk5FTF9ST0xFX1VQREFURRBJEhEKDUNIQU5ORUxfTEVBVk'
-    'UQShIYChRDSEFOTkVMX0pPSU5fUkVRVUVTVBBLEhIKDkNIQU5ORUxfUkVQT1JUEEwSGwoXQ0hB'
-    'Tk5FTF9SRVBPUlRfUkVTUE9OU0UQTRIQCgxKVVJZX1JFUVVFU1QQThIRCg1KVVJZX1ZPVEVfTV'
-    'NHEE8SDwoLSlVSWV9SRVNVTFQQWBIaChZDSEFOTkVMX0lOREVYX0VYQ0hBTkdFEFkSDAoIREhU'
-    'X1BJTkcQUBIMCghESFRfUE9ORxBREhEKDURIVF9GSU5EX05PREUQUhIaChZESFRfRklORF9OT0'
-    'RFX1JFU1BPTlNFEFMSDQoJREhUX1NUT1JFEFQSFgoSREhUX1NUT1JFX1JFU1BPTlNFEFUSEgoO'
-    'REhUX0ZJTkRfVkFMVUUQVhIbChdESFRfRklORF9WQUxVRV9SRVNQT05TRRBXEhIKDkZSQUdNRU'
-    '5UX1NUT1JFEFoSFgoSRlJBR01FTlRfU1RPUkVfQUNLEFsSFQoRRlJBR01FTlRfUkVUUklFVkUQ'
-    'XBITCg9GUkFHTUVOVF9ERUxFVEUQXRIUChBERUxJVkVSWV9SRUNFSVBUEF4SFgoSQ0hBVF9DT0'
-    '5GSUdfVVBEQVRFEGQSGAoUQ0hBVF9DT05GSUdfUkVTUE9OU0UQZRIUChBJREVOVElUWV9ERUxF'
-    'VEVEEGYSEgoOUFJPRklMRV9VUERBVEUQZxIYChRHVUFSRElBTl9TSEFSRV9TVE9SRRBoEhwKGE'
-    'dVQVJESUFOX1JFU1RPUkVfUkVRVUVTVBBpEh0KGUdVQVJESUFOX1JFU1RPUkVfUkVTUE9OU0UQ'
-    'ahIRCg1SRUxBWV9GT1JXQVJEEG4SDQoJUkVMQVlfQUNLEG8SFgoSUkVBQ0hBQklMSVRZX1FVRV'
-    'JZEHASGQoVUkVBQ0hBQklMSVRZX1JFU1BPTlNFEHESDgoKUEVFUl9TVE9SRRByEhIKDlBFRVJf'
-    'U1RPUkVfQUNLEHMSEQoNUEVFUl9SRVRSSUVWRRB0EhoKFlBFRVJfUkVUUklFVkVfUkVTUE9OU0'
-    'UQdRIQCgxST1VURV9VUERBVEUQeBIWChJIT0xFX1BVTkNIX1JFUVVFU1QQeRIVChFIT0xFX1BV'
-    'TkNIX05PVElGWRB6EhMKD0hPTEVfUFVOQ0hfUElORxB7EhMKD0hPTEVfUFVOQ0hfUE9ORxB8Eg'
-    '8KC01FRElBX0NIVU5LEH0SEgoNVFdJTl9BTk5PVU5DRRCCARIOCglUV0lOX1NZTkMQgwESEwoO'
-    'REVWSUNFX1JFVk9LRUQQhAESGwoWS0VZX1JPVEFUSU9OX0JST0FEQ0FTVBCFARIVChBLRVlfUk'
-    '9UQVRJT05fQUNLEIYBEhQKD0NBTEVOREFSX0lOVklURRCMARISCg1DQUxFTkRBUl9SU1ZQEI0B'
-    'EhQKD0NBTEVOREFSX1VQREFURRCOARIUCg9DQUxFTkRBUl9ERUxFVEUQjwESFgoRRlJFRV9CVV'
-    'NZX1JFUVVFU1QQkAESFwoSRlJFRV9CVVNZX1JFU1BPTlNFEJEBEhAKC1BPTExfQ1JFQVRFEJIB'
-    'Eg4KCVBPTExfVk9URRCTARIQCgtQT0xMX1VQREFURRCUARISCg1QT0xMX1NOQVBTSE9UEJUBEh'
-    'gKE1BPTExfVk9URV9BTk9OWU1PVVMQlgESFQoQUE9MTF9WT1RFX1JFVk9LRRCXARIaChVJREVO'
-    'VElUWV9BVVRIX1BVQkxJU0gQmAESGwoWSURFTlRJVFlfQVVUSF9SRVRSSUVWRRCZARIbChZJRE'
-    'VOVElUWV9BVVRIX1JFU1BPTlNFEJoBEhoKFUlERU5USVRZX0xJVkVfUFVCTElTSBCbARIbChZJ'
-    'REVOVElUWV9MSVZFX1JFVFJJRVZFEJwBEhsKFklERU5USVRZX0xJVkVfUkVTUE9OU0UQnQESEQ'
-    'oNQ0FMTF9SVFRfUElORxAlEhEKDUNBTExfUlRUX1BPTkcQJhIUChBDQUxMX1RSRUVfVVBEQVRF'
-    'ECcSDgoKQ0FMTF9WSURFTxAoEhkKFUNBTExfS0VZRlJBTUVfUkVRVUVTVBApEhQKEENBTExfR1'
-    'JPVVBfQVVESU8QKhIUChBDQUxMX0dST1VQX0xFQVZFECsSGQoVQ0FMTF9HUk9VUF9LRVlfUk9U'
-    'QVRFECwSFAoQQ0FMTF9HUk9VUF9WSURFTxAtIgQIChAKIgQICxALIgQIDBAMIgQIPBA8IgQIPR'
-    'A9');
-
 @$core.Deprecated('Use compressionTypeDescriptor instead')
 const CompressionType$json = {
   '1': 'CompressionType',
@@ -205,13 +33,17 @@ const AddressType$json = {
     {'1': 'IPV4_PUBLIC', '2': 0},
     {'1': 'IPV4_PRIVATE', '2': 1},
     {'1': 'IPV6_GLOBAL', '2': 2},
+    {'1': 'IPV6_ULA', '2': 3},
+    {'1': 'IPV6_LINK_LOCAL', '2': 4},
+    {'1': 'IPV6_SITE_LOCAL', '2': 5},
   ],
 };
 
 /// Descriptor for `AddressType`. Decode as a `google.protobuf.EnumDescriptorProto`.
 final $typed_data.Uint8List addressTypeDescriptor = $convert.base64Decode(
     'CgtBZGRyZXNzVHlwZRIPCgtJUFY0X1BVQkxJQxAAEhAKDElQVjRfUFJJVkFURRABEg8KC0lQVj'
-    'ZfR0xPQkFMEAI=');
+    'ZfR0xPQkFMEAISDAoISVBWNl9VTEEQAxITCg9JUFY2X0xJTktfTE9DQUwQBBITCg9JUFY2X1NJ'
+    'VEVfTE9DQUwQBQ==');
 
 @$core.Deprecated('Use natTypeDescriptor instead')
 const NatType$json = {
@@ -397,61 +229,215 @@ final $typed_data.Uint8List dateAvailabilityDescriptor = $convert.base64Decode(
     'ChBEYXRlQXZhaWxhYmlsaXR5EhIKDkRBVEVfQVZBSUxfWUVTEAASEQoNREFURV9BVkFJTF9OTx'
     'ABEhQKEERBVEVfQVZBSUxfTUFZQkUQAg==');
 
-@$core.Deprecated('Use messageEnvelopeDescriptor instead')
-const MessageEnvelope$json = {
-  '1': 'MessageEnvelope',
+@$core.Deprecated('Use payloadTypeV3Descriptor instead')
+const PayloadTypeV3$json = {
+  '1': 'PayloadTypeV3',
   '2': [
-    {'1': 'version', '3': 1, '4': 1, '5': 13, '10': 'version'},
-    {'1': 'sender_id', '3': 2, '4': 1, '5': 12, '10': 'senderId'},
-    {'1': 'recipient_id', '3': 3, '4': 1, '5': 12, '10': 'recipientId'},
-    {'1': 'timestamp', '3': 4, '4': 1, '5': 4, '10': 'timestamp'},
-    {'1': 'message_type', '3': 5, '4': 1, '5': 14, '6': '.cleona.MessageType', '10': 'messageType'},
-    {'1': 'encrypted_payload', '3': 6, '4': 1, '5': 12, '10': 'encryptedPayload'},
-    {'1': 'signature_ed25519', '3': 7, '4': 1, '5': 12, '10': 'signatureEd25519'},
-    {'1': 'signature_ml_dsa', '3': 8, '4': 1, '5': 12, '10': 'signatureMlDsa'},
-    {'1': 'content_metadata', '3': 9, '4': 1, '5': 11, '6': '.cleona.ContentMetadata', '10': 'contentMetadata'},
-    {'1': 'edit_metadata', '3': 10, '4': 1, '5': 11, '6': '.cleona.EditMetadata', '10': 'editMetadata'},
-    {'1': 'expiry_metadata', '3': 11, '4': 1, '5': 11, '6': '.cleona.ExpiryMetadata', '10': 'expiryMetadata'},
-    {'1': 'erasure_metadata', '3': 12, '4': 1, '5': 11, '6': '.cleona.ErasureCodingMetadata', '10': 'erasureMetadata'},
-    {'1': 'pow', '3': 13, '4': 1, '5': 11, '6': '.cleona.ProofOfWork', '10': 'pow'},
-    {'1': 'kem_header', '3': 14, '4': 1, '5': 11, '6': '.cleona.PerMessageKem', '10': 'kemHeader'},
-    {'1': 'compression', '3': 16, '4': 1, '5': 14, '6': '.cleona.CompressionType', '10': 'compression'},
-    {'1': 'network_tag', '3': 17, '4': 1, '5': 9, '10': 'networkTag'},
-    {'1': 'message_id', '3': 18, '4': 1, '5': 12, '10': 'messageId'},
-    {'1': 'group_id', '3': 19, '4': 1, '5': 12, '10': 'groupId'},
-    {'1': 'reply_to_message_id', '3': 20, '4': 1, '5': 12, '10': 'replyToMessageId'},
-    {'1': 'reply_to_text', '3': 21, '4': 1, '5': 9, '10': 'replyToText'},
-    {'1': 'reply_to_sender', '3': 22, '4': 1, '5': 9, '10': 'replyToSender'},
-    {'1': 'link_preview', '3': 23, '4': 1, '5': 11, '6': '.cleona.LinkPreview', '10': 'linkPreview'},
-    {'1': 'sender_device_node_id', '3': 24, '4': 1, '5': 12, '10': 'senderDeviceNodeId'},
-  ],
-  '9': [
-    {'1': 15, '2': 16},
+    {'1': 'PAYLOAD_APPLICATION_FRAME', '2': 0},
+    {'1': 'PAYLOAD_ONION_LAYER', '2': 1},
+    {'1': 'PAYLOAD_INFRASTRUCTURE_FRAME', '2': 2},
+    {'1': 'PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME', '2': 3},
   ],
 };
 
-/// Descriptor for `MessageEnvelope`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List messageEnvelopeDescriptor = $convert.base64Decode(
-    'Cg9NZXNzYWdlRW52ZWxvcGUSGAoHdmVyc2lvbhgBIAEoDVIHdmVyc2lvbhIbCglzZW5kZXJfaW'
-    'QYAiABKAxSCHNlbmRlcklkEiEKDHJlY2lwaWVudF9pZBgDIAEoDFILcmVjaXBpZW50SWQSHAoJ'
-    'dGltZXN0YW1wGAQgASgEUgl0aW1lc3RhbXASNgoMbWVzc2FnZV90eXBlGAUgASgOMhMuY2xlb2'
-    '5hLk1lc3NhZ2VUeXBlUgttZXNzYWdlVHlwZRIrChFlbmNyeXB0ZWRfcGF5bG9hZBgGIAEoDFIQ'
-    'ZW5jcnlwdGVkUGF5bG9hZBIrChFzaWduYXR1cmVfZWQyNTUxORgHIAEoDFIQc2lnbmF0dXJlRW'
-    'QyNTUxORIoChBzaWduYXR1cmVfbWxfZHNhGAggASgMUg5zaWduYXR1cmVNbERzYRJCChBjb250'
-    'ZW50X21ldGFkYXRhGAkgASgLMhcuY2xlb25hLkNvbnRlbnRNZXRhZGF0YVIPY29udGVudE1ldG'
-    'FkYXRhEjkKDWVkaXRfbWV0YWRhdGEYCiABKAsyFC5jbGVvbmEuRWRpdE1ldGFkYXRhUgxlZGl0'
-    'TWV0YWRhdGESPwoPZXhwaXJ5X21ldGFkYXRhGAsgASgLMhYuY2xlb25hLkV4cGlyeU1ldGFkYX'
-    'RhUg5leHBpcnlNZXRhZGF0YRJIChBlcmFzdXJlX21ldGFkYXRhGAwgASgLMh0uY2xlb25hLkVy'
-    'YXN1cmVDb2RpbmdNZXRhZGF0YVIPZXJhc3VyZU1ldGFkYXRhEiUKA3BvdxgNIAEoCzITLmNsZW'
-    '9uYS5Qcm9vZk9mV29ya1IDcG93EjQKCmtlbV9oZWFkZXIYDiABKAsyFS5jbGVvbmEuUGVyTWVz'
-    'c2FnZUtlbVIJa2VtSGVhZGVyEjkKC2NvbXByZXNzaW9uGBAgASgOMhcuY2xlb25hLkNvbXByZX'
-    'NzaW9uVHlwZVILY29tcHJlc3Npb24SHwoLbmV0d29ya190YWcYESABKAlSCm5ldHdvcmtUYWcS'
-    'HQoKbWVzc2FnZV9pZBgSIAEoDFIJbWVzc2FnZUlkEhkKCGdyb3VwX2lkGBMgASgMUgdncm91cE'
-    'lkEi0KE3JlcGx5X3RvX21lc3NhZ2VfaWQYFCABKAxSEHJlcGx5VG9NZXNzYWdlSWQSIgoNcmVw'
-    'bHlfdG9fdGV4dBgVIAEoCVILcmVwbHlUb1RleHQSJgoPcmVwbHlfdG9fc2VuZGVyGBYgASgJUg'
-    '1yZXBseVRvU2VuZGVyEjYKDGxpbmtfcHJldmlldxgXIAEoCzITLmNsZW9uYS5MaW5rUHJldmll'
-    'd1ILbGlua1ByZXZpZXcSMQoVc2VuZGVyX2RldmljZV9ub2RlX2lkGBggASgMUhJzZW5kZXJEZX'
-    'ZpY2VOb2RlSWRKBAgPEBA=');
+/// Descriptor for `PayloadTypeV3`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List payloadTypeV3Descriptor = $convert.base64Decode(
+    'Cg1QYXlsb2FkVHlwZVYzEh0KGVBBWUxPQURfQVBQTElDQVRJT05fRlJBTUUQABIXChNQQVlMT0'
+    'FEX09OSU9OX0xBWUVSEAESIAocUEFZTE9BRF9JTkZSQVNUUlVDVFVSRV9GUkFNRRACEioKJlBB'
+    'WUxPQURfQk9PVFNUUkFQX0lORlJBU1RSVUNUVVJFX0ZSQU1FEAM=');
+
+@$core.Deprecated('Use messageTypeV3Descriptor instead')
+const MessageTypeV3$json = {
+  '1': 'MessageTypeV3',
+  '2': [
+    {'1': 'MTV3_TEXT', '2': 0},
+    {'1': 'MTV3_MEDIA_INLINE', '2': 1},
+    {'1': 'MTV3_MEDIA_ANNOUNCE', '2': 2},
+    {'1': 'MTV3_MEDIA_REQUEST', '2': 3},
+    {'1': 'MTV3_MEDIA_CHUNK', '2': 4},
+    {'1': 'MTV3_MEDIA_COMPLETE', '2': 5},
+    {'1': 'MTV3_MEDIA_REJECT', '2': 6},
+    {'1': 'MTV3_REACTION', '2': 7},
+    {'1': 'MTV3_REPLY', '2': 8},
+    {'1': 'MTV3_EDIT', '2': 9},
+    {'1': 'MTV3_DELETE', '2': 10},
+    {'1': 'MTV3_TYPING_INDICATOR', '2': 15},
+    {'1': 'MTV3_READ_RECEIPT', '2': 16},
+    {'1': 'MTV3_DELIVERY_RECEIPT', '2': 17},
+    {'1': 'MTV3_VOICE_MESSAGE', '2': 22},
+    {'1': 'MTV3_RESTORE_BROADCAST', '2': 30},
+    {'1': 'MTV3_RESTORE_RESPONSE', '2': 31},
+    {'1': 'MTV3_IDENTITY_DELETED', '2': 32},
+    {'1': 'MTV3_PROFILE_UPDATE', '2': 33},
+    {'1': 'MTV3_KEY_ROTATION_BROADCAST', '2': 34},
+    {'1': 'MTV3_KEY_ROTATION_ACK', '2': 38},
+    {'1': 'MTV3_GUARDIAN_SHARE_STORE', '2': 35},
+    {'1': 'MTV3_GUARDIAN_RESTORE_REQUEST', '2': 36},
+    {'1': 'MTV3_GUARDIAN_RESTORE_RESPONSE', '2': 37},
+    {'1': 'MTV3_CONTACT_REQUEST', '2': 40},
+    {'1': 'MTV3_CONTACT_REQUEST_RESPONSE', '2': 41},
+    {'1': 'MTV3_GROUP_CREATE', '2': 50},
+    {'1': 'MTV3_GROUP_INVITE', '2': 51},
+    {'1': 'MTV3_GROUP_LEAVE', '2': 52},
+    {'1': 'MTV3_GROUP_KEY_UPDATE', '2': 53},
+    {'1': 'MTV3_CHANNEL_CREATE', '2': 60},
+    {'1': 'MTV3_CHANNEL_POST', '2': 61},
+    {'1': 'MTV3_CHANNEL_INVITE', '2': 62},
+    {'1': 'MTV3_CHANNEL_LEAVE', '2': 63},
+    {'1': 'MTV3_CHANNEL_ROLE_UPDATE', '2': 64},
+    {'1': 'MTV3_CHANNEL_BAD_BADGE_REPORT', '2': 65},
+    {'1': 'MTV3_CHANNEL_JURY_VOTE', '2': 66},
+    {'1': 'MTV3_CHANNEL_MOD_DECISION', '2': 67},
+    {'1': 'MTV3_CHANNEL_SUBSCRIBE_PROBE', '2': 68},
+    {'1': 'MTV3_CALL_INVITE', '2': 70},
+    {'1': 'MTV3_CALL_ANSWER', '2': 71},
+    {'1': 'MTV3_CALL_REJECT', '2': 72},
+    {'1': 'MTV3_CALL_HANGUP', '2': 73},
+    {'1': 'MTV3_ICE_CANDIDATE', '2': 74},
+    {'1': 'MTV3_CALL_REJOIN', '2': 75},
+    {'1': 'MTV3_CALL_AUDIO', '2': 76},
+    {'1': 'MTV3_CALL_VIDEO', '2': 77},
+    {'1': 'MTV3_CALL_GROUP_AUDIO', '2': 78},
+    {'1': 'MTV3_CALL_GROUP_VIDEO', '2': 79},
+    {'1': 'MTV3_CALL_GROUP_LEAVE', '2': 80},
+    {'1': 'MTV3_CALL_GROUP_KEY_ROTATE', '2': 81},
+    {'1': 'MTV3_CALL_RTT_PING', '2': 82},
+    {'1': 'MTV3_CALL_RTT_PONG', '2': 83},
+    {'1': 'MTV3_CALL_TREE_UPDATE', '2': 84},
+    {'1': 'MTV3_CALL_KEYFRAME_REQUEST', '2': 85},
+    {'1': 'MTV3_CHANNEL_INDEX_EXCHANGE', '2': 90},
+    {'1': 'MTV3_CHANNEL_JOIN_REQUEST', '2': 91},
+    {'1': 'MTV3_CHANNEL_REPORT', '2': 92},
+    {'1': 'MTV3_PEER_LIST_PUSH', '2': 100},
+    {'1': 'MTV3_PEER_LIST_SUMMARY', '2': 101},
+    {'1': 'MTV3_PEER_LIST_WANT', '2': 102},
+    {'1': 'MTV3_PEER_KEY_REQUEST', '2': 103},
+    {'1': 'MTV3_PEER_KEY_RESPONSE', '2': 104},
+    {'1': 'MTV3_DHT_PING', '2': 110},
+    {'1': 'MTV3_DHT_PONG', '2': 111},
+    {'1': 'MTV3_DHT_FIND_NODE', '2': 112},
+    {'1': 'MTV3_DHT_FIND_NODE_RESPONSE', '2': 113},
+    {'1': 'MTV3_DHT_STORE', '2': 114},
+    {'1': 'MTV3_DHT_STORE_RESPONSE', '2': 115},
+    {'1': 'MTV3_DHT_FIND_VALUE', '2': 116},
+    {'1': 'MTV3_DHT_FIND_VALUE_RESPONSE', '2': 117},
+    {'1': 'MTV3_FRAGMENT_STORE', '2': 120},
+    {'1': 'MTV3_FRAGMENT_STORE_ACK', '2': 121},
+    {'1': 'MTV3_FRAGMENT_RETRIEVE', '2': 122},
+    {'1': 'MTV3_FRAGMENT_RETRIEVE_RESPONSE', '2': 123},
+    {'1': 'MTV3_FRAGMENT_DELETE', '2': 124},
+    {'1': 'MTV3_PEER_STORE', '2': 130},
+    {'1': 'MTV3_PEER_STORE_ACK', '2': 131},
+    {'1': 'MTV3_PEER_RETRIEVE', '2': 132},
+    {'1': 'MTV3_PEER_RETRIEVE_RESPONSE', '2': 133},
+    {'1': 'MTV3_CHAT_CONFIG_UPDATE', '2': 140},
+    {'1': 'MTV3_CHAT_CONFIG_RESPONSE', '2': 141},
+    {'1': 'MTV3_ROUTE_UPDATE', '2': 150},
+    {'1': 'MTV3_REACHABILITY_QUERY', '2': 151},
+    {'1': 'MTV3_REACHABILITY_RESPONSE', '2': 152},
+    {'1': 'MTV3_RELAY_FORWARD', '2': 153},
+    {'1': 'MTV3_RELAY_ACK', '2': 154},
+    {'1': 'MTV3_HOLE_PUNCH_REQUEST', '2': 160},
+    {'1': 'MTV3_HOLE_PUNCH_NOTIFY', '2': 161},
+    {'1': 'MTV3_HOLE_PUNCH_PING', '2': 162},
+    {'1': 'MTV3_HOLE_PUNCH_PONG', '2': 163},
+    {'1': 'MTV3_IDENTITY_AUTH_PUBLISH', '2': 170},
+    {'1': 'MTV3_IDENTITY_AUTH_RETRIEVE', '2': 171},
+    {'1': 'MTV3_IDENTITY_AUTH_RESPONSE', '2': 172},
+    {'1': 'MTV3_IDENTITY_LIVE_PUBLISH', '2': 173},
+    {'1': 'MTV3_IDENTITY_LIVE_RETRIEVE', '2': 174},
+    {'1': 'MTV3_IDENTITY_LIVE_RESPONSE', '2': 175},
+    {'1': 'MTV3_IDENTITY_KEM_PUBLISH', '2': 176},
+    {'1': 'MTV3_IDENTITY_KEM_RETRIEVE', '2': 177},
+    {'1': 'MTV3_IDENTITY_KEM_RESPONSE', '2': 178},
+    {'1': 'MTV3_TWIN_SYNC', '2': 180},
+    {'1': 'MTV3_DEVICE_PAIR_REQUEST', '2': 181},
+    {'1': 'MTV3_DEVICE_PAIR_APPROVE', '2': 182},
+    {'1': 'MTV3_DEVICE_REVOCATION', '2': 183},
+    {'1': 'MTV3_CALENDAR_INVITE', '2': 190},
+    {'1': 'MTV3_CALENDAR_RSVP', '2': 191},
+    {'1': 'MTV3_CALENDAR_UPDATE', '2': 192},
+    {'1': 'MTV3_CALENDAR_DELETE', '2': 193},
+    {'1': 'MTV3_FREE_BUSY_REQUEST', '2': 194},
+    {'1': 'MTV3_FREE_BUSY_RESPONSE', '2': 195},
+    {'1': 'MTV3_POLL_CREATE', '2': 200},
+    {'1': 'MTV3_POLL_VOTE', '2': 201},
+    {'1': 'MTV3_POLL_VOTE_ANONYMOUS', '2': 202},
+    {'1': 'MTV3_POLL_UPDATE', '2': 203},
+    {'1': 'MTV3_POLL_SNAPSHOT', '2': 204},
+    {'1': 'MTV3_POLL_REVOKE', '2': 205},
+    {'1': 'MTV3_WHITEBOARD_STROKE', '2': 210},
+    {'1': 'MTV3_WHITEBOARD_PAGE', '2': 211},
+    {'1': 'MTV3_FILE_EXCHANGE', '2': 212},
+    {'1': 'MTV3_CLIPBOARD_EXCHANGE', '2': 213},
+    {'1': 'MTV3_SCREEN_SHARE_FRAME', '2': 214},
+    {'1': 'MTV3_CALL_CHAT', '2': 215},
+    {'1': 'MTV3_REMOTE_CONTROL_INPUT', '2': 216},
+  ],
+};
+
+/// Descriptor for `MessageTypeV3`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List messageTypeV3Descriptor = $convert.base64Decode(
+    'Cg1NZXNzYWdlVHlwZVYzEg0KCU1UVjNfVEVYVBAAEhUKEU1UVjNfTUVESUFfSU5MSU5FEAESFw'
+    'oTTVRWM19NRURJQV9BTk5PVU5DRRACEhYKEk1UVjNfTUVESUFfUkVRVUVTVBADEhQKEE1UVjNf'
+    'TUVESUFfQ0hVTksQBBIXChNNVFYzX01FRElBX0NPTVBMRVRFEAUSFQoRTVRWM19NRURJQV9SRU'
+    'pFQ1QQBhIRCg1NVFYzX1JFQUNUSU9OEAcSDgoKTVRWM19SRVBMWRAIEg0KCU1UVjNfRURJVBAJ'
+    'Eg8KC01UVjNfREVMRVRFEAoSGQoVTVRWM19UWVBJTkdfSU5ESUNBVE9SEA8SFQoRTVRWM19SRU'
+    'FEX1JFQ0VJUFQQEBIZChVNVFYzX0RFTElWRVJZX1JFQ0VJUFQQERIWChJNVFYzX1ZPSUNFX01F'
+    'U1NBR0UQFhIaChZNVFYzX1JFU1RPUkVfQlJPQURDQVNUEB4SGQoVTVRWM19SRVNUT1JFX1JFU1'
+    'BPTlNFEB8SGQoVTVRWM19JREVOVElUWV9ERUxFVEVEECASFwoTTVRWM19QUk9GSUxFX1VQREFU'
+    'RRAhEh8KG01UVjNfS0VZX1JPVEFUSU9OX0JST0FEQ0FTVBAiEhkKFU1UVjNfS0VZX1JPVEFUSU'
+    '9OX0FDSxAmEh0KGU1UVjNfR1VBUkRJQU5fU0hBUkVfU1RPUkUQIxIhCh1NVFYzX0dVQVJESUFO'
+    'X1JFU1RPUkVfUkVRVUVTVBAkEiIKHk1UVjNfR1VBUkRJQU5fUkVTVE9SRV9SRVNQT05TRRAlEh'
+    'gKFE1UVjNfQ09OVEFDVF9SRVFVRVNUECgSIQodTVRWM19DT05UQUNUX1JFUVVFU1RfUkVTUE9O'
+    'U0UQKRIVChFNVFYzX0dST1VQX0NSRUFURRAyEhUKEU1UVjNfR1JPVVBfSU5WSVRFEDMSFAoQTV'
+    'RWM19HUk9VUF9MRUFWRRA0EhkKFU1UVjNfR1JPVVBfS0VZX1VQREFURRA1EhcKE01UVjNfQ0hB'
+    'Tk5FTF9DUkVBVEUQPBIVChFNVFYzX0NIQU5ORUxfUE9TVBA9EhcKE01UVjNfQ0hBTk5FTF9JTl'
+    'ZJVEUQPhIWChJNVFYzX0NIQU5ORUxfTEVBVkUQPxIcChhNVFYzX0NIQU5ORUxfUk9MRV9VUERB'
+    'VEUQQBIhCh1NVFYzX0NIQU5ORUxfQkFEX0JBREdFX1JFUE9SVBBBEhoKFk1UVjNfQ0hBTk5FTF'
+    '9KVVJZX1ZPVEUQQhIdChlNVFYzX0NIQU5ORUxfTU9EX0RFQ0lTSU9OEEMSIAocTVRWM19DSEFO'
+    'TkVMX1NVQlNDUklCRV9QUk9CRRBEEhQKEE1UVjNfQ0FMTF9JTlZJVEUQRhIUChBNVFYzX0NBTE'
+    'xfQU5TV0VSEEcSFAoQTVRWM19DQUxMX1JFSkVDVBBIEhQKEE1UVjNfQ0FMTF9IQU5HVVAQSRIW'
+    'ChJNVFYzX0lDRV9DQU5ESURBVEUQShIUChBNVFYzX0NBTExfUkVKT0lOEEsSEwoPTVRWM19DQU'
+    'xMX0FVRElPEEwSEwoPTVRWM19DQUxMX1ZJREVPEE0SGQoVTVRWM19DQUxMX0dST1VQX0FVRElP'
+    'EE4SGQoVTVRWM19DQUxMX0dST1VQX1ZJREVPEE8SGQoVTVRWM19DQUxMX0dST1VQX0xFQVZFEF'
+    'ASHgoaTVRWM19DQUxMX0dST1VQX0tFWV9ST1RBVEUQURIWChJNVFYzX0NBTExfUlRUX1BJTkcQ'
+    'UhIWChJNVFYzX0NBTExfUlRUX1BPTkcQUxIZChVNVFYzX0NBTExfVFJFRV9VUERBVEUQVBIeCh'
+    'pNVFYzX0NBTExfS0VZRlJBTUVfUkVRVUVTVBBVEh8KG01UVjNfQ0hBTk5FTF9JTkRFWF9FWENI'
+    'QU5HRRBaEh0KGU1UVjNfQ0hBTk5FTF9KT0lOX1JFUVVFU1QQWxIXChNNVFYzX0NIQU5ORUxfUk'
+    'VQT1JUEFwSFwoTTVRWM19QRUVSX0xJU1RfUFVTSBBkEhoKFk1UVjNfUEVFUl9MSVNUX1NVTU1B'
+    'UlkQZRIXChNNVFYzX1BFRVJfTElTVF9XQU5UEGYSGQoVTVRWM19QRUVSX0tFWV9SRVFVRVNUEG'
+    'cSGgoWTVRWM19QRUVSX0tFWV9SRVNQT05TRRBoEhEKDU1UVjNfREhUX1BJTkcQbhIRCg1NVFYz'
+    'X0RIVF9QT05HEG8SFgoSTVRWM19ESFRfRklORF9OT0RFEHASHwobTVRWM19ESFRfRklORF9OT0'
+    'RFX1JFU1BPTlNFEHESEgoOTVRWM19ESFRfU1RPUkUQchIbChdNVFYzX0RIVF9TVE9SRV9SRVNQ'
+    'T05TRRBzEhcKE01UVjNfREhUX0ZJTkRfVkFMVUUQdBIgChxNVFYzX0RIVF9GSU5EX1ZBTFVFX1'
+    'JFU1BPTlNFEHUSFwoTTVRWM19GUkFHTUVOVF9TVE9SRRB4EhsKF01UVjNfRlJBR01FTlRfU1RP'
+    'UkVfQUNLEHkSGgoWTVRWM19GUkFHTUVOVF9SRVRSSUVWRRB6EiMKH01UVjNfRlJBR01FTlRfUk'
+    'VUUklFVkVfUkVTUE9OU0UQexIYChRNVFYzX0ZSQUdNRU5UX0RFTEVURRB8EhQKD01UVjNfUEVF'
+    'Ul9TVE9SRRCCARIYChNNVFYzX1BFRVJfU1RPUkVfQUNLEIMBEhcKEk1UVjNfUEVFUl9SRVRSSU'
+    'VWRRCEARIgChtNVFYzX1BFRVJfUkVUUklFVkVfUkVTUE9OU0UQhQESHAoXTVRWM19DSEFUX0NP'
+    'TkZJR19VUERBVEUQjAESHgoZTVRWM19DSEFUX0NPTkZJR19SRVNQT05TRRCNARIWChFNVFYzX1'
+    'JPVVRFX1VQREFURRCWARIcChdNVFYzX1JFQUNIQUJJTElUWV9RVUVSWRCXARIfChpNVFYzX1JF'
+    'QUNIQUJJTElUWV9SRVNQT05TRRCYARIXChJNVFYzX1JFTEFZX0ZPUldBUkQQmQESEwoOTVRWM1'
+    '9SRUxBWV9BQ0sQmgESHAoXTVRWM19IT0xFX1BVTkNIX1JFUVVFU1QQoAESGwoWTVRWM19IT0xF'
+    'X1BVTkNIX05PVElGWRChARIZChRNVFYzX0hPTEVfUFVOQ0hfUElORxCiARIZChRNVFYzX0hPTE'
+    'VfUFVOQ0hfUE9ORxCjARIfChpNVFYzX0lERU5USVRZX0FVVEhfUFVCTElTSBCqARIgChtNVFYz'
+    'X0lERU5USVRZX0FVVEhfUkVUUklFVkUQqwESIAobTVRWM19JREVOVElUWV9BVVRIX1JFU1BPTl'
+    'NFEKwBEh8KGk1UVjNfSURFTlRJVFlfTElWRV9QVUJMSVNIEK0BEiAKG01UVjNfSURFTlRJVFlf'
+    'TElWRV9SRVRSSUVWRRCuARIgChtNVFYzX0lERU5USVRZX0xJVkVfUkVTUE9OU0UQrwESHgoZTV'
+    'RWM19JREVOVElUWV9LRU1fUFVCTElTSBCwARIfChpNVFYzX0lERU5USVRZX0tFTV9SRVRSSUVW'
+    'RRCxARIfChpNVFYzX0lERU5USVRZX0tFTV9SRVNQT05TRRCyARITCg5NVFYzX1RXSU5fU1lOQx'
+    'C0ARIdChhNVFYzX0RFVklDRV9QQUlSX1JFUVVFU1QQtQESHQoYTVRWM19ERVZJQ0VfUEFJUl9B'
+    'UFBST1ZFELYBEhsKFk1UVjNfREVWSUNFX1JFVk9DQVRJT04QtwESGQoUTVRWM19DQUxFTkRBUl'
+    '9JTlZJVEUQvgESFwoSTVRWM19DQUxFTkRBUl9SU1ZQEL8BEhkKFE1UVjNfQ0FMRU5EQVJfVVBE'
+    'QVRFEMABEhkKFE1UVjNfQ0FMRU5EQVJfREVMRVRFEMEBEhsKFk1UVjNfRlJFRV9CVVNZX1JFUV'
+    'VFU1QQwgESHAoXTVRWM19GUkVFX0JVU1lfUkVTUE9OU0UQwwESFQoQTVRWM19QT0xMX0NSRUFU'
+    'RRDIARITCg5NVFYzX1BPTExfVk9URRDJARIdChhNVFYzX1BPTExfVk9URV9BTk9OWU1PVVMQyg'
+    'ESFQoQTVRWM19QT0xMX1VQREFURRDLARIXChJNVFYzX1BPTExfU05BUFNIT1QQzAESFQoQTVRW'
+    'M19QT0xMX1JFVk9LRRDNARIbChZNVFYzX1dISVRFQk9BUkRfU1RST0tFENIBEhkKFE1UVjNfV0'
+    'hJVEVCT0FSRF9QQUdFENMBEhcKEk1UVjNfRklMRV9FWENIQU5HRRDUARIcChdNVFYzX0NMSVBC'
+    'T0FSRF9FWENIQU5HRRDVARIcChdNVFYzX1NDUkVFTl9TSEFSRV9GUkFNRRDWARITCg5NVFYzX0'
+    'NBTExfQ0hBVBDXARIeChlNVFYzX1JFTU9URV9DT05UUk9MX0lOUFVUENgB');
 
 @$core.Deprecated('Use contentMetadataDescriptor instead')
 const ContentMetadata$json = {
@@ -557,23 +543,6 @@ final $typed_data.Uint8List proofOfWorkDescriptor = $convert.base64Decode(
     'CgtQcm9vZk9mV29yaxIUCgVub25jZRgBIAEoBFIFbm9uY2USHgoKZGlmZmljdWx0eRgCIAEoDV'
     'IKZGlmZmljdWx0eRISCgRoYXNoGAMgASgMUgRoYXNo');
 
-@$core.Deprecated('Use perMessageKemDescriptor instead')
-const PerMessageKem$json = {
-  '1': 'PerMessageKem',
-  '2': [
-    {'1': 'ephemeral_x25519_pk', '3': 1, '4': 1, '5': 12, '10': 'ephemeralX25519Pk'},
-    {'1': 'ml_kem_ciphertext', '3': 2, '4': 1, '5': 12, '10': 'mlKemCiphertext'},
-    {'1': 'aes_nonce', '3': 3, '4': 1, '5': 12, '10': 'aesNonce'},
-    {'1': 'version', '3': 4, '4': 1, '5': 13, '10': 'version'},
-  ],
-};
-
-/// Descriptor for `PerMessageKem`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List perMessageKemDescriptor = $convert.base64Decode(
-    'Cg1QZXJNZXNzYWdlS2VtEi4KE2VwaGVtZXJhbF94MjU1MTlfcGsYASABKAxSEWVwaGVtZXJhbF'
-    'gyNTUxOVBrEioKEW1sX2tlbV9jaXBoZXJ0ZXh0GAIgASgMUg9tbEtlbUNpcGhlcnRleHQSGwoJ'
-    'YWVzX25vbmNlGAMgASgMUghhZXNOb25jZRIYCgd2ZXJzaW9uGAQgASgNUgd2ZXJzaW9u');
-
 @$core.Deprecated('Use peerInfoProtoDescriptor instead')
 const PeerInfoProto$json = {
   '1': 'PeerInfoProto',
@@ -595,6 +564,9 @@ const PeerInfoProto$json = {
     {'1': 'x25519_public_key', '3': 15, '4': 1, '5': 12, '10': 'x25519PublicKey'},
     {'1': 'ml_kem_public_key', '3': 16, '4': 1, '5': 12, '10': 'mlKemPublicKey'},
     {'1': 'user_id', '3': 17, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_ed25519_public_key', '3': 18, '4': 1, '5': 12, '10': 'deviceEd25519PublicKey'},
+    {'1': 'device_ml_dsa_public_key', '3': 19, '4': 1, '5': 12, '10': 'deviceMlDsaPublicKey'},
+    {'1': 'key_fingerprint', '3': 20, '4': 1, '5': 12, '10': 'keyFingerprint'},
   ],
 };
 
@@ -611,7 +583,10 @@ final $typed_data.Uint8List peerInfoProtoDescriptor = $convert.base64Decode(
     'S2V5EisKEWVkMjU1MTlfc2lnbmF0dXJlGA0gASgMUhBlZDI1NTE5U2lnbmF0dXJlEigKEG1sX2'
     'RzYV9zaWduYXR1cmUYDiABKAxSDm1sRHNhU2lnbmF0dXJlEioKEXgyNTUxOV9wdWJsaWNfa2V5'
     'GA8gASgMUg94MjU1MTlQdWJsaWNLZXkSKQoRbWxfa2VtX3B1YmxpY19rZXkYECABKAxSDm1sS2'
-    'VtUHVibGljS2V5EhcKB3VzZXJfaWQYESABKAxSBnVzZXJJZA==');
+    'VtUHVibGljS2V5EhcKB3VzZXJfaWQYESABKAxSBnVzZXJJZBI5ChlkZXZpY2VfZWQyNTUxOV9w'
+    'dWJsaWNfa2V5GBIgASgMUhZkZXZpY2VFZDI1NTE5UHVibGljS2V5EjYKGGRldmljZV9tbF9kc2'
+    'FfcHVibGljX2tleRgTIAEoDFIUZGV2aWNlTWxEc2FQdWJsaWNLZXkSJwoPa2V5X2ZpbmdlcnBy'
+    'aW50GBQgASgMUg5rZXlGaW5nZXJwcmludA==');
 
 @$core.Deprecated('Use peerAddressProtoDescriptor instead')
 const PeerAddressProto$json = {
@@ -642,13 +617,14 @@ const DhtPing$json = {
   '2': [
     {'1': 'sender_id', '3': 1, '4': 1, '5': 12, '10': 'senderId'},
     {'1': 'timestamp', '3': 2, '4': 1, '5': 4, '10': 'timestamp'},
+    {'1': 'pk_recovery_hint', '3': 3, '4': 1, '5': 8, '10': 'pkRecoveryHint'},
   ],
 };
 
 /// Descriptor for `DhtPing`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List dhtPingDescriptor = $convert.base64Decode(
     'CgdEaHRQaW5nEhsKCXNlbmRlcl9pZBgBIAEoDFIIc2VuZGVySWQSHAoJdGltZXN0YW1wGAIgAS'
-    'gEUgl0aW1lc3RhbXA=');
+    'gEUgl0aW1lc3RhbXASKAoQcGtfcmVjb3ZlcnlfaGludBgDIAEoCFIOcGtSZWNvdmVyeUhpbnQ=');
 
 @$core.Deprecated('Use dhtPongDescriptor instead')
 const DhtPong$json = {
@@ -795,13 +771,38 @@ const PeerListPush$json = {
   '1': 'PeerListPush',
   '2': [
     {'1': 'peers', '3': 1, '4': 3, '5': 11, '6': '.cleona.PeerInfoProto', '10': 'peers'},
+    {'1': 'hops_from_sender', '3': 2, '4': 3, '5': 13, '10': 'hopsFromSender'},
+    {'1': 'cost_from_sender', '3': 3, '4': 3, '5': 13, '10': 'costFromSender'},
   ],
 };
 
 /// Descriptor for `PeerListPush`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List peerListPushDescriptor = $convert.base64Decode(
     'CgxQZWVyTGlzdFB1c2gSKwoFcGVlcnMYASADKAsyFS5jbGVvbmEuUGVlckluZm9Qcm90b1IFcG'
-    'VlcnM=');
+    'VlcnMSKAoQaG9wc19mcm9tX3NlbmRlchgCIAMoDVIOaG9wc0Zyb21TZW5kZXISKAoQY29zdF9m'
+    'cm9tX3NlbmRlchgDIAMoDVIOY29zdEZyb21TZW5kZXI=');
+
+@$core.Deprecated('Use peerKeyRequestDescriptor instead')
+const PeerKeyRequest$json = {
+  '1': 'PeerKeyRequest',
+};
+
+/// Descriptor for `PeerKeyRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List peerKeyRequestDescriptor = $convert.base64Decode(
+    'Cg5QZWVyS2V5UmVxdWVzdA==');
+
+@$core.Deprecated('Use peerKeyResponseDescriptor instead')
+const PeerKeyResponse$json = {
+  '1': 'PeerKeyResponse',
+  '2': [
+    {'1': 'peers', '3': 1, '4': 3, '5': 11, '6': '.cleona.PeerInfoProto', '10': 'peers'},
+  ],
+};
+
+/// Descriptor for `PeerKeyResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List peerKeyResponseDescriptor = $convert.base64Decode(
+    'Cg9QZWVyS2V5UmVzcG9uc2USKwoFcGVlcnMYASADKAsyFS5jbGVvbmEuUGVlckluZm9Qcm90b1'
+    'IFcGVlcnM=');
 
 @$core.Deprecated('Use contactRequestMsgDescriptor instead')
 const ContactRequestMsg$json = {
@@ -888,30 +889,30 @@ final $typed_data.Uint8List groupCreateDescriptor = $convert.base64Decode(
     'RuYW1lEiAKC2Rlc2NyaXB0aW9uGAMgASgJUgtkZXNjcmlwdGlvbhIdCgptZW1iZXJfaWRzGAQg'
     'AygMUgltZW1iZXJJZHMSGAoHcGljdHVyZRgFIAEoDFIHcGljdHVyZQ==');
 
-@$core.Deprecated('Use groupInviteDescriptor instead')
-const GroupInvite$json = {
-  '1': 'GroupInvite',
+@$core.Deprecated('Use groupInviteV3Descriptor instead')
+const GroupInviteV3$json = {
+  '1': 'GroupInviteV3',
   '2': [
     {'1': 'group_id', '3': 1, '4': 1, '5': 12, '10': 'groupId'},
     {'1': 'group_name', '3': 2, '4': 1, '5': 9, '10': 'groupName'},
     {'1': 'inviter_id', '3': 3, '4': 1, '5': 12, '10': 'inviterId'},
-    {'1': 'members', '3': 4, '4': 3, '5': 11, '6': '.cleona.GroupMember', '10': 'members'},
+    {'1': 'members', '3': 4, '4': 3, '5': 11, '6': '.cleona.GroupMemberV3', '10': 'members'},
     {'1': 'group_picture', '3': 5, '4': 1, '5': 12, '10': 'groupPicture'},
     {'1': 'group_description', '3': 6, '4': 1, '5': 9, '10': 'groupDescription'},
   ],
 };
 
-/// Descriptor for `GroupInvite`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List groupInviteDescriptor = $convert.base64Decode(
-    'CgtHcm91cEludml0ZRIZCghncm91cF9pZBgBIAEoDFIHZ3JvdXBJZBIdCgpncm91cF9uYW1lGA'
-    'IgASgJUglncm91cE5hbWUSHQoKaW52aXRlcl9pZBgDIAEoDFIJaW52aXRlcklkEi0KB21lbWJl'
-    'cnMYBCADKAsyEy5jbGVvbmEuR3JvdXBNZW1iZXJSB21lbWJlcnMSIwoNZ3JvdXBfcGljdHVyZR'
-    'gFIAEoDFIMZ3JvdXBQaWN0dXJlEisKEWdyb3VwX2Rlc2NyaXB0aW9uGAYgASgJUhBncm91cERl'
-    'c2NyaXB0aW9u');
+/// Descriptor for `GroupInviteV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List groupInviteV3Descriptor = $convert.base64Decode(
+    'Cg1Hcm91cEludml0ZVYzEhkKCGdyb3VwX2lkGAEgASgMUgdncm91cElkEh0KCmdyb3VwX25hbW'
+    'UYAiABKAlSCWdyb3VwTmFtZRIdCgppbnZpdGVyX2lkGAMgASgMUglpbnZpdGVySWQSLwoHbWVt'
+    'YmVycxgEIAMoCzIVLmNsZW9uYS5Hcm91cE1lbWJlclYzUgdtZW1iZXJzEiMKDWdyb3VwX3BpY3'
+    'R1cmUYBSABKAxSDGdyb3VwUGljdHVyZRIrChFncm91cF9kZXNjcmlwdGlvbhgGIAEoCVIQZ3Jv'
+    'dXBEZXNjcmlwdGlvbg==');
 
-@$core.Deprecated('Use groupMemberDescriptor instead')
-const GroupMember$json = {
-  '1': 'GroupMember',
+@$core.Deprecated('Use groupMemberV3Descriptor instead')
+const GroupMemberV3$json = {
+  '1': 'GroupMemberV3',
   '2': [
     {'1': 'node_id', '3': 1, '4': 1, '5': 12, '10': 'nodeId'},
     {'1': 'display_name', '3': 2, '4': 1, '5': 9, '10': 'displayName'},
@@ -922,13 +923,13 @@ const GroupMember$json = {
   ],
 };
 
-/// Descriptor for `GroupMember`. Decode as a `google.protobuf.DescriptorProto`.
-final $typed_data.Uint8List groupMemberDescriptor = $convert.base64Decode(
-    'CgtHcm91cE1lbWJlchIXCgdub2RlX2lkGAEgASgMUgZub2RlSWQSIQoMZGlzcGxheV9uYW1lGA'
-    'IgASgJUgtkaXNwbGF5TmFtZRISCgRyb2xlGAMgASgJUgRyb2xlEiwKEmVkMjU1MTlfcHVibGlj'
-    'X2tleRgEIAEoDFIQZWQyNTUxOVB1YmxpY0tleRIqChF4MjU1MTlfcHVibGljX2tleRgFIAEoDF'
-    'IPeDI1NTE5UHVibGljS2V5EikKEW1sX2tlbV9wdWJsaWNfa2V5GAYgASgMUg5tbEtlbVB1Ymxp'
-    'Y0tleQ==');
+/// Descriptor for `GroupMemberV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List groupMemberV3Descriptor = $convert.base64Decode(
+    'Cg1Hcm91cE1lbWJlclYzEhcKB25vZGVfaWQYASABKAxSBm5vZGVJZBIhCgxkaXNwbGF5X25hbW'
+    'UYAiABKAlSC2Rpc3BsYXlOYW1lEhIKBHJvbGUYAyABKAlSBHJvbGUSLAoSZWQyNTUxOV9wdWJs'
+    'aWNfa2V5GAQgASgMUhBlZDI1NTE5UHVibGljS2V5EioKEXgyNTUxOV9wdWJsaWNfa2V5GAUgAS'
+    'gMUg94MjU1MTlQdWJsaWNLZXkSKQoRbWxfa2VtX3B1YmxpY19rZXkYBiABKAxSDm1sS2VtUHVi'
+    'bGljS2V5');
 
 @$core.Deprecated('Use groupKeyUpdateDescriptor instead')
 const GroupKeyUpdate$json = {
@@ -1011,7 +1012,7 @@ const ChannelInvite$json = {
     {'1': 'welcome_message', '3': 5, '4': 1, '5': 12, '10': 'welcomeMessage'},
     {'1': 'channel_picture', '3': 6, '4': 1, '5': 12, '10': 'channelPicture'},
     {'1': 'channel_description', '3': 7, '4': 1, '5': 9, '10': 'channelDescription'},
-    {'1': 'members', '3': 8, '4': 3, '5': 11, '6': '.cleona.GroupMember', '10': 'members'},
+    {'1': 'members', '3': 8, '4': 3, '5': 11, '6': '.cleona.GroupMemberV3', '10': 'members'},
     {'1': 'is_public', '3': 9, '4': 1, '5': 8, '10': 'isPublic'},
     {'1': 'is_adult', '3': 10, '4': 1, '5': 8, '10': 'isAdult'},
     {'1': 'language', '3': 11, '4': 1, '5': 9, '10': 'language'},
@@ -1024,10 +1025,10 @@ final $typed_data.Uint8List channelInviteDescriptor = $convert.base64Decode(
     'VsX25hbWUYAiABKAlSC2NoYW5uZWxOYW1lEh0KCmludml0ZXJfaWQYAyABKAxSCWludml0ZXJJ'
     'ZBISCgRyb2xlGAQgASgJUgRyb2xlEicKD3dlbGNvbWVfbWVzc2FnZRgFIAEoDFIOd2VsY29tZU'
     '1lc3NhZ2USJwoPY2hhbm5lbF9waWN0dXJlGAYgASgMUg5jaGFubmVsUGljdHVyZRIvChNjaGFu'
-    'bmVsX2Rlc2NyaXB0aW9uGAcgASgJUhJjaGFubmVsRGVzY3JpcHRpb24SLQoHbWVtYmVycxgIIA'
-    'MoCzITLmNsZW9uYS5Hcm91cE1lbWJlclIHbWVtYmVycxIbCglpc19wdWJsaWMYCSABKAhSCGlz'
-    'UHVibGljEhkKCGlzX2FkdWx0GAogASgIUgdpc0FkdWx0EhoKCGxhbmd1YWdlGAsgASgJUghsYW'
-    '5ndWFnZQ==');
+    'bmVsX2Rlc2NyaXB0aW9uGAcgASgJUhJjaGFubmVsRGVzY3JpcHRpb24SLwoHbWVtYmVycxgIIA'
+    'MoCzIVLmNsZW9uYS5Hcm91cE1lbWJlclYzUgdtZW1iZXJzEhsKCWlzX3B1YmxpYxgJIAEoCFII'
+    'aXNQdWJsaWMSGQoIaXNfYWR1bHQYCiABKAhSB2lzQWR1bHQSGgoIbGFuZ3VhZ2UYCyABKAlSCG'
+    'xhbmd1YWdl');
 
 @$core.Deprecated('Use channelRoleUpdateDescriptor instead')
 const ChannelRoleUpdate$json = {
@@ -1253,7 +1254,7 @@ const StoredMessage$json = {
     {'1': 'recipient_id', '3': 3, '4': 1, '5': 12, '10': 'recipientId'},
     {'1': 'conversation_id', '3': 4, '4': 1, '5': 9, '10': 'conversationId'},
     {'1': 'timestamp', '3': 5, '4': 1, '5': 4, '10': 'timestamp'},
-    {'1': 'message_type', '3': 6, '4': 1, '5': 14, '6': '.cleona.MessageType', '10': 'messageType'},
+    {'1': 'ui_message_type', '3': 6, '4': 1, '5': 5, '10': 'uiMessageType'},
     {'1': 'payload', '3': 7, '4': 1, '5': 12, '10': 'payload'},
   ],
 };
@@ -1263,8 +1264,8 @@ final $typed_data.Uint8List storedMessageDescriptor = $convert.base64Decode(
     'Cg1TdG9yZWRNZXNzYWdlEh0KCm1lc3NhZ2VfaWQYASABKAxSCW1lc3NhZ2VJZBIbCglzZW5kZX'
     'JfaWQYAiABKAxSCHNlbmRlcklkEiEKDHJlY2lwaWVudF9pZBgDIAEoDFILcmVjaXBpZW50SWQS'
     'JwoPY29udmVyc2F0aW9uX2lkGAQgASgJUg5jb252ZXJzYXRpb25JZBIcCgl0aW1lc3RhbXAYBS'
-    'ABKARSCXRpbWVzdGFtcBI2CgxtZXNzYWdlX3R5cGUYBiABKA4yEy5jbGVvbmEuTWVzc2FnZVR5'
-    'cGVSC21lc3NhZ2VUeXBlEhgKB3BheWxvYWQYByABKAxSB3BheWxvYWQ=');
+    'ABKARSCXRpbWVzdGFtcBImCg91aV9tZXNzYWdlX3R5cGUYBiABKAVSDXVpTWVzc2FnZVR5cGUS'
+    'GAoHcGF5bG9hZBgHIAEoDFIHcGF5bG9hZA==');
 
 @$core.Deprecated('Use fragmentStoreDescriptor instead')
 const FragmentStore$json = {
@@ -1315,6 +1316,20 @@ const FragmentRetrieve$json = {
 /// Descriptor for `FragmentRetrieve`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List fragmentRetrieveDescriptor = $convert.base64Decode(
     'ChBGcmFnbWVudFJldHJpZXZlEh0KCm1haWxib3hfaWQYASABKAxSCW1haWxib3hJZA==');
+
+@$core.Deprecated('Use fragmentRetrieveResponseDescriptor instead')
+const FragmentRetrieveResponse$json = {
+  '1': 'FragmentRetrieveResponse',
+  '2': [
+    {'1': 'mailbox_id', '3': 1, '4': 1, '5': 12, '10': 'mailboxId'},
+    {'1': 'fragment_count', '3': 2, '4': 1, '5': 13, '10': 'fragmentCount'},
+  ],
+};
+
+/// Descriptor for `FragmentRetrieveResponse`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List fragmentRetrieveResponseDescriptor = $convert.base64Decode(
+    'ChhGcmFnbWVudFJldHJpZXZlUmVzcG9uc2USHQoKbWFpbGJveF9pZBgBIAEoDFIJbWFpbGJveE'
+    'lkEiUKDmZyYWdtZW50X2NvdW50GAIgASgNUg1mcmFnbWVudENvdW50');
 
 @$core.Deprecated('Use fragmentDeleteDescriptor instead')
 const FragmentDelete$json = {
@@ -1788,6 +1803,7 @@ const RelayForward$json = {
     {'1': 'origin_node_id', '3': 7, '4': 1, '5': 12, '10': 'originNodeId'},
     {'1': 'created_at_ms', '3': 8, '4': 1, '5': 4, '10': 'createdAtMs'},
     {'1': 'ttl', '3': 9, '4': 1, '5': 13, '10': 'ttl'},
+    {'1': 'origin_user_id', '3': 10, '4': 1, '5': 12, '10': 'originUserId'},
   ],
 };
 
@@ -1798,7 +1814,8 @@ final $typed_data.Uint8List relayForwardDescriptor = $convert.base64Decode(
     'KAxSD3dyYXBwZWRFbnZlbG9wZRIbCglob3BfY291bnQYBCABKA1SCGhvcENvdW50EhkKCG1heF'
     '9ob3BzGAUgASgNUgdtYXhIb3BzEiMKDXZpc2l0ZWRfbm9kZXMYBiADKAxSDHZpc2l0ZWROb2Rl'
     'cxIkCg5vcmlnaW5fbm9kZV9pZBgHIAEoDFIMb3JpZ2luTm9kZUlkEiIKDWNyZWF0ZWRfYXRfbX'
-    'MYCCABKARSC2NyZWF0ZWRBdE1zEhAKA3R0bBgJIAEoDVIDdHRs');
+    'MYCCABKARSC2NyZWF0ZWRBdE1zEhAKA3R0bBgJIAEoDVIDdHRsEiQKDm9yaWdpbl91c2VyX2lk'
+    'GAogASgMUgxvcmlnaW5Vc2VySWQ=');
 
 @$core.Deprecated('Use relayAckDescriptor instead')
 const RelayAck$json = {
@@ -2026,6 +2043,38 @@ final $typed_data.Uint8List mediaChunkDescriptor = $convert.base64Decode(
     'luZGV4GAIgASgNUgpjaHVua0luZGV4EiEKDHRvdGFsX2NodW5rcxgDIAEoDVILdG90YWxDaHVu'
     'a3MSHQoKY2h1bmtfZGF0YRgEIAEoDFIJY2h1bmtEYXRhEjIKFW9yaWdpbmFsX3JlY2lwaWVudF'
     '9pZBgFIAEoDFITb3JpZ2luYWxSZWNpcGllbnRJZA==');
+
+@$core.Deprecated('Use mediaChunkV3Descriptor instead')
+const MediaChunkV3$json = {
+  '1': 'MediaChunkV3',
+  '2': [
+    {'1': 'media_id', '3': 1, '4': 1, '5': 12, '10': 'mediaId'},
+    {'1': 'chunk_index', '3': 2, '4': 1, '5': 13, '10': 'chunkIndex'},
+    {'1': 'total_chunks', '3': 3, '4': 1, '5': 13, '10': 'totalChunks'},
+    {'1': 'data', '3': 4, '4': 1, '5': 12, '10': 'data'},
+  ],
+};
+
+/// Descriptor for `MediaChunkV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List mediaChunkV3Descriptor = $convert.base64Decode(
+    'CgxNZWRpYUNodW5rVjMSGQoIbWVkaWFfaWQYASABKAxSB21lZGlhSWQSHwoLY2h1bmtfaW5kZX'
+    'gYAiABKA1SCmNodW5rSW5kZXgSIQoMdG90YWxfY2h1bmtzGAMgASgNUgt0b3RhbENodW5rcxIS'
+    'CgRkYXRhGAQgASgMUgRkYXRh');
+
+@$core.Deprecated('Use mediaCompleteV3Descriptor instead')
+const MediaCompleteV3$json = {
+  '1': 'MediaCompleteV3',
+  '2': [
+    {'1': 'media_id', '3': 1, '4': 1, '5': 12, '10': 'mediaId'},
+    {'1': 'content_hash', '3': 2, '4': 1, '5': 12, '10': 'contentHash'},
+    {'1': 'total_size', '3': 3, '4': 1, '5': 4, '10': 'totalSize'},
+  ],
+};
+
+/// Descriptor for `MediaCompleteV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List mediaCompleteV3Descriptor = $convert.base64Decode(
+    'Cg9NZWRpYUNvbXBsZXRlVjMSGQoIbWVkaWFfaWQYASABKAxSB21lZGlhSWQSIQoMY29udGVudF'
+    '9oYXNoGAIgASgMUgtjb250ZW50SGFzaBIdCgp0b3RhbF9zaXplGAMgASgEUgl0b3RhbFNpemU=');
 
 @$core.Deprecated('Use callRttPingDescriptor instead')
 const CallRttPing$json = {
@@ -2717,4 +2766,272 @@ const IdentityLiveRetrieveRequest$json = {
 final $typed_data.Uint8List identityLiveRetrieveRequestDescriptor = $convert.base64Decode(
     'ChtJZGVudGl0eUxpdmVSZXRyaWV2ZVJlcXVlc3QSFwoHdXNlcl9pZBgBIAEoDFIGdXNlcklkEi'
     'QKDmRldmljZV9ub2RlX2lkGAIgASgMUgxkZXZpY2VOb2RlSWQ=');
+
+@$core.Deprecated('Use identityKemRetrieveRequestDescriptor instead')
+const IdentityKemRetrieveRequest$json = {
+  '1': 'IdentityKemRetrieveRequest',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_id', '3': 2, '4': 1, '5': 12, '10': 'deviceId'},
+    {'1': 'minimum_seq', '3': 3, '4': 1, '5': 4, '10': 'minimumSeq'},
+  ],
+};
+
+/// Descriptor for `IdentityKemRetrieveRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List identityKemRetrieveRequestDescriptor = $convert.base64Decode(
+    'ChpJZGVudGl0eUtlbVJldHJpZXZlUmVxdWVzdBIXCgd1c2VyX2lkGAEgASgMUgZ1c2VySWQSGw'
+    'oJZGV2aWNlX2lkGAIgASgMUghkZXZpY2VJZBIfCgttaW5pbXVtX3NlcRgDIAEoBFIKbWluaW11'
+    'bVNlcQ==');
+
+@$core.Deprecated('Use networkPacketV3Descriptor instead')
+const NetworkPacketV3$json = {
+  '1': 'NetworkPacketV3',
+  '2': [
+    {'1': 'version', '3': 1, '4': 1, '5': 13, '10': 'version'},
+    {'1': 'flags', '3': 2, '4': 1, '5': 13, '10': 'flags'},
+    {'1': 'next_hop_device_id', '3': 3, '4': 1, '5': 12, '10': 'nextHopDeviceId'},
+    {'1': 'sender_device_id', '3': 4, '4': 1, '5': 12, '10': 'senderDeviceId'},
+    {'1': 'timestamp_ms', '3': 5, '4': 1, '5': 4, '10': 'timestampMs'},
+    {'1': 'ttl', '3': 6, '4': 1, '5': 13, '10': 'ttl'},
+    {'1': 'hop_count', '3': 7, '4': 1, '5': 13, '10': 'hopCount'},
+    {'1': 'network_tag', '3': 8, '4': 1, '5': 12, '10': 'networkTag'},
+    {'1': 'pow', '3': 9, '4': 1, '5': 11, '6': '.cleona.ProofOfWork', '10': 'pow'},
+    {'1': 'device_ed25519_sig', '3': 10, '4': 1, '5': 12, '10': 'deviceEd25519Sig'},
+    {'1': 'device_ml_dsa_sig', '3': 11, '4': 1, '5': 12, '10': 'deviceMlDsaSig'},
+    {'1': 'payload_type', '3': 12, '4': 1, '5': 14, '6': '.cleona.PayloadTypeV3', '10': 'payloadType'},
+    {'1': 'payload', '3': 13, '4': 1, '5': 12, '10': 'payload'},
+  ],
+};
+
+/// Descriptor for `NetworkPacketV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List networkPacketV3Descriptor = $convert.base64Decode(
+    'Cg9OZXR3b3JrUGFja2V0VjMSGAoHdmVyc2lvbhgBIAEoDVIHdmVyc2lvbhIUCgVmbGFncxgCIA'
+    'EoDVIFZmxhZ3MSKwoSbmV4dF9ob3BfZGV2aWNlX2lkGAMgASgMUg9uZXh0SG9wRGV2aWNlSWQS'
+    'KAoQc2VuZGVyX2RldmljZV9pZBgEIAEoDFIOc2VuZGVyRGV2aWNlSWQSIQoMdGltZXN0YW1wX2'
+    '1zGAUgASgEUgt0aW1lc3RhbXBNcxIQCgN0dGwYBiABKA1SA3R0bBIbCglob3BfY291bnQYByAB'
+    'KA1SCGhvcENvdW50Eh8KC25ldHdvcmtfdGFnGAggASgMUgpuZXR3b3JrVGFnEiUKA3BvdxgJIA'
+    'EoCzITLmNsZW9uYS5Qcm9vZk9mV29ya1IDcG93EiwKEmRldmljZV9lZDI1NTE5X3NpZxgKIAEo'
+    'DFIQZGV2aWNlRWQyNTUxOVNpZxIpChFkZXZpY2VfbWxfZHNhX3NpZxgLIAEoDFIOZGV2aWNlTW'
+    'xEc2FTaWcSOAoMcGF5bG9hZF90eXBlGAwgASgOMhUuY2xlb25hLlBheWxvYWRUeXBlVjNSC3Bh'
+    'eWxvYWRUeXBlEhgKB3BheWxvYWQYDSABKAxSB3BheWxvYWQ=');
+
+@$core.Deprecated('Use applicationFrameV3Descriptor instead')
+const ApplicationFrameV3$json = {
+  '1': 'ApplicationFrameV3',
+  '2': [
+    {'1': 'version', '3': 1, '4': 1, '5': 13, '10': 'version'},
+    {'1': 'recipient_user_id', '3': 2, '4': 1, '5': 12, '10': 'recipientUserId'},
+    {'1': 'sender_user_id', '3': 3, '4': 1, '5': 12, '10': 'senderUserId'},
+    {'1': 'timestamp_ms', '3': 4, '4': 1, '5': 4, '10': 'timestampMs'},
+    {'1': 'message_id', '3': 5, '4': 1, '5': 12, '10': 'messageId'},
+    {'1': 'message_type', '3': 6, '4': 1, '5': 14, '6': '.cleona.MessageTypeV3', '10': 'messageType'},
+    {'1': 'payload', '3': 7, '4': 1, '5': 12, '10': 'payload'},
+    {'1': 'user_ed25519_sig', '3': 10, '4': 1, '5': 12, '10': 'userEd25519Sig'},
+    {'1': 'user_ml_dsa_sig', '3': 11, '4': 1, '5': 12, '10': 'userMlDsaSig'},
+    {'1': 'content_metadata', '3': 12, '4': 1, '5': 11, '6': '.cleona.ContentMetadata', '10': 'contentMetadata'},
+    {'1': 'edit_metadata', '3': 13, '4': 1, '5': 11, '6': '.cleona.EditMetadata', '10': 'editMetadata'},
+    {'1': 'expiry_metadata', '3': 14, '4': 1, '5': 11, '6': '.cleona.ExpiryMetadata', '10': 'expiryMetadata'},
+    {'1': 'erasure_metadata', '3': 15, '4': 1, '5': 11, '6': '.cleona.ErasureCodingMetadata', '10': 'erasureMetadata'},
+    {'1': 'compression', '3': 16, '4': 1, '5': 14, '6': '.cleona.CompressionType', '10': 'compression'},
+    {'1': 'group_id', '3': 17, '4': 1, '5': 12, '10': 'groupId'},
+  ],
+};
+
+/// Descriptor for `ApplicationFrameV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List applicationFrameV3Descriptor = $convert.base64Decode(
+    'ChJBcHBsaWNhdGlvbkZyYW1lVjMSGAoHdmVyc2lvbhgBIAEoDVIHdmVyc2lvbhIqChFyZWNpcG'
+    'llbnRfdXNlcl9pZBgCIAEoDFIPcmVjaXBpZW50VXNlcklkEiQKDnNlbmRlcl91c2VyX2lkGAMg'
+    'ASgMUgxzZW5kZXJVc2VySWQSIQoMdGltZXN0YW1wX21zGAQgASgEUgt0aW1lc3RhbXBNcxIdCg'
+    'ptZXNzYWdlX2lkGAUgASgMUgltZXNzYWdlSWQSOAoMbWVzc2FnZV90eXBlGAYgASgOMhUuY2xl'
+    'b25hLk1lc3NhZ2VUeXBlVjNSC21lc3NhZ2VUeXBlEhgKB3BheWxvYWQYByABKAxSB3BheWxvYW'
+    'QSKAoQdXNlcl9lZDI1NTE5X3NpZxgKIAEoDFIOdXNlckVkMjU1MTlTaWcSJQoPdXNlcl9tbF9k'
+    'c2Ffc2lnGAsgASgMUgx1c2VyTWxEc2FTaWcSQgoQY29udGVudF9tZXRhZGF0YRgMIAEoCzIXLm'
+    'NsZW9uYS5Db250ZW50TWV0YWRhdGFSD2NvbnRlbnRNZXRhZGF0YRI5Cg1lZGl0X21ldGFkYXRh'
+    'GA0gASgLMhQuY2xlb25hLkVkaXRNZXRhZGF0YVIMZWRpdE1ldGFkYXRhEj8KD2V4cGlyeV9tZX'
+    'RhZGF0YRgOIAEoCzIWLmNsZW9uYS5FeHBpcnlNZXRhZGF0YVIOZXhwaXJ5TWV0YWRhdGESSAoQ'
+    'ZXJhc3VyZV9tZXRhZGF0YRgPIAEoCzIdLmNsZW9uYS5FcmFzdXJlQ29kaW5nTWV0YWRhdGFSD2'
+    'VyYXN1cmVNZXRhZGF0YRI5Cgtjb21wcmVzc2lvbhgQIAEoDjIXLmNsZW9uYS5Db21wcmVzc2lv'
+    'blR5cGVSC2NvbXByZXNzaW9uEhkKCGdyb3VwX2lkGBEgASgMUgdncm91cElk');
+
+@$core.Deprecated('Use perMessageKemV3Descriptor instead')
+const PerMessageKemV3$json = {
+  '1': 'PerMessageKemV3',
+  '2': [
+    {'1': 'x25519_ciphertext', '3': 1, '4': 1, '5': 12, '10': 'x25519Ciphertext'},
+    {'1': 'ml_kem_ciphertext', '3': 2, '4': 1, '5': 12, '10': 'mlKemCiphertext'},
+    {'1': 'aead_ciphertext', '3': 3, '4': 1, '5': 12, '10': 'aeadCiphertext'},
+    {'1': 'aead_nonce', '3': 4, '4': 1, '5': 12, '10': 'aeadNonce'},
+    {'1': 'version', '3': 5, '4': 1, '5': 13, '10': 'version'},
+  ],
+};
+
+/// Descriptor for `PerMessageKemV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List perMessageKemV3Descriptor = $convert.base64Decode(
+    'Cg9QZXJNZXNzYWdlS2VtVjMSKwoReDI1NTE5X2NpcGhlcnRleHQYASABKAxSEHgyNTUxOUNpcG'
+    'hlcnRleHQSKgoRbWxfa2VtX2NpcGhlcnRleHQYAiABKAxSD21sS2VtQ2lwaGVydGV4dBInCg9h'
+    'ZWFkX2NpcGhlcnRleHQYAyABKAxSDmFlYWRDaXBoZXJ0ZXh0Eh0KCmFlYWRfbm9uY2UYBCABKA'
+    'xSCWFlYWROb25jZRIYCgd2ZXJzaW9uGAUgASgNUgd2ZXJzaW9u');
+
+@$core.Deprecated('Use infrastructureFrameV3Descriptor instead')
+const InfrastructureFrameV3$json = {
+  '1': 'InfrastructureFrameV3',
+  '2': [
+    {'1': 'version', '3': 1, '4': 1, '5': 13, '10': 'version'},
+    {'1': 'recipient_device_id', '3': 2, '4': 1, '5': 12, '10': 'recipientDeviceId'},
+    {'1': 'sender_device_id', '3': 3, '4': 1, '5': 12, '10': 'senderDeviceId'},
+    {'1': 'timestamp_ms', '3': 4, '4': 1, '5': 4, '10': 'timestampMs'},
+    {'1': 'message_id', '3': 5, '4': 1, '5': 12, '10': 'messageId'},
+    {'1': 'message_type', '3': 6, '4': 1, '5': 14, '6': '.cleona.MessageTypeV3', '10': 'messageType'},
+    {'1': 'payload', '3': 7, '4': 1, '5': 12, '10': 'payload'},
+  ],
+};
+
+/// Descriptor for `InfrastructureFrameV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List infrastructureFrameV3Descriptor = $convert.base64Decode(
+    'ChVJbmZyYXN0cnVjdHVyZUZyYW1lVjMSGAoHdmVyc2lvbhgBIAEoDVIHdmVyc2lvbhIuChNyZW'
+    'NpcGllbnRfZGV2aWNlX2lkGAIgASgMUhFyZWNpcGllbnREZXZpY2VJZBIoChBzZW5kZXJfZGV2'
+    'aWNlX2lkGAMgASgMUg5zZW5kZXJEZXZpY2VJZBIhCgx0aW1lc3RhbXBfbXMYBCABKARSC3RpbW'
+    'VzdGFtcE1zEh0KCm1lc3NhZ2VfaWQYBSABKAxSCW1lc3NhZ2VJZBI4CgxtZXNzYWdlX3R5cGUY'
+    'BiABKA4yFS5jbGVvbmEuTWVzc2FnZVR5cGVWM1ILbWVzc2FnZVR5cGUSGAoHcGF5bG9hZBgHIA'
+    'EoDFIHcGF5bG9hZA==');
+
+@$core.Deprecated('Use textMessageV3Descriptor instead')
+const TextMessageV3$json = {
+  '1': 'TextMessageV3',
+  '2': [
+    {'1': 'text', '3': 1, '4': 1, '5': 9, '10': 'text'},
+    {'1': 'format_hint', '3': 2, '4': 1, '5': 9, '10': 'formatHint'},
+    {'1': 'reply_to_message_id', '3': 3, '4': 1, '5': 12, '10': 'replyToMessageId'},
+    {'1': 'reply_to_snippet', '3': 4, '4': 1, '5': 9, '10': 'replyToSnippet'},
+    {'1': 'link_preview', '3': 5, '4': 1, '5': 11, '6': '.cleona.LinkPreview', '10': 'linkPreview'},
+  ],
+};
+
+/// Descriptor for `TextMessageV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List textMessageV3Descriptor = $convert.base64Decode(
+    'Cg1UZXh0TWVzc2FnZVYzEhIKBHRleHQYASABKAlSBHRleHQSHwoLZm9ybWF0X2hpbnQYAiABKA'
+    'lSCmZvcm1hdEhpbnQSLQoTcmVwbHlfdG9fbWVzc2FnZV9pZBgDIAEoDFIQcmVwbHlUb01lc3Nh'
+    'Z2VJZBIoChByZXBseV90b19zbmlwcGV0GAQgASgJUg5yZXBseVRvU25pcHBldBI2CgxsaW5rX3'
+    'ByZXZpZXcYBSABKAsyEy5jbGVvbmEuTGlua1ByZXZpZXdSC2xpbmtQcmV2aWV3');
+
+@$core.Deprecated('Use authManifestV3Descriptor instead')
+const AuthManifestV3$json = {
+  '1': 'AuthManifestV3',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'authorized_device_ids', '3': 2, '4': 3, '5': 12, '10': 'authorizedDeviceIds'},
+    {'1': 'ttl_seconds', '3': 3, '4': 1, '5': 4, '10': 'ttlSeconds'},
+    {'1': 'sequence_number', '3': 4, '4': 1, '5': 4, '10': 'sequenceNumber'},
+    {'1': 'published_at_ms', '3': 5, '4': 1, '5': 4, '10': 'publishedAtMs'},
+    {'1': 'ed25519_sig', '3': 6, '4': 1, '5': 12, '10': 'ed25519Sig'},
+    {'1': 'ml_dsa_sig', '3': 7, '4': 1, '5': 12, '10': 'mlDsaSig'},
+    {'1': 'user_ed25519_pk', '3': 8, '4': 1, '5': 12, '10': 'userEd25519Pk'},
+    {'1': 'user_ml_dsa_pk', '3': 9, '4': 1, '5': 12, '10': 'userMlDsaPk'},
+  ],
+};
+
+/// Descriptor for `AuthManifestV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List authManifestV3Descriptor = $convert.base64Decode(
+    'Cg5BdXRoTWFuaWZlc3RWMxIXCgd1c2VyX2lkGAEgASgMUgZ1c2VySWQSMgoVYXV0aG9yaXplZF'
+    '9kZXZpY2VfaWRzGAIgAygMUhNhdXRob3JpemVkRGV2aWNlSWRzEh8KC3R0bF9zZWNvbmRzGAMg'
+    'ASgEUgp0dGxTZWNvbmRzEicKD3NlcXVlbmNlX251bWJlchgEIAEoBFIOc2VxdWVuY2VOdW1iZX'
+    'ISJgoPcHVibGlzaGVkX2F0X21zGAUgASgEUg1wdWJsaXNoZWRBdE1zEh8KC2VkMjU1MTlfc2ln'
+    'GAYgASgMUgplZDI1NTE5U2lnEhwKCm1sX2RzYV9zaWcYByABKAxSCG1sRHNhU2lnEiYKD3VzZX'
+    'JfZWQyNTUxOV9waxgIIAEoDFINdXNlckVkMjU1MTlQaxIjCg51c2VyX21sX2RzYV9waxgJIAEo'
+    'DFILdXNlck1sRHNhUGs=');
+
+@$core.Deprecated('Use livenessRecordV3Descriptor instead')
+const LivenessRecordV3$json = {
+  '1': 'LivenessRecordV3',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_node_id', '3': 2, '4': 1, '5': 12, '10': 'deviceNodeId'},
+    {'1': 'addresses', '3': 3, '4': 3, '5': 11, '6': '.cleona.PeerAddressProto', '10': 'addresses'},
+    {'1': 'ttl_seconds', '3': 4, '4': 1, '5': 4, '10': 'ttlSeconds'},
+    {'1': 'sequence_number', '3': 5, '4': 1, '5': 4, '10': 'sequenceNumber'},
+    {'1': 'published_at_ms', '3': 6, '4': 1, '5': 4, '10': 'publishedAtMs'},
+    {'1': 'ed25519_sig', '3': 7, '4': 1, '5': 12, '10': 'ed25519Sig'},
+    {'1': 'device_ed25519_pk', '3': 8, '4': 1, '5': 12, '10': 'deviceEd25519Pk'},
+  ],
+};
+
+/// Descriptor for `LivenessRecordV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List livenessRecordV3Descriptor = $convert.base64Decode(
+    'ChBMaXZlbmVzc1JlY29yZFYzEhcKB3VzZXJfaWQYASABKAxSBnVzZXJJZBIkCg5kZXZpY2Vfbm'
+    '9kZV9pZBgCIAEoDFIMZGV2aWNlTm9kZUlkEjYKCWFkZHJlc3NlcxgDIAMoCzIYLmNsZW9uYS5Q'
+    'ZWVyQWRkcmVzc1Byb3RvUglhZGRyZXNzZXMSHwoLdHRsX3NlY29uZHMYBCABKARSCnR0bFNlY2'
+    '9uZHMSJwoPc2VxdWVuY2VfbnVtYmVyGAUgASgEUg5zZXF1ZW5jZU51bWJlchImCg9wdWJsaXNo'
+    'ZWRfYXRfbXMYBiABKARSDXB1Ymxpc2hlZEF0TXMSHwoLZWQyNTUxOV9zaWcYByABKAxSCmVkMj'
+    'U1MTlTaWcSKgoRZGV2aWNlX2VkMjU1MTlfcGsYCCABKAxSD2RldmljZUVkMjU1MTlQaw==');
+
+@$core.Deprecated('Use deviceKemRecordV3Descriptor instead')
+const DeviceKemRecordV3$json = {
+  '1': 'DeviceKemRecordV3',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_id', '3': 2, '4': 1, '5': 12, '10': 'deviceId'},
+    {'1': 'device_x25519_pk', '3': 3, '4': 1, '5': 12, '10': 'deviceX25519Pk'},
+    {'1': 'device_ml_kem_pk', '3': 4, '4': 1, '5': 12, '10': 'deviceMlKemPk'},
+    {'1': 'ttl_seconds', '3': 5, '4': 1, '5': 4, '10': 'ttlSeconds'},
+    {'1': 'sequence_number', '3': 6, '4': 1, '5': 4, '10': 'sequenceNumber'},
+    {'1': 'published_at_ms', '3': 7, '4': 1, '5': 4, '10': 'publishedAtMs'},
+    {'1': 'ed25519_sig', '3': 8, '4': 1, '5': 12, '10': 'ed25519Sig'},
+    {'1': 'user_ed25519_pk', '3': 9, '4': 1, '5': 12, '10': 'userEd25519Pk'},
+  ],
+};
+
+/// Descriptor for `DeviceKemRecordV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List deviceKemRecordV3Descriptor = $convert.base64Decode(
+    'ChFEZXZpY2VLZW1SZWNvcmRWMxIXCgd1c2VyX2lkGAEgASgMUgZ1c2VySWQSGwoJZGV2aWNlX2'
+    'lkGAIgASgMUghkZXZpY2VJZBIoChBkZXZpY2VfeDI1NTE5X3BrGAMgASgMUg5kZXZpY2VYMjU1'
+    'MTlQaxInChBkZXZpY2VfbWxfa2VtX3BrGAQgASgMUg1kZXZpY2VNbEtlbVBrEh8KC3R0bF9zZW'
+    'NvbmRzGAUgASgEUgp0dGxTZWNvbmRzEicKD3NlcXVlbmNlX251bWJlchgGIAEoBFIOc2VxdWVu'
+    'Y2VOdW1iZXISJgoPcHVibGlzaGVkX2F0X21zGAcgASgEUg1wdWJsaXNoZWRBdE1zEh8KC2VkMj'
+    'U1MTlfc2lnGAggASgMUgplZDI1NTE5U2lnEiYKD3VzZXJfZWQyNTUxOV9waxgJIAEoDFINdXNl'
+    'ckVkMjU1MTlQaw==');
+
+@$core.Deprecated('Use peerListEntryV3Descriptor instead')
+const PeerListEntryV3$json = {
+  '1': 'PeerListEntryV3',
+  '2': [
+    {'1': 'device_id', '3': 1, '4': 1, '5': 12, '10': 'deviceId'},
+    {'1': 'addresses', '3': 2, '4': 3, '5': 11, '6': '.cleona.PeerAddressProto', '10': 'addresses'},
+    {'1': 'last_seen_ms', '3': 3, '4': 1, '5': 4, '10': 'lastSeenMs'},
+    {'1': 'age_hours', '3': 4, '4': 1, '5': 4, '10': 'ageHours'},
+    {'1': 'connection_type', '3': 5, '4': 1, '5': 14, '6': '.cleona.ConnectionTypeProto', '10': 'connectionType'},
+  ],
+};
+
+/// Descriptor for `PeerListEntryV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List peerListEntryV3Descriptor = $convert.base64Decode(
+    'Cg9QZWVyTGlzdEVudHJ5VjMSGwoJZGV2aWNlX2lkGAEgASgMUghkZXZpY2VJZBI2CglhZGRyZX'
+    'NzZXMYAiADKAsyGC5jbGVvbmEuUGVlckFkZHJlc3NQcm90b1IJYWRkcmVzc2VzEiAKDGxhc3Rf'
+    'c2Vlbl9tcxgDIAEoBFIKbGFzdFNlZW5NcxIbCglhZ2VfaG91cnMYBCABKARSCGFnZUhvdXJzEk'
+    'QKD2Nvbm5lY3Rpb25fdHlwZRgFIAEoDjIbLmNsZW9uYS5Db25uZWN0aW9uVHlwZVByb3RvUg5j'
+    'b25uZWN0aW9uVHlwZQ==');
+
+@$core.Deprecated('Use relayForwardV3Descriptor instead')
+const RelayForwardV3$json = {
+  '1': 'RelayForwardV3',
+  '2': [
+    {'1': 'relay_id', '3': 1, '4': 1, '5': 12, '10': 'relayId'},
+    {'1': 'final_recipient_id', '3': 2, '4': 1, '5': 12, '10': 'finalRecipientId'},
+    {'1': 'wrapped_packet', '3': 3, '4': 1, '5': 12, '10': 'wrappedPacket'},
+    {'1': 'hop_count', '3': 4, '4': 1, '5': 13, '10': 'hopCount'},
+    {'1': 'max_hops', '3': 5, '4': 1, '5': 13, '10': 'maxHops'},
+    {'1': 'ttl', '3': 6, '4': 1, '5': 13, '10': 'ttl'},
+    {'1': 'origin_device_id', '3': 7, '4': 1, '5': 12, '10': 'originDeviceId'},
+    {'1': 'created_at_ms', '3': 8, '4': 1, '5': 4, '10': 'createdAtMs'},
+    {'1': 'visited', '3': 9, '4': 3, '5': 12, '10': 'visited'},
+  ],
+};
+
+/// Descriptor for `RelayForwardV3`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List relayForwardV3Descriptor = $convert.base64Decode(
+    'Cg5SZWxheUZvcndhcmRWMxIZCghyZWxheV9pZBgBIAEoDFIHcmVsYXlJZBIsChJmaW5hbF9yZW'
+    'NpcGllbnRfaWQYAiABKAxSEGZpbmFsUmVjaXBpZW50SWQSJQoOd3JhcHBlZF9wYWNrZXQYAyAB'
+    'KAxSDXdyYXBwZWRQYWNrZXQSGwoJaG9wX2NvdW50GAQgASgNUghob3BDb3VudBIZCghtYXhfaG'
+    '9wcxgFIAEoDVIHbWF4SG9wcxIQCgN0dGwYBiABKA1SA3R0bBIoChBvcmlnaW5fZGV2aWNlX2lk'
+    'GAcgASgMUg5vcmlnaW5EZXZpY2VJZBIiCg1jcmVhdGVkX2F0X21zGAggASgEUgtjcmVhdGVkQX'
+    'RNcxIYCgd2aXNpdGVkGAkgAygMUgd2aXNpdGVk');
 

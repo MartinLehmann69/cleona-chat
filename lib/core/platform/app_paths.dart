@@ -2,7 +2,7 @@ import 'dart:io';
 
 /// Central path resolution for Cleona data directory.
 /// On Linux/macOS: $HOME/.cleona
-/// On Windows: %APPDATA%\.cleona
+/// On Windows: %USERPROFILE%\.cleona
 /// On Android: /data/data/`packageName`/files/.cleona (app-private)
 ///
 /// macOS uses $HOME/.cleona (not Application Support) for consistency with
@@ -38,8 +38,8 @@ class AppPaths {
     if (Platform.isAndroid) {
       _cachedHome = '/data/data/$packageName/files';
     } else if (Platform.isWindows) {
-      _cachedHome = Platform.environment['APPDATA'] ??
-          Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Public';
+      _cachedHome = Platform.environment['USERPROFILE'] ??
+          Platform.environment['APPDATA'] ?? 'C:\\Users\\Public';
     } else {
       _cachedHome = Platform.environment['HOME'] ?? '/tmp';
     }

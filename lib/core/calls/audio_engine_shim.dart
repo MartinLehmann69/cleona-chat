@@ -121,7 +121,13 @@ class AudioEngineShim {
         final exeDir = File(Platform.resolvedExecutable).parent.path;
         candidates.add('$exeDir/lib/libcleona_audio.so');
       } catch (_) {/* ignore */}
-      // 3) Build-tree fallback so `dart test` works without installing.
+      // 3) Fallback: binary may run from non-canonical path (e.g. ~/cleona-daemon);
+      //    look for the library in the user's standard cleona-app bundle directory.
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isNotEmpty) {
+        candidates.add('$home/cleona-app/lib/libcleona_audio.so');
+      }
+      // 4) Build-tree fallback so `dart test` works without installing.
       candidates.add(
           '${Directory.current.path}/native/cleona_audio/build/libcleona_audio.so');
     } else if (Platform.isAndroid) {
@@ -135,11 +141,8 @@ class AudioEngineShim {
     } else if (Platform.isMacOS) {
       candidates.add('cleona_audio.dylib');
     } else if (Platform.isIOS) {
-      // iOS: cleona_audio ist (sobald gebaut) static-linked via Embedded
-      // Framework, im Process-Symbol-Table sichtbar. DynamicLibrary.process()
-      // ist die korrekte Variante; .dylib-Pfade fallen auf iOS aus.
-      // Build-Pipeline (scripts/build-ios-libs.sh) noch nicht vorhanden,
-      // bis dahin schlägt das hier zur Runtime fehl — Audio-Engine inaktiv.
+      // Static-linked via CleonaNative.podspec → DynamicLibrary.process()
+      return AudioEngineShim._(DynamicLibrary.process());
     }
     DynamicLibrary? lib;
     for (final c in candidates) {

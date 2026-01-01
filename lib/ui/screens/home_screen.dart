@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
@@ -325,8 +326,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             labelPadding: const EdgeInsets.symmetric(horizontal: 6),
             labelStyle: tabLabelStyle,
             unselectedLabelStyle: tabUnselectedStyle,
-            labelColor: tabLabelStyle.color,
-            unselectedLabelColor: tabUnselectedStyle.color,
+            // Photo/slate modes: explicit white from tabLabelStyle/tabUnselectedStyle.
+            // Default modes: tab*Style.color is null; Linux Skia renders the labels
+            // invisible without an explicit labelColor (AVM/WIN fall back to
+            // colorScheme.onSurface implicitly), so we fall back here ourselves.
+            // See gui-02-navigation Linux-only OCR fail 2026-05-14 + docs/UI.md.
+            labelColor: tabLabelStyle.color ?? colorScheme.onSurface,
+            unselectedLabelColor: tabUnselectedStyle.color ?? colorScheme.onSurface.withValues(alpha: 0.7),
             tabs: [
               _tabWithBadge(locale.get('tab_recent'), totalUnread),
               Tab(text: locale.get('tab_favorites')),
@@ -730,18 +736,37 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
                 Navigator.pop(ctx);
 
-                // Register seed peers if available, wait for PONGs, then send CR
+                // Register seed peers if available, wait for PONGs, then send CR.
+                // Welle 5 §8.1.1: forward Device-KEM pubkeys + deviceId so the
+                // daemon can build the First-CR-Bootstrap InfrastructureFrame.
+                final dxk = seed.deviceX25519Pk;
+                final dmk = seed.deviceMlKemPk;
+                final dxkB64 = dxk != null ? base64.encode(dxk) : null;
+                final dmkB64 = dmk != null ? base64.encode(dmk) : null;
                 if (seed.seedPeers.isNotEmpty || seed.ownAddresses.isNotEmpty) {
                   service.addPeersFromContactSeed(
                     seed.nodeIdHex,
                     seed.ownAddresses,
                     seed.seedPeers.map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses)).toList(),
+                    targetDeviceIdHex: seed.deviceIdHex,
+                    targetDxkB64: dxkB64,
+                    targetDmkB64: dmkB64,
                   );
                   Future.delayed(const Duration(seconds: 3), () {
-                    service.sendContactRequest(seed!.nodeIdHex);
+                    service.sendContactRequest(
+                      seed!.nodeIdHex,
+                      seedDeviceIdHex: seed.deviceIdHex,
+                      seedDxkB64: dxkB64,
+                      seedDmkB64: dmkB64,
+                    );
                   });
                 } else {
-                  service.sendContactRequest(seed.nodeIdHex);
+                  service.sendContactRequest(
+                    seed.nodeIdHex,
+                    seedDeviceIdHex: seed.deviceIdHex,
+                    seedDxkB64: dxkB64,
+                    seedDmkB64: dmkB64,
+                  );
                 }
 
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -2219,7 +2244,6 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
         setState(() {
           _pulseFrozen = true;
           _pulseController.stop();
-          _pulseController.value = 1.0;
         });
       });
     } else {
@@ -2247,14 +2271,21 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
           borderRadius: BorderRadius.circular(14),
           onTap: () => _handleTap(tier, locale),
           child: searching
-              ? AnimatedBuilder(
-                  animation: _pulseAnimation,
-                  builder: (_, child) => Opacity(
-                    opacity: _pulseAnimation.value,
-                    child: child,
-                  ),
-                  child: image,
-                )
+              ? (_pulseFrozen
+                  // Pulse frozen after _pulseFreezeAfter — render at static
+                  // 70% opacity so the frozen weak-tier is visually distinct
+                  // from a healthy medium-tier (which renders at full opacity).
+                  // Without this, both look identical and users misread weak as
+                  // medium ("Mobilfunk"). Observed 2026-05-15 WinVM.
+                  ? Opacity(opacity: 0.7, child: image)
+                  : AnimatedBuilder(
+                      animation: _pulseAnimation,
+                      builder: (_, child) => Opacity(
+                        opacity: _pulseAnimation.value,
+                        child: child,
+                      ),
+                      child: image,
+                    ))
               : image,
         ),
       ),

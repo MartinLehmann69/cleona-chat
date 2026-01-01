@@ -2413,6 +2413,10 @@ class _MessageBubble extends StatelessWidget {
         replyTo: message.replyToText,
         // reactions is Map<String,Set<String>>; MessageBubble takes List<String> emoji-only
         reactions: message.reactions.keys.toList(),
+        // gui-42: surface an active per-chat disappearing-message timer. Uses
+        // the accepted/active config (conv.config) — a pending proposal lives
+        // separately in conv.pendingConfigProposal and must NOT light this up.
+        expiryActive: chatConfig?.expiryDurationMs != null,
         onActionsPressed: _hasMenu
             ? () => _showMessageActions(context)
             : null,
@@ -2422,11 +2426,24 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    // #U4: same frosted-glass treatment as MessageBubble — keep media/reply/
-    // forwarded/edit bubbles transparent so the photo-skin hero asset shows
-    // through. Without this only simple text bubbles got the blur.
+    // #U4 follow-up: keep media/reply/forwarded/edit bubbles transparent so
+    // the photo-skin hero asset shows through. Mirror the chat_list_tile /
+    // contact_tile chrome (50% black neutral fill + 15% white hairline)
+    // so home-screen tiles and chat bubbles render the same frosted-glass
+    // language. The previous fix tinted the bubble with the full primary-
+    // container color at 78% alpha, which was opaque enough to collapse the
+    // BackdropFilter blur visually into a single flat color — exactly the
+    // regression the user reported. Outgoing now blends a low-alpha accent
+    // tint over the neutral dark so sender vs partner stays distinguishable
+    // while the blur remains clearly visible.
     final useBlur = Theme.of(context).character.surfaceRenderMode == SurfaceRenderMode.photo;
     final bubbleRadius = BorderRadius.circular(_activeSkinRadius(context));
+    final character = Theme.of(context).character;
+    final Color partnerPhotoFill = const Color(0x80000000); // rgba(0,0,0,0.5)
+    final Color ownPhotoFill = Color.alphaBlend(
+      character.accentColor.withValues(alpha: 0.45),
+      const Color(0x80000000),
+    );
     final baseColor = isSearchHighlight
         ? colorScheme.tertiaryContainer
         : isEditing
@@ -2437,7 +2454,7 @@ class _MessageBubble extends StatelessWidget {
                     ? colorScheme.primaryContainer
                     : colorScheme.surfaceContainerHighest;
     final bubbleColor = useBlur && !isSearchHighlight && !isEditing && !deleted
-        ? baseColor.withValues(alpha: isOutgoing ? 0.78 : 0.55)
+        ? (isOutgoing ? ownPhotoFill : partnerPhotoFill)
         : baseColor;
 
     Widget bubble = Container(
@@ -2453,9 +2470,11 @@ class _MessageBubble extends StatelessWidget {
               ? Border.all(color: colorScheme.tertiary, width: 2)
               : isEditing
                   ? Border.all(color: colorScheme.primary, width: 1.5)
-                  : _activeSkinBorderWidth(context) > 0
-                      ? Border.all(color: colorScheme.outline.withValues(alpha: 0.3), width: _activeSkinBorderWidth(context))
-                      : null,
+                  : useBlur && !deleted
+                      ? Border.all(color: const Color(0x26FFFFFF), width: 1) // 15% white, matches chat_list_tile
+                      : _activeSkinBorderWidth(context) > 0
+                          ? Border.all(color: colorScheme.outline.withValues(alpha: 0.3), width: _activeSkinBorderWidth(context))
+                          : null,
           boxShadow: !useBlur && _activeSkinElevation(context) > 0
               ? [BoxShadow(color: colorScheme.shadow.withValues(alpha: 0.1), blurRadius: _activeSkinElevation(context) * 2, offset: Offset(0, _activeSkinElevation(context)))]
               : null,
@@ -2557,9 +2576,19 @@ class _MessageBubble extends StatelessWidget {
                 _buildTextWithLinks(
                   message.text,
                   TextStyle(
-                    color: isOutgoing
-                        ? colorScheme.onPrimaryContainer
-                        : colorScheme.onSurface,
+                    color: useBlur && !isSearchHighlight && !isEditing && !deleted
+                        // Photo-skin bubble fill is dark (50%-black neutral
+                        // ± accent tint); use white text + drop shadow so it
+                        // stays readable over any blurred photo region.
+                        ? Colors.white
+                        : (isOutgoing
+                            ? colorScheme.onPrimaryContainer
+                            : colorScheme.onSurface),
+                    shadows: useBlur && !isSearchHighlight && !isEditing && !deleted
+                        ? const [
+                            Shadow(color: Color(0x99000000), blurRadius: 4, offset: Offset(0, 1)),
+                          ]
+                        : null,
                     // Latin fonts FIRST so digits + ASCII land in a real text
                     // font; Emoji fonts AT THE END so they only kick in when
                     // the previous fonts have no glyph (real emoji codepoints).
@@ -2617,7 +2646,9 @@ class _MessageBubble extends StatelessWidget {
                     Text(
                       locale.get('edited'),
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: colorScheme.outline,
+                            color: useBlur && !isSearchHighlight && !isEditing
+                                ? Colors.white.withValues(alpha: 0.78)
+                                : colorScheme.outline,
                             fontSize: 10,
                             fontStyle: FontStyle.italic,
                           ),
@@ -2627,7 +2658,9 @@ class _MessageBubble extends StatelessWidget {
                   Text(
                     '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: colorScheme.outline,
+                          color: useBlur && !isSearchHighlight && !isEditing && !deleted
+                              ? Colors.white.withValues(alpha: 0.78)
+                              : colorScheme.outline,
                           fontSize: 10,
                         ),
                   ),

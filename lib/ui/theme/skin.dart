@@ -79,6 +79,90 @@ class Skin {
     this.fabAssetPath,
   });
 
+  /// Returns a copy of this Skin with selected fields replaced. Used by the
+  /// golden-test harness to null out `heroAssetPath` (so SkinBackgroundImage
+  /// renders the per-skin `fallbackGradient` instead of triggering Flutter's
+  /// asset-not-found path in widget tests, which produces an opaque fallback
+  /// identical for every skin and makes goldens useless). All Skin fields
+  /// remain `final`; this is purely a constructor-style helper.
+  Skin copyWith({
+    String? id,
+    String? name,
+    Color? seedColor,
+    String? fontFamily,
+    FontWeight? titleWeight,
+    double? borderRadius,
+    double? borderWidth,
+    double? shadowElevation,
+    double? fontSizeScale,
+    double? dividerThickness,
+    double? minTouchTarget,
+    bool? forceBorders,
+    double? fabBorderRadius,
+    double? fabElevation,
+    double? fabBorderWidth,
+    IconData? addContactIcon,
+    IconData? addGroupIcon,
+    IconData? addChannelIcon,
+    IconData? addIdentityIcon,
+    AppBarIntensity? appBarIntensity,
+    AppBarForegroundMode? appBarForegroundMode,
+    double? radiusMultiplier,
+    Object? heroAssetPath = _sentinel,
+    Object? fallbackGradient = _sentinel,
+    SurfaceRenderMode? surfaceRenderMode,
+    Object? scrimGradient = _sentinel,
+    Color? peerDotColor,
+    Object? avatarAssetPath = _sentinel,
+    Object? fabAssetPath = _sentinel,
+  }) {
+    return Skin(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      seedColor: seedColor ?? this.seedColor,
+      fontFamily: fontFamily ?? this.fontFamily,
+      titleWeight: titleWeight ?? this.titleWeight,
+      borderRadius: borderRadius ?? this.borderRadius,
+      borderWidth: borderWidth ?? this.borderWidth,
+      shadowElevation: shadowElevation ?? this.shadowElevation,
+      fontSizeScale: fontSizeScale ?? this.fontSizeScale,
+      dividerThickness: dividerThickness ?? this.dividerThickness,
+      minTouchTarget: minTouchTarget ?? this.minTouchTarget,
+      forceBorders: forceBorders ?? this.forceBorders,
+      fabBorderRadius: fabBorderRadius ?? this.fabBorderRadius,
+      fabElevation: fabElevation ?? this.fabElevation,
+      fabBorderWidth: fabBorderWidth ?? this.fabBorderWidth,
+      addContactIcon: addContactIcon ?? this.addContactIcon,
+      addGroupIcon: addGroupIcon ?? this.addGroupIcon,
+      addChannelIcon: addChannelIcon ?? this.addChannelIcon,
+      addIdentityIcon: addIdentityIcon ?? this.addIdentityIcon,
+      appBarIntensity: appBarIntensity ?? this.appBarIntensity,
+      appBarForegroundMode: appBarForegroundMode ?? this.appBarForegroundMode,
+      radiusMultiplier: radiusMultiplier ?? this.radiusMultiplier,
+      heroAssetPath: identical(heroAssetPath, _sentinel)
+          ? this.heroAssetPath
+          : heroAssetPath as String?,
+      fallbackGradient: identical(fallbackGradient, _sentinel)
+          ? this.fallbackGradient
+          : fallbackGradient as LinearGradient?,
+      surfaceRenderMode: surfaceRenderMode ?? this.surfaceRenderMode,
+      scrimGradient: identical(scrimGradient, _sentinel)
+          ? this.scrimGradient
+          : scrimGradient as LinearGradient?,
+      peerDotColor: peerDotColor ?? this.peerDotColor,
+      avatarAssetPath: identical(avatarAssetPath, _sentinel)
+          ? this.avatarAssetPath
+          : avatarAssetPath as String?,
+      fabAssetPath: identical(fabAssetPath, _sentinel)
+          ? this.fabAssetPath
+          : fabAssetPath as String?,
+    );
+  }
+
+  // Sentinel for nullable copyWith fields — distinguishes "not passed"
+  // (keep existing value) from "passed as null" (set to null).
+  static const Object _sentinel = Object();
+
   bool get isContrast => id == 'contrast';
 
   /// Returns the effective skin accent color for the given brightness.

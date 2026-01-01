@@ -119,17 +119,21 @@ class VpxFFI {
   }
 
   void _loadLibrary() {
-    final shimPaths = _shimSearchPaths();
-    for (final path in shimPaths) {
-      try {
-        _lib = DynamicLibrary.open(path);
-        break;
-      } catch (_) {
-        continue;
+    if (Platform.isIOS) {
+      _lib = DynamicLibrary.process();
+    } else {
+      final shimPaths = _shimSearchPaths();
+      for (final path in shimPaths) {
+        try {
+          _lib = DynamicLibrary.open(path);
+          break;
+        } catch (_) {
+          continue;
+        }
       }
     }
     if (_lib == null) {
-      final suffix = (Platform.isMacOS || Platform.isIOS)
+      final suffix = Platform.isMacOS
           ? 'dylib'
           : (Platform.isWindows ? 'dll' : 'so');
       throw VpxNotAvailableException(
@@ -329,7 +333,7 @@ class VpxFFI {
     final lastSep = exe.lastIndexOf(sep);
     final exeDir = lastSep > 0 ? exe.substring(0, lastSep) : '.';
 
-    if (Platform.isMacOS || Platform.isIOS) {
+    if (Platform.isMacOS) {
       return [
         'libcleona_vpx.dylib',
         '$exeDir/libcleona_vpx.dylib',

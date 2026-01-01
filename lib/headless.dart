@@ -6,14 +6,15 @@ import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/network/clogger.dart';
+import 'dart:typed_data';
 import 'package:cleona/core/platform/app_paths.dart';
 
 /// Headless entry point for bootstrap nodes and VM testing.
 ///
 /// Usage:
 ///   cleona-headless --profile `dir` --port `port` [--name `name`]
-///                   [--bootstrap-peer `ip:port`]
 ///                   [--send-cr <nodeIdHex>]      # send contact request after startup
 ///                   [--send-msg <nodeIdHex:text>] # send message after CR accepted
 void main(List<String> args) {
@@ -25,6 +26,42 @@ void main(List<String> args) {
     log.info('Profile: ${config.profileDir}');
     log.info('Port: ${config.port}');
     log.info('Name: ${config.name}');
+
+    // ── Single-Instance Guard ──────────────────────────────────────
+    Directory(config.profileDir).createSync(recursive: true);
+    final pidPath = '${config.profileDir}/cleona.pid';
+    try {
+      final pidFile = File(pidPath);
+      if (pidFile.existsSync()) {
+        final otherPid = int.parse(pidFile.readAsStringSync().trim());
+        if (otherPid != pid) {
+          final result = Process.runSync('kill', ['-0', '$otherPid']);
+          if (result.exitCode == 0) {
+            stderr.writeln(
+              'ERROR: Cleona headless already running (PID $otherPid). '
+              'Stop the running process first.');
+            log.info('Headless PID $otherPid is still alive — exiting.');
+            await CLogger.flushAll();
+            exit(1);
+          }
+        }
+      }
+    } catch (_) { /* stale PID file */ }
+    final lockFile = File('${config.profileDir}/cleona.lock');
+    final lockRaf = lockFile.openSync(mode: FileMode.write);
+    try {
+      await lockRaf.lock(FileLock.exclusive);
+      lockRaf.writeStringSync('$pid\n');
+    } on FileSystemException {
+      stderr.writeln(
+        'ERROR: Another Cleona headless holds the lock file. '
+        'Stop the running process first.');
+      log.info('Another headless holds the lock — exiting.');
+      await CLogger.flushAll();
+      lockRaf.closeSync();
+      exit(1);
+    }
+    File(pidPath).writeAsStringSync('$pid\n');
 
     // Init crypto
     SodiumFFI();
@@ -42,6 +79,7 @@ void main(List<String> args) {
       profileDir: config.profileDir,
       port: config.port,
     );
+    node.manualPublicIp = config.publicIp;
     node.primaryIdentity = identity;
     node.registerIdentity(identity);
 
@@ -75,24 +113,115 @@ void main(List<String> args) {
       }
     };
 
-    // Route messages to service
-    node.onMessageForIdentity = (envelope, from, port, identityCtx) {
-      service.handleMessage(envelope, from, port);
-    };
-
     // Start node (blocking bootstrap)
-    await node.start(bootstrapPeers: config.bootstrapPeers);
+    await node.start();
 
     // Start service (contacts, conversations, mailbox)
     await service.startService();
+
+    // §2.4 receiver step [9] — single-identity AppFrame + InfraFrame dispatch.
+    // Mirrors service_daemon.dart wiring (simplified: one service, no recency).
+    node.onApplicationFramePayload = (packet, from, port, snapshot) async {
+      final outcome = await service.handleIncomingApplicationPacket(
+          packet, from, port, snapshot);
+      if (outcome == AppFrameDispatchOutcome.notForThisIdentity) {
+        log.debug('V3 APP drop: KEM-decap failed (not for this identity)');
+      }
+    };
+
+    node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
+      final mt = frame.messageType;
+      final isServiceRouted =
+          mt == proto.MessageTypeV3.MTV3_CONTACT_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_RESTORE_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE;
+      if (!isServiceRouted) return;
+      final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
+      final identities = node.identitiesForDevice(deviceIdBytes).toList();
+      for (final id in identities) {
+        if (id.userIdHex != identity.userIdHex) continue;
+        switch (mt) {
+          case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
+            service.handleIncomingFirstContactRequest(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+            service.handleIncomingRestoreBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+            service.handleIncomingKeyRotationBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+            service.handleIncomingGuardianShareStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST:
+            service.handleIncomingGuardianRestoreRequestInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
+            service.handleIncomingGuardianRestoreResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+            service.handleIncomingFragmentStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+            service.handleIncomingFragmentRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
+            service.handleIncomingFragmentRetrieveResponseInfra(
+                frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
+            service.handleIncomingFragmentDeleteInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+            service.handleIncomingChannelIndexExchangeInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE:
+            service.handleIncomingPeerStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+            service.handleIncomingPeerRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+            service.handleIncomingPeerRetrieveResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          default:
+            break;
+        }
+      }
+    };
 
     log.info('Node started. User-ID: ${identity.userIdHex.substring(0, 16)}... '
         'Device: ${identity.deviceNodeIdHex.substring(0, 16)}...');
     log.info('Peers: ${service.peerCount}');
 
-    // Write PID file
-    final pidFile = File('${config.profileDir}/cleona.pid');
-    pidFile.writeAsStringSync('$pid');
+    // PID file already written early (single-instance guard needs it).
 
     // Network change detection via IP polling
     _startNetworkChangeHandler(node, log);
@@ -117,7 +246,8 @@ void main(List<String> args) {
       _networkMonitor?.kill();
       await service.stop();
       await node.stop();
-      if (pidFile.existsSync()) pidFile.deleteSync();
+      final pf = File(pidPath);
+      if (pf.existsSync()) pf.deleteSync();
       exit(0);
     });
     ProcessSignal.sigterm.watch().listen((_) async {
@@ -125,7 +255,8 @@ void main(List<String> args) {
       _networkMonitor?.kill();
       await service.stop();
       await node.stop();
-      if (pidFile.existsSync()) pidFile.deleteSync();
+      final pf = File(pidPath);
+      if (pf.existsSync()) pf.deleteSync();
       exit(0);
     });
 
@@ -294,17 +425,17 @@ class _HeadlessConfig {
   final String profileDir;
   final int port;
   final String name;
-  final List<String> bootstrapPeers;
   final String? sendCr;
   final String? sendMsg;
+  final String? publicIp;
 
   _HeadlessConfig({
     required this.profileDir,
     required this.port,
     required this.name,
-    this.bootstrapPeers = const [],
     this.sendCr,
     this.sendMsg,
+    this.publicIp,
   });
 }
 
@@ -312,29 +443,42 @@ _HeadlessConfig _parseArgs(List<String> args) {
   String? profileDir;
   int? port;
   String name = 'Headless';
-  final bootstrapPeers = <String>[];
   String? sendCr;
   String? sendMsg;
+  String? publicIp;
 
-  for (var i = 0; i < args.length; i++) {
-    switch (args[i]) {
+  // Normalise `--key=value` forms (POSIX getopt-style) into separate
+  // tokens so the per-flag matcher below can stay simple.
+  final flat = <String>[];
+  for (final a in args) {
+    final eq = a.indexOf('=');
+    if (a.startsWith('--') && eq > 2) {
+      flat.add(a.substring(0, eq));
+      flat.add(a.substring(eq + 1));
+    } else {
+      flat.add(a);
+    }
+  }
+
+  for (var i = 0; i < flat.length; i++) {
+    switch (flat[i]) {
       case '--profile':
-        if (i + 1 < args.length) profileDir = args[++i];
+        if (i + 1 < flat.length) profileDir = flat[++i];
         break;
       case '--port':
-        if (i + 1 < args.length) port = int.tryParse(args[++i]);
+        if (i + 1 < flat.length) port = int.tryParse(flat[++i]);
         break;
       case '--name':
-        if (i + 1 < args.length) name = args[++i];
-        break;
-      case '--bootstrap-peer':
-        if (i + 1 < args.length) bootstrapPeers.add(args[++i]);
+        if (i + 1 < flat.length) name = flat[++i];
         break;
       case '--send-cr':
-        if (i + 1 < args.length) sendCr = args[++i];
+        if (i + 1 < flat.length) sendCr = flat[++i];
         break;
       case '--send-msg':
-        if (i + 1 < args.length) sendMsg = args[++i];
+        if (i + 1 < flat.length) sendMsg = flat[++i];
+        break;
+      case '--public-ip':
+        if (i + 1 < flat.length) publicIp = flat[++i];
         break;
     }
   }
@@ -349,8 +493,8 @@ _HeadlessConfig _parseArgs(List<String> args) {
     profileDir: profileDir,
     port: port,
     name: name,
-    bootstrapPeers: bootstrapPeers,
     sendCr: sendCr,
     sendMsg: sendMsg,
+    publicIp: publicIp,
   );
 }

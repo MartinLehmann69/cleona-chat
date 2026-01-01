@@ -51,11 +51,14 @@ class CallLanMulticast {
     if (_joined) return true;
 
     try {
+      // SO_REUSEPORT is POSIX-only — on Windows the option does not exist
+      // and combining it with multicast-join leaves the socket unable to
+      // send (silent fail / WSAEINVAL). Same fix as LocalDiscovery.start().
       _socket = await RawDatagramSocket.bind(
         InternetAddress.anyIPv6,
         port,
         reuseAddress: true,
-        reusePort: true,
+        reusePort: !Platform.isWindows,
       );
 
       _socket!.joinMulticast(InternetAddress(multicastGroup));

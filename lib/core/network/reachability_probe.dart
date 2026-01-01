@@ -25,15 +25,24 @@ class _PendingQuery {
 /// When a peer is unreachable (ACK timeout, no relay route), the probe
 /// asks 3 random online peers: "Can you reach peer X?"
 /// The first positive response establishes a relay route.
+///
+/// V3.0: `sendFunction` receives the V3 InfrastructureFrame
+/// triple `(MessageTypeV3, body, PeerInfo)` and is wired to
+/// `CleonaNode._sendInfra` directly. Receive path uses raw payload
+/// bytes + senderDeviceId; the V3 InfraFrame layer in
+/// `cleona_service.dart` supplies both after KEM-AEAD-decrypt.
 class ReachabilityProbe {
   final Map<String, _PendingQuery> _pending = {};
   final CLogger _log;
 
-  /// Callback to send an envelope (injected by CleonaNode).
-  Future<bool> Function(proto.MessageEnvelope envelope, Uint8List recipientNodeId)? sendFunction;
-
-  /// Callback to create a signed envelope (injected by CleonaNode).
-  proto.MessageEnvelope Function(proto.MessageType type, Uint8List payload, {Uint8List? recipientId})? createEnvelopeFunction;
+  /// Callback to send a V3 InfrastructureFrame for the given message type
+  /// and inner payload to the candidate peer's deviceId. Wired to
+  /// `CleonaNode._sendInfra` (recipientDeviceId = peer.nodeId).
+  Future<bool> Function(
+    proto.MessageTypeV3 messageType,
+    Uint8List innerPayload,
+    PeerInfo recipient,
+  )? sendFunction;
 
   /// Callback to get confirmed online peers (injected by CleonaNode).
   List<PeerInfo> Function(Uint8List targetNodeId)? getCandidatesFunction;
@@ -49,8 +58,9 @@ class ReachabilityProbe {
   /// Returns the nodeId of a peer that can reach the target, or null if
   /// no peer can reach it (within 3s timeout).
   Future<Uint8List?> queryPeersAbout(Uint8List targetNodeId) async {
-    if (sendFunction == null || createEnvelopeFunction == null ||
-        getCandidatesFunction == null || randomBytesFunction == null) {
+    if (sendFunction == null ||
+        getCandidatesFunction == null ||
+        randomBytesFunction == null) {
       return null;
     }
 
@@ -80,18 +90,18 @@ class ReachabilityProbe {
       timer: timer,
     );
 
-    // Send query to up to 3 candidates
+    // Build the V3 inner payload once — same bytes go to up to 3 candidates.
     final query = proto.PeerReachabilityQuery()
       ..targetNodeId = targetNodeId
       ..queryId = queryId;
+    final body = Uint8List.fromList(query.writeToBuffer());
 
     for (final candidate in candidates.take(3)) {
-      final env = createEnvelopeFunction!(
-        proto.MessageType.REACHABILITY_QUERY,
-        query.writeToBuffer(),
-        recipientId: candidate.nodeId,
+      sendFunction!(
+        proto.MessageTypeV3.MTV3_REACHABILITY_QUERY,
+        body,
+        candidate,
       );
-      sendFunction!(env, candidate.nodeId);
     }
 
     _log.debug('Queried ${candidates.take(3).length} peers about '
@@ -102,12 +112,14 @@ class ReachabilityProbe {
 
   /// Handle a REACHABILITY_RESPONSE from a peer.
   ///
-  /// Called by CleonaNode when a response arrives.
-  void handleResponse(proto.MessageEnvelope envelope) {
+  /// Called by the V3 InfraFrame dispatcher in `cleona_service.dart` after
+  /// KEM-AEAD-decrypt. `payloadBytes` is the serialized
+  /// [proto.PeerReachabilityResponse]; `senderDeviceId` is the V3 Outer
+  /// `senderDeviceId` (Device-Sig-verified by the receive path).
+  void handleResponse(Uint8List payloadBytes, Uint8List senderDeviceId) {
     try {
-      final response = proto.PeerReachabilityResponse.fromBuffer(envelope.encryptedPayload);
+      final response = proto.PeerReachabilityResponse.fromBuffer(payloadBytes);
       final queryIdHex = bytesToHex(Uint8List.fromList(response.queryId));
-      final senderNodeId = Uint8List.fromList(envelope.senderId);
 
       final entry = _pending[queryIdHex];
       if (entry == null) return; // Unknown or expired query
@@ -118,8 +130,8 @@ class ReachabilityProbe {
         // First positive response — resolve with this peer as relay
         _pending.remove(queryIdHex);
         entry.timer.cancel();
-        entry.completer.complete(senderNodeId);
-        _log.info('Reachability: ${bytesToHex(senderNodeId).substring(0, 8)} '
+        entry.completer.complete(senderDeviceId);
+        _log.info('Reachability: ${bytesToHex(senderDeviceId).substring(0, 8)} '
             'can reach ${bytesToHex(entry.targetNodeId).substring(0, 8)} '
             '(last seen ${response.lastSeenMs}ms ago)');
       }

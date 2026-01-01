@@ -2,215 +2,12 @@ syntax = "proto3";
 
 package cleona;
 
-// ── Core Message Envelope ──────────────────────────────────────────────
-
-message MessageEnvelope {
-  uint32 version = 1;
-  bytes sender_id = 2;          // 32 bytes, SHA-256(tag + pubkey)
-  bytes recipient_id = 3;       // 32 bytes, or empty for broadcasts
-  uint64 timestamp = 4;         // Unix milliseconds
-  MessageType message_type = 5;
-  bytes encrypted_payload = 6;
-  bytes signature_ed25519 = 7;
-  bytes signature_ml_dsa = 8;
-  ContentMetadata content_metadata = 9;
-  EditMetadata edit_metadata = 10;
-  ExpiryMetadata expiry_metadata = 11;
-  ErasureCodingMetadata erasure_metadata = 12;
-  ProofOfWork pow = 13;
-  PerMessageKem kem_header = 14;
-  reserved 15;                   // was: PqxdhInit (removed)
-  CompressionType compression = 16;
-  string network_tag = 17;
-  bytes message_id = 18;        // UUID v4 (16 bytes)
-  bytes group_id = 19;          // Non-empty if this is a group message
-  bytes reply_to_message_id = 20; // Message ID being replied to (quote)
-  string reply_to_text = 21;     // Quoted text snippet (max 200 chars)
-  string reply_to_sender = 22;   // Display name of quoted message sender
-  LinkPreview link_preview = 23; // Sender-side link preview (Architecture Section 2.3.4)
-  bytes sender_device_node_id = 24; // Multi-Device (§26): routing target for replies/receipts
-}
-
-// ── Message Types ──────────────────────────────────────────────────────
-
-enum MessageType {
-  // Core messaging
-  TEXT = 0;
-  IMAGE = 1;
-  VIDEO = 2;
-  GIF = 3;
-  EMOJI_REACTION = 4;
-  MEDIA_ANNOUNCEMENT = 5;
-  MEDIA_ACCEPT = 6;
-  MEDIA_REJECT = 7;
-  MESSAGE_EDIT = 8;
-  MESSAGE_EXPIRE_CONFIG = 9;
-
-  // Key management
-  reserved 10;                   // was: KEY_ROTATION (replaced by KEY_ROTATION_BROADCAST = 133)
-  reserved 11, 12;               // was: PREKEY_BUNDLE, KEY_EXCHANGE_RESPONSE
-
-  // Recovery
-  RESTORE_BROADCAST = 13;
-  RESTORE_RESPONSE = 14;
-
-  // Presence & receipts
-  TYPING_INDICATOR = 15;
-  READ_RECEIPT = 16;
-
-  // Groups
-  GROUP_CREATE = 17;
-  GROUP_INVITE = 18;
-  GROUP_LEAVE = 19;
-  GROUP_KEY_UPDATE = 20;
-  MESSAGE_DELETE = 21;
-  VOICE_MESSAGE = 22;
-  FILE = 23;
-
-  // Calls (WebRTC signaling + overlay multicast)
-  CALL_INVITE = 30;
-  CALL_ANSWER = 31;
-  CALL_REJECT = 32;
-  CALL_HANGUP = 33;
-  ICE_CANDIDATE = 34;
-  CALL_REJOIN = 35;
-  CALL_AUDIO = 36;
-
-  // Peer list exchange (3-step delta)
-  PEER_LIST_SUMMARY = 50;
-  PEER_LIST_WANT = 51;
-  PEER_LIST_PUSH = 52;
-
-  // Contact requests
-  reserved 60, 61;               // was: PQXDH_INIT, OTK_BATCH
-  CONTACT_REQUEST = 62;
-  CONTACT_REQUEST_RESPONSE = 63;
-
-  // Channels
-  CHANNEL_CREATE = 70;
-  CHANNEL_POST = 71;
-  CHANNEL_INVITE = 72;
-  CHANNEL_ROLE_UPDATE = 73;
-  CHANNEL_LEAVE = 74;
-
-  CHANNEL_JOIN_REQUEST = 75;     // subscriber → owner: "I want to join"
-
-  // Public channel moderation
-  CHANNEL_REPORT = 76;
-  CHANNEL_REPORT_RESPONSE = 77;
-  JURY_REQUEST = 78;
-  JURY_VOTE_MSG = 79;
-  JURY_RESULT = 88;
-
-  // Channel index gossip
-  CHANNEL_INDEX_EXCHANGE = 89;
-
-  // DHT operations
-  DHT_PING = 80;
-  DHT_PONG = 81;
-  DHT_FIND_NODE = 82;
-  DHT_FIND_NODE_RESPONSE = 83;
-  DHT_STORE = 84;
-  DHT_STORE_RESPONSE = 85;
-  DHT_FIND_VALUE = 86;
-  DHT_FIND_VALUE_RESPONSE = 87;
-
-  // Fragment storage (erasure coding) with RUDP ACK
-  FRAGMENT_STORE = 90;
-  FRAGMENT_STORE_ACK = 91;
-  FRAGMENT_RETRIEVE = 92;
-  FRAGMENT_DELETE = 93;
-
-  // Delivery receipt
-  DELIVERY_RECEIPT = 94;
-
-  // Per-chat configuration
-  CHAT_CONFIG_UPDATE = 100;
-  CHAT_CONFIG_RESPONSE = 101;
-
-  // Identity management
-  IDENTITY_DELETED = 102;
-
-  // Profile updates
-  PROFILE_UPDATE = 103;
-
-  // Guardian recovery (Shamir SSS)
-  GUARDIAN_SHARE_STORE = 104;
-  GUARDIAN_RESTORE_REQUEST = 105;
-  GUARDIAN_RESTORE_RESPONSE = 106;
-
-  // Relay (multi-hop message forwarding)
-  RELAY_FORWARD = 110;
-  RELAY_ACK = 111;
-
-  // Unreachability reports (relay route discovery)
-  REACHABILITY_QUERY = 112;
-  REACHABILITY_RESPONSE = 113;
-
-  // Store-and-Forward (offline delivery via mutual peers)
-  PEER_STORE = 114;
-  PEER_STORE_ACK = 115;
-  PEER_RETRIEVE = 116;
-  PEER_RETRIEVE_RESPONSE = 117;
-
-  // Distance-Vector Routing (V3)
-  ROUTE_UPDATE = 120;
-
-  // NAT Hole Punch (V3)
-  HOLE_PUNCH_REQUEST = 121;
-  HOLE_PUNCH_NOTIFY = 122;
-  HOLE_PUNCH_PING = 123;
-  HOLE_PUNCH_PONG = 124;
-
-  // App-Level Chunking for relay/S&F paths (V3.1.9)
-  MEDIA_CHUNK = 125;
-
-  // Multi-Device (§26)
-  TWIN_ANNOUNCE = 130;
-  TWIN_SYNC = 131;
-  DEVICE_REVOKED = 132;
-  KEY_ROTATION_BROADCAST = 133;
-  KEY_ROTATION_ACK = 134;
-
-  // Calendar (§23)
-  CALENDAR_INVITE = 140;
-  CALENDAR_RSVP = 141;
-  CALENDAR_UPDATE = 142;
-  CALENDAR_DELETE = 143;
-  FREE_BUSY_REQUEST = 144;
-  FREE_BUSY_RESPONSE = 145;
-
-  // Polls & Voting (§24)
-  POLL_CREATE = 146;
-  POLL_VOTE = 147;
-  POLL_UPDATE = 148;
-  POLL_SNAPSHOT = 149;
-  POLL_VOTE_ANONYMOUS = 150;
-  POLL_VOTE_REVOKE = 151;
-
-  // 2D-DHT Identity Resolution (§2.2.4)
-  IDENTITY_AUTH_PUBLISH = 152;
-  IDENTITY_AUTH_RETRIEVE = 153;
-  IDENTITY_AUTH_RESPONSE = 154;
-  IDENTITY_LIVE_PUBLISH = 155;
-  IDENTITY_LIVE_RETRIEVE = 156;
-  IDENTITY_LIVE_RESPONSE = 157;
-
-  // Overlay Multicast Tree (Phase 3d)
-  CALL_RTT_PING = 37;
-  CALL_RTT_PONG = 38;
-  CALL_TREE_UPDATE = 39;
-
-  // Video Calls (Phase 3b)
-  CALL_VIDEO = 40;
-  CALL_KEYFRAME_REQUEST = 41;
-
-  // Group Calls (Phase 3c)
-  CALL_GROUP_AUDIO = 42;
-  CALL_GROUP_LEAVE = 43;
-  CALL_GROUP_KEY_ROTATE = 44;
-  CALL_GROUP_VIDEO = 45;
-}
+// ── Core Wire Types ────────────────────────────────────────────────────
+// V2 `MessageEnvelope` removed in V3.0 Wave 4 Phase B (2026-05-05).
+// V2 `MessageType` enum removed in V3.0 Wave 7 (2026-05-05) — final V2-cut.
+// Wire-format is exclusively NetworkPacketV3 + ApplicationFrameV3
+// (§3 Appendix A). All wire-typing happens via `MessageTypeV3` (defined
+// below in §V3 Coexistence section).
 
 // ── Compression ────────────────────────────────────────────────────────
 
@@ -268,13 +65,6 @@ message ProofOfWork {
   bytes hash = 3;
 }
 
-message PerMessageKem {
-  bytes ephemeral_x25519_pk = 1;   // 32 bytes
-  bytes ml_kem_ciphertext = 2;     // 1088 bytes
-  bytes aes_nonce = 3;             // 12 bytes
-  uint32 version = 4;              // KEM version. proto3-default = 0 (pre-rollout sender, dropped by v2-only receivers).
-}
-
 // ── Peer Information ───────────────────────────────────────────────────
 
 message PeerInfoProto {
@@ -288,13 +78,21 @@ message PeerInfoProto {
   uint64 last_seen = 8;
   NatType nat_type = 9;
   uint32 capabilities = 10;
-  bytes ed25519_public_key = 11;
-  bytes ml_dsa_public_key = 12;
+  bytes ed25519_public_key = 11;        // User-Sig PK (Identity-Signaturen, Mailbox-IDs, CR-Verify)
+  bytes ml_dsa_public_key = 12;         // User-Sig PK (PQ-Komponente)
   bytes ed25519_signature = 13;
   bytes ml_dsa_signature = 14;
   bytes x25519_public_key = 15;
   bytes ml_kem_public_key = 16;
   bytes user_id = 17;             // Multi-Device (§26): stable identity (same across all devices)
+  // §17.3 Welle 3 — Device-Sig PK (per-device, persisted in device_keys.json).
+  // Distinct from ed25519_public_key/ml_dsa_public_key (User-Sig, identity-wide):
+  // outer NetworkPacketV3 device_sig is signed with the Device-Sig keypair, so
+  // verifyOuterDeviceSig must use *these* fields, not the User-Sig PKs above.
+  // Empty/absent = receiver falls back to lenient-bootstrap path until learned.
+  bytes device_ed25519_public_key = 18;
+  bytes device_ml_dsa_public_key = 19;
+  bytes key_fingerprint = 20;           // SHA-256(ed25519_pk ‖ ml_dsa_pk ‖ x25519_pk ‖ ml_kem_pk ‖ device_ed25519_pk ‖ device_ml_dsa_pk) — slim PEER_LIST_PUSH omits PQ keys; receiver compares fingerprint to detect key changes and requests full keys via PEER_KEY_REQUEST on mismatch.
 }
 
 message PeerAddressProto {
@@ -312,6 +110,9 @@ enum AddressType {
   IPV4_PUBLIC = 0;
   IPV4_PRIVATE = 1;
   IPV6_GLOBAL = 2;
+  IPV6_ULA = 3;          // RFC 4193 fc00::/7 (fc.. or fd..)
+  IPV6_LINK_LOCAL = 4;   // RFC 4291 fe80::/10
+  IPV6_SITE_LOCAL = 5;   // RFC 3879 fec0::/10 (deprecated)
 }
 
 enum NatType {
@@ -326,6 +127,12 @@ enum NatType {
 message DhtPing {
   bytes sender_id = 1;
   uint64 timestamp = 2;
+  // Welle 5.12 Stage-2 hot-path heal hint (§5.10.2 / §5.12). When true, the
+  // ping is a Stale-PK recovery probe — the responder MUST answer with the
+  // normal DHT_PONG *and* an unsolicited firstParty PEER_LIST_PUSH carrying
+  // its own PeerInfo (current signing keys), so the prober heals the cached
+  // PK in 1 RTT instead of waiting for a periodic peer exchange.
+  bool pk_recovery_hint = 3;
 }
 
 message DhtPong {
@@ -382,6 +189,23 @@ message PeerListWant {
 
 message PeerListPush {
   repeated PeerInfoProto peers = 1;
+  // Parallel-Index zu `peers`. Pusher's Distance-Vector-Sicht zu peer[i]:
+  //   hops_from_sender[i] = hop-count (0 = self-broadcast)
+  //   cost_from_sender[i] = aggregierter cost-Sum (0 = self-broadcast)
+  // Backwards-Compat: leer beide Listen → Empfänger fällt auf "nur-Cache"-Pfad
+  // zurück (bisheriges Verhalten). Wenn vorhanden, MÜSSEN beide Listen genau
+  // gleich lang wie `peers` sein, sonst silent drop des betroffenen Eintrags
+  // mit WARN-Log.
+  repeated uint32 hops_from_sender = 2;
+  repeated uint32 cost_from_sender = 3;
+}
+
+message PeerKeyRequest {
+  // Empty — recipient responds with full PeerInfoProto for all hosted identities.
+}
+
+message PeerKeyResponse {
+  repeated PeerInfoProto peers = 1;  // Full PeerInfoProto with all PQ keys
 }
 
 // ── Contact Request ────────────────────────────────────────────────────
@@ -428,16 +252,16 @@ message GroupCreate {
   bytes picture = 5;
 }
 
-message GroupInvite {
+message GroupInviteV3 {
   bytes group_id = 1;
   string group_name = 2;
   bytes inviter_id = 3;
-  repeated GroupMember members = 4;
+  repeated GroupMemberV3 members = 4;
   bytes group_picture = 5;
   string group_description = 6;
 }
 
-message GroupMember {
+message GroupMemberV3 {
   bytes node_id = 1;
   string display_name = 2;
   string role = 3;              // "owner", "admin", "member"
@@ -485,7 +309,7 @@ message ChannelInvite {
   bytes welcome_message = 5;
   bytes channel_picture = 6;
   string channel_description = 7;
-  repeated GroupMember members = 8;   // reuse GroupMember for full member list
+  repeated GroupMemberV3 members = 8;   // reuse GroupMemberV3 for full member list
   bool is_public = 9;
   bool is_adult = 10;
   string language = 11;
@@ -596,7 +420,11 @@ message StoredMessage {
   bytes recipient_id = 3;
   string conversation_id = 4;
   uint64 timestamp = 5;
-  MessageType message_type = 6;
+  // V3 (2026-05-05 Wave 7): UI-tag carrying `UiMessageType.wireValue` (sequential
+  // 0..N, see lib/core/service/service_types.dart). Detached from the V2
+  // `MessageType` wire enum so RESTORE_RESPONSE no longer drags V2-numbering
+  // into the inner-frame payload.
+  int32 ui_message_type = 6;
   bytes payload = 7;             // encrypted
 }
 
@@ -620,6 +448,11 @@ message FragmentStoreAck {
 
 message FragmentRetrieve {
   bytes mailbox_id = 1;
+}
+
+message FragmentRetrieveResponse {
+  bytes mailbox_id = 1;
+  uint32 fragment_count = 2;
 }
 
 message FragmentDelete {
@@ -837,10 +670,17 @@ message RelayForward {
   bytes wrapped_envelope = 3;          // Serialisierter Original-Envelope (unverändert)
   uint32 hop_count = 4;               // Aktueller Hop (startet bei 1)
   uint32 max_hops = 5;                // Maximum (Default 3)
-  repeated bytes visited_nodes = 6;    // Node-IDs die bereits weitergeleitet haben
-  bytes origin_node_id = 7;           // Original-Sender für RELAY_ACK-Routing
+  repeated bytes visited_nodes = 6;    // deviceNodeIds die bereits weitergeleitet haben
+  bytes origin_node_id = 7;           // Original-Sender deviceNodeId für RELAY_ACK-Routing
   uint64 created_at_ms = 8;           // Erstellungszeitpunkt (TTL: max 5 Min)
   uint32 ttl = 9;                     // Hop Limit (Startwert 64, pro Hop -1, bei 0 verwerfen)
+  bytes origin_user_id = 10;          // Original-Sender userId — Multi-Identity-aware
+                                      // Loop-Prevention: Forwarder MUST exclude any
+                                      // candidate whose userId matches origin_user_id,
+                                      // regardless of deviceNodeId. Without this, a
+                                      // sender's secondary identity can be picked as
+                                      // relay-candidate by a third node, creating a
+                                      // loop back to the original device (§3.3.4 + §26).
 }
 
 message RelayAck {
@@ -953,6 +793,28 @@ message MediaChunk {
   uint32 total_chunks = 3;        // Total number of chunks
   bytes chunk_data = 4;           // Chunk payload (piece of the original serialized envelope)
   bytes original_recipient_id = 5; // Final recipient (32 bytes) for routing
+}
+
+// ── Two-Stage Media Stage-2 (V3) ────────────────────────────────────
+//
+// MEDIA_ANNOUNCE (Stage 1) carries metadata + thumbnail. The receiver
+// then asks for the actual content via MTV3_MEDIA_REQUEST (payload =
+// original messageId bytes). The sender splits the file into
+// MediaChunkV3 frames, each shipped as its own ApplicationFrameV3
+// (per-chunk KEM-encrypted via sendToUser), and finalises with a
+// MediaCompleteV3 carrying the SHA-256 of the assembled bytes for
+// receiver-side integrity-check. Architecture §5.7 + §1797.
+message MediaChunkV3 {
+  bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
+  uint32 chunk_index = 2;         // 0-based chunk index
+  uint32 total_chunks = 3;        // Total number of chunks
+  bytes data         = 4;         // Chunk payload (≤32 KB after compression)
+}
+
+message MediaCompleteV3 {
+  bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
+  bytes content_hash = 2;         // SHA-256 of the fully reassembled file
+  uint64 total_size  = 3;         // Total file size in bytes (sanity-check)
 }
 
 // ── Overlay Multicast Tree (Phase 3d) ─────────────────────────────────
@@ -1341,3 +1203,449 @@ message IdentityLiveRetrieveRequest {
   bytes user_id = 1;
   bytes device_node_id = 2;
 }
+
+// Welle 5 (§4.3): pull DeviceKemRecordV3 from K=10 closest replicators per
+// (userId, deviceId). Storage-Key SHA-256("kem" || user_id || device_id).
+message IdentityKemRetrieveRequest {
+  bytes user_id = 1;
+  bytes device_id = 2;
+  uint64 minimum_seq = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// V3.0 LAYERED-FRAMES — Welle 1 Draft (Cleona_Chat_Architecture_v3_0.md)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// STATUS: Draft, NICHT protoc-generiert. Spec-Referenz: Appendix A (§A.1-A.7).
+//
+// Koexistenz-Regel: Diese V3-Typen leben PARALLEL zu MessageEnvelope/MessageType.
+// Build bleibt grün, Wire-Format unverändert. In Welle 2 (Hard-Cut, §23.2):
+//   - MessageEnvelope + MessageType (alt) werden ENTFERNT
+//   - NetworkPacketV3       → NetworkPacket
+//   - ApplicationFrameV3    → ApplicationFrame
+//   - PerMessageKemV3       → PerMessageKem (alt PerMessageKem entfernt)
+//   - MessageTypeV3         → MessageType
+//   - TextMessageV3         → TextMessage (neu, war vorher implizit in payload)
+// Damit sind die V3-Suffixe rein temporär für die Draft-Phase.
+//
+// Wiederverwendete Sub-Messages (unverändert übernommen): ContentMetadata,
+// EditMetadata, ExpiryMetadata, ErasureCodingMetadata, CompressionType,
+// ProofOfWork, PeerAddressProto, AddressType, ConnectionTypeProto. Die in
+// Appendix A.5 gezeigten Payload-Typen (ContactRequest, MediaInline, etc.)
+// existieren bereits oben unter v2-Namen und werden in Welle 2 1:1 reused
+// oder umbenannt — keine Notwendigkeit sie hier zu duplizieren.
+
+// ── Outer Layer (NetworkPacket) — was Relays sehen ──────────────────────
+//
+// Subjekt der Sigs = Device-Keypair (NICHT User-Keypair). Application-Frames
+// hybrid (Ed25519+ML-DSA), Infrastructure-Frames (DHT-Pings, RTT, Hole-Punch)
+// nur Ed25519 zur Bandwidth-Schonung — deviceMlDsaSig dann leer.
+message NetworkPacketV3 {
+  uint32        version            = 1;   // V3.0 = 1
+  uint32        flags              = 2;   // bit-flags, default 0
+  bytes         next_hop_device_id = 3;   // 32 bytes — Routing-Ziel des nächsten Hops
+  bytes         sender_device_id   = 4;   // 32 bytes — Origin-Device
+  uint64        timestamp_ms       = 5;
+  uint32        ttl                = 6;   // default 64, pro Hop -1
+  uint32        hop_count          = 7;   // pro Relay +1
+  bytes         network_tag        = 8;   // 16 bytes HMAC-SHA256-128 (Closed-Network)
+  ProofOfWork   pow                = 9;   // PoW-Solution
+
+  // Sigs (Subjekt = Device-Keypair)
+  bytes         device_ed25519_sig = 10;  // 64 bytes, immer
+  bytes         device_ml_dsa_sig  = 11;  // ~3300 bytes — leer bei Infrastructure-Frames
+
+  // Payload-Discriminator
+  PayloadTypeV3 payload_type       = 12;
+  bytes         payload            = 13;  // serialized ApplicationFrameV3 ODER NetworkPacketV3 (Onion)
+}
+
+enum PayloadTypeV3 {
+  PAYLOAD_APPLICATION_FRAME           = 0;   // Inner KEM-encrypted unter recipient-User-PK (E2E identity)
+  PAYLOAD_ONION_LAYER                 = 1;   // Inner = nested NetworkPacketV3, KEM-encrypted unter hop-Device-PK (V3.0 nicht aktiv, §2.5)
+  PAYLOAD_INFRASTRUCTURE_FRAME        = 2;   // Inner KEM-encrypted unter recipient-Device-PK (DHT, Routing, NAT, Reachability) — siehe §2.3.5
+  PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME = 3;   // Inner = serialized InfrastructureFrameV3 *plaintext* (no KEM, no zstd) — first-contact bootstrap path: solves chicken-and-egg loop where recipient's Device-KEM-PK is not yet known. Strict allow-list of messageTypes (BOOT-subset of §2.3.5). Closed-Network HMAC + Outer Device-Sig + inner-record signatures provide security. Ed25519-only on Outer (no ML-DSA). PoW skipped (same as INFRASTRUCTURE_FRAME).
+  // 4 reserved for future use (do not assign without spec update).
+}
+
+// ── Inner Layer (ApplicationFrame) — KEM-encrypted unter recipient-User-PK ─
+//
+// Wird im NetworkPacketV3.payload als KEM-Ciphertext via PerMessageKemV3 transportiert.
+// Subjekt der Sigs = User-Keypair (für Identity-Authentifizierung End-to-End).
+message ApplicationFrameV3 {
+  uint32          version             = 1;   // V3.0 = 1
+  bytes           recipient_user_id   = 2;   // 32 bytes
+  bytes           sender_user_id      = 3;   // 32 bytes
+  uint64          timestamp_ms        = 4;
+  bytes           message_id          = 5;   // 16 bytes UUID v4
+  MessageTypeV3   message_type        = 6;
+  bytes           payload             = 7;   // type-specific protobuf (siehe MessageTypeV3)
+
+  // Sigs (Subjekt = User-Keypair) — End-to-End-Identity-Authenticity
+  bytes           user_ed25519_sig    = 10;  // 64 bytes, immer
+  bytes           user_ml_dsa_sig     = 11;  // ~3300 bytes, immer für User-Frames
+
+  // Optionale Metadata (reuse existierender Sub-Messages)
+  ContentMetadata        content_metadata    = 12;
+  EditMetadata           edit_metadata       = 13;
+  ExpiryMetadata         expiry_metadata     = 14;
+  ErasureCodingMetadata  erasure_metadata    = 15;
+  CompressionType        compression         = 16;
+
+  // Conversation routing — empty for DM; set for group/channel pairwise fan-out.
+  // Receiver dispatches to the matching group/channel conversation. Calendar/Polls
+  // payload-internal group_ids are semantically distinct (linked-event association).
+  bytes                  group_id            = 17;
+}
+
+// ── KEM-Header v3 (Sec H-5 v2) ──────────────────────────────────────────
+//
+// Trägt den ApplicationFrameV3-Ciphertext + KEM-Material. Steht im
+// NetworkPacketV3.payload (mit payload_type = PAYLOAD_APPLICATION_FRAME).
+message PerMessageKemV3 {
+  bytes  x25519_ciphertext = 1;   // 32 bytes — X25519 ephemeral pubkey/ciphertext
+  bytes  ml_kem_ciphertext = 2;   // 1088 bytes ML-KEM-768
+  bytes  aead_ciphertext   = 3;   // ChaCha20-Poly1305(serialized ApplicationFrameV3 ODER InfrastructureFrameV3) + 16-byte tag
+  bytes  aead_nonce        = 4;   // 12 bytes
+  uint32 version           = 5;   // V3.0 = 2 (Sec H-5)
+}
+
+// ── Infrastructure-Frame V3 (Device-targeted Inner Layer, §2.3.5) ───────
+//
+// Drittes Inner-Frame-Subjekt (neben ApplicationFrameV3 und ONION_LAYER).
+// KEM-encrypted unter recipient-Device-KEM-PK (X25519+ML-KEM-768 hybrid v2),
+// nicht unter recipient-User-PK. Wird verwendet für DHT-Operations, Routing-
+// Probes, NAT-Traversal, Reachability — alles was AN EIN GERAET adressiert
+// ist, nicht an eine User-Identity.
+//
+// KEINE User-Sig-Felder: das Outer Device-Sig (auf NetworkPacketV3) liefert
+// die Routing-Authenticity. Es gibt kein UserID-Subjekt das End-to-End
+// authentifiziert werden muesste.
+//
+// Selektor-Liste: nur MessageTypes aus der §2.3.5 Infrastructure-Whitelist
+// (DHT_*, IDENTITY_AUTH_*, IDENTITY_LIVE_*, FRAGMENT_*, PEER_*, PEER_LIST_*,
+//  ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_*, DELIVERY_RECEIPT).
+// Mirror: isInfrastructureMessageTypeV3() Predicate (commit 940dfa1).
+//
+// Special-case CONTACT_REQUEST (First-CR-Bootstrap, §8.1.1): traegt eine
+// vollstaendige user-signed ApplicationFrameV3 als Sub-Payload, weil der
+// Sender bei First-Contact noch keinen User-KEM-PK des Empfaengers kennt.
+message InfrastructureFrameV3 {
+  uint32        version             = 1;   // V3.0 = 1
+  bytes         recipient_device_id = 2;   // 32 bytes
+  bytes         sender_device_id    = 3;   // 32 bytes (= NetworkPacketV3.sender_device_id)
+  uint64        timestamp_ms        = 4;
+  bytes         message_id          = 5;   // 16 bytes UUID v4 — end-to-end dedup
+  MessageTypeV3 message_type        = 6;   // restricted to §2.3.5 selector list
+  bytes         payload             = 7;   // type-specific protobuf
+                                            // (CR-Bootstrap-Spezialfall: serialized ApplicationFrameV3-bytes)
+}
+
+// ── MessageType V3 (Numbering aus Appendix A.4) ─────────────────────────
+//
+// ACHTUNG: Numbers WEICHEN VON MessageType (alt) AB. Beispiele:
+//   alt: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30
+//   alt: TWIN_SYNC=131          → V3: MTV3_TWIN_SYNC=180
+// Hard-Cut in Welle 2 (Profile-Reset, §23.2). Bis dahin koexistieren beide
+// Enums problemlos weil sie verschiedene Namen haben.
+//
+// Prefix MTV3_ um Symbol-Kollision mit MessageType (alt) zu vermeiden.
+// In Welle 2 wird Prefix entfernt + Enum auf MessageType umbenannt.
+enum MessageTypeV3 {
+  // ── Core Messaging ──────────────────────────────────────────
+  MTV3_TEXT                       = 0;
+  MTV3_MEDIA_INLINE               = 1;   // ≤256KB, inline in payload
+  MTV3_MEDIA_ANNOUNCE             = 2;   // Two-Stage Stage 1
+  MTV3_MEDIA_REQUEST              = 3;   // Two-Stage Stage 2 trigger
+  MTV3_MEDIA_CHUNK                = 4;   // Two-Stage Stage 2 data
+  MTV3_MEDIA_COMPLETE             = 5;
+  MTV3_MEDIA_REJECT               = 6;
+  MTV3_REACTION                   = 7;
+  MTV3_REPLY                      = 8;   // metadata in ContentMetadata
+  MTV3_EDIT                       = 9;   // EditMetadata
+  MTV3_DELETE                     = 10;  // soft-delete (15min window)
+  MTV3_TYPING_INDICATOR           = 15;  // ephemeral
+  MTV3_READ_RECEIPT               = 16;  // ephemeral
+  MTV3_DELIVERY_RECEIPT           = 17;  // ACK für non-ephemere Types
+  MTV3_VOICE_MESSAGE              = 22;  // AAC, optional Transkription
+
+  // ── Recovery & Identity ─────────────────────────────────────
+  MTV3_RESTORE_BROADCAST          = 30;
+  MTV3_RESTORE_RESPONSE           = 31;
+  MTV3_IDENTITY_DELETED           = 32;
+  MTV3_PROFILE_UPDATE             = 33;
+  MTV3_KEY_ROTATION_BROADCAST     = 34;
+  // §26.6.2 Multi-Device Emergency Key Rotation: receiver of a successfully
+  // applied KEY_ROTATION_BROADCAST sends a pure-ACK back to the rotator's
+  // new identity so the broadcaster can mark the contact as acknowledged
+  // and stop retrying. Body is empty — auth is the §23.3 inner User-Sig
+  // (the V2 outer-Ed25519 forge-defence per Paket C F2 is subsumed by the
+  // V3 pipeline's User-Sig + Device-Sig + KEM-decap chain).
+  MTV3_KEY_ROTATION_ACK           = 38;
+
+  // ── Guardian / Shamir Social Recovery (§6.2) ────────────────
+  // Setup-time and restore-time guardian-to-guardian/owner messaging.
+  // Carried on InfrastructureFrame (§2.3.5 selector) because the
+  // recipient is identified by deviceNodeId during setup (mid-bootstrap
+  // contact graph), and during restore the owner's user-sig keys are
+  // mid-rotation (§7.4 — same trust-bootstrap rationale as
+  // RESTORE_BROADCAST). Bodies are pre-existing
+  // GuardianShareStore / GuardianRestoreRequest / GuardianRestoreResponse.
+  MTV3_GUARDIAN_SHARE_STORE       = 35;
+  MTV3_GUARDIAN_RESTORE_REQUEST   = 36;
+  MTV3_GUARDIAN_RESTORE_RESPONSE  = 37;
+
+  // ── Contact Requests ────────────────────────────────────────
+  MTV3_CONTACT_REQUEST            = 40;
+  MTV3_CONTACT_REQUEST_RESPONSE   = 41;
+
+  // ── Groups (Pairwise Fanout) ────────────────────────────────
+  MTV3_GROUP_CREATE               = 50;
+  MTV3_GROUP_INVITE               = 51;
+  MTV3_GROUP_LEAVE                = 52;
+  MTV3_GROUP_KEY_UPDATE           = 53;
+
+  // ── Channels ────────────────────────────────────────────────
+  MTV3_CHANNEL_CREATE             = 60;
+  MTV3_CHANNEL_POST               = 61;
+  MTV3_CHANNEL_INVITE             = 62;
+  MTV3_CHANNEL_LEAVE              = 63;
+  MTV3_CHANNEL_ROLE_UPDATE        = 64;
+  MTV3_CHANNEL_BAD_BADGE_REPORT   = 65;
+  MTV3_CHANNEL_JURY_VOTE          = 66;
+  MTV3_CHANNEL_MOD_DECISION       = 67;
+  MTV3_CHANNEL_SUBSCRIBE_PROBE    = 68;
+
+  // ── Calls (Signaling) ───────────────────────────────────────
+  MTV3_CALL_INVITE                = 70;
+  MTV3_CALL_ANSWER                = 71;
+  MTV3_CALL_REJECT                = 72;
+  MTV3_CALL_HANGUP                = 73;
+  MTV3_ICE_CANDIDATE              = 74;
+  MTV3_CALL_REJOIN                = 75;
+
+  // ── Calls (Live-Media: skip ML-DSA + zstd; AES-GCM under call_key) ──
+  MTV3_CALL_AUDIO                 = 76;
+  MTV3_CALL_VIDEO                 = 77;
+  MTV3_CALL_GROUP_AUDIO           = 78;
+  MTV3_CALL_GROUP_VIDEO           = 79;
+  MTV3_CALL_GROUP_LEAVE           = 80;
+  MTV3_CALL_GROUP_KEY_ROTATE      = 81;
+  MTV3_CALL_RTT_PING              = 82;
+  MTV3_CALL_RTT_PONG              = 83;
+  MTV3_CALL_TREE_UPDATE           = 84;
+  MTV3_CALL_KEYFRAME_REQUEST      = 85;
+
+  // ── Channel Gossip & Moderation Plumbing (§10.2) ────────────
+  // Wave 2B.3: V3 carriers for the V2 CHANNEL_INDEX_EXCHANGE / JOIN_REQUEST /
+  // REPORT triplet. INDEX_EXCHANGE is a peer-to-peer broadcast to random
+  // routing-table peers (NOT necessarily contacts) so its eventual wire path
+  // is InfrastructureFrame; JOIN_REQUEST and REPORT go owner/moderator-bound
+  // and ride ApplicationFrame via sendToUser.
+  MTV3_CHANNEL_INDEX_EXCHANGE     = 90;
+  MTV3_CHANNEL_JOIN_REQUEST       = 91;
+  MTV3_CHANNEL_REPORT             = 92;
+
+  // ── DHT Operations ──────────────────────────────────────────
+  MTV3_PEER_LIST_PUSH             = 100;
+  MTV3_PEER_LIST_SUMMARY          = 101;
+  MTV3_PEER_LIST_WANT             = 102;
+  MTV3_PEER_KEY_REQUEST           = 103;  // "Send me your full PQ keys" (empty payload)
+  MTV3_PEER_KEY_RESPONSE          = 104;  // Full PeerInfoProto with all keys
+
+  MTV3_DHT_PING                   = 110;
+  MTV3_DHT_PONG                   = 111;
+  MTV3_DHT_FIND_NODE              = 112;
+  MTV3_DHT_FIND_NODE_RESPONSE     = 113;
+  MTV3_DHT_STORE                  = 114;
+  MTV3_DHT_STORE_RESPONSE         = 115;
+  MTV3_DHT_FIND_VALUE             = 116;
+  MTV3_DHT_FIND_VALUE_RESPONSE    = 117;
+
+  // ── Fragment Storage (Erasure-Coded) ────────────────────────
+  MTV3_FRAGMENT_STORE             = 120;
+  MTV3_FRAGMENT_STORE_ACK         = 121;
+  MTV3_FRAGMENT_RETRIEVE          = 122;
+  MTV3_FRAGMENT_RETRIEVE_RESPONSE = 123;
+  MTV3_FRAGMENT_DELETE            = 124;
+
+  // ── Store-and-Forward auf Mutual Peers ──────────────────────
+  MTV3_PEER_STORE                 = 130;
+  MTV3_PEER_STORE_ACK             = 131;
+  MTV3_PEER_RETRIEVE              = 132;
+  MTV3_PEER_RETRIEVE_RESPONSE     = 133;
+
+  // ── Per-Chat Configuration ──────────────────────────────────
+  MTV3_CHAT_CONFIG_UPDATE         = 140;
+  MTV3_CHAT_CONFIG_RESPONSE       = 141;
+
+  // ── Routing & Reachability ──────────────────────────────────
+  MTV3_ROUTE_UPDATE               = 150;
+  MTV3_REACHABILITY_QUERY         = 151;
+  MTV3_REACHABILITY_RESPONSE      = 152;
+  MTV3_RELAY_FORWARD              = 153;
+  MTV3_RELAY_ACK                  = 154;
+
+  // ── Hole-Punch ──────────────────────────────────────────────
+  MTV3_HOLE_PUNCH_REQUEST         = 160;
+  MTV3_HOLE_PUNCH_NOTIFY          = 161;
+  MTV3_HOLE_PUNCH_PING            = 162;
+  MTV3_HOLE_PUNCH_PONG            = 163;
+
+  // ── 2D-DHT Identity Resolution ──────────────────────────────
+  MTV3_IDENTITY_AUTH_PUBLISH      = 170;
+  MTV3_IDENTITY_AUTH_RETRIEVE     = 171;
+  MTV3_IDENTITY_AUTH_RESPONSE     = 172;
+  MTV3_IDENTITY_LIVE_PUBLISH      = 173;
+  MTV3_IDENTITY_LIVE_RETRIEVE     = 174;
+  MTV3_IDENTITY_LIVE_RESPONSE     = 175;
+  // ── 2D-DHT Device-KEM-Record (Welle 5, §3.5b + §4.3) ────────
+  MTV3_IDENTITY_KEM_PUBLISH       = 176;
+  MTV3_IDENTITY_KEM_RETRIEVE      = 177;
+  MTV3_IDENTITY_KEM_RESPONSE      = 178;
+
+  // ── Multi-Device (§7) ───────────────────────────────────────
+  MTV3_TWIN_SYNC                  = 180;   // 12 Sub-Types via TwinSyncType
+  MTV3_DEVICE_PAIR_REQUEST        = 181;
+  MTV3_DEVICE_PAIR_APPROVE        = 182;
+  MTV3_DEVICE_REVOCATION          = 183;
+
+  // ── Calendar (§11.1) ────────────────────────────────────────
+  MTV3_CALENDAR_INVITE            = 190;
+  MTV3_CALENDAR_RSVP              = 191;
+  MTV3_CALENDAR_UPDATE            = 192;
+  MTV3_CALENDAR_DELETE            = 193;
+  MTV3_FREE_BUSY_REQUEST          = 194;
+  MTV3_FREE_BUSY_RESPONSE         = 195;
+
+  // ── Polls (§11.3) ───────────────────────────────────────────
+  MTV3_POLL_CREATE                = 200;
+  MTV3_POLL_VOTE                  = 201;
+  MTV3_POLL_VOTE_ANONYMOUS        = 202;
+  MTV3_POLL_UPDATE                = 203;
+  MTV3_POLL_SNAPSHOT              = 204;
+  MTV3_POLL_REVOKE                = 205;
+
+  // ── In-Call Collaboration (§10.5, geplant) ──────────────────
+  MTV3_WHITEBOARD_STROKE          = 210;
+  MTV3_WHITEBOARD_PAGE            = 211;
+  MTV3_FILE_EXCHANGE              = 212;
+  MTV3_CLIPBOARD_EXCHANGE         = 213;
+  MTV3_SCREEN_SHARE_FRAME         = 214;
+  MTV3_CALL_CHAT                  = 215;
+  MTV3_REMOTE_CONTROL_INPUT       = 216;
+}
+
+// ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────
+//
+// V2 packte Text als raw UTF-8 in encrypted_payload. V3 wickelt jeden
+// Payload-Typ in eine eigene proto-Message — gibt uns Versions-Felder pro
+// Typ und ein klares Schema für künftige Extensions (formatHint etc.).
+message TextMessageV3 {
+  string text         = 1;
+  string format_hint  = 2;   // "plain" | "markdown" — V3.0 nur "plain"
+
+  // Reply / Quote (V3 reply schema). Empty when this is not a reply.
+  // - reply_to_message_id: 16-byte messageId of the quoted bubble. Receivers
+  //   can resolve it locally (it lives in the same conversation) to render
+  //   the inline-quote header. UI falls back to reply_to_snippet if the
+  //   referenced message is not retained locally.
+  // - reply_to_snippet:    short text excerpt sender renders at compose-time.
+  //   Bounded to ~120 chars by sender-side trimming.
+  bytes  reply_to_message_id = 3;
+  string reply_to_snippet    = 4;
+
+  // Sender-side link preview (Architecture §2.3.4). Sender fetches the
+  // preview (HTTPS-only, SSRF-guarded) and embeds the result so the
+  // receiver renders it WITHOUT performing any network request — the
+  // receiver-MUST-NOT-fetch invariant is what makes link previews
+  // privacy-safe. Empty when the message has no URL or fetch failed.
+  LinkPreview link_preview   = 5;
+}
+
+// ── Identity-Resolution V3 (§4.3) ───────────────────────────────────────
+//
+// AuthManifestV3 erweitert AuthManifestProto (alt) um die User-Pubkeys,
+// damit Receiver die Sig OHNE separaten Identity-Lookup verifizieren kann.
+// Spec: Appendix A.5 AuthManifest.
+message AuthManifestV3 {
+  bytes           user_id                 = 1;
+  repeated bytes  authorized_device_ids   = 2;
+  uint64          ttl_seconds             = 3;   // 86400 (24h)
+  uint64          sequence_number         = 4;
+  uint64          published_at_ms         = 5;
+  bytes           ed25519_sig             = 6;
+  bytes           ml_dsa_sig              = 7;
+  bytes           user_ed25519_pk         = 8;   // für In-Place-Verify
+  bytes           user_ml_dsa_pk          = 9;
+}
+
+message LivenessRecordV3 {
+  bytes                      user_id            = 1;
+  bytes                      device_node_id     = 2;
+  repeated PeerAddressProto  addresses          = 3;
+  uint64                     ttl_seconds        = 4;   // 900 (15min) oder 3600 (1h)
+  uint64                     sequence_number    = 5;
+  uint64                     published_at_ms    = 6;
+  bytes                      ed25519_sig        = 7;   // signed by USER-key (nicht Device)
+  bytes                      device_ed25519_pk  = 8;   // für Outer-Sig-Verify am Receiver
+}
+
+// ── DeviceKemRecord V3 (2D-DHT, Welle 5, §4.3) ──────────────────────────
+//
+// Dritter 2D-DHT-Record neben AuthManifestV3 und LivenessRecordV3. Traegt
+// die Device-KEM-Pubkeys (X25519 + ML-KEM-768), die fuer das KEM-Encap auf
+// InfrastructureFrameV3 (und spaeter ONION_LAYER) gebraucht werden.
+//
+// Lifecycle-Trennung: KEM-PK aendert sich nur bei Device-Key-Reset (Multi-
+// Year-Cadence), Liveness flippt alle 15min. Separate Records vermeiden
+// unnoetigen DHT-Traffic durch das Zusammen-Republish.
+//
+// Trust-Anchor: signed by user master Ed25519 key (gleiche Chain wie
+// AuthManifestV3 — der User vouches fuer die Device-KEM-PK seines
+// authorisierten Geraets).
+//
+// Storage-Key: SHA-256("kem" || user_id || device_id) — eigener Key-Space,
+// independent von "auth"+userId und "live"+userId+deviceId.
+message DeviceKemRecordV3 {
+  bytes  user_id              = 1;   // 32 bytes
+  bytes  device_id            = 2;   // 32 bytes
+  bytes  device_x25519_pk     = 3;   // 32 bytes
+  bytes  device_ml_kem_pk     = 4;   // 1184 bytes (ML-KEM-768 public key)
+  uint64 ttl_seconds          = 5;   // 86400 (24h)
+  uint64 sequence_number      = 6;
+  uint64 published_at_ms      = 7;
+  bytes  ed25519_sig          = 8;   // signed by user master Ed25519 key
+  bytes  user_ed25519_pk      = 9;   // for in-place verify
+}
+
+// ── PeerListEntry V3 (§5.x PEER_LIST_PUSH) ──────────────────────────────
+//
+// Ersetzt PeerInfoProto in den V3-PEER_LIST_*-Frames. Schmaler weil
+// Identity-Felder (Pubkeys, User-ID) jetzt aus 2D-DHT-Resolver kommen.
+message PeerListEntryV3 {
+  bytes                       device_id        = 1;   // 32 bytes
+  repeated PeerAddressProto   addresses        = 2;
+  uint64                      last_seen_ms     = 3;
+  uint64                      age_hours        = 4;   // routing-table-age hint
+  ConnectionTypeProto         connection_type  = 5;
+}
+
+// ── RelayForward V3 ─────────────────────────────────────────────────────
+//
+// Inhaltlich nahe an RelayForward (alt), aber:
+//   - wrappedPacket = NetworkPacketV3 (statt MessageEnvelope)
+//   - origin_device_id ersetzt origin_node_id (Begriffshygiene)
+//   - kein origin_user_id mehr (User-Identity steckt im Inner Frame)
+message RelayForwardV3 {
+  bytes           relay_id            = 1;   // 16 bytes UUID — Anti-Loop
+  bytes           final_recipient_id  = 2;   // = device_id of final destination
+  bytes           wrapped_packet      = 3;   // serialized NetworkPacketV3
+  uint32          hop_count           = 4;
+  uint32          max_hops            = 5;   // = 3
+  uint32          ttl                 = 6;
+  bytes           origin_device_id    = 7;
+  uint64          created_at_ms       = 8;
+  repeated bytes  visited             = 9;   // device_ids that already forwarded
+}
+

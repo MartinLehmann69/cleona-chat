@@ -120,6 +120,29 @@ class StoredFragment {
       );
 }
 
+/// In-memory push state for proactive fragment push (Architecture §3.5).
+/// Tracks per-fragment delivery state to the mailbox owner so that a relay
+/// can retry on no-ACK within the 3-attempt budget. Reachability events do
+/// not trigger fresh push series (V3.1.75 §3.5 "No re-push on reachability").
+/// Not persisted: rebuilt on relay-node restart from current reachability —
+/// restart resets the budget exactly once (architectural exception).
+/// Duplicate pushes after a restart are deduplicated by `MailboxStore.storeFragment`.
+class FragmentPushState {
+  final Uint8List ownerNodeId;
+  int attempts = 0;
+  DateTime? lastPushAt;
+  bool pushAcked = false;
+  /// Active retry timer — cancelled on ACK or when max attempts reached.
+  /// Single timer per (storeKey, owner) ensures idempotent retry chain.
+  Timer? retryTimer;
+  FragmentPushState(this.ownerNodeId);
+
+  void cancelRetry() {
+    retryTimer?.cancel();
+    retryTimer = null;
+  }
+}
+
 /// Persistent fragment store for relay and own mailbox.
 /// Fragments stored as binary files (.bin) in the profile mailbox directory.
 /// Migrates legacy .json files on load.
@@ -127,9 +150,20 @@ class MailboxStore {
   final String profileDir;
   final CLogger _log;
   final Map<String, StoredFragment> _fragments = {};
+  /// In-memory push state per storeKey. See `FragmentPushState`.
+  final Map<String, FragmentPushState> _pushState = {};
   Timer? _flushTimer;
   Timer? _pruneTimer;
   bool _dirty = false;
+
+  /// Max push attempts per fragment before giving up proactive push.
+  /// (Architecture §3.5 — same semantics as §3.3.7 maxPushCount.)
+  static const int maxPushAttempts = 3;
+
+  /// Fragment TTL for DHT-stored Reed-Solomon fragments (7 days).
+  /// Matches `StoredFragment` default `expiresAt` (line 32 above).
+  /// (Architecture §6.3 — Store-and-Forward / Reed-Solomon backup window.)
+  static const Duration fragmentTtl = Duration(days: 7);
 
   /// Total relay storage budget in bytes.
   /// Dynamically set based on available device storage.
@@ -276,6 +310,7 @@ class MailboxStore {
     }
     for (final key in expired) {
       _fragments.remove(key);
+      _pushState.remove(key)?.cancelRetry();
       _deleteFragmentFile(key);
     }
     return expired.length;
@@ -334,8 +369,65 @@ class MailboxStore {
     }
     for (final key in keysToRemove) {
       _fragments.remove(key);
+      _pushState.remove(key)?.cancelRetry();
       _deleteFragmentFile(key);
     }
+  }
+
+  // ── Proactive push state (Architecture §3.5) ──────────────────────
+
+  /// Get or create push state for a fragment + owner.
+  /// Returns null if fragment is no longer stored.
+  FragmentPushState? pushStateFor(String storeKey, Uint8List ownerNodeId) {
+    if (!_fragments.containsKey(storeKey)) return null;
+    var state = _pushState[storeKey];
+    if (state == null || !_bytesEqual(state.ownerNodeId, ownerNodeId)) {
+      state = FragmentPushState(Uint8List.fromList(ownerNodeId));
+      _pushState[storeKey] = state;
+    }
+    return state;
+  }
+
+  /// Mark a push attempt (increments counter, records timestamp).
+  void recordPushAttempt(String storeKey, Uint8List ownerNodeId) {
+    final state = pushStateFor(storeKey, ownerNodeId);
+    if (state == null) return;
+    state.attempts++;
+    state.lastPushAt = DateTime.now();
+  }
+
+  /// Mark a fragment as ACKed by the owner. Looks up by messageId+index.
+  /// Cancels any pending retry timer. Returns the storeKey if found, else null.
+  String? markPushAcked(Uint8List messageId, int fragmentIndex) {
+    for (final entry in _fragments.entries) {
+      final f = entry.value;
+      if (f.fragmentIndex == fragmentIndex &&
+          _bytesEqual(f.messageId, messageId)) {
+        final state = _pushState[entry.key];
+        if (state != null) {
+          state.pushAcked = true;
+          state.cancelRetry();
+        }
+        return entry.key;
+      }
+    }
+    return null;
+  }
+
+  /// Pending pushes (not acked, attempts < max) for a specific owner.
+  /// Diagnostic / test inspection only — production wiring no longer triggers
+  /// re-pushes on reachability changes (V3.1.75 §3.5).
+  List<StoredFragment> pendingPushesFor(Uint8List ownerNodeId) {
+    final result = <StoredFragment>[];
+    for (final entry in _fragments.entries) {
+      final state = _pushState[entry.key];
+      if (state == null) continue;
+      if (state.pushAcked) continue;
+      if (state.attempts >= maxPushAttempts) continue;
+      if (!_bytesEqual(state.ownerNodeId, ownerNodeId)) continue;
+      result.add(entry.value);
+    }
+    return result;
   }
 
   void _deleteFragmentFile(String key) {
@@ -384,6 +476,9 @@ class MailboxStore {
   void dispose() {
     _flushTimer?.cancel();
     _pruneTimer?.cancel();
+    for (final s in _pushState.values) {
+      s.cancelRetry();
+    }
     _flush();
   }
 }

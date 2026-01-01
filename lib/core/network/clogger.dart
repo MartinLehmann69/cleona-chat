@@ -28,24 +28,29 @@ class CLogger {
   void warn(String msg) => _log(LogLevel.warn, msg);
   void error(String msg) => _log(LogLevel.error, msg);
 
-  /// On Android, DEBUG logs only go to the file buffer (not console) to avoid
-  /// flooding the main thread with synchronous I/O. INFO and above still go
-  /// to logcat so they're visible in real-time.
-  static final bool _isAndroid = Platform.isAndroid;
-
   void _log(LogLevel level, String msg) {
     final now = DateTime.now();
     final ts = now.toIso8601String();
     final levelStr = level.name.toUpperCase().padRight(5);
     final line = '$ts [$levelStr] [$module] $msg';
 
-    // On Android: skip console output for DEBUG to avoid main-thread I/O flooding.
-    // DEBUG lines still go to the file buffer below.
-    if (!(_isAndroid && level == LogLevel.debug)) {
+    // DEBUG only goes to the file buffer — console output is INFO+.
+    // On Android this avoids main-thread I/O flooding; on Windows it
+    // prevents the console window from scrolling endlessly with packet-
+    // level noise that makes the machine look like "die Hölle ist los".
+    if (level != LogLevel.debug) {
       try {
         // ignore: avoid_print
         print(line);
       } catch (_) {}
+    }
+
+    // ERROR-level: also write to stderr directly (synchronous, no buffer).
+    // Survives logger/buffer failure modes; lands in the wrapper's stderr-capture
+    // so a stack trace is visible even when the process dies before the 2s
+    // periodic flush runs. See C-3 (B-4 daemon crash without trace).
+    if (level == LogLevel.error) {
+      try { stderr.writeln(line); } catch (_) {}
     }
 
     // Buffer for file write

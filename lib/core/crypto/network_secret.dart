@@ -165,25 +165,65 @@ class NetworkSecret {
     return result;
   }
 
-  /// Length of the HMAC prefix on all UDP packets.
+  /// Length of the HMAC prefix on all non-Proto UDP packets (Discovery, CPRB,
+  /// fragments). NetworkPacketV3 carries its tag in the `network_tag` field
+  /// instead — see [networkTagLength].
   static const hmacPrefixLength = 8;
+
+  /// Length of the in-frame HMAC tag for NetworkPacketV3 (V3 wire-format).
+  /// HMAC-SHA256 truncated to 128 bits per Architecture v3.0 §2.4 [11].
+  static const networkTagLength = 16;
 
   /// Compute 8-byte truncated HMAC-SHA256 for packet authentication.
   /// Prepended to every outgoing UDP packet (Architecture 17.5.4).
   /// Always uses the CURRENT secret.
   static Uint8List computePacketHmac(Uint8List payload) {
-    return _computeHmacWith(secret, payload);
+    return _truncate(_computeHmacFull(secret, payload), hmacPrefixLength);
   }
 
-  /// Compute HMAC with a specific secret.
-  static Uint8List _computeHmacWith(Uint8List secretBytes, Uint8List payload) {
+  /// Compute the 16-byte in-frame network_tag for a NetworkPacketV3.
+  /// Input must be the protobuf serialization of the packet WITHOUT the
+  /// network_tag field set (Architecture v3.0 §2.4 [11]). Always uses the
+  /// CURRENT secret.
+  static Uint8List computeNetworkTag(Uint8List frameBytesWithoutTag) {
+    return _truncate(
+        _computeHmacFull(secret, frameBytesWithoutTag), networkTagLength);
+  }
+
+  /// Verify the 16-byte network_tag of a received NetworkPacketV3.
+  /// `frameBytesWithoutTag` must be the re-serialization of the parsed packet
+  /// with the network_tag field cleared. Tries the current secret first, then
+  /// the previous secret (if in transition).
+  static bool verifyNetworkTag(
+      Uint8List tag, Uint8List frameBytesWithoutTag) {
+    if (tag.length != networkTagLength) return false;
+    if (_verifyTagWith(secret, tag, frameBytesWithoutTag)) return true;
+    final prev = previousSecret;
+    if (prev != null && _verifyTagWith(prev, tag, frameBytesWithoutTag)) {
+      return true;
+    }
+    return false;
+  }
+
+  static bool _verifyTagWith(
+      Uint8List secretBytes, Uint8List tag, Uint8List payload) {
+    final expected =
+        _truncate(_computeHmacFull(secretBytes, payload), networkTagLength);
+    return _ctEquals(tag, expected);
+  }
+
+  /// Compute full 32-byte HMAC-SHA256 with a specific secret. Internal — most
+  /// callers want the 8-byte (prefix) or 16-byte (network_tag) truncation.
+  static Uint8List _computeHmacFull(Uint8List secretBytes, Uint8List payload) {
     final sodium = SodiumFFI();
     // HMAC-SHA256 expects 32-byte key — pad 16-byte secret to 32
     final key = Uint8List(32);
     key.setRange(0, 16, secretBytes);
-    final full = sodium.hmacSha256(key, payload);
-    return Uint8List.fromList(full.sublist(0, hmacPrefixLength));
+    return Uint8List.fromList(sodium.hmacSha256(key, payload));
   }
+
+  static Uint8List _truncate(Uint8List bytes, int length) =>
+      Uint8List.fromList(bytes.sublist(0, length));
 
   /// Verify the 8-byte HMAC prefix of a received packet.
   /// Returns true if valid against the current secret.
@@ -194,12 +234,19 @@ class NetworkSecret {
   /// Verify HMAC with a specific secret.
   static bool _verifyHmacWith(
       Uint8List secretBytes, Uint8List hmacBytes, Uint8List payload) {
-    final expected = _computeHmacWith(secretBytes, payload);
+    final expected =
+        _truncate(_computeHmacFull(secretBytes, payload), hmacPrefixLength);
     if (hmacBytes.length < hmacPrefixLength) return false;
-    // Constant-time comparison
+    return _ctEquals(
+        Uint8List.fromList(hmacBytes.sublist(0, hmacPrefixLength)), expected);
+  }
+
+  /// Constant-time equality on equal-length Uint8Lists.
+  static bool _ctEquals(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
     var diff = 0;
-    for (var i = 0; i < hmacPrefixLength; i++) {
-      diff |= hmacBytes[i] ^ expected[i];
+    for (var i = 0; i < a.length; i++) {
+      diff |= a[i] ^ b[i];
     }
     return diff == 0;
   }

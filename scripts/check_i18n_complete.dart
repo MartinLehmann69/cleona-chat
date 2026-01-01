@@ -7,7 +7,7 @@
 //
 // The Cleona project deliberately does not support an EN-fallback pattern for
 // new i18n keys: every key must carry a real translation in every supported
-// locale. See Cleona_Chat_Architecture_v2_2.md §13.
+// locale. See Cleona_Chat_Architecture_v3_0.md §17.
 //
 // Add this as a pre-commit / pre-push hook and a CI gate to prevent the
 // regression where new keys ship with only DE/EN (or DE/EN/ES/FR).
@@ -62,6 +62,6 @@ void main(List<String> args) {
     stderr.writeln('  $issue');
   }
   stderr.writeln('\nCleona does not permit EN-fallback for new keys. Add real translations');
-  stderr.writeln('for every supported locale (see Cleona_Chat_Architecture_v2_2.md §13).');
+  stderr.writeln('for every supported locale (see Cleona_Chat_Architecture_v3_0.md §17).');
   exit(1);
 }

@@ -19,6 +19,11 @@ class MessageBubble extends StatelessWidget {
   /// affordance.
   final VoidCallback? onActionsPressed;
 
+  /// When true, an active per-chat disappearing-message timer applies to this
+  /// message — render a small timer glyph next to the timestamp so the user
+  /// can see at a glance that the message will expire (gui-42).
+  final bool expiryActive;
+
   const MessageBubble({
     super.key,
     required this.text,
@@ -30,6 +35,7 @@ class MessageBubble extends StatelessWidget {
     this.onTap,
     this.onLongPress,
     this.onActionsPressed,
+    this.expiryActive = false,
   });
 
   @override
@@ -58,15 +64,35 @@ class MessageBubble extends StatelessWidget {
             bottomRight: Radius.circular(baseRadius),
           );
 
-    // Photo-skin frosted glass: let the hero asset shine through. Partner
-    // bubbles get a lightly-tinted surface, own bubbles keep accent but at
-    // reduced alpha so the BackdropFilter blur underneath is visible.
+    // Photo-skin frosted glass: let the hero asset shine through. Match the
+    // chat_list_tile / contact_tile pattern (50%-black neutral fill + 15%
+    // white hairline border) so home-screen tiles and chat bubbles share one
+    // visual language. Own bubbles add a subtle accent tint on top of the
+    // neutral dark so sender vs partner is still distinguishable, but keep
+    // the alpha low enough that the BackdropFilter blur is clearly visible
+    // (saturated 0.78 accent fills were too opaque — the previous values
+    // collapsed the frosted-glass effect into a flat-color bubble, which is
+    // exactly the regression the user reported).
+    final Color partnerPhotoFill = const Color(0x80000000); // rgba(0,0,0,0.5)
+    final Color ownPhotoFill = Color.alphaBlend(
+      character.accentColor.withValues(alpha: 0.45),
+      const Color(0x80000000),
+    );
     final bubbleColor = isOwn
-        ? (useBlur ? character.accentColor.withValues(alpha: 0.78) : character.accentColor)
-        : (useBlur ? theme.colorScheme.surface.withValues(alpha: 0.55) : theme.colorScheme.surface);
-    final textColor = isOwn
+        ? (useBlur ? ownPhotoFill : character.accentColor)
+        : (useBlur ? partnerPhotoFill : theme.colorScheme.surface);
+    final textColor = useBlur
         ? Colors.white
-        : theme.colorScheme.onSurface;
+        : (isOwn ? Colors.white : theme.colorScheme.onSurface);
+
+    // Photo mode mirrors the tile chrome: hairline white border, no shadow
+    // (BackdropFilter does the depth cue). Solid skins keep the original
+    // outline + elevation language.
+    final Border? bubbleBorder = useBlur
+        ? Border.all(color: const Color(0x26FFFFFF), width: 1) // 15% white
+        : (isOwn
+            ? null
+            : Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)));
 
     final hasActions = onActionsPressed != null;
     Widget bubbleContainer = Container(
@@ -80,7 +106,7 @@ class MessageBubble extends StatelessWidget {
       decoration: BoxDecoration(
         color: bubbleColor,
         borderRadius: useBlur ? null : radius,
-        border: isOwn ? null : Border.all(color: theme.colorScheme.outline.withValues(alpha: 0.2)),
+        border: bubbleBorder,
         boxShadow: isOwn && !useBlur ? tokens.elevation.level1 : null,
       ),
       child: Column(
@@ -106,7 +132,17 @@ class MessageBubble extends StatelessWidget {
             ),
             SizedBox(height: tokens.spacing.xs),
           ],
-          Text(text, style: tokens.typography.body.copyWith(color: textColor)),
+          Text(
+            text,
+            style: tokens.typography.body.copyWith(
+              color: textColor,
+              shadows: useBlur
+                  ? const [
+                      Shadow(color: Color(0x99000000), blurRadius: 4, offset: Offset(0, 1)),
+                    ]
+                  : null,
+            ),
+          ),
           SizedBox(height: tokens.spacing.xs),
           Row(
             mainAxisSize: MainAxisSize.min,
@@ -125,6 +161,14 @@ class MessageBubble extends StatelessWidget {
                   style: tokens.typography.mono.copyWith(
                     color: textColor.withValues(alpha: 0.6),
                   ),
+                ),
+              ],
+              if (expiryActive) ...[
+                SizedBox(width: tokens.spacing.xs),
+                Icon(
+                  Icons.timer_outlined,
+                  size: tokens.typography.mono.fontSize ?? 12,
+                  color: textColor.withValues(alpha: 0.6),
                 ),
               ],
             ],

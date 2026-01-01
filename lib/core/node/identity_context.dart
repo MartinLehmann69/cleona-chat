@@ -1,17 +1,14 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/device_keys_store.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/compression.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/platform/app_paths.dart';
-import 'package:fixnum/fixnum.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Holds all cryptographic keys and identity for one user profile.
 /// Multiple IdentityContexts can share a single CleonaNode.
@@ -43,12 +40,11 @@ class IdentityContext {
   /// Used for contact lookup, sender_id in envelopes, S&F storage key.
   late Uint8List userId;
 
-  /// Device-Node-ID: unique per device = SHA-256(network_secret + ed25519_pk + device_uuid).
-  /// Used for network routing, DHT registration, routing table entries.
+  /// Device-Node-ID: daemon-global routing identifier.
+  /// device_id = SHA-256(network_secret + ed25519_device_pubkey)
+  /// Derived from the daemon-global Device-Sig keypair (§3.5/§3.7) — all
+  /// hosted UserIDs share the same DeviceID. See Architecture §3.1.
   late Uint8List deviceNodeId;
-
-  /// Device UUID (16 bytes, generated once per device, persisted).
-  late Uint8List deviceUuid;
 
   // ── 2D-DHT Identity Resolution: persistierte seq-Counter ──────────
   // Plan: docs/superpowers/plans/2026-04-26-2d-dht-identity-resolution.md (Task 4)
@@ -56,14 +52,17 @@ class IdentityContext {
   // Auth-Seq und Liveness-Seq sind bewusst getrennt (verschiedene TTLs / Update-Frequenzen).
   int _authManifestSeq = 0;
   int _livenessSeq = 0;
+  int _deviceKemSeq = 0;
   Uint8List? _lastAuthManifestContentHash;
 
   int get authManifestSeq => _authManifestSeq;
   int get livenessSeq => _livenessSeq;
+  int get deviceKemSeq => _deviceKemSeq;
   Uint8List? get lastAuthManifestContentHash => _lastAuthManifestContentHash;
 
   int bumpAuthManifestSeq() => ++_authManifestSeq;
   int bumpLivenessSeq() => ++_livenessSeq;
+  int bumpDeviceKemSeq() => ++_deviceKemSeq;
 
   void setLastAuthManifestContentHash(Uint8List hash) {
     _lastAuthManifestContentHash = hash;
@@ -94,6 +93,7 @@ class IdentityContext {
     fileEnc.writeJsonFile('$profileDir/identity_resolution.json', {
       'authManifestSeq': _authManifestSeq,
       'livenessSeq': _livenessSeq,
+      'deviceKemSeq': _deviceKemSeq,
       'lastAuthManifestContentHash': _lastAuthManifestContentHash != null
           ? bytesToHex(_lastAuthManifestContentHash!)
           : null,
@@ -108,6 +108,7 @@ class IdentityContext {
     if (data == null) return;
     _authManifestSeq = (data['authManifestSeq'] as int?) ?? 0;
     _livenessSeq = (data['livenessSeq'] as int?) ?? 0;
+    _deviceKemSeq = (data['deviceKemSeq'] as int?) ?? 0;
     final hashHex = data['lastAuthManifestContentHash'] as String?;
     _lastAuthManifestContentHash =
         hashHex != null ? hexToBytes(hashHex) : null;
@@ -203,11 +204,13 @@ class IdentityContext {
     // Compute User-ID: SHA-256(network_secret + ed25519PublicKey) — stable identity
     userId = HdWallet.computeUserId(ed25519PublicKey, NetworkSecret.secret);
 
-    // Load or generate Device UUID (persisted per device)
-    deviceUuid = _loadOrCreateDeviceUuid(fileEnc);
-
-    // Compute Device-Node-ID: SHA-256(network_secret + ed25519_pk + device_uuid) — routing
-    deviceNodeId = HdWallet.computeDeviceNodeId(ed25519PublicKey, NetworkSecret.secret, deviceUuid);
+    // Compute Device-Node-ID from the daemon-global Device-Sig keypair
+    // (§3.1, §3.5). Multi-Identity sharing: all IdentityContexts in this
+    // daemon load the SAME DeviceKeysStore (single file in baseDir) and
+    // therefore derive the SAME deviceNodeId.
+    final deviceBundle = DeviceKeysStore.loadOrCreate(baseDir: _baseDir, fileEnc: fileEnc);
+    deviceNodeId = HdWallet.computeDeviceNodeId(
+        deviceBundle.sig.ed25519PublicKey, NetworkSecret.secret);
 
     _log.info('Identity "$displayName" User-ID: ${userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${deviceNodeIdHex.substring(0, 16)}...');
@@ -261,22 +264,6 @@ class IdentityContext {
     if (keyRotatedAt != null) data['key_rotated_at'] = keyRotatedAt!.millisecondsSinceEpoch;
     if (keysCreatedAt != null) data['keys_created_at'] = keysCreatedAt!.millisecondsSinceEpoch;
     fileEnc.writeJsonFile('$profileDir/keys.json', data);
-  }
-
-  /// Load device UUID from disk, or generate a new one.
-  /// Stored alongside keys but NOT rotated — it's the device's permanent identity.
-  Uint8List _loadOrCreateDeviceUuid(FileEncryption fileEnc) {
-    final uuidFile = File('$profileDir/device_uuid');
-    if (uuidFile.existsSync()) {
-      final hex = uuidFile.readAsStringSync().trim();
-      if (hex.length == 32) return hexToBytes(hex);
-    }
-    // Generate new UUID (16 bytes)
-    final uuid = SodiumFFI().randomBytes(16);
-    uuidFile.parent.createSync(recursive: true);
-    uuidFile.writeAsStringSync(bytesToHex(uuid));
-    _log.info('New device UUID generated: ${bytesToHex(uuid).substring(0, 8)}...');
-    return uuid;
   }
 
   /// Check if KEM keys need rotation (> 7 days old).
@@ -345,9 +332,10 @@ class IdentityContext {
 
     keyRotatedAt = DateTime.now();
 
-    // Recompute User-ID and Device-Node-ID with new Ed25519 public key
+    // Recompute User-ID with new Ed25519 public key.
+    // DeviceID is unchanged: it's derived from the daemon-global Device-Sig
+    // keypair (§3.1, §3.5), which is independent of any User-keypair rotation.
     userId = HdWallet.computeUserId(ed25519PublicKey, NetworkSecret.secret);
-    deviceNodeId = HdWallet.computeDeviceNodeId(ed25519PublicKey, NetworkSecret.secret, deviceUuid);
 
     _saveKeys(fileEnc);
     _log.info('Full identity rotation complete. New User-ID: ${userIdHex.substring(0, 16)}...');
@@ -365,122 +353,6 @@ class IdentityContext {
     }
   }
 
-  /// Create and sign a message envelope.
-  /// Payloads >= 64 bytes are zstd-compressed automatically.
-  ///
-  /// [senderIdOverride]: when set, used in place of the current `userId` as
-  /// `envelope.senderId`. Needed by §26.6.2 Paket C so the emergency
-  /// key-rotation retry keeps the receiver's pre-rotation contact-lookup hex
-  /// after the local `userId` has already flipped to the new one.
-  /// The envelope is still signed with the *current* Ed25519 key — the inner
-  /// dual-signature is what authenticates the rotation itself.
-  proto.MessageEnvelope createSignedEnvelope(
-    proto.MessageType type,
-    Uint8List payload, {
-    Uint8List? recipientId,
-    bool compress = true,
-    Uint8List? senderIdOverride,
-  }) {
-    // Compress payload if beneficial (>= 64 bytes)
-    Uint8List effectivePayload = payload;
-    var compression = proto.CompressionType.NONE;
-    if (compress && payload.length >= 64 && !_isEphemeralMediaType(type)) {
-      try {
-        final compressed = ZstdCompression.instance.compress(payload);
-        if (compressed.length < payload.length) {
-          effectivePayload = compressed;
-          compression = proto.CompressionType.ZSTD;
-        }
-      } catch (_) {
-        // Compression failed, send uncompressed
-      }
-    }
-
-    final envelope = proto.MessageEnvelope()
-      ..version = 1
-      ..senderId = senderIdOverride ?? userId  // Stable identity (contact lookup)
-      ..senderDeviceNodeId = deviceNodeId  // For routing replies/receipts back
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..messageType = type
-      ..networkTag = networkChannel
-      ..compression = compression
-      ..encryptedPayload = effectivePayload;
-    if (recipientId != null) envelope.recipientId = recipientId;
-
-    // Generate message ID
-    final sodium = SodiumFFI();
-    envelope.messageId = sodium.randomBytes(16);
-
-    // Sign with Ed25519
-    final dataToSign = envelope.writeToBuffer();
-    envelope.signatureEd25519 = sodium.signEd25519(dataToSign, ed25519SecretKey);
-
-    // Sign with ML-DSA (skip for infrastructure messages — inner payload already has dual signatures)
-    // Also skip for ephemeral media frames (CALL_AUDIO/CALL_VIDEO) — see _isEphemeralMediaType.
-    if (!_isInfrastructureType(type) && !_isEphemeralMediaType(type)) {
-      final oqs = OqsFFI();
-      envelope.signatureMlDsa = oqs.mlDsaSign(dataToSign, mlDsaSecretKey);
-    }
-
-    return envelope;
-  }
-
-  /// Infrastructure message types that only need Ed25519 (not ML-DSA).
-  /// These are routing/relay messages where the inner payload already has
-  /// full dual signatures. Skipping ML-DSA saves ~3.3KB per hop, critical
-  /// for mobile delivery where UDP fragments get lost.
-  static bool _isInfrastructureType(proto.MessageType type) {
-    switch (type) {
-      case proto.MessageType.RELAY_FORWARD:
-      case proto.MessageType.RELAY_ACK:
-      case proto.MessageType.DHT_PING:
-      case proto.MessageType.DHT_PONG:
-      case proto.MessageType.DHT_FIND_NODE:
-      case proto.MessageType.DHT_FIND_NODE_RESPONSE:
-      case proto.MessageType.DHT_STORE:
-      case proto.MessageType.DHT_STORE_RESPONSE:
-      case proto.MessageType.DHT_FIND_VALUE:
-      case proto.MessageType.DHT_FIND_VALUE_RESPONSE:
-      case proto.MessageType.ROUTE_UPDATE:
-      case proto.MessageType.PEER_LIST_PUSH:
-      case proto.MessageType.PEER_STORE:
-      case proto.MessageType.PEER_STORE_ACK:
-      case proto.MessageType.PEER_RETRIEVE:
-      case proto.MessageType.PEER_RETRIEVE_RESPONSE:
-      case proto.MessageType.REACHABILITY_QUERY:
-      case proto.MessageType.REACHABILITY_RESPONSE:
-      case proto.MessageType.HOLE_PUNCH_REQUEST:
-      case proto.MessageType.HOLE_PUNCH_NOTIFY:
-      case proto.MessageType.HOLE_PUNCH_PING:
-      case proto.MessageType.HOLE_PUNCH_PONG:
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  /// Ephemeral media types — Live-Stream-Frames (Audio/Video) im aktiven Call.
-  /// Authentifizierung läuft über den Call-Setup-Handshake (CALL_INVITE/ANSWER
-  /// mit voller Hybrid-Signatur + KEM-Etablierung von callKey). Pro-Frame
-  /// AES-GCM mit callKey + Ed25519-Signatur reichen für Authentizität +
-  /// Identitätsbeweis. ML-DSA pro Frame ist redundant: callKey ist bereits
-  /// post-quantum sicher etabliert, jeder Frame mit callKey damit auch.
-  /// Skip spart 500 µs CPU + 3.3 KB Wire-Bytes pro Frame, kritisch für
-  /// Mobilfunk-Delivery wo UDP-Fragmente verloren gehen.
-  ///
-  /// Audit (2026-04-25): Receiver-Side `mlDsaVerify` wird heute nirgendwo
-  /// aufgerufen (siehe grep "mlDsaVerify" in lib/) — dieser Skip ist also
-  /// auch ohne symmetrischen Receiver-Update sicher.
-  static bool _isEphemeralMediaType(proto.MessageType type) {
-    switch (type) {
-      case proto.MessageType.CALL_AUDIO:
-      case proto.MessageType.CALL_VIDEO:
-        return true;
-      default:
-        return false;
-    }
-  }
-
   /// Build a PeerInfo representing this identity.
   /// [allLocalIps] — all local IPv4 addresses (WiFi, LAN, mobile).
   /// Each is added as a PeerAddress for multi-homed connectivity.
@@ -490,26 +362,66 @@ class IdentityContext {
     String? publicIp,
     int? publicPort,
     List<String> allLocalIps = const [],
+    // Welle 3 (§17.3): outer NetworkPacketV3 device_sig is signed with the
+    // Device-Sig keypair, distinct from the User-Sig keypair on this
+    // IdentityContext. The receiver caches these PKs and verifies subsequent
+    // outer-sigs with them, so the sender MUST advertise them in its
+    // self-broadcast PEER_LIST_PUSH or every receive after the first
+    // lenient-bootstrap pass dies in §5.10.2 stale-PK recovery.
+    Uint8List? deviceEd25519PublicKey,
+    Uint8List? deviceMlDsaPublicKey,
   }) {
-    // Build multi-address list from all available IPs
+    // Build multi-address list from all available IPs.
+    //
+    // Bug C — Liveness pre-filter:
+    // We previously published *every* local IP including IPv6 ULA (fc/fd…),
+    // link-local (fe80::), site-local (fec0:: deprecated), and multicast
+    // (ff..) — and tagged them all as IPV6_GLOBAL on the wire. That polluted
+    // every other node's routing table: the bootstrap then treated a
+    // home-router-assigned ULA as the highest-scored "global" address and
+    // burned ACK timeouts trying to reach it.
+    //
+    // Single source of truth: PeerAddress.classifyIp(ip).
+    // Allowed in liveness:  ipv4Public, ipv4Private, ipv6Global.
+    // Skipped in liveness:  ipv6Ula, ipv6LinkLocal, ipv6SiteLocal.
+    //   - ULA: meaningful only inside the issuing /48; we have no way to
+    //     prove the receiver shares that prefix, so don't advertise.
+    //   - Link-Local: per definition not routable beyond the segment.
+    //   - Site-Local: deprecated by RFC 3879; treat like ULA.
     final addresses = <PeerAddress>[];
     for (final ip in allLocalIps) {
+      final t = PeerAddress.classifyIp(ip);
+      if (t == PeerAddressType.ipv6Ula ||
+          t == PeerAddressType.ipv6LinkLocal ||
+          t == PeerAddressType.ipv6SiteLocal) {
+        continue;
+      }
       addresses.add(PeerAddress(
         ip: ip,
         port: localPort,
-        type: ip.contains(':') ? PeerAddressType.ipv6Global
-            : _isPrivateIpAddr(ip) ? PeerAddressType.ipv4Private : PeerAddressType.ipv4Public,
+        type: t,
       ));
     }
     if (publicIp != null && publicIp.isNotEmpty) {
       final pubPort = publicPort ?? localPort;
       final alreadyListed = addresses.any((a) => a.ip == publicIp && a.port == pubPort);
       if (!alreadyListed) {
-        addresses.add(PeerAddress(
-          ip: publicIp,
-          port: pubPort,
-          type: PeerAddressType.ipv4Public,
-        ));
+        // Public IP is by definition routable; classify so IPv6 publics
+        // get IPV6_GLOBAL not IPV4_PUBLIC.
+        final t = PeerAddress.classifyIp(publicIp);
+        // Defensive: if a misconfigured upstream hands us a private/ULA as
+        // "public", honour the filter anyway.
+        if (t != PeerAddressType.ipv6Ula &&
+            t != PeerAddressType.ipv6LinkLocal &&
+            t != PeerAddressType.ipv6SiteLocal) {
+          addresses.add(PeerAddress(
+            ip: publicIp,
+            port: pubPort,
+            type: t == PeerAddressType.ipv4Private
+                ? PeerAddressType.ipv4Public  // upstream said public, trust the role
+                : t,
+          ));
+        }
       }
     }
 
@@ -523,28 +435,11 @@ class IdentityContext {
       addresses: addresses,
       networkChannel: networkChannel,
       ed25519PublicKey: ed25519PublicKey,
+      mlDsaPublicKey: mlDsaPublicKey,
       x25519PublicKey: x25519PublicKey,
       mlKemPublicKey: mlKemPublicKey,
+      deviceEd25519PublicKey: deviceEd25519PublicKey,
+      deviceMlDsaPublicKey: deviceMlDsaPublicKey,
     );
-  }
-
-  static bool _isPrivateIpAddr(String ip) {
-    if (ip.contains(':')) {
-      final lower = ip.toLowerCase();
-      return lower.startsWith('fe80:') || lower.startsWith('fc') ||
-             lower.startsWith('fd') || lower == '::1';
-    }
-    if (ip.startsWith('192.168.')) return true;
-    if (ip.startsWith('10.')) return true;
-    if (ip.startsWith('172.')) {
-      final second = int.tryParse(ip.split('.')[1]);
-      if (second != null && second >= 16 && second <= 31) return true;
-    }
-    if (ip.startsWith('100.')) {
-      final second = int.tryParse(ip.split('.')[1]) ?? 0;
-      if (second >= 64 && second <= 127) return true;
-    }
-    if (ip.startsWith('192.0.0.')) return true;
-    return false;
   }
 }

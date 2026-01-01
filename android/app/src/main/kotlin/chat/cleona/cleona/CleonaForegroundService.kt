@@ -68,7 +68,21 @@ class CleonaForegroundService : Service() {
         super.onCreate()
         instance = this
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, createNotification())
+        // Manifest declares foregroundServiceType="dataSync|microphone".
+        // The 2-arg startForeground() implicitly applies ALL manifest types,
+        // which forces the system to verify RECORD_AUDIO at boot — crashing
+        // freshly installed apps that have never granted the permission.
+        // Boot as DATA_SYNC only; _promoteForCall() upgrades to MICROPHONE
+        // on demand once RECORD_AUDIO has been granted.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                createNotification(),
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, createNotification())
+        }
     }
 
     override fun onDestroy() {

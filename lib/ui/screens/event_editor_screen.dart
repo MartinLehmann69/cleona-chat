@@ -200,7 +200,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
             contentPadding: EdgeInsets.zero,
             leading: const Icon(Icons.repeat),
             title: Text(_recurrenceRule != null
-                ? _formatRecurrence(_recurrenceRule!)
+                ? _formatRecurrence(_recurrenceRule!, locale)
                 : locale.get('calendar_no_repeat')),
             onTap: () => _showRecurrenceDialog(context, locale),
           ),
@@ -274,15 +274,16 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     );
   }
 
-  void _saveEvent(BuildContext context) {
+  Future<void> _saveEvent(BuildContext context) async {
     final appState = context.read<CleonaAppState>();
     final service = appState.service;
     if (service == null) return;
+    final locale = AppLocale.of(context);
 
     final title = _titleController.text.trim();
     if (title.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Bitte Titel eingeben')),
+        SnackBar(content: Text(locale.get('calendar_title_required'))),
       );
       return;
     }
@@ -295,6 +296,13 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
         ? _endDate.add(const Duration(days: 1))
         : DateTime(_endDate.year, _endDate.month, _endDate.day,
             _endTime.hour, _endTime.minute);
+
+    if (end.isBefore(start)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(locale.get('calendar_end_before_start'))),
+      );
+      return;
+    }
 
     final event = widget.event;
     event.title = title;
@@ -317,9 +325,9 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     event.updatedAt = DateTime.now().millisecondsSinceEpoch;
 
     if (widget.isNew) {
-      service.createCalendarEvent(event);
+      await service.createCalendarEvent(event);
     } else {
-      service.updateCalendarEvent(event.eventId,
+      await service.updateCalendarEvent(event.eventId,
         title: event.title,
         description: event.description,
         location: event.location,
@@ -334,17 +342,19 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
       );
     }
 
+    if (!context.mounted) return;
     Navigator.pop(context);
   }
 
   void _deleteEvent(BuildContext context) {
+    final locale = AppLocale.of(context);
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Termin löschen?'),
-        content: Text('${widget.event.title} wird gelöscht.'),
+        title: Text(locale.get('calendar_delete_event_title')),
+        content: Text(locale.tr('calendar_delete_event_body', {'title': widget.event.title})),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Abbrechen')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
           TextButton(
             onPressed: () {
               final service = context.read<CleonaAppState>().service;
@@ -354,7 +364,7 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
               Navigator.pop(ctx);
               Navigator.pop(context);
             },
-            child: const Text('Löschen', style: TextStyle(color: Colors.red)),
+            child: Text(locale.get('delete'), style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -372,11 +382,11 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     ];
     final labels = [
       locale.get('calendar_no_repeat'),
-      'Täglich',
-      'Wöchentlich',
-      'Mo, Mi, Fr',
-      'Monatlich',
-      'Jährlich',
+      locale.get('calendar_recur_daily'),
+      locale.get('calendar_recur_weekly'),
+      locale.get('calendar_recur_weekly_mwf'),
+      locale.get('calendar_recur_monthly'),
+      locale.get('calendar_recur_yearly'),
     ];
 
     showDialog(
@@ -460,15 +470,15 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
     );
   }
 
-  String _formatRecurrence(String rrule) {
+  String _formatRecurrence(String rrule, AppLocale locale) {
     final parts = rrule.split(';');
     for (final p in parts) {
       if (p.startsWith('FREQ=')) {
         switch (p.substring(5)) {
-          case 'DAILY': return 'Täglich';
-          case 'WEEKLY': return 'Wöchentlich';
-          case 'MONTHLY': return 'Monatlich';
-          case 'YEARLY': return 'Jährlich';
+          case 'DAILY': return locale.get('calendar_recur_daily');
+          case 'WEEKLY': return locale.get('calendar_recur_weekly');
+          case 'MONTHLY': return locale.get('calendar_recur_monthly');
+          case 'YEARLY': return locale.get('calendar_recur_yearly');
         }
       }
     }

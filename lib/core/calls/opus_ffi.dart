@@ -106,14 +106,17 @@ class OpusFFI {
   }
 
   void _loadLibrary() {
-    final libNames = _libSearchPaths();
-
-    for (final name in libNames) {
-      try {
-        _lib = DynamicLibrary.open(name);
-        break;
-      } catch (_) {
-        continue;
+    if (Platform.isIOS) {
+      _lib = DynamicLibrary.process();
+    } else {
+      final libNames = _libSearchPaths();
+      for (final name in libNames) {
+        try {
+          _lib = DynamicLibrary.open(name);
+          break;
+        } catch (_) {
+          continue;
+        }
       }
     }
 
@@ -139,10 +142,7 @@ class OpusFFI {
   }
 
   static List<String> _libSearchPaths() {
-    if (Platform.isMacOS || Platform.isIOS) {
-      // iOS: Embedded Framework via DynamicLibrary.process() würde sauberer
-      // sein; bis das Pod-Setup steht, nutzen wir die gleichen .dylib-Namen
-      // wie macOS (failt zur Runtime falls nicht gebaut).
+    if (Platform.isMacOS) {
       return const [
         'libopus.dylib',
         'libopus.0.dylib',

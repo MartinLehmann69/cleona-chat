@@ -1,0 +1,192 @@
+###############################################################################
+# ios-build.yml — Build Cleona iOS IPA and upload to TestFlight
+#
+# Triggers:
+#   - Manual dispatch (workflow_dispatch) with optional tag
+#   - Push of a tag matching v*-ios or v*
+#
+# Required GitHub Secrets:
+#   APPLE_TEAM_ID            — 10-char Apple Developer Team ID
+#   APP_STORE_CONNECT_KEY_ID — App Store Connect API Key ID
+#   APP_STORE_CONNECT_ISSUER — App Store Connect API Issuer UUID
+#   APP_STORE_CONNECT_KEY    — App Store Connect API Key (.p8 content, base64)
+#   MATCH_PASSWORD           — Encryption password for signing certificates
+#   CERT_P12_BASE64          — Distribution certificate .p12 (base64-encoded)
+#   CERT_P12_PASSWORD        — Password for the .p12 file
+#   PROVISIONING_PROFILE_B64 — Provisioning profile (base64-encoded)
+#
+# Architecture:
+#   1. Build all native libs (libsodium, liboqs, libzstd, liberasurecode,
+#      libopus, whisper.cpp, libcleona_audio) as static .a via build-ios-libs.sh
+#   2. flutter build ipa (--release, beta flavor via dart-define)
+#   3. Sign with distribution certificate
+#   4. Upload to TestFlight via xcrun altool / App Store Connect API
+###############################################################################
+name: iOS Build & TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Build channel'
+        required: true
+        default: 'beta'
+        type: choice
+        options:
+          - beta
+          - live
+  push:
+    tags:
+      - 'v*'
+
+# Cancel in-progress runs for the same ref
+concurrency:
+  group: ios-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.32.1'
+  IOS_DEPLOYMENT_TARGET: '13.0'
+
+jobs:
+  build-native-libs:
+    name: Build Native Libraries
+    runs-on: macos-14  # Apple Silicon (M1) runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja autoconf automake libtool pkg-config
+
+      - name: Cache native lib sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ios-libs-build-*
+          key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
+          restore-keys: ios-native-libs-
+
+      - name: Build all native libs
+        run: ./scripts/build-ios-libs.sh
+        timeout-minutes: 30
+
+      - name: Upload XCFrameworks
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcframeworks
+          path: build/ios-frameworks/
+          retention-days: 7
+
+  build-ipa:
+    name: Build IPA & Upload to TestFlight
+    needs: build-native-libs
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download XCFrameworks
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-xcframeworks
+          path: build/ios-frameworks/
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter dependencies
+        run: flutter pub get
+
+      - name: Install CocoaPods
+        run: |
+          cd ios
+          pod install --repo-update
+
+      # ── Signing setup ────────────────────────────────────────────────
+      - name: Install distribution certificate
+        env:
+          CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          echo "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$CERT_P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+      - name: Install provisioning profile
+        env:
+          PROVISIONING_PROFILE_B64: ${{ secrets.PROVISIONING_PROFILE_B64 }}
+        run: |
+          PP_PATH="$RUNNER_TEMP/cleona.mobileprovision"
+          echo "$PROVISIONING_PROFILE_B64" | base64 --decode > "$PP_PATH"
+
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          UUID="$(security cms -D -i "$PP_PATH" | plutil -extract UUID raw -)"
+          cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID.mobileprovision"
+          echo "PROVISIONING_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
+
+      # ── Build ────────────────────────────────────────────────────────
+      - name: Determine channel
+        id: channel
+        env:
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+        run: |
+          CHANNEL="${INPUT_CHANNEL:-beta}"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Build IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          flutter build ipa \
+            --release \
+            --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
+            --export-options-plist=ios/ExportOptions.plist
+
+      # ── Upload ───────────────────────────────────────────────────────
+      - name: Upload to TestFlight
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/asc-key.p8"
+          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
+
+          xcrun notarytool submit \
+            build/ios/ipa/*.ipa \
+            --key "$KEY_PATH" \
+            --key-id "$APP_STORE_CONNECT_KEY_ID" \
+            --issuer "$APP_STORE_CONNECT_ISSUER" \
+            --wait 2>/dev/null || true
+
+          xcrun altool --upload-app \
+            --type ios \
+            --file build/ios/ipa/*.ipa \
+            --apiKey "$APP_STORE_CONNECT_KEY_ID" \
+            --apiIssuer "$APP_STORE_CONNECT_ISSUER"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleona-ios-${{ steps.channel.outputs.channel }}
+          path: build/ios/ipa/*.ipa
+          retention-days: 30
+
+      # ── Cleanup ──────────────────────────────────────────────────────
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true

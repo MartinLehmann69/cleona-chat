@@ -184,15 +184,21 @@ bool isPrivateOrReservedIp(InternetAddress addr) {
 
 /// Resolve hostname and check if ALL resulting IPs are safe.
 /// Returns the first safe IP, or null if all are private/reserved.
-Future<InternetAddress?> resolveSafeIp(String hostname) async {
+Future<InternetAddress?> resolveSafeIp(String hostname,
+    {int timeoutSec = 5}) async {
   try {
-    final addresses = await InternetAddress.lookup(hostname);
+    // B-32: bound the DNS lookup. Without a timeout, a slow/unreachable resolver
+    // (common on VMs routing via parprouted) stalls sendTextMessage for tens of
+    // seconds inside the synchronous send path. TimeoutException falls into the
+    // catch below → treated as "could not resolve" → no preview (fail-fast).
+    final addresses = await InternetAddress.lookup(hostname)
+        .timeout(Duration(seconds: timeoutSec));
     for (final addr in addresses) {
       if (!isPrivateOrReservedIp(addr)) return addr;
     }
     return null; // All IPs are private
   } catch (_) {
-    return null; // DNS failure
+    return null; // DNS failure or timeout
   }
 }
 
@@ -280,7 +286,8 @@ class LinkPreviewFetcher {
       }
 
       // SSRF check — resolve DNS and verify IP is not private
-      final safeIp = await resolveSafeIp(uri.host);
+      final safeIp = await resolveSafeIp(uri.host,
+          timeoutSec: settings.fetchTimeoutSec);
       if (safeIp == null) {
         log?.call('LinkPreview: SSRF blocked — private/reserved IP for ${uri.host}');
         return null;
@@ -379,7 +386,8 @@ class LinkPreviewFetcher {
       if (imgUri.scheme != 'https') return null;
 
       // SSRF check on image URL too
-      final safeIp = await resolveSafeIp(imgUri.host);
+      final safeIp = await resolveSafeIp(imgUri.host,
+          timeoutSec: timeout.inSeconds);
       if (safeIp == null) return null;
 
       client = HttpClient();

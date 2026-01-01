@@ -1,9 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
+import 'package:cleona/core/storage/atomic_json_writer.dart';
 
 /// A single held message for Store-and-Forward delivery.
 class _HeldMessage {
@@ -78,7 +78,7 @@ class PeerMessageStore {
   final String _profileDir;
   final CLogger _log;
 
-  /// recipientNodeIdHex → list of held messages.
+  /// recipientUserIdHex → list of held messages.
   final Map<String, List<_HeldMessage>> _messages = {};
 
   /// Known store IDs for dedup.
@@ -87,17 +87,24 @@ class PeerMessageStore {
   bool _dirty = false;
   Timer? _flushTimer;
 
+  /// Serializes concurrent _flush() calls within-process.
+  Future<void>? _writeInFlight;
+
   PeerMessageStore({required String profileDir})
       : _profileDir = profileDir,
         _log = CLogger.get('peer-msg-store', profileDir: profileDir);
 
   /// Load held messages from disk.
   Future<void> load() async {
-    final file = File('$_profileDir/peer_messages.json');
-    if (!await file.exists()) return;
+    final path = '$_profileDir/peer_messages.json';
+    // Sidecar-recovery via AtomicJsonWriter: handles canonical + .tmp + .old.
+    final json = AtomicJsonWriter.readJsonFile(path);
+    if (json == null) {
+      _startFlushTimer();
+      return;
+    }
 
     try {
-      final json = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       for (final entry in json.entries) {
         final recipientHex = entry.key;
         final msgs = (entry.value as List).map((e) {
@@ -127,7 +134,7 @@ class PeerMessageStore {
   ///
   /// Returns true if stored, false if rejected (budget, size, dedup).
   bool storeMessage({
-    required Uint8List recipientNodeId,
+    required Uint8List recipientUserId,
     required Uint8List wrappedEnvelope,
     required String storeIdHex,
     int ttlMs = defaultTtlMs,
@@ -144,7 +151,7 @@ class PeerMessageStore {
       return false;
     }
 
-    final recipientHex = bytesToHex(recipientNodeId);
+    final recipientHex = bytesToHex(recipientUserId);
     final list = _messages.putIfAbsent(recipientHex, () => []);
 
     // Budget
@@ -173,8 +180,8 @@ class PeerMessageStore {
   /// the same messages later. Messages expire via TTL (7 days) and
   /// are cleaned up by [pruneExpired].
   /// The recipient's deduplication layer discards already-processed messages.
-  List<Uint8List> retrieveMessages(Uint8List recipientNodeId) {
-    final recipientHex = bytesToHex(recipientNodeId);
+  List<Uint8List> retrieveMessages(Uint8List recipientUserId) {
+    final recipientHex = bytesToHex(recipientUserId);
     final list = _messages[recipientHex];
     if (list == null || list.isEmpty) return [];
 
@@ -193,11 +200,11 @@ class PeerMessageStore {
   /// Architecture: S&F messages persist until confirmed delivery (PEER_RETRIEVE)
   /// or TTL expiry (7 days). Push is event-driven (peer comes online) and
   /// rate-limited + count-limited to prevent flooding.
-  List<Uint8List> peekMessages(Uint8List recipientNodeId, {
+  List<Uint8List> peekMessages(Uint8List recipientUserId, {
     int pushIntervalSeconds = 300,
     int maxPushCount = 3,
   }) {
-    final recipientHex = bytesToHex(recipientNodeId);
+    final recipientHex = bytesToHex(recipientUserId);
     final list = _messages[recipientHex];
     if (list == null || list.isEmpty) return [];
 
@@ -218,8 +225,8 @@ class PeerMessageStore {
   }
 
   /// Check if we have messages for a given recipient.
-  bool hasMessagesFor(Uint8List recipientNodeId) {
-    final recipientHex = bytesToHex(recipientNodeId);
+  bool hasMessagesFor(Uint8List recipientUserId) {
+    final recipientHex = bytesToHex(recipientUserId);
     final list = _messages[recipientHex];
     return list != null && list.isNotEmpty;
   }
@@ -264,21 +271,30 @@ class PeerMessageStore {
     _flushTimer = Timer.periodic(const Duration(seconds: 5), (_) => _flush());
   }
 
-  Future<void> _flush() async {
-    if (!_dirty) return;
+  Future<void> _flush() {
+    if (!_dirty) return Future.value();
     _dirty = false;
 
-    try {
-      final json = <String, dynamic>{};
-      for (final entry in _messages.entries) {
-        json[entry.key] = entry.value.map((m) => m.toJson()).toList();
+    final prev = _writeInFlight;
+    final myWrite = (() async {
+      if (prev != null) {
+        try {
+          await prev;
+        } catch (_) {}
       }
-      final file = File('$_profileDir/peer_messages.json');
-      await file.writeAsString(jsonEncode(json));
-    } catch (e) {
-      _log.error('Failed to flush peer messages: $e');
-      _dirty = true;
-    }
+      try {
+        final json = <String, dynamic>{};
+        for (final entry in _messages.entries) {
+          json[entry.key] = entry.value.map((m) => m.toJson()).toList();
+        }
+        AtomicJsonWriter.writeJsonFile('$_profileDir/peer_messages.json', json);
+      } catch (e) {
+        _log.error('Failed to flush peer messages: $e');
+        _dirty = true;
+      }
+    })();
+    _writeInFlight = myWrite;
+    return myWrite;
   }
 
   Future<void> dispose() async {

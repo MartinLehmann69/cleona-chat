@@ -33,6 +33,7 @@ dependencies:
   connectivity_plus: ^6.0.0
 
   # QR Code
+  qr: ^3.0.2
   qr_flutter: ^4.1.0
 
   # Shared preferences for settings

@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cleona/core/network/clogger.dart';
+
 /// Available ringtones for incoming calls.
 enum Ringtone {
   gentle('Gentle', 'ringtone_gentle.ogg'),
@@ -65,6 +67,8 @@ class NotificationSettings {
 /// Uses paplay (PulseAudio) on Linux for audio playback — no Flutter dependency.
 /// On Android, sounds are played via platform channel.
 class NotificationSoundService {
+  CLogger _log = CLogger.get('notification_sound');
+
   NotificationSettings _settings = NotificationSettings();
   String? _profileDir;
   String? _soundsDir;
@@ -81,17 +85,25 @@ class NotificationSoundService {
   /// Initialize with profile directory for settings persistence.
   Future<void> init(String profileDir) async {
     _profileDir = profileDir;
+    _log = CLogger.get('notification_sound', profileDir: profileDir);
     await _loadSettings();
     _soundsDir = await _findSoundsDir();
   }
 
   /// Find the sounds directory (Flutter asset bundle or project assets).
   Future<String?> _findSoundsDir() async {
-    // Check Flutter bundle path (Linux desktop)
+    // Primary: adjacent to binary (canonical ~/cleona-app/data/...)
     final execDir = File(Platform.resolvedExecutable).parent.path;
     final bundleSounds = '$execDir/data/flutter_assets/assets/sounds';
     if (Directory(bundleSounds).existsSync()) return bundleSounds;
-    // Check project assets directly (development)
+    // Fallback: binary may run from non-canonical path (e.g. ~/cleona-daemon);
+    // look for the bundle in the user's standard cleona-app directory.
+    final home = Platform.environment['HOME'] ?? '';
+    if (home.isNotEmpty) {
+      final appBundle = '$home/cleona-app/data/flutter_assets/assets/sounds';
+      if (Directory(appBundle).existsSync()) return appBundle;
+    }
+    // Development: check project assets
     final projectSounds = '${Directory.current.path}/assets/sounds';
     if (Directory(projectSounds).existsSync()) return projectSounds;
     return null;
@@ -173,7 +185,11 @@ class NotificationSoundService {
       final args = player == 'paplay'
           ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
           : [path]; // pw-play doesn't support --volume
-      Process.start(player, args).then((p) => p.exitCode).catchError((_) => -1);
+      _log.debug('_playOnce: player=$player path=$path');
+      Process.start(player, args).then((p) {
+        p.exitCode.then((code) => _log.debug('_playOnce: exit=$code player=$player'));
+        return p.exitCode;
+      }).catchError((_) => -1);
     } catch (_) {}
   }
 
@@ -247,6 +263,7 @@ class NotificationSoundService {
 
   /// Preview a ringtone (for settings UI).
   Future<void> previewRingtone(Ringtone ringtone) async {
+    _log.debug('previewRingtone: ${ringtone.name} → ${ringtone.filename}');
     await _stopLoop();
     await _playOnce(ringtone.filename);
   }

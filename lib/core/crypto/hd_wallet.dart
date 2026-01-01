@@ -54,15 +54,22 @@ class HdWallet {
   static Uint8List computeNodeId(Uint8List ed25519Pk, Uint8List networkSecret) =>
       computeUserId(ed25519Pk, networkSecret);
 
-  /// Compute Device-Node-ID for network routing (Architecture §26).
-  /// device_node_id = SHA-256(network_secret + ed25519_public_key + device_uuid)
-  /// Unique per device — each device is a separate node in the network.
-  static Uint8List computeDeviceNodeId(Uint8List ed25519Pk, Uint8List networkSecret, Uint8List deviceUuid) {
+  /// Compute Device-Node-ID for network routing (Architecture §3.1, §7.1).
+  /// device_id = SHA-256(network_secret + ed25519_device_public_key)
+  ///
+  /// **Daemon-global identifier**: derived from the daemon's Device-Sig keypair
+  /// (lives in `~/.cleona/device_keys.enc`, see §3.5/§3.7), NOT from any User-
+  /// keypair. A daemon hosting N UserIDs has exactly one DeviceID — Multi-
+  /// Identity is a User-Layer property and has no Device-Layer consequence
+  /// (§3.1).
+  ///
+  /// Multi-Device (one UserID on N physical devices) yields N distinct
+  /// DeviceIDs — one per device, each computed from its own device-keypair.
+  static Uint8List computeDeviceNodeId(Uint8List deviceEd25519Pk, Uint8List networkSecret) {
     final sodium = SodiumFFI();
-    final combined = Uint8List(networkSecret.length + ed25519Pk.length + deviceUuid.length);
+    final combined = Uint8List(networkSecret.length + deviceEd25519Pk.length);
     combined.setRange(0, networkSecret.length, networkSecret);
-    combined.setRange(networkSecret.length, networkSecret.length + ed25519Pk.length, ed25519Pk);
-    combined.setRange(networkSecret.length + ed25519Pk.length, combined.length, deviceUuid);
+    combined.setRange(networkSecret.length, combined.length, deviceEd25519Pk);
     return sodium.sha256(combined);
   }
 

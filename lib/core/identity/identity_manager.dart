@@ -8,6 +8,7 @@ import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/storage/atomic_json_writer.dart';
 
 /// Represents a single identity profile.
 class Identity {
@@ -195,30 +196,29 @@ class IdentityManager {
     return bytes;
   }
 
-  /// Load all identities.
+  /// Load all identities. Recovers from .tmp/.old sidecars if canonical
+  /// is missing or corrupt.
   List<Identity> loadIdentities() {
-    final file = File(_identitiesFile);
-    if (!file.existsSync()) {
+    final canonicalExists = File(_identitiesFile).existsSync();
+    final tmpExists = File('$_identitiesFile.tmp').existsSync();
+    final oldExists = File('$_identitiesFile.old').existsSync();
+    if (!canonicalExists && !tmpExists && !oldExists) {
       // Migration: check if last_profile.json exists (single-identity mode)
       return _migrateFromSingleProfile();
     }
-
-    try {
-      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-      final list = json['identities'] as List<dynamic>? ?? [];
-      return list.map((e) => Identity.fromJson(e as Map<String, dynamic>)).toList();
-    } catch (_) {
-      return [];
-    }
+    final json = AtomicJsonWriter.readJsonFile(_identitiesFile);
+    if (json == null) return [];
+    final list = json['identities'] as List<dynamic>? ?? [];
+    return list.map((e) => Identity.fromJson(e as Map<String, dynamic>)).toList();
   }
 
-  /// Save identities list.
+  /// Atomically save identities list (tmp+rename, sidecar-recovery on read).
   void saveIdentities(List<Identity> identities) {
     Directory(baseDir).createSync(recursive: true);
-    File(_identitiesFile).writeAsStringSync(jsonEncode({
+    AtomicJsonWriter.writeJsonFile(_identitiesFile, {
       'version': 1,
       'identities': identities.map((e) => e.toJson()).toList(),
-    }));
+    });
   }
 
   /// In-flight PQ keygen started by [preWarmPqKeys]. Picked up by
@@ -447,12 +447,12 @@ class IdentityManager {
   /// Set active identity.
   void setActiveIdentity(Identity identity) {
     Directory(baseDir).createSync(recursive: true);
-    File('$baseDir/last_profile.json').writeAsStringSync(jsonEncode({
+    AtomicJsonWriter.writeJsonFile('$baseDir/last_profile.json', {
       'profileDir': identity.profileDir,
       'displayName': identity.displayName,
       'port': identity.port,
       if (identity.nodeIdHex != null) 'nodeIdHex': identity.nodeIdHex,
-    }));
+    });
   }
 
   /// Migrate from single-profile mode (last_profile.json only).

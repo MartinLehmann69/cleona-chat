@@ -1,0 +1,10 @@
+# CMake build output
+build/
+*.so
+*.so.*
+*.dll
+*.dylib
+*.o
+*.obj
+*.exp
+*.lib

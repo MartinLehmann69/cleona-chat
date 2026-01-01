@@ -103,6 +103,93 @@ class FileEncryption {
     return null;
   }
 
+  /// Read and decrypt a binary blob. Returns null if the file doesn't exist
+  /// or cannot be decrypted (truncated / bad MAC). Mirrors `readJsonFile`'s
+  /// crash-recovery sweep over `.enc.tmp` / `.enc.old` sidecars.
+  ///
+  /// Use this for fixed-shape on-disk artefacts like the Device-Sig keypair
+  /// (`device_keys.bin.enc`, 6096 bytes) where JSON wrapping would only add
+  /// base64 overhead and a parse step that buys nothing.
+  Uint8List? readBinaryFile(String path) {
+    final encFile = File('$path.enc');
+
+    Uint8List decryptOrThrow(File f) {
+      final data = f.readAsBytesSync();
+      if (data.length <= 24) {
+        throw StateError('truncated (${data.length} bytes, need >24)');
+      }
+      final nonce = Uint8List.fromList(data.sublist(0, 24));
+      final ciphertext = Uint8List.fromList(data.sublist(24));
+      return _sodium.secretBoxDecrypt(ciphertext, _key, nonce);
+    }
+
+    if (encFile.existsSync()) {
+      try {
+        return decryptOrThrow(encFile);
+      } catch (e) {
+        stderr.writeln('[FileEncryption] WARNING: $path.enc exists '
+            '(${encFile.lengthSync()} bytes) but binary decryption failed: $e '
+            '— attempting crash-recovery from sidecars.');
+      }
+    }
+
+    for (final suffix in ['.enc.tmp', '.enc.old']) {
+      final side = File('$path$suffix');
+      if (!side.existsSync()) continue;
+      try {
+        final recovered = decryptOrThrow(side);
+        stderr.writeln('[FileEncryption] INFO: recovered binary $path '
+            'from $suffix sidecar.');
+        writeBinaryFile(path, recovered);
+        return recovered;
+      } catch (e) {
+        stderr.writeln('[FileEncryption] WARNING: sidecar $path$suffix '
+            'unreadable: $e');
+      }
+    }
+    return null;
+  }
+
+  /// Encrypt and atomically write a binary blob via tmp+rename. Same atomic
+  /// guarantees as [writeJsonFile]; callers do NOT need their own locking.
+  void writeBinaryFile(String path, Uint8List plaintext) {
+    final nonce = _sodium.randomBytes(24);
+    final ciphertext = _sodium.secretBoxEncrypt(plaintext, _key, nonce);
+
+    final output = Uint8List(24 + ciphertext.length);
+    output.setRange(0, 24, nonce);
+    output.setRange(24, output.length, ciphertext);
+
+    final encFile = File('$path.enc');
+    final tmpFile = File('$path.enc.tmp');
+    final oldFile = File('$path.enc.old');
+    encFile.parent.createSync(recursive: true);
+
+    try {
+      tmpFile.writeAsBytesSync(output, flush: true);
+      if (Platform.isWindows && encFile.existsSync()) {
+        if (oldFile.existsSync()) oldFile.deleteSync();
+        encFile.renameSync(oldFile.path);
+        try {
+          tmpFile.renameSync(encFile.path);
+        } catch (e) {
+          if (oldFile.existsSync() && !encFile.existsSync()) {
+            oldFile.renameSync(encFile.path);
+          }
+          rethrow;
+        }
+        if (oldFile.existsSync()) oldFile.deleteSync();
+      } else {
+        tmpFile.renameSync(encFile.path);
+      }
+    } catch (e) {
+      if (tmpFile.existsSync()) {
+        try { tmpFile.deleteSync(); } catch (_) {}
+      }
+      rethrow;
+    }
+  }
+
   /// Encrypt and atomically write a JSON file via tmp+rename.
   /// POSIX: `renameSync` is crash-atomic (old or new, never torn).
   /// Windows: `renameSync` cannot overwrite, so we stage canonical→.enc.old

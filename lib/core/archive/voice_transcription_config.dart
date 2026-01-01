@@ -6,7 +6,6 @@
 // [VoiceTranscriptionConfig.test] provides shortened values for tests.
 
 import 'package:cleona/core/service/service_types.dart' show Conversation;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Whisper model size (determines quality and resource consumption).
 enum WhisperModelSize {
@@ -52,7 +51,8 @@ class VoiceTranscriptionConfig {
   /// Default language ('auto' = automatic detection).
   final String defaultLanguage;
 
-  /// Supported languages (Cleona languages + auto).
+  /// Supported languages: 'auto' + all 33 Cleona UI locales (V3.1.70+ parity).
+  /// Whisper tiny/base support all of these natively.
   final List<String> supportedLanguages;
 
   /// Max audio duration for transcription in seconds.
@@ -78,11 +78,10 @@ class VoiceTranscriptionConfig {
     this.defaultLanguage = 'auto',
     this.supportedLanguages = const [
       'auto',
-      'de',
-      'en',
-      'es',
-      'hu',
-      'sv',
+      'ar', 'bg', 'cs', 'da', 'de', 'el', 'en', 'es', 'fa', 'fi',
+      'fr', 'he', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'ms',
+      'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sk', 'sv', 'th', 'tr',
+      'uk', 'vi', 'zh',
     ],
     this.maxAudioDurationSec = 300,
     this.minConfidenceThreshold = 0.5,
@@ -133,11 +132,6 @@ class VoiceTranscriptionConfig {
     return isEligible(isGroup: conv.isGroup, isChannel: conv.isChannel);
   }
 
-  /// Whether a message type is transcribable.
-  static bool isTranscribable(proto.MessageType type) {
-    return type == proto.MessageType.VOICE_MESSAGE;
-  }
-
   /// Whether a lifecycle transition is valid.
   static bool isValidTransition(VoiceLifecycle from, VoiceLifecycle to) {
     switch (from) {
@@ -180,7 +174,13 @@ class VoiceTranscriptionConfig {
         supportedLanguages: (json['supportedLanguages'] as List<dynamic>?)
                 ?.map((e) => e as String)
                 .toList() ??
-            const ['auto', 'de', 'en', 'es', 'hu', 'sv'],
+            const [
+              'auto',
+              'ar', 'bg', 'cs', 'da', 'de', 'el', 'en', 'es', 'fa', 'fi',
+              'fr', 'he', 'hi', 'hr', 'hu', 'id', 'it', 'ja', 'ko', 'ms',
+              'nl', 'no', 'pl', 'pt', 'ro', 'ru', 'sk', 'sv', 'th', 'tr',
+              'uk', 'vi', 'zh',
+            ],
         maxAudioDurationSec: json['maxAudioDurationSec'] as int? ?? 300,
         minConfidenceThreshold:
             (json['minConfidenceThreshold'] as num?)?.toDouble() ?? 0.5,

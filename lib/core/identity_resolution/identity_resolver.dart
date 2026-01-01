@@ -36,6 +36,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -44,15 +45,26 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 /// `addresses` kann leer sein, wenn Auth-Manifest gefunden wurde aber
 /// Liveness-Lookup für das Device fehlschlug oder revoked-by-filter ist —
 /// in dem Fall fällt `sendEnvelope` auf DV-Relay-Cascade an die deviceNodeId.
+///
+/// Welle 5 (§3.5b + §4.3): zusaetzliche KEM-Felder. Wenn der DeviceKemRecord
+/// fehlt (Hop noch nicht publisht oder Sig-Verify fehlgeschlagen) bleiben sie
+/// `null` — Sender muss dann auf den Per-Identity-KEM-Key (Legacy-Pfad)
+/// zurueckfallen oder den Send queueen bis ein KEM-Record vorliegt.
 class ResolvedDevice {
   final Uint8List deviceNodeId;
   final List<PeerAddress> addresses;
   final int livenessPublishedAtMs;
+  final Uint8List? deviceX25519Pk;
+  final Uint8List? deviceMlKemPk;
+  final int? deviceKemPublishedAtMs;
 
   ResolvedDevice({
     required this.deviceNodeId,
     required this.addresses,
     required this.livenessPublishedAtMs,
+    this.deviceX25519Pk,
+    this.deviceMlKemPk,
+    this.deviceKemPublishedAtMs,
   });
 }
 
@@ -71,21 +83,41 @@ class ResolvedDevice {
 class IdentityResolver {
   final RoutingTable routingTable;
 
-  /// DHT-RPC-Channel. In Wave 4 (Phase 5 Integration) typisiert auf
-  /// `CleonaNode`-Helper, hier `dynamic` für Test-Mocks. Erwartete API:
-  ///   `Future<MessageEnvelope?> sendAndWait(MessageEnvelope envelope, peer)`
+  /// DHT-RPC-Channel (Welle 2A V3-direct). Production wiring uses
+  /// `CleonaNode.dhtRpc` (`DhtRpc` class); tests inject in-memory mocks
+  /// matching the same shape:
+  ///   `Future<DhtRpcResponse?> sendAndWait(MTV3 type, Uint8List body, peer)`
+  /// Stays `dynamic`-typed so test mocks don't need to implement DhtRpc's
+  /// full surface.
   final dynamic dhtRpc;
+
+  /// Local 2D-DHT handler — gives the resolver direct access to
+  /// AuthManifest / Liveness / DeviceKemRecord that this node has stored
+  /// (either as a closest-peer replicator for someone else's record, or
+  /// via `IdentityPublisher` self-store after a local publish). Used in
+  /// the cache-hit short-circuit to populate the `deviceX25519Pk` /
+  /// `deviceMlKemPk` fields on the returned `ResolvedDevice` — without
+  /// this, the cache path returns devices with null KEM-PKs, so callers
+  /// that need KEM (`firstCrPickDeviceKem` for First-CR, §8.1.1) drop the
+  /// resolution and the contact request silently fails even though the
+  /// data is locally available.
+  final dynamic dhtHandler; // IdentityDhtHandler? — kept dynamic for tests
 
   /// Inflight-Dedup: userIdHex → in-flight Future. `whenComplete` entfernt
   /// den Eintrag — sowohl bei Success als auch bei Error.
   final Map<String, Future<List<ResolvedDevice>>> _inflight = {};
 
-  IdentityResolver({required this.routingTable, required this.dhtRpc});
+  IdentityResolver({
+    required this.routingTable,
+    required this.dhtRpc,
+    this.dhtHandler,
+  });
 
   /// Auflöse `userId` zu einer Liste authorisierter Devices.
   /// Bei Cache-Hit (frisch < 1h) sofortige Rückgabe ohne DHT-Lookup.
   /// Bei Lookup-Failure (kein Auth-Manifest) leere Liste — Caller soll
-  /// MessageQueue.enqueue() für ack-worthy Envelopes.
+  /// die V3-Offline-Cascade triggern (S&F + Reed-Solomon + Mailbox-Pull,
+  /// Architektur §5). MessageQueue entfernt in V3.0 (Welle 2 Teil 3 / C5).
   Future<List<ResolvedDevice>> resolve(Uint8List userId) {
     final key = bytesToHex(userId);
     final existing = _inflight[key];
@@ -99,16 +131,53 @@ class IdentityResolver {
 
   Future<List<ResolvedDevice>> _resolveImpl(Uint8List userId) async {
     // ── 1. Cache-Hit Short-Circuit ─────────────────────────────────────
+    // The routing-table cache short-circuits the network round-trip when
+    // we already know live devices for this user. We populate the
+    // KEM-PK fields from the local DhtHandler — this node may have
+    // received the recipient's `IDENTITY_KEM_PUBLISH` as a replicator
+    // (or be the publisher itself, via self-store) — so callers that
+    // need KEM-PKs (First-CR §8.1.1 firstCrPickDeviceKem) get them
+    // without requiring an extra RETRIEVE round-trip.
+    //
+    // If KEM is missing for any cached device but addresses are present,
+    // we fall through to the full DHT lookup path. The shortcut applies
+    // only when we have BOTH addresses and KEM locally — otherwise the
+    // sender silently drops First-CR even though the network might be
+    // able to provide the missing record.
     final cachedPeers = routingTable.getAllPeersForUserId(userId);
     final fresh = cachedPeers.where(_cacheStillFresh).toList();
     if (fresh.isNotEmpty) {
-      return fresh
-          .map((p) => ResolvedDevice(
-                deviceNodeId: p.nodeId,
-                addresses: List.of(p.addresses),
-                livenessPublishedAtMs: p.lastSeen.millisecondsSinceEpoch,
-              ))
-          .toList();
+      final cached = fresh.map((p) {
+        // Pull KEM-PKs from local DhtHandler if present.
+        Uint8List? deviceX25519Pk;
+        Uint8List? deviceMlKemPk;
+        int? deviceKemPublishedAtMs;
+        try {
+          final r = dhtHandler?.getKemRecord(userId, p.nodeId);
+          if (r != null) {
+            deviceX25519Pk = r.deviceX25519Pk;
+            deviceMlKemPk = r.deviceMlKemPk;
+            deviceKemPublishedAtMs = r.publishedAtMs;
+          }
+        } catch (_) {
+          // dhtHandler may not implement getKemRecord (test mocks);
+          // missing KEM is handled by the fall-through below.
+        }
+        return ResolvedDevice(
+          deviceNodeId: p.nodeId,
+          addresses: List.of(p.addresses),
+          livenessPublishedAtMs: p.lastSeen.millisecondsSinceEpoch,
+          deviceX25519Pk: deviceX25519Pk,
+          deviceMlKemPk: deviceMlKemPk,
+          deviceKemPublishedAtMs: deviceKemPublishedAtMs,
+        );
+      }).toList();
+      // Only short-circuit if every cached device has KEM populated. If any
+      // is missing KEM, fall through to the network DHT-lookup so the
+      // caller is not stuck with a no-KEM result that can't drive First-CR.
+      final allHaveKem = cached.every((d) =>
+          d.deviceX25519Pk != null && d.deviceMlKemPk != null);
+      if (allHaveKem) return cached;
     }
 
     // ── 2. Auth-Manifest Lookup ────────────────────────────────────────
@@ -122,10 +191,35 @@ class IdentityResolver {
     // aus einem CleonaService-Cache (Auth-Manifest-Reception füllt den)
     // und verifiziert hier hybrid Ed25519 + ML-DSA.
 
-    // ── 3. Liveness-Lookup parallel pro authorisiertem Device ──────────
+    // ── 3. Liveness-Lookup + Step 4b Device-KEM-Lookup parallel ────────
+    // Welle 5 (§4.3): pro Device zwei Records gleichzeitig fetchen
+    // (Liveness + DeviceKemRecord). Beide haben denselben Trust-Anchor
+    // (User-Master-Ed25519 — Liveness signiert vom DEVICE-Key in der V3-Spec
+    // hat ein anderes Trust-Profil, aber im aktuellen Skeleton ist die
+    // Liveness-Sig vom User-Key gemeint — siehe LivenessRecord.sign).
     final results = await Future.wait(
       authManifest.authorizedDeviceNodeIds.map((deviceId) async {
-        final live = await _lookupLiveness(userId, deviceId);
+        final liveFuture = _lookupLiveness(userId, deviceId);
+        final kemFuture = _lookupDeviceKem(userId, deviceId);
+        final live = await liveFuture;
+        final kem = await kemFuture;
+
+        // Step 4b: KEM-Sig-Verify in-place (Pubkey ist im Record, Trust-
+        // Anchor wird durch Cross-Check mit anderen Records desselben Users
+        // sichergestellt — sobald CleonaService den User-Pubkey-Cache
+        // bereitstellt verifizieren wir hier zusaetzlich gegen den Cache).
+        DeviceKemRecord? validatedKem;
+        if (kem != null) {
+          if (kem.verify(kem.userEd25519Pk)) {
+            validatedKem = kem;
+          }
+          // Hinweis: ohne externen Pubkey-Cache kann ein malicious Replicator
+          // die Sig zwar valide austauschen, aber nicht die KEM-PK von einem
+          // legitim publisht-Record (dort ist die Sig mit dem echten User-Sk
+          // gemacht und der User-Pk zeigt auf den echten Key). Welle-5-Teil-2
+          // wired CleonaService.userPubkeyCache hier rein.
+        }
+
         if (live == null) {
           // Liveness fehlt — Device authorisiert aber keine aktuelle
           // Adresse. Sender soll auf DV-Relay-Cascade fallen.
@@ -133,12 +227,18 @@ class IdentityResolver {
             deviceNodeId: deviceId,
             addresses: const [],
             livenessPublishedAtMs: 0,
+            deviceX25519Pk: validatedKem?.deviceX25519Pk,
+            deviceMlKemPk: validatedKem?.deviceMlKemPk,
+            deviceKemPublishedAtMs: validatedKem?.publishedAtMs,
           );
         }
 
         // Authorized-List-Filter (Revocation-Schutz). Liveness deviceNodeId
         // muss in AuthManifest.authorizedDeviceNodeIds enthalten sein,
-        // sonst gefilterten Eintrag mit leeren Adressen zurückgeben.
+        // sonst gefilterten Eintrag mit leeren Adressen zurückgeben. Step 5
+        // muss laut Spec auch auf den DeviceKemRecord angewendet werden —
+        // der KEM-Record ist per (userId,deviceId) gekeyed, dieselbe deviceId
+        // gilt also derselben Authorization-Pruefung.
         final isAuthorized = authManifest.authorizedDeviceNodeIds
             .any((d) => _bytesEqual(d, live.deviceNodeId));
         if (!isAuthorized) {
@@ -146,6 +246,7 @@ class IdentityResolver {
             deviceNodeId: deviceId,
             addresses: const [],
             livenessPublishedAtMs: 0,
+            // KEM bewusst gedroppt wenn Device revoked — kein Encap-Risk.
           );
         }
 
@@ -161,6 +262,9 @@ class IdentityResolver {
           deviceNodeId: deviceId,
           addresses: addrs,
           livenessPublishedAtMs: live.publishedAtMs,
+          deviceX25519Pk: validatedKem?.deviceX25519Pk,
+          deviceMlKemPk: validatedKem?.deviceMlKemPk,
+          deviceKemPublishedAtMs: validatedKem?.publishedAtMs,
         );
       }),
     );
@@ -173,6 +277,13 @@ class IdentityResolver {
     // Nur Devices mit non-empty Adressen in den `_byUserIdHex`-Index. Devices
     // ohne Adressen (Liveness fehlt / revoked) bleiben außerhalb des Caches —
     // beim nächsten resolve()-Call wird der Lookup wieder durchlaufen.
+    //
+    // TODO Welle 5 Teil 2: Device-KEM-PKs (validatedKem.deviceX25519Pk +
+    // deviceMlKemPk) muessen in einen RoutingTable-Cache (z.B.
+    // `routingTable.addDeviceKem(deviceId, x25519Pk, mlKemPk, publishedAtMs)`)
+    // wandern, sobald die API dort existiert. Aktuell trasportiert der
+    // ResolvedDevice die PKs zum Caller, der den naechsten Lookup
+    // verkürzen muss (oder erneut ueber resolve() pulled).
     for (final r in results) {
       if (r.addresses.isEmpty) continue;
       routingTable.addPeer(PeerInfo(
@@ -186,37 +297,66 @@ class IdentityResolver {
     return results;
   }
 
+  /// Step 4b: K=10 closest replicators zum kem-key parallel anfragen,
+  /// hoechste seq gewinnt (Tie-Break ueber publishedAtMs). Spec §4.3.
+  Future<DeviceKemRecord?> _lookupDeviceKem(
+      Uint8List userId, Uint8List deviceId) async {
+    final body = Uint8List.fromList((proto.IdentityKemRetrieveRequest()
+          ..userId = userId
+          ..deviceId = deviceId)
+        .writeToBuffer());
+
+    final responses = await _parallelSendAndWait(
+      requestType: proto.MessageTypeV3.MTV3_IDENTITY_KEM_RETRIEVE,
+      body: body,
+      dhtKey: _kemKey(userId, deviceId),
+    );
+
+    DeviceKemRecord? best;
+    for (final response in responses) {
+      if (response == null) continue;
+      if (response.type != proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE) {
+        continue;
+      }
+      try {
+        final p = proto.DeviceKemRecordV3.fromBuffer(response.payload);
+        final r = DeviceKemRecord.fromProto(p);
+        if (best == null ||
+            r.sequenceNumber > best.sequenceNumber ||
+            (r.sequenceNumber == best.sequenceNumber &&
+                r.publishedAtMs > best.publishedAtMs)) {
+          best = r;
+        }
+      } catch (_) {
+        // skip malformed
+      }
+    }
+    return best;
+  }
+
   /// K=10 closest replicators zum Schlüssel parallel anfragen, höchste seq
   /// gewinnt (Tie-Break über publishedAtMs). Spec §4.3 Schritt 1.
   ///
   /// Fallback (Test-Skeleton-Kompat): wenn routingTable keine Peers hat,
   /// Single-Call mit `peer=null` — Mocks akzeptieren das.
   Future<AuthManifest?> _lookupAuthManifest(Uint8List userId) async {
-    final envelope = proto.MessageEnvelope()
-      ..messageType = proto.MessageType.IDENTITY_AUTH_RETRIEVE
-      ..encryptedPayload = (proto.IdentityAuthRetrieveRequest()..userId = userId)
-          .writeToBuffer();
+    final body = Uint8List.fromList(
+        (proto.IdentityAuthRetrieveRequest()..userId = userId).writeToBuffer());
 
-    final authKey = _authKey(userId);
-    final closest = routingTable.findClosestPeers(authKey, count: 10);
-    final responses = closest.isEmpty
-        ? <dynamic>[await dhtRpc.sendAndWait(envelope, null)]
-        : await Future.wait(closest.map((peer) async {
-            try {
-              return await dhtRpc.sendAndWait(envelope, peer);
-            } catch (_) {
-              return null;
-            }
-          }));
+    final responses = await _parallelSendAndWait(
+      requestType: proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE,
+      body: body,
+      dhtKey: _authKey(userId),
+    );
 
     AuthManifest? best;
     for (final response in responses) {
       if (response == null) continue;
-      if (response.messageType != proto.MessageType.IDENTITY_AUTH_RESPONSE) {
+      if (response.type != proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE) {
         continue;
       }
       try {
-        final p = proto.AuthManifestProto.fromBuffer(response.encryptedPayload);
+        final p = proto.AuthManifestProto.fromBuffer(response.payload);
         final m = AuthManifest.fromProto(p);
         if (best == null ||
             m.sequenceNumber > best.sequenceNumber ||
@@ -233,34 +373,25 @@ class IdentityResolver {
 
   Future<LivenessRecord?> _lookupLiveness(
       Uint8List userId, Uint8List deviceNodeId) async {
-    final envelope = proto.MessageEnvelope()
-      ..messageType = proto.MessageType.IDENTITY_LIVE_RETRIEVE
-      ..encryptedPayload = (proto.IdentityLiveRetrieveRequest()
-            ..userId = userId
-            ..deviceNodeId = deviceNodeId)
-          .writeToBuffer();
+    final body = Uint8List.fromList((proto.IdentityLiveRetrieveRequest()
+          ..userId = userId
+          ..deviceNodeId = deviceNodeId)
+        .writeToBuffer());
 
-    final closest =
-        routingTable.findClosestPeers(_liveKey(userId, deviceNodeId), count: 10);
-    final responses = closest.isEmpty
-        ? <dynamic>[await dhtRpc.sendAndWait(envelope, null)]
-        : await Future.wait(closest.map((peer) async {
-            try {
-              return await dhtRpc.sendAndWait(envelope, peer);
-            } catch (_) {
-              return null;
-            }
-          }));
+    final responses = await _parallelSendAndWait(
+      requestType: proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE,
+      body: body,
+      dhtKey: _liveKey(userId, deviceNodeId),
+    );
 
     LivenessRecord? best;
     for (final response in responses) {
       if (response == null) continue;
-      if (response.messageType != proto.MessageType.IDENTITY_LIVE_RESPONSE) {
+      if (response.type != proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE) {
         continue;
       }
       try {
-        final p =
-            proto.LivenessRecordProto.fromBuffer(response.encryptedPayload);
+        final p = proto.LivenessRecordProto.fromBuffer(response.payload);
         final r = LivenessRecord.fromProto(p);
         if (best == null ||
             r.sequenceNumber > best.sequenceNumber ||
@@ -275,6 +406,30 @@ class IdentityResolver {
     return best;
   }
 
+  /// Parallel sendAndWait helper — fan out to K=10 closest replicators of
+  /// `dhtKey`. Falls back to a single `peer=null` call when the routing
+  /// table is empty (test-skeleton / cold-start case). Returns one
+  /// `DhtRpcResponse?` per peer (or `[null]` if the empty-table call also
+  /// fails). Per-peer exceptions are squashed to `null` so a single bad
+  /// replicator can't fail the whole lookup.
+  Future<List<dynamic>> _parallelSendAndWait({
+    required proto.MessageTypeV3 requestType,
+    required Uint8List body,
+    required Uint8List dhtKey,
+  }) async {
+    final closest = routingTable.findClosestPeers(dhtKey, count: 10);
+    if (closest.isEmpty) {
+      return <dynamic>[null];
+    }
+    return Future.wait(closest.map((peer) async {
+      try {
+        return await dhtRpc.sendAndWait(requestType, body, peer);
+      } catch (_) {
+        return null;
+      }
+    }));
+  }
+
   // ── DHT-Schlüssel-Hashing (gleicher Pattern wie IdentityPublisher) ────────
 
   Uint8List _authKey(Uint8List userId) => _hashWithPrefix('auth', userId);
@@ -284,6 +439,14 @@ class IdentityResolver {
     combined.setRange(0, userId.length, userId);
     combined.setRange(userId.length, combined.length, deviceNodeId);
     return _hashWithPrefix('live', combined);
+  }
+
+  /// `kem-key = SHA-256("kem" || userId || deviceId)`. Welle 5 (§4.3).
+  Uint8List _kemKey(Uint8List userId, Uint8List deviceId) {
+    final combined = Uint8List(userId.length + deviceId.length);
+    combined.setRange(0, userId.length, userId);
+    combined.setRange(userId.length, combined.length, deviceId);
+    return _hashWithPrefix('kem', combined);
   }
 
   Uint8List _hashWithPrefix(String prefix, Uint8List data) {

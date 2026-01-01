@@ -13,6 +13,7 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/core/ipc/ipc_server.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/transport.dart' show Transport;
 import 'package:cleona/core/tray/native_tray.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
@@ -20,6 +21,13 @@ import 'package:cleona/core/calendar/reminder_service.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/service/notification_sound_service.dart' show VibrationType;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+/// Holds the machine-global single-instance flock (§15.1) for the entire
+/// process lifetime. Top-level so it is NEVER garbage-collected — a block- or
+/// method-scoped RandomAccessFile would be finalized once out of scope, closing
+/// the fd and silently releasing the lock (observed 2026-05-30: a second daemon
+/// then slipped past Guard 2 to the IPC-socket check).
+RandomAccessFile? _machineGlobalLockRaf;
 
 /// Cleona service daemon — runs independently of the GUI.
 /// One daemon, one port, one node — all identities active simultaneously.
@@ -39,19 +47,96 @@ void main(List<String> args) {
     await CLogger.flushAll();
 
     // ── Single-Instance Guard ────────────────────────────────────────
-    // Check 1: Lock file with living PID
-    final lockFile = File('${config.baseDir}/cleona.lock');
-    if (lockFile.existsSync()) {
-      try {
-        final existingPid = int.parse(lockFile.readAsStringSync().trim());
-        if (existingPid != pid && _isProcessAlive(existingPid)) {
-          log.info('Daemon already running (PID $existingPid), exiting.');
-          exit(0);
+    Directory(config.baseDir).createSync(recursive: true);
+
+    // Guard 0 (defense-in-depth): PID-file alive check. Catches duplicates
+    // even when cleona.lock was deleted externally (which defeats the flock
+    // guard because the new file has a different inode).
+    final pidPath = '${config.baseDir}/cleona.pid';
+    try {
+      final pidFile = File(pidPath);
+      if (pidFile.existsSync()) {
+        final otherPid = int.parse(pidFile.readAsStringSync().trim());
+        if (otherPid != pid) {
+          final result = Process.runSync('kill', ['-0', '$otherPid']);
+          if (result.exitCode == 0) {
+            stderr.writeln(
+              'ERROR: Cleona daemon already running (PID $otherPid). '
+              'Stop the running process first before starting a new one.');
+            log.info('Daemon PID $otherPid is still alive — exiting.');
+            await CLogger.flushAll();
+            exit(1);
+          }
         }
-      } catch (_) {}
-      try { lockFile.deleteSync(); } catch (_) {}
+      }
+    } catch (_) { /* stale/corrupt PID file — proceed to flock guard */ }
+
+    // Guard 1 (primary): advisory exclusive file lock (LOCK_EX|LOCK_NB).
+    // The lock is released automatically when the winning process exits (fd
+    // closed by kernel). IMPORTANT: never delete cleona.lock externally — the
+    // flock is inode-based; deleting the file lets a second process create a
+    // new inode and acquire its own lock, defeating the guard.
+    final lockFile = File('${config.baseDir}/cleona.lock');
+    final lockRaf = lockFile.openSync(mode: FileMode.write);
+    try {
+      await lockRaf.lock(FileLock.exclusive);
+      lockRaf.writeStringSync('$pid\n');
+    } on FileSystemException {
+      stderr.writeln(
+        'ERROR: Another Cleona daemon holds the lock file. '
+        'Stop the running process first before starting a new one.');
+      log.info('Another Cleona daemon already holds the lock — exiting.');
+      await CLogger.flushAll();
+      lockRaf.closeSync();
+      exit(1);
     }
-    // Check 2: IPC endpoint is connectable (another daemon owns it)
+    // lockRaf stays open: lock is held until this process exits.
+
+    // Guard 2 (machine-global, V3.1.72, §15.1): a fixed, profile-independent
+    // lock so a SECOND daemon with a different --base-dir/--profile cannot
+    // start on the same machine. The per-baseDir lock above is blind across
+    // data roots — that was the V3.1.72 split-brain (~/.cleona vs
+    // ~/.cleona/Cleona2 both started, inbound + GUI/IPC state diverged).
+    // Bypass only via --ignore-single-instance in BETA builds (lab/jury-swarm).
+    if (config.ignoreSingleInstance &&
+        NetworkSecret.channel == NetworkChannel.beta) {
+      log.info('--ignore-single-instance (beta): machine-global guard skipped.');
+    } else {
+      // Path MUST be deterministic across launch contexts (start.sh, systemd,
+      // ssh) — env vars like XDG_RUNTIME_DIR are not reliably set, so two
+      // launches could pick different paths and defeat the guard. Use the
+      // stable per-user home (AppPaths.home → USERPROFILE on Windows), as a
+      // SIBLING of the profile dir so an E2E/profile wipe of ~/.cleona (which
+      // deletes the inode-based cleona.lock and defeats Guard 0/1) does NOT
+      // remove this lock.
+      final globalLockPath = '${AppPaths.home}/.cleona-daemon.lock';
+      final globalLock = File(globalLockPath);
+      try {
+        globalLock.parent.createSync(recursive: true);
+      } catch (_) {}
+      _machineGlobalLockRaf = globalLock.openSync(mode: FileMode.write);
+      try {
+        await _machineGlobalLockRaf!.lock(FileLock.exclusive);
+        _machineGlobalLockRaf!.writeStringSync('$pid\n');
+      } on FileSystemException {
+        stderr.writeln(
+          'ERROR: Another Cleona daemon is already running on this machine '
+          '(machine-global lock $globalLockPath held). One daemon per machine; '
+          'use --ignore-single-instance (beta only) for lab multi-instance.');
+        log.info('Machine-global single-instance lock held — exiting.');
+        await CLogger.flushAll();
+        _machineGlobalLockRaf!.closeSync();
+        _machineGlobalLockRaf = null;
+        exit(1);
+      }
+      // _machineGlobalLockRaf is top-level → never GC'd → lock held for the
+      // entire process lifetime.
+    }
+
+    // Write PID file early so Guard 0 can detect us before we finish init.
+    File(pidPath).writeAsStringSync('$pid\n');
+
+    // Guard 2: IPC endpoint is connectable (another daemon owns it)
     if (Platform.isWindows) {
       // Windows: TCP loopback — check port file (format: port:token)
       final portFile = File('${config.baseDir}/cleona.port');
@@ -63,8 +148,11 @@ void main(List<String> args) {
             InternetAddress.loopbackIPv4, port,
           ).timeout(const Duration(seconds: 2));
           testSock.destroy();
+          stderr.writeln(
+            'ERROR: Another daemon is listening on TCP port $port. '
+            'Stop the running process first.');
           log.info('Another daemon is listening on TCP port $port, exiting.');
-          exit(0);
+          exit(1);
         } catch (_) {
           // Port file exists but not connectable — stale, remove it
           try { portFile.deleteSync(); } catch (_) {}
@@ -80,8 +168,11 @@ void main(List<String> args) {
             0,
           );
           testSock.destroy();
+          stderr.writeln(
+            'ERROR: Another daemon is listening on IPC socket. '
+            'Stop the running process first.');
           log.info('Another daemon is listening on socket, exiting.');
-          exit(0);
+          exit(1);
         } catch (_) {
           // Socket exists but not connectable — stale, remove it
           try { socketFile.deleteSync(); } catch (_) {}
@@ -115,14 +206,13 @@ void main(List<String> args) {
         probe.close();
         // Port was free — we can proceed
       } on SocketException {
+        stderr.writeln(
+          'ERROR: UDP port $probePort already in use. '
+          'Stop the running process first.');
         log.info('Port $probePort already in use (orphaned daemon?), exiting.');
-        exit(0);
+        exit(1);
       }
     }
-
-    // Write our lock immediately to prevent races
-    Directory(config.baseDir).createSync(recursive: true);
-    lockFile.writeAsStringSync('$pid');
 
     // Clear any stale ready-flag from a crashed previous instance. Ready-flag
     // is written only after ipcServer.start() succeeds (see `_startAllInner`).
@@ -159,9 +249,17 @@ void main(List<String> args) {
 
     // ── Signal handling ───────────────────────────────────────────────
     // Windows only supports SIGINT (Ctrl+C), not SIGTERM/SIGHUP.
-    ProcessSignal.sigint.watch().listen((_) => lifecycle.shutdownAll());
+    // Log every signal — distinguishing "killed by signal" from "died spontaneously"
+    // is the first forensic split when investigating a daemon crash (C-3).
+    ProcessSignal.sigint.watch().listen((_) {
+      log.warn('SIGINT received — initiating shutdown');
+      lifecycle.shutdownAll();
+    });
     if (!Platform.isWindows) {
-      ProcessSignal.sigterm.watch().listen((_) => lifecycle.shutdownAll());
+      ProcessSignal.sigterm.watch().listen((_) {
+        log.warn('SIGTERM received — initiating shutdown');
+        lifecycle.shutdownAll();
+      });
       // Ignore SIGHUP — daemon must survive when parent (GUI) exits or session changes
       try {
         ProcessSignal.sighup.watch().listen((_) {
@@ -171,10 +269,27 @@ void main(List<String> args) {
     }
 
     log.info('Cleona daemon running.');
-  }, (error, stack) {
-    final log = CLogger.get('daemon');
-    log.error('Unhandled error: $error');
-    log.error('Stack: $stack');
+  }, (error, stack) async {
+    // C-3 forensics: an uncaught async error here used to be logged into the
+    // in-memory buffer only, with flush running on a 2s timer — if the daemon
+    // died before that tick, the stack trace was lost (B-4 crash 2026-05-14
+    // 13:36 had exactly this pattern). Now: synchronous stderr write (lands
+    // in wrapper-captured log immediately), then await flushAll.
+    // Survivable errors (TimeoutException, SocketException) are logged but do
+    // NOT terminate the daemon — they occur routinely when peers are
+    // temporarily unreachable. Only truly unexpected errors exit(99).
+    final msg = 'UNHANDLED ASYNC ERROR: $error\nStack:\n$stack';
+    try { stderr.writeln(msg); } catch (_) {}
+    try {
+      final log = CLogger.get('daemon');
+      log.error(msg);
+      await CLogger.flushAll();
+    } catch (_) {}
+    final isSurvivable = error is TimeoutException ||
+        error is SocketException ||
+        error is IOException ||
+        (error is StateError && error.message.contains('DhtRpc disposed'));
+    if (!isSurvivable) exit(99);
   });
 }
 
@@ -191,6 +306,8 @@ class _MultiServiceDaemon {
   ReminderService? _reminderService;
   CalDAVServer? _caldavServer;
   Timer? _statusTimer;
+  Timer? _networkPollTimer; // Windows-only: 30s poll fallback for network changes
+  List<String> _lastPollIps = []; // Windows-only: IP snapshot for delta-check
   Process? _networkMonitor;
   Timer? _triggerTimer;
   Timer? _heartbeatTimer;
@@ -284,6 +401,7 @@ class _MultiServiceDaemon {
       port: nodePort,
       networkChannel: NetworkSecret.channel.name,
     );
+    node.manualPublicIp = config.publicIp;
     node.primaryIdentity = primaryCtx;
     _node = node;
 
@@ -318,8 +436,160 @@ class _MultiServiceDaemon {
       node.registerIdentity(ctx);
     }
 
-    // Route incoming messages to the correct service
-    node.onMessageForIdentity = _onMessageForIdentity;
+    // §2.4 receiver step [9] (Edit 2 — multi-identity KEM-Try-Loop): V3
+    // ApplicationFrame dispatcher. Per §3.1 the deviceID is daemon-global,
+    // so `nextHopDeviceId` cannot identify the owning identity any longer
+    // (it identifies the daemon). The receive pipeline therefore tries each
+    // hosted identity's User-KEM-SK in turn until one decapsulates
+    // successfully (recently-active-first heuristic), or all fail.
+    node.onApplicationFramePayload = (packet, from, port, snapshot) async {
+      if (_services.isEmpty) {
+        if (!_servicesReady) {
+          log.debug('V3 APP drop during boot: services not ready');
+          return;
+        }
+        log.warn('V3 APP drop: no services registered');
+        return;
+      }
+
+      // Try-order: most-recently-delivered identity first (heuristic — the
+      // active conversation partner is statistically the most likely
+      // recipient for the next inbound frame). Fall back to insertion order
+      // for ties / cold daemon start.
+      final ordered = _orderedServicesByRecency();
+      for (final service in ordered) {
+        final outcome = await service.handleIncomingApplicationPacket(
+            packet, from, port, snapshot);
+        if (outcome == AppFrameDispatchOutcome.delivered) {
+          _markServiceActive(service);
+          return;
+        }
+        if (outcome == AppFrameDispatchOutcome.droppedAfterDecap) {
+          // Decap succeeded under this identity's User-KEM-SK but a later
+          // step failed (sig/parse/recipient-mismatch). Final drop — no
+          // other identity could decap the same KEM-ciphertext.
+          return;
+        }
+        // outcome == notForThisIdentity: continue to next service.
+      }
+      log.debug('V3 APP drop: KEM-decap failed under all '
+          '${ordered.length} hosted identit${ordered.length == 1 ? "y" : "ies"} '
+          '(frame not addressed to any UserID on this daemon)');
+    };
+
+    // Welle 5 §8.1.1: First-CR-Bootstrap arrives as InfrastructureFrame
+    // with messageType=MTV3_CONTACT_REQUEST (selector exception). Route by
+    // frame.recipientDeviceId — same lookup pattern as the application
+    // path. Other infrastructure types that fall through to this hook
+    // (post-Wave-1 cluster — e.g. routing/DHT chatter that the node hasn't
+    // node-locally dispatched yet) get logged and dropped because their
+    // service-side handlers don't exist yet.
+    node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
+      // Service-routed Identity-Layer messageTypes (Welle 5 + 6): CR-Bootstrap,
+      // RESTORE_BROADCAST, Emergency KEY_ROTATION_BROADCAST. Everything else
+      // either lives in the node-local infra dispatch or has no handler yet.
+      final mt = frame.messageType;
+      final isServiceRouted =
+          mt == proto.MessageTypeV3.MTV3_CONTACT_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_RESTORE_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE ||
+          // Wave 2B.3 (§6 Reed-Solomon erasure + S&F mailbox):
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
+          // §5.5 Store-and-Forward on mutual peers:
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
+          // Wave 2B.3 (§10.2): channel-index gossip
+          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE;
+      if (!isServiceRouted) {
+        log.debug('V3 INFRA hook drop: messageType=${mt.name} '
+            'has no service-side handler');
+        return;
+      }
+      // §3.1 C-1: all hosted identities share one daemon-global deviceNodeId.
+      // Fan out to every identity on this device — each handler drops
+      // internally if the frame is not relevant to that identity.
+      final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
+      final identities = node.identitiesForDevice(deviceIdBytes).toList();
+      if (identities.isEmpty) {
+        log.debug('V3 INFRA drop: recipientDeviceId '
+            '${bytesToHex(deviceIdBytes).substring(0, 8)} '
+            'is not local (mt=${mt.name})');
+        return;
+      }
+      for (final id in identities) {
+        final service = _services[id.userIdHex];
+        if (service == null) continue;
+        switch (mt) {
+          case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
+            service.handleIncomingFirstContactRequest(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+            service.handleIncomingRestoreBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+            service.handleIncomingKeyRotationBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+            service.handleIncomingGuardianShareStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST:
+            service.handleIncomingGuardianRestoreRequestInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
+            service.handleIncomingGuardianRestoreResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+            service.handleIncomingFragmentStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+            service.handleIncomingFragmentRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
+            service.handleIncomingFragmentRetrieveResponseInfra(
+                frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
+            service.handleIncomingFragmentDeleteInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+            service.handleIncomingChannelIndexExchangeInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE:
+            service.handleIncomingPeerStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+            service.handleIncomingPeerRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+            service.handleIncomingPeerRetrieveResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          default:
+            break;
+        }
+      }
+    };
 
     // Notify GUI when peer addresses change (e.g. bootstrap discovers public IP)
     node.onPeersChanged = () {
@@ -329,7 +599,7 @@ class _MultiServiceDaemon {
     };
 
     // Start the shared node
-    await node.startQuick(bootstrapPeers: config.bootstrapPeers);
+    await node.startQuick();
     log.info('Node gestartet auf Port $nodePort, ${_contexts.length} Identitäten');
 
     // Create and start a CleonaService for each identity
@@ -346,8 +616,8 @@ class _MultiServiceDaemon {
       log.info('Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
 
-    // Services ready — replay any messages that arrived during startup
-    _replayEarlyMessages();
+    // Services ready — V3 ApplicationFrame/InfrastructureFrame hooks gate on this flag.
+    _servicesReady = true;
 
     // Save updated nodeIdHex values
     mgr.saveIdentities(identities);
@@ -368,9 +638,7 @@ class _MultiServiceDaemon {
     await ipcServer.start();
     _ipcServer = ipcServer;
 
-    // PID file (lock file already written in main())
-    final pidFile = File('${config.baseDir}/cleona.pid');
-    pidFile.writeAsStringSync('$pid');
+    // PID file already written early (Guard 0 needs it before init completes).
 
     // Calendar reminder service (§23) — checks all identity calendars
     _startReminderService();
@@ -451,73 +719,40 @@ class _MultiServiceDaemon {
     } catch (_) { /* non-fatal */ }
   }
 
-  // Buffer for messages that arrive before services are ready.
-  final _earlyMessages = <(dynamic, dynamic, int, IdentityContext?)>[];
+  // Boot-window gate read by V3 ApplicationFrame / InfrastructureFrame hooks
+  // to drop frames that arrive before per-identity services are constructed.
+  // The sender retries via S&F (§3.3.7) + erasure (§6), so dropping is safe.
   bool _servicesReady = false;
 
-  /// Replay buffered messages after services are created.
-  void _replayEarlyMessages() {
-    _servicesReady = true;
-    if (_earlyMessages.isEmpty) return;
-    log.info('Replaying ${_earlyMessages.length} early messages');
-    final buffered = List.of(_earlyMessages);
-    _earlyMessages.clear();
-    for (final (env, from, port, id) in buffered) {
-      _onMessageForIdentity(env, from, port, id);
+  // Recently-active identity tracking for the §2.4 step [9] try-loop. The
+  // most-recently-delivered identity is tried first on the next inbound
+  // ApplicationFrame — the active conversation partner is statistically
+  // the most likely recipient, which keeps the per-frame KEM-decap cost
+  // at one attempt for the common case.
+  final List<String> _serviceRecency = <String>[];
+
+  /// Order [_services.values] most-recently-active first. Identities not
+  /// yet in the recency list (cold start, fresh identity) are appended
+  /// after the recency-sorted prefix in insertion order.
+  Iterable<CleonaService> _orderedServicesByRecency() {
+    final seen = <String>{};
+    final out = <CleonaService>[];
+    for (final id in _serviceRecency) {
+      final s = _services[id];
+      if (s != null && seen.add(id)) out.add(s);
     }
+    for (final entry in _services.entries) {
+      if (seen.add(entry.key)) out.add(entry.value);
+    }
+    return out;
   }
 
-  void _onMessageForIdentity(dynamic envelope, dynamic from, int port, IdentityContext? identity) {
-    // Buffer messages that arrive before services are ready
-    if (!_servicesReady) {
-      _earlyMessages.add((envelope, from, port, identity));
-      return;
-    }
-
-    if (identity != null) {
-      final service = _services[identity.userIdHex];
-      if (service == null) {
-        final env = envelope as proto.MessageEnvelope;
-        log.warn('No service for identity ${identity.userIdHex.substring(0, 8)} '
-            '(type=${env.messageType}, services=${_services.keys.map((k) => k.substring(0, 8)).toList()})');
-      }
-      service?.handleMessage(envelope, from, port);
-    } else {
-      // recipientId didn't match or empty — route by message type
-      final env = envelope as proto.MessageEnvelope;
-      final isFragment = env.messageType == proto.MessageType.FRAGMENT_STORE ||
-          env.messageType == proto.MessageType.FRAGMENT_RETRIEVE ||
-          env.messageType == proto.MessageType.FRAGMENT_STORE_ACK;
-
-      if (isFragment) {
-        // Fragments: let each service check mailbox ownership
-        for (final service in _services.values) {
-          service.handleMessage(envelope, from, port);
-        }
-      } else if (env.groupId.isNotEmpty) {
-        // Group messages: route only to services that are members of this group
-        final groupIdHex = bytesToHex(Uint8List.fromList(env.groupId));
-        var routed = false;
-        for (final service in _services.values) {
-          if (service.groups.containsKey(groupIdHex) ||
-              service.channels.containsKey(groupIdHex)) {
-            service.handleMessage(envelope, from, port);
-            routed = true;
-          }
-        }
-        if (!routed) {
-          // Fallback: try all services (may be a new group invite)
-          for (final service in _services.values) {
-            service.handleMessage(envelope, from, port);
-          }
-        }
-      } else {
-        // Unknown routing: try all services
-        for (final service in _services.values) {
-          service.handleMessage(envelope, from, port);
-        }
-      }
-    }
+  /// Mark [service]'s identity as most-recently-active. Called after a
+  /// successful ApplicationFrame delivery to that service.
+  void _markServiceActive(CleonaService service) {
+    final id = service.nodeIdHex;
+    _serviceRecency.remove(id);
+    _serviceRecency.insert(0, id);
   }
 
   /// Add a new identity at runtime.
@@ -635,6 +870,8 @@ class _MultiServiceDaemon {
 
     _statusTimer?.cancel();
     _statusTimer = null;
+    _networkPollTimer?.cancel();
+    _networkPollTimer = null;
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
     _reminderService?.dispose();
@@ -666,8 +903,12 @@ class _MultiServiceDaemon {
     log.info('Daemon wird beendet...');
     _triggerTimer?.cancel();
     if (_running) await stopAll();
-    final lockFile = File('${config.baseDir}/cleona.lock');
-    if (lockFile.existsSync()) lockFile.deleteSync();
+    // Do NOT delete cleona.lock — the flock is inode-based and released
+    // automatically by the kernel when this process exits (fd closed).
+    // Deleting the file would break the single-instance guarantee if
+    // another daemon starts before this one fully exits (new inode = new
+    // lock = two daemons with valid exclusive locks on different inodes).
+    // The stale PID in the file is detected by the GUI via kill -0.
     tray.dispose();
     exit(0);
   }
@@ -878,13 +1119,22 @@ class _MultiServiceDaemon {
   /// Windows: polling fallback (no equivalent of ip monitor).
   void _startNetworkMonitor() async {
     if (Platform.isWindows) {
-      // Windows: poll for network changes every 30s (no ip monitor equivalent)
-      _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
+      // Windows: poll for network changes every 30s (no ip monitor equivalent).
+      // The node-reset runs once for the whole daemon; per-service we only
+      // trigger the service-side cleanup (mailbox poll, identity-publisher).
+      _networkPollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
         if (!_running) return;
+        final currentIps = await Transport.getAllLocalIps();
+        final ipsKey = currentIps.join(',');
+        final lastKey = _lastPollIps.join(',');
+        if (ipsKey == lastKey && _lastPollIps.isNotEmpty) return;
+        _lastPollIps = currentIps;
+        log.info('Network change detected (poll) — IPs: $lastKey → $ipsKey');
         await _node?.onNetworkChanged();
         for (final service in _services.values) {
-          service.onNetworkChanged();
+          service.onNetworkChanged(triggerNodeReset: false);
         }
+        _queryPublicIpFallback(delay: const Duration(seconds: 10));
       });
       return;
     }
@@ -903,7 +1153,7 @@ class _MultiServiceDaemon {
           log.info('Network change detected (ip monitor)');
           await _node?.onNetworkChanged();
           for (final service in _services.values) {
-            service.onNetworkChanged();
+            service.onNetworkChanged(triggerNodeReset: false);
           }
           // Re-query public IP after network change (DNAT may have changed)
           _queryPublicIpFallback(delay: const Duration(seconds: 10));
@@ -1007,20 +1257,6 @@ class _MultiServiceDaemon {
   }
 }
 
-/// Check if a process with the given PID is alive.
-bool _isProcessAlive(int pidToCheck) {
-  try {
-    if (Platform.isWindows) {
-      final result = Process.runSync('tasklist', ['/FI', 'PID eq $pidToCheck', '/NH']);
-      return result.stdout.toString().contains('$pidToCheck');
-    } else {
-      return Process.runSync('kill', ['-0', '$pidToCheck']).exitCode == 0;
-    }
-  } catch (_) {
-    return false;
-  }
-}
-
 String? _findIconPath({bool beta = false}) {
   final exePath = Platform.resolvedExecutable;
   final sep = Platform.pathSeparator;
@@ -1067,47 +1303,70 @@ class _CalDAVServerConfig {
 class _DaemonConfig {
   final String baseDir; // ~/.cleona
   final int? port;
-  final List<String> bootstrapPeers;
   final String? iconPath;
+  final String? publicIp;
+  /// Beta-only: skip the machine-global single-instance guard (§15.1).
+  /// Used by lab tooling (jury-swarm) to run N daemons on one host.
+  final bool ignoreSingleInstance;
 
   _DaemonConfig({
     required this.baseDir,
     this.port,
-    this.bootstrapPeers = const [],
     this.iconPath,
+    this.publicIp,
+    this.ignoreSingleInstance = false,
   });
 }
 
 _DaemonConfig _parseArgs(List<String> args) {
   String? baseDir;
   int? port;
-  final bootstrapPeers = <String>[];
   String? iconPath;
+  String? publicIp;
+  bool ignoreSingleInstance = false;
 
   // Legacy: --profile and --name still accepted for compatibility
   String? legacyProfile;
 
-  for (var i = 0; i < args.length; i++) {
-    switch (args[i]) {
+  // Normalise `--key=value` forms (POSIX getopt-style) into separate
+  // tokens so the per-flag matcher below can stay simple.
+  final flat = <String>[];
+  for (final a in args) {
+    final eq = a.indexOf('=');
+    if (a.startsWith('--') && eq > 2) {
+      flat.add(a.substring(0, eq));
+      flat.add(a.substring(eq + 1));
+    } else {
+      flat.add(a);
+    }
+  }
+
+  for (var i = 0; i < flat.length; i++) {
+    switch (flat[i]) {
       case '--base-dir':
-        if (i + 1 < args.length) baseDir = args[++i];
+        if (i + 1 < flat.length) baseDir = flat[++i];
         break;
       case '--profile':
         // Legacy: single-identity profile dir
-        if (i + 1 < args.length) legacyProfile = args[++i];
+        if (i + 1 < flat.length) legacyProfile = flat[++i];
         break;
       case '--port':
-        if (i + 1 < args.length) port = int.tryParse(args[++i]);
+        if (i + 1 < flat.length) port = int.tryParse(flat[++i]);
         break;
       case '--name':
         // Legacy: ignored in multi-identity mode
-        if (i + 1 < args.length) i++;
-        break;
-      case '--bootstrap-peer':
-        if (i + 1 < args.length) bootstrapPeers.add(args[++i]);
+        if (i + 1 < flat.length) i++;
         break;
       case '--icon':
-        if (i + 1 < args.length) iconPath = args[++i];
+        if (i + 1 < flat.length) iconPath = flat[++i];
+        break;
+      case '--public-ip':
+        if (i + 1 < flat.length) publicIp = flat[++i];
+        break;
+      case '--ignore-single-instance':
+        // Beta-only bypass of the machine-global single-instance guard
+        // (lab/jury-swarm multi-instance). Honored only in beta builds.
+        ignoreSingleInstance = true;
         break;
     }
   }
@@ -1128,7 +1387,8 @@ _DaemonConfig _parseArgs(List<String> args) {
   return _DaemonConfig(
     baseDir: baseDir,
     port: port,
-    bootstrapPeers: bootstrapPeers,
     iconPath: iconPath,
+    publicIp: publicIp,
+    ignoreSingleInstance: ignoreSingleInstance,
   );
 }

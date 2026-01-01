@@ -2,8 +2,29 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:meta/meta.dart';
+
+/// Plain-Dart KEM-header tuple returned by [PerMessageKem.encrypt] and
+/// consumed by [PerMessageKem.decrypt]. Field names mirror the V3 wire
+/// shape ([proto.PerMessageKemV3]); the codec layer is responsible for
+/// packing/unpacking against the wire type.
+///
+/// This deliberately replaces the historical V2 wire-message
+/// `proto.PerMessageKem` (dropped Wave 9 Beta) — the API no longer leaks
+/// the deprecated wire shape.
+class KemHeader {
+  final Uint8List ephemeralX25519Pk; // 32 bytes — X25519 ephemeral pubkey
+  final Uint8List mlKemCiphertext;   // 1088 bytes — ML-KEM-768 ciphertext
+  final Uint8List aesNonce;          // 12 bytes — AEAD nonce
+  final int version;                 // KEM version (Sec H-5: v2)
+
+  const KemHeader({
+    required this.ephemeralX25519Pk,
+    required this.mlKemCiphertext,
+    required this.aesNonce,
+    required this.version,
+  });
+}
 
 /// Thrown by [PerMessageKem.decrypt] when the header carries a KEM version
 /// that is not in [PerMessageKem.acceptKemVersions].
@@ -74,7 +95,7 @@ class PerMessageKem {
   }
 
   /// Encrypt a message for a recipient.
-  static (proto.PerMessageKem, Uint8List) encrypt({
+  static (KemHeader, Uint8List) encrypt({
     required Uint8List plaintext,
     required Uint8List recipientX25519Pk,
     required Uint8List recipientMlKemPk,
@@ -109,11 +130,12 @@ class PerMessageKem {
     final ciphertext = _sodium.aesGcmEncrypt(plaintext, msgKey, nonce);
 
     // 6. Build KEM header WITH version
-    final header = proto.PerMessageKem()
-      ..ephemeralX25519Pk = ephX25519Pk
-      ..mlKemCiphertext = kemCiphertext
-      ..aesNonce = nonce
-      ..version = version;
+    final header = KemHeader(
+      ephemeralX25519Pk: ephX25519Pk,
+      mlKemCiphertext: kemCiphertext,
+      aesNonce: nonce,
+      version: version,
+    );
 
     // 7. Zero ephemeral secrets
     for (var i = 0; i < ephX25519Sk.length; i++) { ephX25519Sk[i] = 0; }
@@ -124,7 +146,7 @@ class PerMessageKem {
 
   /// Decrypt a message using our private keys.
   static Uint8List decrypt({
-    required proto.PerMessageKem kemHeader,
+    required KemHeader kemHeader,
     required Uint8List ciphertext,
     required Uint8List ourX25519Sk,
     required Uint8List ourMlKemSk,
@@ -137,11 +159,11 @@ class PerMessageKem {
     }
 
     // 1. X25519 DH with ephemeral public key
-    final ephPk = Uint8List.fromList(kemHeader.ephemeralX25519Pk);
+    final ephPk = kemHeader.ephemeralX25519Pk;
     final dhSecret = _sodium.x25519ScalarMult(ourX25519Sk, ephPk);
 
     // 2. ML-KEM-768 decapsulation
-    final kemCiphertext = Uint8List.fromList(kemHeader.mlKemCiphertext);
+    final kemCiphertext = kemHeader.mlKemCiphertext;
     final kemSecret = _oqs.mlKemDecapsulate(kemCiphertext, ourMlKemSk);
 
     // 3. Derive the same message key with version-correct salt + info
@@ -156,49 +178,10 @@ class PerMessageKem {
     );
 
     // 4. Decrypt with AES-256-GCM
-    final nonce = Uint8List.fromList(kemHeader.aesNonce);
+    final nonce = kemHeader.aesNonce;
     return _sodium.aesGcmDecrypt(ciphertext, msgKey, nonce);
   }
 
-  /// Check if a message type should be encrypted with Per-Message KEM.
-  static bool shouldEncrypt(proto.MessageType type) {
-    switch (type) {
-      case proto.MessageType.CONTACT_REQUEST:
-      case proto.MessageType.CONTACT_REQUEST_RESPONSE:
-      case proto.MessageType.RESTORE_BROADCAST:
-      case proto.MessageType.RESTORE_RESPONSE:
-      case proto.MessageType.DHT_PING:
-      case proto.MessageType.DHT_PONG:
-      case proto.MessageType.DHT_FIND_NODE:
-      case proto.MessageType.DHT_FIND_NODE_RESPONSE:
-      case proto.MessageType.DHT_STORE:
-      case proto.MessageType.DHT_STORE_RESPONSE:
-      case proto.MessageType.DHT_FIND_VALUE:
-      case proto.MessageType.DHT_FIND_VALUE_RESPONSE:
-      case proto.MessageType.FRAGMENT_STORE:
-      case proto.MessageType.FRAGMENT_STORE_ACK:
-      case proto.MessageType.FRAGMENT_RETRIEVE:
-      case proto.MessageType.FRAGMENT_DELETE:
-      case proto.MessageType.PEER_LIST_SUMMARY:
-      case proto.MessageType.PEER_LIST_WANT:
-      case proto.MessageType.PEER_LIST_PUSH:
-        return false;
-      default:
-        return true;
-    }
-  }
-
-  /// Check if a message type is ephemeral (skip erasure-coded backup).
-  static bool isEphemeral(proto.MessageType type) {
-    switch (type) {
-      case proto.MessageType.TYPING_INDICATOR:
-      case proto.MessageType.READ_RECEIPT:
-      case proto.MessageType.DELIVERY_RECEIPT:
-      case proto.MessageType.FREE_BUSY_REQUEST:
-      case proto.MessageType.FREE_BUSY_RESPONSE:
-        return true;
-      default:
-        return false;
-    }
-  }
+  // Encryption decision lives in V3FrameCodec; ephemeral / erasure-skip
+  // logic lives in CleonaService._handleApplicationFrame.
 }

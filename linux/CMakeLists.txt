@@ -63,6 +63,12 @@ add_subdirectory("runner")
 # REMOVE_RECURSE block), so the .so survives Flutter's bundle wipe.
 add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_audio" "${CMAKE_BINARY_DIR}/cleona_audio_build")
 
+# === cleona_net shim (libcleona_net.so) ===
+# Direct-syscall UDP send-path — see Cleona_Chat_Architecture_v3_0.md §4.5.2.
+# Same install pattern as cleona_audio: built here, installed below into
+# bundle/lib/ after the Flutter bundle wipe.
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_net" "${CMAKE_BINARY_DIR}/cleona_net_build")
+
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
 
@@ -103,6 +109,10 @@ install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
 # cleona_audio shim — install after the bundle wipe above so the .so lands in
 # bundle/lib/ next to libapp.so (RPATH $ORIGIN/lib resolves it for FFI).
 install(TARGETS cleona_audio LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
+# cleona_net shim — same install pattern as cleona_audio.
+install(TARGETS cleona_net LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

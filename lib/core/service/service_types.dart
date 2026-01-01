@@ -1,7 +1,50 @@
 import 'dart:typed_data';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+/// UI tag enum, decoupled from the wire layer; persisted by ordinal
+/// [wireValue]. V3 wire frames use `MessageTypeV3` exclusively — this enum
+/// is purely UI/persistence-internal.
+enum UiMessageType {
+  // Content payloads
+  text(0),
+  image(1),
+  video(2),
+  gif(3),
+  voiceMessage(4),
+  file(5),
+  // Group lifecycle
+  groupInvite(6),
+  groupLeave(7),
+  // Channels
+  channelPost(8),
+  channelInvite(9),
+  channelLeave(10),
+  channelRoleUpdate(11),
+  // Identity
+  identityDeleted(12),
+  // Calendar
+  calendarInvite(13),
+  calendarRsvp(14),
+  calendarUpdate(15),
+  calendarDelete(16),
+  // Polls
+  pollCreate(17),
+  ;
+
+  final int wireValue;
+  const UiMessageType(this.wireValue);
+
+  /// Decode from persisted int. Falls back to [UiMessageType.text] for unknown
+  /// values (forward-compatible: a future wire-only type accidentally landing
+  /// in a UiMessage blob shouldn't crash UI).
+  static UiMessageType fromInt(int v) {
+    for (final t in UiMessageType.values) {
+      if (t.wireValue == v) return t;
+    }
+    return UiMessageType.text;
+  }
+}
 
 /// Message delivery status.
 enum MessageStatus { sending, queued, sent, storedInNetwork, delivered, read }
@@ -170,7 +213,7 @@ class UiMessage {
   String senderNodeIdHex;
   String text;
   final DateTime timestamp;
-  final proto.MessageType type;
+  final UiMessageType type;
   MessageStatus status;
   final bool isOutgoing;
   String? filePath;
@@ -256,7 +299,7 @@ class UiMessage {
         'sender': senderNodeIdHex,
         'text': text,
         'timestamp': timestamp.millisecondsSinceEpoch,
-        'type': type.value,
+        'type': type.wireValue,
         'status': status.index,
         'isOutgoing': isOutgoing,
         'filePath': filePath,
@@ -291,7 +334,7 @@ class UiMessage {
         senderNodeIdHex: json['sender'] as String? ?? '',
         text: json['text'] as String? ?? '',
         timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int),
-        type: proto.MessageType.valueOf(json['type'] as int) ?? proto.MessageType.TEXT,
+        type: UiMessageType.fromInt(json['type'] as int),
         status: MessageStatus.values[json['status'] as int? ?? 3],
         isOutgoing: json['isOutgoing'] as bool,
         filePath: json['filePath'] as String?,
@@ -1017,6 +1060,16 @@ class ContactInfo {
   int? birthdayDay;
   int? birthdayYear;
 
+  /// First-CR-Bootstrap seed (§8.1.1, persisted from QR/NFC scan).
+  /// Required for retrying a `pending_outgoing` first-contact CR — the
+  /// recipient's User-KEM-PK is unknown until CR-Response arrives, so the
+  /// retry must re-encap under the recipient's Device-KEM-PK from the seed.
+  /// Cleared once the contact transitions to `accepted` is unnecessary —
+  /// these are tiny static fields and survive across re-installs.
+  String? seedDeviceIdHex;
+  String? seedDxkB64;
+  String? seedDmkB64;
+
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
 
@@ -1038,6 +1091,9 @@ class ContactInfo {
     this.birthdayMonth,
     this.birthdayDay,
     this.birthdayYear,
+    this.seedDeviceIdHex,
+    this.seedDxkB64,
+    this.seedDmkB64,
   }) : deviceNodeIds = deviceNodeIds ?? {};
 
   String get nodeIdHex => bytesToHex(nodeId);
@@ -1060,6 +1116,9 @@ class ContactInfo {
         if (birthdayMonth != null) 'birthdayMonth': birthdayMonth,
         if (birthdayDay != null) 'birthdayDay': birthdayDay,
         if (birthdayYear != null) 'birthdayYear': birthdayYear,
+        if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
+        if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
+        if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -1092,6 +1151,9 @@ class ContactInfo {
         birthdayMonth: json['birthdayMonth'] as int?,
         birthdayDay: json['birthdayDay'] as int?,
         birthdayYear: json['birthdayYear'] as int?,
+        seedDeviceIdHex: json['seedDeviceIdHex'] as String?,
+        seedDxkB64: json['seedDxkB64'] as String?,
+        seedDmkB64: json['seedDmkB64'] as String?,
       );
 }
 

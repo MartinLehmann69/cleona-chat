@@ -176,6 +176,48 @@ class ModerationConfig {
   /// Production configuration with the values from docs/CHANNELS.md.
   factory ModerationConfig.production() => const ModerationConfig();
 
+  /// Lab configuration for the 20-node moderation lab on test-server.
+  /// Realistic jury sizes and anti-Sybil enabled, but shortened timeouts
+  /// and no identity-age barriers (VMs are freshly initialized).
+  factory ModerationConfig.lab() => const ModerationConfig(
+        juryVoteTimeout: Duration(seconds: 30),
+        juryMinSize: 5,
+        juryMaxSize: 9,
+        juryMaxPercent: 0.50,
+        juryMajority: 2.0 / 3.0,
+        juryFallbackDoubleThreshold: true,
+        reportThresholdForJury: 2,
+        maxReportsPerIdentityPerDay: 20,
+        singlePostEscalationTimeout: Duration(seconds: 30),
+        badgeProbationLevel1: Duration(seconds: 60),
+        badgeProbationLevel2: Duration(seconds: 120),
+        csamStage2Min: 3,
+        csamStage2Factor: 0.05,
+        csamStage3Min: 5,
+        csamStage3Factor: 0.10,
+        csamTempHideDuration: Duration(seconds: 45),
+        csamReporterCooldown: Duration(seconds: 10),
+        csamMaxStrikes: 3,
+        identityMinAge: Duration.zero,
+        identityMinAgeCSAM: Duration.zero,
+        csamMinBidirectionalPartners: 2,
+        csamMinReceivedMessages: 0,
+        csamMinLongtermContacts: 0,
+        csamLongtermContactAge: Duration.zero,
+        csamRequiresAdult: true,
+        jurorMinAge: Duration.zero,
+        jurorRequiresAdult: true,
+        jurorRequiresReviewEnabled: true,
+        reachabilityEnabled: true,
+        reachabilityThreshold: 0.60,
+        reachabilityMaxHops: 5,
+        reachabilityValidatorCount: 10,
+        independenceMinGroupSize: 5,
+        independenceGroupFactor: 0.05,
+        directContactsAlwaysConnected: true,
+        channelCreationMinAge: Duration.zero,
+      );
+
   /// Test configuration with greatly shortened timeouts and disabled barriers.
   factory ModerationConfig.test() => const ModerationConfig(
         // Jury — seconds instead of days

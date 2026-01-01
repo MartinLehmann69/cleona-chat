@@ -14,10 +14,12 @@
 // and only enforces seq-monotonicity + TTL.
 
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -33,12 +35,15 @@ class IdentityDhtHandler {
   // Storage-Caps
   static const int maxAuthManifests = 1000;
   static const int maxLivenessRecords = 5000;
+  static const int maxKemRecords = 5000;
   static const int maxRecordSizeBytes = 16 * 1024; // 16 KB sanity cap
 
   // userIdHex → AuthManifest
   final Map<String, AuthManifest> _storedAuthManifests = {};
   // (userIdHex, deviceNodeIdHex) joined with ":" → LivenessRecord
   final Map<String, LivenessRecord> _storedLiveness = {};
+  // (userIdHex, deviceIdHex) joined with ":" → DeviceKemRecord (Welle 5, §4.3)
+  final Map<String, DeviceKemRecord> _storedKemRecords = {};
 
   Timer? _maintenanceTimer;
   Timer? _persistDebounce;
@@ -103,6 +108,28 @@ class IdentityDhtHandler {
     return _storedLiveness[key];
   }
 
+  // ── Device-KEM-Record API (Welle 5, §4.3) ─────────────────────
+
+  /// Wird vom Wire-Layer aufgerufen wenn IDENTITY_KEM_PUBLISH ankommt.
+  /// Trust-Anchor: ed25519_sig vom User-Master-Key. Sig-Verification erfolgt
+  /// im Wire-Layer (cleona_node.dart) bevor wir hier landen — derselbe
+  /// Pattern wie bei AuthManifest/Liveness.
+  void handleKemPublish(DeviceKemRecord r) {
+    final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceId)}';
+    final existing = _storedKemRecords[key];
+    if (existing != null && r.sequenceNumber <= existing.sequenceNumber) {
+      return; // Replay-Schutz / monotonic-seq
+    }
+    _storedKemRecords[key] = r;
+    _enforceKemCap();
+    _persistAsync();
+  }
+
+  DeviceKemRecord? getKemRecord(Uint8List userId, Uint8List deviceId) {
+    final key = '${bytesToHex(userId)}:${bytesToHex(deviceId)}';
+    return _storedKemRecords[key];
+  }
+
   // ── Internal: cap enforcement ────────────────────────────────
 
   void _enforceAuthCap() {
@@ -132,6 +159,22 @@ class IdentityDhtHandler {
     }
   }
 
+  void _enforceKemCap() {
+    if (_storedKemRecords.length <= maxKemRecords) return;
+    final entries = _storedKemRecords.entries.toList();
+    entries.sort((a, b) {
+      // Key-Format ist "userIdHex:deviceIdHex"; XOR-Dist auf userIdHex
+      // (gleiche Logik wie Liveness-Cap; eviktiert die fernsten User-IDs).
+      final aUserId = hexToBytes(a.key.split(':')[0]);
+      final bUserId = hexToBytes(b.key.split(':')[0]);
+      return _xorDistance(bUserId).compareTo(_xorDistance(aUserId));
+    });
+    final toEvict = entries.length - maxKemRecords;
+    for (var i = 0; i < toEvict; i++) {
+      _storedKemRecords.remove(entries[i].key);
+    }
+  }
+
   /// XOR-Distance als BigInt für Sortier-Vergleich.
   BigInt _xorDistance(Uint8List recordKey) {
     var dist = BigInt.zero;
@@ -150,6 +193,7 @@ class IdentityDhtHandler {
   void _runMaintenance() {
     _storedAuthManifests.removeWhere((_, m) => m.isExpired());
     _storedLiveness.removeWhere((_, r) => r.isExpired());
+    _storedKemRecords.removeWhere((_, r) => r.isExpired());
     _persistAsync();
   }
 
@@ -183,6 +227,19 @@ class IdentityDhtHandler {
         }
       } catch (_) {/* skip corrupt */}
     }
+
+    final kems = (data['kemRecords'] as List?) ?? [];
+    for (final entry in kems) {
+      try {
+        final bytes = hexToBytes(entry as String);
+        final r = DeviceKemRecord.fromProto(
+            proto.DeviceKemRecordV3.fromBuffer(bytes));
+        if (!r.isExpired()) {
+          final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceId)}';
+          _storedKemRecords[key] = r;
+        }
+      } catch (_) {/* skip corrupt */}
+    }
   }
 
   void _persistAsync() {
@@ -196,20 +253,28 @@ class IdentityDhtHandler {
 
   void _persistNow() {
     if (fileEncryption == null || storagePath == null) return;
-    fileEncryption!.writeJsonFile(storagePath!, {
-      'authManifests': _storedAuthManifests.values
-          .map((m) => bytesToHex(Uint8List.fromList(m.toProto().writeToBuffer())))
-          .toList(),
-      'liveness': _storedLiveness.values
-          .map((r) => bytesToHex(Uint8List.fromList(r.toProto().writeToBuffer())))
-          .toList(),
-    });
+    try {
+      fileEncryption!.writeJsonFile(storagePath!, {
+        'authManifests': _storedAuthManifests.values
+            .map((m) => bytesToHex(Uint8List.fromList(m.toProto().writeToBuffer())))
+            .toList(),
+        'liveness': _storedLiveness.values
+            .map((r) => bytesToHex(Uint8List.fromList(r.toProto().writeToBuffer())))
+            .toList(),
+        'kemRecords': _storedKemRecords.values
+            .map((r) => bytesToHex(Uint8List.fromList(r.toProto().writeToBuffer())))
+            .toList(),
+      });
+    } catch (e) {
+      stderr.writeln('[IdentityDhtHandler] _persistNow failed (non-fatal): $e');
+    }
   }
 
   // ── Test/Debug helpers ────────────────────────────────────────
 
   int get authManifestCount => _storedAuthManifests.length;
   int get livenessCount => _storedLiveness.length;
+  int get kemRecordCount => _storedKemRecords.length;
 
   /// Direct access to the in-memory auth-manifest store; used by tests
   /// that need to inject pre-built (e.g. expired) records to exercise prune.
@@ -218,4 +283,7 @@ class IdentityDhtHandler {
 
   @visibleForTesting
   Map<String, LivenessRecord> get debugLiveness => _storedLiveness;
+
+  @visibleForTesting
+  Map<String, DeviceKemRecord> get debugKemRecords => _storedKemRecords;
 }

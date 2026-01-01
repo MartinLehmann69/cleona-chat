@@ -5,8 +5,21 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
+import 'package:cleona/core/network/udp_keepalive.dart' show SendInfraDirectFn;
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+/// DV-cascade V3 InfrastructureFrame sender contract used by
+/// [NatTraversal] for HOLE_PUNCH_REQUEST → coordinator and HOLE_PUNCH_NOTIFY
+/// → target. The implementation builds a V3 NetworkPacketV3 and routes it
+/// through the DV cascade (max 3 routes + default-gateway fallback).
+/// Fire-and-forget; returns false on (a) messageType outside §2.3.5,
+/// (b) no Device-KEM-PK known, (c) DV cascade exhausted.
+typedef SendInfraFn = Future<bool> Function(
+  proto.MessageTypeV3 messageType,
+  Uint8List innerPayload,
+  Uint8List recipientDeviceId,
+);
 
 /// Decentralized STUN + NAT Hole Punch + Keepalive.
 ///
@@ -50,14 +63,27 @@ class NatTraversal {
   /// Established punched connections: peerNodeIdHex → PunchedConnection
   final Map<String, PunchedConnection> _punchedConnections = {};
 
-  /// Callback: send an envelope to a specific peer by nodeId.
-  Future<bool> Function(proto.MessageEnvelope, Uint8List)? sendFunction;
+  /// V3-direct DV-cascade InfrastructureFrame sender. Wires to
+  /// `cleona_node.sendInfraTo`. Used for HOLE_PUNCH_REQUEST →
+  /// coordinator and HOLE_PUNCH_NOTIFY → target.
+  ///
+  /// V3.0: the §2.3.5 InfraFrame pipeline owns Device-Sig +
+  /// KEM-AEAD + HMAC; this module hands off via `(type, body, nodeId)`.
+  SendInfraFn? sendInfraFn;
 
-  /// Callback: send raw UDP to a specific address (for punch packets).
-  Future<bool> Function(Uint8List, InternetAddress, int)? sendUdpRaw;
-
-  /// Callback: create a signed envelope.
-  proto.MessageEnvelope Function(proto.MessageType, Uint8List, {Uint8List? recipientId})? createEnvelope;
+  /// V3-direct address-targeted InfrastructureFrame sender. Wires to
+  /// `cleona_node.sendInfraDirectTo`. Used for HOLE_PUNCH_PING /
+  /// HOLE_PUNCH_PONG and pinhole-keepalive where we have an explicit
+  /// `(addr, port)` and bypassing the DV cascade is mandatory (we want
+  /// to hit *that* address, not whatever route DV thinks is cheapest).
+  ///
+  /// V3.0: hole-punch + pinhole-keepalive ship via `NetworkPacketV3`
+  /// (the receiver only parses V3 since Welle 1 — see
+  /// `transport.dart:_processUdpDatagram`). Pinholes
+  /// expire ~30-60 s after last real traffic, NAT keepalive probing
+  /// never advanced past its first interval, and `_punchedConnections`
+  /// were torn down spuriously.
+  SendInfraDirectFn? sendInfraDirectFn;
 
   /// Own node ID (set by CleonaNode on start).
   Uint8List? ownNodeId;
@@ -135,7 +161,7 @@ class NatTraversal {
   /// 4. NAT pinholes open, HOLE_PUNCH_PONG confirms connectivity
   void initiateHolePunch(Uint8List targetNodeId, Uint8List coordinatorNodeId) {
     if (ownNodeId == null || !hasPublicIp) return;
-    if (sendFunction == null || createEnvelope == null) return;
+    if (sendInfraFn == null) return;
 
     final targetHex = bytesToHex(targetNodeId);
 
@@ -160,20 +186,18 @@ class NatTraversal {
       _activePunches.remove(requestIdHex);
     });
 
-    // Build and send HOLE_PUNCH_REQUEST to coordinator
+    // Build and send HOLE_PUNCH_REQUEST to coordinator via DV-cascade.
     final req = proto.HolePunchRequest()
       ..targetNodeId = targetNodeId
       ..myPublicIp = _confirmedPublicIp!
       ..myPublicPort = _confirmedPublicPort!
       ..requestId = requestId;
 
-    final envelope = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_REQUEST,
+    sendInfraFn!(
+      proto.MessageTypeV3.MTV3_HOLE_PUNCH_REQUEST,
       req.writeToBuffer(),
-      recipientId: coordinatorNodeId,
+      coordinatorNodeId,
     );
-
-    sendFunction!(envelope, coordinatorNodeId);
     _log.info('Hole punch initiated for ${targetHex.substring(0, 8)} '
         'via coordinator ${bytesToHex(coordinatorNodeId).substring(0, 8)}');
   }
@@ -181,40 +205,47 @@ class NatTraversal {
   /// Handle incoming HOLE_PUNCH_REQUEST (we are the coordinator).
   ///
   /// Forward a HOLE_PUNCH_NOTIFY to the target peer.
-  void handleHolePunchRequest(proto.MessageEnvelope envelope) {
-    if (createEnvelope == null || sendFunction == null) return;
+  ///
+  /// Welle 5.x V3 hard-cut: arguments now reflect the V3 receive-side
+  /// shape — the parsed [proto.HolePunchRequest] body plus the sender
+  /// deviceNodeId extracted from the InfrastructureFrameV3 envelope.
+  /// Receive-side dispatch wiring (cleona_service `_handleHolePunch...V3`)
+  /// is owned by Subagent C4.
+  void handleHolePunchRequest(
+      proto.HolePunchRequest req, Uint8List requesterDeviceNodeId) {
+    if (sendInfraFn == null) return;
 
-    final req = proto.HolePunchRequest.fromBuffer(envelope.encryptedPayload);
     final requestIdHex = bytesToHex(Uint8List.fromList(req.requestId));
-    final requesterNodeId = Uint8List.fromList(envelope.senderId);
     final targetNodeId = Uint8List.fromList(req.targetNodeId);
 
-    _log.info('Hole punch coordinator: ${bytesToHex(requesterNodeId).substring(0, 8)} '
+    _log.info('Hole punch coordinator: ${bytesToHex(requesterDeviceNodeId).substring(0, 8)} '
         '→ ${bytesToHex(targetNodeId).substring(0, 8)} ($requestIdHex)');
 
-    // Forward HOLE_PUNCH_NOTIFY to target
+    // Forward HOLE_PUNCH_NOTIFY to target via DV-cascade.
     final notify = proto.HolePunchNotify()
-      ..requesterNodeId = requesterNodeId
+      ..requesterNodeId = requesterDeviceNodeId
       ..requesterIp = req.myPublicIp
       ..requesterPort = req.myPublicPort
       ..requestId = req.requestId;
 
-    final notifyEnvelope = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_NOTIFY,
+    sendInfraFn!(
+      proto.MessageTypeV3.MTV3_HOLE_PUNCH_NOTIFY,
       notify.writeToBuffer(),
-      recipientId: targetNodeId,
+      targetNodeId,
     );
-
-    sendFunction!(notifyEnvelope, targetNodeId);
   }
 
   /// Handle incoming HOLE_PUNCH_NOTIFY (someone wants to punch us).
   ///
   /// Send HOLE_PUNCH_PING to the requester's public IP.
-  void handleHolePunchNotify(proto.MessageEnvelope envelope) {
-    if (sendUdpRaw == null || createEnvelope == null || ownNodeId == null) return;
+  ///
+  /// Welle 5.x V3 hard-cut: arguments now reflect the V3 receive-side
+  /// shape — parsed [proto.HolePunchNotify] body plus the coordinator's
+  /// deviceNodeId from the InfrastructureFrameV3 envelope.
+  void handleHolePunchNotify(
+      proto.HolePunchNotify notify, Uint8List coordinatorDeviceNodeId) {
+    if (sendInfraDirectFn == null || ownNodeId == null) return;
 
-    final notify = proto.HolePunchNotify.fromBuffer(envelope.encryptedPayload);
     final requesterNodeId = Uint8List.fromList(notify.requesterNodeId);
     final requesterIp = notify.requesterIp;
     final requesterPort = notify.requesterPort;
@@ -228,7 +259,7 @@ class NatTraversal {
     final session = HolePunchSession(
       requestId: requestId,
       targetNodeId: requesterNodeId, // from our perspective, the requester is the "target"
-      coordinatorNodeId: Uint8List.fromList(envelope.senderId),
+      coordinatorNodeId: coordinatorDeviceNodeId,
       initiatedAt: DateTime.now(),
       remotePublicIp: requesterIp,
       remotePublicPort: requesterPort,
@@ -236,15 +267,21 @@ class NatTraversal {
     _activePunches[requestIdHex] = session;
     Timer(const Duration(seconds: 30), () => _activePunches.remove(requestIdHex));
 
-    // Send HOLE_PUNCH_PING to requester's public IP (opens our NAT pinhole)
-    _sendHolePunchPing(requestId, requesterIp, requesterPort);
+    // Send HOLE_PUNCH_PING to requester's public IP (opens our NAT pinhole).
+    // Recipient device ID is the requester (we know it from the notify).
+    _sendHolePunchPing(requestId, requesterNodeId, requesterIp, requesterPort);
   }
 
   /// Handle incoming HOLE_PUNCH_PING — respond with PONG.
-  void handleHolePunchPing(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    if (createEnvelope == null || sendUdpRaw == null || ownNodeId == null) return;
+  ///
+  /// Welle 5.x V3 hard-cut: arguments now reflect the V3 receive-side
+  /// shape — parsed [proto.HolePunchPing] body plus the on-wire address
+  /// from the UDP datagram (used as the PONG destination so the reply
+  /// traverses the freshly-opened pinhole).
+  void handleHolePunchPing(
+      proto.HolePunchPing ping, InternetAddress from, int fromPort) {
+    if (sendInfraDirectFn == null || ownNodeId == null) return;
 
-    final ping = proto.HolePunchPing.fromBuffer(envelope.encryptedPayload);
     final requestIdHex = bytesToHex(Uint8List.fromList(ping.requestId));
     final senderNodeId = Uint8List.fromList(ping.senderNodeId);
 
@@ -255,29 +292,32 @@ class NatTraversal {
     final session = _activePunches[requestIdHex];
     if (session != null && session.remotePublicIp != null && !session.pingSent) {
       session.pingSent = true;
-      _sendHolePunchPing(Uint8List.fromList(ping.requestId),
+      _sendHolePunchPing(Uint8List.fromList(ping.requestId), senderNodeId,
           session.remotePublicIp!, session.remotePublicPort!);
     }
 
-    // Send PONG back to the sender (via the punched pinhole)
+    // Send PONG back to the sender (via the punched pinhole) as a V3
+    // InfrastructureFrame at the explicit on-wire address.
     final pong = proto.HolePunchPong()
       ..requestId = ping.requestId
       ..senderNodeId = ownNodeId!
       ..pingTimestampMs = ping.timestampMs;
 
-    final pongEnv = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_PONG,
+    sendInfraDirectFn!(
+      proto.MessageTypeV3.MTV3_HOLE_PUNCH_PONG,
       pong.writeToBuffer(),
-      recipientId: senderNodeId,
+      senderNodeId,
+      from,
+      fromPort,
     );
-
-    final data = pongEnv.writeToBuffer();
-    sendUdpRaw!(Uint8List.fromList(data), from, fromPort);
   }
 
   /// Handle incoming HOLE_PUNCH_PONG — hole punch successful!
-  void handleHolePunchPong(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    final pong = proto.HolePunchPong.fromBuffer(envelope.encryptedPayload);
+  ///
+  /// Welle 5.x V3 hard-cut: arguments now reflect the V3 receive-side
+  /// shape — parsed [proto.HolePunchPong] body plus the on-wire address.
+  void handleHolePunchPong(
+      proto.HolePunchPong pong, InternetAddress from, int fromPort) {
     final requestIdHex = bytesToHex(Uint8List.fromList(pong.requestId));
     final senderNodeId = Uint8List.fromList(pong.senderNodeId);
     final senderHex = bytesToHex(senderNodeId);
@@ -364,7 +404,7 @@ class NatTraversal {
   }
 
   void _sendKeepalivePing(String peerHex, PunchedConnection conn, int intervalSec) {
-    if (sendUdpRaw == null || createEnvelope == null || ownNodeId == null) return;
+    if (sendInfraDirectFn == null || ownNodeId == null) return;
 
     final requestId = _randomBytes(16);
     conn.lastPingTime = DateTime.now();
@@ -374,15 +414,14 @@ class NatTraversal {
       ..senderNodeId = ownNodeId!
       ..timestampMs = Int64(conn.lastPingTime!.millisecondsSinceEpoch);
 
-    final env = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_PING,
-      ping.writeToBuffer(),
-      recipientId: conn.peerNodeId,
-    );
-
-    final data = env.writeToBuffer();
     try {
-      sendUdpRaw!(Uint8List.fromList(data), InternetAddress(conn.peerIp), conn.peerPort);
+      sendInfraDirectFn!(
+        proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING,
+        ping.writeToBuffer(),
+        conn.peerNodeId,
+        InternetAddress(conn.peerIp),
+        conn.peerPort,
+      );
     } catch (_) {}
 
     // Wait for PONG (timeout after 5 seconds)
@@ -428,22 +467,21 @@ class NatTraversal {
   }
 
   void _sendKeepalive(String peerHex, PunchedConnection conn) {
-    if (sendUdpRaw == null || createEnvelope == null || ownNodeId == null) return;
+    if (sendInfraDirectFn == null || ownNodeId == null) return;
 
     final ping = proto.HolePunchPing()
       ..requestId = _randomBytes(16)
       ..senderNodeId = ownNodeId!
       ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
 
-    final env = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_PING,
-      ping.writeToBuffer(),
-      recipientId: conn.peerNodeId,
-    );
-
-    final data = env.writeToBuffer();
     try {
-      sendUdpRaw!(Uint8List.fromList(data), InternetAddress(conn.peerIp), conn.peerPort);
+      sendInfraDirectFn!(
+        proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING,
+        ping.writeToBuffer(),
+        conn.peerNodeId,
+        InternetAddress(conn.peerIp),
+        conn.peerPort,
+      );
     } catch (_) {}
 
     // Track consecutive failures
@@ -672,26 +710,28 @@ class NatTraversal {
 
   // ── Internal Helpers ──────────────────────────────────────────────────
 
-  void _sendHolePunchPing(Uint8List requestId, String ip, int port) {
-    if (sendUdpRaw == null || createEnvelope == null || ownNodeId == null) return;
+  /// Send HOLE_PUNCH_PING to a known on-wire address — opens our local
+  /// pinhole + (with ±10 port-prediction) targets sequential symmetric-NAT
+  /// allocations. `peerDeviceNodeId` from the caller
+  /// (handleHolePunchNotify / handleHolePunchPing) is wired into the
+  /// InfrastructureFrameV3 recipient field so the KEM-AEAD derivation
+  /// lines up.
+  void _sendHolePunchPing(
+      Uint8List requestId, Uint8List peerDeviceNodeId, String ip, int port) {
+    if (sendInfraDirectFn == null || ownNodeId == null) return;
 
     final ping = proto.HolePunchPing()
       ..requestId = requestId
       ..senderNodeId = ownNodeId!
       ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
 
-    final env = createEnvelope!(
-      proto.MessageType.HOLE_PUNCH_PING,
-      ping.writeToBuffer(),
-      recipientId: Uint8List(32), // unknown at this point
-    );
-
-    final data = Uint8List.fromList(env.writeToBuffer());
+    final body = ping.writeToBuffer();
     final addr = InternetAddress(ip);
 
     // Send to the exact reported port
     try {
-      sendUdpRaw!(data, addr, port);
+      sendInfraDirectFn!(proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING, body,
+          peerDeviceNodeId, addr, port);
     } catch (e) {
       _log.debug('Hole punch PING send error to $ip:$port: $e');
     }
@@ -704,10 +744,16 @@ class NatTraversal {
       final above = port + delta;
       final below = port - delta;
       if (above > 0 && above <= 65535) {
-        try { sendUdpRaw!(data, addr, above); } catch (_) {}
+        try {
+          sendInfraDirectFn!(proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING, body,
+              peerDeviceNodeId, addr, above);
+        } catch (_) {}
       }
       if (below > 0 && below <= 65535) {
-        try { sendUdpRaw!(data, addr, below); } catch (_) {}
+        try {
+          sendInfraDirectFn!(proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING, body,
+              peerDeviceNodeId, addr, below);
+        } catch (_) {}
       }
     }
     _log.debug('Hole punch PING sent to $ip:$port (+ ±10 port prediction)');

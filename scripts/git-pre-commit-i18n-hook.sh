@@ -5,7 +5,7 @@
 # To activate:
 #   ln -s ../../scripts/git-pre-commit-i18n-hook.sh .git/hooks/pre-commit
 #
-# See CLAUDE.md Arbeitsregel #7 and Cleona_Chat_Architecture_v2_2.md §13.
+# See CLAUDE.md Arbeitsregel #7 and Cleona_Chat_Architecture_v3_0.md §17.
 
 set -e
 

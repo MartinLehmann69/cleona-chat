@@ -16,6 +16,7 @@ import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
@@ -34,8 +35,6 @@ import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/share_receiver.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
@@ -196,15 +195,28 @@ class CleonaApp extends StatefulWidget {
 class _CleonaAppState extends State<CleonaApp> {
   late bool _showHardBlock = widget.hardBlocked && widget.blockManifest != null;
 
+  // B-30: ONE stable AppLocale for the whole app lifetime. Previously a fresh
+  // AppLocale() was created on every build() and handed to
+  // ChangeNotifierProvider.value, so Consumer2 watched the newest instance while
+  // CleonaAppState._appLocale (assigned once in the create-lambda) stayed pinned
+  // to the first instance — IPC switch_language then notified an orphaned object
+  // and the UI never rebuilt. Calling load() once in initState also restores a
+  // persisted locale on startup (it was needlessly re-run on every rebuild before).
+  final AppLocale _appLocale = AppLocale();
+
+  @override
+  void initState() {
+    super.initState();
+    _appLocale.load();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final appLocale = AppLocale();
-
     return MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) {
           final state = CleonaAppState();
-          state._appLocale = appLocale;
+          state._appLocale = _appLocale;
           // Sec H-5 / T13: if the user already chose "skip into limited" on
           // this session before the appState was constructed (impossible in
           // the current flow — appState is created the first build — but
@@ -221,7 +233,7 @@ class _CleonaAppState extends State<CleonaApp> {
           );
           return state;
         }),
-        ChangeNotifierProvider.value(value: appLocale..load()),
+        ChangeNotifierProvider.value(value: _appLocale),
       ],
       child: Consumer2<CleonaAppState, AppLocale>(
         builder: (context, appState, locale, _) {
@@ -261,6 +273,15 @@ class _CleonaAppState extends State<CleonaApp> {
               themeMode: appState.themeMode,
               themeAnimationDuration: const Duration(milliseconds: 400),
               themeAnimationCurve: Curves.easeInOut,
+              actions: <Type, Action<Intent>>{
+                ...WidgetsApp.defaultActions,
+                DismissIntent: CallbackAction<DismissIntent>(
+                  onInvoke: (_) {
+                    navigatorKey.currentState?.maybePop();
+                    return null;
+                  },
+                ),
+              },
               home: home,
             ),
           );
@@ -382,8 +403,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   CleonaNode? _androidNode;
   final Map<String, CleonaService> _androidServices = {};
   final Map<String, IdentityContext> _androidContexts = {};
-  final List<(dynamic, dynamic, int, IdentityContext?)> _androidEarlyMessages = [];
-  bool _androidServicesReady = false;
 
   ICleonaService? get service => _service;
   IpcClient? get ipcClient => _ipcClient;
@@ -448,6 +467,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
       if (_service is CleonaService) {
         (_service as CleonaService).saveState();
+      }
+      if (_androidNode != null && _androidNode!.isRunning) {
+        _androidNode!.saveNetworkState();
       }
     } else if (isResumed) {
       // After Doze/background: network may have changed, re-discover peers.
@@ -612,9 +634,29 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     try {
       final p = int.parse(lockFile.readAsStringSync().trim());
       return _isProcessAlive(p);
-    } catch (_) {}
-    try { lockFile.deleteSync(); } catch (_) {}
-    return false;
+    } catch (_) {
+      // Do NOT delete the lock file here — the daemon holds an flock on
+      // the inode. Deleting it would break the single-instance guarantee.
+      // A temporarily unreadable lock file is not evidence that no daemon
+      // is running. On Windows the live daemon holds cleona.lock with a
+      // MANDATORY exclusive lock (LockFileEx) that also blocks READS, so
+      // readAsStringSync throws for the ENTIRE daemon lifetime (on Linux
+      // flock is advisory → the read succeeds). Returning false here made
+      // the GUI think no daemon exists → it spawned a SECOND daemon that
+      // then died on the machine-global lock, leaving no cleona.port and
+      // the GUI stuck on "Verbinde mit Dienst". Fall back to the readable
+      // cleona.pid (same source _isDaemonServiceRunning uses); if that is
+      // unreadable too, an existing-but-locked lock file is itself proof a
+      // daemon owns it → report alive so the GUI SIGNALS it (cleona.start)
+      // instead of spawning a duplicate.
+      try {
+        final pidFile = File('$_baseDir/cleona.pid');
+        if (pidFile.existsSync()) {
+          return _isProcessAlive(int.parse(pidFile.readAsStringSync().trim()));
+        }
+      } catch (_) {}
+      return true;
+    }
   }
 
   Future<bool> _signalDaemonToStart() async {
@@ -623,15 +665,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<bool> _ensureDaemonRunning() async {
-    // Check if an existing daemon has a display (= tray-capable).
-    // If it runs without a display (e.g. started from SSH), replace it.
+    // Tray contract: daemon MUST have DISPLAY so tray icon is visible.
+    // If a daemon is alive but has no DISPLAY → replace it so the tray works.
     if (_isDaemonProcessAlive()) {
-      if (!_daemonHasDisplay()) {
-        _killExistingDaemon();
-      } else if (_isDaemonServiceRunning()) {
+      if (_isDaemonServiceRunning() && _daemonHasDisplay()) {
         return true;
-      } else {
+      }
+      if (_isDaemonServiceRunning() && !_daemonHasDisplay()) {
+        _killExistingDaemon();
+        // Fall through to spawn a new daemon with GUI's DISPLAY
+      } else if (_daemonHasDisplay()) {
         return _signalDaemonToStart();
+      } else {
+        _killExistingDaemon();
       }
     }
 
@@ -682,7 +728,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Kill existing daemon and clean up lock files.
+  /// Kill existing daemon and wait for it to exit.
+  /// IMPORTANT: Do NOT delete cleona.lock — the flock is inode-based.
+  /// Deleting the file creates a new inode, breaking the single-instance
+  /// guarantee: the old daemon still holds the lock on the deleted inode
+  /// while a new daemon locks the newly-created file. This race condition
+  /// allowed multiple daemon instances (observed 2026-05-16 on Node2).
   void _killExistingDaemon() {
     final lockFile = File('$_baseDir/cleona.lock');
     try {
@@ -691,13 +742,20 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         Process.runSync('taskkill', ['/PID', '$p', '/F']);
       } else {
         Process.runSync('kill', ['-TERM', '$p']);
-        sleep(const Duration(seconds: 1));
+        // Wait up to 3s for graceful shutdown before SIGKILL
+        for (var i = 0; i < 6; i++) {
+          sleep(const Duration(milliseconds: 500));
+          if (Process.runSync('kill', ['-0', '$p']).exitCode != 0) break;
+        }
         if (Process.runSync('kill', ['-0', '$p']).exitCode == 0) {
           Process.runSync('kill', ['-9', '$p']);
+          sleep(const Duration(milliseconds: 200));
         }
       }
     } catch (_) {}
-    try { lockFile.deleteSync(); } catch (_) {}
+    // Clean up IPC artifacts (socket/port/pid) but NOT the lock file.
+    // The lock file is released by the kernel when the daemon's fd closes
+    // (process exit), making it safe for the next daemon to acquire.
     try { File('$_baseDir/cleona.sock').deleteSync(); } catch (_) {}
     try { File('$_baseDir/cleona.port').deleteSync(); } catch (_) {}
     try { File('$_baseDir/cleona.pid').deleteSync(); } catch (_) {}
@@ -797,11 +855,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _connectivityResults = results;
       notifyListeners();
       if (!_isInitialized) return;
-      // Android multi-identity: notify node + ALL services
+      // Android multi-identity: notify node ONCE + service-side cleanup per
+      // identity (mailbox poll, identity-publisher). Avoid the N+1 node-reset
+      // multiplication — node-reset is global, not per-service.
       if (_androidNode != null) {
         _androidNode!.onNetworkChanged();
         for (final service in _androidServices.values) {
-          service.onNetworkChanged();
+          service.onNetworkChanged(triggerNodeReset: false);
         }
       } else {
         _service?.onNetworkChanged();
@@ -835,10 +895,24 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onCallRejected = (call, reason) => notifyListeners();
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
         ipcClient.onDaemonDied = () {
-          // GUI and daemon act as one unit — if daemon dies, GUI exits.
-          // Next GUI launch will start a fresh daemon via _ensureDaemonRunning().
-          debugPrint('[main] Daemon connection lost — exiting GUI');
+          // GUI and daemon act as one unit — if daemon truly dies (lock file
+          // missing or PID gone), GUI exits. Next GUI launch will start a
+          // fresh daemon via _ensureDaemonRunning().
+          debugPrint('[main] Daemon process gone — exiting GUI');
           exit(0);
+        };
+        ipcClient.onIpcStalled = () {
+          // Daemon process is still alive but IPC retries (3× short backoff)
+          // were exhausted — typically a daemon mid-restart or PQ keygen
+          // taking longer than 3.5 s. Don't exit. Tear the dead client down
+          // and re-arm the longer-window connect retry; the next successful
+          // connect will rebuild the IPC bridge in place.
+          debugPrint('[main] IPC stalled (daemon alive) — re-arming retry');
+          _ipcClient = null;
+          _service = null;
+          _isInitialized = false;
+          notifyListeners();
+          _scheduleRetryConnect();
         };
 
         // Sync active identity from IdentityManager to IPC
@@ -942,9 +1016,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     };
 
-    // Message routing (with early-message buffer)
-    node.onMessageForIdentity = _androidOnMessageForIdentity;
-
     // Start node (UDP listener active → messages can arrive)
     await node.startQuick();
 
@@ -969,16 +1040,121 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       debugPrint('[main] Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
     }
 
-    // Replay early messages
-    _androidServicesReady = true;
-    if (_androidEarlyMessages.isNotEmpty) {
-      debugPrint('[main] Replaying ${_androidEarlyMessages.length} early messages');
-      final buffered = List.of(_androidEarlyMessages);
-      _androidEarlyMessages.clear();
-      for (final (env, from, port, id) in buffered) {
-        _androidOnMessageForIdentity(env, from, port, id);
+    // §2.4 receiver step [9] — multi-identity KEM-Try-Loop for Android
+    // in-process mode. Mirrors service_daemon.dart wiring.
+    final androidServiceRecency = <String>[];
+    node.onApplicationFramePayload = (packet, from, port, snapshot) async {
+      if (_androidServices.isEmpty) return;
+      final seen = <String>{};
+      final ordered = <CleonaService>[];
+      for (final id in androidServiceRecency) {
+        final s = _androidServices[id];
+        if (s != null && seen.add(id)) ordered.add(s);
       }
-    }
+      for (final entry in _androidServices.entries) {
+        if (seen.add(entry.key)) ordered.add(entry.value);
+      }
+      for (final service in ordered) {
+        final outcome = await service.handleIncomingApplicationPacket(
+            packet, from, port, snapshot);
+        if (outcome == AppFrameDispatchOutcome.delivered) {
+          androidServiceRecency.remove(service.nodeIdHex);
+          androidServiceRecency.insert(0, service.nodeIdHex);
+          return;
+        }
+        if (outcome == AppFrameDispatchOutcome.droppedAfterDecap) return;
+      }
+    };
+
+    node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
+      final mt = frame.messageType;
+      final isServiceRouted =
+          mt == proto.MessageTypeV3.MTV3_CONTACT_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_RESTORE_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
+          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE;
+      if (!isServiceRouted) return;
+      final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
+      final identities = node.identitiesForDevice(deviceIdBytes).toList();
+      if (identities.isEmpty) return;
+      for (final id in identities) {
+        final service = _androidServices[id.userIdHex];
+        if (service == null) continue;
+        switch (mt) {
+          case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
+            service.handleIncomingFirstContactRequest(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+            service.handleIncomingRestoreBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+            service.handleIncomingKeyRotationBroadcastInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+            service.handleIncomingGuardianShareStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST:
+            service.handleIncomingGuardianRestoreRequestInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
+            service.handleIncomingGuardianRestoreResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+            service.handleIncomingFragmentStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+            service.handleIncomingFragmentRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
+            service.handleIncomingFragmentRetrieveResponseInfra(
+                frame, senderDeviceId);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
+            service.handleIncomingFragmentDeleteInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+            service.handleIncomingChannelIndexExchangeInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE:
+            service.handleIncomingPeerStoreInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+            service.handleIncomingPeerRetrieveInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+            service.handleIncomingPeerRetrieveResponseInfra(
+                frame, senderDeviceId, from, port, snapshot);
+            break;
+          default:
+            break;
+        }
+      }
+    };
 
     // Save updated nodeIdHex values
     mgr.saveIdentities(identities);
@@ -1200,52 +1376,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// Routes messages to the correct service (Android in-process only).
-  /// Same logic as _MultiServiceDaemon._onMessageForIdentity in service_daemon.dart.
-  void _androidOnMessageForIdentity(
-      dynamic envelope, dynamic from, int port, IdentityContext? identity) {
-    if (!_androidServicesReady) {
-      _androidEarlyMessages.add((envelope, from, port, identity));
-      return;
-    }
-
-    if (identity != null) {
-      _androidServices[identity.userIdHex]?.handleMessage(envelope, from, port);
-      return;
-    }
-
-    // recipientId didn't match or empty — route by message type
-    final env = envelope as proto.MessageEnvelope;
-    final isFragment = env.messageType == proto.MessageType.FRAGMENT_STORE ||
-        env.messageType == proto.MessageType.FRAGMENT_RETRIEVE ||
-        env.messageType == proto.MessageType.FRAGMENT_STORE_ACK;
-
-    if (isFragment) {
-      for (final service in _androidServices.values) {
-        service.handleMessage(envelope, from, port);
-      }
-    } else if (env.groupId.isNotEmpty) {
-      final groupIdHex = bytesToHex(Uint8List.fromList(env.groupId));
-      var routed = false;
-      for (final service in _androidServices.values) {
-        if (service.groups.containsKey(groupIdHex) ||
-            service.channels.containsKey(groupIdHex)) {
-          service.handleMessage(envelope, from, port);
-          routed = true;
-        }
-      }
-      if (!routed) {
-        for (final service in _androidServices.values) {
-          service.handleMessage(envelope, from, port);
-        }
-      }
-    } else {
-      for (final service in _androidServices.values) {
-        service.handleMessage(envelope, from, port);
-      }
-    }
-  }
-
   /// Removes an identity at runtime (Android in-process).
   Future<bool> deleteIdentityAndroid(String nodeIdHex) async {
     if (_androidServices.length <= 1) return false;
@@ -1308,7 +1438,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
-  void _handleGuiAction(Map<String, dynamic> data) {
+  Future<void> _handleGuiAction(Map<String, dynamic> data) async {
     final action = data['action'] as String?;
     if (action == null) return;
     final nav = navigatorKey.currentState;
@@ -1463,8 +1593,22 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
               }
             }
           }
-          final conv = _service!.conversations[convId];
-          if (conv == null) return;
+          // B-33: the conversation may not be in the GUI's IpcClient cache yet
+          // (a just-arrived message whose new_message event hasn't landed, or a
+          // debounced refreshState). Kick an immediate refresh and poll briefly
+          // rather than silently giving up — otherwise ChatScreen never opens
+          // and the receiver "sees nothing".
+          var conv = _service!.conversations[convId];
+          if (conv == null) {
+            unawaited(_ipcClient?.refreshState() ?? Future<void>.value());
+            final deadline = DateTime.now().add(const Duration(seconds: 3));
+            while (conv == null && DateTime.now().isBefore(deadline)) {
+              await Future<void>.delayed(const Duration(milliseconds: 250));
+              conv = _service?.conversations[convId];
+            }
+          }
+          final resolved = conv;
+          if (resolved == null) return;
           final navState = navigatorKey.currentState;
           if (navState == null) return;
           navState.push(MaterialPageRoute(
@@ -1472,9 +1616,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
               value: this,
               child: ChatScreen(
                 conversationId: convId,
-                displayName: conv.displayName,
-                isGroup: conv.isGroup,
-                isChannel: conv.isChannel,
+                displayName: resolved.displayName,
+                isGroup: resolved.isGroup,
+                isChannel: resolved.isChannel,
               ),
             ),
           ));
@@ -1607,8 +1751,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // `_natWizardShown` one-shot latch. Production code never emits
         // this action; it exists purely so gui-53 tests can re-trigger
         // the wizard after a prior run already showed it.
+        //
+        // B-34: `notifyListeners()` only *schedules* a rebuild — HomeScreen's
+        // `build()` (which sets `_natWizardShown = false`) runs on the NEXT
+        // frame. A following `test_force_nat_wizard_trigger` could otherwise
+        // fire while the latch is still set, so the wizard would not re-show
+        // (gui-53 53.01). Await the end of the next frame so that by the time
+        // this handler completes, the latch has been cleared.
         _natWizardResetCounter++;
         notifyListeners();
+        await WidgetsBinding.instance.endOfFrame;
         break;
 
       case 'user_request_nat_wizard':

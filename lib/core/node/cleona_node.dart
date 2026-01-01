@@ -2,32 +2,36 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/device_signature.dart';
+import 'package:cleona/core/crypto/device_kem.dart';
+import 'package:cleona/core/crypto/device_keys_store.dart';
 import 'package:cleona/core/crypto/proof_of_work.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
 import 'package:cleona/core/dht/dht_rpc.dart';
 import 'package:cleona/core/network/ack_tracker.dart';
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/message_queue.dart';
 import 'package:cleona/core/network/peer_message_store.dart';
+import 'package:cleona/core/network/sender_identity_snapshot.dart';
 import 'package:cleona/core/network/reachability_probe.dart';
 import 'package:cleona/core/network/lan_discovery.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/network/tls_fallback.dart';
 import 'package:cleona/core/network/nat_traversal.dart';
 import 'package:cleona/core/network/port_mapper.dart';
-import 'package:cleona/core/network/compression.dart';
+import 'package:cleona/core/network/udp_keepalive.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/network/dv_routing.dart';
 import 'package:cleona/core/network/transport.dart';
-import 'package:cleona/core/network/relay_chunker.dart';
+import 'package:cleona/core/network/v3_frame_codec.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
 import 'package:cleona/core/network/rate_limiter.dart';
 import 'package:cleona/core/network/peer_reputation.dart';
 import 'package:cleona/core/node/identity_context.dart';
-import 'package:cleona/core/node/relay_budget.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart';
@@ -39,10 +43,26 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 /// Central network component. Handles transport, DHT, discovery, and message dispatch.
 /// Shared by all identities — one node, one port, one network stack.
 class CleonaNode {
+  /// Device-Sig-Keypair (Architecture v3.0 §3.5). One per daemon, shared by
+  /// all hosted user identities — DeviceID is device-bound, not identity-bound.
+  /// Loaded from `<baseDir>/device_keys.bin.enc` on start, lazy-created on
+  /// first run via OS CSPRNG. Not seed-derived (per §3.6 #5).
+  late final DeviceKeyBundle _deviceKeys;
+
+  /// Read-only access for callers that build NetworkPacketV3 outers
+  /// (cleona_service.sendToUser, relay-forward path).
+  DeviceKeyPair get deviceKeyPair => _deviceKeys.sig;
+  DeviceKemKeyPair get deviceKem => _deviceKeys.kem;
+
   final String profileDir;
   int port;
   final String networkChannel;
   final CLogger _log;
+
+  /// Explicitly configured public IP (e.g. `--public-ip` on Bootstrap nodes
+  /// with manual DNAT). Only used for peer advertisement when NAT traversal
+  /// cannot port-verify automatically (no UPnP/STUN success).
+  String? manualPublicIp;
 
   /// Primary identity used for DHT protocol messages (PING/PONG senderId).
   late IdentityContext primaryIdentity;
@@ -50,17 +70,11 @@ class CleonaNode {
   /// TLS fallback manager: tracks per-peer consecutive failures, activates TLS when UDP is blocked.
   final TlsFallbackManager _tlsFallback = TlsFallbackManager();
 
-  /// Relay budget: rate-limiting and dedup for relay traffic.
-  final RelayBudget _relayBudget = RelayBudget();
-
   /// Per-node rate limiter (DoS Layer 2, Architecture Section 9.2).
   late final RateLimiter rateLimiter;
 
   /// Local peer reputation + banning (DoS Layers 3+5, Architecture Sections 9.3/9.5).
   late final ReputationManager reputationManager;
-
-  /// Chunk reassembler for MEDIA_CHUNK messages (large envelopes split for relay).
-  late final ChunkReassembler _chunkReassembler;
 
   /// Shared network-stats collector. The transport is owned by the node and
   /// fan-outs every UDP frame to a single counter pair — wiring it per-Service
@@ -73,7 +87,7 @@ class CleonaNode {
   /// Callback for mutual peer computation (wired by CleonaService).
   /// Returns nodeIdHex set of peers likely known to the recipient
   /// (shared contacts + shared group members). Architecture Section 3.3.7.
-  Set<String> Function(Uint8List recipientNodeId)? getMutualPeerIds;
+  Set<String> Function(Uint8List recipientUserId)? getMutualPeerIds;
 
   /// All registered identities: userIdHex → IdentityContext.
   /// Keyed by userId (stable identity), not deviceNodeId (per-device routing).
@@ -83,13 +97,35 @@ class CleonaNode {
   /// Used for routing table operations that reference device-specific IDs.
   final Map<String, IdentityContext> _identitiesByDeviceId = {};
 
+  /// Welle 5 (§2.6): public lookup by device-id for the daemon-level
+  /// ApplicationFrame dispatcher — finds the local IdentityContext that
+  /// owns [deviceId] (each identity has its own deviceNodeId, so the
+  /// `nextHopDeviceId` of an incoming packet uniquely selects the
+  /// recipient identity on a multi-identity daemon). Returns null when
+  /// [deviceId] is not local (caller will drop the packet — receiver-side
+  /// invariant of `sendToDevice`).
+  IdentityContext? identityByDeviceId(Uint8List deviceId) {
+    return _identitiesByDeviceId[bytesToHex(deviceId)];
+  }
+
+  /// All identities hosted on [deviceId] (may be >1 after C-1/§3.1 made
+  /// deviceNodeId daemon-global — Bob and Charly share device 8a631212).
+  /// Used by service-routed handlers that carry recipientUserId in the payload.
+  Iterable<IdentityContext> identitiesForDevice(Uint8List deviceId) {
+    final hex = bytesToHex(deviceId);
+    return _identities.values.where((ctx) => ctx.nodeIdHex == hex);
+  }
+
   // Components
   late Transport transport;
   late RoutingTable routingTable;
   late DhtRpc dhtRpc;
   late AckTracker ackTracker;
   late PeerMessageStore peerMessageStore;
-  late MessageQueue messageQueue;
+  // V3.0: persistent MessageQueue removed (Cleona_Chat_Architecture_v3_0.md §5).
+  // Offline-Delivery wird ausschließlich von Store-and-Forward + Reed-Solomon
+  // Erasure Coding + Mailbox-Pull übernommen. Sender stoppt bei „alle Routen
+  // erschöpft", kein lokales Re-Send-Park.
   late ReachabilityProbe reachabilityProbe;
   late LocalDiscovery localDiscovery;
   late MulticastDiscovery multicastDiscovery;
@@ -101,9 +137,11 @@ class CleonaNode {
   late IdentityDhtHandler identityDhtHandler;
   late IdentityResolver identityResolver;
 
-  // Callback for application-layer messages routed to a specific identity.
-  // If identity is null, recipientId didn't match any registered identity.
-  void Function(proto.MessageEnvelope envelope, InternetAddress from, int port, IdentityContext? identity)? onMessageForIdentity;
+  /// Keepalive for public-IP peers without a coordinated hole punch
+  /// (e.g. Bootstrap, peers learned via PEER_LIST_PUSH). Architecture
+  /// §2.4.5 + §7.6 — the only periodic UDP traffic in the system besides
+  /// hole-punch keepalive in [NatTraversal].
+  late UdpKeepalive udpKeepalive;
 
   // Plan §D2: lightweight signal so application-layer code (e.g. CallManager's
   // per-CallSession route cache) can invalidate stale routes when DV-Routing
@@ -112,15 +150,84 @@ class CleonaNode {
   // a userId (V3.1.65 multi-device routing); listeners should match either.
   void Function(String peerHex)? onRouteDownForCalls;
 
+  // Architecture §3.5 Push reliability: service-layer hook fires for every
+  // observed FRAGMENT_STORE_ACK so the proactive-push tracker can mark the
+  // matching push as completed and cancel its retry timer. Fires in addition
+  // to the existing dhtRpc.handleResponse path (which matches sender→storage
+  // requests); the two paths are independent and non-conflicting.
+  void Function(Uint8List messageId, int fragmentIndex)? onFragmentStoreAck;
+
+  /// Fires when [ackTracker] has exhausted its surgical retry budget for a
+  /// (messageId, recipientDeviceId) pair — i.e. all DV routes returned ACK
+  /// timeouts and the per-message retry counter passed `_computeMaxRetries`.
+  ///
+  /// Service-layer consumer: trigger the V3 offline cascade per
+  /// `Cleona_Chat_Architecture_v3_0.md` §5 — Reed-Solomon erasure-coded S&F
+  /// (§5.4 + §5.5) plus mailbox publication (§5.6). Sender stops touching
+  /// the wire from here; receiver pulls offline messages on next online.
+  ///
+  /// `messageIdHex` identifies the message for de-dup with prior S&F-Backup
+  /// attempts. `recipientUserId` is the userId the AckTracker tracked.
+  /// `serializedPacket` carries the `NetworkPacketV3` wire-payload bytes
+  /// the AckTracker stored on `trackSend`.
+  /// Fire-and-forget; consumer must own its own error handling.
+  void Function(
+    String messageIdHex,
+    Uint8List serializedPacket,
+    Uint8List recipientUserId,
+  )? onMessageRetryExhausted;
+
+  /// Welle 5 (§2.4.1) infrastructure-receive hook. The V3 receive pipeline
+  /// ([_onPacketV3Received]) decapsulates `PAYLOAD_INFRASTRUCTURE_FRAME`
+  /// packets inline using the local Device-KEM private keys (§3.5b),
+  /// validates `messageType ∈ §2.3.5 selector` and `recipientDeviceId ==
+  /// myDeviceId`, then dispatches the typed [proto.InfrastructureFrameV3]
+  /// to this callback. Consumers (CleonaService) route by `frame.messageType`
+  /// — there is no second decap step.
+  ///
+  /// Drop conditions (parseFailed, kemDecapFailed, selectorMismatch,
+  /// recipientMismatch) never reach the hook; they are silently absorbed at
+  /// the codec boundary per §2.4.1 [10']/[14'].
+  ///
+  /// Welle 6 (§2.4.0): `snapshot` carries the outcome of step §2.4 [4]
+  /// (Outer Device-Sig-Verify). InfrastructureFrame senderUserId is empty
+  /// (no user-identity claim at this layer); inner-handlers that need a
+  /// userId attach it after parsing the wrapped payload.
+  void Function(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+    SenderIdentitySnapshot snapshot,
+  )? onInfrastructureFramePayload;
+
   // State
   StreamSubscription<PortMapperEvent>? _portMapperSub;
   Timer? _maintenanceTimer;
   Timer? _peerExchangeTimer;
   Timer? _dvSafetyNetTimer;
   Timer? _dvPropagationDebounce;
+  Timer? _networkStateSaveDebounce;
   final Set<String> _dvPendingChanges = {};
+  final RelayDedupCache _relayDedup = RelayDedupCache();
+  DateTime? _lastBroadcastTime;
   bool _running = false;
-  late final DateTime _startedAt;
+  /// Count of authenticated packets received in this session.
+  /// Used by [_hasRecentlyReachablePeer] to gate Stage-5 Re-Discovery
+  /// (Architecture §5.10.5): if the daemon has not received a single
+  /// HMAC-validated packet since startup, the mesh is presumed unreachable
+  /// and the Re-Discovery procedure (3-burst + Subnet-Scan) must run.
+  ///
+  /// `PeerInfo.lastSeen` on persisted entries is NOT a valid signal here —
+  /// it can be touched without a real receive (e.g. by `_loadRoutingTable`
+  /// at startup, or via address-update paths). A stale entry from a dead
+  /// peer could keep lastSeen ahead of any session marker and silently
+  /// abort Stage-5, leaving the daemon isolated. See C-3 WinVM forensics
+  /// 2026-05-15: routing-table entry 7e41005a @ 192.168.10.92 (no Cleona
+  /// daemon there) had lastSeen freshly updated each session, scan aborted
+  /// `sent=0` 12× the same day, mesh isolation.
+  int _authenticatedReceivesInSession = 0;
+
   DateTime? _lastNetworkChangeAt;
   String _localIp = '';
   List<String> _localIps = [];
@@ -129,18 +236,44 @@ class CleonaNode {
   final List<DateTime> _routeDownTimestamps = [];
   bool _networkChangeInProgress = false;
 
-  /// Peers that have actually responded since this node started.
-  /// Used to distinguish "loaded from disk" peers from truly reachable ones.
-  final Set<String> _confirmedPeers = {};
+  /// Peers that have actually responded since this node started, with the
+  /// timestamp of the last direct (hopCount==0) packet received. Used to
+  /// distinguish "loaded from disk" peers from truly reachable ones. Peers
+  /// that haven't sent a direct packet in [_confirmedPeerTtl] are no longer
+  /// considered confirmed — UDP fire-and-forget to them returns false,
+  /// enabling the relay/failure cascade.
+  final Map<String, DateTime> _confirmedPeers = {};
+  static const Duration _confirmedPeerTtl = Duration(hours: 1);
+  bool isPeerConfirmed(String hex) {
+    final ts = _confirmedPeers[hex];
+    if (ts == null) return false;
+    if (DateTime.now().difference(ts) > _confirmedPeerTtl) return false;
+    return true;
+  }
+
+  /// Stricter liveness check for gossip responses (PeerListPush content).
+  /// A peer is gossip-worthy only if:
+  ///  1. confirmed (direct packet within TTL), AND
+  ///  2. has an alive DV route, AND
+  ///  3. fewer than 3 unacked packets (not in cascade-exhaustion state).
+  /// Dead peers are excluded from gossip immediately — they pull updates
+  /// themselves via Mesh-Refresh when they come back online.
+  bool _isPeerAliveForGossip(String hex) {
+    if (!isPeerConfirmed(hex)) return false;
+    final route = dvRouting.bestRouteTo(hex);
+    if (route == null || !route.isAlive) return false;
+    if ((_unackedPacketsToPeer[hex] ?? 0) >= 3) return false;
+    return true;
+  }
+
   /// Live view: drops peers whose direct AND relay routes have died (3x ACK
   /// timeout) so the connection-status UI doesn't show "all good" after the
   /// network broke. Stays cheap because the set is small (handful of peers).
-  Set<String> get confirmedPeerIds => _confirmedPeers.where((hex) {
+  Set<String> get confirmedPeerIds => _confirmedPeers.keys.where((hex) {
+        if (!isPeerConfirmed(hex)) return false;
         try {
           final peer = routingTable.getPeer(hexToBytes(hex));
           if (peer == null) return false;
-          // Route DOWN if BOTH direct (3x consecutiveRouteFailures) AND relay
-          // (3x consecutiveRelayFailures) have given up.
           final directDead = peer.consecutiveRouteFailures >= 3;
           final relayDead = peer.consecutiveRelayFailures >= 3 ||
                             peer.relayViaNodeId == null;
@@ -150,29 +283,98 @@ class CleonaNode {
         }
       }).toSet();
 
-  /// Last live UDP address per peer — for S&F push to mobile peers.
-  final Map<String, (InternetAddress, int)> _lastLiveAddr = {};
-
-  // Message-level dedup: skip duplicate application messages (same messageId).
-  // Prevents double-processing when the same message arrives via multiple paths
-  // (e.g. RELAY_FORWARD + S&F push, or multiple relay routes).
-  final LinkedHashSet<String> _seenMessageIds = LinkedHashSet<String>();
-  static const int _maxSeenMessages = 1000;
-
   // DV-Routing: track when we last sent a route update to each neighbor.
   // Used for catch-up: if >60s since last update, send full routes on next packet.
   final Map<String, DateTime> _lastRouteUpdateSentTo = {};
 
-  /// Pending relay sends: relayIdHex → (recipientNodeId, relayPeerNodeId).
-  /// Used by _handleRelayAck() to learn relay routes.
-  final Map<String, ({Uint8List recipientNodeId, Uint8List relayPeerNodeId})> _pendingRelays = {};
+  // DV→K-bucket seeding: cooldown per destination to avoid repeated WANTs.
+  final Map<String, DateTime> _dvSeedWantCooldown = {};
+
+  // §5.10.4 Solicited-Reply-Adoption tracker.
+  //
+  // When we send a `MTV3_PEER_LIST_WANT` to a peer, we record the deviceId-hex
+  // here with the send timestamp. An incoming `MTV3_PEER_LIST_PUSH` from that
+  // peer within `_solicitedReplyWindow` is treated as a *solicited reply* —
+  // the peer is adopted as a direct neighbor (idempotent
+  // `dvRouting.addDirectNeighbor` call) before `processRouteUpdate` runs, so
+  // the silent-drop in `dv_routing.dart:processRouteUpdate` (return false on
+  // unknown sender) cannot eat the carried routes when the adoption hasn't
+  // already happened via the V3-receive hook (cold-start / fresh peer cases).
+  // Outer-Sig + HMAC + rate-limit + reputation-ban remain the trust gate;
+  // this tracker only short-circuits the DV neighbor-membership precondition.
+  // Entries are removed on first match or pruned by `_maintenance` after the
+  // window expires; the tracker is in-memory only — an outstanding WANT from
+  // a previous daemon lifetime carries no semantics.
+  final Map<String, DateTime> _outstandingPeerListWants = {};
+  static const Duration _solicitedReplyWindow = Duration(seconds: 30);
+
+  /// Cooldown map for PEER_KEY_REQUEST: deviceIdHex → last request time.
+  /// At most one request per peer per 60s to avoid request storms.
+  final Map<String, DateTime> _peerKeyRequestCooldown = {};
+
+  // ── §5.10 Send-Cascade Recovery & Self-Healing ───────────────────────
+  //
+  // Counter-driven (NOT timer-driven) self-healing for the V3 send cascade:
+  //   Stage 1 Direct (≤3 packets, AckTracker)
+  //   Stage 2 Stale-PK Recovery     ← see _triggerStalePkRecovery
+  //   Stage 3 Alternative Route (≤3 packets, sendToDevice DV cascade)
+  //   Stage 4 Mesh-State Refresh    ← see _triggerMeshRefresh
+  //   Stage 5 Re-Discovery          ← see _triggerReDiscovery
+  // Cascade falls through to §5.4 Erasure / §5.6 Mailbox layers normally.
+
+  /// §5.10.4 — per-peer counter of in-flight, unACK'd packets to that device.
+  /// Incremented on each `sendToDevice`; decremented on any positive signal
+  /// from the same device (DELIVERY_RECEIPT via `ackTracker.onAckReceived`,
+  /// DHT_PONG, PEER_LIST_PUSH). Stage 4 Mesh-Refresh triggers at ≥6.
+  final Map<String, int> _unackedPacketsToPeer = {};
+
+  /// §5.10.4 — Stage 4 trigger threshold (in unACK'd packets to one peer).
+  static const int _stage4Threshold = 6;
+
+  /// §5.10.2 — last Stale-PK probe per peer (deviceIdHex → DateTime). Throttle
+  /// repeats from a flood of `device_sig_invalid` packets to a single probe
+  /// per 30s window. Mirrors the feel of `_lastPeerListProbe` and friends.
+  final Map<String, DateTime> _lastStalePkProbe = {};
+  static const Duration _stalePkProbeThrottle = Duration(seconds: 30);
+
+  /// §5.10.4 — last Mesh-Refresh per failed-peer (deviceIdHex → DateTime).
+  /// 60 s cooldown so a single message-cascade collapse doesn't keep firing
+  /// PEER_LIST_WANT bursts on every retry tick. Cooldown anchors on the
+  /// failed device's hex (de-dup matches the spec's "by original messageId"
+  /// intent — a single failed peer in this window only refreshes once).
+  final Map<String, DateTime> _lastMeshRefresh = {};
+  static const Duration _meshRefreshThrottle = Duration(seconds: 60);
+
+  /// §5.10.5 — timestamp of last Re-Discovery trigger.
+  ///
+  /// Re-Discovery is a heavy operation: 3-burst multicast + LAN-broadcast
+  /// + a subnet scan that can take 130-200s to complete on slow networks.
+  /// Without a global cooldown, a daemon with no reachable peers ends up
+  /// in a tight loop: send-cascade fails → Re-Discovery triggers → before
+  /// the previous discovery finishes, the next message-send cascade also
+  /// fails → another Re-Discovery → multicast/broadcast bursts pile up,
+  /// the existing subnet scan is interrupted (`startSubnetScan` no-ops
+  /// when already active so the *scan* is fine, but the redundant burst
+  /// traffic floods the LAN and wastes per-peer rate-limit budget).
+  /// 60 s mirrors `_meshRefreshThrottle` for symmetry; long enough that
+  /// a typical subnet scan can make meaningful fill-phase progress before
+  /// the next trigger, short enough that a peer that *does* come up
+  /// gets noticed reasonably quickly.
+  DateTime? _lastReDiscoveryTrigger;
+  static const Duration _reDiscoveryCooldown = Duration(seconds: 60);
+
+  /// §5.10.4 — timestamp of the most recent Stage-4 PEER_LIST_WANT burst,
+  /// used by `_handlePeerListPushInfra` to detect "we received a reply
+  /// inside the tail window" → set `_stage4ReplySeen = true`.
+  DateTime? _lastStage4BurstAt;
+  Duration _lastStage4TailWindow = Duration.zero;
+  bool _stage4ReplySeen = false;
 
   CleonaNode({
     required this.profileDir,
     required this.port,
     this.networkChannel = 'beta',
-  }) : _log = CLogger.get('node', profileDir: profileDir),
-       _chunkReassembler = ChunkReassembler(profileDir: profileDir) {
+  }) : _log = CLogger.get('node', profileDir: profileDir) {
     rateLimiter = RateLimiter.production();
     reputationManager = ReputationManager.production(profileDir: profileDir);
   }
@@ -238,33 +440,72 @@ class CleonaNode {
       routingTable.addLocalNodeId(ctx.deviceNodeId);
     }
     _loadRoutingTable();
-    // Set _startedAt AFTER loading routing table — _loadRoutingTable touches
-    // all peers (lastSeen=now) to prevent maintenance prune. _startedAt must
-    // be after that so _hasRecentlyReachablePeer() ignores disk-loaded peers.
-    _startedAt = DateTime.now();
 
-    // Init DHT RPC
+    // Init Distance-Vector routing table (V3) — must exist before loadDvRouting.
+    // Phase 2: ownNodeId = deviceNodeId (per-device routing)
+    dvRouting = DvRoutingTable(ownNodeId: primaryIdentity.deviceNodeId);
+    dvRouting.onRouteChanged = _onDvRouteChanged;
+
+    // DV-table sits *next* to the routing table on disk (Architektur §2.7.3).
+    // Order matters: routes/neighbors reference nodeIds that must already be
+    // resolvable as PeerInfos in `routingTable`, so the routing table loads
+    // first, the topology second.
+    _loadDvRouting();
+
+    // Init DHT RPC. V3-direct contract: sendFunction takes
+    // `(MTV3, body, peer)` and we plumb that into the §2.3.5 InfraFrame
+    // pipeline directly via `_sendInfra`.
     dhtRpc = DhtRpc(profileDir: profileDir);
-    dhtRpc.sendFunction = _sendEnvelopeToPeer;
+    dhtRpc.sendFunction = (proto.MessageTypeV3 type, Uint8List body,
+            PeerInfo peer) =>
+        _sendInfra(
+          messageType: type,
+          innerPayload: body,
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
+        );
 
     // Init RUDP Light ACK tracker (uses shared RTT from DhtRpc)
     ackTracker = AckTracker(rttSource: dhtRpc, profileDir: profileDir);
 
-    // RUDP Light retry: on ACK timeout, re-queue message for immediate re-send.
-    // Architecture Section 2.4.3: "On timeout → try next route."
-    // The re-queued message runs through sendEnvelope() again, which picks
-    // the next cheapest route (failed route has incremented failure counter).
-    ackTracker.onRetryNeeded = (messageIdHex, serializedEnvelope, recipientNodeId) {
-      if (!messageQueue.contains(messageIdHex)) {
-        messageQueue.enqueue(
-          messageIdHex: messageIdHex,
-          recipientNodeId: recipientNodeId,
-          serializedEnvelope: serializedEnvelope,
-        );
+    // DV-6: Wire dynamic retry cap. The tracker queries this callback at
+    // timeout time to compute how many retries the current message gets.
+    // Single-route peers stay at the conservative base of 3; peers with
+    // multiple alternatives get a deeper budget so one broken route
+    // doesn't exhaust the whole recovery window.
+    ackTracker.aliveRouteCount = (peerHex) {
+      // peerHex from trackSend is userId. DV routes are indexed by deviceId.
+      // Sum alive routes across all devices of this user.
+      final peerBytes = hexToBytes(peerHex);
+      final directRoutes = dvRouting.routesTo(peerHex).where((r) => r.isAlive).length;
+      if (directRoutes > 0) return directRoutes;
+      int total = 0;
+      for (final p in routingTable.getAllPeersForUserId(peerBytes)) {
+        total += dvRouting.routesTo(bytesToHex(p.nodeId)).where((r) => r.isAlive).length;
       }
-      // Immediate drain — don't wait for the 30s periodic timer.
-      final recipientHex = bytesToHex(recipientNodeId);
-      messageQueue.drainForRecipient(recipientHex);
+      return total;
+    };
+
+    // onRetryNeeded fires after AckTracker has surgically marked the failing
+    // route DOWN and bumped the per-message retry counter. "Retry" here does
+    // not mean "park locally and re-attempt the same recipient via DV
+    // cascade" — that is what the AckTracker's per-route logic already
+    // exhausted. Instead, a single `onMessageRetryExhausted` signal is
+    // forwarded to the service layer so the V3 offline cascade can take
+    // over: Reed-Solomon S&F (§5.4 + §5.5) plus mailbox publication (§5.6).
+    // Sender stops attempting direct delivery, receiver pulls on next online.
+    //
+    // The actual S&F + mailbox-push consumer lives in cleona_service —
+    // see `cleona_service.dart` `_handleFragmentStore` / `_storeErasureCoded
+    // Backup` (separate subagent migration). Until that consumer is wired
+    // here via `onMessageRetryExhausted`, the AckTracker still counts up to
+    // `maxRetries` and fires `onRouteDown` for DV bookkeeping; the offline
+    // cascade is just not triggered, matching V3.1.x post-MessageQueue
+    // behaviour. Once the service registers a consumer, exhausted messages
+    // get S&F-stored automatically.
+    ackTracker.onRetryNeeded =
+        (messageIdHex, serializedPacket, recipientUserId) {
+      onMessageRetryExhausted?.call(
+          messageIdHex, serializedPacket, recipientUserId);
     };
 
     // Wire Route-Down: 3x ACK timeout → surgical DV markRouteDown → Poison Reverse
@@ -272,18 +513,38 @@ class CleonaNode {
     // V3.1.44: Mass route-down detection → infer network change → re-discover public IP.
     ackTracker.onRouteDown = (peerHex, {String? viaNextHopHex}) {
       final viaShort = viaNextHopHex != null ? viaNextHopHex.substring(0, 8) : 'direct';
-      _log.info('Route DOWN via ACK: ${peerHex.substring(0, 8)} via $viaShort — surgical DV markRouteDown');
-      dvRouting.markRouteDown(peerHex, viaNextHopHex: viaNextHopHex);
+      _log.info('Route DOWN via ACK: ${peerHex.substring(0, 8)} via $viaShort');
 
-      // Plan §D2: notify call layer so any active CallSession with a
-      // cached route to this peer drops the cache and re-resolves on
-      // the next audio frame. Fire-and-forget; handler is non-throwing.
-      try {
-        onRouteDownForCalls?.call(peerHex);
-      } catch (_) {}
+      // peerHex from AckTracker timeout is userId (trackSend keyed by userId).
+      // DV routes are indexed by deviceId. Resolve userId→device(s) so
+      // markRouteDown and routesTo operate on the correct keys.
+      final peerBytes = hexToBytes(peerHex);
+      final peers = routingTable.getAllPeersForUserId(peerBytes);
+      // Direct deviceId hit (legacy or if peerHex IS a deviceId).
+      if (peers.isEmpty) {
+        final directPeer = routingTable.getPeer(peerBytes);
+        if (directPeer != null) {
+          peers.add(directPeer);
+        }
+      }
+      if (peers.isEmpty) return;
+
+      // Mark DV routes down for every device of this user.
+      for (final peer in peers) {
+        final deviceHex = bytesToHex(peer.nodeId);
+        dvRouting.markRouteDown(deviceHex, viaNextHopHex: viaNextHopHex);
+        _log.debug('DV markRouteDown: device ${deviceHex.substring(0, 8)} '
+            '(user ${peerHex.substring(0, 8)}) via $viaShort');
+      }
+
+      // Notify call layer (fire-and-forget).
+      for (final peer in peers) {
+        try {
+          onRouteDownForCalls?.call(bytesToHex(peer.nodeId));
+        } catch (_) {}
+      }
 
       // Mass route-down → infer network change (e.g. ISP IP reassignment, WiFi switch).
-      // If ≥3 distinct peers go DOWN within 30s, trigger onNetworkChanged().
       _routeDownTimestamps.add(DateTime.now());
       _routeDownTimestamps.removeWhere((t) =>
           DateTime.now().difference(t).inSeconds > 30);
@@ -295,42 +556,73 @@ class CleonaNode {
         onNetworkChanged(force: true).whenComplete(() => _networkChangeInProgress = false);
       }
 
-      // Fix B (Task #30): peerHex aus AckTracker kann userId sein, wenn der
-      // Sender mit userId trackAck'd hat. routingTable.getPeer() indiziert
-      // nur deviceNodeId, getPeerByUserId ist der Fallback (V3.1.65 O(1)).
-      // Ohne Fallback war diese Branch quasi-deaktiviert für Multi-Device-
-      // Empfänger und der learned-relay-Cleanup griff praktisch nie.
-      final peer = routingTable.getPeer(hexToBytes(peerHex)) ??
-          routingTable.getPeerByUserId(hexToBytes(peerHex));
-      if (peer == null) return;
-
-      if (viaNextHopHex != null) {
-        // Relay route failure — only invalidate if this IS the learned relay route
-        final relayHex = peer.relayViaNodeId != null ? bytesToHex(peer.relayViaNodeId!) : null;
-        if (relayHex == viaNextHopHex) {
-          peer.consecutiveRelayFailures = 3;
-          _log.info('Relay route DOWN: ${peerHex.substring(0, 8)} via $viaShort — clearing learned relay');
-          // Task #30 (Y): cooldown the failed relay BEFORE clearRelayRoute
-          // resets state. Without this, the next incoming RELAY_FORWARD from
-          // the same peer via the same broken relay will overwrite
-          // relayViaNodeId again (asymmetric reachability) and the cascade
-          // will pick the dead path on the next send.
-          peer.markRelayFailed(viaNextHopHex);
-          peer.clearRelayRoute();
-        }
-      } else {
-        // Direct route failure — only mark peer as fully unreachable if NO DV alternatives
-        final remaining = dvRouting.routesTo(peerHex).where((r) => r.isAlive).toList();
-        if (remaining.isNotEmpty) {
-          _log.info('Route DOWN: ${remaining.length} alternative route(s) remain for ${peerHex.substring(0, 8)}');
+      // Per-device routing table bookkeeping.
+      for (final peer in peers) {
+        final deviceHex = bytesToHex(peer.nodeId);
+        if (viaNextHopHex != null) {
+          final relayHex = peer.relayViaNodeId != null ? bytesToHex(peer.relayViaNodeId!) : null;
+          if (relayHex == viaNextHopHex) {
+            peer.consecutiveRelayFailures = 3;
+            _log.info('Relay route DOWN: ${deviceHex.substring(0, 8)} via $viaShort — clearing learned relay');
+            peer.markRelayFailed(viaNextHopHex);
+            peer.clearRelayRoute();
+          }
         } else {
-          peer.consecutiveRouteFailures = 3;
+          final remaining = dvRouting.routesTo(deviceHex).where((r) => r.isAlive).toList();
+          if (remaining.isNotEmpty) {
+            _log.info('Route DOWN: ${remaining.length} alternative route(s) remain for ${deviceHex.substring(0, 8)}');
+          } else {
+            peer.consecutiveRouteFailures = 3;
+          }
         }
+      }
+    };
+
+    // §3.4: Single source of truth for ACK-Success → DV-Routing.
+    // Mirror of onRouteDown (Failure-Seite). The DELIVERY_RECEIPT envelope
+    // handler computes `wasDirect` from the source address and forwards it
+    // through handleAck → here, instead of duplicating DV-state logic inline.
+    // §3.1 B-1: peerHex is now the ACK sender's deviceId (not userId),
+    // so dvRouting.confirmRoute and routingTable.getPeer work directly.
+    ackTracker.onAckReceived = (msgIdHex, peerHex, wasDirect) {
+      if (wasDirect) {
+        dvRouting.confirmRoute(peerHex);
+        if (!_isLocalIdentity(peerHex)) {
+          dvRouting.confirmRelayNeighbor(peerHex);
+        }
+      }
+
+      final peerBytes = hexToBytes(peerHex);
+      final peer = routingTable.getPeer(peerBytes);
+      if (peer == null) {
+        _log.debug('onAckReceived: peer ${peerHex.substring(0, 8)} not in '
+            'routing table (stale or userId leak)');
+        _decrementUnackedPacketsToPeer(peerHex);
+        return;
+      }
+      if (peer.consecutiveRouteFailures > 0) {
+        _log.debug('Reset consecutiveRouteFailures for ${peerHex.substring(0, 8)} '
+            '(ACK ${wasDirect ? "direct" : "via relay"})');
+        peer.consecutiveRouteFailures = 0;
+      }
+      if (peer.consecutiveRelayFailures > 0) {
+        peer.consecutiveRelayFailures = 0;
+      }
+      _decrementUnackedPacketsToPeer(bytesToHex(peer.nodeId));
+      if (peer.userId != null) {
+        _decrementUnackedPacketsToPeer(bytesToHex(peer.userId!));
       }
     };
 
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
     final identityFileEnc = FileEncryption(baseDir: '${AppPaths.home}/.cleona');
+
+    // V3.0 Device-Sig keypair (§3.5). Loaded once per daemon, shared across
+    // all hosted identities. Lazy-created on first start.
+    _deviceKeys = DeviceKeysStore.loadOrCreate(
+      baseDir: '${AppPaths.home}/.cleona',
+      fileEnc: identityFileEnc,
+    );
     identityDhtHandler = IdentityDhtHandler(
       ownNodeId: primaryIdentity.deviceNodeId,
       fileEncryption: identityFileEnc,
@@ -340,51 +632,88 @@ class CleonaNode {
     identityResolver = IdentityResolver(
       routingTable: routingTable,
       dhtRpc: dhtRpc,
+      dhtHandler: identityDhtHandler,
+      // V3-direct: outer Device-Sig + KEM-AEAD inner are added by the
+      // §2.3.5 InfraFrame pipeline (`_sendInfra` keyed by the sending
+      // identity's device-keypair) when DhtRpc.sendFunction fires.
     );
 
     // Init Store-and-Forward message store
     peerMessageStore = PeerMessageStore(profileDir: profileDir);
     await peerMessageStore.load();
 
-    // Init message queue (holds messages when no route available)
-    messageQueue = MessageQueue(profileDir: profileDir);
-    await messageQueue.load();
-    messageQueue.onRetrySend = (serializedEnvelope, recipientNodeId) {
-      final env = proto.MessageEnvelope.fromBuffer(serializedEnvelope);
-      return sendEnvelope(env, recipientNodeId);
-    };
+    // V3.0: keine MessageQueue-Initialisierung mehr. Offline-Delivery läuft
+    // über S&F + Reed-Solomon + Mailbox-Pull (Architektur §5).
 
     // Load reputation data from disk
     await reputationManager.load(profileDir);
 
-    // Init reachability probe (relay route discovery)
+    // Init reachability probe (relay route discovery). ReachabilityProbe
+    // hands us V3 InfraFrame triples `(MessageTypeV3, body, PeerInfo)`
+    // directly. recipientDeviceId == peer.nodeId for the §2.3.5
+    // InfraFrame path.
     reachabilityProbe = ReachabilityProbe(profileDir: profileDir);
-    reachabilityProbe.sendFunction = (env, nodeId) => sendEnvelope(env, nodeId);
-    reachabilityProbe.createEnvelopeFunction = (type, payload, {Uint8List? recipientId}) =>
-        primaryIdentity.createSignedEnvelope(type, payload, recipientId: recipientId);
+    reachabilityProbe.sendFunction = (proto.MessageTypeV3 type,
+            Uint8List body, PeerInfo peer) =>
+        _sendInfra(
+          messageType: type,
+          innerPayload: body,
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
+        );
     reachabilityProbe.getCandidatesFunction = (targetNodeId) {
       final targetHex = bytesToHex(targetNodeId);
       return routingTable.allPeers
-          .where((p) => _confirmedPeers.contains(p.nodeIdHex))
+          .where((p) => isPeerConfirmed(p.nodeIdHex))
           .where((p) => p.nodeIdHex != targetHex)
           .where((p) => !routingTable.isLocalNode(p.nodeId))
           .toList();
     };
     reachabilityProbe.randomBytesFunction = (size) => SodiumFFI().randomBytes(size);
 
-    // Init Distance-Vector routing table (V3)
-    // Phase 2: ownNodeId = deviceNodeId (per-device routing)
-    dvRouting = DvRoutingTable(ownNodeId: primaryIdentity.deviceNodeId);
-    dvRouting.onRouteChanged = _onDvRouteChanged;
-
-    // Init NAT traversal
+    // NatTraversal ships a V3-direct sender contract — `sendInfraFn` for
+    // DV-cascade (HOLE_PUNCH_REQUEST → coordinator, HOLE_PUNCH_NOTIFY →
+    // target) and `sendInfraDirectFn` for explicit-address sends
+    // (HOLE_PUNCH_PING / PONG, NAT-timeout-probing keepalive).
     natTraversal = NatTraversal(profileDir: profileDir);
     natTraversal.ownNodeId = primaryIdentity.deviceNodeId;
-    natTraversal.sendFunction = (env, nodeId) => sendEnvelope(env, nodeId);
-    natTraversal.sendUdpRaw = (data, addr, port) => transport.sendUdpRaw(data, addr, port);
-    natTraversal.createEnvelope = (type, payload, {Uint8List? recipientId}) =>
-        primaryIdentity.createSignedEnvelope(type, payload, recipientId: recipientId);
+    natTraversal.sendInfraFn = (type, body, deviceId) =>
+        _sendInfra(messageType: type, innerPayload: body, recipientDeviceId: deviceId);
+    natTraversal.sendInfraDirectFn = (type, body, deviceId, addr, port) =>
+        _sendInfraDirect(
+          messageType: type,
+          innerPayload: body,
+          recipientDeviceId: deviceId,
+          addr: addr,
+          port: port,
+        );
     natTraversal.onHolePunchSuccess = _onHolePunchSuccess;
+
+    // Init UDP keepalive for public-IP peers (non-hole-punch path).
+    // Architecture §2.4.5 / §7.6: keep carrier-NAT pinholes alive (~25s
+    // interval, well below typical 30–60s carrier timeout). After 3
+    // consecutive rounds where ALL registered peers fail to respond
+    // (~75s) we infer a network change and run onNetworkChanged().
+    udpKeepalive = UdpKeepalive(profileDir: profileDir);
+    udpKeepalive.ownNodeId = primaryIdentity.deviceNodeId;
+    // V3 hard-cut: keepalive PINGs use V3-direct InfraFrame send
+    // (transport.dart:_processUdpDatagram only accepts NetworkPacketV3
+    // since Welle 1; legacy raw-UDP pings were silently dropped on the
+    // wire and carrier-NAT pinholes expired after ~30-60s).
+    udpKeepalive.sendInfraFn = (type, body, deviceId, addr, port) =>
+        _sendInfraDirect(
+          messageType: type,
+          innerPayload: body,
+          recipientDeviceId: deviceId,
+          addr: addr,
+          port: port,
+        );
+    udpKeepalive.onAllPeersFailed = () {
+      if (_networkChangeInProgress) return;
+      _log.info('UdpKeepalive: all peers failed — inferring network change');
+      _networkChangeInProgress = true;
+      onNetworkChanged(force: true)
+          .whenComplete(() => _networkChangeInProgress = false);
+    };
 
     // Get all local IPs BEFORE transport starts — isReachableFromCurrentNetwork
     // depends on this being set when incoming packets trigger outgoing sends.
@@ -396,11 +725,18 @@ class CleonaNode {
 
     // Init transport (starts receiving immediately — localIps must be set first)
     transport = Transport(port: port, profileDir: profileDir);
-    transport.onEnvelope = _onEnvelopeReceived;
+    transport.onPacketV3 = _onPacketV3Received;
     transport.onDiscovery = _onDiscoveryReceived;
     transport.onPortProbe = _onPortProbeReceived;
     transport.onBytesSent = (b) => statsCollector.addBytesSent(b);
     transport.onBytesReceived = (b) => statsCollector.addBytesReceived(b);
+    transport.onUdpSocketDead = () {
+      if (_networkChangeInProgress) return;
+      _log.warn('UDP socket dead — triggering network change');
+      _networkChangeInProgress = true;
+      onNetworkChanged(force: true)
+          .whenComplete(() => _networkChangeInProgress = false);
+    };
     await transport.start();
 
     // Init LAN discovery — Phase 2: broadcast deviceNodeId (per-device routing)
@@ -447,17 +783,25 @@ class CleonaNode {
         _addBootstrapPeer(bp);
       }
     }
-    _loadBootstrapSeeds();
 
-    // Wait for PINGs to get PONGs back (populates routing table)
-    if (bootstrapPeers.isNotEmpty || routingTable.peerCount == 0) {
-      await Future.delayed(const Duration(seconds: 3));
-    }
+    // NOTE: no convergence delay here. _startBase() is shared by start() and
+    // startQuick(); a blocking delay here delayed startQuick() → IpcServer.start()
+    // → cleona.port on slow hosts (Windows first-run "Verbinde mit Dienst" hang).
+    // The convergence wait now lives only in start() (headless), which blocks on
+    // bootstrap by design.
   }
 
   /// Full start (blocking bootstrap). Used by headless mode.
   Future<void> start({List<String> bootstrapPeers = const []}) async {
     await _startBase(bootstrapPeers: bootstrapPeers);
+
+    // Headless mode: give PINGs time to get PONGs back (populate routing table)
+    // before the blocking Kademlia bootstrap. startQuick() callers deliberately
+    // skip this — they converge via the background _kademliaBootstrap() and must
+    // not block the path to IPC-readiness on it.
+    if (bootstrapPeers.isNotEmpty || routingTable.peerCount == 0) {
+      await Future.delayed(const Duration(seconds: 3));
+    }
 
     // Start Kademlia bootstrap (FIND_NODE for own ID)
     await _kademliaBootstrap();
@@ -478,30 +822,73 @@ class CleonaNode {
   }
 
   void _finishStart() {
+    // Cold-start jitter (0-3s): stagger startup bursts when many nodes boot
+    // simultaneously (e.g. mod-lab cluster) to avoid O(N²) push cascade.
+    final jitterMs = Random().nextInt(3000);
+    if (jitterMs > 0) {
+      Future.delayed(Duration(milliseconds: jitterMs), _finishStartDelayed);
+      return;
+    }
+    _finishStartDelayed();
+  }
+
+  void _finishStartDelayed() {
+    // §4.6 (V3.1.72): DHT/resolution lookups select by age + XOR distance
+    // (findClosestPeers prefers "recent" < 10 min), NOT by direct-confirmed.
+    // The V3.1.71 `defaultPeerFilter = isPeerConfirmed` is removed: it hid
+    // unconfirmed-but-reachable replicators from Kademlia and broke
+    // first-contact identity resolution. Gossip-content traffic reduction
+    // stays governed by `_isPeerAliveForGossip` (a separate, stricter gate).
+    routingTable.defaultPeerFilter = null;
+
     // Immediate peer exchange with all known peers
     if (routingTable.peerCount > 0) {
       _doPeerExchange();
       // Also broadcast our own PeerInfo (including PKs)
-      _broadcastAddressUpdate();
+      _broadcastAddressUpdate(force: true);
     }
 
-    // Cross-subnet discovery: scan other /24 subnets in the /16 range via
-    // unicast on the discovery port. Runs when no peer is confirmed reachable
-    // (not just when peerCount==0 — peers may exist but be unreachable due to
-    // AP isolation or network change). Stops as soon as any peer responds.
-    if (!_hasRecentlyReachablePeer()) {
-      _log.info('No recently reachable peer at startup — starting subnet scan');
-      localDiscovery.startSubnetScan(_localIps, () => _hasRecentlyReachablePeer());
+    // Cross-subnet discovery (§4.10): scan other /24 subnets in the /16 range
+    // until a confirmed cross-subnet peer is found (e.g. Bootstrap). This
+    // ensures the QR ContactSeed includes a publicly-reachable relay.
+    // Using _hasCrossSubnetPeer as the sole stop condition: finding only
+    // same-subnet peers (Node2) keeps scanning; finding Bootstrap stops.
+    if (!_hasCrossSubnetPeer()) {
+      _log.info('No cross-subnet peer at startup — starting subnet scan');
+      localDiscovery.startSubnetScan(_localIps, () => _hasCrossSubnetPeer());
     }
 
-    // Start maintenance timer (60 seconds)
-    _maintenanceTimer ??= Timer.periodic(const Duration(seconds: 60), (_) => _maintenance());
+    // §5.11 — Maintenance timer (15 min, intern-only). Local prune of peers
+    // older than 4 h, stale addresses, default-gateway recompute, persistence.
+    // Generates NO network traffic itself — 60 s was lärmig given the 4 h+
+    // pruning window. 15 min is plenty.
+    _maintenanceTimer ??=
+        Timer.periodic(const Duration(minutes: 15), (_) => _maintenance());
 
-    // Start peer exchange timer (every 120 seconds)
-    _peerExchangeTimer ??= Timer.periodic(const Duration(seconds: 120), (_) => _doPeerExchange());
+    // §5.11 — Peer-exchange tick removed. Mesh churn is now event-driven:
+    //   • new neighbor (`isNewNeighbor==true`) → `_pushSelfToNeighbors()`
+    //   • own identity-key rotation → `_broadcastAddressUpdate()` (self-PUSH)
+    //   • DV-safety-net (1 h) carries a piggy-backed firstParty self-PUSH
+    //     as cold-path backstop (see `_dvSafetyNetExchange`).
+    // Stage 2 §5.10.2 still triggers DHT_PING with `pk_recovery_hint=true`
+    // for hot-path heal in 1 RTT (§5.12). The 120 s heartbeat is gone.
 
-    // Safety-Net: full route exchange every 1h (in case an update was missed)
+    // §5.12 cold-path — full DV exchange + firstParty self-broadcast every 1h.
+    // Backstop for any Stage-2 trigger that we missed: ensures every neighbor
+    // sees our current signing keys at least hourly.
     _dvSafetyNetTimer ??= Timer.periodic(const Duration(hours: 1), (_) => _dvSafetyNetExchange());
+
+    // Startup mobile fallback: if after 30s no peer has been confirmed via
+    // inbound hopCount==0 packet, the primary network path is likely broken
+    // (WiFi hairpin NAT, captive portal). Probe alternative interfaces
+    // without waiting for UdpKeepalive (which needs registered peers to fail).
+    Future.delayed(const Duration(seconds: 30), () {
+      if (!_running) return;
+      if (_confirmedPeers.values.any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) return;
+      if (transport.isMobileFallbackActive) return;
+      _log.info('Startup: 0 confirmed peers after 30s — probing mobile fallback');
+      _tryMobileFallback();
+    });
 
     _running = true;
     _log.info('Node started. Peers: ${routingTable.peerCount}');
@@ -512,412 +899,2260 @@ class CleonaNode {
     // for PeerExchange to include our PK.
   }
 
-  void _onEnvelopeReceived(proto.MessageEnvelope envelope, InternetAddress from, int fromPort, {bool isUdp = false, bool skipRateLimit = false}) {
-    final type = envelope.messageType;
+  // ── V3.0 Receive Pipeline (Architecture v3.0 §2.4 receiver steps 3-7) ──
 
-    // Network channel filter (defense-in-depth — HMAC already filters at transport layer)
-    if (envelope.networkTag.isNotEmpty && envelope.networkTag != networkChannel) return;
+  /// Callback for locally-delivered NetworkPacketV3. Called from
+  /// [_onPacketV3Received] when nextHopDeviceId == myDeviceId. The receiver
+  /// (cleona_service) is responsible for KEM-decap, ApplicationFrame parse,
+  /// User-Sig verify (V3FrameCodec.decryptAndVerifyInner) and dispatch.
+  ///
+  /// Welle 6 (§2.4.0): `snapshot` carries the outcome of step §2.4 [4]
+  /// (Outer Device-Sig-Verify) so type-specific handlers can gate trust-
+  /// elevating actions (e.g. F4 Re-Contact-Auto-Overwrite, §8.1).
+  void Function(proto.NetworkPacketV3 packet, InternetAddress from, int fromPort,
+          SenderIdentitySnapshot snapshot)?
+      onApplicationFramePayload;
 
-    // --- DoS Layer 3+5: Ban check (Architecture Section 9.3/9.5) ---
-    // Banned peers are silently dropped before any processing.
-    if (envelope.senderId.isNotEmpty) {
-      final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      if (reputationManager.isBanned(senderHex)) return;
+  /// Receiver-side V3 pipeline (Architecture v3.0 §2.4 steps 3-7).
+  ///
+  /// `network_tag` (HMAC) was already verified by [Transport]; this method
+  /// covers timestamp window, DoS gates, Device-Sig-Verify, PoW-Verify,
+  /// DV-Routing neighbor learning, and the routing decision (forward vs
+  /// local delivery). Local delivery hands the packet to
+  /// [onApplicationFramePayload] for inner KEM-decap + User-Sig-Verify.
+  void _onPacketV3Received(
+    proto.NetworkPacketV3 packet,
+    InternetAddress from,
+    int fromPort, {
+    bool isUdp = false,
+  }) {
+    // [3] Timestamp window: ±60s replay protection (Architecture §2.4 step 3).
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final tsDelta = (nowMs - packet.timestampMs.toInt()).abs();
+    if (tsDelta > 60 * 1000) {
+      _log.debug('V3 drop: timestamp window violation (${tsDelta}ms)');
+      return;
+    }
 
-      // --- DoS Layer 2: Rate limiting (Architecture Section 9.2) ---
-      // Excessive traffic from a single source is silently dropped.
-      // skipRateLimit: relay-unwrapped inner envelopes were already counted
-      // against the relay node's budget — counting them again would double-
-      // charge the original sender.
-      if (!skipRateLimit) {
-        final packetSize = envelope.writeToBuffer().length;
-        if (!rateLimiter.allowPacketHex(senderHex, packetSize)) {
-          reputationManager.recordBad(senderHex, 'rate_limit_exceeded');
-          return;
-        }
+    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+    final senderHex = senderDeviceId.isNotEmpty ? bytesToHex(senderDeviceId) : '';
+
+    // DoS Layer 3+5: Ban check — banned senders silently dropped.
+    if (senderHex.isNotEmpty && reputationManager.isBanned(senderHex)) {
+      _log.warn('V3 drop: banned sender ${senderHex.substring(0, 8)} type=${packet.payloadType.name}');
+      return;
+    }
+
+    // DoS Layer 2: Rate limiting per sender device.
+    // PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME is plaintext (cheap to forge) →
+    // full per-source limits apply.  KEM-encrypted frames (INFRASTRUCTURE_FRAME
+    // and APPLICATION_FRAME) are expensive to produce, so their natural
+    // rate limit is CPU-bound; only the global total-byte limit applies.
+    if (senderHex.isNotEmpty) {
+      final pktSize = packet.writeToBuffer().length;
+      final isBootInfra = packet.payloadType == proto.PayloadTypeV3.PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME;
+      if (!rateLimiter.allowPacketHex(senderHex, pktSize,
+          checkPacketCount: isBootInfra, checkSourceLimits: isBootInfra)) {
+        _log.debug('V3 drop: rate-limited ${senderHex.substring(0, 8)} pkt=${pktSize}B type=${packet.payloadType.name}');
+        return;
       }
-
-      // DoS Layer 3: Every accepted packet counts as positive reputation.
-      // Infrastructure messages (DHT, DV, PeerList, Relay) return in the
-      // switch-case below and never reach the application-level recordGood().
-      // Without this, new peers doing normal bootstrap traffic can never
-      // build goodActions → score stays 0.0 after first violation → score-
-      // gate (Section 9.3) is ineffective.
       reputationManager.recordGood(senderHex);
     }
+    _log.debug('V3 recv ok: type=${packet.payloadType.name} from ${senderHex.isEmpty ? "?" : senderHex.substring(0, 8)} isUdp=$isUdp');
 
-    // Decompress encryptedPayload if needed — node-level handlers (relay, S&F,
-    // reachability) read encryptedPayload directly and need decompressed data.
-    // V3.1.7 FIX: Skip decompression for KEM-encrypted messages. Their
-    // compression field describes the PLAINTEXT (pre-encryption), not the
-    // ciphertext. Decompressing ciphertext corrupts it → decrypt fails.
-    // The service layer handles post-decryption decompression.
-    final isKemEncrypted = envelope.hasKemHeader() &&
-        envelope.kemHeader.ephemeralX25519Pk.isNotEmpty;
-    if (envelope.compression == proto.CompressionType.ZSTD && isKemEncrypted) {
-      _log.debug('Skip node-level decompress for KEM-encrypted ${envelope.messageType} '
-          '(${envelope.encryptedPayload.length}B payload)');
-    }
-    if (!isKemEncrypted &&
-        envelope.compression == proto.CompressionType.ZSTD &&
-        envelope.encryptedPayload.isNotEmpty) {
-      try {
-        envelope.encryptedPayload = ZstdCompression.instance.decompress(
-            Uint8List.fromList(envelope.encryptedPayload));
-        envelope.compression = proto.CompressionType.NONE;
-      } catch (_) {
-        // Decompression failed — leave payload as-is for service layer to handle
-      }
-    }
+    // Mark session as having received at least one valid peer packet
+    // (HMAC + timestamp window + ban check + rate-limit all passed).
+    // Read by _hasRecentlyReachablePeer() to gate Stage-5 Re-Discovery
+    // per Architecture §5.10.5. See field doc.
+    _authenticatedReceivesInSession++;
 
-    // Update routing table with sender info
-    // DHT protocol messages are authoritative (direct from the peer)
-    if (envelope.senderId.isNotEmpty) {
-      final senderUserId = Uint8List.fromList(envelope.senderId);
-      final senderUserHex = bytesToHex(senderUserId);
-      // Phase 2: routing operations use deviceNodeId (per-device),
-      // identity operations use userId (stable across devices).
-      final routingId = _routingIdFromEnvelope(envelope);
-      final routingHex = bytesToHex(routingId);
-      _confirmedPeers.add(routingHex); // Mark device as actually reachable
-
-      // DV-Routing: register neighbors (direct connection)
-      if (from.address != '0.0.0.0') {
-        final addr = PeerAddress(ip: from.address, port: fromPort);
-        final ct = connectionTypeFromPriority(addr.priority);
-        final isNewNeighbor = dvRouting.addDirectNeighbor(routingId, ct);
-
-        if (isNewNeighbor) {
-          _log.info('DV: New neighbor ${routingHex.substring(0, 8)} from ${from.address}:$fromPort (${ct.name})');
-          // Prevent catch-up from firing on subsequent packets before welcome timer
-          _lastRouteUpdateSentTo[routingHex] = DateTime.now();
-          // Schedule welcome route update (after _touchPeer adds peer to routing table)
-          Timer(const Duration(milliseconds: 500), () => _sendWelcomeRouteUpdate(routingHex));
+    // [4] Device-Sig-Verify (Architecture §2.4 step 4). Lookup the sender's
+    // *Device*-Sig PK via routing table. Welle 3 (§17.3): the cached
+    // `deviceEd25519PublicKey` / `deviceMlDsaPublicKey` are the per-device
+    // signing keys (distinct from the User-Sig PKs that share the
+    // `ed25519PublicKey` field). Bootstrap path: no Device-Sig PK on file →
+    // lenient pass; the next self-broadcast PEER_LIST_PUSH installs the PK
+    // and subsequent packets verify strictly.
+    final senderPeer = senderDeviceId.isNotEmpty
+        ? routingTable.getPeer(senderDeviceId)
+        : null;
+    final edPk = senderPeer?.deviceEd25519PublicKey;
+    OuterSigStatus outerStatus;
+    if (edPk != null) {
+      final ok = V3FrameCodec.verifyOuterDeviceSig(
+        packet: packet,
+        senderDeviceEd25519Pk: edPk,
+        senderDeviceMlDsaPk: senderPeer?.deviceMlDsaPublicKey,
+      );
+      if (!ok) {
+        // §5.10.2 Stale-PK Recovery — if this senderId is a known peer for
+        // which we have a *firstParty* PK on file, the most likely cause of
+        // a fresh `device_sig_invalid` is a key rotation we haven't learned
+        // about yet, not an adversary forging packets. Treat the failure as
+        // a refresh signal: mark the cached PK stale and fire ONE BOOT-path
+        // DHT_PING so the peer's reply (PONG + follow-up self-broadcast
+        // PEER_LIST_PUSH) repopulates the cache with the rotated PK. The
+        // `pkStale` flag (a) suppresses reputation hits while recovery is
+        // in flight and (b) lets the next firstParty Self-Broadcast
+        // overwrite the cached PK even though pkSource is already firstParty
+        // (see `PeerInfo.setSigningKeys` §5.10.5 carve-out). Sender side does
+        // NOT block on this — Stage 2 is fire-and-forget; Stages 1/3/4/5 of
+        // the cascade run in parallel on their own counters.
+        if (senderPeer != null &&
+            senderPeer.pkSource == PkSource.firstParty &&
+            !senderPeer.pkStale) {
+          // §5.10.2 key-rotation path: fire refresh probe, but do NOT drop.
+          // HMAC already proves network membership; sig failure on a known
+          // firstParty peer almost always means key rotation (e.g. profile
+          // wipe), not spoofing. The inner handler validates at its own trust
+          // level using outerStatus=skippedBootstrap. Dropping here would
+          // silently block the re-contact-request that carries the new key.
+          _triggerStalePkRecovery(senderPeer);
+          outerStatus = OuterSigStatus.skippedBootstrap;
+        } else if (senderPeer?.pkStale == true) {
+          // Recovery already in flight — let through with the same lenient
+          // status; the probe's ≥30s throttle prevents probe storms.
+          outerStatus = OuterSigStatus.skippedBootstrap;
         } else {
-          // Catch-up: if we haven't sent a route update to this neighbor recently,
-          // send one now — covers returning peers whose route never went DOWN.
-          _maybeSendCatchUpRouteUpdate(routingHex);
-        }
-
-        // V3.1 Fix: Reset failure counters — direct packet proves reachability.
-        final senderPeer = routingTable.getPeer(routingId);
-        if (senderPeer != null) {
-          if (senderPeer.consecutiveRouteFailures > 0) {
-            _log.debug('Reset consecutiveRouteFailures for ${routingHex.substring(0, 8)} '
-                '(direct packet received from ${from.address})');
-            senderPeer.consecutiveRouteFailures = 0;
+          // No firstParty cache → unknown sender using a known device-id
+          // (or a thirdParty PK mismatch). Reputation hit + drop.
+          if (senderHex.isNotEmpty) {
+            reputationManager.recordBad(senderHex, 'device_sig_invalid');
           }
-          if (senderPeer.consecutiveRelayFailures > 0) {
-            senderPeer.consecutiveRelayFailures = 0;
-          }
+          _log.debug('V3 drop: device-sig invalid from '
+              '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
+          return;
         }
-
-        // Public-IP-Trigger: if a peer with a public IP appears as neighbor
-        // and we don't have a port mapping yet, start acquiring one.
-        // UPnP discovers the IGD (Fritzbox) via SSDP unicast + tracepath
-        // and queries it for the external IP — no external service needed.
-        if (!PeerAddress.isPrivateIp(from.address) &&
-            !natTraversal.hasPortMapping &&
-            portMapper.state != PortMapperState.acquiring &&
-            portMapper.state != PortMapperState.mapped) {
-          _log.info('Public-IP peer detected (${from.address}) — starting port mapping');
-          portMapper.start();
-        }
+        // outerStatus already set to skippedBootstrap in the branches above.
+      } else {
+        outerStatus = OuterSigStatus.verified;
       }
-
-      // Track live UDP address for S&F push (keyed by userId — S&F is identity-level).
-      final senderId = Uint8List.fromList(envelope.senderId);
-      if (isUdp && from.address != '0.0.0.0' && fromPort > 0) {
-        _lastLiveAddr[senderUserHex] = (from, fromPort);
-      }
-
-      // Push-based S&F: if we have stored messages for this peer, push them now
-      // via the LIVE address we just received from (not routing table — may be stale).
-      // Wrap in RELAY_FORWARD so receiver processes with from=0.0.0.0 and does NOT
-      // register the original sender as a direct neighbor at our IP (V3.1.7 fix).
-      //
-      // Architecture (3.3.7): Messages persist until confirmed delivery (PEER_RETRIEVE)
-      // or TTL expiry (7 days). peekMessages() reads without removing and rate-limits
-      // pushes to once per 30 seconds per message to avoid flooding.
-      if (from.address != '0.0.0.0' && fromPort > 0 && peerMessageStore.hasMessagesFor(senderId)) {
-        final toPush = peerMessageStore.peekMessages(senderId);
-        for (final envBytes in toPush) {
-          try {
-            final storedEnv = proto.MessageEnvelope.fromBuffer(envBytes);
-            // Phase 2: prefer senderDeviceNodeId for relay origin (per-device routing)
-            final originId = storedEnv.senderDeviceNodeId.isNotEmpty
-                ? Uint8List.fromList(storedEnv.senderDeviceNodeId)
-                : (storedEnv.senderId.isNotEmpty
-                    ? Uint8List.fromList(storedEnv.senderId)
-                    : primaryIdentity.deviceNodeId);
-            final relay = proto.RelayForward()
-              ..relayId = SodiumFFI().randomBytes(16)
-              ..finalRecipientId = senderId
-              ..wrappedEnvelope = envBytes
-              ..hopCount = 1
-              ..maxHops = 3
-              ..ttl = 63
-              ..originNodeId = originId
-              ..createdAtMs = Int64(DateTime.now().millisecondsSinceEpoch);
-            relay.visitedNodes.add(primaryIdentity.deviceNodeId);
-            final relayEnv = primaryIdentity.createSignedEnvelope(
-              proto.MessageType.RELAY_FORWARD,
-              relay.writeToBuffer(),
-            );
-            transport.sendUdp(relayEnv, from, fromPort);
-          } catch (_) {}
-        }
-        if (toPush.isNotEmpty) {
-          _log.info('S&F push: sent ${toPush.length} stored messages (RELAY_FORWARD) to ${senderUserHex.substring(0, 8)} at ${from.address}:$fromPort');
-        }
-      }
-
-      final isDhtDirect = type == proto.MessageType.DHT_PING ||
-          type == proto.MessageType.DHT_PONG ||
-          type == proto.MessageType.DHT_FIND_NODE ||
-          type == proto.MessageType.DHT_FIND_NODE_RESPONSE;
-      // Phase 2: _touchPeer uses routingId (deviceNodeId) so the routing table
-      // entry is per-device, with userId attached for identity lookups.
-      _touchPeer(routingId, from.address, fromPort,
-          isAuthoritative: isDhtDirect, userId: senderUserId);
+    } else {
+      // No PK on file → lenient pass (bootstrap, §2.4.0).
+      outerStatus = OuterSigStatus.skippedBootstrap;
     }
 
-    // Handle DHT protocol messages internally
-    switch (type) {
-      case proto.MessageType.DHT_PING:
-        _handlePing(envelope, from, fromPort);
+    // §2.4.0 — build the snapshot once, thread it through both inner-frame
+    // hooks. `senderUserId` is empty here; inner handlers fill it in after
+    // parsing ApplicationFrame.senderUserId / the wrapped CR payload.
+    final snapshot = SenderIdentitySnapshot(
+      senderDeviceId: senderDeviceId,
+      senderUserId: Uint8List(0),
+      outerSigStatus: outerStatus,
+      verifiedDeviceEd25519Pk: outerStatus == OuterSigStatus.verified ? edPk : null,
+      verifiedDeviceMlDsaPk: outerStatus == OuterSigStatus.verified
+          ? senderPeer?.deviceMlDsaPublicKey
+          : null,
+      newKeyDetectedForSenderUser: false,
+      receivedAt: DateTime.now(),
+    );
+
+    // [5] PoW-Verify (Architecture §2.4 step 5). Skip for LAN peers — the
+    // sender side mirrors this and omits PoW for same-subnet targets.
+    final isLanPeer = !PeerAddress.isPrivateIp(from.address) ? false :
+        _localIps.any((ip) => _samePrivateNetwork(from.address, ip));
+    if (!isLanPeer && packet.hasPow()) {
+      if (!ProofOfWork.verify(Uint8List.fromList(packet.payload), packet.pow)) {
+        if (senderHex.isNotEmpty) {
+          reputationManager.recordBad(senderHex, 'pow_invalid');
+        }
+        _log.debug('V3 drop: PoW invalid from '
+            '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
         return;
-      case proto.MessageType.DHT_PONG:
-        _handlePong(envelope, from, fromPort);
+      }
+    }
+
+    // DV-Routing: register sender as direct neighbor. Routing keys are
+    // deviceNodeIds in V3 by construction.
+    // Guard: only for direct packets (hopCount==0). Relayed packets carry
+    // the originator's senderDeviceId but arrive from the relay node's IP.
+    // Without this guard, _touchPeer maps the originator to the relay's
+    // address → routing table pollution (B-28).
+    if (senderDeviceId.isNotEmpty && from.address != '0.0.0.0' && packet.hopCount == 0) {
+      final addr = PeerAddress(ip: from.address, port: fromPort);
+      final ct = connectionTypeFromPriority(addr.priority);
+      final isNewNeighbor = dvRouting.addDirectNeighbor(senderDeviceId, ct);
+      _confirmedPeers[senderHex] = DateTime.now();
+
+      // DV-3 bias fix: receiving a direct packet (hopCount=0) proves
+      // bidirectional reachability — same as DELIVERY_RECEIPT. Without
+      // this, infra-only peers (Bootstrap ↔ Node) never get ackConfirmed,
+      // the +10 bias makes indirect routes win, and relay loops form.
+      dvRouting.confirmRoute(senderHex);
+
+      // Cross-subnet fix (2026-05-06): for same-subnet peers, LAN multicast
+      // Discovery → `_onDiscoveryReceived` → `_touchPeer` populates
+      // `routingTable` *before* the first DHT_PING arrives. For cross-subnet
+      // peers (e.g. 192.168.10.x ↔ 192.0.2.x via DNAT), multicast does not
+      // cross the router, so `_touchPeer` never fires and `routingTable`
+      // remains empty for the new neighbor — even though `dvRouting` knows
+      // about it. The result: `_sendV3ViaHop` (line ~1734) and
+      // `_sendWelcomeRouteUpdate` (line ~2845) both look up the peer via
+      // `routingTable.getPeer` and find nothing → "cascade exhausted
+      // (routes=1)" / "Welcome skipped — not in routing table". Mirroring the
+      // discovery-side behaviour here keeps the two tables in sync regardless
+      // of the discovery channel that brought the peer in.
+      _touchPeer(senderDeviceId, from.address, fromPort,
+          isAuthoritative: true);
+
+      _debouncedNetworkStateSave();
+
+      if (isNewNeighbor) {
+        _log.info('DV: New neighbor ${senderHex.substring(0, 8)} from '
+            '${from.address}:$fromPort (${ct.name}) '
+            '— routing table populated via _touchPeer');
+        _lastRouteUpdateSentTo[senderHex] = DateTime.now();
+        Timer(const Duration(milliseconds: 500),
+            () => _sendWelcomeRouteUpdate(senderHex));
+        // §5.11 event-driven mesh push — the periodic 120 s peer-exchange tick
+        // is gone. Tell the existing neighbors about ourselves on each new-
+        // neighbor event so the mesh-state stays fresh without lärmiges
+        // Polling. `isNewNeighbor` fires at most once per peer.
+        _pushSelfToNeighborsExcept(senderDeviceId);
+      } else {
+        _maybeSendCatchUpRouteUpdate(senderHex);
+      }
+
+      // Reset failure counters — direct packet proves reachability.
+      if (senderPeer != null) {
+        if (senderPeer.consecutiveRouteFailures > 0) {
+          senderPeer.consecutiveRouteFailures = 0;
+        }
+        if (senderPeer.consecutiveRelayFailures > 0) {
+          senderPeer.consecutiveRelayFailures = 0;
+        }
+      }
+
+      // Public-IP-Trigger for port mapping.
+      if (!PeerAddress.isPrivateIp(from.address) &&
+          !natTraversal.hasPortMapping &&
+          portMapper.state != PortMapperState.acquiring &&
+          portMapper.state != PortMapperState.mapped) {
+        _log.info('Public-IP peer detected (${from.address}) — starting port mapping');
+        portMapper.start();
+      }
+    }
+
+    // [6] Routing decision: am I the next hop?
+    // Per §3.1 the DeviceID is daemon-global — all hosted identities share
+    // the same deviceNodeId. Equality with primaryIdentity.deviceNodeId is
+    // sufficient; no per-identity hostedDeviceIds set needed.
+    final nextHop = Uint8List.fromList(packet.nextHopDeviceId);
+    final myDeviceId = primaryIdentity.deviceNodeId;
+    final isLocal = _bytesEqual(nextHop, myDeviceId);
+
+    if (!isLocal) {
+      // §3.7.3 Relay loop prevention — originator check: if we originated
+      // this packet and it came back via relay, it has looped. Drop.
+      if (_bytesEqual(senderDeviceId, myDeviceId)) {
+        _log.debug('V3 relay drop: originator loop '
+            '(dest=${bytesToHex(nextHop).substring(0, 8)})');
         return;
-      case proto.MessageType.DHT_FIND_NODE:
-        _handleFindNode(envelope, from, fromPort);
+      }
+      // Forward as relay. Decrement TTL, increment hopCount.
+      if (packet.ttl <= 0) {
+        _log.debug('V3 relay drop: TTL exhausted for '
+            '${bytesToHex(nextHop).substring(0, 8)}');
         return;
-      case proto.MessageType.DHT_FIND_NODE_RESPONSE:
-      case proto.MessageType.DHT_STORE_RESPONSE:
-      case proto.MessageType.DHT_FIND_VALUE_RESPONSE:
-      case proto.MessageType.FRAGMENT_STORE_ACK:
-        dhtRpc.handleResponse(envelope, from.address, fromPort);
+      }
+      // Relay dedup: same packet arriving via multiple paths must only
+      // be forwarded once. Key = sender + timestamp + payload fingerprint.
+      final dedupKey = '${senderHex.substring(0, 8)}:'
+          '${packet.timestampMs}:${packet.payload.length}:'
+          '${packet.payload.length > 16 ? bytesToHex(Uint8List.fromList(packet.payload.sublist(0, 16))) : bytesToHex(Uint8List.fromList(packet.payload))}';
+      if (_relayDedup.isDuplicate(dedupKey)) {
+        _log.debug('V3 relay drop: dedup '
+            '${bytesToHex(nextHop).substring(0, 8)}');
         return;
-      case proto.MessageType.PEER_LIST_SUMMARY:
-        _handlePeerListSummary(envelope, from, fromPort);
+      }
+      // §4.6 (V3.1.72): relay-forward gates on REACHABILITY, not
+      // direct-confirmed. A relay node almost never has direct-confirmed
+      // status for a final destination it only forwards to (esp. CGNAT
+      // targets — that is exactly why relay exists). Drop only if we have
+      // no alive route (direct or onward-relay) to forward along.
+      final nextHopHex = bytesToHex(nextHop);
+      if (!dvRouting.hasAliveRouteTo(nextHopHex)) {
+        _log.debug('V3 relay drop: dest ${nextHopHex.substring(0, 8)} no alive route');
         return;
-      case proto.MessageType.PEER_LIST_WANT:
-        _handlePeerListWant(envelope, from, fromPort);
+      }
+      // §3.7.3 Reverse-path loop prevention: resolve who sent this packet
+      // to us (by IP) and exclude them as next-hop candidate so we don't
+      // bounce the packet right back.
+      final relaySenderHex = _resolveDeviceHexFromAddress(from.address);
+      _log.info('V3 relay forward: ${packet.payloadType.name} '
+          '${packet.payload.length}B ttl=${packet.ttl} '
+          'from ${senderHex.substring(0, 8)} → ${nextHopHex.substring(0, 8)}'
+          '${relaySenderHex != null ? " (excl ${relaySenderHex.substring(0, 8)})" : ""}');
+      packet.ttl = packet.ttl - 1;
+      packet.hopCount = packet.hopCount + 1;
+      // Fire-and-forget relay forward — exclude the relay sender from
+      // route candidates to prevent 2-node bounce loops.
+      sendToDevice(packet, nextHop,
+              excludeNextHopHex: relaySenderHex, isRelay: true)
+          .then((ok) {
+        if (!ok) {
+          _log.warn('V3 relay send FAILED to ${nextHopHex.substring(0, 8)} '
+              '(routes=${dvRouting.routesTo(nextHopHex).length})');
+        }
+      });
+      return;
+    }
+
+    // [7] Local delivery — see [_deliverLocalV3Packet]. Factored out so the
+    // §5.4 erasure-coded reassembly path can re-use the local-delivery branch
+    // without going through routing/timestamp/HMAC again.
+    if (packet.payloadType == proto.PayloadTypeV3.PAYLOAD_INFRASTRUCTURE_FRAME) {
+      _log.info('V3 local deliver: INFRA ${packet.payload.length}B '
+          'from ${senderHex.isEmpty ? "?" : senderHex.substring(0, 8)}');
+    }
+    _deliverLocalV3Packet(packet, from, fromPort, snapshot);
+  }
+
+  /// Local-delivery branch of the V3 receive pipeline (Architecture §2.4
+  /// receiver step 7+). Called from [_onPacketV3Received] after the routing
+  /// decision concluded "next-hop is me", and from [dispatchReassembledPacket]
+  /// after Reed-Solomon reassembly forces local delivery (§5.4).
+  void _deliverLocalV3Packet(
+    proto.NetworkPacketV3 packet,
+    InternetAddress from,
+    int fromPort,
+    SenderIdentitySnapshot snapshot,
+  ) {
+    if (packet.payloadType ==
+        proto.PayloadTypeV3.PAYLOAD_INFRASTRUCTURE_FRAME) {
+      // Receiver pipeline (§2.4.1 [8'-14']) — inline KEM-decap with the
+      // daemon-global Device-KEM private keys, validate selector + recipient,
+      // then dispatch the typed InfrastructureFrameV3 to the consumer hook.
+      // V3FrameCodec absorbs every drop case (parse / KEM / selector /
+      // recipient mismatch) and returns a typed result.
+      // Per §3.1 the DeviceID is daemon-global — recipient check is plain
+      // equality with myDeviceId; the Welle-5 isLocalDeviceId callback is
+      // obsolete (one deviceId per daemon, regardless of hosted identities).
+      final result = V3FrameCodec.decryptAndVerifyInfrastructure(
+        innerPayload: Uint8List.fromList(packet.payload),
+        ourDeviceKemX25519Sk: _deviceKeys.kem.x25519PrivateKey,
+        ourDeviceKemMlKemSk: _deviceKeys.kem.mlKemPrivateKey,
+        myDeviceId: primaryIdentity.deviceNodeId,
+      );
+      final frame = result.frame;
+      if (frame == null) {
+        _log.debug(
+            'V3 INFRA drop: ${result.error?.name ?? "unknown"} '
+            '(sender=${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)})');
         return;
-      case proto.MessageType.PEER_LIST_PUSH:
-        _handlePeerListPush(envelope, from, fromPort);
+      }
+      final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+      // Node-local infrastructure dispatch — types whose handlers live in the
+      // node layer (identityDhtHandler, etc.) are processed inline; everything
+      // else falls through to the consumer hook so the service / future
+      // node-local handlers can pick it up.
+      if (_dispatchInfrastructureFrameLocal(
+          frame, senderDeviceId, from, fromPort)) {
         return;
-      case proto.MessageType.RELAY_FORWARD:
-        _handleRelayForward(envelope, from, fromPort);
+      }
+      final hook = onInfrastructureFramePayload;
+      if (hook == null) {
+        _log.debug(
+            'V3 INFRA drop: no onInfrastructureFramePayload hook wired '
+            '(messageType=${frame.messageType.name})');
         return;
-      case proto.MessageType.RELAY_ACK:
-        _handleRelayAck(envelope);
+      }
+      hook(frame, senderDeviceId, from, fromPort, snapshot);
+      return;
+    }
+
+    if (packet.payloadType ==
+        proto.PayloadTypeV3.PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME) {
+      // BOOT-path receiver: outer.payload is a serialized
+      // InfrastructureFrameV3 *plaintext* (no KEM, no zstd). Closed-Network
+      // HMAC + Outer Device-Sig were already validated at the caller; here
+      // we parse the inner directly, enforce the strict BOOT-subset
+      // selector (drops cross-layer abuse attempts that try to skip the
+      // KEM wrapper for non-bootstrap types), and dispatch via the same
+      // hooks as the KEM path. PUBLISH-RPCs (IDENTITY_AUTH/LIVE/KEM_PUBLISH)
+      // re-verify the inner-record signature in their existing handler —
+      // unchanged from the KEM path, since the inner record is identical.
+      // Per §3.1 the DeviceID is daemon-global — recipient check is plain
+      // equality (no isLocalDeviceId callback needed).
+      final result = V3FrameCodec.decryptAndVerifyBootstrapInfrastructure(
+        innerPayload: Uint8List.fromList(packet.payload),
+        myDeviceId: primaryIdentity.deviceNodeId,
+      );
+      final frame = result.frame;
+      if (frame == null) {
+        _log.debug(
+            'V3 BOOT drop: ${result.error?.name ?? "unknown"} '
+            '(sender=${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)})');
         return;
-      case proto.MessageType.REACHABILITY_QUERY:
-        _handleReachabilityQuery(envelope, from, fromPort);
+      }
+      _log.info(
+          'V3 BOOT recv: ${frame.messageType.name} '
+          'from ${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)}');
+      final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+      if (_dispatchInfrastructureFrameLocal(
+          frame, senderDeviceId, from, fromPort)) {
         return;
-      case proto.MessageType.REACHABILITY_RESPONSE:
-        reachabilityProbe.handleResponse(envelope);
+      }
+      final hook = onInfrastructureFramePayload;
+      if (hook == null) {
+        _log.debug(
+            'V3 BOOT drop: no onInfrastructureFramePayload hook wired '
+            '(messageType=${frame.messageType.name})');
         return;
-      case proto.MessageType.PEER_STORE:
-        _handlePeerStore(envelope, from, fromPort);
+      }
+      hook(frame, senderDeviceId, from, fromPort, snapshot);
+      return;
+    }
+
+    if (packet.payloadType != proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME) {
+      _log.warn('V3 drop: unsupported payloadType ${packet.payloadType}');
+      return;
+    }
+
+    onApplicationFramePayload?.call(packet, from, fromPort, snapshot);
+  }
+
+  /// V3 reassembly entrypoint (Architecture §5.4 — Reed-Solomon offline
+  /// delivery). Re-injects a complete `NetworkPacketV3` reconstructed from
+  /// DHT-stored fragments into the local-delivery branch of the receive
+  /// pipeline. Two principled deviations from the UDP path:
+  /// (a) the timestamp window check is bypassed — fragments live up to
+  ///     7 days in the DHT (§5.4 Lifetime), 60 s replay would drop every
+  ///     reassembled packet;
+  /// (b) the routing decision is forced local — by definition the
+  ///     mailbox-ID pointed to *this* user, so the packet is for us; the
+  ///     `nextHopDeviceId` of the canonical erasure-source may target a
+  ///     sibling device of the same user (multi-device case), where naive
+  ///     routing would attempt a relay forward.
+  ///
+  /// HMAC, Outer-Device-Sig, KEM-decap and Inner-Sig-verify run identically
+  /// to the UDP path — the encoded blob is auth-bound by the original
+  /// sender's keys, not by the DHT-replicator that delivered it. Drops
+  /// (HMAC mismatch, parse fail, sig invalid) are silent + logged at debug.
+  void dispatchReassembledPacket(Uint8List packetBytes) {
+    final packet = transport.parseAndVerifyNetworkPacketV3(packetBytes);
+    if (packet == null) {
+      _log.debug('V3 reassembled drop: HMAC/parse invalid');
+      return;
+    }
+
+    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
+    final senderHex = senderDeviceId.isNotEmpty ? bytesToHex(senderDeviceId) : '';
+
+    // Outer-Device-Sig-Verify (§2.4 step 4). Mandatory for reassembled
+    // packets — fragments could be injected into the DHT by an adversary
+    // without HMAC compromise (HMAC alone proves network membership, not
+    // sender authenticity). Lenient bootstrap (no PK yet) = same as UDP
+    // path: accept and let the next first-party exchange teach us the PK.
+    final senderPeer = senderDeviceId.isNotEmpty
+        ? routingTable.getPeer(senderDeviceId)
+        : null;
+    // Welle 3 (§17.3): use Device-Sig PK, not User-Sig PK.
+    final edPk = senderPeer?.deviceEd25519PublicKey;
+    OuterSigStatus outerStatus;
+    if (edPk != null) {
+      final ok = V3FrameCodec.verifyOuterDeviceSig(
+        packet: packet,
+        senderDeviceEd25519Pk: edPk,
+        senderDeviceMlDsaPk: senderPeer?.deviceMlDsaPublicKey,
+      );
+      if (!ok) {
+        if (senderHex.isNotEmpty) {
+          reputationManager.recordBad(senderHex, 'reassembled_device_sig_invalid');
+        }
+        _log.debug('V3 reassembled drop: device-sig invalid from '
+            '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
         return;
-      case proto.MessageType.PEER_STORE_ACK:
-        _log.debug('PEER_STORE_ACK received from ${from.address}');
-        return;
-      case proto.MessageType.PEER_RETRIEVE:
-        _handlePeerRetrieve(envelope, from, fromPort);
-        return;
-      case proto.MessageType.PEER_RETRIEVE_RESPONSE:
-        _handlePeerRetrieveResponse(envelope);
-        return;
-      // 2D-DHT Identity Resolution (§2.2.4) — Replicator-Side dispatch.
-      // *_RESPONSE-Cases werden vom DhtRpc-Layer als Response abgegriffen.
-      case proto.MessageType.IDENTITY_AUTH_PUBLISH:
-        _handleIdentityAuthPublish(envelope, from, fromPort);
-        return;
-      case proto.MessageType.IDENTITY_AUTH_RETRIEVE:
-        _handleIdentityAuthRetrieve(envelope, from, fromPort);
-        return;
-      case proto.MessageType.IDENTITY_LIVE_PUBLISH:
-        _handleIdentityLivePublish(envelope, from, fromPort);
-        return;
-      case proto.MessageType.IDENTITY_LIVE_RETRIEVE:
-        _handleIdentityLiveRetrieve(envelope, from, fromPort);
-        return;
-      case proto.MessageType.ROUTE_UPDATE:
-        _handleRouteUpdate(envelope);
-        return;
-      case proto.MessageType.HOLE_PUNCH_REQUEST:
-        natTraversal.handleHolePunchRequest(envelope);
-        return;
-      case proto.MessageType.HOLE_PUNCH_NOTIFY:
-        natTraversal.handleHolePunchNotify(envelope);
-        return;
-      case proto.MessageType.HOLE_PUNCH_PING:
-        natTraversal.handleHolePunchPing(envelope, from, fromPort);
-        return;
-      case proto.MessageType.HOLE_PUNCH_PONG:
-        natTraversal.handleHolePunchPong(envelope, from, fromPort);
-        return;
-      case proto.MessageType.MEDIA_CHUNK:
-        _handleMediaChunk(envelope, from, fromPort);
-        return;
+      }
+      outerStatus = OuterSigStatus.verified;
+    } else {
+      outerStatus = OuterSigStatus.skippedBootstrap;
+    }
+
+    final snapshot = SenderIdentitySnapshot(
+      senderDeviceId: senderDeviceId,
+      senderUserId: Uint8List(0),
+      outerSigStatus: outerStatus,
+      verifiedDeviceEd25519Pk:
+          outerStatus == OuterSigStatus.verified ? edPk : null,
+      verifiedDeviceMlDsaPk: outerStatus == OuterSigStatus.verified
+          ? senderPeer?.deviceMlDsaPublicKey
+          : null,
+      newKeyDetectedForSenderUser: false,
+      receivedAt: DateTime.now(),
+    );
+
+    // Force local delivery — `from = loopback` because there is no real
+    // network source for a reassembled packet; downstream code that uses
+    // `from` for DV-neighbor registration is bypassed by skipping the
+    // routing-decision branch entirely (we jump straight to local delivery).
+    _deliverLocalV3Packet(
+      packet,
+      InternetAddress.loopbackIPv4,
+      0,
+      snapshot,
+    );
+  }
+
+  /// Welle 5 (§4.3): Node-local dispatch for infrastructure frames whose
+  /// handler is owned by a node-level subsystem ([identityDhtHandler] for
+  /// the 2D-DHT identity-resolution records — `AuthManifest`,
+  /// `LivenessRecord`, `DeviceKemRecord`). Returns `true` when the frame was
+  /// consumed; `false` lets the caller fall through to the
+  /// `onInfrastructureFramePayload` hook for service-side / not-yet-migrated
+  /// types.
+  ///
+  /// Sig-Verification policy at the replicator boundary:
+  ///
+  /// * **AuthManifest / LivenessRecord** are signed against pubkeys we do
+  ///   NOT generally have at replicator-time (the user's Master-Ed25519/
+  ///   ML-DSA-65 for AuthManifest, the device-sig pubkey for LivenessRecord).
+  ///   The handler explicitly delegates verification to the read-side
+  ///   resolver (§4.3.4) which cross-checks via Contact-Registry /
+  ///   AuthManifest chain. At this layer we trust the wire HMAC + Outer-
+  ///   Device-Sig (§3.5) and forward the record into replication storage
+  ///   so it survives until somebody asks for it.
+  /// * **DeviceKemRecord** embeds its own `userEd25519Pk`, enabling a
+  ///   self-consistency check (catches sig-corruption and parser-mismatches
+  ///   on the wire boundary). Impersonation defence is the resolver's job
+  ///   on read — same trust model as AUTH/LIVE.
+  bool _dispatchInfrastructureFrameLocal(
+      proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId,
+      InternetAddress from,
+      int fromPort) {
+    // §5.10.4 — any infrastructure frame from this device proves it's alive,
+    // so the unACK'd-packets counter for it can come down. Especially for
+    // DHT_PONG (Stage-2 reply) and PEER_LIST_PUSH (Stage-4 reply) where the
+    // reply is the *signal* the cascade was waiting for. Cheap O(1) and
+    // works for every messageType — fewer special cases.
+    if (senderDeviceId.isNotEmpty) {
+      final senderHexLocal = bytesToHex(senderDeviceId);
+      _decrementUnackedPacketsToPeer(senderHexLocal);
+      // Also clear under userId in case the counter was incremented under it.
+      final senderPeerLocal = routingTable.getPeer(senderDeviceId);
+      if (senderPeerLocal?.userId != null) {
+        _decrementUnackedPacketsToPeer(bytesToHex(senderPeerLocal!.userId!));
+      }
+    }
+    switch (frame.messageType) {
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:
+        try {
+          final p = proto.AuthManifestProto.fromBuffer(frame.payload);
+          identityDhtHandler.handleAuthPublish(AuthManifest.fromProto(p));
+        } catch (e) {
+          _log.debug('AUTH_PUBLISH drop: parse error: $e');
+        }
+        return true;
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH:
+        try {
+          final p = proto.LivenessRecordProto.fromBuffer(frame.payload);
+          final live = LivenessRecord.fromProto(p);
+          identityDhtHandler.handleLivePublish(live);
+          // Welle 5 §4.3 (multi-identity routability): also seed the
+          // routing-table with the announced device — Liveness carries
+          // userId + deviceId + concrete addresses, which is exactly the
+          // tuple `sendToDevice` / DV-routing needs to compute a path. In
+          // a multi-identity-on-one-daemon setup (Bob + Charly on the same
+          // physical node) the secondary identity never bonds via the V3
+          // BOOT-cascade on its own (the daemon already V3-bonded with
+          // its primary identity), so without this hop a sender that has
+          // resolved the secondary identity's KEM record via 2D-DHT still
+          // fails the actual `sendToDevice` because routes are absent.
+          //
+          // The PeerInfo carries the LivenessRecord's addresses; the
+          // routing table will deduplicate against any existing entry for
+          // the same deviceNodeId. We deliberately do NOT touch
+          // confirmedPeer state here — that requires a wire round-trip,
+          // and these addresses are still hearsay until the BOOT-cascade
+          // verifies them.
+          if (live.addresses.isNotEmpty) {
+            final addrs = <PeerAddress>[];
+            for (final pa in live.addresses) {
+              final a = PeerAddress.fromProto(pa);
+              if (a != null) addrs.add(a);
+            }
+            if (addrs.isNotEmpty) {
+              final peer = PeerInfo(
+                nodeId: live.deviceNodeId,
+                userId: live.userId,
+                addresses: addrs,
+                lastSeen: DateTime.fromMillisecondsSinceEpoch(live.publishedAtMs),
+              );
+              routingTable.addPeer(peer);
+              // K-3: Do NOT call dvRouting.addDirectNeighbor() here.
+              // A Liveness Record from the DHT is hearsay — we never
+              // exchanged a direct packet with this device.  Only
+              // _touchPeer() (called from _onPacketV3Received when
+              // hopCount == 0) should promote a peer to DV direct
+              // neighbor.  The routingTable.addPeer() above is correct:
+              // it populates the address cache for future sendToDevice
+              // lookups so a direct PING can be attempted.
+            }
+          }
+        } catch (e) {
+          _log.debug('LIVE_PUBLISH drop: parse error: $e');
+        }
+        return true;
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_PUBLISH:
+        try {
+          final p = proto.DeviceKemRecordV3.fromBuffer(frame.payload);
+          final r = DeviceKemRecord.fromProto(p);
+          if (!r.verify(r.userEd25519Pk)) {
+            _log.debug('KEM_PUBLISH drop: in-place sig verify failed '
+                '(user=${bytesToHex(r.userId).substring(0, 8)} '
+                'device=${bytesToHex(r.deviceId).substring(0, 8)})');
+            return true;
+          }
+          identityDhtHandler.handleKemPublish(r);
+        } catch (e) {
+          _log.debug('KEM_PUBLISH drop: parse/verify error: $e');
+        }
+        return true;
+
+      // ── 2D-DHT RETRIEVE: lookup-and-respond ──────────────────────────
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE:
+        try {
+          final req = proto.IdentityAuthRetrieveRequest.fromBuffer(frame.payload);
+          final m = identityDhtHandler.getAuthManifest(Uint8List.fromList(req.userId));
+          if (m == null) return true; // silent — sender's RPC will time out
+          _sendInfra(
+            messageType: proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE,
+            innerPayload: Uint8List.fromList(m.toProto().writeToBuffer()),
+            recipientDeviceId: senderDeviceId,
+          );
+        } catch (e) {
+          _log.debug('AUTH_RETRIEVE drop: parse/lookup error: $e');
+        }
+        return true;
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE:
+        try {
+          final req = proto.IdentityLiveRetrieveRequest.fromBuffer(frame.payload);
+          final r = identityDhtHandler.getLiveness(
+              Uint8List.fromList(req.userId),
+              Uint8List.fromList(req.deviceNodeId));
+          if (r == null) return true;
+          _sendInfra(
+            messageType: proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE,
+            innerPayload: Uint8List.fromList(r.toProto().writeToBuffer()),
+            recipientDeviceId: senderDeviceId,
+          );
+        } catch (e) {
+          _log.debug('LIVE_RETRIEVE drop: parse/lookup error: $e');
+        }
+        return true;
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RETRIEVE:
+        try {
+          final req = proto.IdentityKemRetrieveRequest.fromBuffer(frame.payload);
+          final r = identityDhtHandler.getKemRecord(
+              Uint8List.fromList(req.userId),
+              Uint8List.fromList(req.deviceId));
+          if (r == null) return true;
+          _sendInfra(
+            messageType: proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE,
+            innerPayload: Uint8List.fromList(r.toProto().writeToBuffer()),
+            recipientDeviceId: senderDeviceId,
+          );
+        } catch (e) {
+          _log.debug('KEM_RETRIEVE drop: parse/lookup error: $e');
+        }
+        return true;
+
+      // ── 2D-DHT RESPONSE: forward to DhtRpc V3-direct matcher ─────────
+      // DhtRpc.handleResponse takes the V3 type + payload + senderDeviceId
+      // + remote (addr, port). The IdentityResolver-side awaiter receives a
+      // `(type, payload)` tuple it decodes with the typed proto's
+      // `fromBuffer`.
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_PONG:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_STORE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort);
+        return true;
+
+      // ── DHT request side (DHT_PING / DHT_FIND_NODE) ──────────────────
+      // Wave 2B.3: ported from the dead-code V2-bridge stubs in
+      // cleona_service.dart (`_handleDhtPingV3`, `_handleDhtFindNodeV3`)
+      // which were unreachable — these messageTypes route as
+      // InfrastructureFrames per §2.3.5 selector. Reply via _sendInfra.
+      case proto.MessageTypeV3.MTV3_DHT_PING:
+        _handleDhtPingInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_DHT_FIND_NODE:
+        _handleDhtFindNodeInfra(frame, senderDeviceId);
+        return true;
+
+      // ── Peer-list gossip (PEER_LIST_PUSH/SUMMARY/WANT) ───────────────
+      // Wave 2B.3: ported from cleona_service.dart V2-bridge stubs.
+      // PUSH = absorb the pushed PeerInfos into the routing table.
+      // SUMMARY = gossip-anti-entropy: pull missing peers, push wanted ones.
+      // WANT = answer with PEER_LIST_PUSH for each requested peer we know.
+      case proto.MessageTypeV3.MTV3_PEER_LIST_PUSH:
+        _handlePeerListPushInfra(frame, senderDeviceId, from);
+        return true;
+      case proto.MessageTypeV3.MTV3_PEER_LIST_SUMMARY:
+        _handlePeerListSummaryInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_PEER_LIST_WANT:
+        _handlePeerListWantInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_PEER_KEY_REQUEST:
+        _handlePeerKeyRequestInfra(senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_PEER_KEY_RESPONSE:
+        _handlePeerKeyResponseInfra(frame, senderDeviceId);
+        return true;
+
+      // ── Distance-Vector routing (ROUTE_UPDATE) ───────────────────────
+      // Wave 2B.3: ported from cleona_service.dart V2-bridge stub.
+      // V3 simplifies vs V2 — `senderDeviceId` is already the routing key,
+      // no need for the V2 `_routingIdFromEnvelope` extraction.
+      case proto.MessageTypeV3.MTV3_ROUTE_UPDATE:
+        _handleRouteUpdateInfra(frame, senderDeviceId);
+        return true;
+
+      // ── Reachability probe (relay route discovery + port probe) ──────
+      // Wave 2B.3: ported from cleona_service.dart V2-bridge stubs.
+      // QUERY = answer whether we can reach `targetNodeId` (or send a
+      // CPRB port probe if `probeIp/Port` is set, V3.1.33 path).
+      // RESPONSE = forward to ReachabilityProbe matcher (not on dhtRpc —
+      // ReachabilityProbe owns its own pending-query table).
+      case proto.MessageTypeV3.MTV3_REACHABILITY_QUERY:
+        _handleReachabilityQueryInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_REACHABILITY_RESPONSE:
+        reachabilityProbe.handleResponse(
+            Uint8List.fromList(frame.payload), senderDeviceId);
+        return true;
+
+      // ── NAT hole-punch (REQUEST/NOTIFY/PING/PONG) ────────────────────
+      // Wave 2B.3: NatTraversal already has clean V3 handler methods
+      // taking parsed proto bodies. Parse here, then dispatch.
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_REQUEST:
+        _handleHolePunchRequestInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_NOTIFY:
+        _handleHolePunchNotifyInfra(frame, senderDeviceId);
+        return true;
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING:
+        _handleHolePunchPingInfra(frame, from, fromPort);
+        return true;
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PONG:
+        _handleHolePunchPongInfra(frame, senderDeviceId, from, fromPort);
+        return true;
+
       default:
-        break;
+        return false;
     }
+  }
 
-    // Verify Proof of Work on application messages (mandatory for chat messages)
-    // Infrastructure, group/channel management, and LAN peers are exempt —
-    // authenticated via per-message KEM + Ed25519 signature.
-    final powExempt = type == proto.MessageType.FRAGMENT_STORE ||
-        type == proto.MessageType.FRAGMENT_RETRIEVE ||
-        type == proto.MessageType.FRAGMENT_DELETE ||
-        type == proto.MessageType.CONTACT_REQUEST ||
-        type == proto.MessageType.CONTACT_REQUEST_RESPONSE ||
-        type == proto.MessageType.TYPING_INDICATOR ||
-        type == proto.MessageType.READ_RECEIPT ||
-        type == proto.MessageType.DELIVERY_RECEIPT ||
-        type == proto.MessageType.GROUP_INVITE ||
-        type == proto.MessageType.GROUP_LEAVE ||
-        type == proto.MessageType.CHANNEL_INVITE ||
-        type == proto.MessageType.CHANNEL_LEAVE ||
-        type == proto.MessageType.CHANNEL_ROLE_UPDATE ||
-        type == proto.MessageType.CHAT_CONFIG_UPDATE ||
-        type == proto.MessageType.KEY_ROTATION_BROADCAST ||
-        type == proto.MessageType.PROFILE_UPDATE ||
-        type == proto.MessageType.RESTORE_BROADCAST ||
-        type == proto.MessageType.CHANNEL_JOIN_REQUEST ||
-        type == proto.MessageType.CHANNEL_INDEX_EXCHANGE ||
-        type == proto.MessageType.CHANNEL_REPORT ||
-        type == proto.MessageType.JURY_REQUEST ||
-        type == proto.MessageType.JURY_VOTE_MSG ||
-        type == proto.MessageType.JURY_RESULT ||
-        type == proto.MessageType.RELAY_FORWARD ||
-        type == proto.MessageType.RELAY_ACK ||
-        type == proto.MessageType.REACHABILITY_QUERY ||
-        type == proto.MessageType.REACHABILITY_RESPONSE ||
-        type == proto.MessageType.PEER_STORE ||
-        type == proto.MessageType.PEER_STORE_ACK ||
-        type == proto.MessageType.PEER_RETRIEVE ||
-        type == proto.MessageType.PEER_RETRIEVE_RESPONSE ||
-        type == proto.MessageType.ROUTE_UPDATE ||
-        type == proto.MessageType.HOLE_PUNCH_REQUEST ||
-        type == proto.MessageType.HOLE_PUNCH_NOTIFY ||
-        type == proto.MessageType.HOLE_PUNCH_PING ||
-        type == proto.MessageType.HOLE_PUNCH_PONG ||
-        type == proto.MessageType.MEDIA_CHUNK || // Relay chunking transport
-        type == proto.MessageType.CALL_AUDIO || // Real-time audio frames
-        type == proto.MessageType.CALL_VIDEO || // Real-time video frames
-        type == proto.MessageType.CALL_KEYFRAME_REQUEST || // Video keyframe request
-        type == proto.MessageType.CALL_GROUP_AUDIO || // Real-time group audio
-        type == proto.MessageType.CALL_GROUP_VIDEO || // Real-time group video
-        type == proto.MessageType.CALL_GROUP_LEAVE ||
-        type == proto.MessageType.CALL_GROUP_KEY_ROTATE ||
-        type == proto.MessageType.CALL_RTT_PING ||
-        type == proto.MessageType.CALL_RTT_PONG ||
-        type == proto.MessageType.CALL_TREE_UPDATE ||
-        type == proto.MessageType.CALL_REJOIN ||
-        _isPrivateIp(from.address) || // LAN peers exempt
-        from.address == '0.0.0.0'; // Relay-delivered (already validated by RelayBudget)
-    if (!powExempt) {
-      final powSenderHex = envelope.senderId.isNotEmpty
-          ? bytesToHex(Uint8List.fromList(envelope.senderId))
-          : '';
-      if (!envelope.hasPow() || envelope.pow.difficulty < ProofOfWork.minAcceptedDifficulty) {
-        _log.info('Rejected message without valid PoW from ${from.address}:$fromPort (type: $type)');
-        if (powSenderHex.isNotEmpty) {
-          reputationManager.recordBad(powSenderHex, 'missing_or_insufficient_pow');
-        }
-        return;
-      }
-      final stripped = envelope.clone()..clearPow();
-      final signedData = stripped.writeToBuffer();
-      if (!ProofOfWork.verify(signedData, envelope.pow)) {
-        _log.info('PoW verification failed from ${from.address}:$fromPort');
-        if (powSenderHex.isNotEmpty) {
-          reputationManager.recordBad(powSenderHex, 'invalid_pow');
-        }
-        return;
-      }
-    }
+  // ── Wave 2B.3 receive-side handlers (Architecture v3.0 §2.3.5) ──────
+  // Ported from dead V2-bridge stubs in cleona_service.dart. All operate
+  // on node-local state only (routingTable, dvRouting, reachabilityProbe,
+  // natTraversal, peerManager) — no service-state access.
 
-    // Message-level dedup: skip if we've already processed this messageId.
-    // Infrastructure messages (DHT, RELAY, etc.) are handled above and never reach here.
-    final msgIdHex = envelope.messageId.isNotEmpty
-        ? bytesToHex(Uint8List.fromList(envelope.messageId))
-        : '';
-    if (msgIdHex.isNotEmpty) {
-      if (_seenMessageIds.contains(msgIdHex)) {
-        _log.debug('Dedup: skipping duplicate messageId ${msgIdHex.substring(0, 8)} type=$type');
-        return;
-      }
-      _seenMessageIds.add(msgIdHex);
-      if (_seenMessageIds.length > _maxSeenMessages) {
-        _seenMessageIds.remove(_seenMessageIds.first);
-      }
-    }
-    _log.info('→ Service: type=$type msgId=${msgIdHex.isNotEmpty ? msgIdHex.substring(0, 8) : "empty"} from=${from.address}');
+  void _handleDhtPingInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      // V2-equivalent: just respond with DHT_PONG. The V3 receive pipeline
+      // (`_onPacketV3Received` lines 802-836) already registers the sender
+      // as a DV neighbor + records UdpKeepalive observation, so a PING
+      // implicitly bumps liveness without the V2 `_handlePing` body needing
+      // to do it manually.
+      final pong = proto.DhtPong()
+        ..senderId = primaryIdentity.deviceNodeId
+        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch);
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_DHT_PONG,
+        innerPayload: pong.writeToBuffer(),
+        recipientDeviceId: senderDeviceId,
+      );
 
-    // Route to the correct identity based on recipientId
-    IdentityContext? targetIdentity;
-    if (envelope.recipientId.isNotEmpty) {
-      final recipientHex = bytesToHex(Uint8List.fromList(envelope.recipientId));
-      // Phase 2: try userId first, then deviceNodeId fallback
-      targetIdentity = _identities[recipientHex] ??
-          _identitiesByDeviceId[recipientHex];
-    }
-
-    // RUDP Light: intercept DELIVERY_RECEIPT as ACK at node level.
-    // Still forwarded to service layer for UI status update.
-    if (type == proto.MessageType.DELIVERY_RECEIPT) {
+      // §5.12 hot-path — if the ping is a Stale-PK recovery probe (§5.10.2),
+      // also send back an unsolicited firstParty PEER_LIST_PUSH with our
+      // current PeerInfo. This heals the prober's stale-PK cache in 1 RTT
+      // instead of waiting for the cold-path DV-safety-net.
       try {
-        final receipt = proto.DeliveryReceipt.fromBuffer(envelope.encryptedPayload);
-        final msgIdHex = bytesToHex(Uint8List.fromList(receipt.messageId));
-        // Phase 2: ackTracker keys must match _trackAck (which uses peer.nodeIdHex = deviceNodeId)
-        final ackRoutingId = _routingIdFromEnvelope(envelope);
-        final ackRoutingHex = bytesToHex(ackRoutingId);
-        ackTracker.handleAck(msgIdHex, ackRoutingHex);
-        // Remove from send queue if present (message delivered)
-        messageQueue.remove(msgIdHex);
-        // Confirm DV route — only for DIRECT-delivered receipts.
-        // Relay-delivered (from=0.0.0.0) proves end-to-end reachability but NOT
-        // that the direct UDP path works. Confirming relay-delivered receipts
-        // causes sendEnvelope to skip the relay cascade (directProven=true),
-        // sending to a stale NAT address that drops packets silently.
-        if (from.address != '0.0.0.0') {
-          dvRouting.confirmRoute(ackRoutingHex);
+        final ping = proto.DhtPing.fromBuffer(frame.payload);
+        if (ping.pkRecoveryHint) {
+          _log.info('§5.12 hot-path: pk_recovery_hint received → answering '
+              'with self-broadcast PEER_LIST_PUSH');
+          _pushSelfToPeer(senderDeviceId);
         }
-        // Confirm relay neighbor: we received an ACK,
-        // so the direct sender is a reliable relay partner.
-        if (from.address != '0.0.0.0' && !_isLocalIdentity(ackRoutingHex)) {
-          dvRouting.confirmRelayNeighbor(ackRoutingHex);
+      } catch (_) {
+        // Unparseable ping body — ignore the hint (the PONG above is enough).
+      }
+    } catch (e) {
+      _log.debug('DHT_PING handler error: $e');
+    }
+  }
+
+  void _handleDhtFindNodeInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final find = proto.DhtFindNode.fromBuffer(frame.payload);
+      final targetId = Uint8List.fromList(find.targetId);
+      final closest = routingTable.findClosestPeers(targetId, count: kBucketSize);
+      final response = proto.DhtFindNodeResponse();
+      for (final peer in closest) {
+        response.closestPeers.add(peer.toProto(gossipFilter: true));
+      }
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE,
+        innerPayload: response.writeToBuffer(),
+        recipientDeviceId: senderDeviceId,
+      );
+    } catch (e) {
+      _log.debug('DHT_FIND_NODE handler error: $e');
+    }
+  }
+
+  void _handlePeerListPushInfra(proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId, InternetAddress from) {
+    // §5.10.4 — Stage-4 success signal. If we are currently inside the tail
+    // window of a Mesh-Refresh burst, ANY incoming PEER_LIST_PUSH counts as a
+    // refreshed peer-state and lets the post-tail check skip Stage 5
+    // Re-Discovery (which is the heavier hammer). The flag is consumed by the
+    // delayed callback in `_triggerMeshRefresh`.
+    if (_lastStage4BurstAt != null) {
+      final age = DateTime.now().difference(_lastStage4BurstAt!);
+      if (age <= _lastStage4TailWindow) {
+        _stage4ReplySeen = true;
+      }
+    }
+    try {
+      final push = proto.PeerListPush.fromBuffer(frame.payload);
+
+      // §5.10.4 Solicited-Reply-Adoption (Architektur §5.10.4):
+      //
+      // If this PUSH is a direct reply to a recent PEER_LIST_WANT we sent to
+      // this very peer, adopt the sender as a direct neighbor before
+      // `processRouteUpdate` runs. Without this, a freshly-restarted node (no
+      // `dv_routing.json` yet) or a never-seen peer that we just queried
+      // would have no `_neighbors` entry for the sender, and
+      // `dvRouting.processRouteUpdate` (`dv_routing.dart:196-197`) would
+      // silently discard the carried routes — exactly the "asks for All,
+      // gets All back, doesn't write it down" symptom observed in §5.10.4
+      // mesh-refresh logs.
+      //
+      // Trust argument: outer-sig verify + closed-network HMAC ran upstream
+      // in `_onPacketV3Received` and would have rejected a forged reply long
+      // before this handler. Receiving a PUSH within 30 s of our WANT to the
+      // same deviceId is therefore proof of liveness *and* authenticity —
+      // sufficient to flip `_neighbors[sender] = ct`. The existing
+      // `addDirectNeighbor` is idempotent (always sets the map entry; only
+      // returns true when a *better* direct route gets installed) so calling
+      // it a second time after the V3-receive hook already did is cheap and
+      // semantically safe.
+      final senderHex = bytesToHex(senderDeviceId);
+      final wantSentAt = _outstandingPeerListWants[senderHex];
+      final isSolicitedReply = wantSentAt != null &&
+          DateTime.now().difference(wantSentAt) <= _solicitedReplyWindow;
+      if (isSolicitedReply) {
+        _outstandingPeerListWants.remove(senderHex);
+        final addr = PeerAddress(ip: from.address, port: 0);
+        final ct = connectionTypeFromPriority(addr.priority);
+        final adopted = dvRouting.addDirectNeighbor(senderDeviceId, ct);
+        _log.info(
+            '§5.10.4: Solicited PEER_LIST_PUSH from ${senderHex.substring(0, 8)} '
+            '— adopted as direct neighbor (${ct.name}, '
+            '${adopted ? "new direct route" : "already known"})');
+      }
+
+      // Bellman-Ford-Sicht des Senders ist genau dann verwertbar, wenn beide
+      // parallelen Listen vorhanden UND gleich lang wie `peers` sind. Sonst
+      // (alter Sender / Längen-Mismatch) fallen wir auf den Backwards-Compat
+      // "nur-Cache"-Pfad zurück.
+      final hasDvView = push.hopsFromSender.length == push.peers.length &&
+          push.costFromSender.length == push.peers.length;
+      if (!hasDvView &&
+          (push.hopsFromSender.isNotEmpty || push.costFromSender.isNotEmpty)) {
+        _log.warn('PeerListPush: parallel-list length mismatch '
+            '(peers=${push.peers.length}, hops=${push.hopsFromSender.length}, '
+            'cost=${push.costFromSender.length}) — DV update skipped');
+      }
+
+      // Architecture §17.3 PK provenance: a self-broadcast PEER_LIST_PUSH —
+      // where the pushed peerProto.nodeId equals the sender's deviceId — is
+      // authoritative for that peer's signing keys (firstParty). All other
+      // entries are thirdParty hearsay; their PKs populate empty caches but
+      // never overwrite firstParty entries.
+      final dvUpdates = <RouteEntry>[];
+      for (var i = 0; i < push.peers.length; i++) {
+        final peerProto = push.peers[i];
+        final peer = PeerInfo.fromProto(peerProto);
+        if (peer.networkChannel.isNotEmpty &&
+            peer.networkChannel != networkChannel) {
+          continue;
         }
-        // V3.1 Fix: Reset failure counters for sender —
-        // DELIVERY_RECEIPT proves end-to-end reachability (at least via relay).
-        final ackPeer = routingTable.getPeer(ackRoutingId);
-        if (ackPeer != null) {
-          if (ackPeer.consecutiveRouteFailures > 0) {
-            _log.debug('Reset consecutiveRouteFailures for ${ackRoutingHex.substring(0, 8)} '
-                '(DELIVERY_RECEIPT received)');
-            ackPeer.consecutiveRouteFailures = 0;
+        final isSelfBroadcast = peer.nodeId.length == senderDeviceId.length &&
+            bytesToHex(peer.nodeId) == bytesToHex(senderDeviceId);
+        peer.pkSource =
+            isSelfBroadcast ? PkSource.firstParty : PkSource.thirdParty;
+        routingTable.addPeer(peer);
+
+        // Slim-push key-fetch: if PQ keys are missing or fingerprint changed,
+        // send PEER_KEY_REQUEST to the sender (with 60s cooldown per peer).
+        if (isSelfBroadcast) {
+          final existing = routingTable.getPeer(peer.nodeId);
+          final needKeys = existing != null &&
+              (existing.mlKemPublicKey == null ||
+               existing.mlDsaPublicKey == null ||
+               (peer.keyFingerprint != null &&
+                existing.computedKeyFingerprint != null &&
+                bytesToHex(peer.keyFingerprint!) !=
+                    bytesToHex(existing.computedKeyFingerprint!)));
+          if (needKeys) {
+            _sendPeerKeyRequest(senderDeviceId);
           }
-          if (ackPeer.consecutiveRelayFailures > 0) {
-            ackPeer.consecutiveRelayFailures = 0;
+        }
+
+        for (final addr in peer.allConnectionTargets()) {
+          if (addr.ip.isEmpty || addr.port <= 0) continue;
+          if (!_needsKeepalive(addr.ip)) continue;
+          udpKeepalive.register(peer.nodeIdHex, addr.ip, addr.port, peer.nodeId);
+          break;
+        }
+
+        // Bellman-Ford-Update: wir haben die DV-Sicht des Senders bekommen
+        // → schreibe gelernte Route in dvRouting via processRouteUpdate.
+        // Self-Broadcast übersprungen, weil der Sender bereits via
+        // _touchPeer + dvRouting.addDirectNeighbor (Receive-Pipeline §4.4)
+        // als Direct-Neighbor registriert wurde.
+        if (hasDvView &&
+            !isSelfBroadcast &&
+            !routingTable.isLocalNode(peer.nodeId)) {
+          final senderHops = push.hopsFromSender[i];
+          final senderCost = push.costFromSender[i];
+          // ConnectionType-Hint für die synthetische Entry: wir kennen den
+          // Connection-Type des Sender→peer-Hops nicht (die Pusher-Route
+          // wurde nicht serialisiert). Wir nehmen `publicUdp` als neutralen
+          // Default — die effektive Kostenrechnung in processRouteUpdate
+          // verwendet ohnehin senderCost direkt (entry.cost), nur die
+          // gespeicherte Route trägt diesen connType-Hint mit.
+          dvUpdates.add(RouteEntry(
+            destinationHex: bytesToHex(peer.nodeId),
+            hopCount: senderHops,
+            cost: senderCost,
+            connType: ConnectionType.publicUdp,
+          ));
+        }
+      }
+
+      // Single processRouteUpdate-Call mit allen entries: addiert linkCost
+      // (= Sender-zu-uns) + senderCost und schreibt die Route via Sender als
+      // nextHop. Verwirft silent, falls senderDeviceId nicht in _neighbors
+      // ist — das ist ok (ohne registrierte Neighbor-Beziehung wäre die
+      // gelernte Route ohnehin nicht trustworthy).
+      if (dvUpdates.isNotEmpty) {
+        dvRouting.processRouteUpdate(senderDeviceId, dvUpdates);
+      }
+
+      // §5.10.4 — wenn die Antwort auf einen Stage-4-Burst leer war,
+      // verdient das einen WARN: dann hat der Pusher entweder nichts in
+      // seinem Cache, oder unsere WANT-Liste hat ihn nicht erreicht.
+      final stage4Tail = _lastStage4BurstAt != null &&
+          DateTime.now().difference(_lastStage4BurstAt!) <=
+              _lastStage4TailWindow;
+      if (push.peers.isEmpty && stage4Tail) {
+        _log.warn('PeerListPush: empty reply during Stage-4 tail window '
+            'from ${from.address}');
+      } else {
+        _log.debug('PeerListPush: received ${push.peers.length} peers from '
+            '${from.address}');
+      }
+      onPeersChanged?.call();
+    } catch (e) {
+      _log.debug('PeerListPush parse error: $e');
+    }
+  }
+
+  void _sendPeerKeyRequest(Uint8List recipientDeviceId) {
+    final hex = bytesToHex(recipientDeviceId);
+    final last = _peerKeyRequestCooldown[hex];
+    if (last != null && DateTime.now().difference(last).inSeconds < 60) return;
+    _peerKeyRequestCooldown[hex] = DateTime.now();
+    _log.info('Sending PEER_KEY_REQUEST to ${hex.substring(0, 8)}');
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_PEER_KEY_REQUEST,
+      innerPayload: proto.PeerKeyRequest().writeToBuffer(),
+      recipientDeviceId: recipientDeviceId,
+    );
+  }
+
+  void _handlePeerKeyRequestInfra(Uint8List senderDeviceId) {
+    _log.info('PEER_KEY_REQUEST from ${bytesToHex(senderDeviceId).substring(0, 8)} '
+        '— responding with full PeerInfo for ${_identities.length} identities');
+    final response = proto.PeerKeyResponse();
+    for (final ctx in _identities.values) {
+      response.peers.add(ctx.ownPeerInfo(
+        localIp: _localIp,
+        localPort: port,
+        publicIp: _advertisedPublicIp,
+        publicPort: _advertisedPublicPort,
+        allLocalIps: _localIps,
+        deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
+        deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+      ).toProto());
+    }
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_PEER_KEY_RESPONSE,
+      innerPayload: response.writeToBuffer(),
+      recipientDeviceId: senderDeviceId,
+    );
+  }
+
+  void _handlePeerKeyResponseInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final response = proto.PeerKeyResponse.fromBuffer(frame.payload);
+      _log.info('PEER_KEY_RESPONSE from ${bytesToHex(senderDeviceId).substring(0, 8)} '
+          '— ${response.peers.length} full PeerInfos');
+      for (final peerProto in response.peers) {
+        final peer = PeerInfo.fromProto(peerProto);
+        if (peer.networkChannel.isNotEmpty &&
+            peer.networkChannel != networkChannel) {
+          continue;
+        }
+        peer.pkSource = PkSource.firstParty;
+        routingTable.addPeer(peer);
+      }
+    } catch (e) {
+      _log.debug('PeerKeyResponse parse error: $e');
+    }
+  }
+
+  void _handlePeerListSummaryInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final summary = proto.PeerListSummary.fromBuffer(frame.payload);
+      final theirEntries = <String, int>{};
+      for (final entry in summary.entries) {
+        theirEntries[bytesToHex(Uint8List.fromList(entry.nodeId))] =
+            entry.lastSeen.toInt();
+      }
+
+      // Find peers we have that they need (newer or missing).
+      // §4.4 gossip gate: only include peers that are confirmed + alive +
+      // not in cascade-exhaustion. Dead peers are not gossipped — they pull
+      // updates themselves via Mesh-Refresh when they come back online.
+      final wantedByThem = <Uint8List>[];
+      for (final peer in routingTable.allPeers) {
+        final hex = peer.nodeIdHex;
+        if (!routingTable.isLocalNode(peer.nodeId) &&
+            !_isPeerAliveForGossip(hex)) {
+          continue;
+        }
+        final theirTs = theirEntries[hex];
+        if (theirTs == null ||
+            peer.lastSeen.millisecondsSinceEpoch > theirTs) {
+          wantedByThem.add(peer.nodeId);
+        }
+      }
+
+      // Find peers they have that we want.
+      final wanted = <Uint8List>[];
+      final ourPeerIds =
+          routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
+      for (final entry in summary.entries) {
+        final hex = bytesToHex(Uint8List.fromList(entry.nodeId));
+        if (!ourPeerIds.contains(hex)) {
+          wanted.add(Uint8List.fromList(entry.nodeId));
+        }
+      }
+
+      // Send WANT for peers we need.
+      if (wanted.isNotEmpty) {
+        final wantData = proto.PeerListWant();
+        for (final id in wanted) {
+          wantData.wantedNodeIds.add(id);
+        }
+        _sendInfra(
+          messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+          innerPayload: wantData.writeToBuffer(),
+          recipientDeviceId: senderDeviceId,
+        );
+        // §5.10.4 Solicited-Reply-Adoption: record the WANT so an incoming
+        // PUSH from this peer within the window adopts it as a neighbor
+        // even if `_neighbors` is currently empty for it (cold-start case).
+        _outstandingPeerListWants[bytesToHex(senderDeviceId)] = DateTime.now();
+      }
+
+      // Push peers they need (cap at 50 to avoid fragmentation storm).
+      if (wantedByThem.isNotEmpty) {
+        final pushData = proto.PeerListPush();
+        for (final id in wantedByThem.take(50)) {
+          final peer = routingTable.getPeer(id);
+          if (peer != null) {
+            pushData.peers.add(peer.toProto(gossipFilter: true));
           }
         }
-      } catch (_) {}
+        _sendInfra(
+          messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+          innerPayload: pushData.writeToBuffer(),
+          recipientDeviceId: senderDeviceId,
+        );
+      }
+    } catch (e) {
+      _log.debug('PeerListSummary handler error: $e');
+    }
+  }
+
+  void _handlePeerListWantInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final want = proto.PeerListWant.fromBuffer(frame.payload);
+      final pushData = proto.PeerListPush();
+      for (final wantedId in want.wantedNodeIds) {
+        final id = Uint8List.fromList(wantedId);
+        final peer = routingTable.getPeer(id);
+        if (peer == null) continue;
+
+        // Eigene DV-Sicht zu diesem Peer beilegen, damit der Empfänger
+        // Bellman-Ford-Update fahren kann statt nur den PeerInfo-Cache zu
+        // füllen. Self-Broadcast: hops=0, cost=0. Sonst: cheapest alive
+        // route aus dvRouting. Wenn keine alive route existiert, skip — wir
+        // hätten einen logischen Bruch (Cache-Eintrag ohne Route), den der
+        // Empfänger nicht sinnvoll als DV-Update verarbeiten kann.
+        final isSelf = routingTable.isLocalNode(id);
+        final peerHex = bytesToHex(id);
+        Route? route;
+        if (!isSelf) {
+          // §4.4 gossip gate: only include peers that pass the full
+          // liveness check (confirmed + alive route + not cascade-exhausted).
+          if (!_isPeerAliveForGossip(peerHex)) {
+            _log.debug('PeerListWant: skip ${peerHex.substring(0, 8)} '
+                '— not alive for gossip');
+            continue;
+          }
+          route = dvRouting
+              .routesTo(peerHex)
+              .where((r) => r.isAlive)
+              .firstOrNull;
+          if (route == null) {
+            _log.debug('PeerListWant: skip ${peerHex.substring(0, 8)} '
+                '— have PeerInfo but no alive DV route');
+            continue;
+          }
+        }
+
+        pushData.peers.add(isSelf ? peer.toProto() : peer.toProto(gossipFilter: true));
+        pushData.hopsFromSender.add(isSelf ? 0 : route!.hopCount);
+        pushData.costFromSender.add(isSelf ? 0 : route!.cost);
+      }
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+        innerPayload: pushData.writeToBuffer(),
+        recipientDeviceId: senderDeviceId,
+      );
+    } catch (e) {
+      _log.debug('PeerListWant handler error: $e');
+    }
+  }
+
+  // ── §5.10 Send-Cascade Recovery & Self-Healing helpers ──────────────
+
+  /// §5.10.4 — Decrement the per-peer unACK'd-packets counter. Floors at 0
+  /// and removes the entry when it reaches 0 to keep the map bounded.
+  /// Idempotent: a no-op if the peer is not currently tracked.
+  void _decrementUnackedPacketsToPeer(String peerHex) {
+    final n = _unackedPacketsToPeer[peerHex];
+    if (n == null) return;
+    if (n <= 1) {
+      _unackedPacketsToPeer.remove(peerHex);
+    } else {
+      _unackedPacketsToPeer[peerHex] = n - 1;
+    }
+  }
+
+  /// §5.10.2 Stale-PK Recovery — Stage 2 of the send cascade.
+  ///
+  /// Triggered exclusively from [_onPacketV3Received] when an incoming
+  /// `device_sig_invalid` arrives from a peer for whom we have a firstParty
+  /// PK on file. We mark that PK stale (so the next firstParty Self-Broadcast
+  /// can overwrite it via the §5.10.5 carve-out in `setSigningKeys`) and send
+  /// ONE BOOT-path `MTV3_DHT_PING`. The reply path:
+  ///
+  ///   1. Peer replies with `MTV3_DHT_PONG` (BOOT, HMAC-only) — the response
+  ///      arrives via UDP, gets HMAC-verified at the transport edge, and
+  ///      bypasses Outer-Sig-Verify because the peer's NEW PK is not yet
+  ///      cached. This re-touches the routing table.
+  ///   2. The peer follows up with a self-broadcast `PEER_LIST_PUSH` carrying
+  ///      its current PK pair — `_handlePeerListPushInfra` overwrites the
+  ///      cached PK because `pkStale == true`, and `setSigningKeys` clears
+  ///      the flag.
+  ///   3. The next packet from this peer Outer-Sig-Verifies normally; the
+  ///      cascade is healed.
+  ///
+  /// 30 s throttle per peer guards against `device_sig_invalid` floods (e.g.
+  /// a burst of buffered packets queued before the rotation). Fire-and-forget
+  /// — the caller is the receive pipeline and does NOT await this.
+  void _triggerStalePkRecovery(PeerInfo peer) {
+    final hex = peer.nodeIdHex;
+    final last = _lastStalePkProbe[hex];
+    if (last != null &&
+        DateTime.now().difference(last) < _stalePkProbeThrottle) {
+      return; // throttle — already probed recently
+    }
+    _lastStalePkProbe[hex] = DateTime.now();
+
+    peer.pkStale = true;
+
+    // Pick a usable address — `allConnectionTargets` is sorted priority-asc
+    // / score-desc, so the first reachable entry is the best shot.
+    PeerAddress? probe;
+    for (final addr in peer.allConnectionTargets()) {
+      if (addr.ip.isEmpty || addr.port <= 0) continue;
+      if (!addr.isReachableFromCurrentNetwork) continue;
+      if (addr.isInBackoff) continue;
+      probe = addr;
+      break;
     }
 
-    // Forward to application layer with identity context
-    if (type == proto.MessageType.CONTACT_REQUEST || type == proto.MessageType.CONTACT_REQUEST_RESPONSE) {
-      final sHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-      final rHex = envelope.recipientId.isNotEmpty ? bytesToHex(Uint8List.fromList(envelope.recipientId)) : 'empty';
-      _log.info('Forwarding $type from ${sHex.substring(0, 8)} to service '
-          '(recipientId=${rHex.substring(0, 8)}, identity=${targetIdentity?.nodeIdHex.substring(0, 8) ?? "null"})');
+    final shortHex =
+        hex.length >= 8 ? hex.substring(0, 8) : hex;
+    if (probe == null) {
+      _log.info('§5.10.2: Stale-PK recovery for $shortHex — '
+          'no usable address (will rely on incoming traffic + Stage 4)');
+      return;
     }
-    onMessageForIdentity?.call(envelope, from, fromPort, targetIdentity);
+
+    _log.info('§5.10.2: Stale-PK recovery probe → $shortHex at '
+        '${probe.ip}:${probe.port} (BOOT DHT_PING)');
+
+    // BOOT-path DHT_PING — body needn't carry routing info; it just needs to
+    // elicit a PONG. `_sendInfra` routes via DV cascade, which for a peer in
+    // routingTable hits the same direct/relay path the cascade is rebuilding.
+    // §5.12 hot-path — set pkRecoveryHint=true so the responder also sends
+    // back an unsolicited firstParty PEER_LIST_PUSH; that heals our cached
+    // stale signing PK in 1 RTT instead of waiting for the cold-path safety
+    // net (1 h) or never (the periodic 120 s peer-exchange is gone).
+    final ping = proto.DhtPing()
+      ..senderId = primaryIdentity.deviceNodeId
+      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..pkRecoveryHint = true;
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_DHT_PING,
+      innerPayload: ping.writeToBuffer(),
+      recipientDeviceId: peer.nodeId,
+    );
+
+    // Notify any UI watchers that peer state changed (pkStale flag).
+    onPeersChanged?.call();
+  }
+
+  /// §5.10.4 Mesh-State Refresh — Stage 4 of the send cascade.
+  ///
+  /// Triggered when `_unackedPacketsToPeer[deviceHex] >= _stage4Threshold`
+  /// (=6 packets sent without a reply). Iterates other peers in the routing
+  /// table (excluding the failed peer) in cost order and sends one BOOT-path
+  /// `MTV3_PEER_LIST_WANT` to each, spaced 50 ms apart. After the last WANT
+  /// is dispatched we wait an additional 150 ms tail; if any peer responded
+  /// with `MTV3_PEER_LIST_PUSH` inside that window (`_stage4ReplySeen` set
+  /// by `_handlePeerListPushInfra`), we reset the unACK counter for the
+  /// failed peer and let the next send-attempt naturally retry Stage 1 with
+  /// potentially refreshed cache. If the tail elapses without any reply, we
+  /// escalate to Stage 5 Re-Discovery.
+  ///
+  /// 60 s throttle per failed-peer key prevents a stuck cascade from firing
+  /// WANTs every retry tick. Fire-and-forget — caller is `sendToDevice` and
+  /// does NOT await this.
+  void _triggerMeshRefresh(Uint8List failedDeviceId) {
+    final failedHex = bytesToHex(failedDeviceId);
+    final last = _lastMeshRefresh[failedHex];
+    if (last != null &&
+        DateTime.now().difference(last) < _meshRefreshThrottle) {
+      return; // throttle — already refreshed recently
+    }
+    _lastMeshRefresh[failedHex] = DateTime.now();
+
+    // Build the candidate list: every peer in the routing table EXCEPT the
+    // failed one and our own identities. Cost-order via DV `bestRouteTo`
+    // (lower cost = better — preferred for the WANT burst since they're
+    // most likely to actually reach + reply quickly).
+    final candidates = <_MeshRefreshCandidate>[];
+    for (final peer in routingTable.allPeers) {
+      final hex = peer.nodeIdHex;
+      if (hex == failedHex) continue;
+      if (_isLocalIdentity(hex)) continue;
+      if (!isPeerConfirmed(hex)) continue;
+      final route = dvRouting.bestRouteTo(hex);
+      if (route == null || !route.isAlive) continue;
+      candidates.add(_MeshRefreshCandidate(peer.nodeId, route.cost));
+    }
+    candidates.sort((a, b) => a.cost.compareTo(b.cost));
+
+    final shortFailed =
+        failedHex.length >= 8 ? failedHex.substring(0, 8) : failedHex;
+    if (candidates.isEmpty) {
+      // No other peers → cascade has fully collapsed; jump straight to
+      // Stage 5 Re-Discovery.
+      _log.info('§5.10.4: Mesh refresh for $shortFailed — '
+          'zero candidate peers, escalating directly to Re-Discovery');
+      _triggerReDiscovery();
+      return;
+    }
+
+    _log.info('§5.10.4: Mesh refresh — failed=$shortFailed, '
+        'sending PEER_LIST_WANT to ${candidates.length} peers (50 ms spacing)');
+
+    // Inner WANT payload: empty `wantedNodeIds` = "send me your full peer
+    // list". Receivers iterate `wantedNodeIds`; an empty list naturally
+    // produces an empty `PeerListPush` — but receivers also gossip back
+    // freshly-known peers via the SUMMARY/PUSH path on the next anti-entropy
+    // tick. To force an immediate reply, we ask specifically for the failed
+    // peer's nodeId. If anyone in the mesh has it, they push it back.
+    final wantData = proto.PeerListWant();
+    wantData.wantedNodeIds.add(failedDeviceId);
+    final wantBytes = wantData.writeToBuffer();
+
+    for (var i = 0; i < candidates.length; i++) {
+      final candidate = candidates[i];
+      Future.delayed(Duration(milliseconds: 50 * i), () {
+        if (!_running) return;
+        _sendInfra(
+          messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+          innerPayload: wantBytes,
+          recipientDeviceId: candidate.deviceId,
+        );
+        // §5.10.4 Solicited-Reply-Adoption: arm each candidate so a PUSH
+        // back within the window adopts it as a neighbor. Stamping inside
+        // the delayed callback (vs. up-front in the loop) means the window
+        // starts when the WANT actually leaves, not 50ms × i earlier.
+        _outstandingPeerListWants[bytesToHex(candidate.deviceId)] =
+            DateTime.now();
+      });
+    }
+
+    // Tail-window: total burst duration plus a 150 ms grace for replies to
+    // arrive. The PEER_LIST_PUSH receive path flips `_stage4ReplySeen`.
+    final tailTotal = Duration(
+        milliseconds: 50 * (candidates.length - 1) + 150);
+    _lastStage4BurstAt = DateTime.now();
+    _lastStage4TailWindow = tailTotal;
+    _stage4ReplySeen = false;
+    Future.delayed(tailTotal, () {
+      if (!_running) return;
+      if (_stage4ReplySeen) {
+        _log.info('§5.10.4: Mesh refresh — at least one reply for '
+            '$shortFailed, refreshing cache (counter reset)');
+        _unackedPacketsToPeer.remove(failedHex);
+      } else {
+        _log.info('§5.10.5: Mesh refresh yielded zero replies for '
+            '$shortFailed → Re-Discovery');
+        _triggerReDiscovery();
+      }
+    });
+  }
+
+  /// §5.10.5 Re-Discovery — Stage 5 of the send cascade.
+  ///
+  /// Last-resort: re-execute the §2.7.1 startup discovery routine
+  /// (multicast/broadcast 3-burst on both LAN channels, plus subnet-scan
+  /// fallback). Single-shot per cascade-fail — if Stage 5 yields nothing,
+  /// the message proceeds to §5.4 Erasure / §5.6 Mailbox layers via the
+  /// existing fall-through. We also blanket-mark every peer's firstParty PK
+  /// as stale so the next Self-Broadcast can overwrite it (covers the case
+  /// where multiple peers rotated keys while we were partitioned).
+  void _triggerReDiscovery() {
+    if (!_running) return;
+
+    // §5.10.5 cooldown: suppress repeated Re-Discovery triggers within 60 s.
+    // Empirically (2026-05-09 WinVM bonding-loop investigation) the cascade
+    // could fire 4 Re-Discoveries in 4 minutes when no peer was reachable —
+    // each one re-emits multicast + broadcast 3-bursts on top of the
+    // already-running subnet scan, flooding the LAN and never letting the
+    // subnet scan complete. The cooldown lets the in-flight scan make
+    // meaningful fill-phase progress (130-200 s typical) before the next
+    // burst tries again.
+    final now = DateTime.now();
+    if (_lastReDiscoveryTrigger != null &&
+        now.difference(_lastReDiscoveryTrigger!) < _reDiscoveryCooldown) {
+      final ago = now.difference(_lastReDiscoveryTrigger!).inSeconds;
+      _log.debug('§5.10.5: Re-Discovery suppressed (last trigger ${ago}s ago, '
+          'cooldown ${_reDiscoveryCooldown.inSeconds}s)');
+      return;
+    }
+    _lastReDiscoveryTrigger = now;
+
+    // Mark every firstParty peer's PK as stale so a fresh Self-Broadcast
+    // can overwrite via the §5.10.5 carve-out. Cheap O(N) walk over the
+    // routing table; the flag does no harm if no rotation actually happened
+    // (next packet still verifies cleanly under the cached PK if it's still
+    // valid, and `setSigningKeys` only clears the flag on a firstParty
+    // overwrite — but a passing verify is fine, the peer is alive).
+    var marked = 0;
+    for (final peer in routingTable.allPeers) {
+      if (peer.pkSource == PkSource.firstParty && !peer.pkStale) {
+        peer.pkStale = true;
+        marked++;
+      }
+    }
+
+    _log.info('§5.10.5: Re-Discovery triggered — '
+        'multicast + LAN-broadcast 3-burst + subnet scan; '
+        'marked $marked firstParty PKs stale for refresh');
+
+    // Re-execute discovery — the existing fast-discovery + subnet-scan
+    // primitives that `_finishStart` uses on cold-start. No new mechanism.
+    try {
+      localDiscovery.triggerFastDiscovery();
+    } catch (e) {
+      _log.debug('§5.10.5: localDiscovery.triggerFastDiscovery error: $e');
+    }
+    try {
+      multicastDiscovery.triggerFastDiscovery();
+    } catch (e) {
+      _log.debug('§5.10.5: multicastDiscovery.triggerFastDiscovery error: $e');
+    }
+    try {
+      localDiscovery.startSubnetScan(
+          _localIps, () => _hasCrossSubnetPeer());
+    } catch (e) {
+      _log.debug('§5.10.5: subnet-scan error: $e');
+    }
+
+    onPeersChanged?.call();
+  }
+
+  void _handleRouteUpdateInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final msg = proto.RouteUpdateMsg.fromBuffer(frame.payload);
+      final fromHex = bytesToHex(senderDeviceId);
+
+      final entries = msg.routes
+          .map((r) => RouteEntry(
+                destinationHex:
+                    bytesToHex(Uint8List.fromList(r.destination)),
+                hopCount: r.hopCount,
+                cost: r.cost,
+                connType: _connTypeFromProto(r.connType),
+              ))
+          .toList();
+
+      // Change-gated propagation: suppress the per-entry onRouteChanged
+      // callback during batch processing — we populate _dvPendingChanges
+      // manually from the result's updatedDestinations list, which only
+      // includes destinations whose BEST route actually changed.
+      final savedCallback = dvRouting.onRouteChanged;
+      dvRouting.onRouteChanged = null;
+      final result = dvRouting.processRouteUpdateDetailed(
+          senderDeviceId, entries);
+      dvRouting.onRouteChanged = savedCallback;
+      if (result.changed) {
+        for (final dest in result.updatedDestinations) {
+          _dvPendingChanges.add(dest);
+        }
+        _dvPropagationDebounce?.cancel();
+        _dvPropagationDebounce =
+            Timer(const Duration(seconds: 2), _flushDvUpdates);
+        dvRouting.updateDefaultGateway();
+      }
+      _log.info('DV: Route update from ${fromHex.substring(0, 8)}: '
+          '${entries.length} entries, changed=${result.changed} '
+          '(${result.updatedDestinations.length} dests), '
+          'gwHex=${dvRouting.defaultGatewayHex?.substring(0, 8)}, '
+          'routes=${dvRouting.routeCount}, '
+          'neighbors=${dvRouting.neighbors.length}');
+
+      // DV→K-bucket seeding: if the ROUTE_UPDATE advertises destinations
+      // that we don't have in our K-bucket routing table, send a targeted
+      // PEER_LIST_WANT to the neighbor so it pushes the peer metadata
+      // (addresses, keys). Without this, DV-only destinations (e.g.
+      // bootstrap on another subnet) never appear in peerSummaries and
+      // cannot be included as seed peers in ContactSeed URIs.
+      if (result.changed) {
+        final missing = <Uint8List>[];
+        final now = DateTime.now();
+        for (final entry in entries) {
+          if (entry.cost >= Route.infinity) continue;
+          final destBytes = hexToBytes(entry.destinationHex);
+          if (routingTable.getPeer(destBytes) != null) continue;
+          final lastWant = _dvSeedWantCooldown[entry.destinationHex];
+          if (lastWant != null && now.difference(lastWant).inSeconds < 120) continue;
+          missing.add(destBytes);
+          _dvSeedWantCooldown[entry.destinationHex] = now;
+        }
+        if (missing.isNotEmpty) {
+          final wantData = proto.PeerListWant();
+          for (final id in missing) {
+            wantData.wantedNodeIds.add(id);
+          }
+          _sendInfra(
+            messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+            innerPayload: wantData.writeToBuffer(),
+            recipientDeviceId: senderDeviceId,
+          );
+          _outstandingPeerListWants[fromHex] = now;
+          _log.info('DV: Requested peer metadata for ${missing.length} '
+              'DV-only destinations from ${fromHex.substring(0, 8)}');
+        }
+      }
+
+      // Reciprocal welcome: empty/minimal update from a known neighbor
+      // signals a peer restart — respond with our full table.
+      if (entries.isEmpty && dvRouting.neighbors.containsKey(fromHex)) {
+        final ourRoutes = dvRouting.buildFullUpdate();
+        if (ourRoutes.isNotEmpty) {
+          final peer = routingTable.getPeer(senderDeviceId);
+          if (peer != null) {
+            _sendRouteUpdate(peer, ourRoutes);
+            _lastRouteUpdateSentTo[fromHex] = DateTime.now();
+            _log.info('DV: Reciprocal welcome sent ${ourRoutes.length} '
+                'routes to ${fromHex.substring(0, 8)} (peer restart)');
+          }
+        }
+      }
+    } catch (e) {
+      _log.debug('DV: Failed to parse ROUTE_UPDATE: $e');
+    }
+  }
+
+  void _handleReachabilityQueryInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final query = proto.PeerReachabilityQuery.fromBuffer(frame.payload);
+
+      // V3.1.33 port probe: send CPRB packet to sender's claimed public address.
+      if (query.probeIp.isNotEmpty && query.probePort > 0) {
+        final senderHex = bytesToHex(senderDeviceId);
+        // Security: only probe for confirmed peers.
+        if (!isPeerConfirmed(senderHex)) {
+          _log.debug('Port probe rejected: ${senderHex.substring(0, 8)} '
+              'not confirmed');
+          return;
+        }
+        if (_isPrivateIp(query.probeIp)) {
+          _log.debug('Port probe rejected: ${query.probeIp} is private');
+          return;
+        }
+        _log.info('Port probe: sending CPRB to ${query.probeIp}:'
+            '${query.probePort} for ${senderHex.substring(0, 8)}');
+        transport.sendPortProbe(
+          Uint8List.fromList(query.queryId),
+          InternetAddress(query.probeIp),
+          query.probePort,
+        );
+        return;
+      }
+
+      // Normal reachability query: do we know a route to targetNodeId?
+      final targetId = Uint8List.fromList(query.targetNodeId);
+      final targetHex = bytesToHex(targetId);
+      final peer = routingTable.getPeer(targetId);
+      final confirmed = isPeerConfirmed(targetHex);
+
+      final response = proto.PeerReachabilityResponse()
+        ..targetNodeId = query.targetNodeId
+        ..queryId = query.queryId
+        ..canReach = (peer != null && confirmed)
+        ..lastSeenMs = Int64(peer?.lastSeen.millisecondsSinceEpoch ?? 0);
+
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_REACHABILITY_RESPONSE,
+        innerPayload: response.writeToBuffer(),
+        recipientDeviceId: senderDeviceId,
+      );
+      _log.debug('Reachability query for ${targetHex.substring(0, 8)}: '
+          'canReach=${peer != null && confirmed}');
+    } catch (e) {
+      _log.debug('REACHABILITY_QUERY parse error: $e');
+    }
+  }
+
+  void _handleHolePunchRequestInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final req = proto.HolePunchRequest.fromBuffer(frame.payload);
+      natTraversal.handleHolePunchRequest(req, senderDeviceId);
+    } catch (e) {
+      _log.debug('HOLE_PUNCH_REQUEST parse error: $e');
+    }
+  }
+
+  void _handleHolePunchNotifyInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final notify = proto.HolePunchNotify.fromBuffer(frame.payload);
+      natTraversal.handleHolePunchNotify(notify, senderDeviceId);
+    } catch (e) {
+      _log.debug('HOLE_PUNCH_NOTIFY parse error: $e');
+    }
+  }
+
+  void _handleHolePunchPingInfra(
+      proto.InfrastructureFrameV3 frame, InternetAddress from, int fromPort) {
+    try {
+      final ping = proto.HolePunchPing.fromBuffer(frame.payload);
+      natTraversal.handleHolePunchPing(ping, from, fromPort);
+    } catch (e) {
+      _log.debug('HOLE_PUNCH_PING parse error: $e');
+    }
+  }
+
+  void _handleHolePunchPongInfra(proto.InfrastructureFrameV3 frame,
+      Uint8List senderDeviceId, InternetAddress from, int fromPort) {
+    try {
+      final pong = proto.HolePunchPong.fromBuffer(frame.payload);
+      natTraversal.handleHolePunchPong(pong, from, fromPort);
+      // V2 parity: a HOLE_PUNCH_PONG also proves the peer's pinhole is
+      // alive — reset UdpKeepalive's all-failure counter for this peer.
+      udpKeepalive.onPongReceived(bytesToHex(senderDeviceId));
+    } catch (e) {
+      _log.debug('HOLE_PUNCH_PONG parse error: $e');
+    }
+  }
+
+  /// Receive-side bridge: hand the V3 InfraFrame response straight to
+  /// [DhtRpc.handleResponse] so the awaiting `sendAndWait` completer fires.
+  /// V3-direct contract: the DhtRpc pending-table is keyed by V3 type, and
+  /// `_requestTypeFor` maps each `MTV3_*_RESPONSE` to its matching
+  /// `MTV3_*_RETRIEVE` request.
+  void _bridgeInfraResponseToDhtRpc(
+      proto.MessageTypeV3 v3ResponseType,
+      proto.InfrastructureFrameV3 frame,
+      InternetAddress from,
+      int fromPort) {
+    dhtRpc.handleResponse(
+      v3ResponseType,
+      Uint8List.fromList(frame.payload),
+      Uint8List.fromList(frame.senderDeviceId),
+      from.address,
+      fromPort,
+    );
+  }
+
+  static bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// §3.7.3 Reverse-path relay loop prevention: resolve a peer's IP address
+  /// to its device-ID hex by scanning DV neighbors. O(N) but N ≤ ~100.
+  String? _resolveDeviceHexFromAddress(String ip) {
+    for (final nhHex in dvRouting.neighbors.keys) {
+      final peer = routingTable.getPeer(hexToBytes(nhHex));
+      if (peer != null && peer.addresses.any((a) => a.ip == ip)) {
+        return nhHex;
+      }
+    }
+    return null;
+  }
+
+  /// Welle 2 Teil 4 (C4-β): Routing-layer chatter that
+  /// (a) carries no user-private payload, (b) is high-frequency enough to
+  /// justify Ed25519-only Outer-Sigs (§3.5), and (c) — once the receive
+  /// pipeline is wired — should be handled inside cleona_node.dart rather
+  /// than the application service. PoW is also skipped for these types
+  /// (Architecture §2.4 sender step 10).
+  ///
+  /// The mapping is deliberately conservative: identity-resolution
+  /// (`MTV3_IDENTITY_*`) is included so the DHT replicator/resolver can
+  /// run without a hop through cleona_service, but live-call media
+  /// (`MTV3_CALL_AUDIO/VIDEO`) is **not** infrastructure — those are
+  /// ephemeral application frames that already follow the
+  /// `applicationFlavor=false` selector independently (cleona_service
+  /// owns the call cluster, C3).
+  /// §2.3.5 selector predicate. Mirror of the canonical implementation in
+  /// `lib/core/network/v3_frame_codec.dart` (top-level
+  /// `isInfrastructureMessageTypeV3`); both lists MUST stay in sync. The
+  /// codec uses its own copy to avoid an upward dependency on `cleona_node`;
+  /// `CleonaNode` keeps this static method as a stable surface for external
+  /// callers (CleonaService, tests) that already import this class.
+  static bool isInfrastructureMessageTypeV3(proto.MessageTypeV3 type) {
+    switch (type) {
+      // Peer-list / DHT chatter
+      case proto.MessageTypeV3.MTV3_PEER_LIST_PUSH:
+      case proto.MessageTypeV3.MTV3_PEER_LIST_SUMMARY:
+      case proto.MessageTypeV3.MTV3_PEER_LIST_WANT:
+      case proto.MessageTypeV3.MTV3_PEER_KEY_REQUEST:
+      case proto.MessageTypeV3.MTV3_PEER_KEY_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_PING:
+      case proto.MessageTypeV3.MTV3_DHT_PONG:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_NODE:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_STORE:
+      case proto.MessageTypeV3.MTV3_DHT_STORE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE:
+      case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE_RESPONSE:
+      // Reed-Solomon fragment storage / S&F mailbox primitives
+      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
+      case proto.MessageTypeV3.MTV3_PEER_STORE:
+      case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+      case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+      // Routing / RUDP / NAT control-plane
+      case proto.MessageTypeV3.MTV3_ROUTE_UPDATE:
+      case proto.MessageTypeV3.MTV3_REACHABILITY_QUERY:
+      case proto.MessageTypeV3.MTV3_REACHABILITY_RESPONSE:
+      case proto.MessageTypeV3.MTV3_RELAY_FORWARD:
+      case proto.MessageTypeV3.MTV3_RELAY_ACK:
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_REQUEST:
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_NOTIFY:
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING:
+      case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PONG:
+      // 2D-DHT identity resolution (§4.3) — also infrastructure
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
+      // Welle 5: Device-KEM-Record class — separate DHT key-space ("kem")
+      // but same §2.3.5 selector membership as AUTH/LIVE.
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_PUBLISH:
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE:
+      // Welle 6 (§2.3.5 / §6.3 / §7.4): Identity-Layer Infrastructure.
+      // Mirror of the codec list — see top-level
+      // `isInfrastructureMessageTypeV3` in v3_frame_codec.dart for rationale.
+      case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+      case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+      // Guardian / Shamir Social Recovery (§6.2) — mirror of the codec
+      // selector list. Trust-bootstrap rationale: see top-level
+      // `isInfrastructureMessageTypeV3` in v3_frame_codec.dart.
+      case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+      case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST:
+      case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
+      // Wave 2B.3 (§10.2): channel-index gossip — see codec selector for rationale.
+      case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // ── V3.0 Send API (Architecture v3.0 §2.6 lifecycle [c]) ──────────
+
+  /// Route a fully-built [NetworkPacketV3] to the device identified by
+  /// [deviceId]. Iterates DV routes cheapest-first (max 3), then falls back
+  /// to the default-gateway last-resort path (Architecture §4.7). Sets
+  /// `nextHopDeviceId` per attempt. Returns true on first kernel-accepted
+  /// send. No ACK tracking here — that lives in the service layer alongside
+  /// inner ApplicationFrame state. Returns false when the cascade is
+  /// exhausted; callers (cleona_service.sendToUser) own S&F orchestration.
+  Future<bool> sendToDevice(
+      proto.NetworkPacketV3 packet, Uint8List deviceId,
+      {String? excludeNextHopHex,
+      bool isRelay = false,
+      bool expectsReply = true}) async {
+    final destHex = bytesToHex(deviceId);
+    final myDeviceId = primaryIdentity.deviceNodeId;
+    // §5.10.4 — bump the per-peer unACK'd counter BEFORE the send. Every
+    // send to this device counts; positive signals from the same device
+    // (DELIVERY_RECEIPT, DHT_PONG, PEER_LIST_PUSH) decrement. Reaching
+    // [_stage4Threshold] without a decrement triggers Mesh-State Refresh.
+    // Loopback short-circuits below skip the increment because the counter
+    // is for *wire* round-trips with this peer, not local-delivery hits.
+    // §3.1: deviceID is daemon-global, equality with myDeviceId is sufficient.
+    final isLoopback = _bytesEqual(deviceId, myDeviceId);
+    if (isLoopback) {
+      // Loopback — never send, callers should short-circuit. Defensive:
+      // dispatch directly to the local-delivery hook. Synthesize a
+      // verified-snapshot: we are the sender, so the outer sig is
+      // implicitly authenticated by our own keys.
+      final loopbackSnapshot = SenderIdentitySnapshot(
+        senderDeviceId: myDeviceId,
+        senderUserId: Uint8List(0),
+        outerSigStatus: OuterSigStatus.verified,
+        verifiedDeviceEd25519Pk: _deviceKeys.sig.ed25519PublicKey,
+        verifiedDeviceMlDsaPk: _deviceKeys.sig.mlDsaPublicKey,
+        newKeyDetectedForSenderUser: false,
+        receivedAt: DateTime.now(),
+      );
+      onApplicationFramePayload?.call(
+          packet, InternetAddress('0.0.0.0'), 0, loopbackSnapshot);
+      return true;
+    }
+
+    // §5.10.4 — wire-bound send: bump the unACK'd counter and check whether
+    // the Stage-4 Mesh-Refresh threshold has been crossed *before* this
+    // attempt. Fire-and-forget messages (DHT publishes, fragment stores)
+    // skip the counter — they have no expected reply, so counting them
+    // as "unacked" falsely triggers Mesh-Refresh and Re-Discovery cycles.
+    if (expectsReply) {
+      final newCount = (_unackedPacketsToPeer[destHex] ?? 0) + 1;
+      _unackedPacketsToPeer[destHex] = newCount;
+      if (newCount >= _stage4Threshold) {
+        _triggerMeshRefresh(deviceId);
+      }
+    }
+
+    // §3.7.2 relay-forwarding invariant: the packet's nextHopDeviceId must
+    // always equal the *final destination* (deviceId), not the intermediate
+    // relay hop. The relay node sees nextHopDeviceId != myDeviceId and
+    // forwards toward the destination; _sendV3ViaHop uses hopDeviceId only
+    // for the physical-address lookup and must NOT overwrite nextHopDeviceId.
+    packet.nextHopDeviceId = deviceId;
+
+    final routes = dvRouting.routesTo(destHex);
+    var attempts = 0;
+    const maxRouteAttempts = 3;
+    for (final route in routes) {
+      if (attempts >= maxRouteAttempts) break;
+      if (!route.isAlive) continue;
+      // Determine concrete next hop:
+      //  - direct route → hopId is the destination itself
+      //  - relay route  → hopId is the next relay device; packet.nextHopDeviceId
+      //    stays == deviceId so the relay node forwards rather than delivers locally
+      final hopId = route.isDirect ? deviceId : route.nextHop;
+      if (hopId == null) continue;
+      // §3.7.3 relay loop prevention: skip routes through the excluded node
+      if (excludeNextHopHex != null && bytesToHex(hopId) == excludeNextHopHex) continue;
+      attempts++;
+      final ok = await _sendV3ViaHop(packet, hopId);
+      if (ok) return true;
+    }
+
+    // Confirmed DV neighbor: fire-and-forget direct send, but do NOT stop
+    // the cascade. "Confirmed" means we once received a hopCount==0 packet
+    // from this peer — it does NOT mean the reverse path works (CGNAT Phone
+    // receives from LAN node via relay with hopCount==0 punched, but Phone→
+    // LAN direct is black-holed). Always fall through to the relay cascade
+    // so at least one path with actual delivery evidence gets tried.
+    if (dvRouting.neighbors.containsKey(destHex) &&
+        isPeerConfirmed(destHex)) {
+      _log.info('sendToDevice ${destHex.substring(0, 8)}: '
+          'confirmed neighbor — direct + relay cascade');
+      await _sendV3ViaHop(packet, deviceId);
+    }
+
+    // Last-resort: try ALL DV neighbors as relay candidates.
+    // Prefer the elected default gateway first, then remaining neighbors.
+    // This ensures first-contact CRs (phone behind CGNAT with only seed peers
+    // as neighbors) try every available relay path, not just one random winner.
+    //
+    // §3.7.3 relay-forward constraint: when forwarding someone else's packet
+    // (isRelay=true), skip the neighbor spray entirely. Relay-forwarding
+    // should use learned DV routes and default-GW only — broadcasting a
+    // relay packet to all neighbors is flooding, not routing.
+    if (isRelay) {
+      _log.warn('sendToDevice ${destHex.substring(0, 8)}: relay cascade '
+          'exhausted (routes=${dvRouting.routesTo(destHex).length}), '
+          'skipping neighbor spray for relayed packet');
+      return false;
+    }
+    final gwHex = dvRouting.defaultGatewayHex;
+    final triedNeighbors = <String>{};
+    if (gwHex != null && gwHex != destHex && !_isLocalIdentity(gwHex) &&
+        gwHex != excludeNextHopHex) {
+      triedNeighbors.add(gwHex);
+      final gwBytes = hexToBytes(gwHex);
+      final gwPeer = routingTable.getPeer(gwBytes);
+      if (gwPeer != null) {
+        _log.info('sendToDevice ${destHex.substring(0, 8)}: '
+            'fall through to default-GW ${gwHex.substring(0, 8)}');
+        final ok = await _sendV3ViaHop(packet, gwBytes);
+        if (ok) return true;
+      }
+    }
+
+    // Try remaining neighbors (skip GW already tried, skip destination, skip self,
+    // skip excluded relay sender)
+    for (final neighborHex in dvRouting.neighbors.keys) {
+      if (triedNeighbors.contains(neighborHex)) continue;
+      if (neighborHex == destHex) continue;
+      if (_isLocalIdentity(neighborHex)) continue;
+      if (neighborHex == excludeNextHopHex) continue;
+      triedNeighbors.add(neighborHex);
+      final nBytes = hexToBytes(neighborHex);
+      final nPeer = routingTable.getPeer(nBytes);
+      if (nPeer == null) continue;
+      _log.info('sendToDevice ${destHex.substring(0, 8)}: '
+          'trying neighbor ${neighborHex.substring(0, 8)} as relay');
+      final ok = await _sendV3ViaHop(packet, nBytes);
+      if (ok) return true;
+    }
+
+    _log.warn('sendToDevice ${destHex.substring(0, 8)}: cascade exhausted '
+        '(routes=${routes.length}, neighbors=${triedNeighbors.length})');
+    return false;
+  }
+
+  /// Internal: emit [packet] to the address(es) of the hop identified by
+  /// [hopDeviceId]. Protocol Escalation per §4.1: UDP (auto-fragments
+  /// >1200B via Transport.sendUdp) → TLS fallback if UDP fails on all
+  /// targets and payload is large.
+  Future<bool> _sendV3ViaHop(
+      proto.NetworkPacketV3 packet, Uint8List hopDeviceId) async {
+    // packet.nextHopDeviceId is set by the caller (sendToDevice) to the final
+    // destination, not to hopDeviceId. This ensures relay nodes forward the
+    // packet rather than delivering it locally. Do NOT overwrite it here.
+    final hopHex = bytesToHex(hopDeviceId);
+    var hopPeer = routingTable.getPeer(hopDeviceId);
+    if (hopPeer == null) {
+      // §3.1 B-1: fallback — caller may have passed a userId (legacy path).
+      hopPeer = routingTable.getPeerByUserId(hopDeviceId);
+      if (hopPeer != null) {
+        _log.warn('_sendV3ViaHop ${hopHex.substring(0, 8)}: resolved via '
+            'userId fallback — caller should pass deviceId');
+      }
+    }
+    if (hopPeer == null) {
+      _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: peer not found in routing table');
+      return false;
+    }
+    // §4.6 (V3.1.72): direct-confirmed is NOT a send gate. This is the
+    // per-hop best-effort send primitive; the sendToDevice cascade decides
+    // reachability (direct → relay → S&F) and RUDP-Light (DELIVERY_RECEIPT)
+    // proves delivery. We still read direct-confirmed below to decide whether
+    // a fire-and-forget UDP "ok" counts as delivered (confirmed peers) or
+    // whether we must also try TLS and let the receipt decide (unconfirmed,
+    // e.g. CGNAT / first-contact targets).
+    final isConfirmed = isPeerConfirmed(hopHex);
+
+    final allTargets = hopPeer.allConnectionTargets();
+    final targets = _filterNatContext(allTargets, hopPeer)
+        .where((a) => !a.isInBackoff && a.isReachableFromCurrentNetwork)
+        .toList();
+    if (targets.isEmpty) {
+      final afterNat = _filterNatContext(allTargets, hopPeer);
+      final backoffList = afterNat.where((a) => a.isInBackoff).map((a) => '${a.ip}:${a.port}').toList();
+      final unreachList = afterNat.where((a) => !a.isReachableFromCurrentNetwork).map((a) => '${a.ip}:${a.port}').toList();
+      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: no reachable targets '
+          '(all=${allTargets.map((a) => "${a.ip}:${a.port}").toList()}, '
+          'backoff=$backoffList, unreach=$unreachList)');
+      return false;
+    }
+
+    // §4.1 Protocol Escalation: always try UDP first (Transport.sendUdp
+    // auto-fragments payloads >1200B with CFRA + NACK retry).
+    final wireSize = packet.writeToBuffer().length;
+    final isLargePayload = wireSize > maxFragmentPacketSize;
+    var anySent = false;
+    for (final addr in targets) {
+      try {
+        final ok = await transport.sendUdp(
+            packet, InternetAddress(addr.ip), addr.port);
+        if (ok) {
+          if (isConfirmed && !isLargePayload) return true;
+          anySent = true;
+        }
+      } catch (e) {
+        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
+      }
+    }
+
+    // §4.6 (V3.1.72): for peers we are not direct-confirmed for (CGNAT,
+    // first-contact), a UDP "ok" is only a local buffer write — the packet
+    // may be black-holed. Try TLS on all targets (real delivery feedback);
+    // otherwise return false so the cascade continues to relay routes, and
+    // RUDP-Light (DELIVERY_RECEIPT) confirms actual delivery.
+    if (!isConfirmed) {
+      for (final addr in targets) {
+        final ia = InternetAddress(addr.ip);
+        if (!transport.tlsBulkCapable(ia, addr.port)) continue;
+        try {
+          final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
+          if (ok) {
+            addr.recordSuccess();
+            return true;
+          }
+        } catch (e) {
+          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
+        }
+      }
+      return false;
+    }
+
+    // §4.1 step 3: TLS backup for large payloads (>1200B → fragmented).
+    // UDP fragment bursts are unreliable across routed subnets — the kernel
+    // accepts the datagrams but intermediate routers may drop the burst.
+    // TLS gives real delivery feedback. Try it even when UDP "succeeded"
+    // for payloads that required fragmentation.
+    if (isConfirmed && isLargePayload) {
+      if (!anySent) {
+        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP failed on all '
+            '${targets.length} targets, trying TLS for ${wireSize}B payload');
+      }
+      for (final addr in targets) {
+        final ia = InternetAddress(addr.ip);
+        if (!transport.tlsBulkCapable(ia, addr.port)) continue;
+        try {
+          final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
+          if (ok) {
+            addr.recordSuccess();
+            return true;
+          }
+        } catch (e) {
+          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
+        }
+      }
+    }
+
+    if (anySent) return true;
+
+    for (final addr in targets) {
+      addr.recordFailure();
+    }
+    _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: all ${targets.length} targets failed '
+        '(${targets.map((a) => "${a.ip}:${a.port} cf=${a.consecutiveFailures}").join(", ")})');
+    return false;
+  }
+
+  // ── Welle 5: INFRASTRUCTURE_FRAME sender helpers (§2.3.5 + §2.4.1) ─
+  //
+  // These three methods are the local stand-in for what will eventually
+  // be a Subagent C network helper (`buildInfrastructureFrame`) plus a
+  // Subagent A DeviceKem service (`encapsulateForDevice`) plus a
+  // Subagent B resolver extension (`lookupDeviceKemRecord`). Until those
+  // land in main, cleona_node.dart owns the whole pipeline inline so
+  // the Welle-2-Teil-4-blocked sender migration (PEER_LIST_PUSH/SUMMARY,
+  // ROUTE_UPDATE, REACHABILITY_RESPONSE, RELAY_ACK, DHT_*, etc.) can
+  // ship without a cross-subagent merge dance. Consolidation happens at
+  // the Hauptthread merge.
+
+  /// Resolve the recipient's Device-KEM-PK pair (X25519 + ML-KEM-768) for
+  /// InfrastructureFrame encap. Two-stage lookup per §4.3 step 4b:
+  ///
+  ///   1. **DeviceKemRecord (canonical, §3.5b)** — read from the local
+  ///      `IdentityDhtHandler` replica cache. Records arrive there via
+  ///      `IDENTITY_KEM_PUBLISH` from the publisher of the target device
+  ///      (us, when we publish ours; or other replicators when they
+  ///      forward). The record carries the device-bound KEM keypair the
+  ///      sender wants — not the user-bound one.
+  ///   2. **PeerInfo User-KEM (bridge fallback)** — when no DeviceKemRecord
+  ///      is replicated locally yet (e.g. early-boot bootstrap peers, or
+  ///      peers we have not seen via IDENTITY_KEM_PUBLISH), fall back to
+  ///      the User-KEM-PK already cached on `PeerInfo`. This is a
+  ///      best-effort bridge: callers that *only* hold User-KEM material
+  ///      can still receive infrastructure traffic — the receiver-side
+  ///      decap fails (different SK) and silently drops, which matches
+  ///      §2.4.1 [10']. The send is therefore "fire-and-forget against the
+  ///      best key we know"; the next round (after IDENTITY_KEM_PUBLISH
+  ///      replication) will hit the canonical path.
+  ///
+  /// Returns `null` only when neither source has any KEM material — the
+  /// sender then drops the InfraFrame entirely rather than building an
+  /// unencryptable packet.
+  ({Uint8List x25519Pk, Uint8List mlKemPk})? _lookupDeviceKemPk(
+      Uint8List deviceId) {
+    var peer = routingTable.getPeer(deviceId);
+    if (peer == null) {
+      peer = routingTable.getPeerByUserId(deviceId);
+      if (peer != null) {
+        _log.warn('_lookupDeviceKemPk ${bytesToHex(deviceId).substring(0, 8)}: '
+            'resolved via userId fallback — caller should pass deviceId');
+      }
+    }
+    if (peer == null) return null;
+
+    // [1] Canonical: DeviceKemRecord from local 2D-DHT replica cache.
+    final userId = peer.userId;
+    if (userId != null) {
+      final rec = identityDhtHandler.getKemRecord(userId, deviceId);
+      if (rec != null && !rec.isExpired()) {
+        return (x25519Pk: rec.deviceX25519Pk, mlKemPk: rec.deviceMlKemPk);
+      }
+    }
+
+    // No Device-KEM record → return null. The BOOT-path allow-list
+    // (isBootstrapMessageTypeV3) already covers every essential infra
+    // message type. KEM-path messages (DHT_STORE, FRAGMENT_STORE,
+    // PEER_STORE, RELAY_*) are dropped until Device-KEM records
+    // propagate — correct: sending with wrong key (User-KEM) would
+    // cause kemDecapFailed on the receiver anyway.
+    return null;
+  }
+
+  /// Build a NetworkPacketV3 carrying an InfrastructureFrameV3 inner
+  /// targeted at `recipientDeviceId`. Thin wrapper around
+  /// [V3FrameCodec.buildInfrastructureFrame]: validates the §2.3.5 selector
+  /// and resolves the recipient's Device-KEM-PK pair, then delegates the
+  /// `[1']-[8']` pipeline (build → serialize → zstd → KEM-encrypt → Outer
+  /// → Ed25519-only Device-Sig → PoW-skip) to the codec.
+  ///
+  /// Returns `null` when (a) `messageType` is outside the §2.3.5 selector
+  /// list, or (b) no Device-KEM-PK is known for the recipient — caller
+  /// treats both as "drop the message, no shouting" (§2.4.1 receiver
+  /// pipeline drops on KEM-decap failure anyway, so a sender-side drop on
+  /// missing PK is symmetric).
+  proto.NetworkPacketV3? _buildInfraPacket({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+  }) {
+    if (!isInfrastructureMessageTypeV3(messageType)) {
+      _log.warn('_buildInfraPacket: messageType $messageType not in §2.3.5 '
+          'selector — refusing to build');
+      return null;
+    }
+    // BOOT path: first-contact bootstrap RPCs ride a plaintext
+    // InfrastructureFrameV3 (no KEM, no zstd). This is the only way to
+    // break the chicken-and-egg loop where the recipient's Device-KEM-PK
+    // is precisely what the bootstrap RPCs are trying to discover.
+    // Closed-Network HMAC + Outer Device-Sig + inner-record sigs carry
+    // the security properties on this path. See [isBootstrapMessageTypeV3]
+    // for the strict allow-list and rationale per type.
+    if (isBootstrapMessageTypeV3(messageType)) {
+      _log.info(
+          '_buildInfraPacket: BOOT-path ${messageType.name} → '
+          '${bytesToHex(recipientDeviceId).substring(0, 8)} '
+          '(plaintext InfrastructureFrameV3, no KEM)');
+      return V3FrameCodec.buildBootstrapInfrastructureFrame(
+        recipientDeviceId: recipientDeviceId,
+        senderDeviceId: primaryIdentity.deviceNodeId,
+        senderDeviceKeys: _deviceKeys.sig,
+        messageType: messageType,
+        payload: innerPayload,
+      );
+    }
+    // KEM path: the recipient's Device-KEM-PK MUST be in the cache. If
+    // it isn't, the message is dropped — the recipient cannot decrypt it
+    // anyway, and the BOOT path above is reserved for the strict allow-
+    // list of types that legitimately need to operate without a known PK.
+    final pks = _lookupDeviceKemPk(recipientDeviceId);
+    if (pks == null) {
+      _log.debug(
+          '_buildInfraPacket: no Device-KEM-PK for ${bytesToHex(recipientDeviceId).substring(0, 8)} '
+          '— dropping ${messageType.name}');
+      return null;
+    }
+    return V3FrameCodec.buildInfrastructureFrame(
+      recipientDeviceId: recipientDeviceId,
+      senderDeviceId: primaryIdentity.deviceNodeId,
+      senderDeviceKeys: _deviceKeys.sig,
+      messageType: messageType,
+      payload: innerPayload,
+      recipientDeviceX25519Pk: pks.x25519Pk,
+      recipientDeviceMlKemPk: pks.mlKemPk,
+    );
+  }
+
+  /// Convenience: build + send an InfrastructureFrame to a device. Returns
+  /// false when (a) no Device-KEM-PK known (best-effort drop), (b) the DV
+  /// cascade exhausts all routes. Fire-and-forget for callers that don't
+  /// care about the cascade outcome.
+  Future<bool> _sendInfra({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+  }) async {
+    final packet = _buildInfraPacket(
+      messageType: messageType,
+      innerPayload: innerPayload,
+      recipientDeviceId: recipientDeviceId,
+    );
+    if (packet == null) return false;
+    return sendToDevice(packet, recipientDeviceId,
+        expectsReply: _isRequestResponseType(messageType));
+  }
+
+  /// True for message types that expect a reply (request/response patterns).
+  /// False for fire-and-forget DHT publishes and stores — these should not
+  /// drive the §5.10.4 unacked-packets counter because no reply is expected.
+  static bool _isRequestResponseType(proto.MessageTypeV3 type) {
+    switch (type) {
+      // Fire-and-forget: DHT publishes, fragment/peer stores, broadcasts
+      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:
+      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH:
+      case proto.MessageTypeV3.MTV3_IDENTITY_KEM_PUBLISH:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+      case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_PEER_STORE:
+      case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+      case proto.MessageTypeV3.MTV3_PEER_LIST_PUSH:
+      case proto.MessageTypeV3.MTV3_ROUTE_UPDATE:
+      case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
+      case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
+      case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
+        return false;
+      // Everything else: request/response (PING→PONG, RETRIEVE→RESPONSE, etc.)
+      default:
+        return true;
+    }
+  }
+
+  /// Public delegate to [_buildInfraPacket]. Service-layer callers that need
+  /// access to the constructed packet bytes (e.g. §5.4 Reed-Solomon
+  /// offline-delivery, which serializes the canonical InfraFrame packet for
+  /// erasure-coded fragmentation) build via this entrypoint and then either
+  /// send via [sendToDevice] + capture, or distribute via the offline path.
+  proto.NetworkPacketV3? buildInfraPacket({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+  }) =>
+      _buildInfraPacket(
+        messageType: messageType,
+        innerPayload: innerPayload,
+        recipientDeviceId: recipientDeviceId,
+      );
+
+  /// Serialize a built `NetworkPacketV3` to wire bytes (HMAC-tagged). Used by
+  /// the §5.4 Reed-Solomon offline-delivery path to obtain the canonical wire
+  /// bytes for fragmentation, identical to what would have been sent over UDP.
+  /// The receiver's HMAC-verify in `dispatchReassembledPacket` accepts these
+  /// bytes after Reed-Solomon reassembly.
+  Uint8List serializePacketForOfflineDelivery(proto.NetworkPacketV3 packet) =>
+      transport.serializeWithTag(packet);
+
+  /// Public delegate to [_sendInfra]. Service-layer migrations that own the
+  /// per-device fan-out (Welle 6 §6.3 RESTORE_BROADCAST and §7.4 Emergency
+  /// KEY_ROTATION_BROADCAST) call this with `(messageType, innerPayload,
+  /// recipientDeviceId)` after resolving the recipient's authorized device
+  /// set via `IdentityResolver.resolve(...)`. Returns false on
+  /// (a) `messageType` outside the §2.3.5 selector, (b) no Device-KEM-PK
+  /// known for `recipientDeviceId`, or (c) the DV cascade exhausting all
+  /// routes. Fire-and-forget — the offline-cascade (S&F + Reed-Solomon)
+  /// remains the service-layer's responsibility.
+  Future<bool> sendInfraTo({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+  }) =>
+      _sendInfra(
+        messageType: messageType,
+        innerPayload: innerPayload,
+        recipientDeviceId: recipientDeviceId,
+      );
+
+  /// Direct UDP send of an InfrastructureFrame to a specific peer's
+  /// address. Bypasses DV cascade — used for hole-punch / port-probe /
+  /// ping where the caller already has the on-wire address. Returns false
+  /// on KEM-PK miss or transport rejection. Fire-and-forget.
+  Future<bool> _sendInfraDirect({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+    required InternetAddress addr,
+    required int port,
+  }) async {
+    final packet = _buildInfraPacket(
+      messageType: messageType,
+      innerPayload: innerPayload,
+      recipientDeviceId: recipientDeviceId,
+    );
+    if (packet == null) return false;
+    packet.nextHopDeviceId = recipientDeviceId;
+    try {
+      return await transport.sendUdp(packet, addr, port);
+    } catch (e) {
+      _log.debug('_sendInfraDirect: transport error to ${addr.address}:$port: $e');
+      return false;
+    }
+  }
+
+  /// Resolve a user identifier to the set of authorized device-node-IDs
+  /// via the 2D-DHT auth-manifest (Architecture §2.2.4). Wraps
+  /// [identityResolver.resolve] and projects the result to deviceNodeIds.
+  Future<List<Uint8List>> resolveUserToDevices(Uint8List userId) async {
+    final devices = await identityResolver.resolve(userId);
+    return devices
+        .map((d) => Uint8List.fromList(d.deviceNodeId))
+        .toList(growable: false);
   }
 
   void _onDiscoveryReceived(Uint8List peerId, int peerPort, InternetAddress from, int fromPort) {
@@ -957,6 +3192,29 @@ class CleonaNode {
       // otherwise the freshly-learned userId is invisible to O(1) lookups.
       if (userId != null && existing.userId == null) {
         routingTable.setPeerUserId(existing, userId);
+      } else if (userId != null &&
+          existing.userId != null &&
+          !_bytesEqual(userId, existing.userId!)) {
+        // Multi-identity: same device, different userId (e.g. Bob+Charly on
+        // the same daemon). Register the additional userId in the secondary
+        // index so resolveUserToDevices() can find this device for either
+        // identity (§26 §3.1). Primary field stays unchanged.
+        routingTable.addExtraUserIdIndex(peerId, userId);
+      }
+      // Inbound packet from a known address is the only hard proof we
+      // have that this address actually works. UDP sendto() returning OK
+      // at the sender side does NOT prove delivery (kernel accepts the
+      // packet for unroutable destinations like 192.0.0.4 too) — without
+      // this hook, recordSuccess() would never fire for non-ack-worthy
+      // traffic and stale addresses kept score=1.0 from artefactual
+      // sender-side bumps.
+      if (ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
+        for (final addr in existing.addresses) {
+          if (addr.ip == ip && addr.port == port) {
+            addr.recordReceived();
+            break;
+          }
+        }
       }
       if (ip.isNotEmpty && ip != '0.0.0.0' && ip != '::' && isAuthoritative) {
         // Legacy fields: only for IPv4 (publicIp/localIp are IPv4 NAT concepts)
@@ -1015,221 +3273,10 @@ class CleonaNode {
       }
       routingTable.addPeer(peer);
     }
-  }
 
-  // ── DHT Protocol Handlers ──────────────────────────────────────────
-
-  void _handlePing(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    // Respond with PONG including observed address + all secondary identities
-    final pong = _createEnvelope(proto.MessageType.DHT_PONG);
-    final pongData = proto.DhtPong()
-      ..senderId = primaryIdentity.nodeId
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..observedIp = from.address
-      ..observedPort = fromPort;
-    // Announce secondary identities so peers can route to them.
-    // Phase 2: send deviceNodeId (per-device routing key for DV neighbor registration)
-    for (final ctx in _identities.values) {
-      if (ctx.nodeIdHex != primaryIdentity.nodeIdHex) {
-        pongData.additionalNodeIds.add(ctx.deviceNodeId);
-      }
-    }
-    pong.encryptedPayload = pongData.writeToBuffer();
-    pong.recipientId = envelope.senderId;
-    if (from.address != '0.0.0.0') {
-      transport.sendUdp(pong, from, fromPort);
-    } else {
-      sendEnvelope(pong, Uint8List.fromList(envelope.senderId));
-    }
-  }
-
-  void _handlePong(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final pongData = proto.DhtPong.fromBuffer(envelope.encryptedPayload);
-      // Use observed address for NAT traversal
-      if (pongData.observedIp.isNotEmpty) {
-        final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-        natTraversal.addObservation(senderHex, pongData.observedIp, pongData.observedPort);
-      }
-      // Register secondary identities at the same address as the primary
-      // They share the same transport, so they need DV neighbor status too —
-      // otherwise messages to secondary identities have no DV route.
-      for (final additionalId in pongData.additionalNodeIds) {
-        final addId = Uint8List.fromList(additionalId);
-        final addHex = bytesToHex(addId);
-        _touchPeer(addId, from.address, fromPort, isAuthoritative: true);
-        _confirmedPeers.add(addHex);
-        if (from.address != '0.0.0.0') {
-          final addr = PeerAddress(ip: from.address, port: fromPort);
-          final ct = connectionTypeFromPriority(addr.priority);
-          final isNew = dvRouting.addDirectNeighbor(addId, ct);
-          if (isNew) {
-            _log.info('DV: New neighbor (secondary) ${addHex.substring(0, 8)} from ${from.address}:$fromPort (${ct.name})');
-            _lastRouteUpdateSentTo[addHex] = DateTime.now();
-            Timer(const Duration(milliseconds: 500), () => _sendWelcomeRouteUpdate(addHex));
-          }
-        }
-      }
-
-      // CGNAT gateway keepalive: when we're behind carrier NAT and receive
-      // a PONG from a public-IP peer, register it for NAT-Timeout-Probing.
-      // This keeps the carrier NAT pinhole alive without a coordinated Hole Punch.
-      if (_isBehindCgnat() && !_isPrivateIp(from.address)) {
-        final senderNodeId = Uint8List.fromList(envelope.senderId);
-        natTraversal.registerGatewayConnection(senderNodeId, from.address, fromPort);
-      }
-
-      // Match to pending RPC
-      dhtRpc.handleResponse(envelope, from.address, fromPort);
-    } catch (e) {
-      _log.debug('PONG parse error: $e');
-    }
-  }
-
-  /// Detect CGNAT: 100.64.0.0/10 or 192.0.0.0/29 (DS-Lite).
-  bool _isBehindCgnat() {
-    return _localIps.any((ip) =>
-        (ip.startsWith('100.') && _isCgnatRange(ip)) ||
-        ip.startsWith('192.0.0.'));
-  }
-
-  bool _isCgnatRange(String ip) {
-    final parts = ip.split('.');
-    if (parts.length != 4) return false;
-    final b1 = int.tryParse(parts[0]) ?? 0;
-    final b2 = int.tryParse(parts[1]) ?? 0;
-    return b1 == 100 && b2 >= 64 && b2 <= 127;
-  }
-
-  void _handleFindNode(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final findData = proto.DhtFindNode.fromBuffer(envelope.encryptedPayload);
-      final targetId = Uint8List.fromList(findData.targetId);
-      final closest = routingTable.findClosestPeers(targetId, count: kBucketSize);
-
-      final response = _createEnvelope(proto.MessageType.DHT_FIND_NODE_RESPONSE);
-      final respData = proto.DhtFindNodeResponse();
-      for (final peer in closest) {
-        respData.closestPeers.add(peer.toProto());
-      }
-      response.encryptedPayload = respData.writeToBuffer();
-      response.recipientId = envelope.senderId;
-      if (from.address != '0.0.0.0') {
-        transport.sendUdp(response, from, fromPort);
-      } else {
-        sendEnvelope(response, Uint8List.fromList(envelope.senderId));
-      }
-    } catch (e) {
-      _log.debug('FIND_NODE error: $e');
-    }
-  }
-
-  // ── Peer List Exchange (3-step delta) ──────────────────────────────
-
-  void _handlePeerListSummary(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final summary = proto.PeerListSummary.fromBuffer(envelope.encryptedPayload);
-      final theirEntries = <String, int>{};
-      for (final entry in summary.entries) {
-        theirEntries[bytesToHex(Uint8List.fromList(entry.nodeId))] = entry.lastSeen.toInt();
-      }
-
-      // Find peers we have that they need (newer or missing)
-      final wantedByThem = <Uint8List>[];
-      for (final peer in routingTable.allPeers) {
-        final hex = peer.nodeIdHex;
-        final theirTs = theirEntries[hex];
-        if (theirTs == null || peer.lastSeen.millisecondsSinceEpoch > theirTs) {
-          wantedByThem.add(peer.nodeId);
-        }
-      }
-
-      // Find peers they have that we want
-      final wanted = <Uint8List>[];
-      final ourPeerIds = routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
-      for (final entry in summary.entries) {
-        final hex = bytesToHex(Uint8List.fromList(entry.nodeId));
-        if (!ourPeerIds.contains(hex)) {
-          wanted.add(Uint8List.fromList(entry.nodeId));
-        }
-      }
-
-      // Send WANT for peers we need
-      if (wanted.isNotEmpty) {
-        final wantMsg = _createEnvelope(proto.MessageType.PEER_LIST_WANT);
-        final wantData = proto.PeerListWant();
-        for (final id in wanted) {
-          wantData.wantedNodeIds.add(id);
-        }
-        wantMsg.encryptedPayload = wantData.writeToBuffer();
-        wantMsg.recipientId = envelope.senderId;
-        if (from.address != '0.0.0.0') {
-          transport.sendUdp(wantMsg, from, fromPort);
-        } else {
-          sendEnvelope(wantMsg, Uint8List.fromList(envelope.senderId));
-        }
-      }
-
-      // Push peers they need
-      if (wantedByThem.isNotEmpty) {
-        final pushMsg = _createEnvelope(proto.MessageType.PEER_LIST_PUSH);
-        final pushData = proto.PeerListPush();
-        for (final id in wantedByThem.take(50)) { // Limit to 50
-          final peer = routingTable.getPeer(id);
-          if (peer != null) {
-            pushData.peers.add(peer.toProto());
-          }
-        }
-        pushMsg.encryptedPayload = pushData.writeToBuffer();
-        pushMsg.recipientId = envelope.senderId;
-        if (from.address != '0.0.0.0') {
-          transport.sendUdp(pushMsg, from, fromPort);
-        } else {
-          sendEnvelope(pushMsg, Uint8List.fromList(envelope.senderId));
-        }
-      }
-    } catch (e) {
-      _log.debug('PeerListSummary error: $e');
-    }
-  }
-
-  void _handlePeerListWant(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final want = proto.PeerListWant.fromBuffer(envelope.encryptedPayload);
-      final pushMsg = _createEnvelope(proto.MessageType.PEER_LIST_PUSH);
-      final pushData = proto.PeerListPush();
-
-      for (final wantedId in want.wantedNodeIds) {
-        final peer = routingTable.getPeer(Uint8List.fromList(wantedId));
-        if (peer != null) {
-          pushData.peers.add(peer.toProto());
-        }
-      }
-
-      pushMsg.encryptedPayload = pushData.writeToBuffer();
-      pushMsg.recipientId = envelope.senderId;
-      if (from.address != '0.0.0.0') {
-        transport.sendUdp(pushMsg, from, fromPort);
-      } else {
-        sendEnvelope(pushMsg, Uint8List.fromList(envelope.senderId));
-      }
-    } catch (e) {
-      _log.debug('PeerListWant error: $e');
-    }
-  }
-
-  void _handlePeerListPush(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final push = proto.PeerListPush.fromBuffer(envelope.encryptedPayload);
-      for (final peerProto in push.peers) {
-        final peer = PeerInfo.fromProto(peerProto);
-        if (peer.networkChannel.isNotEmpty && peer.networkChannel != networkChannel) continue;
-        routingTable.addPeer(peer);
-      }
-      _log.debug('PeerListPush: received ${push.peers.length} peers from ${from.address}');
-      onPeersChanged?.call();
-    } catch (e) {
-      _log.debug('PeerListPush error: $e');
+    if (isAuthoritative && ip.isNotEmpty && _needsKeepalive(ip) &&
+        port > 0) {
+      udpKeepalive.register(bytesToHex(peerId), ip, port, peerId);
     }
   }
 
@@ -1254,18 +3301,23 @@ class CleonaNode {
   }
 
   Future<List<PeerInfo>> _sendFindNode(PeerInfo peer, Uint8List targetId) async {
-    final envelope = _createEnvelope(proto.MessageType.DHT_FIND_NODE);
-    final findData = proto.DhtFindNode()
-      ..targetId = targetId
-      ..senderId = primaryIdentity.nodeId;
-    envelope.encryptedPayload = findData.writeToBuffer();
-    envelope.recipientId = peer.nodeId;
+    // Welle 2A V3-direct: hand DhtRpc the typed request body directly.
+    // Outer Device-Sig + KEM-AEAD are added by the InfraFrame pipeline in
+    // `_sendInfra` (wired into `dhtRpc.sendFunction` at init).
+    final body = Uint8List.fromList((proto.DhtFindNode()
+          ..targetId = targetId
+          ..senderId = primaryIdentity.nodeId)
+        .writeToBuffer());
 
-    final response = await dhtRpc.sendAndWait(envelope, peer);
+    final response = await dhtRpc.sendAndWait(
+      proto.MessageTypeV3.MTV3_DHT_FIND_NODE,
+      body,
+      peer,
+    );
     if (response == null) return [];
 
     try {
-      final respData = proto.DhtFindNodeResponse.fromBuffer(response.encryptedPayload);
+      final respData = proto.DhtFindNodeResponse.fromBuffer(response.payload);
       final result = <PeerInfo>[];
       for (final p in respData.closestPeers) {
         final info = PeerInfo.fromProto(p);
@@ -1289,52 +3341,55 @@ class CleonaNode {
   void sendPing(String ip, int port) => _sendPing(ip, port);
 
   Future<void> _sendPing(String ip, int port) async {
-    final envelope = _createEnvelope(proto.MessageType.DHT_PING);
-    final pingData = proto.DhtPing()
-      ..senderId = primaryIdentity.nodeId
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch);
-    envelope.encryptedPayload = pingData.writeToBuffer();
-
-    try {
-      final addr = InternetAddress(ip);
-      await transport.sendUdp(envelope, addr, port);
-    } catch (_) {}
-  }
-
-  // ── Envelope Creation ──────────────────────────────────────────────
-
-  /// §2.2.4: optionaler `identity`-Parameter für Multi-Identity-Daemons. Ohne
-  /// fällt auf `primaryIdentity` zurück (existing behavior). Application-Layer-
-  /// Sender, die eine spezifische Identität signieren wollen (z.B. Alice +
-  /// AllyCat im selben Daemon), übergeben hier ihren IdentityContext.
-  /// Infrastructure-Sender (DHT, PEER_LIST, ROUTE_UPDATE, etc.) verwenden
-  /// weiterhin `primaryIdentity` — das ist das daemon-weite Self.
-  proto.MessageEnvelope _createEnvelope(
-      proto.MessageType type, {IdentityContext? identity}) {
-    final id = identity ?? primaryIdentity;
-    return proto.MessageEnvelope()
-      ..version = 1
-      ..senderId = id.nodeId          // userId (stable identity)
-      ..senderDeviceNodeId = id.deviceNodeId  // Phase 2: per-device routing
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..messageType = type
-      ..networkTag = networkChannel;
-  }
-
-  /// Extract the device-specific routing ID from an envelope.
-  /// Phase 2: uses senderDeviceNodeId if available, falls back to senderId
-  /// for backward compatibility with pre-Phase-2 peers.
-  Uint8List _routingIdFromEnvelope(proto.MessageEnvelope envelope) {
-    if (envelope.senderDeviceNodeId.isNotEmpty) {
-      return Uint8List.fromList(envelope.senderDeviceNodeId);
+    // Welle 5 INFRASTRUCTURE_FRAME path. DHT_PING is sent unsolicited to
+    // a freshly-discovered IP:port pair where we may not yet know the
+    // recipient's deviceId — Kademlia-style discovery probes work that
+    // way. We try to look the peer up by address; on miss we cannot
+    // build an InfraFrame (no deviceId → no Device-KEM-PK) and silently
+    // skip the ping. The catch-up path (_handleHello / _handlePong)
+    // populates the routing table on the first reverse-direction
+    // packet, after which subsequent pings have a deviceId to encrypt
+    // against.
+    //
+    // TODO (Hauptthread merge — Welle 5 Subagent A+B): when DeviceKEM is
+    // a first-class field on PeerInfo and discovery responses include
+    // it, the address-to-deviceId lookup gets reliable. Today's
+    // best-effort path is symmetric with §2.4.1 which silently drops
+    // on KEM-PK mismatch anyway.
+    PeerInfo? recipient;
+    for (final p in routingTable.allPeers) {
+      for (final a in p.allConnectionTargets()) {
+        if (a.ip == ip && a.port == port) {
+          recipient = p;
+          break;
+        }
+      }
+      if (recipient != null) break;
     }
-    return Uint8List.fromList(envelope.senderId);
+    if (recipient == null) {
+      _log.debug('_sendPing: no peer at $ip:$port — skipping discovery ping '
+          '(deviceId unknown until reverse-direction packet)');
+      return;
+    }
+
+    final ping = proto.DhtPing()
+      ..senderId = primaryIdentity.deviceNodeId;
+
+    await _sendInfraDirect(
+      messageType: proto.MessageTypeV3.MTV3_DHT_PING,
+      innerPayload: ping.writeToBuffer(),
+      recipientDeviceId: recipient.nodeId,
+      addr: InternetAddress(ip),
+      port: port,
+    );
   }
 
-  /// Check if a hex ID belongs to any registered local identity
-  /// (checks both userId and deviceNodeId).
+  /// Check if a hex ID belongs to any registered local identity.
+  /// Matches by userId (per-identity), or by daemon-global deviceNodeId
+  /// (shared by all hosted identities, §3.1).
   bool _isLocalIdentity(String hex) {
-    return _identities.containsKey(hex) || _identitiesByDeviceId.containsKey(hex);
+    return _identities.containsKey(hex) ||
+        bytesToHex(primaryIdentity.deviceNodeId) == hex;
   }
 
   /// Filter targets by NAT context: private IPs are only meaningful when our
@@ -1349,112 +3404,33 @@ class CleonaNode {
       // IPv6 global: no NAT context needed — always routable
       if (addr.ip.contains(':') && !addr.ip.toLowerCase().startsWith('fe80:')) return true;
       if (!_isPrivateIp(addr.ip)) return true;
-      // Bridged-LAN (#U21): target's private IP is in our local network class →
-      // reachable via L2, regardless of public-IP detection state. Without this,
-      // ipify-rotation or stale peer.publicIp causes nodes on the same /24 to
-      // drop direct LAN sends and fall back to relay (~14 s instead of <1 s).
-      // Mirrors the Step-1-success same-network trust at line 1552.
-      if (_isPrivateIp(_localIp) && _samePrivateNetwork(addr.ip, _localIp)) return true;
+      // Private-to-private: if WE are on a private network and the target is
+      // also private, allow it through. Same-subnet reaches via L2; cross-subnet
+      // (e.g. 192.168.10.x ↔ 192.0.2.x) reaches via the gateway router
+      // (OPNsense). Worst case: one wasted UDP packet. Without this, cross-subnet
+      // peers behind the same infrastructure are unreachable for DV ROUTE_UPDATEs
+      // and all routed traffic falls back to relay or times out.
+      if (_isPrivateIp(_localIp) && _isPrivateIp(addr.ip)) return true;
       // Private IP: only try if same NAT (matching public IP) or unknown
       return effectivePublicIp == null || effectivePublicIp == peer.publicIp || peer.publicIp.isEmpty;
     }).toList();
   }
 
-  /// Send an envelope to a peer (used by DhtRpc and relay forwarding).
-  /// V3.1.7: Large payloads (>1200 bytes) use TLS (TCP, reliable, no fragmentation).
-  /// Small payloads use UDP (fast, single packet).
-  Future<bool> _sendEnvelopeToPeer(proto.MessageEnvelope envelope, PeerInfo peer) async {
-    final targets = peer.allConnectionTargets();
-    if (targets.isEmpty) return false;
+  /// Public IP to advertise to peers: port-verified (UPnP/STUN) takes
+  /// priority, then explicit manual override (DNAT on Bootstrap).
+  /// `publicIpForNatContext` (ipify-only) is deliberately excluded —
+  /// it has no port verification and would cause every node behind the
+  /// same NAT to advertise the WAN IP with a non-DNAT'd local port.
+  String? get _advertisedPublicIp =>
+      natTraversal.publicIp ?? manualPublicIp;
 
-    // Check for punched connection — prefer it over regular addresses
-    final peerHex = peer.nodeIdHex;
-    final punched = natTraversal.getPunchedConnection(peerHex);
-    if (punched != null) {
-      try {
-        final ok = await transport.sendUdp(
-          envelope,
-          InternetAddress(punched.peerIp),
-          punched.peerPort,
-        );
-        if (ok) return true;
-      } catch (_) {}
-    }
-
-    // Filter unreachable private IPs + NAT context (V3.1.32).
-    // Private IPs only meaningful if we share the same NAT (public IP match).
-    final natFiltered = _filterNatContext(targets, peer);
-    var reachable = natFiltered.where((addr) => addr.isReachableFromCurrentNetwork).toList();
-    if (reachable.isEmpty) {
-      // All targets heuristically unreachable — try NAT-filtered targets anyway
-      // (DNAT/port-forwarding can make private IPs reachable from same NAT).
-      reachable = natFiltered;
-    }
-    if (reachable.isEmpty) {
-      _log.debug('_sendEnvelopeToPeer: no reachable targets for ${peerHex.substring(0, 8)} '
-          '(${targets.length} total, all filtered by NAT context or reachability)');
-      return false;
-    }
-
-    // V3.1.7: Protocol escalation — lightest first, escalate on failure.
-    // UDP (with NACK-retry for fragments) → TLS (TCP, last resort).
-    // TlsFallbackManager tracks per-peer: 15 UDP failures → TLS mode.
-    final dataSize = envelope.writeToBuffer().length;
-    final isLargePayload = dataSize > maxFragmentPacketSize;
-
-    // If in TLS mode for this peer, skip UDP and go straight to TLS
-    if (isLargePayload && _tlsFallback.isInTlsMode(peerHex)) {
-      for (final addr in reachable) {
-        try {
-          final ok = await transport.sendTls(envelope, InternetAddress(addr.ip), addr.port);
-          if (ok) {
-            _log.debug('_sendEnvelopeToPeer: TLS sent ${dataSize}B to ${peerHex.substring(0, 8)} at ${addr.ip}:${addr.port}');
-            _tlsFallback.recordTlsSuccess(peerHex);
-            return true;
-          }
-        } catch (_) {}
-      }
-      return false;
-    }
-
-    // V3: Prioritized delivery — best address first, escalate on failure.
-    // Architecture Section 2.4.3: "V3 replaces shotgun to all addresses
-    // with route-based prioritized delivery."
-    // Addresses are already sorted by priority (LAN > private > public).
-    for (final addr in reachable) {
-      try {
-        final ok = await transport.sendUdp(envelope, InternetAddress(addr.ip), addr.port);
-        if (ok) return true;
-      } catch (_) {}
-    }
-
-    // UDP failed on all addresses — escalate to TLS for large payloads
-    if (isLargePayload) {
-      for (final addr in reachable) {
-        try {
-          final ok = await transport.sendTls(envelope, InternetAddress(addr.ip), addr.port);
-          if (ok) {
-            _log.debug('_sendEnvelopeToPeer: UDP→TLS escalation ${dataSize}B to '
-                '${peerHex.substring(0, 8)} at ${addr.ip}:${addr.port}');
-            return true;
-          }
-        } catch (_) {}
-      }
-    }
-
-    _log.debug('_sendEnvelopeToPeer: all sends failed for '
-        '${peerHex.substring(0, 8)} (targets: ${reachable.map((a) => "${a.ip}:${a.port}").join(", ")})');
-    return false;
-  }
-
-  /// V3.1: Public relay send — for "reply via same path" (DELIVERY_RECEIPT via relay).
-  Future<bool> sendViaRelay(proto.MessageEnvelope envelope, Uint8List recipientNodeId) =>
-      _sendViaRelay(envelope, recipientNodeId);
-
-  /// §2.2.4: public direct-send-to-peer für IdentityPublisher (fire-and-forget).
-  /// Nutzt den existierenden Address-Cascade (LAN-priorisiert, mit Backoff).
-  Future<bool> sendEnvelopeToPeer(proto.MessageEnvelope envelope, PeerInfo peer) =>
-      _sendEnvelopeToPeer(envelope, peer);
+  /// Public port to advertise. When `--public-ip` was set manually (Bootstrap
+  /// / seed nodes), the listening port is authoritative — a NAT port-probe may
+  /// detect a DNAT-translated port (e.g. Fritzbox maps external:8080 →
+  /// internal:8081) which belongs to a DIFFERENT network channel (Live vs Beta)
+  /// and must never be advertised.
+  int? get _advertisedPublicPort =>
+      manualPublicIp != null ? port : natTraversal.publicPort;
 
   /// §2.2.4: Liefert die aktuelle Adress-Liste dieses Nodes als
   /// `PeerAddressProto`-Bündel für die Liveness-Records. LAN-Adressen
@@ -1470,11 +3446,12 @@ class CleonaNode {
             ? proto.AddressType.IPV6_GLOBAL
             : proto.AddressType.IPV4_PRIVATE);
     }
-    final pubV4 = natTraversal.publicIp;
+    final pubV4 = _advertisedPublicIp;
+    final pubPort = _advertisedPublicPort ?? port;
     if (pubV4 != null && pubV4.isNotEmpty) {
       list.add(proto.PeerAddressProto()
         ..ip = pubV4
-        ..port = port
+        ..port = pubPort
         ..addressType = proto.AddressType.IPV4_PUBLIC);
     }
     final pubV6 = natTraversal.publicIpv6;
@@ -1487,538 +3464,45 @@ class CleonaNode {
     return list;
   }
 
-  /// V3.1: Public DV next-hop send — for "reply via same path".
-  Future<bool> sendViaNextHopPublic(proto.MessageEnvelope envelope, Uint8List recipientNodeId, PeerInfo nextHopPeer) =>
-      _sendViaNextHop(envelope, recipientNodeId, nextHopPeer);
-
   /// Send an envelope to a specific peer by node ID.
-  /// V3 + §2.2.4: Cache-Hit → Dim-2 Resolution → MessageQueue. Kein Legacy-
-  /// Resolution-Fallback (Hard-Cut, gebündelt mit Sec H-5 KEM v2). DV-Routing
-  /// bleibt als TRANSPORT-Mechanismus aktiv für die aufgelösten Adressen.
-  Future<bool> sendEnvelope(proto.MessageEnvelope envelope, Uint8List recipientNodeId) async {
-    // Phase 2: try deviceNodeId first, then userId fallback (callers may pass either).
-    // Freshness gate matches IdentityPublisher.foregroundLiveTtl — addresses older
-    // than this window are not authoritative; treat as cache miss so the resolver
-    // can refresh from the 2D-DHT (§2.2.4). Without this gate a stale entry from
-    // a prior session (e.g. peer restart with new NAT-egress port) silently
-    // sends to the dead address and the cascade falls into relay/S&F instead of
-    // direct delivery.
-    const cacheMaxAge = Duration(minutes: 15);
-    var peer = routingTable.getFreshPeer(recipientNodeId, maxAge: cacheMaxAge) ??
-        routingTable.getFreshPeerByUserId(recipientNodeId, maxAge: cacheMaxAge);
-
-    // Cache miss → §2.2.4 IdentityResolver (Auth-Manifest + Liveness-Lookup)
-    if (peer == null) {
-      final recipientHex = bytesToHex(recipientNodeId);
-      _log.debug('Peer ${recipientHex.substring(0, 8)} cache miss → Dim-2 lookup');
-      final resolved = await identityResolver.resolve(recipientNodeId);
-      if (resolved.isNotEmpty) {
-        // Resolver populated routingTable; re-query without the freshness gate
-        // (the resolver just wrote these entries, so they're current by definition).
-        peer = routingTable.getPeer(recipientNodeId) ??
-            routingTable.getPeerByUserId(recipientNodeId);
-      } else {
-        // Resolver had no manifest. Fall back to whatever the routing table
-        // still holds — better a stale-address attempt than silently dropping
-        // when a peer has just gone offline.
-        peer = routingTable.getPeer(recipientNodeId) ??
-            routingTable.getPeerByUserId(recipientNodeId);
-      }
-    }
-
-    if (peer == null) {
-      // Hard-Cut: kein Default-Gateway-Resolution-Fallback mehr.
-      final recipientHex = bytesToHex(recipientNodeId);
-      _log.debug('Cannot send: identity ${recipientHex.substring(0, 8)} '
-          'unresolvable via cache + Dim-2');
-      final type = envelope.messageType;
-      // Queue ack-worthy messages for later delivery when route appears
-      if (AckTracker.isAckWorthy(type) && envelope.messageId.isNotEmpty) {
-        final msgIdHex = bytesToHex(Uint8List.fromList(envelope.messageId));
-        messageQueue.enqueue(
-          messageIdHex: msgIdHex,
-          recipientNodeId: recipientNodeId,
-          serializedEnvelope: envelope.writeToBuffer(),
-        );
-      }
-      return false;
-    }
-
-    final peerHex = peer.nodeIdHex;
-    final targets = peer.allConnectionTargets();
-
-    // Compute PoW only for non-infrastructure messages to non-LAN peers.
-    final type = envelope.messageType;
-    final isInfrastructure = type == proto.MessageType.FRAGMENT_STORE ||
-        type == proto.MessageType.FRAGMENT_RETRIEVE ||
-        type == proto.MessageType.FRAGMENT_DELETE ||
-        type == proto.MessageType.CONTACT_REQUEST ||
-        type == proto.MessageType.CONTACT_REQUEST_RESPONSE ||
-        type == proto.MessageType.TYPING_INDICATOR ||
-        type == proto.MessageType.READ_RECEIPT ||
-        type == proto.MessageType.DELIVERY_RECEIPT ||
-        type == proto.MessageType.GROUP_INVITE ||
-        type == proto.MessageType.GROUP_LEAVE ||
-        type == proto.MessageType.CHANNEL_INVITE ||
-        type == proto.MessageType.CHANNEL_LEAVE ||
-        type == proto.MessageType.CHANNEL_ROLE_UPDATE ||
-        type == proto.MessageType.CHAT_CONFIG_UPDATE ||
-        type == proto.MessageType.KEY_ROTATION_BROADCAST ||
-        type == proto.MessageType.PROFILE_UPDATE ||
-        type == proto.MessageType.RESTORE_BROADCAST ||
-        type == proto.MessageType.RELAY_FORWARD ||
-        type == proto.MessageType.RELAY_ACK ||
-        type == proto.MessageType.REACHABILITY_QUERY ||
-        type == proto.MessageType.REACHABILITY_RESPONSE ||
-        type == proto.MessageType.PEER_STORE ||
-        type == proto.MessageType.PEER_STORE_ACK ||
-        type == proto.MessageType.PEER_RETRIEVE ||
-        type == proto.MessageType.PEER_RETRIEVE_RESPONSE ||
-        type == proto.MessageType.HOLE_PUNCH_REQUEST ||
-        type == proto.MessageType.HOLE_PUNCH_NOTIFY ||
-        type == proto.MessageType.HOLE_PUNCH_PING ||
-        type == proto.MessageType.HOLE_PUNCH_PONG ||
-        type == proto.MessageType.MEDIA_CHUNK ||
-        type == proto.MessageType.CALL_GROUP_AUDIO ||
-        type == proto.MessageType.CALL_GROUP_VIDEO ||
-        type == proto.MessageType.CALL_GROUP_LEAVE ||
-        type == proto.MessageType.CALL_GROUP_KEY_ROTATE ||
-        type == proto.MessageType.CALL_RTT_PING ||
-        type == proto.MessageType.CALL_RTT_PONG ||
-        type == proto.MessageType.CALL_TREE_UPDATE ||
-        type == proto.MessageType.CALL_REJOIN;
-    // A peer is LAN if it has at least one same-subnet address (priority 1).
-    // Previous check (targets.every(isPrivateIp)) falsely classified LAN peers
-    // as non-LAN when they also had a public IP (via UPnP), forcing unnecessary
-    // PoW computation that blocked image delivery (fire-and-forget race condition).
-    final isLanPeer = targets.any((addr) => addr.priority == 1);
-    // V3.1.7: Skip PoW when message will travel via relay — receiver exempts
-    // relay-delivered messages (from=0.0.0.0) from PoW verification anyway.
-    // Saves 500ms-2s on mobile devices.
-    // Multi-device: directBlocked is per-address (via backoff), not per-node.
-    // A second device may have a fresh address while the first is in backoff.
-    // The node-level consecutiveRouteFailures is kept for diagnostics/logging
-    // but no longer gates the send decision.
-    final activeTargets = targets.where((addr) =>
-        !addr.isInBackoff && addr.isReachableFromCurrentNetwork).toList();
-    final directBlocked = activeTargets.isEmpty;
-    final willRelay = directBlocked;
-    if (!isInfrastructure && !isLanPeer && !willRelay && !envelope.hasPow()) {
-      final signedData = envelope.writeToBuffer();
-      try {
-        envelope.pow = await ProofOfWork.computeAsync(signedData, difficulty: ProofOfWork.defaultDifficulty);
-      } catch (e) {
-        _log.error('PoW computation failed: $e — using sync fallback');
-        envelope.pow = ProofOfWork.compute(signedData, difficulty: ProofOfWork.defaultDifficulty);
-      }
-    }
-
-    final ackWorthy = AckTracker.isAckWorthy(type);
-    final isRelayable = type != proto.MessageType.RELAY_FORWARD &&
-        type != proto.MessageType.RELAY_ACK &&
-        type != proto.MessageType.TYPING_INDICATOR &&
-        type != proto.MessageType.READ_RECEIPT;
-
-    // ── V3.1 Route-based sending ──────────────────────────────
-    // RUDP Light principle: OS-level UDP "success" ≠ delivery.
-    // Only DELIVERY_RECEIPT confirms actual delivery.
-    //
-    // Cascade logic:
-    // 1. Direct to recipient (ACK tracker monitors)
-    // 2. Relay via confirmed-working neighbor (Gateway/DV)
-    // 3. Fallback relays (learned, generic)
-    // 4. S&F as offline safety net
-    //
-    // Direct send to recipient starts ACK tracker but does NOT
-    // end the cascade — the confirmed-working relay is always
-    // also tried (because direct can fail due to AP isolation).
-    bool anySent = false;
-
-    // ── Step 1: Direct to recipient ────────────────────────────
-    // Attempts direct delivery. With AP isolation the ACK fails
-    // after 8s → Route DOWN. Cascade continues regardless.
-    // V3.1.7: Skip direct for large payloads when route is not ackConfirmed.
-    // Large unconfirmed direct sends flood the OS send buffer with dead
-    // fragments (AP isolation drops them), blocking subsequent relay sends.
-    // (directBlocked computed above for PoW exemption, reused here)
-    final directRoute = dvRouting.bestRouteTo(peerHex);
-    final directProven = directRoute != null && directRoute.isDirect && directRoute.ackConfirmed;
-    // Skip large direct sends only if peer is truly unconfirmed (never heard from).
-    // Confirmed peers (received PONG/message) have a working path — no AP isolation.
-    final peerConfirmed = _confirmedPeers.contains(peerHex);
-    final skipDirectLarge = !directProven && !peerConfirmed &&
-        envelope.writeToBuffer().length > maxFragmentPacketSize;
-    if (!directBlocked && !skipDirectLarge && targets.isNotEmpty) {
-      final success = await _sendDirectToPeer(envelope, peer, ackWorthy);
-      if (success) {
-        if (directProven) {
-          return true;
-        }
-        // Cross-subnet private peers (priority 2): trust direct send only if
-        // we also have a private IP in the SAME /8 range (same physical network).
-        // 10.0.2.x (emulator NAT) is NOT reachable from 192.168.x.x even though
-        // both are "private" — different network classes behind different NATs.
-        final bestTarget = targets.firstOrNull;
-        if (bestTarget != null && bestTarget.priority == 2 && _isPrivateIp(_localIp) &&
-            _samePrivateNetwork(bestTarget.ip, _localIp)) {
-          return true;
-        }
-        // Priority 1 (same subnet): only trust if directProven (handled above).
-        // confirmedPeers is NOT sufficient — peer may be confirmed via relay
-        // (from=0.0.0.0) while AP isolation blocks direct UDP.
-        // Fall through to relay cascade for all non-proven same-subnet peers.
-        // Untrusted direct (priority 1 without ACK, never heard from):
-        // packet was sent but may be AP-isolated. Do NOT set anySent —
-        // relay fallback (Steps 2c/4) must still run as safety net.
-      }
-    }
-
-    // ── Step 2: Relay via confirmed-working neighbor ──────────
-    // Priority: learned relay route (proven return path from incoming
-    // RELAY_FORWARD) > DV relay routes > default gateway.
-    _log.debug('Cascade for ${peerHex.substring(0, 8)}: anySent=$anySent, '
-        'directBlocked=$directBlocked, isRelayable=$isRelayable, '
-        'hasRelay=${peer.hasValidRelayRoute}, '
-        'gwHex=${dvRouting.defaultGatewayHex?.substring(0, 8)}, '
-        'dvRoutes=${dvRouting.routesTo(peerHex).length}, '
-        'neighbors=${dvRouting.neighbors.length}');
-    if (isRelayable) {
-      // 2a: Learned relay route — most specific, proven path for THIS peer.
-      // Must be tried BEFORE default gateway, because the gateway may not
-      // be able to reach the target (e.g. AP isolation: Alice as gateway
-      // can't reach phone, but Bootstrap as learned relay can).
-      // V3.1.35: Validate relay node is actually reachable — stale relay
-      // routes from disk-loaded routing tables cause unnecessary timeouts.
-      if (peer.hasValidRelayRoute) {
-        final relayViaHex = bytesToHex(peer.relayViaNodeId!);
-        // Task #30 (Y): skip the learned relay if it's in cooldown after a
-        // recent 3x ACK timeout. Lets the cascade fall through to DV/GW
-        // alternatives instead of replaying a known-broken outgoing path.
-        if (peer.isRelayInCooldown(relayViaHex)) {
-          _log.debug('Step 2a skipped: ${peerHex.substring(0, 8)} via '
-              '${relayViaHex.substring(0, 8)} in cooldown');
-        } else if (relayViaHex != peerHex && !_isLocalIdentity(relayViaHex)) {
-          final relayPeer = routingTable.getPeer(peer.relayViaNodeId!);
-          final relayAlive = relayPeer != null && _confirmedPeers.contains(relayViaHex);
-          if (relayPeer != null && relayAlive) {
-            _log.debug('Learned relay for ${peerHex.substring(0, 8)} via ${relayViaHex.substring(0, 8)}');
-            final success = await _sendViaSpecificRelay(envelope, recipientNodeId, relayPeer);
-            // Fix A2 (Task #30): nur short-circuit, wenn diese Route zuletzt
-            // sauber funktioniert hat. Bei recent ACK-Timeouts (consecutive
-            // RelayFailures>0) durchfallen lassen zu 2b/2c/2d/4 — Multi-Pfad-
-            // Versicherung gegen kaputte learned relay routes (z.B. asymmetrische
-            // Reachability oder stale Mapping nach Bob's Routing-Wechsel).
-            // Für Internet-Szenarien bleibt das Lernen unverändert; nur die
-            // Stop-Bedingung der Cascade wird strenger.
-            if (success && peer.consecutiveRelayFailures == 0) return true;
-          } else {
-            peer.clearRelayRoute();
-          }
-        } else {
-          peer.clearRelayRoute();
-        }
-      }
-
-      final dvRoutes = dvRouting.routesTo(peerHex);
-
-      // 2b: DV relay routes — confirmed nextHops first
-      for (final route in dvRoutes) {
-        if (!route.isAlive || route.isDirect) continue;
-        if (route.nextHop == null) continue;
-        final nhHex = bytesToHex(route.nextHop!);
-        if (!dvRouting.isRelayConfirmed(nhHex)) continue; // Only confirmed
-        final nextHopPeer = routingTable.getPeer(route.nextHop!);
-        if (nextHopPeer != null) {
-          final success = await _sendViaNextHop(envelope, recipientNodeId, nextHopPeer);
-          if (success) return true; // Confirmed → end cascade
-        }
-      }
-
-      // 2c: Default gateway
-      if (!anySent) {
-        final gwHex = dvRouting.defaultGatewayHex;
-        if (gwHex != null && gwHex != peerHex && !_isLocalIdentity(gwHex)) {
-          final gwPeer = routingTable.getPeer(hexToBytes(gwHex));
-          if (gwPeer != null) {
-            _log.debug('Default-Gateway ${gwHex.substring(0, 8)} for ${peerHex.substring(0, 8)}');
-            final success = await _sendViaNextHop(envelope, recipientNodeId, gwPeer);
-            if (success) return true;
-          } else {
-            _log.debug('Default-Gateway ${gwHex.substring(0, 8)} skipped for ${peerHex.substring(0, 8)}: gwPeer not in routing table');
-          }
-        } else if (gwHex != null) {
-          final skipReason = gwHex == peerHex
-              ? 'gwHex == peerHex (handled by alt-relay below)'
-              : '_isLocalIdentity(${gwHex.substring(0, 8)})';
-          _log.debug('Default-Gateway skipped for ${peerHex.substring(0, 8)}: $skipReason');
-        }
-        // V3.1.52: Target IS the default gateway — direct send failed or
-        // unconfirmed, relay through any OTHER confirmed neighbor instead.
-        // Without this, messages to the gateway node have no relay fallback
-        // (gwHex == peerHex skips the normal GW path, and all DV routes to
-        // a neighbor are isDirect → Steps 2b/2d skip them too).
-        if (gwHex != null && gwHex == peerHex) {
-          for (final neighborHex in dvRouting.neighbors.keys) {
-            if (neighborHex == peerHex) continue;
-            if (_isLocalIdentity(neighborHex)) continue;
-            if (!_confirmedPeers.contains(neighborHex)) continue;
-            final neighborPeer = routingTable.getPeer(hexToBytes(neighborHex));
-            if (neighborPeer != null) {
-              _log.debug('Alt-relay via ${neighborHex.substring(0, 8)} for gateway-target ${peerHex.substring(0, 8)}');
-              final success = await _sendViaNextHop(envelope, recipientNodeId, neighborPeer);
-              if (success) return true;
-            }
-          }
-        }
-      }
-
-      // 2d: DV relay routes — unconfirmed nextHops (fallback)
-      for (final route in dvRoutes) {
-        if (!route.isAlive || route.isDirect) continue;
-        if (route.nextHop == null) continue;
-        final nhHex = bytesToHex(route.nextHop!);
-        if (dvRouting.isRelayConfirmed(nhHex)) continue; // Already tried in 2b
-        final nextHopPeer = routingTable.getPeer(route.nextHop!);
-        if (nextHopPeer != null) {
-          final success = await _sendViaNextHop(envelope, recipientNodeId, nextHopPeer);
-          if (success) { anySent = true; break; } // Unconfirmed → continue
-        }
-      }
-    }
-
-    // ── Step 4: Generic relay search ──────────────────────────
-    if (!anySent && isRelayable) {
-      final relayed = await _sendViaRelay(envelope, recipientNodeId);
-      if (relayed) return true;
-    }
-
-    if (anySent) return true; // Direct or unconfirmed relay has sent
-
-    // Observability: if we reach here with no send path, the cascade
-    // exhausted all options silently. This is the signal for debugging
-    // "message never arrives" incidents.
-    _log.warn('Cascade fell through for ${peerHex.substring(0, 8)}: '
-        'no direct, no relay, no gateway, no S&F path — '
-        'type=${envelope.messageType.name} size=${envelope.encryptedPayload.length}B '
-        'dvRoutes=${dvRouting.routesTo(peerHex).length} '
-        'neighbors=${dvRouting.neighbors.length} '
-        'hasRelay=${peer.hasValidRelayRoute} '
-        'gwHex=${dvRouting.defaultGatewayHex?.substring(0, 8)} '
-        'ackWorthy=$ackWorthy');
-
-    // ── Step 5: Store-and-Forward (offline safety net) ─────────
-    if (ackWorthy) {
-      await _storeOnPeers(envelope, recipientNodeId);
-    }
-
-    _tlsFallback.recordFailure(peerHex);
-
-    // Queue for retry when route becomes available
-    if (ackWorthy && envelope.messageId.isNotEmpty) {
-      final msgIdHex = bytesToHex(Uint8List.fromList(envelope.messageId));
-      messageQueue.enqueue(
-        messageIdHex: msgIdHex,
-        recipientNodeId: recipientNodeId,
-        serializedEnvelope: envelope.writeToBuffer(),
-      );
-    }
-
-    return false;
-  }
-
-  /// Direct send to peer's addresses (priority-sorted, UDP primary, TLS as anti-censorship fallback).
-  Future<bool> _sendDirectToPeer(
-    proto.MessageEnvelope envelope,
-    PeerInfo peer,
-    bool ackWorthy,
-  ) async {
-    final peerHex = peer.nodeIdHex;
-    final targets = peer.allConnectionTargets(); // Sorted by priority ASC, score DESC
-
-    // Filter: NAT context (V3.1.32) + backoff + reachability heuristic.
-    final natFiltered = _filterNatContext(targets, peer);
-    var activeTargets = natFiltered
-        .where((addr) => !addr.isInBackoff && addr.isReachableFromCurrentNetwork)
-        .toList();
-    if (activeTargets.isEmpty) {
-      // All targets heuristically unreachable — try non-backoff NAT-filtered targets
-      activeTargets = natFiltered.where((addr) => !addr.isInBackoff).toList();
-      if (activeTargets.isEmpty) return false;
-    }
-
-    // TLS mode (anti-censorship fallback): periodic UDP probe + TLS send
-    if (_tlsFallback.isInTlsMode(peerHex)) {
-      if (_tlsFallback.shouldProbeUdp(peerHex)) {
-        _tlsFallback.resetProbeTimer(peerHex);
-        for (final addr in activeTargets) {
-          try {
-            final udpOk = await transport.sendUdp(envelope, InternetAddress(addr.ip), addr.port);
-            if (udpOk) {
-              _tlsFallback.recordSuccess(peerHex);
-              addr.recordSuccess();
-              if (ackWorthy && envelope.messageId.isNotEmpty) {
-                _trackAck(envelope, peerHex, peer.nodeId, [addr]);
-              }
-              return true;
-            }
-          } catch (_) {}
-        }
-      }
-      for (final addr in activeTargets) {
-        try {
-          final tlsOk = await transport.sendTls(envelope, InternetAddress(addr.ip), addr.port);
-          if (tlsOk) {
-            _tlsFallback.recordTlsSuccess(peerHex);
-            addr.recordSuccess();
-            if (ackWorthy && envelope.messageId.isNotEmpty) {
-              _trackAck(envelope, peerHex, peer.nodeId, [addr]);
-            }
-            return true;
-          }
-        } catch (_) {}
-      }
-      return false;
-    }
-
-    // UDP primary — single port, all traffic
-    final udpFutures = <Future<bool>>[];
-    for (final addr in activeTargets) {
-      try {
-        udpFutures.add(transport.sendUdp(envelope, InternetAddress(addr.ip), addr.port));
-      } catch (_) {}
-    }
-
-    if (udpFutures.isEmpty) return false;
-
-    final results = await Future.wait(udpFutures).timeout(
-      const Duration(milliseconds: 1500),
-      onTimeout: () => udpFutures.map((_) => false).toList(),
-    );
-
-    // Score tracking: for ackWorthy messages, let AckTracker handle BOTH
-    // success and failure exclusively — prevents double-counting failures
-    // (once here + once in AckTracker timeout → premature backoff).
-    for (var i = 0; i < activeTargets.length && i < results.length; i++) {
-      if (results[i]) {
-        if (!ackWorthy) activeTargets[i].recordSuccess();
-      } else {
-        if (!ackWorthy) activeTargets[i].recordFailure();
-      }
-    }
-
-    final anySuccess = results.any((r) => r);
-
-    if (anySuccess) {
-      _tlsFallback.recordSuccess(peerHex);
-      if (ackWorthy && envelope.messageId.isNotEmpty) {
-        _trackAck(envelope, peerHex, peer.nodeId, activeTargets);
-      }
-      return true;
-    }
-
-    return false;
-  }
-
-  /// Register ACK tracking for RUDP Light (non-blocking).
-  /// V3.1: Supports relay context for per-route failure tracking and relay-aware timeouts.
-  void _trackAck(
-    proto.MessageEnvelope envelope, String peerHex, Uint8List peerNodeId, List<PeerAddress> addrs, {
-    String? viaNextHopHex,
-    int estimatedHops = 1,
-  }) {
-    final msgIdHex = bytesToHex(Uint8List.fromList(envelope.messageId));
-    final rtt = dhtRpc.getRtt(peerNodeId);
-    final timeout = AckTracker.computeTimeout(rtt, hopCount: estimatedHops);
-    ackTracker.trackSend(msgIdHex, peerHex, List.of(addrs), timeout,
-        viaNextHopHex: viaNextHopHex, estimatedHops: estimatedHops,
-        serializedEnvelope: envelope.writeToBuffer(),
-        recipientNodeId: peerNodeId);
-  }
-
-  /// §26 Phase 3: Send envelope to ALL known devices of a user (call fan-out).
-  /// Falls back to single sendEnvelope if no per-device entries exist.
-  Future<bool> sendToAllDevices(proto.MessageEnvelope envelope, Uint8List userId) async {
-    final peers = routingTable.getAllPeersForUserId(userId);
-    if (peers.isEmpty) {
-      // No device-specific entries — try normal send (may use userId fallback)
-      return sendEnvelope(envelope, userId);
-    }
-    var anySent = false;
-    for (final peer in peers) {
-      // Clone envelope for each device (PoW/ack tracking are per-send)
-      final copy = proto.MessageEnvelope.fromBuffer(envelope.writeToBuffer());
-      final sent = await sendEnvelope(copy, peer.nodeId);
-      if (sent) anySent = true;
-    }
-    return anySent;
-  }
-
-  /// Send via DV routing next-hop (wraps in RELAY_FORWARD with TTL=64).
-  Future<bool> _sendViaNextHop(
-    proto.MessageEnvelope envelope,
-    Uint8List recipientNodeId,
-    PeerInfo nextHopPeer,
-  ) async {
-    // V3.1.12: Chunk large envelopes that would exceed relay budget
-    if (_needsChunking(envelope)) {
-      return _sendChunkedViaRelay(envelope, recipientNodeId, nextHopPeer, isNextHop: true);
-    }
-
-    final sodium = SodiumFFI();
-    final relayId = sodium.randomBytes(16);
-
-    final relay = proto.RelayForward()
-      ..relayId = relayId
-      ..finalRecipientId = recipientNodeId
-      ..wrappedEnvelope = envelope.writeToBuffer()
-      ..hopCount = 1
-      ..maxHops = RelayBudget.maxHops
-      ..ttl = 64
-      ..originNodeId = primaryIdentity.deviceNodeId
-      ..createdAtMs = Int64(DateTime.now().millisecondsSinceEpoch);
-    relay.visitedNodes.add(primaryIdentity.deviceNodeId);
-
-    final relayEnvelope = primaryIdentity.createSignedEnvelope(
-      proto.MessageType.RELAY_FORWARD,
-      relay.writeToBuffer(),
-      recipientId: nextHopPeer.nodeId,
-    );
-
-    final ok = await _sendEnvelopeToPeer(relayEnvelope, nextHopPeer);
-    if (ok) {
-      final relayIdHex = bytesToHex(relayId);
-      _pendingRelays[relayIdHex] = (
-        recipientNodeId: recipientNodeId,
-        relayPeerNodeId: Uint8List.fromList(nextHopPeer.nodeId),
-      );
-      Timer(const Duration(minutes: 5), () => _pendingRelays.remove(relayIdHex));
-
-      // V3.1: Track ACK against FINAL RECIPIENT with relay-aware timeout.
-      final innerType = envelope.messageType;
-      if (AckTracker.isAckWorthy(innerType) && envelope.messageId.isNotEmpty) {
-        final recipientHex = bytesToHex(recipientNodeId);
-        final route = dvRouting.bestRouteTo(recipientHex);
-        final hops = route?.hopCount ?? 2;
-        _trackAck(envelope, recipientHex, recipientNodeId,
-            nextHopPeer.allConnectionTargets(),
-            viaNextHopHex: nextHopPeer.nodeIdHex, estimatedHops: hops);
-      }
-
-      _log.info('DV relay: via ${nextHopPeer.nodeIdHex.substring(0, 8)} '
-          'for ${bytesToHex(recipientNodeId).substring(0, 8)}');
-      return true;
-    }
-    return false;
-  }
-
+  /// V3 + §2.2.4: Cache-Hit → Dim-2 Resolution → S&F/Reed-Solomon/Mailbox-Pull.
+  /// Kein Legacy-Resolution-Fallback (Hard-Cut, gebündelt mit Sec H-5 KEM v2).
+  /// DV-Routing bleibt als TRANSPORT-Mechanismus aktiv für die aufgelösten
   /// Returns true if any peer has been confirmed reachable since this node
   /// started. Uses PeerInfo.lastSeen (set on PONG / actual message receipt)
   /// rather than PeerAddress.lastSuccess (set on OS-level send, which can
   /// succeed even when the peer is unreachable due to AP isolation).
   /// Ignores lastSeen values loaded from disk (previous sessions).
   bool _hasRecentlyReachablePeer() {
+    // Spec-aligned reachability check (Architecture §5.10.5): a peer is
+    // considered reachable in this session only if at least one
+    // HMAC-validated, rate-limit-passed packet has actually arrived.
+    // `PeerInfo.lastSeen` from disk-loaded entries is NOT a valid signal —
+    // a single dead entry with a touched lastSeen would otherwise abort
+    // Stage-5 Re-Discovery and leave the daemon mesh-isolated.
+    return _authenticatedReceivesInSession > 0;
+  }
+
+  bool _hasCrossSubnetPeer() {
+    if (_localIps.isEmpty) return false;
+    final ownThirdOctets = <int>{};
+    for (final ip in _localIps) {
+      final parts = ip.split('.');
+      if (parts.length == 4) {
+        final c = int.tryParse(parts[2]);
+        if (c != null) ownThirdOctets.add(c);
+      }
+    }
+    if (ownThirdOctets.isEmpty) return false;
     for (final peer in routingTable.allPeers) {
-      if (peer.lastSeen.isAfter(_startedAt)) return true;
+      if (!isPeerConfirmed(peer.nodeIdHex)) continue;
+      for (final addr in peer.addresses) {
+        final parts = addr.ip.split('.');
+        if (parts.length == 4) {
+          final c = int.tryParse(parts[2]);
+          if (c != null && !ownThirdOctets.contains(c)) return true;
+        }
+      }
     }
     return false;
   }
@@ -2043,6 +3527,18 @@ class CleonaNode {
       for (final hex in removed) {
         _log.info('Maintenance: removed ${hex.substring(0, 8)} from routing table');
         dvRouting.removeNeighbor(hexToBytes(hex));
+        udpKeepalive.unregister(hex);
+      }
+    }
+    // H-3: Evict DV neighbors that are no longer in the routing table.
+    // When routingTable.prune() evicts a peer, the DV _neighbors map may
+    // still reference it. Gateway selection then scores a neighbor with no
+    // addresses, leading to sends into the void.
+    final dvNeighborIds = dvRouting.neighborIds;
+    for (final nid in dvNeighborIds) {
+      if (routingTable.getPeer(hexToBytes(nid)) == null) {
+        _log.info('Maintenance: evicting zombie DV neighbor ${nid.substring(0, 8)}');
+        dvRouting.removeNeighbor(hexToBytes(nid));
       }
     }
     // Deep GC: protected seeds survive the 4h prune for Doze-resilience
@@ -2051,6 +3547,27 @@ class CleonaNode {
     final staleSeeds = routingTable.pruneStaleSeeds(const Duration(days: 30));
     if (staleSeeds > 0) {
       _log.info('Maintenance: pruned $staleSeeds stale seed peers (>30d)');
+    }
+    // Evict peers with high failure count + old lastSeen + no alive DV routes.
+    // Catches zombie peers (e.g. stale deviceIds) that accumulate failures
+    // without being old enough for the 4h prune.
+    final evicted = routingTable.evictStalePeers(
+      hasAliveRoutes: (deviceHex) =>
+          dvRouting.aliveRouteCountFor(deviceHex) > 0,
+    );
+    if (evicted.isNotEmpty) {
+      for (final hex in evicted) {
+        _log.info('Maintenance: evicted stale peer ${hex.substring(0, 8)} '
+            '(high failures, no alive routes)');
+        dvRouting.removeNeighbor(hexToBytes(hex));
+        udpKeepalive.unregister(hex);
+      }
+    }
+    // Prune expired DV routes (dead for >15 min, not refreshed).
+    final expiredDests =
+        dvRouting.pruneExpiredRoutes(const Duration(minutes: 15));
+    if (expiredDests.isNotEmpty) {
+      _log.info('Maintenance: pruned ${expiredDests.length} expired DV destinations');
     }
     // Prune stale addresses (>14 days without lastSuccess)
     var staleAddrs = 0;
@@ -2061,19 +3578,42 @@ class CleonaNode {
       _log.info('Maintenance: removed $staleAddrs stale addresses');
     }
 
+    // Cross-subnet discovery (§4.10): if no peer on a different /24 is known,
+    // run a subnet scan. Architecturally replaces the removed bootstrap_seeds.json.
+    if (!_hasCrossSubnetPeer()) {
+      _log.info('Maintenance: no cross-subnet peer — starting subnet scan');
+      localDiscovery.startSubnetScan(
+          _localIps, () => _hasCrossSubnetPeer());
+    }
+
     dvRouting.updateDefaultGateway();
     peerMessageStore.pruneExpired();
-    messageQueue.pruneExpired();
+    // V3.0: messageQueue.pruneExpired() entfällt — keine persistente SendQueue.
     _saveRoutingTable();
+    // Snapshot the DV-table together with the routing table so the two
+    // disk files stay coherent (Architektur §2.7.3). A crash between the
+    // two writes can at worst leave a stale `dv_routing.json` referring
+    // to peers no longer in `routing_table.json`; loadFromJson tolerates
+    // that — the orphan routes simply prune within 30 s.
+    _saveDvRouting();
+
+    // §5.10.4 Solicited-Reply-Adoption: drop expired tracker entries
+    // (no PUSH came back within the window). The handler also `remove`s
+    // on first match, so this sweep only catches the no-reply case.
+    final cutoff = DateTime.now().subtract(_solicitedReplyWindow);
+    _outstandingPeerListWants.removeWhere((_, sentAt) => sentAt.isBefore(cutoff));
   }
 
   void _doPeerExchange() {
     final peers = routingTable.allPeers;
     if (peers.isEmpty) return;
 
-    // Pick a random subset of peers for exchange
-    final shuffled = List<PeerInfo>.from(peers)..shuffle();
-    for (final peer in shuffled.take(3)) {
+    // §4.4: only exchange with confirmed peers.
+    final confirmed = peers
+        .where((p) => isPeerConfirmed(p.nodeIdHex))
+        .toList()
+      ..shuffle();
+    for (final peer in confirmed.take(3)) {
       _sendPeerListSummary(peer);
     }
   }
@@ -2085,11 +3625,12 @@ class CleonaNode {
         ..nodeId = p.nodeId
         ..lastSeen = Int64(p.lastSeen.millisecondsSinceEpoch));
     }
-
-    final envelope = _createEnvelope(proto.MessageType.PEER_LIST_SUMMARY);
-    envelope.encryptedPayload = summary.writeToBuffer();
-    envelope.recipientId = peer.nodeId;
-    _sendEnvelopeToPeer(envelope, peer);
+    // Welle 5: §2.3.5 selector → INFRASTRUCTURE_FRAME path. Fire-and-forget.
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_PEER_LIST_SUMMARY,
+      innerPayload: summary.writeToBuffer(),
+      recipientDeviceId: peer.nodeId,
+    );
   }
 
   // ── Network Change ─────────────────────────────────────────────────
@@ -2128,33 +3669,70 @@ class CleonaNode {
     localDiscovery.triggerFastDiscovery();
     multicastDiscovery.triggerFastDiscovery();
 
+    // 2b. Reconnect UDP sockets — Android invalidates sockets when the active
+    // network interface changes (WiFi→mobile→WiFi). Without this, all
+    // subsequent sends return 0 even though the interface is back.
+    await transport.reconnectUdpSockets();
+
     // 3. Update local IPs (all interfaces)
     _localIp = updatedIps.isNotEmpty ? updatedIps.first : '127.0.0.1';
     _localIps = updatedIps;
     PeerAddress.currentLocalIps = _localIps;
     _log.info('Network recovery: IPs ${updatedIps.join(", ")}');
 
-    // 3b. Clear all relay routes and failure counters (network topology may have changed).
-    // Failure counters from the old network are meaningless — a peer unreachable via
-    // WiFi/LAN may be perfectly reachable via mobile (public IP) and vice versa.
-    // Without this reset, directBlocked stays true and _sendDirectToPeer is never called.
+    // 3b. Soft-reset of per-peer state (Architektur §2.7.2 / §7.6).
+    // Per-address failure counters and exponential backoff are network-bound
+    // and cleared outright — a peer unreachable on the old network may be
+    // perfectly reachable on the new one. Learned relay routes are NOT
+    // cleared but marked `stale` (cost penalty +5, 30 s revalidation
+    // deadline): a route that was working before the event almost always
+    // still is, and the cost penalty just ensures fresh post-recovery
+    // routes are preferred while the stale entry stays available as a
+    // fallback. Routes that fail to revalidate within the deadline are
+    // pruned by the timer below.
     for (final peer in routingTable.allPeers) {
-      peer.clearRelayRoute();
+      peer.markRelayStale();
       peer.consecutiveRouteFailures = 0;
       peer.consecutiveRelayFailures = 0;
-      // Reset per-address backoff (exponential backoff from old network is stale)
       for (final addr in peer.addresses) {
         addr.consecutiveFailures = 0;
       }
     }
-    _pendingRelays.clear();
 
     // 3b2. Reset TLS fallback (peer stuck in TLS mode from old network would skip UDP)
     _tlsFallback.reset();
 
-    // 3c. DV-Routing: clear all routes (topology may have changed)
-    dvRouting.clearAllRoutes();
+    // 3b3. Reset suspended keepalive peers — NAT context changed, give
+    // unconfirmed peers another round of attempts.
+    udpKeepalive.resetUnconfirmed();
+
+    // 3c. DV-Routing: mark all routes as stale (cost +5, 30 s deadline)
+    // instead of clearing. Topology knowledge survives transient events;
+    // routes that re-confirm via PONG / DV-update lose the penalty,
+    // routes that miss the deadline are pruned.
+    final staleCount = dvRouting.markAllRoutesStale();
+    _log.debug('Soft-reset: marked $staleCount DV-routes as stale (30s deadline)');
     _lastRouteUpdateSentTo.clear();
+
+    // Schedule the prune sweep for the soft-reset deadline. Routes /
+    // relay-routes that did not revalidate via PONG / DV-update / Relay-
+    // delivery within 30 s are dropped — replicating the prior "hard reset"
+    // outcome exactly when revalidation actually fails, but only then.
+    Future.delayed(const Duration(seconds: 30), () {
+      if (!_running) return;
+      final dropped = dvRouting.pruneStaleRoutes(const Duration(seconds: 30));
+      var relayDropped = 0;
+      for (final peer in routingTable.allPeers) {
+        if (peer.pruneRelayIfStale(const Duration(seconds: 30))) {
+          relayDropped++;
+        }
+      }
+      if (dropped > 0 || relayDropped > 0) {
+        _log.info(
+            'Soft-reset prune: dropped $dropped DV-routes + $relayDropped relay-routes '
+            'that did not revalidate within 30 s');
+      }
+    });
 
     // 4. Ping all known peers with network-aware address selection.
     // Private IPs are only meaningful within their NAT context. A peer's
@@ -2173,8 +3751,12 @@ class CleonaNode {
     // 5. Re-bootstrap
     await _kademliaBootstrap();
 
+    // 5b. H-4 (§12.3 step 11): Notify service layer to re-publish Liveness
+    // Record with updated addresses before we broadcast the address update.
+    onAddressesChanged?.call();
+
     // 6. Broadcast address update
-    _broadcastAddressUpdate();
+    _broadcastAddressUpdate(force: true);
 
     // 7. Subnet scan fallback: if no peer responded within 5s after network
     // change, scan /16 range. Covers the case where known peers are in a
@@ -2195,7 +3777,7 @@ class CleonaNode {
     // IP and sending PINGs. If mobile works → activate mobile fallback socket.
     Future.delayed(const Duration(seconds: 15), () {
       if (!_running) return;
-      if (_confirmedPeers.isNotEmpty) return; // Peers found via WiFi — no fallback needed
+      if (_confirmedPeers.values.any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) return; // Peers found via WiFi — no fallback needed
       if (transport.isMobileFallbackActive) return; // Already active
       _tryMobileFallback();
     });
@@ -2213,13 +3795,13 @@ class CleonaNode {
   /// Ask any confirmed peer about peers/contacts not reconfirmed since the
   /// last network change. Establishes relay routes from the responses.
   Future<void> _tryProactiveRendezvous() async {
-    if (_confirmedPeers.isEmpty) return;
+    if (!_confirmedPeers.values.any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) return;
     final changeAt = _lastNetworkChangeAt;
     if (changeAt == null) return;
 
     final stale = routingTable.allPeers.where((p) {
       if (_isLocalIdentity(p.nodeIdHex)) return false;
-      if (_confirmedPeers.contains(p.nodeIdHex)) return false;
+      if (isPeerConfirmed(p.nodeIdHex)) return false;
       if (p.hasValidRelayRoute) return false;
       return p.lastSeen.isBefore(changeAt);
     }).take(5).toList();
@@ -2276,11 +3858,13 @@ class CleonaNode {
 
     _log.info('Mobile fallback: probing ${alternativeIps.length} alternative interface(s)');
 
-    // Build a PING envelope for probing
-    final pingData = _buildPingPacket();
-
     for (final altIp in alternativeIps) {
       for (final peer in probePeers) {
+        // V3 InfraFrame is per-peer (KEM-encrypted under recipient's
+        // Device-KEM-PK), so the probe packet is built fresh in the inner
+        // loop. A KEM-PK miss yields null → skip this peer.
+        final pingData = _buildPingPacket(peer.nodeId);
+        if (pingData == null) continue;
         try {
           final sent = await transport.probeViaInterface(
             altIp,
@@ -2313,14 +3897,20 @@ class CleonaNode {
     _log.info('Mobile fallback: no alternative interface worked');
   }
 
-  /// Build a raw PING packet for interface probing.
-  Uint8List _buildPingPacket() {
-    final ping = proto.MessageEnvelope()
-      ..version = 1
-      ..messageType = proto.MessageType.DHT_PING
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..senderId = primaryIdentity.userId;
-    return Uint8List.fromList(ping.writeToBuffer());
+  /// Build a raw V3 InfraFrame DHT_PING packet (HMAC-tagged wire bytes) for
+  /// interface probing on a specific recipient device. Returns null on
+  /// Device-KEM-PK miss — caller skips that peer.
+  Uint8List? _buildPingPacket(Uint8List recipientDeviceId) {
+    final ping = proto.DhtPing()
+      ..senderId = primaryIdentity.deviceNodeId;
+    final packet = _buildInfraPacket(
+      messageType: proto.MessageTypeV3.MTV3_DHT_PING,
+      innerPayload: Uint8List.fromList(ping.writeToBuffer()),
+      recipientDeviceId: recipientDeviceId,
+    );
+    if (packet == null) return null;
+    packet.nextHopDeviceId = recipientDeviceId;
+    return transport.serializeWithTag(packet);
   }
 
   /// Change the listening port at runtime. Rebinds UDP+TLS, updates all peers.
@@ -2330,33 +3920,121 @@ class CleonaNode {
     await transport.rebind(newPort);
     port = newPort;
     _log.info('Port changed to $newPort, broadcasting to peers');
-    _broadcastAddressUpdate();
+    _broadcastAddressUpdate(force: true);
   }
 
   /// Broadcast our current address info to all peers.
   /// Called internally on network changes and externally by headless public IP polling.
-  void broadcastAddressUpdate() => _broadcastAddressUpdate();
+  void broadcastAddressUpdate() => _broadcastAddressUpdate(force: true);
 
-  /// Initiate a port probe for an external IP (public API for daemon/headless ipify fallback).
-  void probePublicPort(String externalIp) => _initiatePortProbe(externalIp);
-
-  void _broadcastAddressUpdate() {
-    // Broadcast PeerInfo for ALL registered identities
+  /// §5.11 / §5.12 — Send a single firstParty self-broadcast PEER_LIST_PUSH
+  /// (one entry: our own PeerInfo, carrying current Ed25519/ML-DSA + KEM PKs)
+  /// to a specific recipient. Used by:
+  ///   • §5.12 hot-path — answer to a DHT_PING with `pk_recovery_hint=true`.
+  ///   • §5.11 new-neighbor event — fan-out to existing neighbors so the
+  ///     mesh learns about a freshly-seen peer immediately.
+  ///
+  /// Loops over all hosted identities (Multi-Identity nodes broadcast each).
+  void _pushSelfToPeer(Uint8List recipientDeviceId) {
     for (final ctx in _identities.values) {
-      final pushMsg = _createEnvelope(proto.MessageType.PEER_LIST_PUSH);
       final pushData = proto.PeerListPush();
       pushData.peers.add(ctx.ownPeerInfo(
         localIp: _localIp,
         localPort: port,
-        publicIp: natTraversal.publicIp,
-        publicPort: natTraversal.publicPort,
+        publicIp: _advertisedPublicIp,
+        publicPort: _advertisedPublicPort,
         allLocalIps: _localIps,
-      ).toProto());
-      pushMsg.encryptedPayload = pushData.writeToBuffer();
+        deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
+        deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+      ).toProto(slim: true));
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+        innerPayload: pushData.writeToBuffer(),
+        recipientDeviceId: recipientDeviceId,
+      );
+    }
+  }
 
-      for (final peer in routingTable.allPeers) {
-        pushMsg.recipientId = peer.nodeId;
-        _sendEnvelopeToPeer(pushMsg, peer);
+  /// §5.11 — broadcast self-PEER_LIST_PUSH to every neighbor *except* the
+  /// given peer. Used on new-neighbor events: we tell the existing mesh
+  /// about ourselves (which transitively informs them about the new edge,
+  /// since our reachability has changed).
+  void _pushSelfToNeighborsExcept(Uint8List excludeDeviceId) {
+    final excludeHex = bytesToHex(excludeDeviceId);
+    // §4.4: only push to confirmed peers.
+    final targets = routingTable.allPeers
+        .where((p) => p.nodeIdHex != excludeHex && isPeerConfirmed(p.nodeIdHex))
+        .toList()
+      ..shuffle();
+    for (var i = 0; i < targets.length; i++) {
+      if (i == 0) {
+        _pushSelfToPeer(targets[i].nodeId);
+      } else {
+        final peer = targets[i];
+        Future.delayed(
+          Duration(milliseconds: 200 * i),
+          () => _pushSelfToPeer(peer.nodeId),
+        );
+      }
+    }
+    if (targets.isNotEmpty) {
+      _log.info('§5.11: new-peer-event → broadcasting PEER_LIST_PUSH to '
+          '${targets.length} neighbors (200ms jitter)');
+    }
+  }
+
+  /// Initiate a port probe for an external IP (public API for daemon/headless ipify fallback).
+  void probePublicPort(String externalIp) => _initiatePortProbe(externalIp);
+
+  void _broadcastAddressUpdate({bool force = false}) {
+    // Throttle: at most once per 30s unless forced (port change, startup).
+    if (!force && _lastBroadcastTime != null &&
+        DateTime.now().difference(_lastBroadcastTime!).inSeconds < 30) {
+      _log.debug('_broadcastAddressUpdate: throttled (last ${DateTime.now().difference(_lastBroadcastTime!).inSeconds}s ago)');
+      return;
+    }
+    _lastBroadcastTime = DateTime.now();
+    // §4.4: only push to confirmed peers (direct packet in last 15 min).
+    // Unconfirmed peers pull via Mesh-Refresh when they come back online.
+    final peers = routingTable.allPeers
+        .where((p) => isPeerConfirmed(p.nodeIdHex))
+        .toList()
+      ..shuffle();
+    if (peers.isEmpty) {
+      _log.debug('_broadcastAddressUpdate: 0 confirmed peers — skipped');
+      return;
+    }
+    for (final ctx in _identities.values) {
+      final pushData = proto.PeerListPush();
+      pushData.peers.add(ctx.ownPeerInfo(
+        localIp: _localIp,
+        localPort: port,
+        publicIp: _advertisedPublicIp,
+        publicPort: _advertisedPublicPort,
+        allLocalIps: _localIps,
+        deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
+        deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+      ).toProto(slim: true));
+      final innerBytes = pushData.writeToBuffer();
+
+      for (var i = 0; i < peers.length; i++) {
+        final peer = peers[i];
+        if (i == 0) {
+          _sendInfra(
+            messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+            innerPayload: innerBytes,
+            recipientDeviceId: peer.nodeId,
+          );
+        } else {
+          Future.delayed(
+            Duration(milliseconds: 200 * i),
+            () => _sendInfra(
+              messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+              innerPayload: innerBytes,
+              recipientDeviceId: peer.nodeId,
+            ),
+          );
+        }
       }
     }
     // Notify services so IPC clients refresh peerSummaries
@@ -2371,13 +4049,20 @@ class CleonaNode {
   /// Used by daemon/headless to re-query public IP via ipify.
   void Function()? onNetworkChangeDetected;
 
+  /// H-4: Called during network recovery (§12.3 step 11) so the service layer
+  /// can trigger IdentityPublisher.onAddressesChanged() — re-publishes the
+  /// Liveness Record with the new addresses before the address broadcast.
+  void Function()? onAddressesChanged;
+
   PeerInfo _ownPeerInfo() {
     return primaryIdentity.ownPeerInfo(
       localIp: _localIp,
       localPort: port,
-      publicIp: natTraversal.publicIp,
-      publicPort: natTraversal.publicPort,
+      publicIp: _advertisedPublicIp,
+      publicPort: _advertisedPublicPort,
       allLocalIps: _localIps,
+      deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
+      deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
     );
   }
 
@@ -2389,6 +4074,16 @@ class CleonaNode {
       try {
         final json = jsonDecode(file.readAsStringSync()) as List<dynamic>;
         routingTable.loadFromJson(json);
+        // WIN-4: prune unreachable addresses from the persistent cache
+        // (Carrier-NAT, private-IPv4-outside-local-subnet) before they
+        // get used for outbound sends. Patch F prevents *new* pollution at
+        // runtime; this audit cleans up entries written before Patch F
+        // and addresses learned through DHT replication paths that don't
+        // go through the runtime filter.
+        final pruned = routingTable.auditAddresses(_localIps);
+        if (pruned > 0) {
+          _log.info('Routing-table audit: pruned $pruned unreachable addresses');
+        }
         // Touch all loaded peers so maintenance prune (4h) doesn't remove them
         // before they have a chance to respond to discovery/PINGs.
         final now = DateTime.now();
@@ -2412,29 +4107,69 @@ class CleonaNode {
     }
   }
 
-  void _loadBootstrapSeeds() {
-    if (routingTable.peerCount > 3) return; // Enough peers already
-
-    final file = File('$profileDir/bootstrap_seeds.json');
-    if (file.existsSync()) {
-      try {
-        final json = jsonDecode(file.readAsStringSync()) as List<dynamic>;
-        for (final entry in json) {
-          final ip = entry['ip'] as String;
-          final port = entry['port'] as int;
-          final peerId = entry['nodeId'] as String?;
-          if (ip.isNotEmpty && port > 0) {
-            if (peerId != null) {
-              _touchPeer(hexToBytes(peerId), ip, port);
-            }
-            _sendPing(ip, port);
-          }
+  /// Load the persisted DV-table (Architektur §2.7.3).
+  ///
+  /// Companion to `_loadRoutingTable`: the routing table provides the
+  /// *peer cache* (addresses, PKs), this provides the *topology* (direct
+  /// neighbours, learned multi-hop routes, default gateway). Without
+  /// loading the topology, every restart loses the Bellman-Ford state
+  /// and a fresh daemon sees `peers=N` but `cascade exhausted (routes=0)`
+  /// for every send until the first authenticated V3 receive from each
+  /// peer rebuilds `_neighbors` from scratch — visibly fatal for nodes
+  /// behind NATs whose peers expect *us* to ping first.
+  ///
+  /// All loaded routes are marked stale by `DvRoutingTable.loadFromJson`
+  /// itself; we only need to schedule the same 30 s prune sweep that the
+  /// soft-reset path uses, so routes that fail to revalidate disappear.
+  void _loadDvRouting() {
+    final file = File('$profileDir/dv_routing.json');
+    if (!file.existsSync()) return;
+    try {
+      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      dvRouting.loadFromJson(json);
+      _log.info(
+          'Loaded DV-routing: ${dvRouting.neighbors.length} neighbors, '
+          '${dvRouting.routeCount} routes (all marked stale, 30s revalidation)');
+      // Mirror the soft-reset prune sweep so loaded routes that nobody
+      // re-confirms within 30 s are dropped — exactly as `onNetworkChanged`
+      // does for live network-change events.
+      Future.delayed(const Duration(seconds: 30), () {
+        if (!_running) return;
+        final dropped = dvRouting.pruneStaleRoutes(const Duration(seconds: 30));
+        if (dropped > 0) {
+          _log.info(
+              'DV-routing boot prune: dropped $dropped routes that did not '
+              'revalidate within 30 s');
         }
-        _log.info('Loaded bootstrap seeds');
-      } catch (e) {
-        _log.warn('Failed to load bootstrap seeds: $e');
-      }
+      });
+    } catch (e) {
+      _log.warn('Failed to load DV-routing: $e');
     }
+  }
+
+  void _saveDvRouting() {
+    try {
+      final file = File('$profileDir/dv_routing.json');
+      file.parent.createSync(recursive: true);
+      file.writeAsStringSync(jsonEncode(dvRouting.toJson()));
+    } catch (e) {
+      _log.warn('Failed to save DV-routing: $e');
+    }
+  }
+
+  /// Persist routing + DV tables NOW. Called from Android lifecycle (paused)
+  /// so peer state survives process kills between maintenance ticks.
+  void saveNetworkState() {
+    _saveRoutingTable();
+    _saveDvRouting();
+  }
+
+  void _debouncedNetworkStateSave() {
+    _networkStateSaveDebounce?.cancel();
+    _networkStateSaveDebounce = Timer(const Duration(seconds: 10), () {
+      if (!_running) return;
+      saveNetworkState();
+    });
   }
 
   void _addBootstrapPeer(String addressStr) {
@@ -2459,675 +4194,7 @@ class CleonaNode {
     _sendPing(ip, port);
   }
 
-  // ── Multi-Hop Relay ─────────────────────────────────────────────────
-
-  /// Send an envelope via relay when direct delivery failed.
-  /// Wraps the original envelope in RELAY_FORWARD and sends to relay candidates.
-  Future<bool> _sendViaRelay(proto.MessageEnvelope envelope, Uint8List recipientNodeId) async {
-    final candidates = findRelayCandidates(recipientNodeId);
-    if (candidates.isEmpty) {
-      _log.debug('Relay: no candidates for ${bytesToHex(recipientNodeId).substring(0, 8)}');
-      return false;
-    }
-
-    // V3.1.12: Chunk large envelopes that would exceed relay budget
-    if (_needsChunking(envelope)) {
-      // Try each candidate until one works
-      for (final candidate in candidates) {
-        final ok = await _sendChunkedViaRelay(envelope, recipientNodeId, candidate);
-        if (ok) return true;
-      }
-      return false;
-    }
-
-    final sodium = SodiumFFI();
-    final relayId = sodium.randomBytes(16);
-
-    final relay = proto.RelayForward()
-      ..relayId = relayId
-      ..finalRecipientId = recipientNodeId
-      ..wrappedEnvelope = envelope.writeToBuffer()
-      ..hopCount = 1
-      ..maxHops = RelayBudget.maxHops
-      ..ttl = 64  // V3: Hop limit (decremented per hop, dropped at 0)
-      ..originNodeId = primaryIdentity.deviceNodeId
-      ..createdAtMs = Int64(DateTime.now().millisecondsSinceEpoch);
-    relay.visitedNodes.add(primaryIdentity.deviceNodeId);
-
-    final relayEnvelope = primaryIdentity.createSignedEnvelope(
-      proto.MessageType.RELAY_FORWARD,
-      relay.writeToBuffer(),
-    );
-
-    // Register for relay route learning (auto-cleanup after 5 min)
-    final relayIdHex = bytesToHex(relayId);
-
-    // Try each candidate in order (sorted by score — best first).
-    for (final candidate in candidates) {
-      relayEnvelope.recipientId = candidate.nodeId;
-      final ok = await _sendEnvelopeToPeer(relayEnvelope, candidate);
-      if (ok) {
-        _pendingRelays[relayIdHex] = (
-          recipientNodeId: recipientNodeId,
-          relayPeerNodeId: Uint8List.fromList(candidate.nodeId),
-        );
-        Timer(const Duration(minutes: 5), () => _pendingRelays.remove(relayIdHex));
-
-        // V3.1: Track ACK against final recipient via relay
-        if (AckTracker.isAckWorthy(envelope.messageType) && envelope.messageId.isNotEmpty) {
-          final recipientHex = bytesToHex(recipientNodeId);
-          _trackAck(envelope, recipientHex, recipientNodeId,
-              candidate.allConnectionTargets(),
-              viaNextHopHex: candidate.nodeIdHex, estimatedHops: 2);
-        }
-
-        _log.info('Relay: sent via ${candidate.nodeIdHex.substring(0, 8)} '
-            'for ${bytesToHex(recipientNodeId).substring(0, 8)}');
-        return true;
-      }
-    }
-
-    _log.debug('Relay: all ${candidates.length} candidates failed');
-    return false;
-  }
-
-  /// Send via a specific relay peer (used when a learned relay route exists).
-  /// Falls back to generic relay search on failure.
-  Future<bool> _sendViaSpecificRelay(
-    proto.MessageEnvelope envelope,
-    Uint8List recipientNodeId,
-    PeerInfo relayPeer,
-  ) async {
-    // V3.1.12: Chunk large envelopes that would exceed relay budget
-    if (_needsChunking(envelope)) {
-      final ok = await _sendChunkedViaRelay(envelope, recipientNodeId, relayPeer);
-      if (ok) return true;
-      // Fall through to generic relay on failure
-      final peer = routingTable.getPeer(recipientNodeId);
-      peer?.clearRelayRoute();
-      return _sendViaRelay(envelope, recipientNodeId);
-    }
-
-    final sodium = SodiumFFI();
-    final relayId = sodium.randomBytes(16);
-
-    final relay = proto.RelayForward()
-      ..relayId = relayId
-      ..finalRecipientId = recipientNodeId
-      ..wrappedEnvelope = envelope.writeToBuffer()
-      ..hopCount = 1
-      ..maxHops = RelayBudget.maxHops
-      ..ttl = 64  // V3: Hop Limit
-      ..originNodeId = primaryIdentity.deviceNodeId
-      ..createdAtMs = Int64(DateTime.now().millisecondsSinceEpoch);
-    relay.visitedNodes.add(primaryIdentity.deviceNodeId);
-
-    final relayEnvelope = primaryIdentity.createSignedEnvelope(
-      proto.MessageType.RELAY_FORWARD,
-      relay.writeToBuffer(),
-      recipientId: relayPeer.nodeId,
-    );
-
-    final targets = _filterNatContext(relayPeer.allConnectionTargets(), relayPeer);
-    for (final addr in targets) {
-      try {
-        final udpOk = await transport.sendUdp(relayEnvelope, InternetAddress(addr.ip), addr.port);
-        if (udpOk) {
-          final relayIdHex = bytesToHex(relayId);
-          _pendingRelays[relayIdHex] = (
-            recipientNodeId: recipientNodeId,
-            relayPeerNodeId: Uint8List.fromList(relayPeer.nodeId),
-          );
-          Timer(const Duration(minutes: 5), () => _pendingRelays.remove(relayIdHex));
-
-          // V3.1: Track ACK against final recipient via specific relay
-          if (AckTracker.isAckWorthy(envelope.messageType) && envelope.messageId.isNotEmpty) {
-            final recipientHex = bytesToHex(recipientNodeId);
-            _trackAck(envelope, recipientHex, recipientNodeId,
-                _filterNatContext(relayPeer.allConnectionTargets(), relayPeer),
-                viaNextHopHex: relayPeer.nodeIdHex, estimatedHops: 2);
-          }
-
-          _log.info('Relay (learned route): sent via ${relayPeer.nodeIdHex.substring(0, 8)} '
-              'for ${bytesToHex(recipientNodeId).substring(0, 8)}');
-          return true;
-        }
-      } catch (_) {}
-    }
-
-    // Learned relay route failed — clear it and fall back to generic relay search
-    _log.debug('Learned relay route to ${relayPeer.nodeIdHex.substring(0, 8)} failed — clearing');
-    final peer = routingTable.getPeer(recipientNodeId) ??
-        routingTable.getPeerByUserId(recipientNodeId);
-    // Task #30 (Y): cooldown the failed relay before clear, so re-learning
-    // through incoming traffic doesn't immediately re-arm a dead path.
-    peer?.markRelayFailed(relayPeer.nodeIdHex);
-    peer?.clearRelayRoute();
-    return _sendViaRelay(envelope, recipientNodeId);
-  }
-
-  // ── App-Level Chunking for Relay (V3.1.12) ───────────────────────
-
-  /// Handle incoming MEDIA_CHUNK: reassemble chunks into original envelope.
-  void _handleMediaChunk(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    final chunk = proto.MediaChunk.fromBuffer(envelope.encryptedPayload);
-    final transferIdHex = bytesToHex(Uint8List.fromList(chunk.transferId));
-
-    final reassembled = _chunkReassembler.addChunk(
-      transferIdHex: transferIdHex,
-      chunkIndex: chunk.chunkIndex,
-      totalChunks: chunk.totalChunks,
-      chunkData: Uint8List.fromList(chunk.chunkData),
-    );
-
-    if (reassembled != null) {
-      // Reassembly complete — deserialize original envelope and process
-      try {
-        final originalEnvelope = proto.MessageEnvelope.fromBuffer(reassembled);
-        _log.info('Chunk reassembly complete: transfer=$transferIdHex '
-            '(${reassembled.length}B, ${chunk.totalChunks} chunks)');
-        _onEnvelopeReceived(originalEnvelope, from, fromPort, skipRateLimit: true);
-      } catch (e) {
-        _log.error('Chunk reassembly failed to parse envelope: $e');
-      }
-    }
-  }
-
-  /// Split a large envelope into MEDIA_CHUNK messages and send each via relay.
-  /// Returns true if all chunks were sent successfully.
-  Future<bool> _sendChunkedViaRelay(
-    proto.MessageEnvelope envelope,
-    Uint8List recipientNodeId,
-    PeerInfo relayPeer, {
-    bool isNextHop = false,
-  }) async {
-    final data = Uint8List.fromList(envelope.writeToBuffer());
-    final chunks = chunkPayload(data);
-    final sodium = SodiumFFI();
-    final transferId = sodium.randomBytes(16);
-
-    _log.info('Chunking ${data.length}B envelope into ${chunks.length} chunks '
-        'for relay via ${relayPeer.nodeIdHex.substring(0, 8)}');
-
-    for (var i = 0; i < chunks.length; i++) {
-      final chunkMsg = proto.MediaChunk()
-        ..transferId = transferId
-        ..chunkIndex = i
-        ..totalChunks = chunks.length
-        ..chunkData = chunks[i]
-        ..originalRecipientId = recipientNodeId;
-
-      final chunkEnvelope = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.MEDIA_CHUNK,
-        chunkMsg.writeToBuffer(),
-        recipientId: recipientNodeId,
-      );
-
-      // Wrap each chunk in RELAY_FORWARD
-      final relayId = sodium.randomBytes(16);
-      final relay = proto.RelayForward()
-        ..relayId = relayId
-        ..finalRecipientId = recipientNodeId
-        ..wrappedEnvelope = chunkEnvelope.writeToBuffer()
-        ..hopCount = 1
-        ..maxHops = RelayBudget.maxHops
-        ..ttl = 64
-        ..originNodeId = primaryIdentity.deviceNodeId
-        ..createdAtMs = Int64(DateTime.now().millisecondsSinceEpoch);
-      relay.visitedNodes.add(primaryIdentity.deviceNodeId);
-
-      final relayEnvelope = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.RELAY_FORWARD,
-        relay.writeToBuffer(),
-        recipientId: relayPeer.nodeId,
-      );
-
-      final ok = await _sendEnvelopeToPeer(relayEnvelope, relayPeer);
-      if (!ok) {
-        _log.debug('Chunk $i/${chunks.length} relay send failed');
-        return false;
-      }
-    }
-
-    // Track ACK against final recipient for the original message
-    if (AckTracker.isAckWorthy(envelope.messageType) && envelope.messageId.isNotEmpty) {
-      final recipientHex = bytesToHex(recipientNodeId);
-      _trackAck(envelope, recipientHex, recipientNodeId,
-          relayPeer.allConnectionTargets(),
-          viaNextHopHex: relayPeer.nodeIdHex, estimatedHops: 2);
-    }
-
-    _log.info('All ${chunks.length} chunks sent via ${relayPeer.nodeIdHex.substring(0, 8)}');
-    return true;
-  }
-
-  /// Check if an envelope needs chunking for relay (exceeds relay budget).
-  bool _needsChunking(proto.MessageEnvelope envelope) {
-    // Estimate size without full serialization: check encryptedPayload + overhead
-    final payloadSize = envelope.encryptedPayload.length;
-    // Rough estimate: payload + ~200B envelope overhead + ~100B relay overhead
-    return payloadSize > maxChunkDataSize - 300;
-  }
-
-  /// Handle an incoming RELAY_FORWARD message.
-  void _handleRelayForward(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    final relay = proto.RelayForward.fromBuffer(envelope.encryptedPayload);
-    final relayIdHex = bytesToHex(Uint8List.fromList(relay.relayId));
-
-    // Dedup check (applies to local delivery AND forwarding)
-    final relayIdBytes = Uint8List.fromList(relay.relayId);
-    if (_relayBudget.isDuplicate(relayIdBytes)) {
-      _log.debug('Relay rejected ($relayIdHex): duplicate relay_id');
-      return;
-    }
-
-    // Loop check: our deviceNodeId in visited_nodes?
-    for (final identity in _identities.values) {
-      if (_relayBudget.isLoop(relay.visitedNodes, identity.deviceNodeId)) {
-        _log.debug('Relay loop detected ($relayIdHex)');
-        return;
-      }
-    }
-
-    final targetId = Uint8List.fromList(relay.finalRecipientId);
-    final targetHex = bytesToHex(targetId);
-
-    // Local delivery FIRST — hop count must NOT block messages addressed to us.
-    // A 3-hop path (Alice→Bob→Bootstrap→Handy) arrives with hopCount=3 which
-    // equals maxHops=3. This is valid for delivery, only invalid for forwarding.
-    // Phase 2: check both userId and deviceNodeId maps
-    if (_identities.containsKey(targetHex) || _identitiesByDeviceId.containsKey(targetHex)) {
-      // Record in budget
-      _relayBudget.recordRelay(
-        relayId: relayIdBytes,
-        originNodeId: Uint8List.fromList(relay.originNodeId),
-        payloadSize: relay.wrappedEnvelope.length,
-      );
-      _log.info('Relay: delivering to local identity ${targetHex.substring(0, 8)}');
-
-      // Confirm relay neighbor: this neighbor successfully delivered
-      // a relay message to us → reliable relay partner.
-      // Phase 2: use routing ID (deviceNodeId) for the forwarding node
-      final relayNeighborRoutingId = _routingIdFromEnvelope(envelope);
-      final relayNeighborHex = bytesToHex(relayNeighborRoutingId);
-      if (!_isLocalIdentity(relayNeighborHex)) {
-        dvRouting.confirmRelayNeighbor(relayNeighborHex);
-      }
-
-      // Learn relay route back to the original sender.
-      // The envelope.senderId is the relay node that forwarded this to us —
-      // we can reach the origin through that relay.
-      if (relay.originNodeId.isNotEmpty) {
-        final originId = Uint8List.fromList(relay.originNodeId);
-        final originHex = bytesToHex(originId);
-        // Phase 2: relay route via the specific DEVICE that forwarded
-        final relayNodeId = relayNeighborRoutingId;
-        final relayHex = relayNeighborHex;
-
-        // Guard: relay via origin itself = circular (sender forwarded directly)
-        if (relayHex != originHex && !_isLocalIdentity(relayHex)) {
-          var originPeer = routingTable.getPeer(originId) ??
-              routingTable.getPeerByUserId(originId);
-          if (originPeer == null) {
-            originPeer = PeerInfo(nodeId: originId, networkChannel: networkChannel);
-            routingTable.addPeer(originPeer);
-          }
-          // Task #30 (Y): incoming relay packets prove the relay can reach
-          // us, but NOT that we can reach the origin via that relay
-          // (asymmetric reachability). If the relay is in cooldown after a
-          // recent outgoing failure, do not re-arm relayViaNodeId.
-          if (originPeer.isRelayInCooldown(relayHex)) {
-            _log.debug('Relay re-learn (delivery) suppressed for '
-                '${originHex.substring(0, 8)} via ${relayHex.substring(0, 8)} '
-                '(cooldown)');
-            // fall through past the relayViaNodeId set
-          } else {
-            originPeer.relayViaNodeId = relayNodeId;
-            originPeer.relaySetAt = DateTime.now();
-            _log.info('Relay route learned (delivery): ${originHex.substring(0, 8)} '
-                'via ${relayHex.substring(0, 8)}');
-          }
-        } else {
-          _log.debug('Relay route skipped (circular): ${originHex.substring(0, 8)} '
-              'via ${relayHex.substring(0, 8)}');
-        }
-      }
-
-      // Process inner envelope with from=0.0.0.0 so _touchPeer does NOT
-      // associate the sender's nodeId with the relay node's IP address.
-      try {
-        final inner = proto.MessageEnvelope.fromBuffer(relay.wrappedEnvelope);
-        final innerType = inner.messageType;
-        final innerSender = inner.senderId.isNotEmpty
-            ? bytesToHex(Uint8List.fromList(inner.senderId)).substring(0, 8)
-            : 'empty';
-        final innerMsgId = inner.messageId.isNotEmpty
-            ? bytesToHex(Uint8List.fromList(inner.messageId)).substring(0, 8)
-            : 'empty';
-        _log.info('Relay inner: type=$innerType sender=$innerSender msgId=$innerMsgId');
-        _onEnvelopeReceived(inner, InternetAddress('0.0.0.0'), 0, skipRateLimit: true);
-      } catch (e) {
-        _log.warn('Relay: failed to parse inner envelope: $e');
-      }
-      _sendRelayAck(relay, delivered: true);
-      statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
-      return;
-    }
-
-    // Forward to target or next hop — full validation for forwarding
-    // (hop limit, TTL, payload size, budget). Local delivery above skips these.
-    final rejection = _relayBudget.checkRelay(
-      relayId: relayIdBytes,
-      originNodeId: Uint8List.fromList(relay.originNodeId),
-      payloadSize: relay.wrappedEnvelope.length,
-      hopCount: relay.hopCount,
-      maxHopsField: relay.maxHops,
-      createdAtMs: relay.createdAtMs.toInt(),
-    );
-    if (rejection != null) {
-      _log.debug('Relay rejected ($relayIdHex): $rejection');
-      return;
-    }
-    _relayBudget.recordRelay(
-      relayId: relayIdBytes,
-      originNodeId: Uint8List.fromList(relay.originNodeId),
-      payloadSize: relay.wrappedEnvelope.length,
-    );
-
-    () async {
-      try {
-        // V3 TTL check: ttl>0 means V3 message, ttl=0 means pre-V3 (backwards compatible)
-        if (relay.ttl > 0 && relay.ttl <= 1) {
-          _log.debug('Relay: TTL expired ($relayIdHex), ttl=${relay.ttl}');
-          return;
-        }
-
-        final nextRelay = proto.RelayForward()
-          ..relayId = relay.relayId
-          ..finalRecipientId = relay.finalRecipientId
-          ..wrappedEnvelope = relay.wrappedEnvelope
-          ..hopCount = relay.hopCount + 1
-          ..maxHops = relay.maxHops
-          ..ttl = relay.ttl > 0 ? relay.ttl - 1 : 0  // Decrement (0 = not set)
-          ..originNodeId = relay.originNodeId
-          ..createdAtMs = relay.createdAtMs;
-        nextRelay.visitedNodes.addAll(relay.visitedNodes);
-        // Phase 2: add deviceNodeId to visited (per-device loop prevention)
-        for (final identity in _identities.values) {
-          nextRelay.visitedNodes.add(identity.deviceNodeId);
-        }
-
-        final nextEnvelope = primaryIdentity.createSignedEnvelope(
-          proto.MessageType.RELAY_FORWARD,
-          nextRelay.writeToBuffer(),
-        );
-
-        // Compute visited set early — needed for relay route + candidate checks
-        final visitedSet = nextRelay.visitedNodes
-            .map((n) => bytesToHex(Uint8List.fromList(n)))
-            .toSet();
-
-        // Try delivery to the final recipient
-        // Phase 2: try deviceNodeId first, then userId fallback
-        final peer = routingTable.getPeer(targetId) ??
-            routingTable.getPeerByUserId(targetId);
-        if (peer != null) {
-          // Direct DV neighbor: send directly, skip learned relay route.
-          // Learned relay routes create unnecessary hops when the target is
-          // a direct neighbor (e.g., Bootstrap→Bob→Alice instead of Bootstrap→Alice).
-          // This also ensures correct relay-route learning on the recipient side.
-          final targetDvRoute = dvRouting.bestRouteTo(targetHex);
-          final isDirectNeighbor = targetDvRoute != null && targetDvRoute.isDirect;
-
-          // Use learned relay route ONLY for non-direct peers.
-          // For direct neighbors, always try direct first.
-          if (!isDirectNeighbor && peer.hasValidRelayRoute) {
-            final relayNode = routingTable.getPeer(peer.relayViaNodeId!);
-            if (relayNode != null && !visitedSet.contains(relayNode.nodeIdHex)) {
-              nextEnvelope.recipientId = relayNode.nodeId;
-              final ok = await _sendEnvelopeToPeer(nextEnvelope, relayNode);
-              if (ok) {
-                _log.info('Relay: forwarded via learned relay '
-                    '${relayNode.nodeIdHex.substring(0, 8)} for '
-                    '${targetHex.substring(0, 8)} (hop ${nextRelay.hopCount})');
-                final storeIdHex = bytesToHex(Uint8List.fromList(relay.relayId));
-                peerMessageStore.storeMessage(
-                  recipientNodeId: targetId,
-                  wrappedEnvelope: Uint8List.fromList(relay.wrappedEnvelope),
-                  storeIdHex: 'relay-bs-$storeIdHex',
-                );
-                _sendRelayAck(relay, delivered: false);
-                statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
-                return;
-              }
-            }
-          }
-
-          // Direct send — trust only for direct DV neighbors (same transport path).
-          // For non-neighbors (public/CGNAT), UDP "success" ≠ delivery.
-          nextEnvelope.recipientId = peer.nodeId;
-          final ok = await _sendEnvelopeToPeer(nextEnvelope, peer);
-          if (ok && isDirectNeighbor) {
-            _log.info('Relay: forwarded to target ${targetHex.substring(0, 8)} (hop ${nextRelay.hopCount})');
-            final storeIdHex = bytesToHex(Uint8List.fromList(relay.relayId));
-            peerMessageStore.storeMessage(
-              recipientNodeId: targetId,
-              wrappedEnvelope: Uint8List.fromList(relay.wrappedEnvelope),
-              storeIdHex: 'relay-bs-$storeIdHex',
-            );
-            _sendRelayAck(relay, delivered: false);
-            statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
-            return;
-          }
-          // Non-neighbor: direct send attempted but unconfirmed — fall through
-          // to DV routing for reliable multi-hop delivery.
-        }
-
-        // Target not reachable directly — try DV routing next-hop
-        final dvRoutes = dvRouting.routesTo(targetHex);
-        for (final route in dvRoutes) {
-          if (!route.isAlive || route.isDirect) continue;
-          if (route.nextHop == null) continue;
-          final nhHex = bytesToHex(route.nextHop!);
-          if (visitedSet.contains(nhHex)) continue;
-          final nextHopPeer = routingTable.getPeer(route.nextHop!);
-          if (nextHopPeer != null) {
-            nextEnvelope.recipientId = nextHopPeer.nodeId;
-            final ok = await _sendEnvelopeToPeer(nextEnvelope, nextHopPeer);
-            if (ok) {
-              _log.info('Relay: forwarded via DV next-hop '
-                  '${nhHex.substring(0, 8)} for ${targetHex.substring(0, 8)} '
-                  '(hop ${nextRelay.hopCount})');
-              final storeIdHex = bytesToHex(Uint8List.fromList(relay.relayId));
-              peerMessageStore.storeMessage(
-                recipientNodeId: targetId,
-                wrappedEnvelope: Uint8List.fromList(relay.wrappedEnvelope),
-                storeIdHex: 'relay-bs-$storeIdHex',
-              );
-              _sendRelayAck(relay, delivered: false);
-              statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
-              return;
-            }
-          }
-        }
-
-        // Fallback: forward to generic relay candidates
-        final candidates = findRelayCandidates(targetId)
-            .where((p) => !visitedSet.contains(p.nodeIdHex))
-            .toList();
-
-        if (candidates.isNotEmpty) {
-          for (final candidate in candidates) {
-            nextEnvelope.recipientId = candidate.nodeId;
-            final ok = await _sendEnvelopeToPeer(nextEnvelope, candidate);
-            if (ok) {
-              _log.info('Relay: forwarded to ${candidate.nodeIdHex.substring(0, 8)} '
-                  '(hop ${nextRelay.hopCount})');
-              _sendRelayAck(relay, delivered: false);
-              statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
-              return;
-            }
-          }
-        }
-
-        // All delivery attempts failed — store locally for later PEER_RETRIEVE.
-        // This is the key fix for large packets (e.g. CR-Response ~4KB with PQ keys)
-        // that can't be delivered via UDP fragmentation to NAT'd mobile devices.
-        final storeIdHex = bytesToHex(Uint8List.fromList(relay.relayId));
-        final stored = peerMessageStore.storeMessage(
-          recipientNodeId: targetId,
-          wrappedEnvelope: Uint8List.fromList(relay.wrappedEnvelope),
-          storeIdHex: 'relay-$storeIdHex',
-        );
-        if (stored) {
-          _log.info('Relay: stored for later retrieval by ${targetHex.substring(0, 8)} ($relayIdHex)');
-        } else {
-          _log.debug('Relay: could not deliver, forward, or store ($relayIdHex)');
-        }
-      } catch (e) {
-        _log.warn('Relay forward error: $e');
-      }
-    }();
-  }
-
-  /// Handle an incoming RELAY_ACK — learn relay route if delivered.
-  void _handleRelayAck(proto.MessageEnvelope envelope) {
-    try {
-      final ack = proto.RelayAck.fromBuffer(envelope.encryptedPayload);
-      final relayIdHex = bytesToHex(Uint8List.fromList(ack.relayId));
-
-      final info = _pendingRelays.remove(relayIdHex);
-      if (info == null) {
-        _log.debug('Relay ACK: $relayIdHex (no pending entry)');
-        return;
-      }
-
-      if (ack.delivered) {
-        // Learn relay route: this relay peer can reach the target.
-        // Guard against circular routes: relayedBy must NOT equal the target.
-        // Phase 2: try deviceNodeId first, then userId fallback
-        final peer = routingTable.getPeer(info.recipientNodeId) ??
-            routingTable.getPeerByUserId(info.recipientNodeId);
-        if (peer != null) {
-          final relayVia = ack.relayedBy.isNotEmpty
-              ? Uint8List.fromList(ack.relayedBy)
-              : Uint8List.fromList(info.relayPeerNodeId);
-          final relayViaHex = bytesToHex(relayVia);
-          if (relayViaHex != peer.nodeIdHex) {
-            peer.relayViaNodeId = relayVia;
-            peer.relaySetAt = DateTime.now();
-            _log.info('Relay route learned: ${peer.nodeIdHex.substring(0, 8)} '
-                'via ${relayViaHex.substring(0, 8)}');
-          } else {
-            _log.debug('Relay ACK: ignoring circular route for ${peer.nodeIdHex.substring(0, 8)}');
-          }
-        }
-      } else {
-        _log.debug('Relay ACK: $relayIdHex not delivered');
-      }
-    } catch (e) {
-      _log.debug('Relay ACK parse error: $e');
-    }
-  }
-
-  /// Send a RELAY_ACK back towards the origin.
-  /// Uses the origin's relay route if available (origin may only be reachable via relay).
-  void _sendRelayAck(proto.RelayForward relay, {required bool delivered}) {
-    final originId = Uint8List.fromList(relay.originNodeId);
-    final peer = routingTable.getPeer(originId);
-    if (peer == null) return;
-
-    final ack = proto.RelayAck()
-      ..relayId = relay.relayId
-      ..delivered = delivered
-      ..relayedBy = primaryIdentity.deviceNodeId;  // Phase 2: per-device relay identity
-
-    final ackEnvelope = primaryIdentity.createSignedEnvelope(
-      proto.MessageType.RELAY_ACK,
-      ack.writeToBuffer(),
-      recipientId: originId,
-    );
-
-    // RELAY_ACK must NEVER be wrapped in RELAY_FORWARD — that causes an
-    // infinite loop (each side sends RELAY_ACK for received RELAY_FORWARD,
-    // which triggers another RELAY_ACK on the other side).
-    // Direct send only. If unreachable, the ACK is lost — that's OK because
-    // DELIVERY_RECEIPT provides end-to-end confirmation via the normal cascade.
-    _sendEnvelopeToPeer(ackEnvelope, peer);
-  }
-
-  /// Find relay candidates: recently reachable peers, sorted by RTT.
-  /// Uses 10-minute window (not 2 min) — peers behind AP isolation may have
-  /// infrequent but valid connections (e.g. relay-forwarded messages).
-  List<PeerInfo> findRelayCandidates(Uint8List recipientNodeId, {int count = 5}) {
-    final recipientHex = bytesToHex(recipientNodeId);
-    final localIds = _identities.keys.toSet();
-
-    final candidates = routingTable.allPeers
-        .where((p) => p.nodeIdHex != recipientHex)
-        .where((p) => !localIds.contains(p.nodeIdHex))
-        .where((p) => p.allConnectionTargets().isNotEmpty)
-        .toList();
-
-    // Sort: prefer dual-stack (can bridge IPv4↔IPv6), then score, then RTT
-    candidates.sort((a, b) {
-      // Dual-stack nodes can bridge — prefer them as relays (§27)
-      final dualA = (a.capabilities & PeerCapabilities.dualStack) == PeerCapabilities.dualStack ? 1 : 0;
-      final dualB = (b.capabilities & PeerCapabilities.dualStack) == PeerCapabilities.dualStack ? 1 : 0;
-      if (dualA != dualB) return dualB.compareTo(dualA);
-      final scoreA = a.allConnectionTargets().fold(0.0, (s, addr) => s + addr.score);
-      final scoreB = b.allConnectionTargets().fold(0.0, (s, addr) => s + addr.score);
-      if (scoreA != scoreB) return scoreB.compareTo(scoreA);
-      final rttA = dhtRpc.getRtt(a.nodeId).inMilliseconds;
-      final rttB = dhtRpc.getRtt(b.nodeId).inMilliseconds;
-      return rttA.compareTo(rttB);
-    });
-
-    return candidates.take(count).toList();
-  }
-
   // ── Distance-Vector Routing (V3) ───────────────────────────────────
-
-  void _handleRouteUpdate(proto.MessageEnvelope envelope) {
-    if (envelope.senderId.isEmpty) return;
-    try {
-      final msg = proto.RouteUpdateMsg.fromBuffer(envelope.encryptedPayload);
-      // Phase 2: route updates come from a specific DEVICE
-      final fromNodeId = _routingIdFromEnvelope(envelope);
-      final fromHex = bytesToHex(fromNodeId);
-
-      final entries = msg.routes.map((r) => RouteEntry(
-        destinationHex: bytesToHex(Uint8List.fromList(r.destination)),
-        hopCount: r.hopCount,
-        cost: r.cost,
-        connType: _connTypeFromProto(r.connType),
-      )).toList();
-
-      final changed = dvRouting.processRouteUpdate(fromNodeId, entries);
-      if (changed) {
-        dvRouting.updateDefaultGateway();
-      }
-      _log.info('DV: Route update from ${fromHex.substring(0, 8)}: ${entries.length} entries, changed=$changed, '
-          'gwHex=${dvRouting.defaultGatewayHex?.substring(0, 8)}, routes=${dvRouting.routeCount}, '
-          'neighbors=${dvRouting.neighbors.length}');
-
-      // Reciprocal welcome: if neighbor sent empty/minimal update (likely just
-      // restarted), respond with our full table so they can rebuild routes.
-      if (entries.isEmpty && dvRouting.neighbors.containsKey(fromHex)) {
-        final ourRoutes = dvRouting.buildFullUpdate();
-        if (ourRoutes.isNotEmpty) {
-          final peer = routingTable.getPeer(fromNodeId);
-          if (peer != null) {
-            _sendRouteUpdate(peer, ourRoutes);
-            _lastRouteUpdateSentTo[fromHex] = DateTime.now();
-            _log.info('DV: Reciprocal welcome sent ${ourRoutes.length} routes to ${fromHex.substring(0, 8)} (peer restart detected)');
-          }
-        }
-      }
-    } catch (e) {
-      _log.debug('DV: Failed to parse ROUTE_UPDATE: $e');
-    }
-  }
 
   /// Debounced route propagation: collects changes and sends after 2s.
   void _onDvRouteChanged(String destHex, int cost) {
@@ -3141,10 +4208,12 @@ class CleonaNode {
     final changes = _dvPendingChanges.length;
     _dvPendingChanges.clear();
 
-    // For each neighbor an individual update (Split Horizon)
+    // For each neighbor an individual update (Split Horizon).
+    // §4.4: only send to confirmed peers.
     var sent = 0;
     final now = DateTime.now();
     for (final neighborHex in dvRouting.neighbors.keys) {
+      if (!isPeerConfirmed(neighborHex)) continue;
       final entries = dvRouting.buildUpdateFor(neighborHex);
       if (entries.isEmpty) continue;
 
@@ -3159,14 +4228,9 @@ class CleonaNode {
       _log.debug('DV: Flush sent updates to $sent neighbors ($changes pending changes)');
     }
 
-    // Drain queued messages for destinations that now have routes
-    if (messageQueue.totalMessages > 0) {
-      messageQueue.drainAll((recipientHex) {
-        final routes = dvRouting.routesTo(recipientHex);
-        return routes.any((r) => r.isAlive) ||
-            routingTable.getPeer(hexToBytes(recipientHex)) != null;
-      });
-    }
+    // V3.0: Drain-on-DV-Update entfällt — keine persistente SendQueue mehr.
+    // Stattdessen: Empfänger holt offline gewordene Nachrichten via Mailbox-Pull
+    // (Architektur §5). TODO(C-Phase): Mailbox-Pull-Trigger bei DV-Route-Recovery.
   }
 
   void _sendRouteUpdate(PeerInfo peer, List<RouteEntry> entries) {
@@ -3179,29 +4243,77 @@ class CleonaNode {
         ..connType = _connTypeToProto(e.connType)
         ..lastConfirmedMs = Int64(DateTime.now().millisecondsSinceEpoch));
     }
-
-    final envelope = _createEnvelope(proto.MessageType.ROUTE_UPDATE);
-    envelope.encryptedPayload = msg.writeToBuffer();
-    envelope.recipientId = peer.nodeId;
-    _sendEnvelopeToPeer(envelope, peer);
+    // Welle 5: §2.3.5 selector → INFRASTRUCTURE_FRAME path.
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_ROUTE_UPDATE,
+      innerPayload: msg.writeToBuffer(),
+      recipientDeviceId: peer.nodeId,
+    );
   }
 
   /// Safety-Net: full route exchange with all neighbors every 1h.
+  /// §5.12 cold-path — additionally piggybacks one firstParty self-broadcast
+  /// PEER_LIST_PUSH per tick. With the periodic 120 s peer-exchange removed,
+  /// this is the cold-path backstop ensuring every neighbor sees our current
+  /// signing keys at least hourly even if no Stage-2 trigger ever fires.
   void _dvSafetyNetExchange() {
     final fullUpdate = dvRouting.buildFullUpdate();
-    if (fullUpdate.isEmpty) return;
 
+    if (fullUpdate.isNotEmpty) {
+      // §4.4: only send to confirmed peers.
+      for (final neighborHex in dvRouting.neighbors.keys) {
+        if (!isPeerConfirmed(neighborHex)) continue;
+        final peer = routingTable.getPeer(hexToBytes(neighborHex));
+        if (peer == null) continue;
+        // For safety-net no Split Horizon — send all routes
+        _sendRouteUpdate(peer, fullUpdate);
+      }
+      _log.debug('DV: Safety-net exchange sent ${fullUpdate.length} routes '
+          'to ${dvRouting.neighbors.length} neighbors');
+      // Update catch-up timestamps for all neighbors
+      final now = DateTime.now();
+      for (final neighborHex in dvRouting.neighbors.keys) {
+        _lastRouteUpdateSentTo[neighborHex] = now;
+      }
+    }
+
+    // §5.12 cold-path — firstParty self-broadcast piggy-back. Loops every
+    // hosted identity over every known peer, mirroring `_broadcastAddressUpdate`.
+    if (routingTable.peerCount > 0) {
+      _log.info('§5.12 cold-path: DV-safety-net firstParty self-broadcast '
+          '→ ${routingTable.peerCount} peers');
+      _broadcastAddressUpdate();
+    }
+
+    // §4.6 (V3.1.72) liveness heartbeat: refresh `direct-confirmed` for ALL
+    // direct neighbors — incl. LAN/IPv6/same-WAN, which UdpKeepalive
+    // deliberately skips — by sending a gate-bypassing direct PING (via
+    // `_sendPing` → `_sendInfraDirect`). A returning direct (hopCount==0)
+    // PONG re-confirms the peer (§4.6). This is the SOLE periodic refresh of
+    // direct-confirmed for non-NAT peers; without it, idle LAN/IPv6 contacts
+    // would silently decay past the 1h TTL and the first new message to them
+    // would have to fall back to relay. Jittered (150 ms/peer) to avoid a
+    // burst; unconfirmed neighbors are pinged too (that is how they become
+    // confirmed in the first place).
+    var hbIdx = 0;
     for (final neighborHex in dvRouting.neighbors.keys) {
       final peer = routingTable.getPeer(hexToBytes(neighborHex));
       if (peer == null) continue;
-      // For safety-net no Split Horizon — send all routes
-      _sendRouteUpdate(peer, fullUpdate);
+      final targets = peer
+          .allConnectionTargets()
+          .where((a) => !a.isInBackoff && a.isReachableFromCurrentNetwork)
+          .toList();
+      if (targets.isEmpty) continue;
+      final addr = targets.first;
+      final delayMs = 150 * hbIdx++;
+      Future.delayed(Duration(milliseconds: delayMs), () {
+        if (!_running) return;
+        _sendPing(addr.ip, addr.port);
+      });
     }
-    _log.debug('DV: Safety-net exchange sent ${fullUpdate.length} routes to ${dvRouting.neighbors.length} neighbors');
-    // Update catch-up timestamps for all neighbors
-    final now = DateTime.now();
-    for (final neighborHex in dvRouting.neighbors.keys) {
-      _lastRouteUpdateSentTo[neighborHex] = now;
+    if (hbIdx > 0) {
+      _log.debug('§4.6 liveness heartbeat: PINGing $hbIdx direct neighbors '
+          '(150ms jitter)');
     }
   }
 
@@ -3210,6 +4322,7 @@ class CleonaNode {
   /// Always sends, even if our table is empty — this acts as a "hello" signal
   /// that tells the peer we (re)started and need their routes.
   void _sendWelcomeRouteUpdate(String neighborHex) {
+    if (!isPeerConfirmed(neighborHex)) return;
     final peer = routingTable.getPeer(hexToBytes(neighborHex));
     if (peer == null) {
       _log.debug('DV: Welcome skipped for ${neighborHex.substring(0, 8)} — not in routing table');
@@ -3226,6 +4339,7 @@ class CleonaNode {
   /// Catch-up: if we haven't sent a route update to this neighbor in >60s,
   /// send a full update now. Covers returning peers whose route never went DOWN.
   void _maybeSendCatchUpRouteUpdate(String neighborHex) {
+    if (!isPeerConfirmed(neighborHex)) return;
     final lastSent = _lastRouteUpdateSentTo[neighborHex];
     if (lastSent != null && DateTime.now().difference(lastSent).inSeconds < 60) {
       return; // Recent update — no catch-up needed
@@ -3239,22 +4353,45 @@ class CleonaNode {
     _log.info('DV: Catch-up update sent ${fullUpdate.length} routes to ${neighborHex.substring(0, 8)}');
   }
 
+  // ── NAT Keepalive Gate ──────────────────────────────────────────────
+
+  /// Whether a peer at [peerIp] needs UDP keepalive to maintain a NAT
+  /// pinhole. Returns false for LAN-reachable peers (no NAT involved).
+  bool _needsKeepalive(String peerIp) {
+    // IPv6 has no NAT — global addresses are end-to-end routable.
+    if (peerIp.contains(':')) return false;
+
+    // Private IPv4: same LAN or cross-subnet via local routing, no pinhole.
+    if (_isPrivateIp(peerIp)) return false;
+
+    // Public IPv4 identical to our own WAN IP: behind the same NAT,
+    // no pinhole between us and this peer.
+    final myPub = natTraversal.publicIpForNatContext;
+    if (myPub != null && !myPub.contains(':') && peerIp == myPub) return false;
+
+    return true;
+  }
+
   // ── Hole Punch Success Callback ────────────────────────────────────
 
   void _onHolePunchSuccess(Uint8List peerNodeId, String ip, int port) {
     final peerHex = bytesToHex(peerNodeId);
     _log.info('Hole punch succeeded: ${peerHex.substring(0, 8)} at $ip:$port');
 
+    // Bidirectional reachability confirmed — mark as confirmed peer so
+    // _sendV3ViaHop can stop after first successful send (no scatter-shot).
+    _confirmedPeers[peerHex] = DateTime.now();
+
     // Add/update punched address in peer's address list
     final peer = routingTable.getPeer(peerNodeId);
     if (peer != null) {
-      // Add the punched public address
+      // Add the punched public address with verified success
       final addr = PeerAddress(
         ip: ip,
         port: port,
-        type: PeerAddressType.ipv4Public,
+        type: _classifyAddressType(ip),
       );
-      addr.recordSuccess();
+      addr.recordReceived();
       final key = '$ip:$port';
       peer.addresses.removeWhere((a) => '${a.ip}:${a.port}' == key);
       peer.addresses.insert(0, addr);
@@ -3308,7 +4445,7 @@ class CleonaNode {
   void _initiatePortProbe(String externalIp) {
     // Find a confirmed peer with a public IP (Internet peer) to act as prober
     final candidates = routingTable.allPeers
-        .where((p) => _confirmedPeers.contains(p.nodeIdHex))
+        .where((p) => isPeerConfirmed(p.nodeIdHex))
         .where((p) => p.publicIp.isNotEmpty && !_isPrivateIp(p.publicIp))
         .toList();
 
@@ -3316,7 +4453,7 @@ class CleonaNode {
       // No Internet peer available — try any confirmed peer
       // (might work if they can route to our public IP)
       final fallback = routingTable.allPeers
-          .where((p) => _confirmedPeers.contains(p.nodeIdHex))
+          .where((p) => isPeerConfirmed(p.nodeIdHex))
           .where((p) => !_isLocalIdentity(p.nodeIdHex))
           .toList();
       if (fallback.isEmpty) {
@@ -3330,7 +4467,8 @@ class CleonaNode {
     final probeIdHex = bytesToHex(probeId);
     _pendingPortProbes[probeIdHex] = externalIp;
 
-    // Send probe request to up to 2 candidates
+    // Send probe request to up to 2 candidates. Welle 5: §2.3.5 selector
+    // → INFRASTRUCTURE_FRAME path.
     for (final prober in candidates.take(2)) {
       final query = proto.PeerReachabilityQuery(
         targetNodeId: primaryIdentity.deviceNodeId,
@@ -3338,12 +4476,11 @@ class CleonaNode {
         probeIp: externalIp,
         probePort: port,
       );
-      final envelope = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.REACHABILITY_QUERY,
-        query.writeToBuffer(),
-        recipientId: prober.nodeId,
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_REACHABILITY_QUERY,
+        innerPayload: query.writeToBuffer(),
+        recipientDeviceId: prober.nodeId,
       );
-      sendEnvelope(envelope, prober.nodeId);
       _log.info('Port probe request sent to ${prober.nodeIdHex.substring(0, 8)} '
           'for $externalIp:$port');
     }
@@ -3371,7 +4508,7 @@ class CleonaNode {
     _log.info('Port probe SUCCESS — $externalIp:$port is reachable from outside! '
         '(probe from ${from.address}:$fromPort)');
     natTraversal.confirmPublicAddress(externalIp, port);
-    _broadcastAddressUpdate();
+    _broadcastAddressUpdate(force: true);
   }
 
   /// Try to initiate a hole punch for a public-IP peer.
@@ -3406,18 +4543,19 @@ class CleonaNode {
     }
   }
 
-  static ConnectionType _connTypeFromProto(proto.ConnectionTypeProto ct) {
-    switch (ct) {
+  static ConnectionType _connTypeFromProto(proto.ConnectionTypeProto p) {
+    switch (p) {
       case proto.ConnectionTypeProto.CT_LAN_SAME_SUBNET:  return ConnectionType.lanSameSubnet;
       case proto.ConnectionTypeProto.CT_LAN_OTHER_SUBNET: return ConnectionType.lanOtherSubnet;
       case proto.ConnectionTypeProto.CT_WIFI_DIRECT:      return ConnectionType.wifiDirect;
-      case proto.ConnectionTypeProto.CT_PUBLIC_UDP:        return ConnectionType.publicUdp;
+      case proto.ConnectionTypeProto.CT_PUBLIC_UDP:       return ConnectionType.publicUdp;
       case proto.ConnectionTypeProto.CT_HOLE_PUNCH:       return ConnectionType.holePunch;
-      case proto.ConnectionTypeProto.CT_RELAY:             return ConnectionType.relay;
-      case proto.ConnectionTypeProto.CT_MOBILE:            return ConnectionType.mobile;
-      case proto.ConnectionTypeProto.CT_MOBILE_RELAY:      return ConnectionType.mobileRelay;
-      default:                                              return ConnectionType.publicUdp;
+      case proto.ConnectionTypeProto.CT_RELAY:            return ConnectionType.relay;
+      case proto.ConnectionTypeProto.CT_MOBILE:           return ConnectionType.mobile;
+      case proto.ConnectionTypeProto.CT_MOBILE_RELAY:     return ConnectionType.mobileRelay;
     }
+    // Unknown enum value (forward-compat) → default to publicUdp.
+    return ConnectionType.publicUdp;
   }
 
   // ── Getters ────────────────────────────────────────────────────────
@@ -3438,286 +4576,25 @@ class CleonaNode {
     _peerExchangeTimer?.cancel();
     _dvSafetyNetTimer?.cancel();
     _dvPropagationDebounce?.cancel();
+    _networkStateSaveDebounce?.cancel();
     localDiscovery.stop();
     multicastDiscovery.stop();
     ackTracker.dispose();
     reachabilityProbe.dispose();
     natTraversal.dispose();
+    udpKeepalive.dispose();
     _portMapperSub?.cancel();
     await portMapper.dispose();
     await peerMessageStore.dispose();
-    await messageQueue.dispose();
+    // V3.0: kein messageQueue.dispose() mehr.
     dhtRpc.dispose();
     _saveRoutingTable();
+    _saveDvRouting();
     await reputationManager.save(profileDir);
     await transport.stop();
     _log.info('Node stopped');
   }
 
-  // ── Reachability Query Handler ──────────────────────────────────
-
-  void _handleReachabilityQuery(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final query = proto.PeerReachabilityQuery.fromBuffer(envelope.encryptedPayload);
-
-      // V3.1.33: Port probe — send CPRB packet to sender's claimed public address
-      if (query.probeIp.isNotEmpty && query.probePort > 0) {
-        final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-        final senderDeviceHex = envelope.senderDeviceNodeId.isNotEmpty
-            ? bytesToHex(Uint8List.fromList(envelope.senderDeviceNodeId))
-            : senderHex;
-        // Security: only probe for confirmed peers (check both userId and deviceNodeId)
-        if (!_confirmedPeers.contains(senderHex) &&
-            !_confirmedPeers.contains(senderDeviceHex)) {
-          _log.debug('Port probe rejected: ${senderHex.substring(0, 8)} not confirmed');
-          return;
-        }
-        if (_isPrivateIp(query.probeIp)) {
-          _log.debug('Port probe rejected: ${query.probeIp} is private');
-          return;
-        }
-        _log.info('Port probe: sending CPRB to ${query.probeIp}:${query.probePort} '
-            'for ${senderHex.substring(0, 8)}');
-        transport.sendPortProbe(
-          Uint8List.fromList(query.queryId),
-          InternetAddress(query.probeIp),
-          query.probePort,
-        );
-        return;
-      }
-
-      // Normal reachability query (relay route discovery)
-      final targetId = Uint8List.fromList(query.targetNodeId);
-      final targetHex = bytesToHex(targetId);
-      final peer = routingTable.getPeer(targetId);
-      final confirmed = _confirmedPeers.contains(targetHex);
-
-      final response = proto.PeerReachabilityResponse()
-        ..targetNodeId = query.targetNodeId
-        ..queryId = query.queryId
-        ..canReach = (peer != null && confirmed)
-        ..lastSeenMs = Int64(peer?.lastSeen.millisecondsSinceEpoch ?? 0);
-
-      final respEnvelope = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.REACHABILITY_RESPONSE,
-        response.writeToBuffer(),
-        recipientId: Uint8List.fromList(envelope.senderId),
-      );
-      sendEnvelope(respEnvelope, Uint8List.fromList(envelope.senderId));
-      _log.debug('Reachability query for ${targetHex.substring(0, 8)}: '
-          'canReach=${peer != null && confirmed}');
-    } catch (e) {
-      _log.debug('REACHABILITY_QUERY parse error: $e');
-    }
-  }
-
-  // ── Store-and-Forward Handlers ──────────────────────────────────
-
-  void _handlePeerStore(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final store = proto.PeerStore.fromBuffer(envelope.encryptedPayload);
-      final storeIdHex = bytesToHex(Uint8List.fromList(store.storeId));
-      final recipientId = Uint8List.fromList(store.recipientNodeId);
-
-      final accepted = peerMessageStore.storeMessage(
-        recipientNodeId: recipientId,
-        wrappedEnvelope: Uint8List.fromList(store.wrappedEnvelope),
-        storeIdHex: storeIdHex,
-        ttlMs: store.ttlMs.toInt(),
-      );
-
-      // Send ACK
-      final ack = proto.PeerStoreAck()
-        ..storeId = store.storeId
-        ..accepted = accepted;
-      final ackEnv = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.PEER_STORE_ACK,
-        ack.writeToBuffer(),
-        recipientId: Uint8List.fromList(envelope.senderId),
-      );
-      sendEnvelope(ackEnv, Uint8List.fromList(envelope.senderId));
-    } catch (e) {
-      _log.debug('PEER_STORE parse error: $e');
-    }
-  }
-
-  void _handlePeerRetrieve(proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final retrieve = proto.PeerRetrieve.fromBuffer(envelope.encryptedPayload);
-      final requesterId = Uint8List.fromList(retrieve.requesterNodeId);
-
-      final messages = peerMessageStore.retrieveMessages(requesterId);
-
-      final response = proto.PeerRetrieveResponse()
-        ..remaining = 0;
-      for (final msg in messages) {
-        response.storedEnvelopes.add(msg);
-      }
-
-      final respEnv = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.PEER_RETRIEVE_RESPONSE,
-        response.writeToBuffer(),
-        recipientId: Uint8List.fromList(envelope.senderId),
-      );
-      sendEnvelope(respEnv, Uint8List.fromList(envelope.senderId));
-      _log.info('PEER_RETRIEVE: sent ${messages.length} stored messages to '
-          '${bytesToHex(requesterId).substring(0, 8)}');
-    } catch (e) {
-      _log.debug('PEER_RETRIEVE parse error: $e');
-    }
-  }
-
-  void _handlePeerRetrieveResponse(proto.MessageEnvelope envelope) {
-    try {
-      final response = proto.PeerRetrieveResponse.fromBuffer(envelope.encryptedPayload);
-      _log.info('PEER_RETRIEVE_RESPONSE: ${response.storedEnvelopes.length} messages '
-          '(remaining: ${response.remaining})');
-
-      for (final envBytes in response.storedEnvelopes) {
-        try {
-          final storedEnvelope = proto.MessageEnvelope.fromBuffer(envBytes);
-          // Process as if received directly — the envelope has its own sender/recipient/signatures.
-          // Use 0.0.0.0 so _touchPeer does NOT store the storage peer's IP as the sender's address.
-          _onEnvelopeReceived(storedEnvelope, InternetAddress('0.0.0.0'), 0, skipRateLimit: true);
-        } catch (e) {
-          _log.debug('Failed to process stored envelope: $e');
-        }
-      }
-    } catch (e) {
-      _log.debug('PEER_RETRIEVE_RESPONSE parse error: $e');
-    }
-  }
-
-  // ── 2D-DHT Identity Resolution Handlers (§2.2.4) ─────────────────────
-
-  void _handleIdentityAuthPublish(
-      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final m = AuthManifest.fromProto(
-          proto.AuthManifestProto.fromBuffer(envelope.encryptedPayload));
-      identityDhtHandler.handleAuthPublish(m);
-    } catch (e) {
-      _log.debug('IDENTITY_AUTH_PUBLISH parse error: $e');
-    }
-  }
-
-  void _handleIdentityAuthRetrieve(
-      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final req = proto.IdentityAuthRetrieveRequest.fromBuffer(
-          envelope.encryptedPayload);
-      final m = identityDhtHandler.getAuthManifest(
-          Uint8List.fromList(req.userId));
-      if (m == null) return; // Not-found responses sind silent.
-      final response = _createEnvelope(proto.MessageType.IDENTITY_AUTH_RESPONSE)
-        ..encryptedPayload = m.toProto().writeToBuffer();
-      transport.sendUdp(response, from, fromPort);
-    } catch (e) {
-      _log.debug('IDENTITY_AUTH_RETRIEVE error: $e');
-    }
-  }
-
-  void _handleIdentityLivePublish(
-      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final r = LivenessRecord.fromProto(
-          proto.LivenessRecordProto.fromBuffer(envelope.encryptedPayload));
-      identityDhtHandler.handleLivePublish(r);
-    } catch (e) {
-      _log.debug('IDENTITY_LIVE_PUBLISH parse error: $e');
-    }
-  }
-
-  void _handleIdentityLiveRetrieve(
-      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
-    try {
-      final req = proto.IdentityLiveRetrieveRequest.fromBuffer(
-          envelope.encryptedPayload);
-      final r = identityDhtHandler.getLiveness(
-          Uint8List.fromList(req.userId),
-          Uint8List.fromList(req.deviceNodeId));
-      if (r == null) return;
-      final response = _createEnvelope(proto.MessageType.IDENTITY_LIVE_RESPONSE)
-        ..encryptedPayload = r.toProto().writeToBuffer();
-      transport.sendUdp(response, from, fromPort);
-    } catch (e) {
-      _log.debug('IDENTITY_LIVE_RETRIEVE error: $e');
-    }
-  }
-
-  /// Store a message on mutual peers when direct+relay delivery fails.
-  /// Architecture Section 3.3.7: Mutual Peer Selection — prefer peers known
-  /// to both sender and recipient (shared contacts, shared group members).
-  /// Falls back to any confirmed peer if fewer than 3 mutual peers available.
-  Future<void> _storeOnPeers(proto.MessageEnvelope envelope, Uint8List recipientNodeId) async {
-    final recipientHex = bytesToHex(recipientNodeId);
-    const maxStorePeers = 3;
-
-    // All confirmed online peers (excluding self and recipient)
-    final allCandidates = routingTable.allPeers
-        .where((p) => _confirmedPeers.contains(p.nodeIdHex))
-        .where((p) => !routingTable.isLocalNode(p.nodeId))
-        .where((p) => p.nodeIdHex != recipientHex && p.userIdHex != recipientHex)
-        .toList();
-
-    if (allCandidates.isEmpty) {
-      _log.debug('No online peers for Store-and-Forward');
-      return;
-    }
-
-    // Compute mutual peer set (Architecture Section 3.3.7)
-    final mutualIds = getMutualPeerIds?.call(recipientNodeId) ?? <String>{};
-
-    // Partition: mutual peers first, then fallback peers
-    final mutualPeers = <PeerInfo>[];
-    final fallbackPeers = <PeerInfo>[];
-    for (final p in allCandidates) {
-      if (mutualIds.contains(p.nodeIdHex)) {
-        mutualPeers.add(p);
-      } else {
-        fallbackPeers.add(p);
-      }
-    }
-
-    // Select up to maxStorePeers: mutual first, then fallback
-    final selected = <PeerInfo>[];
-    selected.addAll(mutualPeers.take(maxStorePeers));
-    if (selected.length < maxStorePeers) {
-      selected.addAll(fallbackPeers.take(maxStorePeers - selected.length));
-    }
-
-    final mutualCount = selected.where((p) => mutualIds.contains(p.nodeIdHex)).length;
-    _log.info('S&F peer selection for ${recipientHex.substring(0, 8)}: '
-        '${mutualPeers.length} mutual, ${fallbackPeers.length} fallback → '
-        'selected $mutualCount mutual + ${selected.length - mutualCount} fallback');
-
-    final sodium = SodiumFFI();
-    // §26.6.2: KEY_ROTATION_BROADCAST gets a 30-day S&F TTL so offline
-    // contacts can still receive the new pubkey after vacation / device swap.
-    // All other messages keep the default 7-day TTL.
-    final ttlMs = envelope.messageType == proto.MessageType.KEY_ROTATION_BROADCAST
-        ? Int64(30 * 24 * 60 * 60 * 1000)
-        : Int64(7 * 24 * 60 * 60 * 1000);
-    var successCount = 0;
-    for (final peer in selected) {
-      final storeMsg = proto.PeerStore()
-        ..recipientNodeId = recipientNodeId
-        ..wrappedEnvelope = envelope.writeToBuffer()
-        ..storeId = sodium.randomBytes(16)
-        ..ttlMs = ttlMs;
-
-      final storeEnv = primaryIdentity.createSignedEnvelope(
-        proto.MessageType.PEER_STORE,
-        storeMsg.writeToBuffer(),
-        recipientId: peer.nodeId,
-      );
-      final ok = await _sendEnvelopeToPeer(storeEnv, peer);
-      if (ok) successCount++;
-    }
-
-    _log.info('Store-and-Forward: $successCount/${selected.length} stores sent '
-        'for ${recipientHex.substring(0, 8)}');
-  }
 }
 
 bool _isPrivateIp(String ip) {
@@ -3751,13 +4628,44 @@ PeerAddressType _classifyAddressType(String ip) {
   return _isPrivateIp(ip) ? PeerAddressType.ipv4Private : PeerAddressType.ipv4Public;
 }
 
-/// Check if two private IPs are in the same /8 network class.
-/// 10.x.x.x and 192.168.x.x are different networks (emulator NAT vs LAN).
-/// Same-class peers are likely router-connected; different-class peers are behind
-/// separate NATs and cannot reach each other directly.
+/// Check if two private IPs are in the same /24 subnet.
+/// Same-subnet peers are directly reachable (L2); different-subnet peers may
+/// be behind separate NATs. Cross-subnet routing behind the same gateway is
+/// handled by the publicIp match in _filterNatContext, not here.
 bool _samePrivateNetwork(String ip1, String ip2) {
-  final a = ip1.split('.').firstOrNull;
-  final b = ip2.split('.').firstOrNull;
-  if (a == null || b == null) return false;
-  return a == b;
+  if (ip1.contains(':') || ip2.contains(':')) return false;
+  final p1 = ip1.split('.');
+  final p2 = ip2.split('.');
+  if (p1.length != 4 || p2.length != 4) return false;
+  return p1[0] == p2[0] && p1[1] == p2[1] && p1[2] == p2[2];
+}
+
+/// §5.10.4 Mesh-Refresh internal candidate record. Pairs a peer's deviceId
+/// with the cost of the best DV route to it, so the WANT-burst can be
+/// dispatched cheapest-first.
+class _MeshRefreshCandidate {
+  final Uint8List deviceId;
+  final int cost;
+  const _MeshRefreshCandidate(this.deviceId, this.cost);
+}
+
+/// Relay dedup cache: prevents the same relayed packet from being forwarded
+/// more than once (§3.7.3 relay dedup). TTL-based eviction + LRU cap.
+class RelayDedupCache {
+  final int maxSize;
+  final Duration ttl;
+  final LinkedHashMap<String, DateTime> _cache = LinkedHashMap();
+
+  RelayDedupCache({this.maxSize = 2048, this.ttl = const Duration(seconds: 30)});
+
+  bool isDuplicate(String packetHash) {
+    final cutoff = DateTime.now().subtract(ttl);
+    _cache.removeWhere((_, t) => t.isBefore(cutoff));
+    if (_cache.containsKey(packetHash)) return true;
+    _cache[packetHash] = DateTime.now();
+    if (_cache.length > maxSize) _cache.remove(_cache.keys.first);
+    return false;
+  }
+
+  int get length => _cache.length;
 }

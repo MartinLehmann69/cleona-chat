@@ -1,9 +1,9 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/storage/atomic_json_writer.dart';
 
 // ---------------------------------------------------------------------------
 // Contact status enum
@@ -157,6 +157,9 @@ class ContactManager {
   /// nodeIdHex -> Contact
   final Map<String, Contact> _contacts = {};
 
+  /// Serializes concurrent save() calls within-process.
+  Future<void>? _writeInFlight;
+
   // ── Callbacks ──────────────────────────────────────────────────────────
 
   void Function(Contact)? onContactRequestReceived;
@@ -165,10 +168,10 @@ class ContactManager {
 
   // ── Send a contact request ─────────────────────────────────────────────
 
-  /// Creates a [proto.ContactRequestMsg] to be wrapped in a MessageEnvelope
-  /// and sent to [recipientNodeId].
+  /// Creates a [proto.ContactRequestMsg] to be wrapped in an
+  /// [proto.ApplicationFrameV3] and sent to [recipientUserId].
   proto.ContactRequestMsg sendContactRequest({
-    required Uint8List recipientNodeId,
+    required Uint8List recipientUserId,
     required String displayName,
     String message = '',
     required Uint8List ed25519Pk,
@@ -178,12 +181,12 @@ class ContactManager {
     Uint8List? profilePicture,
     String? description,
   }) {
-    final hex = bytesToHex(recipientNodeId);
+    final hex = bytesToHex(recipientUserId);
 
     // Store the outgoing request as pending so we remember we sent it.
     if (!_contacts.containsKey(hex)) {
       _contacts[hex] = Contact(
-        nodeId: Uint8List.fromList(recipientNodeId),
+        nodeId: Uint8List.fromList(recipientUserId),
         displayName: '', // We don't know their name yet.
         status: ContactStatus.pending,
       );
@@ -201,17 +204,37 @@ class ContactManager {
     );
   }
 
-  // ── Handle incoming contact request ────────────────────────────────────
-
-  /// Processes a received [proto.MessageEnvelope] of type CONTACT_REQUEST.
-  /// The payload must already be decrypted and deserialized into a
-  /// [proto.ContactRequestMsg].
-  void handleContactRequest(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final crMsg = proto.ContactRequestMsg.fromBuffer(envelope.encryptedPayload);
+  // ── V3-native: handle CONTACT_REQUEST from ApplicationFrameV3 ─────────
+  //
+  // V3.0 §8.1: under the layered-frame contract, the inbound CR arrives as
+  // an [proto.ApplicationFrameV3] whose `payload` is the (already decrypted +
+  // authenticated by the V3 pipeline) [proto.ContactRequestMsg] protobuf,
+  // and whose `senderUserId` carries the sender's user-id (the stable
+  // identity used for contact bookkeeping).
+  //
+  // `senderDeviceId` is the wire-level device-routing id from
+  // `NetworkPacketV3.senderDeviceId`. ContactManager does not yet persist
+  // device-routing info on its own [Contact] model; the parameter is part
+  // of the §2.4.0 sender-identity-snapshot threading. Future Trust-Bootstrap
+  // work (§8.1.1) can extend [Contact] with device-pubkey caching.
+  //
+  // The richer trust-elevation logic (F4-Gate, Re-Contact-Auto-Overwrite)
+  // lives in `cleona_service.dart::_handleContactRequest`, which owns the
+  // multi-identity contact store and consults the SenderIdentitySnapshot.
+  // ContactManager's role here is the lightweight contact-bookkeeping path
+  // used by callers that don't go through CleonaService.
+  void handleContactRequestV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
+    // For ContactManager bookkeeping we key on the sender's user-id (the
+    // V3 stable identity).
+    final senderUserId = Uint8List.fromList(frame.senderUserId);
+    final senderHex = bytesToHex(senderUserId);
+    final crMsg = proto.ContactRequestMsg.fromBuffer(frame.payload);
 
     final contact = Contact(
-      nodeId: Uint8List.fromList(envelope.senderId),
+      nodeId: senderUserId,
       displayName: crMsg.displayName,
       ed25519Pk: crMsg.ed25519PublicKey.isEmpty
           ? null
@@ -290,14 +313,22 @@ class ContactManager {
     );
   }
 
-  // ── Handle incoming contact response ───────────────────────────────────
-
-  /// Processes a received [proto.MessageEnvelope] of type
-  /// CONTACT_REQUEST_RESPONSE.  The payload must already be decrypted.
-  void handleContactResponse(proto.MessageEnvelope envelope) {
-    final senderHex = bytesToHex(Uint8List.fromList(envelope.senderId));
-    final resp = proto.ContactRequestResponse.fromBuffer(
-        envelope.encryptedPayload);
+  // ── V3-native: handle CONTACT_REQUEST_RESPONSE from ApplicationFrameV3 ─
+  //
+  // V3.0 §8.1: handles inbound CONTACT_REQUEST_RESPONSE on the V3 layered
+  // frame contract. `frame.payload` carries the
+  // [proto.ContactRequestResponse] protobuf (already decrypted +
+  // authenticated by the V3 pipeline). `frame.senderUserId` identifies the
+  // sender for contact bookkeeping; `senderDeviceId` is the wire-level
+  // device-routing id. See [handleContactRequestV3] for the rationale on
+  // parameter shape.
+  void handleContactResponseV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
+    final senderUserId = Uint8List.fromList(frame.senderUserId);
+    final senderHex = bytesToHex(senderUserId);
+    final resp = proto.ContactRequestResponse.fromBuffer(frame.payload);
 
     final contact = _contacts[senderHex];
     if (contact == null) return; // Unknown sender, ignore.
@@ -458,23 +489,26 @@ class ContactManager {
 
   // ── Disk persistence ───────────────────────────────────────────────────
 
-  Future<void> save(String profileDir) async {
-    final file = File('$profileDir/contacts.json');
-    await file.parent.create(recursive: true);
-    await file.writeAsString(
-      const JsonEncoder.withIndent('  ').convert(toJson()),
-    );
+  Future<void> save(String profileDir) {
+    final prev = _writeInFlight;
+    final myWrite = (() async {
+      if (prev != null) {
+        try {
+          await prev;
+        } catch (_) {}
+      }
+      AtomicJsonWriter.writeJsonFile('$profileDir/contacts.json', toJson());
+    })();
+    _writeInFlight = myWrite;
+    return myWrite;
   }
 
   Future<void> load(String profileDir) async {
-    final file = File('$profileDir/contacts.json');
-    if (!await file.exists()) return;
-    try {
-      final content = await file.readAsString();
-      final json = jsonDecode(content) as Map<String, dynamic>;
-      fromJson(json);
-    } on FormatException {
-      // Corrupted file -- start fresh.
-    }
+    // Sidecar-recovery via AtomicJsonWriter: handles canonical + .tmp + .old.
+    // Returns null if all paths missing or unreadable (was: FormatException
+    // → start fresh).
+    final json = AtomicJsonWriter.readJsonFile('$profileDir/contacts.json');
+    if (json == null) return;
+    fromJson(json);
   }
 }

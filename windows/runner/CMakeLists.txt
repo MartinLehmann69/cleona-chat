@@ -52,6 +52,21 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Copying cleona_audio.dll into Windows bundle"
 )
 
+# === cleona_net shim (cleona_net.dll) ===
+# Direct-syscall UDP send-path — see Cleona_Chat_Architecture_v3_0.md §4.5.2.
+# Built from native/cleona_net/, copied next to cleona.exe so DynamicLibrary
+# can load it for FFI calls (native_udp_sender.dart looks for "cleona_net.dll"
+# in the same directory as the executable). Hard dependency on Windows desktop;
+# the daemon refuses to start if this DLL is missing from the bundle.
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_net" "${CMAKE_BINARY_DIR}/cleona_net_build")
+add_dependencies(${BINARY_NAME} cleona_net)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_net>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_net.dll into Windows bundle"
+)
+
 # Copy native DLLs (libsodium, liboqs, libzstd) to the build output directory.
 set(NATIVE_DLLS
   "${CMAKE_CURRENT_SOURCE_DIR}/libsodium.dll"

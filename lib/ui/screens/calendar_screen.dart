@@ -447,6 +447,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ── iCal Import ─────────────────────────────────────────────────────
 
   Future<void> _importIcs(BuildContext context, ICleonaService service) async {
+    final locale = AppLocale.of(context);
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['ics'],
@@ -466,7 +467,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
       if (events.isEmpty) {
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Keine Termine in der Datei gefunden')),
+            SnackBar(content: Text(locale.get('calendar_import_empty'))),
           );
         }
         return;
@@ -480,14 +481,14 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('$imported Termine importiert')),
+          SnackBar(content: Text(locale.tr('calendar_import_done', {'count': '$imported'}))),
         );
         setState(() {});
       }
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Import fehlgeschlagen: $e')),
+          SnackBar(content: Text(locale.tr('calendar_import_failed', {'error': '$e'}))),
         );
       }
     }
@@ -496,6 +497,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
   // ── iCal Export ─────────────────────────────────────────────────────
 
   Future<void> _exportIcs(BuildContext context, ICleonaService service) async {
+    final locale = AppLocale.of(context);
     final events = service.calendarManager.events.values
         .where((e) => !e.cancelled)
         .toList();
@@ -503,7 +505,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     if (events.isEmpty) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Keine Termine zum Exportieren')),
+          SnackBar(content: Text(locale.get('calendar_export_empty'))),
         );
       }
       return;
@@ -512,7 +514,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
     final icsContent = ICalEngine.exportToIcs(events, calendarName: 'Cleona Calendar');
 
     final savePath = await FilePicker.platform.saveFile(
-      dialogTitle: 'Kalender exportieren',
+      dialogTitle: locale.get('calendar_export_dialog_title'),
       fileName: 'cleona_calendar_${DateTime.now().toString().substring(0, 10)}.ics',
       type: FileType.custom,
       allowedExtensions: ['ics'],
@@ -524,13 +526,13 @@ class _CalendarScreenState extends State<CalendarScreen> {
       File(savePath).writeAsStringSync(icsContent);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${events.length} Termine exportiert')),
+          SnackBar(content: Text(locale.tr('calendar_export_done', {'count': '${events.length}'}))),
         );
       }
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Export fehlgeschlagen: $e')),
+          SnackBar(content: Text(locale.tr('calendar_export_failed', {'error': '$e'}))),
         );
       }
     }

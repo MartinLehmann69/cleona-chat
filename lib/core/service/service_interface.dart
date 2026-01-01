@@ -22,6 +22,14 @@ abstract class ICleonaService {
 
   // Getters
   String get nodeIdHex;
+  /// Welle 5/6: Device-Node-ID (≠ User-ID) for direct InfraFrame addressing
+  /// before the Auth-Manifest is published. Used by ContactSeed-URI.
+  String get deviceNodeIdHex;
+  /// Welle 5: Device-X25519-PK (32 bytes) — KEM subject for First-CR.
+  /// Embedded in ContactSeed-URI so the receiver skips the 2D-DHT lookup.
+  Uint8List get deviceX25519Pk;
+  /// Welle 5: Device-ML-KEM-768-PK (1184 bytes) — see [deviceX25519Pk].
+  Uint8List get deviceMlKemPk;
   int get peerCount;
   /// Peers with confirmed bidirectional UDP contact this session.
   /// Used for P2P-aware connection status icon.
@@ -104,7 +112,7 @@ abstract class ICleonaService {
   void Function(CallInfo call)? onCallEnded;
 
   // Actions
-  Future<UiMessage?> sendTextMessage(String recipientNodeIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
+  Future<UiMessage?> sendTextMessage(String recipientUserIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
   Future<UiMessage?> sendMediaMessage(String conversationId, String filePath);
   Future<bool> acceptMediaDownload(String conversationId, String messageId);
   Future<bool> editMessage(String conversationId, String messageId, String newText);
@@ -127,8 +135,22 @@ abstract class ICleonaService {
   Future<bool> setProfilePicture(String? base64Jpeg);
   String? get profilePictureBase64;
   void updateDisplayName(String newName);
-  Future<bool> sendContactRequest(String recipientNodeIdHex, {String message = ''});
-  void addPeersFromContactSeed(String targetNodeIdHex, List<String> targetAddresses, List<({String nodeIdHex, List<String> addresses})> seedPeers);
+  Future<bool> sendContactRequest(String recipientUserIdHex,
+      {String message = '',
+      String? seedDeviceIdHex,
+      String? seedDxkB64,
+      String? seedDmkB64});
+  /// Welle 5/6 (§8.1.1): pass [targetDeviceIdHex] + Device-KEM-PKs from a
+  /// modern ContactSeed-URI so the seeded peer is keyed by Device-Node-ID
+  /// and a direct DV-route is registered (otherwise sendToDevice exhausts).
+  void addPeersFromContactSeed(
+    String targetNodeIdHex,
+    List<String> targetAddresses,
+    List<({String nodeIdHex, List<String> addresses})> seedPeers, {
+    String? targetDeviceIdHex,
+    String? targetDxkB64,
+    String? targetDmkB64,
+  });
   bool addManualPeer(String ip, int port);
   Future<bool> acceptContactRequest(String nodeIdHex);
   void deleteContact(String nodeIdHex);
@@ -257,7 +279,7 @@ abstract class ICleonaService {
     String? title, String? description, String? location,
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
-    bool? taskCompleted, int? taskPriority,
+    bool? taskCompleted, int? taskPriority, bool? cancelled,
   });
   /// Delete a calendar event (local CRUD + group delete if applicable).
   Future<bool> deleteCalendarEvent(String eventIdHex);
@@ -321,6 +343,11 @@ abstract class ICleonaService {
   void Function(String contactNodeIdHex, int pendingCount)?
       onKeyRotationPendingExpired;
 
-  Future<void> onNetworkChanged();
+  /// [triggerNodeReset] (default `true`): forwards to `node.onNetworkChanged()`
+  /// before running service-side cleanup (mailbox poll, identity-publisher
+  /// re-publish). Daemon-style callers that already invoke `node.onNetworkChanged()`
+  /// once for all identities should pass `false` to avoid the N+1 multiplication
+  /// (one node-reset per identity on top of the direct one).
+  Future<void> onNetworkChanged({bool triggerNodeReset = true});
   Future<void> stop();
 }

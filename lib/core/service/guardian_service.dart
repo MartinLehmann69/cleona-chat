@@ -1,8 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
-import 'package:cleona/core/crypto/per_message_kem.dart';
 import 'package:cleona/core/crypto/shamir_sss.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
@@ -69,30 +67,31 @@ class GuardianService {
     var sent = 0;
     for (var i = 0; i < 5; i++) {
       final guardian = guardians[i];
-      if (guardian.x25519Pk == null || guardian.mlKemPk == null) continue;
-
       final msg = proto.GuardianShareStore()
         ..shareData = shares[i]
         ..ownerNodeId = identity.nodeId
         ..ownerDisplayName = identity.displayName;
+      final payload = Uint8List.fromList(msg.writeToBuffer());
 
-      final payload = msg.writeToBuffer();
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(payload),
-        recipientX25519Pk: guardian.x25519Pk!,
-        recipientMlKemPk: guardian.mlKemPk!,
-      );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.GUARDIAN_SHARE_STORE,
-        ciphertext,
-        recipientId: guardian.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-
-      node.sendEnvelope(envelope, guardian.nodeId);
-      sent++;
+      // §3.1: guardian may have multiple devices — send to all known ones.
+      var deviceIds = guardian.deviceNodeIds.map(hexToBytes).toList();
+      if (deviceIds.isEmpty) {
+        deviceIds = await node.resolveUserToDevices(guardian.nodeId);
+      }
+      if (deviceIds.isEmpty) {
+        _log.warn('setupGuardians: ${guardian.displayName} has no known devices');
+        continue;
+      }
+      var guardianSent = false;
+      for (final deviceId in deviceIds) {
+        final ok = await node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE,
+          innerPayload: payload,
+          recipientDeviceId: deviceId,
+        );
+        if (ok) guardianSent = true;
+      }
+      if (guardianSent) sent++;
     }
 
     // Save guardian list
@@ -112,9 +111,15 @@ class GuardianService {
   // ── Flow B: Handle incoming share (as guardian) ───────────────────
 
   /// Handle GUARDIAN_SHARE_STORE: store the share locally.
-  void handleShareStore(proto.MessageEnvelope envelope, Uint8List decryptedPayload) {
+  ///
+  /// V3-direct: [payload] is the plain `GuardianShareStore` proto bytes
+  /// from an `InfrastructureFrameV3` whose Device-KEM encap was already
+  /// verified by the V3 receive pipeline (§6.2 + §2.3.5). The frame has
+  /// no inner KEM wrap — the frame-level encap is the only confidentiality
+  /// layer.
+  void handleShareStore(Uint8List payload) {
     try {
-      final msg = proto.GuardianShareStore.fromBuffer(decryptedPayload);
+      final msg = proto.GuardianShareStore.fromBuffer(payload);
       final ownerHex = bytesToHex(Uint8List.fromList(msg.ownerNodeId));
 
       _storedShares[ownerHex] = Uint8List.fromList(msg.shareData);
@@ -174,23 +179,22 @@ class GuardianService {
       if (contact.status != 'accepted') continue;
       if (contact.nodeIdHex == ownerNodeIdHex) continue; // Skip the owner
       if (contact.nodeIdHex == identity.userIdHex) continue; // Skip self
-      if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
 
-      final (kemHeader, ciphertext) = PerMessageKem.encrypt(
-        plaintext: Uint8List.fromList(requestBytes),
-        recipientX25519Pk: contact.x25519Pk!,
-        recipientMlKemPk: contact.mlKemPk!,
-      );
-
-      final envelope = identity.createSignedEnvelope(
-        proto.MessageType.GUARDIAN_RESTORE_REQUEST,
-        ciphertext,
-        recipientId: contact.nodeId,
-        compress: false,
-      );
-      envelope.kemHeader = kemHeader;
-
-      node.sendEnvelope(envelope, contact.nodeId);
+      // §3.1: contact may have multiple devices — best-effort to all.
+      final deviceIds = contact.deviceNodeIds.map(hexToBytes).toList();
+      if (deviceIds.isEmpty) {
+        _log.debug('triggerGuardianRestore: ${contact.displayName} has no '
+            'known deviceNodeIds, skipping');
+        continue;
+      }
+      for (final deviceId in deviceIds) {
+        // ignore: unawaited_futures
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST,
+          innerPayload: Uint8List.fromList(requestBytes),
+          recipientDeviceId: deviceId,
+        );
+      }
       notified++;
     }
 
@@ -201,9 +205,14 @@ class GuardianService {
   // ── Flow C: Handle restore request (other guardian side) ──────────
 
   /// Handle GUARDIAN_RESTORE_REQUEST: show pop-up to user.
-  void handleRestoreRequest(proto.MessageEnvelope envelope, Uint8List decryptedPayload) {
+  ///
+  /// V3-direct: [payload] is the plain `GuardianRestoreRequest` proto bytes
+  /// from an `InfrastructureFrameV3` whose Device-KEM encap was already
+  /// verified by the V3 receive pipeline (§6.2 + §2.3.5). Recipients that
+  /// do not hold a stored share for the named owner silently drop below.
+  void handleRestoreRequest(Uint8List payload) {
     try {
-      final msg = proto.GuardianRestoreRequest.fromBuffer(decryptedPayload);
+      final msg = proto.GuardianRestoreRequest.fromBuffer(payload);
       final ownerHex = bytesToHex(Uint8List.fromList(msg.ownerNodeId));
 
       // Only process if we have a share for this owner
@@ -236,36 +245,48 @@ class GuardianService {
     final response = proto.GuardianRestoreResponse()
       ..shareData = share
       ..ownerNodeId = hexToBytes(ownerNodeIdHex);
+    final responseBytes = response.writeToBuffer();
 
-    // Send to recovery mailbox via erasure coding (same as offline delivery)
-    final envelope = identity.createSignedEnvelope(
-      proto.MessageType.GUARDIAN_RESTORE_RESPONSE,
-      response.writeToBuffer(),
-      recipientId: hexToBytes(ownerNodeIdHex),
-    );
-
-    // Store in DHT near the recovery mailbox
+    // Store in DHT near the recovery mailbox so the recovering owner —
+    // who is offline and has only the recovery-mailbox-id (derived from
+    // their own old node-id) plus a few bootstrap peer addresses from
+    // the QR code — can later FRAGMENT_RETRIEVE the share.
+    //
+    // Outer transport is MTV3_FRAGMENT_STORE on InfrastructureFrame.
+    // Inner fragmentData holds the raw GuardianRestoreResponse bytes;
+    // on retrieval the recovering side parses fragmentData directly via
+    // GuardianRestoreResponse.fromBuffer (see `handleRestoreResponse`
+    // — TODO when the recovering side wires the V3 retrieve path it
+    // must adapt to the un-wrapped payload shape).
     final recoveryMailboxId = hexToBytes(recoveryMailboxIdHex);
     final peers = node.routingTable.findClosestPeers(recoveryMailboxId, count: 10);
 
+    // Synthesize a deterministic messageId for the FragmentStore so the
+    // recovering side can de-dup across peers (hashed from
+    // recipient + responseBytes).
+    final messageId = _sodium.sha256(Uint8List.fromList([
+      ...recoveryMailboxId,
+      ...responseBytes,
+    ])).sublist(0, 16);
+
     final fragStore = proto.FragmentStore()
       ..mailboxId = recoveryMailboxId
-      ..messageId = Uint8List.fromList(envelope.messageId)
+      ..messageId = messageId
       ..fragmentIndex = 0
       ..totalFragments = 1
       ..requiredFragments = 1
-      ..fragmentData = envelope.writeToBuffer()
-      ..originalSize = envelope.writeToBuffer().length;
+      ..fragmentData = responseBytes
+      ..originalSize = responseBytes.length;
+    final fragStoreBytes = Uint8List.fromList(fragStore.writeToBuffer());
 
     var sent = 0;
     for (final peer in peers) {
-      final fragEnv = identity.createSignedEnvelope(
-        proto.MessageType.FRAGMENT_STORE,
-        fragStore.writeToBuffer(),
-        recipientId: peer.nodeId,
+      final ok = await node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+        innerPayload: fragStoreBytes,
+        recipientDeviceId: Uint8List.fromList(peer.nodeId),
       );
-      node.transport.sendUdp(fragEnv, InternetAddress(peer.publicIp), peer.publicPort);
-      sent++;
+      if (ok) sent++;
     }
 
     _log.info('Guardian restore confirmed for ${ownerNodeIdHex.substring(0, 8)}: share sent to $sent peers');
@@ -309,9 +330,16 @@ class GuardianService {
   }
 
   /// Handle GUARDIAN_RESTORE_RESPONSE received via mailbox.
-  void handleRestoreResponse(proto.MessageEnvelope envelope) {
+  ///
+  /// V3-direct: [payload] is the plain `GuardianRestoreResponse` proto
+  /// bytes. Two arrival paths converge here:
+  ///   1. DHT FRAGMENT_RETRIEVE — `FragmentStore.fragmentData` carries the
+  ///      response bytes verbatim (see `confirmRestore` above).
+  ///   2. Direct InfraFrame (future) — `InfrastructureFrameV3.payload`
+  ///      whose Device-KEM encap was verified upstream.
+  void handleRestoreResponse(Uint8List payload) {
     try {
-      final msg = proto.GuardianRestoreResponse.fromBuffer(envelope.encryptedPayload);
+      final msg = proto.GuardianRestoreResponse.fromBuffer(payload);
       addShare(Uint8List.fromList(msg.shareData));
     } catch (e) {
       _log.error('GUARDIAN_RESTORE_RESPONSE failed: $e');

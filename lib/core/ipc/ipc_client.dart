@@ -13,7 +13,6 @@ import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/node/identity_context.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// IPC client that connects to the cleona-daemon via Unix Domain Socket.
 /// Implements ICleonaService so the GUI can use it transparently.
@@ -26,15 +25,31 @@ class IpcClient implements ICleonaService {
   final StringBuffer _buffer = StringBuffer();
   bool _connected = false;
 
-  /// Called when the daemon socket closes unexpectedly.
-  /// GUI should exit — daemon and GUI act as one unit.
+  /// Called when the daemon process is genuinely gone (lock file missing or
+  /// PID dead) and reconnect retries are exhausted. GUI should exit — daemon
+  /// and GUI act as one unit per CLAUDE.md §1.
   void Function()? onDaemonDied;
+
+  /// Called when reconnect retries are exhausted but the daemon process is
+  /// still alive (lock file present, PID still reachable). This typically
+  /// means the daemon is mid-restart or doing slow PQ keygen. The GUI should
+  /// re-arm a longer-window retry instead of exiting; otherwise a transient
+  /// stall would tear down the GUI even though the daemon will be back in
+  /// seconds. Architecturally distinct from `onDaemonDied`.
+  void Function()? onIpcStalled;
 
   // Active identity for this client connection
   String? activeIdentityId;
 
   // Cached state from daemon
   String _nodeIdHex = '';
+  // Welle 5/6: device identity bits (= deviceNodeIdHex + Device-KEM-PKs).
+  // Filled from `get_state` snapshot; required by ContactSeed-URI generation
+  // (identity_detail_screen.dart) so the receiver can run First-CR without
+  // a 2D-DHT DeviceKemRecord lookup (Architecture §8.1.1).
+  String _deviceNodeIdHex = '';
+  Uint8List _deviceX25519Pk = Uint8List(0);
+  Uint8List _deviceMlKemPk = Uint8List(0);
   String _displayName = '';
   int _port = 0;
   int _peerCount = 0;
@@ -128,8 +143,20 @@ class IpcClient implements ICleonaService {
       _connected = true;
       _attachSocketListener();
 
-      // Fetch initial state
-      await refreshState();
+      // Fetch initial state. Apply a hard timeout so a half-open socket
+      // (kernel `bind()` happened, but the daemon's accept-loop hasn't started
+      // serving yet — observed during PQ keygen on slow VMs) cannot leave the
+      // GUI in a deaf "_connected=true but no responses" state. On timeout,
+      // tear the connection down and let the caller fall through to
+      // `_scheduleRetryConnect()`.
+      try {
+        await refreshState().timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        _connected = false;
+        try { _socket?.destroy(); } catch (_) {}
+        _socket = null;
+        return false;
+      }
       return true;
     } catch (e) {
       _connected = false;
@@ -190,10 +217,45 @@ class IpcClient implements ICleonaService {
           // try next iteration
         }
       }
-      // All retries exhausted — daemon really is gone.
-      onDaemonDied?.call();
+      // All 3 fast-retries exhausted. Distinguish "daemon really gone"
+      // (lock file missing or PID dead → onDaemonDied) from "daemon alive
+      // but IPC unreachable" (mid-restart, slow PQ keygen → onIpcStalled).
+      // The 3-attempt × 3.5 s backoff is too short for PQ keygen on slow
+      // VMs (15–30 s observed); on a transient stall we want the higher-
+      // level `_scheduleRetryConnect` (5 s × 24 = 2 min window) to take over,
+      // not an immediate `exit(0)`.
+      if (_isDaemonProcessAlive()) {
+        onIpcStalled?.call();
+      } else {
+        onDaemonDied?.call();
+      }
     } finally {
       _reconnecting = false;
+    }
+  }
+
+  /// Is the daemon process still running according to the lock file?
+  /// Best-effort: missing lock file → daemon gone; lock-file PID alive → daemon up.
+  bool _isDaemonProcessAlive() {
+    try {
+      final lockPath = socketPath.replaceAll(
+          RegExp(r'cleona\.sock$'), 'cleona.lock');
+      final lockFile = File(lockPath);
+      if (!lockFile.existsSync()) return false;
+      final pid = int.tryParse(lockFile.readAsStringSync().trim());
+      if (pid == null || pid <= 0) return false;
+      if (Platform.isLinux || Platform.isMacOS) {
+        // `kill -0` on Unix: signal 0 doesn't deliver, just probes existence.
+        return Process.runSync('kill', ['-0', '$pid']).exitCode == 0;
+      }
+      if (Platform.isWindows) {
+        final res = Process.runSync(
+            'tasklist', ['/FI', 'PID eq $pid', '/NH']);
+        return res.stdout.toString().contains('$pid');
+      }
+      return true; // unknown platform — fail-safe: assume alive
+    } catch (_) {
+      return false;
     }
   }
 
@@ -273,14 +335,40 @@ class IpcClient implements ICleonaService {
         final convId = event.data['conversationId'] as String;
         final msgData = event.data['message'] as Map<String, dynamic>;
         final message = UiMessage.fromJson(msgData);
-        // Update local state
-        final conv = conversations[convId];
-        if (conv != null) {
-          conv.messages.add(message);
-          conv.lastActivity = message.timestamp;
-          if (!message.isOutgoing) conv.unreadCount++;
-        }
+        // Update local state. Mirror daemon's `_addMessageToConversation`
+        // pattern (cleona_service.dart:4400 — `conversations.putIfAbsent`):
+        // if the conversation doesn't exist yet on the GUI side because the
+        // initial `refreshState()` is still pending or this is a brand-new
+        // contact whose conversation hasn't been pulled, create a placeholder
+        // entry so the incoming message is not silently dropped from the
+        // GUI cache. Display fields (displayName, profile picture) get
+        // populated by the next `refreshState()` triggered via _scheduleRefresh.
+        final conv = conversations.putIfAbsent(convId, () => Conversation(
+          id: convId,
+          displayName: convId.length >= 8 ? convId.substring(0, 8) : convId,
+        ));
+        conv.messages.add(message);
+        conv.lastActivity = message.timestamp;
+        if (!message.isOutgoing) conv.unreadCount++;
         onNewMessage?.call(convId, message);
+        onStateChanged?.call();
+        // Pull authoritative state so the placeholder gets the real
+        // displayName / profile picture / config from the daemon.
+        _scheduleRefresh();
+        break;
+      case 'read_receipt':
+        final rrConvId = event.data['conversationId'] as String;
+        final rrMsgId = event.data['messageId'] as String;
+        final rrConv = conversations[rrConvId];
+        if (rrConv != null) {
+          for (final m in rrConv.messages) {
+            if (m.id == rrMsgId && m.isOutgoing) {
+              m.status = MessageStatus.read;
+              m.readAt ??= DateTime.now();
+              break;
+            }
+          }
+        }
         onStateChanged?.call();
         break;
       case 'contact_request':
@@ -430,6 +518,15 @@ class IpcClient implements ICleonaService {
 
   void _applyStateSnapshot(Map<String, dynamic> state) {
     _nodeIdHex = state['nodeIdHex'] as String? ?? _nodeIdHex;
+    _deviceNodeIdHex = state['deviceNodeIdHex'] as String? ?? _deviceNodeIdHex;
+    final dxkB64 = state['deviceX25519PkB64'] as String? ?? state['dxkB64'] as String?;
+    if (dxkB64 != null && dxkB64.isNotEmpty) {
+      try { _deviceX25519Pk = base64Decode(dxkB64); } catch (_) {}
+    }
+    final dmkB64 = state['deviceMlKemPkB64'] as String? ?? state['dmkB64'] as String?;
+    if (dmkB64 != null && dmkB64.isNotEmpty) {
+      try { _deviceMlKemPk = base64Decode(dmkB64); } catch (_) {}
+    }
     _displayName = state['displayName'] as String? ?? _displayName;
     _port = state['port'] as int? ?? _port;
     _peerCount = state['peerCount'] as int? ?? _peerCount;
@@ -587,17 +684,31 @@ class IpcClient implements ICleonaService {
 
   /// Fetch full state from daemon.
   Timer? _refreshTimer;
+  DateTime _lastRefreshAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _refreshDebounce = Duration(seconds: 1);
+  static const Duration _refreshMaxStaleness = Duration(seconds: 2);
 
-  /// Debounced refresh: coalesces multiple state_changed events into one get_state call.
+  /// Debounced refresh: coalesces multiple state_changed events into one
+  /// get_state call. B-33: the debounce was reset by every state_changed event,
+  /// so a continuous traffic storm could starve refreshState() indefinitely and
+  /// leave `conversations` stale. Cap it — once it has been >2s since the last
+  /// actual refresh, fire immediately instead of rescheduling.
   void _scheduleRefresh() {
+    if (DateTime.now().difference(_lastRefreshAt) >= _refreshMaxStaleness) {
+      _refreshTimer?.cancel();
+      _refreshTimer = null;
+      unawaited(refreshState());
+      return;
+    }
     _refreshTimer?.cancel();
-    _refreshTimer = Timer(const Duration(seconds: 1), () async {
+    _refreshTimer = Timer(_refreshDebounce, () async {
       await refreshState();
     });
   }
 
   /// Fetch full state from daemon.
   Future<void> refreshState() async {
+    _lastRefreshAt = DateTime.now(); // B-33: advance the staleness clock
     final resp = await _sendRequest('get_state');
     if (resp.success) {
       _applyStateSnapshot(resp.data);
@@ -671,6 +782,12 @@ class IpcClient implements ICleonaService {
   @override
   String get nodeIdHex => _nodeIdHex;
   @override
+  String get deviceNodeIdHex => _deviceNodeIdHex;
+  @override
+  Uint8List get deviceX25519Pk => _deviceX25519Pk;
+  @override
+  Uint8List get deviceMlKemPk => _deviceMlKemPk;
+  @override
   String get displayName => _displayName;
   @override
   int get port => _port;
@@ -727,9 +844,9 @@ class IpcClient implements ICleonaService {
   }
 
   @override
-  Future<UiMessage?> sendTextMessage(String recipientNodeIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender}) async {
+  Future<UiMessage?> sendTextMessage(String recipientUserIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender}) async {
     final resp = await _sendRequest('send_text', params: {
-      'recipientId': recipientNodeIdHex,
+      'recipientId': recipientUserIdHex,
       'text': text,
       'replyToMessageId': ?replyToMessageId,
       'replyToText': ?replyToText,
@@ -738,11 +855,11 @@ class IpcClient implements ICleonaService {
     if (resp.success) {
       final msg = UiMessage(
         id: resp.data['messageId'] as String? ?? '',
-        conversationId: recipientNodeIdHex,
+        conversationId: recipientUserIdHex,
         senderNodeIdHex: _nodeIdHex,
         text: text,
         timestamp: DateTime.now(),
-        type: proto.MessageType.TEXT,
+        type: UiMessageType.text,
         status: MessageStatus.sent,
         isOutgoing: true,
       );
@@ -765,7 +882,7 @@ class IpcClient implements ICleonaService {
         senderNodeIdHex: _nodeIdHex,
         text: filePath.split('/').last,
         timestamp: DateTime.now(),
-        type: proto.MessageType.FILE,
+        type: UiMessageType.file,
         status: MessageStatus.sent,
         isOutgoing: true,
         filePath: filePath,
@@ -925,7 +1042,7 @@ class IpcClient implements ICleonaService {
       senderNodeIdHex: nodeIdHex,
       text: '',
       timestamp: DateTime.now(),
-      type: proto.MessageType.TEXT,
+      type: UiMessageType.text,
       isOutgoing: true,
     ) : null;
   }
@@ -962,7 +1079,7 @@ class IpcClient implements ICleonaService {
         senderNodeIdHex: _nodeIdHex,
         text: text,
         timestamp: DateTime.now(),
-        type: proto.MessageType.TEXT,
+        type: UiMessageType.text,
         status: MessageStatus.sent,
         isOutgoing: true,
       );
@@ -1049,7 +1166,7 @@ class IpcClient implements ICleonaService {
         senderNodeIdHex: _nodeIdHex,
         text: text,
         timestamp: DateTime.now(),
-        type: proto.MessageType.CHANNEL_POST,
+        type: UiMessageType.channelPost,
         status: MessageStatus.sent,
         isOutgoing: true,
       );
@@ -1353,9 +1470,17 @@ class IpcClient implements ICleonaService {
   }
 
   @override
-  Future<bool> sendContactRequest(String recipientNodeIdHex, {String message = ''}) async {
+  Future<bool> sendContactRequest(String recipientUserIdHex,
+      {String message = '',
+      String? seedDeviceIdHex,
+      String? seedDxkB64,
+      String? seedDmkB64}) async {
     final resp = await _sendRequest('send_contact_request', params: {
-      'recipientId': recipientNodeIdHex,
+      'recipientId': recipientUserIdHex,
+      if (message.isNotEmpty) 'message': message,
+      if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
+      if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
+      if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
     });
     return resp.success;
   }
@@ -1375,8 +1500,11 @@ class IpcClient implements ICleonaService {
   void addPeersFromContactSeed(
     String targetNodeIdHex,
     List<String> targetAddresses,
-    List<({String nodeIdHex, List<String> addresses})> seedPeers,
-  ) {
+    List<({String nodeIdHex, List<String> addresses})> seedPeers, {
+    String? targetDeviceIdHex,
+    String? targetDxkB64,
+    String? targetDmkB64,
+  }) {
     // On GUI side: send seed peers via IPC to daemon for routing table injection
     _sendRequest('add_seed_peers', params: {
       'targetNodeIdHex': targetNodeIdHex,
@@ -1385,6 +1513,9 @@ class IpcClient implements ICleonaService {
         'nodeIdHex': p.nodeIdHex,
         'addresses': p.addresses,
       }).toList(),
+      if (targetDeviceIdHex != null) 'targetDeviceIdHex': targetDeviceIdHex,
+      if (targetDxkB64 != null) 'targetDxkB64': targetDxkB64,
+      if (targetDmkB64 != null) 'targetDmkB64': targetDmkB64,
     });
   }
 
@@ -1862,7 +1993,7 @@ class IpcClient implements ICleonaService {
     String? title, String? description, String? location,
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
-    bool? taskCompleted, int? taskPriority,
+    bool? taskCompleted, int? taskPriority, bool? cancelled,
   }) async {
     final resp = await _sendRequest('calendar_update_event', params: {
       'eventId': eventIdHex,
@@ -1878,6 +2009,7 @@ class IpcClient implements ICleonaService {
         'recurrenceRule': ?recurrenceRule,
         'taskCompleted': ?taskCompleted,
         'taskPriority': ?taskPriority,
+        'cancelled': ?cancelled,
       },
     });
     if (resp.success) {
@@ -2174,8 +2306,9 @@ class IpcClient implements ICleonaService {
   }
 
   @override
-  Future<void> onNetworkChanged() async {
-    // Network changes are handled by the daemon
+  Future<void> onNetworkChanged({bool triggerNodeReset = true}) async {
+    // Network changes are handled by the daemon — IPC client is a no-op.
+    // The `triggerNodeReset` flag is accepted for interface conformance only.
   }
 
   @override

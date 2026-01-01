@@ -105,11 +105,37 @@ class WhisperFFI {
   void _ensureLoaded() {
     if (_lib != null) return;
 
+    // iOS: all native libs statically linked → DynamicLibrary.process()
+    if (Platform.isIOS) {
+      _lib = DynamicLibrary.process();
+      _initFromFile = _lib!
+          .lookupFunction<_WhisperInitFromFileNative, _WhisperInitFromFileDart>(
+              'whisper_init_from_file');
+      _freeCtx = _lib!.lookupFunction<_WhisperFreeNative, _WhisperFreeDart>(
+          'whisper_free');
+      final fullFnName = _lib!.providesSymbol('whisper_full_from_ptr')
+          ? 'whisper_full_from_ptr' : 'whisper_full';
+      _full = _lib!.lookupFunction<_WhisperFullNative, _WhisperFullDart>(fullFnName);
+      _nSegments = _lib!.lookupFunction<_WhisperFullNSegmentsNative,
+          _WhisperFullNSegmentsDart>('whisper_full_n_segments');
+      _getSegmentText = _lib!.lookupFunction<_WhisperFullGetSegmentTextNative,
+          _WhisperFullGetSegmentTextDart>('whisper_full_get_segment_text');
+      _langId = _lib!
+          .lookupFunction<_WhisperFullLangIdNative, _WhisperFullLangIdDart>(
+              'whisper_full_lang_id');
+      _langStr =
+          _lib!.lookupFunction<_WhisperLangStrNative, _WhisperLangStrDart>(
+              'whisper_lang_str');
+      _defaultParams = _lib!.lookupFunction<_WhisperFullDefaultParamsNative,
+          _WhisperFullDefaultParamsDart>('whisper_full_default_params_by_ref');
+      return;
+    }
+
     final (libName, wrapperName, ggmlLibs) = _libNamesForPlatform();
     final home = Platform.environment['HOME'];
     final searchPaths = <String>[
-      libName, // bare name — linker searches system paths + jniLibs on Android
-      if (Platform.isMacOS || Platform.isIOS) ...[
+      libName,
+      if (Platform.isMacOS) ...[
         '@executable_path/../Frameworks/$libName',
         '/opt/homebrew/lib/$libName',
         '/usr/local/lib/$libName',
@@ -121,12 +147,7 @@ class WhisperFFI {
       'build/$libName',
     ];
 
-    // Pre-load GGML dependencies before opening libwhisper.
-    // libwhisper links against libggml*. When opened via absolute path,
-    // the dynamic linker still searches system paths for transitive deps.
-    // We must load them first so they're already in the process address space.
     for (final ggmlName in ggmlLibs) {
-      // On Android, bare name is enough — jniLibs are on the linker path
       if (Platform.isAndroid) {
         try {
           DynamicLibrary.open(ggmlName);
@@ -164,13 +185,10 @@ class WhisperFFI {
           '$libName not found. Please compile and install whisper.cpp.');
     }
 
-    // Load wrapper library (bridges pointer-based API to whisper_full's value-based params).
-    // whisper_full() takes whisper_full_params by value which Dart FFI cannot handle.
-    // The wrapper provides whisper_full_from_ptr() that takes a pointer and dereferences.
     DynamicLibrary? wrapperLib;
     final wrapperSearchPaths = <String>[
       wrapperName,
-      if (Platform.isMacOS || Platform.isIOS) ...[
+      if (Platform.isMacOS) ...[
         '@executable_path/../Frameworks/$wrapperName',
         '/opt/homebrew/lib/$wrapperName',
         '/usr/local/lib/$wrapperName',

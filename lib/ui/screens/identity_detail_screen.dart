@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:qr/qr.dart' as qr_lib;
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -151,24 +152,54 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     if (service.publicIp != null && service.publicPort != null) {
       ownAddrs.add(_formatAddr(service.publicIp!, service.publicPort!));
     }
-    final seed = ContactSeed(
-      nodeIdHex: service.nodeIdHex,
-      displayName: service.displayName,
-      ownAddresses: ownAddrs,
-      // Up to 2 addresses per peer (IPv4 + IPv6 for bridging, §27)
-      seedPeers: peers.map((p) => SeedPeer(
+    final seedPeerList = peers.map((p) {
+      final sorted = List<String>.from(p.allAddresses);
+      sorted.sort((a, b) => _addressPriority(a).compareTo(_addressPriority(b)));
+      return SeedPeer(
         nodeIdHex: p.nodeIdHex,
-        addresses: p.allAddresses.isNotEmpty
-            ? p.allAddresses.take(2).toList()
+        addresses: sorted.isNotEmpty
+            ? sorted.take(3).toList()
             : [_formatAddr(p.address, p.port)],
-      )).toList(),
+      );
+    }).toList();
+
+    // §8.1.1 rev2: QR includes dxk/dmk (DHT fallback unreliable for
+    // cross-network scans). Compact binary + zstd keeps QR manageable.
+    // Use widget.identity for userId/displayName (explicit, not IPC state).
+    final idNodeIdHex = widget.identity.nodeIdHex ?? service.nodeIdHex;
+    final idDisplayName = widget.identity.displayName;
+    final qrSeed = ContactSeed(
+      nodeIdHex: idNodeIdHex,
+      displayName: idDisplayName,
+      ownAddresses: ownAddrs,
+      seedPeers: seedPeerList,
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+      deviceIdHex: service.deviceNodeIdHex,
+      deviceX25519Pk: service.deviceX25519Pk.isEmpty ? null : service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk.isEmpty ? null : service.deviceMlKemPk,
     );
-    final uri = seed.toUri();
+    final qrBytes = qrSeed.toQrBytes();
+    final qrCode = qr_lib.QrCode.fromUint8List(
+      data: qrBytes,
+      errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
+    );
+
+    final shareSeed = ContactSeed(
+      nodeIdHex: idNodeIdHex,
+      displayName: idDisplayName,
+      ownAddresses: ownAddrs,
+      seedPeers: seedPeerList,
+      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+      deviceIdHex: service.deviceNodeIdHex,
+      deviceX25519Pk: service.deviceX25519Pk.isEmpty ? null : service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk.isEmpty ? null : service.deviceMlKemPk,
+    );
+    final shareUri = shareSeed.toUri();
+
     debugPrint('[QR-GEN] peerSummaries=${validPeers.length}, '
         'lan=${lanPeers.length}, public=${publicPeers.length}, '
         'seedPeers=${peers.length}, ownAddrs=${ownAddrs.length}, '
-        'uri=${uri.length} chars');
+        'qrBytes=${qrBytes.length} bytes, shareUri=${shareUri.length} chars');
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -180,19 +211,15 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
             ),
-            // QrVersions.auto picks the right QR version for the data length.
-            // Version 13 (535B) was too small — auto uses version 20+ (~1249B).
-            child: QrImageView(
-              data: uri,
-              version: QrVersions.auto,
-              errorCorrectionLevel: QrErrorCorrectLevel.L,
-              size: 280,
+            child: QrImageView.withQr(
+              qr: qrCode,
+              size: 400,
               backgroundColor: Colors.white,
             ),
           ),
           const SizedBox(height: 8),
           Text(
-            'Node-ID: ${service.nodeIdHex.substring(0, 16)}...',
+            'Node-ID: ${idNodeIdHex.substring(0, 16)}...',
             style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
           ),
           const SizedBox(height: 4),
@@ -200,7 +227,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             icon: const Icon(Icons.copy, size: 16),
             label: Text(locale.get('copy')),
             onPressed: () {
-              Clipboard.setData(ClipboardData(text: uri));
+              Clipboard.setData(ClipboardData(text: shareUri));
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text(locale.get('copied_to_clipboard'))),
               );
@@ -227,8 +254,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             fallback: CircleAvatar(
               radius: 40,
               child: Text(
-                widget.service.displayName.isNotEmpty
-                    ? widget.service.displayName[0].toUpperCase()
+                widget.identity.displayName.isNotEmpty
+                    ? widget.identity.displayName[0].toUpperCase()
                     : '?',
                 style: const TextStyle(fontSize: 32),
               ),
@@ -742,3 +769,28 @@ bool _isPrivateIp(String ip) {
 /// Format ip:port — brackets for IPv6: [2001:db8::1]:41338
 String _formatAddr(String ip, int port) =>
     ip.contains(':') ? '[$ip]:$port' : '$ip:$port';
+
+/// Sort key: public/global addresses first (0), private/link-local last (2).
+int _addressPriority(String addrPort) {
+  var host = addrPort;
+  if (host.startsWith('[')) {
+    final end = host.indexOf(']');
+    if (end > 0) host = host.substring(1, end);
+  } else {
+    final colon = host.lastIndexOf(':');
+    if (colon > 0) host = host.substring(0, colon);
+  }
+  if (host.contains(':')) {
+    if (host.startsWith('fe80')) return 2;
+    return 0;
+  }
+  final parts = host.split('.');
+  if (parts.length == 4) {
+    final a = int.tryParse(parts[0]) ?? 0;
+    if (a == 10) return 2;
+    if (a == 172 && (int.tryParse(parts[1]) ?? 0) >= 16 && (int.tryParse(parts[1]) ?? 0) <= 31) return 2;
+    if (a == 192 && parts[1] == '168') return 2;
+    if (a == 127) return 2;
+  }
+  return 0;
+}

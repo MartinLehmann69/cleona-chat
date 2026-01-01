@@ -73,6 +73,7 @@ class _PollEditorScreenState extends State<PollEditorScreen> {
           children: [
             TextField(
               controller: _question,
+              autofocus: true,
               decoration: InputDecoration(
                 labelText: locale.get('poll_question'),
                 border: const OutlineInputBorder(),

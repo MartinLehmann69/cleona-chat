@@ -5,6 +5,9 @@ import 'package:cleona/core/network/peer_info.dart';
 /// K-bucket size (standard Kademlia parameter).
 const int kBucketSize = 20;
 
+/// Max addresses per peer. Prevents unbounded accumulation from gossip.
+const int maxAddressesPerPeer = 15;
+
 /// Number of bits in node IDs (SHA-256 → 256 bits).
 const int idBitLength = 256;
 
@@ -68,21 +71,67 @@ class KBucket {
 
     if (existingIdx >= 0) {
       final existing = peers[existingIdx];
-      // Preserve known PK if new entry lacks it
-      if (peer.ed25519PublicKey == null || peer.ed25519PublicKey!.isEmpty) {
+      // Architecture §17.3 PK provenance precedence:
+      // - Never downgrade firstParty signing keys to thirdParty.
+      // - When new claim is firstParty (or equal-or-higher source) it wins.
+      // - When existing is firstParty and new is thirdParty, keep existing.
+      final existingIsFirstParty = existing.pkSource == PkSource.firstParty;
+      final newIsThirdParty = peer.pkSource == PkSource.thirdParty;
+      if (existingIsFirstParty && newIsThirdParty) {
+        // Existing has authoritative PK; foreign claim must not overwrite.
         peer.ed25519PublicKey = existing.ed25519PublicKey;
+        peer.mlDsaPublicKey = existing.mlDsaPublicKey;
+        // Welle 3 (§17.3): Device-Sig PKs follow the same provenance gate.
+        peer.deviceEd25519PublicKey = existing.deviceEd25519PublicKey;
+        peer.deviceMlDsaPublicKey = existing.deviceMlDsaPublicKey;
+        peer.pkSource = existing.pkSource;
+        peer.pkStale = existing.pkStale;
+      } else {
+        // Preserve known PK if new entry lacks it (regardless of provenance —
+        // missing fields just inherit; provenance reflects the actual source).
+        if (peer.ed25519PublicKey == null || peer.ed25519PublicKey!.isEmpty) {
+          peer.ed25519PublicKey = existing.ed25519PublicKey;
+          if (peer.pkSource == PkSource.none) peer.pkSource = existing.pkSource;
+        }
+        if (peer.mlDsaPublicKey == null || peer.mlDsaPublicKey!.isEmpty) {
+          peer.mlDsaPublicKey = existing.mlDsaPublicKey;
+        }
+        // Welle 3: same inherit-when-missing rule for Device-Sig PKs.
+        if (peer.deviceEd25519PublicKey == null ||
+            peer.deviceEd25519PublicKey!.isEmpty) {
+          peer.deviceEd25519PublicKey = existing.deviceEd25519PublicKey;
+        }
+        if (peer.deviceMlDsaPublicKey == null ||
+            peer.deviceMlDsaPublicKey!.isEmpty) {
+          peer.deviceMlDsaPublicKey = existing.deviceMlDsaPublicKey;
+        }
+        // §5.10.5: firstParty PK arrival clears stale status.
+        if (peer.pkSource == PkSource.firstParty) peer.pkStale = false;
       }
+      // X25519 + ML-KEM are KEM keys (encryption, not signing) — no provenance
+      // gating. Inherit from existing if missing.
       if (peer.x25519PublicKey == null || peer.x25519PublicKey!.isEmpty) {
         peer.x25519PublicKey = existing.x25519PublicKey;
       }
       if (peer.mlKemPublicKey == null || peer.mlKemPublicKey!.isEmpty) {
         peer.mlKemPublicKey = existing.mlKemPublicKey;
       }
-      if (peer.mlDsaPublicKey == null || peer.mlDsaPublicKey!.isEmpty) {
-        peer.mlDsaPublicKey = existing.mlDsaPublicKey;
-      }
-      // Preserve authoritative public IP (from PeerExchange)
-      if (peer.publicIp.isEmpty || _isPrivateIp(peer.publicIp)) {
+      // Public IP merge: firstParty self-broadcast is authoritative — if the
+      // peer itself no longer advertises a publicIp, clear it (the old one
+      // may be stale/unreachable). ThirdParty hearsay with missing publicIp
+      // just means the gossiper didn't know it — preserve existing.
+      //
+      // Exception (M-4): if the firstParty broadcast has publicIp='' but we
+      // already hold a non-private publicIp (learned via STUN / NAT-egress
+      // from the UDP source address), the peer simply doesn't know its own
+      // public IP. Clearing it would lose the only reachable address for
+      // cross-NAT sends. Preserve the existing STUN-observed IP instead.
+      if (peer.pkSource == PkSource.firstParty) {
+        if (peer.publicIp.isEmpty && existing.publicIp.isNotEmpty && !_isPrivateIp(existing.publicIp)) {
+          peer.publicIp = existing.publicIp;
+          peer.publicPort = existing.publicPort;
+        }
+      } else if (peer.publicIp.isEmpty || _isPrivateIp(peer.publicIp)) {
         if (existing.publicIp.isNotEmpty && !_isPrivateIp(existing.publicIp)) {
           peer.publicIp = existing.publicIp;
           peer.publicPort = existing.publicPort;
@@ -95,9 +144,81 @@ class KBucket {
         peer.localIp = existing.localIp;
         peer.localPort = existing.localPort;
       }
-      // Preserve multi-address entries
+      // Address list merge — provenance-aware (K-1/K-2).
+      // Empty new list (e.g. legacy peers without addresses[]) → fully
+      // inherit existing list as before.
       if (peer.addresses.isEmpty && existing.addresses.isNotEmpty) {
         peer.addresses.addAll(existing.addresses);
+      } else if (peer.addresses.isNotEmpty && existing.addresses.isNotEmpty) {
+        final existingByKey = <String, PeerAddress>{};
+        for (final a in existing.addresses) {
+          existingByKey['${a.ip}:${a.port}'] = a;
+        }
+
+        if (peer.pkSource == PkSource.firstParty) {
+          // Peer is authoritative about its own addresses.
+          // Transfer local counters for matching ip:port pairs.
+          for (final fresh in peer.addresses) {
+            final old = existingByKey.remove('${fresh.ip}:${fresh.port}');
+            if (old != null) {
+              fresh.successCount = old.successCount;
+              fresh.failCount = old.failCount;
+              fresh.score = old.score;
+              fresh.lastSuccess = old.lastSuccess;
+              fresh.lastAttempt = old.lastAttempt;
+              fresh.lastReceivedAt = old.lastReceivedAt;
+            }
+          }
+          // Addresses no longer advertised by the peer but confirmed by
+          // received traffic: keep WITHOUT backoff (the NAT mapping is
+          // provably live — symmetric NAT assigns different ports per
+          // destination, so the peer can't know our specific mapping).
+          // Addresses without receive confirmation get stale backoff.
+          for (final orphan in existingByKey.values) {
+            if (orphan.lastReceivedAt == null &&
+                orphan.consecutiveFailures < 1) {
+              orphan.consecutiveFailures = 1;
+            }
+            peer.addresses.add(orphan);
+          }
+          // Cap orphan accumulation: drop worst-scoring entries above budget.
+          if (peer.addresses.length > maxAddressesPerPeer) {
+            peer.addresses.sort((a, b) =>
+                b.effectiveScore.compareTo(a.effectiveScore));
+            peer.addresses.removeRange(
+                maxAddressesPerPeer, peer.addresses.length);
+          }
+        } else {
+          // thirdParty / none: gossip must not replace locally-confirmed
+          // addresses. Existing list is the base; add genuinely new
+          // addresses from gossip with zero counters.
+          final merged = List<PeerAddress>.from(existing.addresses);
+          final mergedKeys = <String>{};
+          for (final a in merged) {
+            mergedKeys.add('${a.ip}:${a.port}');
+          }
+          for (final fresh in peer.addresses) {
+            final key = '${fresh.ip}:${fresh.port}';
+            if (!mergedKeys.contains(key)) {
+              merged.add(fresh);
+              mergedKeys.add(key);
+            }
+          }
+          // Cap: drop lowest-scoring unverified addresses when over budget.
+          if (merged.length > maxAddressesPerPeer) {
+            merged.sort((a, b) {
+              // Verified (lastSuccess != null) before unverified
+              final aV = a.lastSuccess != null ? 0 : 1;
+              final bV = b.lastSuccess != null ? 0 : 1;
+              if (aV != bV) return aV.compareTo(bV);
+              return b.effectiveScore.compareTo(a.effectiveScore);
+            });
+            merged.removeRange(maxAddressesPerPeer, merged.length);
+          }
+          peer.addresses
+            ..clear()
+            ..addAll(merged);
+        }
       }
       // Move to end (most recently seen)
       peers.removeAt(existingIdx);
@@ -142,6 +263,13 @@ class RoutingTable {
   final Uint8List ownNodeId; // Primary node ID (used for XOR distance)
   final Set<String> _localNodeIds = {}; // All local identity node IDs (hex)
   final List<KBucket> buckets = List.generate(idBitLength, (_) => KBucket());
+
+  /// Default peer filter for `findClosestPeers`. When set, only peers
+  /// passing this filter are returned for DHT operations (publish, retrieve,
+  /// gossip). Peers that fail the filter stay in the table (persistence for
+  /// restart) but are excluded from active operations. Set by CleonaNode to
+  /// `isPeerConfirmed` after startup.
+  bool Function(PeerInfo)? defaultPeerFilter;
 
   /// Secondary index: userIdHex → all peers (one per device) sharing that
   /// stable identity. Maintained in lockstep with the k-buckets so that
@@ -215,7 +343,21 @@ class RoutingTable {
 
     // Secondary-index maintenance: reflect the post-add state.
     if (existing != null && existingUserHex != null) {
-      _unindexFromUser(existingUserHex, peer.nodeId);
+      if (existingUserHex == peer.userIdHex) {
+        // Same userId refresh — update in place.
+        _unindexFromUser(existingUserHex, peer.nodeId);
+      } else {
+        // Different userId (multi-identity: same device, new userId seen).
+        // Keep the old userId indexed so both entries remain reachable via
+        // resolveUserToDevices. Update the old list's peer reference to the
+        // freshly-added object (the old PeerInfo was replaced in the bucket).
+        final oldList = _byUserIdHex[existingUserHex];
+        if (oldList != null) {
+          final i =
+              oldList.indexWhere((p) => _bytesEqual(p.nodeId, peer.nodeId));
+          if (i >= 0) oldList[i] = peer; // keep entry, update reference
+        }
+      }
     }
     // A stale eviction may have displaced a DIFFERENT peer with its own
     // userIdHex — unindex that one too so we don't leak dangling refs.
@@ -264,6 +406,21 @@ class RoutingTable {
     _indexPeer(peer);
   }
 
+  /// Register a peer under an additional userId without changing its primary
+  /// `userId` field. Used for multi-identity daemons: a single device nodeId
+  /// can host several user identities — each one must appear in the secondary
+  /// index so that `getAllPeersForUserId` / `getPeerByUserId` finds the device
+  /// regardless of which identity the caller is looking up (§26 §3.1).
+  void addExtraUserIdIndex(Uint8List deviceId, Uint8List extraUserId) {
+    final peer = getPeer(deviceId);
+    if (peer == null) return;
+    final hex = _bytesToHex(extraUserId);
+    final list = _byUserIdHex.putIfAbsent(hex, () => []);
+    if (!list.any((p) => _bytesEqual(p.nodeId, deviceId))) {
+      list.add(peer);
+    }
+  }
+
   void _indexPeer(PeerInfo peer) {
     final hex = peer.userIdHex;
     if (hex == null) return;
@@ -283,13 +440,20 @@ class RoutingTable {
 
   /// Find the K closest peers to a target ID.
   /// Partitions into recent (seen < 10 min) and stale, preferring recent.
-  List<PeerInfo> findClosestPeers(Uint8List targetId, {int count = kBucketSize}) {
+  List<PeerInfo> findClosestPeers(Uint8List targetId,
+      {int count = kBucketSize,
+      bool Function(PeerInfo)? filter,
+      bool includeStale = false}) {
     final now = DateTime.now();
     final recentCutoff = now.subtract(const Duration(minutes: 10));
 
+    final effectiveFilter = filter ?? (includeStale ? null : defaultPeerFilter);
     final allPeers = <PeerInfo>[];
     for (final bucket in buckets) {
-      allPeers.addAll(bucket.peers);
+      for (final p in bucket.peers) {
+        if (effectiveFilter != null && !effectiveFilter(p)) continue;
+        allPeers.add(p);
+      }
     }
 
     // Sort by XOR distance to target
@@ -478,6 +642,41 @@ class RoutingTable {
     return pruned;
   }
 
+  /// Evict peers that exceed both a failure threshold AND an age threshold.
+  /// A peer is evicted only if:
+  ///   - `consecutiveRouteFailures >= failureThreshold`
+  ///   - `lastSeen` is older than `ageThreshold`
+  ///   - `hasAliveRoutes` returns false (caller provides a checker so this
+  ///     class does not depend on DvRoutingTable directly)
+  ///   - peer is NOT a protected seed
+  ///
+  /// Called lazily during other operations, not on a timer.
+  /// Returns the list of evicted deviceNodeId hex strings.
+  List<String> evictStalePeers({
+    int failureThreshold = 10,
+    Duration ageThreshold = const Duration(minutes: 15),
+    bool Function(String deviceHex)? hasAliveRoutes,
+  }) {
+    final cutoff = DateTime.now().subtract(ageThreshold);
+    final evicted = <String>[];
+
+    for (final bucket in buckets) {
+      bucket.peers.removeWhere((p) {
+        if (p.isProtectedSeed) return false;
+        if (p.consecutiveRouteFailures < failureThreshold) return false;
+        if (!p.lastSeen.isBefore(cutoff)) return false;
+        if (hasAliveRoutes != null && hasAliveRoutes(p.nodeIdHex)) return false;
+
+        final hex = p.userIdHex;
+        if (hex != null) _unindexFromUser(hex, p.nodeId);
+        evicted.add(p.nodeIdHex);
+        return true;
+      });
+    }
+
+    return evicted;
+  }
+
   /// Serialize to JSON for persistence.
   List<Map<String, dynamic>> toJson() {
     return allPeers.map((p) => p.toJson()).toList();
@@ -493,6 +692,40 @@ class RoutingTable {
         // Skip invalid entries
       }
     }
+  }
+
+  /// WIN-4: One-shot audit of persisted addresses on daemon start.
+  /// Removes addresses that we know cannot be routable from this host:
+  ///   - Carrier-NAT (100.64.0.0/10 RFC 6598, 192.0.0.0/24)
+  ///   - Private IPv4 outside of any local /24 (e.g. 10.0.2.x emulator
+  ///     NAT addresses on a 192.168.x host)
+  /// Returns total count of pruned addresses (for logging).
+  ///
+  /// Public IPv4 (non-private, non-CGNAT) and all IPv6 are kept as-is —
+  /// the cost-sort and address-score machinery handles their decay.
+  /// Hairpinning-self-loop pruning (own public IP) requires NAT-discovery
+  /// to have completed; deferred to a later audit-pass.
+  int auditAddresses(Iterable<String> currentLocalIps) {
+    final localIps = currentLocalIps.toList();
+    var pruned = 0;
+    for (final peer in allPeers) {
+      peer.addresses.removeWhere((addr) {
+        if (PeerAddress.isCarrierNAT(addr.ip)) {
+          pruned++;
+          return true;
+        }
+        // Private IPv4 not in any local /24 → unreachable from here.
+        // Skip the check for IPv6 entirely (no /24 concept).
+        if (!addr.ip.contains(':') &&
+            PeerAddress.isPrivateIp(addr.ip) &&
+            !PeerAddress.isInLocalSubnet(addr.ip, localIps)) {
+          pruned++;
+          return true;
+        }
+        return false;
+      });
+    }
+    return pruned;
   }
 }
 

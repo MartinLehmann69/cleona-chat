@@ -1,6 +1,8 @@
+import 'dart:math' show exp;
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/crypto/sodium_ffi.dart';
 
 class PeerAddress {
   String ip;
@@ -14,6 +16,14 @@ class PeerAddress {
   /// Consecutive failures since last success (for exponential backoff).
   int consecutiveFailures;
 
+  /// Set when an inbound packet is received FROM this ip:port. Proves
+  /// bidirectional reachability — the NAT mapping is live in both directions.
+  /// Distinct from [lastSuccess] which is also set by outbound UDP send
+  /// (OS-level accept, not delivery proof). Used by [allConnectionTargets]
+  /// to prefer addresses confirmed by received traffic over STUN-discovered
+  /// addresses that may map to a different CGNAT port (symmetric NAT).
+  DateTime? lastReceivedAt;
+
   PeerAddress({
     required this.ip,
     required this.port,
@@ -24,11 +34,13 @@ class PeerAddress {
     this.successCount = 0,
     this.failCount = 0,
     this.consecutiveFailures = 0,
+    this.lastReceivedAt,
   });
 
   /// Base delay for exponential backoff (doubles each failure).
-  static const _baseBackoffMs = 2000; // 2s
-  static const _maxBackoffMs = 120000; // 2 min cap
+  /// Architecture §4.6: "5s → 30s → 5min" progression.
+  static const _baseBackoffMs = 5000; // 5s (spec first tier)
+  static const _maxBackoffMs = 300000; // 5 min cap (spec third tier)
 
   void recordSuccess() {
     successCount++;
@@ -36,6 +48,14 @@ class PeerAddress {
     lastSuccess = DateTime.now();
     lastAttempt = lastSuccess;
     score = successCount / (successCount + failCount);
+  }
+
+  /// Record that an inbound packet was received FROM this address.
+  /// Stronger signal than [recordSuccess] (which also fires on outbound
+  /// OS-level send accept). Proves the NAT mapping is live bidirectionally.
+  void recordReceived() {
+    lastReceivedAt = DateTime.now();
+    recordSuccess();
   }
 
   void recordFailure() {
@@ -47,44 +67,60 @@ class PeerAddress {
 
   /// Whether this address should be skipped due to backoff.
   bool get isInBackoff {
-    if (consecutiveFailures < 2) return false;
+    if (consecutiveFailures < 1) return false;
     final last = lastAttempt;
     if (last == null) return false;
     final elapsed = DateTime.now().difference(last).inMilliseconds;
     return elapsed < currentBackoffMs;
   }
 
-  /// Current backoff delay in ms (exponential: 2s, 4s, 8s, ... capped at 2min).
+  /// Current backoff delay in ms (exponential: 5s, 10s, 20s, 40s, 80s, 160s, 300s cap).
+  /// Architecture §4.6: "on failure, exponential backoff (5s → 30s → 5min)."
   int get currentBackoffMs {
-    if (consecutiveFailures < 2) return 0;
-    final delay = _baseBackoffMs * (1 << (consecutiveFailures - 2).clamp(0, 6));
+    if (consecutiveFailures < 1) return 0;
+    final delay = _baseBackoffMs * (1 << (consecutiveFailures - 1).clamp(0, 6));
     return delay.clamp(0, _maxBackoffMs);
   }
 
   proto.PeerAddressProto toProto() {
+    // Bug 4: success_count/fail_count/score/last_success/last_attempt are
+    // strictly LOCAL epistemics — they describe what THIS node has
+    // observed about address X working. They have no meaning for any
+    // other node, whose network position, NAT context, and IPv6
+    // reachability differ. Sharing them via PEER_LIST_PUSH gossip lets
+    // a peer with polluted counters (e.g. an old build that bumped
+    // recordSuccess() on every kernel-accept) overwrite the receiver's
+    // legitimate local observations on KBucket.addPeer merge. The proto
+    // fields stay on the wire for backwards compatibility but are
+    // explicitly zeroed; receivers ignore them — see fromProto.
     return proto.PeerAddressProto()
       ..ip = ip
       ..port = port
-      ..addressType = _typeToProto(type)
-      ..score = score
-      ..lastSuccess = Int64(lastSuccess?.millisecondsSinceEpoch ?? 0)
-      ..lastAttempt = Int64(lastAttempt?.millisecondsSinceEpoch ?? 0)
-      ..successCount = successCount
-      ..failCount = failCount;
+      ..addressType = _typeToProto(type);
   }
 
   static PeerAddress? fromProto(proto.PeerAddressProto p) {
     final ip = p.ip.trim();
     if (ip.isEmpty || ip == '0.0.0.0' || ip == '::' || p.port <= 0) return null;
+    // Migration on load: older peers (and even older code in this peer)
+    // sent every IPv6 address as IPV6_GLOBAL. Re-classify against actual
+    // textual prefix so that ULA/LinkLocal/SiteLocal records that were
+    // mislabelled on the wire get healed transparently.
+    var type = _typeFromProto(p.addressType);
+    final classified = classifyIp(ip);
+    if (type == PeerAddressType.ipv6Global &&
+        classified != PeerAddressType.ipv6Global) {
+      type = classified;
+    }
+    // Bug 4: never trust the wire's success/fail/score numbers. They
+    // are local-only facts that the sending peer has no authority to
+    // claim about us. New address entry → counters start at zero;
+    // KBucket.addPeer preserves existing local counters when the same
+    // ip:port is re-advertised so merges don't blow away local state.
     return PeerAddress(
       ip: ip,
       port: p.port,
-      type: _typeFromProto(p.addressType),
-      score: p.score,
-      lastSuccess: _dateFromMs(p.lastSuccess.toInt()),
-      lastAttempt: _dateFromMs(p.lastAttempt.toInt()),
-      successCount: p.successCount,
-      failCount: p.failCount,
+      type: type,
     );
   }
 
@@ -96,6 +132,12 @@ class PeerAddress {
         return proto.AddressType.IPV4_PRIVATE;
       case PeerAddressType.ipv6Global:
         return proto.AddressType.IPV6_GLOBAL;
+      case PeerAddressType.ipv6Ula:
+        return proto.AddressType.IPV6_ULA;
+      case PeerAddressType.ipv6LinkLocal:
+        return proto.AddressType.IPV6_LINK_LOCAL;
+      case PeerAddressType.ipv6SiteLocal:
+        return proto.AddressType.IPV6_SITE_LOCAL;
     }
   }
 
@@ -107,14 +149,93 @@ class PeerAddress {
         return PeerAddressType.ipv4Private;
       case proto.AddressType.IPV6_GLOBAL:
         return PeerAddressType.ipv6Global;
+      case proto.AddressType.IPV6_ULA:
+        return PeerAddressType.ipv6Ula;
+      case proto.AddressType.IPV6_LINK_LOCAL:
+        return PeerAddressType.ipv6LinkLocal;
+      case proto.AddressType.IPV6_SITE_LOCAL:
+        return PeerAddressType.ipv6SiteLocal;
       default:
         return PeerAddressType.ipv4Public;
     }
   }
 
+  /// Single source of truth for IP → PeerAddressType classification.
+  ///
+  /// IPv4: public vs private (RFC 1918 / loopback / CGNAT).
+  /// IPv6 textual prefixes:
+  ///   ::1                                 → ipv6LinkLocal (loopback, never published)
+  ///   fe80::/10  (fe80..febf)             → ipv6LinkLocal
+  ///   fc00::/7   (fc..  / fd..)           → ipv6Ula      (RFC 4193 unique-local)
+  ///   fec0::/10  (fec0..feff)             → ipv6SiteLocal (RFC 3879 deprecated)
+  ///   ff00::/8   (ff..)                   → ipv6LinkLocal sentinel (multicast — never publish)
+  ///   else                                → ipv6Global
+  ///
+  /// Used by both Liveness-Builder (filter ULA/LL/SL out) and `fromProto`
+  /// migration (heal mislabelled IPV6_GLOBAL records).
+  static PeerAddressType classifyIp(String ip) {
+    final s = ip.trim();
+    if (s.isEmpty) return PeerAddressType.ipv4Public;
+    if (!s.contains(':')) {
+      // IPv4
+      return _isPrivateIp(s) ? PeerAddressType.ipv4Private : PeerAddressType.ipv4Public;
+    }
+    // IPv6 — strip zone suffix (fe80::1%eth0) and brackets if any.
+    var v6 = s;
+    if (v6.startsWith('[')) {
+      final close = v6.indexOf(']');
+      if (close > 0) v6 = v6.substring(1, close);
+    }
+    final pct = v6.indexOf('%');
+    if (pct >= 0) v6 = v6.substring(0, pct);
+    final lower = v6.toLowerCase();
+    if (lower == '::1') return PeerAddressType.ipv6LinkLocal;
+    if (lower.startsWith('fe80')) return PeerAddressType.ipv6LinkLocal;
+    // fc00::/7 → first byte 0xfc or 0xfd → "fc" or "fd" prefix.
+    if (lower.startsWith('fc') || lower.startsWith('fd')) {
+      return PeerAddressType.ipv6Ula;
+    }
+    // fec0::/10 deprecated site-local. fec0..feff (excluding fe80..febf which
+    // is link-local handled above).
+    if (lower.startsWith('fec') || lower.startsWith('fed') ||
+        lower.startsWith('fee') || lower.startsWith('fef')) {
+      return PeerAddressType.ipv6SiteLocal;
+    }
+    // ff00::/8 multicast — caller should never publish; we mark it as
+    // link-local sentinel so reachability filters drop it.
+    if (lower.startsWith('ff')) return PeerAddressType.ipv6LinkLocal;
+    return PeerAddressType.ipv6Global;
+  }
+
   /// Current local IPs — set by CleonaNode on start and network change.
   /// Used for address priority calculation (same subnet = highest priority).
   static List<String> currentLocalIps = [];
+
+  // ── Score-Decay (Bug B) ────────────────────────────────────────────
+  // Raw `score` = succ / (succ+fail) is sticky for life: an address with
+  // 4 successes from two weeks ago stays at 1.0 forever and dominates the
+  // route-selection sort. Effective score applies an exponential decay
+  // anchored on the last confirmed activity timestamp.
+  //
+  //   effectiveScore = score * exp(-(ageHours / halfLifeHours) * ln2)
+  //
+  //   halfLife = 24h when we've ever seen a `lastSuccess`
+  //            =  6h when we've only attempted (no success ever)
+  //            = no decay if both timestamps are null (cold record)
+  static const double _ln2 = 0.693147180559945;
+
+  /// Time-decayed score for sorting / route selection.
+  /// Falls back to raw `score` when no activity timestamp is available.
+  double get effectiveScore {
+    final anchor = lastSuccess ?? lastAttempt;
+    if (anchor == null) return score;
+    final halfLifeHours = (lastSuccess != null) ? 24.0 : 6.0;
+    final ageHours =
+        DateTime.now().difference(anchor).inMilliseconds / 3600000.0;
+    if (ageHours <= 0) return score;
+    final decay = exp(-(ageHours / halfLifeHours) * _ln2);
+    return score * decay;
+  }
 
   /// Address priority: 1=same-subnet/link-local, 2=IPv6 global/other-private,
   /// 3=public IPv4, 4=CGNAT/mobile.
@@ -145,6 +266,26 @@ class PeerAddress {
     return ip.startsWith('192.0.0.');
   }
 
+  /// WIN-4: Public alias for `_isCgnat`. Used by `RoutingTable.auditAddresses`
+  /// to prune carrier-NAT IPs from the persistent cache at startup. Carrier
+  /// NAT addresses (100.64.0.0/10 RFC 6598, plus the legacy 192.0.0.0/24
+  /// well-known prefix) are NEVER routable from outside the carrier and
+  /// belong only to the carrier-side temporary client side of mobile DS-Lite.
+  static bool isCarrierNAT(String ip) => _isCgnat(ip);
+
+  /// WIN-4: Whether `ip` is in a /24 of any of `localIps` (IPv4 only).
+  /// Used by audit-pass to decide whether a private address is reachable
+  /// from the current host. Returns true for IPs that DO share a /24 with
+  /// at least one local interface; false for unreachable private IPs (e.g.
+  /// 10.0.2.x emulator-NAT addresses on a 192.168.10.x host).
+  static bool isInLocalSubnet(String ip, Iterable<String> localIps) {
+    if (ip.contains(':')) return false; // IPv6 handled separately
+    for (final localIp in localIps) {
+      if (_sameSubnet(ip, localIp)) return true;
+    }
+    return false;
+  }
+
   /// Check if two IPs are in the same /24 subnet (IPv4 only).
   static bool _sameSubnet(String ip1, String ip2) {
     if (ip1.contains(':') || ip2.contains(':')) return false; // IPv6: no /24 concept
@@ -155,20 +296,40 @@ class PeerAddress {
   }
 
   /// Whether this address is reachable from the device's current network.
-  /// Global IPv6 reachable iff WE have a global IPv6 — site-local (fec0:),
-  /// ULA (fc00:/fd00:), link-local (fe80:) on the device do not provide global
-  /// egress (e.g. QEMU user-mode NAT routes ::/0 via fe80::2 but drops the
-  /// packet silently; OS-level send returns ok and the score-pinning prevents
-  /// IPv4 fallback from ever being tried).
-  /// Private IPs reachable iff WE have any private IP — different RFC1918
-  /// classes within one routed network are common (192.168.10.x ↔ 192.0.2.x
-  /// across VLANs, 10.0.2.x QEMU-NAT egressing onto a 192.168.x host LAN).
-  /// CGNAT IPs (100.64.x.x) are treated like public (mobile carrier NAT outbound works).
+  /// IPv4: private IPs reachable iff we also have a private IP (cross-class OK
+  /// since 6acbdef Bug C — different RFC1918 classes within one routed network
+  /// are common). CGNAT IPs (100.64.x.x) are treated like public.
+  /// IPv6 (Bug A/C):
+  ///   - IPV6_GLOBAL:     reachable iff we have a global IPv6 ourselves
+  ///   - IPV6_ULA:        reachable iff we have any ULA ourselves
+  ///   - IPV6_SITE_LOCAL: same as ULA (deprecated but treat conservatively)
+  ///   - IPV6_LINK_LOCAL: never reachable across DHT routing (return false).
+  ///                     Includes the multicast sentinel (`ff..`).
   bool get isReachableFromCurrentNetwork {
-    if (ip.contains(':') && !ip.toLowerCase().startsWith('fe80:')) {
+    // IPv6 dispatch first — IPv4 helpers below assume dot-notation.
+    if (ip.contains(':')) {
       if (ip == '::1') return true; // loopback to self always reachable
-      return _hasGlobalIpv6();
+      switch (type) {
+        case PeerAddressType.ipv6Global:
+          return _hasGlobalIpv6();
+        case PeerAddressType.ipv6Ula:
+        case PeerAddressType.ipv6SiteLocal:
+          return _hasAnyUlaAddress();
+        case PeerAddressType.ipv6LinkLocal:
+          return false;
+        default:
+          // IPv4 enum value but colon in IP string — defensive: classify on
+          // the fly and recurse. Avoid infinite loop by inlining the result.
+          final t = classifyIp(ip);
+          if (t == PeerAddressType.ipv6LinkLocal) return false;
+          if (t == PeerAddressType.ipv6Global) return _hasGlobalIpv6();
+          if (t == PeerAddressType.ipv6Ula || t == PeerAddressType.ipv6SiteLocal) {
+            return _hasAnyUlaAddress();
+          }
+          return false;
+      }
     }
+    // IPv4 path
     if (!_isPrivateIp(ip)) return true;
     // Loopback is always reachable from the same machine
     if (ip.startsWith('127.')) return true;
@@ -183,19 +344,27 @@ class PeerAddress {
     return false;
   }
 
-  /// True if the device has at least one routable (global) IPv6 address.
-  /// Excludes link-local (fe80:), site-local-deprecated (fec0:),
-  /// ULA (fc00:/fd00:), loopback (::1), multicast (ff..).
+  /// Do we currently have any global-scope IPv6 address bound locally?
+  /// Conservative — only `ipv6Global` per `classifyIp` counts.
   static bool _hasGlobalIpv6() {
-    for (final localIp in currentLocalIps) {
-      if (!localIp.contains(':')) continue;
-      final lower = localIp.toLowerCase();
-      if (lower == '::1') continue;
-      if (lower.startsWith('fe80:')) continue;
-      if (lower.startsWith('fec0:')) continue;
-      if (lower.startsWith('ff')) continue;
-      if (lower.startsWith('fc') || lower.startsWith('fd')) continue;
-      return true;
+    for (final ip in currentLocalIps) {
+      if (!ip.contains(':')) continue;
+      if (classifyIp(ip) == PeerAddressType.ipv6Global) return true;
+    }
+    return false;
+  }
+
+  /// Do we have any ULA (or site-local) IPv6 address bound locally?
+  /// Used to decide whether a peer's ULA is potentially reachable. Conservative:
+  /// "any ULA" rather than "ULA in the same /48 prefix" — good enough for now,
+  /// avoids dropping records on home networks where the prefix is stable.
+  static bool _hasAnyUlaAddress() {
+    for (final ip in currentLocalIps) {
+      if (!ip.contains(':')) continue;
+      final t = classifyIp(ip);
+      if (t == PeerAddressType.ipv6Ula || t == PeerAddressType.ipv6SiteLocal) {
+        return true;
+      }
     }
     return false;
   }
@@ -226,7 +395,14 @@ class PeerAddress {
   String toString() => '$ip:$port (${type.name}, pri=$priority, score=${score.toStringAsFixed(2)})';
 }
 
-enum PeerAddressType { ipv4Public, ipv4Private, ipv6Global }
+enum PeerAddressType {
+  ipv4Public,
+  ipv4Private,
+  ipv6Global,
+  ipv6Ula,
+  ipv6LinkLocal,
+  ipv6SiteLocal,
+}
 
 /// Capability bitmask flags for PeerInfo.capabilities (§27 IPv6 Transport).
 class PeerCapabilities {
@@ -288,6 +464,23 @@ class Route {
   /// Used by sendEnvelope cascade: if direct route is ackConfirmed, skip relay.
   bool ackConfirmed;
 
+  /// True while this route is in the soft-reset "stale" window after a network
+  /// change (Architektur §2.7.2 / §7.6). Stale routes still appear in lookups
+  /// but at +5 cost, so freshly revalidated routes are preferred. Routes that
+  /// fail to revalidate within the deadline are dropped by `pruneStaleRoutes`.
+  bool isStale = false;
+
+  /// When the route entered the `stale` state (null when not stale).
+  DateTime? staleSince;
+
+  /// Cost penalty applied to [cost] while the route is stale. Always 0 or
+  /// [stalenessPenalty]; persisted so [revalidate] can restore the original
+  /// cost without floating-point drift if multiple stale cycles occur.
+  int _stalenessPenalty = 0;
+
+  /// Soft-reset cost penalty for stale routes (Architektur §2.7.2).
+  static const int stalenessPenalty = 5;
+
   static const int infinity = 65535;
 
   Route({
@@ -302,6 +495,26 @@ class Route {
     this.ackConfirmed = false,
   }) : lastConfirmed = lastConfirmed ?? DateTime.now();
 
+  /// Mark this route as stale (idempotent). Adds [stalenessPenalty] to [cost]
+  /// the first time it is called on a fresh route.
+  void markStale({DateTime? now}) {
+    if (isStale) return;
+    isStale = true;
+    staleSince = now ?? DateTime.now();
+    cost = (cost + stalenessPenalty).clamp(0, infinity);
+    _stalenessPenalty = stalenessPenalty;
+  }
+
+  /// Clear the stale flag and remove the cost penalty. Idempotent.
+  void revalidate({DateTime? now}) {
+    if (!isStale) return;
+    isStale = false;
+    staleSince = null;
+    cost = (cost - _stalenessPenalty).clamp(0, infinity);
+    _stalenessPenalty = 0;
+    lastConfirmed = now ?? DateTime.now();
+  }
+
   bool get isAlive => cost < infinity && consecutiveFailures < 3;
   bool get isDirect => nextHop == null;
 
@@ -313,7 +526,66 @@ class Route {
       'Route(${destinationHex.substring(0, 8)}.. '
       'via ${nextHopHex?.substring(0, 8) ?? "direct"}, '
       'cost=$cost, hops=$hopCount, ${connType.name})';
+
+  /// Serialize for `dv_routing.json` persistence (Architecture §2.7.3).
+  /// `cost` is stored *without* the stale-penalty so a daemon restart does
+  /// not pile penalty on penalty across multiple stale cycles. The `isStale`
+  /// / `staleSince` / `_stalenessPenalty` fields are intentionally NOT
+  /// persisted — `DvRoutingTable.loadFromJson` re-marks every loaded route
+  /// stale via `markAllRoutesStale`, mirroring the soft-reset semantics in
+  /// `cleona_node.dart:onNetworkChanged` (§2.7.2).
+  Map<String, dynamic> toJson() => {
+        'destination': _bytesToHex(destination),
+        if (nextHop != null) 'nextHop': _bytesToHex(nextHop!),
+        'hopCount': hopCount,
+        'cost': (cost - _stalenessPenalty).clamp(0, infinity),
+        'type': type.name,
+        'lastConfirmed': lastConfirmed.millisecondsSinceEpoch,
+        'connType': connType.name,
+        'consecutiveFailures': consecutiveFailures,
+        'ackConfirmed': ackConfirmed,
+      };
+
+  /// Reconstruct a Route from its persisted JSON form. Unknown enum values
+  /// fall back to safe defaults (relay / publicUdp) rather than throwing —
+  /// a corrupted persisted file should at worst yield slightly off cost
+  /// estimates that the next live `processRouteUpdate` corrects, never a
+  /// crash on daemon start.
+  static Route fromJson(Map<String, dynamic> json) {
+    return Route(
+      destination: _hexToBytes(json['destination'] as String),
+      nextHop: json['nextHop'] != null
+          ? _hexToBytes(json['nextHop'] as String)
+          : null,
+      hopCount: json['hopCount'] as int,
+      cost: json['cost'] as int,
+      type: RouteType.values.firstWhere(
+        (e) => e.name == (json['type'] as String? ?? 'relay'),
+        orElse: () => RouteType.relay,
+      ),
+      lastConfirmed: DateTime.fromMillisecondsSinceEpoch(
+          json['lastConfirmed'] as int? ?? 0),
+      connType: ConnectionType.values.firstWhere(
+        (e) => e.name == (json['connType'] as String? ?? 'publicUdp'),
+        orElse: () => ConnectionType.publicUdp,
+      ),
+      consecutiveFailures: json['consecutiveFailures'] as int? ?? 0,
+      ackConfirmed: json['ackConfirmed'] as bool? ?? false,
+    );
+  }
 }
+
+/// Provenance of a cached PubKey in `PeerInfo` — drives `verifyOuterEnvelope`
+/// behavior on signature mismatch (Architecture §17.3).
+///
+/// - [none]: no PK cached.
+/// - [thirdParty]: learned via foreign PEER_LIST_PUSH (a node telling us about
+///   another node). Mismatch → clear + accept (lenient — tolerates pollution).
+/// - [firstParty]: learned via authenticated direct exchange with the peer
+///   itself (self-broadcast PEER_LIST_PUSH where pushed deviceNodeId matches
+///   envelope.senderDeviceNodeId; CONTACT_REQUEST/RESPONSE; signed
+///   KEY_ROTATION_BROADCAST). Mismatch → drop + preserve (presumed adversarial).
+enum PkSource { none, thirdParty, firstParty }
 
 /// Represents a known peer in the network.
 /// After Phase 2 (§26 Multi-Device), nodeId = deviceNodeId (per-device routing).
@@ -331,12 +603,75 @@ class PeerInfo {
   DateTime lastSeen;
   NatClassification natType;
   int capabilities;
+  /// **User-Sig** PK (Ed25519). Identity-wide — derived from the User's seed,
+  /// identical across all of the User's devices. Used for: contact-resolution,
+  /// mailbox-ID derivation (§3.2 `mailboxId = SHA-256("mailbox" || ed25519_pk)`),
+  /// CR/CRR signature verification.
+  ///
+  /// **Not** used for outer NetworkPacketV3 device-sig verification — that
+  /// reaches for [deviceEd25519PublicKey] (Welle 3, §17.3).
   Uint8List? ed25519PublicKey;
+
+  /// **User-Sig** PK (ML-DSA-65) — PQ companion to [ed25519PublicKey].
   Uint8List? mlDsaPublicKey;
+
   Uint8List? x25519PublicKey;
   Uint8List? mlKemPublicKey;
+
+  /// **Device-Sig** PK (Ed25519). Per-device, persisted server-side in
+  /// `device_keys.json`. Distinct from [ed25519PublicKey] (User-Sig). The
+  /// outer `NetworkPacketV3.device_sig` is signed with the Device-Sig
+  /// keypair — `verifyOuterDeviceSig` MUST consult these fields, not the
+  /// User-Sig PKs above. `null` means we have not yet learned this peer's
+  /// Device-Sig PK from a self-broadcast / KEY_ROTATION; the receiver then
+  /// falls back to the lenient-bootstrap path (§2.4.0).
+  Uint8List? deviceEd25519PublicKey;
+
+  /// **Device-Sig** PK (ML-DSA-65) — PQ companion to [deviceEd25519PublicKey].
+  Uint8List? deviceMlDsaPublicKey;
+
+  /// Provenance of the cached signing keys (Ed25519 + ML-DSA), used by
+  /// `CleonaNode.verifyOuterEnvelope` to choose the mismatch policy.
+  /// See `PkSource` for semantics; default `none`. The two PK types share a
+  /// single source flag because both are populated from the same authenticated
+  /// channels (CONTACT_REQUEST, self-broadcast PEER_LIST_PUSH, KEY_ROTATION).
+  PkSource pkSource = PkSource.none;
+
+  /// §5.10 Send-Cascade Recovery — Stale-PK flag (orthogonal to [pkSource]).
+  ///
+  /// Set when the cached signing PK is suspected stale (Stage 2: incoming
+  /// `device_sig_invalid` from a peer with a firstParty PK we cached, treated
+  /// as likely key rotation rather than malice; Stage 5: blanket mark on
+  /// re-discovery so the next firstParty Self-Broadcast can refresh every
+  /// peer's PK after a wider mesh-state loss).
+  ///
+  /// Contract (§5.10.5): while `pkStale == true` AND `pkSource ==
+  /// PkSource.firstParty`, [setSigningKeys] allows an incoming firstParty PK
+  /// to overwrite the cached one — bypassing the "firstParty cannot be
+  /// overwritten" pollution-prevention rule. The overwrite clears `pkStale`.
+  /// Receiver-side reputation hits for `device_sig_invalid` are suppressed
+  /// while the flag is set (the cascade is owning the recovery).
+  bool pkStale = false;
   Uint8List? ed25519Signature;
   Uint8List? mlDsaSignature;
+
+  /// SHA-256 fingerprint over all 6 PK fields (ed25519 + ml_dsa + x25519 +
+  /// ml_kem + device_ed25519 + device_ml_dsa). Carried in slim PEER_LIST_PUSH
+  /// so the receiver can detect key changes without the full PQ keys.
+  Uint8List? keyFingerprint;
+
+  Uint8List? get computedKeyFingerprint {
+    if (ed25519PublicKey == null) return null;
+    final buf = <int>[
+      ...ed25519PublicKey!,
+      ...?mlDsaPublicKey,
+      ...?x25519PublicKey,
+      ...?mlKemPublicKey,
+      ...?deviceEd25519PublicKey,
+      ...?deviceMlDsaPublicKey,
+    ];
+    return SodiumFFI().sha256(Uint8List.fromList(buf));
+  }
 
   /// Relay route: nodeId of the relay peer that can reach this peer.
   /// Transient — not persisted.
@@ -360,11 +695,53 @@ class PeerInfo {
       relayViaNodeId != null &&
       consecutiveRelayFailures < 3;
 
+  /// True while the learned relay route is in the soft-reset "stale" window
+  /// (Architektur §2.7.2 / §7.6). The route is still consulted by the cascade,
+  /// but `bestRouteTo` adds a cost penalty so a freshly revalidated direct
+  /// route is preferred. Cleared on incoming PONG / DELIVERY_RECEIPT through
+  /// the relay; pruned to `clearRelayRoute()` if not revalidated within the
+  /// 30 s deadline by `pruneRelayIfStale`.
+  bool relayStale = false;
+
+  /// Timestamp when the relay route entered the `stale` state (null when not).
+  DateTime? relayStaleSince;
+
+  /// Mark the learned relay route as stale (idempotent, no-op if no relay).
+  void markRelayStale({DateTime? now}) {
+    if (relayViaNodeId == null) return;
+    if (relayStale) return;
+    relayStale = true;
+    relayStaleSince = now ?? DateTime.now();
+  }
+
+  /// Clear the stale flag (called when a frame is delivered through the relay
+  /// or the relay sends us a fresh DV-update). Idempotent.
+  void confirmRelay({DateTime? now}) {
+    if (!relayStale) return;
+    relayStale = false;
+    relayStaleSince = null;
+    relaySetAt = now ?? DateTime.now();
+  }
+
+  /// Drop the relay route entirely if it has been stale for longer than
+  /// [maxAge]. Returns true if the route was pruned.
+  bool pruneRelayIfStale(Duration maxAge, {DateTime? now}) {
+    if (!relayStale || relayStaleSince == null) return false;
+    final tNow = now ?? DateTime.now();
+    if (tNow.difference(relayStaleSince!) <= maxAge) return false;
+    clearRelayRoute();
+    relayStale = false;
+    relayStaleSince = null;
+    return true;
+  }
+
   /// Clear the relay route (on network change, or relay peer gone).
   void clearRelayRoute() {
     relayViaNodeId = null;
     relaySetAt = null;
     consecutiveRelayFailures = 0;
+    relayStale = false;
+    relayStaleSince = null;
   }
 
   /// Per-relay-route cooldown (Task #30): relayHex → expiresAt.
@@ -429,10 +806,68 @@ class PeerInfo {
     this.mlDsaPublicKey,
     this.x25519PublicKey,
     this.mlKemPublicKey,
+    this.deviceEd25519PublicKey,
+    this.deviceMlDsaPublicKey,
     this.ed25519Signature,
     this.mlDsaSignature,
+    this.keyFingerprint,
+    this.pkSource = PkSource.none,
   })  : addresses = addresses ?? [],
         lastSeen = lastSeen ?? DateTime.now();
+
+  /// Set or upgrade the cached signing PKs.
+  ///
+  /// Provenance precedence: a `firstParty` PK is **never** overwritten by a
+  /// `thirdParty` claim — that closes the cache-pollution vector identified
+  /// in V3.1.74 (Architecture §17.3 "Stale key handling"). Setting the same
+  /// or higher provenance is allowed; the same provenance with new bytes
+  /// overwrites (legitimate key rotation flows go through dedicated paths
+  /// that pass `firstParty`).
+  ///
+  /// Returns `true` if the PK fields were updated, `false` if the call was
+  /// suppressed by the precedence rule.
+  bool setSigningKeys({
+    Uint8List? ed25519,
+    Uint8List? mlDsa,
+    Uint8List? deviceEd25519,
+    Uint8List? deviceMlDsa,
+    required PkSource source,
+  }) {
+    if (source == PkSource.none) return false;
+    if (pkSource == PkSource.firstParty && source == PkSource.thirdParty) {
+      return false; // Don't downgrade.
+    }
+    if (ed25519 != null && ed25519.isNotEmpty) ed25519PublicKey = ed25519;
+    if (mlDsa != null && mlDsa.isNotEmpty) mlDsaPublicKey = mlDsa;
+    // Welle 3 (§17.3): Device-Sig PKs are populated from the same authenticated
+    // channels (self-broadcast PEER_LIST_PUSH, KEY_ROTATION) and share the
+    // provenance flag. The outer NetworkPacketV3 device_sig verifier reaches
+    // for these explicitly — keeping them in sync with the User-Sig PKs is
+    // mandatory or `verifyOuterDeviceSig` will silently fall through.
+    if (deviceEd25519 != null && deviceEd25519.isNotEmpty) {
+      deviceEd25519PublicKey = deviceEd25519;
+    }
+    if (deviceMlDsa != null && deviceMlDsa.isNotEmpty) {
+      deviceMlDsaPublicKey = deviceMlDsa;
+    }
+    pkSource = source;
+    // §5.10.5 — once a fresh firstParty PK has landed, the Stage-2/Stage-5
+    // recovery is over for this peer. Clear the stale flag so subsequent
+    // packets verify normally and the reputation-hit suppression in
+    // `_onPacketV3Received` (§5.10.2) lifts.
+    if (source == PkSource.firstParty) pkStale = false;
+    return true;
+  }
+
+  /// Clear the cached signing PKs (e.g. on signature mismatch with
+  /// `thirdParty` provenance — the lenient policy from §17.3).
+  void clearSigningKeys() {
+    ed25519PublicKey = null;
+    mlDsaPublicKey = null;
+    deviceEd25519PublicKey = null;
+    deviceMlDsaPublicKey = null;
+    pkSource = PkSource.none;
+  }
 
   String get nodeIdHex => _bytesToHex(nodeId);
 
@@ -495,11 +930,17 @@ class PeerInfo {
     }
 
     final result = targets.values.toList();
-    // Sort by priority ASC (lower = better), then by score DESC (higher = better)
+    // Sort: priority ASC → receive-confirmed first → effectiveScore DESC.
+    // Receive-confirmed (lastReceivedAt != null) addresses have proven
+    // bidirectional NAT reachability — critical for symmetric NAT / CGNAT
+    // where STUN-discovered ports differ per destination.
     result.sort((a, b) {
       final priCmp = a.priority.compareTo(b.priority);
       if (priCmp != 0) return priCmp;
-      return b.score.compareTo(a.score);
+      final aRecv = a.lastReceivedAt != null ? 0 : 1;
+      final bRecv = b.lastReceivedAt != null ? 0 : 1;
+      if (aRecv != bRecv) return aRecv.compareTo(bRecv);
+      return b.effectiveScore.compareTo(a.effectiveScore);
     });
     return result;
   }
@@ -530,7 +971,15 @@ class PeerInfo {
     }
   }
 
-  proto.PeerInfoProto toProto() {
+  /// Serialize to protobuf.
+  ///
+  /// [slim]: omit PQ key material (ml_dsa_pk, ml_kem_pk, x25519_pk,
+  /// device_ml_dsa_pk) and ML-DSA signature. Includes key_fingerprint so the
+  /// receiver can detect key changes. ~450B instead of ~8,800B.
+  ///
+  /// [gossipFilter]: only addresses with at least one local success are
+  /// included — prevents propagating unverified NAT-mapped addresses.
+  proto.PeerInfoProto toProto({bool slim = false, bool gossipFilter = false}) {
     final p = proto.PeerInfoProto()
       ..nodeId = nodeId
       ..publicIp = publicIp
@@ -542,14 +991,28 @@ class PeerInfo {
       ..natType = PeerInfo._natToProto(natType)
       ..capabilities = capabilities;
     for (final addr in addresses) {
+      if (gossipFilter && addr.lastSuccess == null && addr.successCount == 0) {
+        continue;
+      }
       p.addresses.add(addr.toProto());
     }
     if (ed25519PublicKey != null) p.ed25519PublicKey = ed25519PublicKey!;
-    if (mlDsaPublicKey != null) p.mlDsaPublicKey = mlDsaPublicKey!;
-    if (x25519PublicKey != null) p.x25519PublicKey = x25519PublicKey!;
-    if (mlKemPublicKey != null) p.mlKemPublicKey = mlKemPublicKey!;
+    if (deviceEd25519PublicKey != null) {
+      p.deviceEd25519PublicKey = deviceEd25519PublicKey!;
+    }
     if (ed25519Signature != null) p.ed25519Signature = ed25519Signature!;
-    if (mlDsaSignature != null) p.mlDsaSignature = mlDsaSignature!;
+    if (slim) {
+      final fp = computedKeyFingerprint;
+      if (fp != null) p.keyFingerprint = fp;
+    } else {
+      if (mlDsaPublicKey != null) p.mlDsaPublicKey = mlDsaPublicKey!;
+      if (x25519PublicKey != null) p.x25519PublicKey = x25519PublicKey!;
+      if (mlKemPublicKey != null) p.mlKemPublicKey = mlKemPublicKey!;
+      if (deviceMlDsaPublicKey != null) {
+        p.deviceMlDsaPublicKey = deviceMlDsaPublicKey!;
+      }
+      if (mlDsaSignature != null) p.mlDsaSignature = mlDsaSignature!;
+    }
     if (userId != null && userId!.isNotEmpty) p.userId = userId!;
     return p;
   }
@@ -571,8 +1034,15 @@ class PeerInfo {
       mlDsaPublicKey: p.mlDsaPublicKey.isEmpty ? null : Uint8List.fromList(p.mlDsaPublicKey),
       x25519PublicKey: p.x25519PublicKey.isEmpty ? null : Uint8List.fromList(p.x25519PublicKey),
       mlKemPublicKey: p.mlKemPublicKey.isEmpty ? null : Uint8List.fromList(p.mlKemPublicKey),
+      deviceEd25519PublicKey: p.deviceEd25519PublicKey.isEmpty
+          ? null
+          : Uint8List.fromList(p.deviceEd25519PublicKey),
+      deviceMlDsaPublicKey: p.deviceMlDsaPublicKey.isEmpty
+          ? null
+          : Uint8List.fromList(p.deviceMlDsaPublicKey),
       ed25519Signature: p.ed25519Signature.isEmpty ? null : Uint8List.fromList(p.ed25519Signature),
       mlDsaSignature: p.mlDsaSignature.isEmpty ? null : Uint8List.fromList(p.mlDsaSignature),
+      keyFingerprint: p.keyFingerprint.isEmpty ? null : Uint8List.fromList(p.keyFingerprint),
     );
   }
 
@@ -613,8 +1083,21 @@ class PeerInfo {
       'lastSeen': lastSeen.millisecondsSinceEpoch,
       'natType': natType.name,
       'ed25519PublicKey': ed25519PublicKey != null ? _bytesToHex(ed25519PublicKey!) : null,
+      'mlDsaPublicKey': mlDsaPublicKey != null ? _bytesToHex(mlDsaPublicKey!) : null,
       'x25519PublicKey': x25519PublicKey != null ? _bytesToHex(x25519PublicKey!) : null,
       'mlKemPublicKey': mlKemPublicKey != null ? _bytesToHex(mlKemPublicKey!) : null,
+      // Welle 3 (§17.3): persist Device-Sig PKs so a daemon restart re-uses
+      // the cached device pubkey instead of falling back to lenient bootstrap.
+      'deviceEd25519PublicKey': deviceEd25519PublicKey != null
+          ? _bytesToHex(deviceEd25519PublicKey!)
+          : null,
+      'deviceMlDsaPublicKey': deviceMlDsaPublicKey != null
+          ? _bytesToHex(deviceMlDsaPublicKey!)
+          : null,
+      // Persist provenance so a daemon restart preserves the firstParty
+      // protection (Architecture §17.3). Without this, every restart would
+      // reset to thirdParty and re-open the pollution window.
+      if (pkSource != PkSource.none) 'pkSource': pkSource.name,
       'addresses': addresses.map((a) => {
         'ip': a.ip,
         'port': a.port,
@@ -622,6 +1105,8 @@ class PeerInfo {
         'score': a.score,
         'successCount': a.successCount,
         'failCount': a.failCount,
+        if (a.lastReceivedAt != null)
+          'lastReceivedAt': a.lastReceivedAt!.millisecondsSinceEpoch,
       }).toList(),
       if (isProtectedSeed) 'isProtectedSeed': true,
     };
@@ -642,13 +1127,25 @@ class PeerInfo {
         orElse: () => NatClassification.unknown,
       ),
       ed25519PublicKey: json['ed25519PublicKey'] != null ? _hexToBytes(json['ed25519PublicKey'] as String) : null,
+      mlDsaPublicKey: json['mlDsaPublicKey'] != null ? _hexToBytes(json['mlDsaPublicKey'] as String) : null,
       x25519PublicKey: json['x25519PublicKey'] != null ? _hexToBytes(json['x25519PublicKey'] as String) : null,
       mlKemPublicKey: json['mlKemPublicKey'] != null ? _hexToBytes(json['mlKemPublicKey'] as String) : null,
+      deviceEd25519PublicKey: json['deviceEd25519PublicKey'] != null
+          ? _hexToBytes(json['deviceEd25519PublicKey'] as String)
+          : null,
+      deviceMlDsaPublicKey: json['deviceMlDsaPublicKey'] != null
+          ? _hexToBytes(json['deviceMlDsaPublicKey'] as String)
+          : null,
+      pkSource: PkSource.values.firstWhere(
+        (e) => e.name == (json['pkSource'] as String? ?? 'none'),
+        orElse: () => PkSource.none,
+      ),
       addresses: (json['addresses'] as List<dynamic>?)?.map((a) {
         final m = a as Map<String, dynamic>;
         final ip = (m['ip'] as String).trim();
         final port = m['port'] as int;
         if (ip.isEmpty || ip == '0.0.0.0' || port <= 0) return null;
+        final lrMs = m['lastReceivedAt'] as int?;
         return PeerAddress(
           ip: ip,
           port: port,
@@ -659,6 +1156,9 @@ class PeerInfo {
           score: (m['score'] as num?)?.toDouble() ?? 0.5,
           successCount: m['successCount'] as int? ?? 0,
           failCount: m['failCount'] as int? ?? 0,
+          lastReceivedAt: lrMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(lrMs)
+              : null,
         );
       }).whereType<PeerAddress>().toList() ?? [],
     )..isProtectedSeed = json['isProtectedSeed'] as bool? ?? false;
