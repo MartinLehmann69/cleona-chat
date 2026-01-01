@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.13)
-project(cleona_audio C)
+if(APPLE)
+  project(cleona_audio C OBJC)
+else()
+  project(cleona_audio C)
+endif()
 
 # Find SpeexDSP via pkg-config (Linux preferred) or vendored fallback
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
