@@ -1,0 +1,196 @@
+###############################################################################
+# cross-node-test.yml — Cross-node integration test (macOS ↔ Node 1)
+#
+# 3-job pipeline on GitHub Actions:
+#   1. setup-node1 (self-hosted on Bootstrap): start daemon + IPC watcher,
+#      export ContactSeed URIs for Alice + AllyCat
+#   2. macos-test (macos-14): build app, run Phase 1+2+3 integration test
+#   3. cleanup (self-hosted): stop IPC watcher
+#
+# Phase 3 test flow:
+#   - macOS sends CR to Alice → auto-accepted by watcher → test msg back
+#   - macOS sends CR to AllyCat → auto-accepted by watcher → test msg back
+#   - macOS sends test messages to both → verified on macOS side
+###############################################################################
+name: Cross-Node Integration Test
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: cross-node-test
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: '3.41.2'
+
+jobs:
+  # ── Job 1: Start Node 1 daemon + IPC watcher, export seeds ──────────
+  setup-node1:
+    name: Setup Node 1
+    runs-on: [self-hosted, bootstrap]
+    timeout-minutes: 5
+    outputs:
+      alice_seed: ${{ steps.seeds.outputs.alice }}
+      allycat_seed: ${{ steps.seeds.outputs.allycat }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure Node 1 daemon running
+        run: |
+          ssh cleona@${{ vars.NODE1_HOST }} bash -s << 'REMOTE'
+          set -e
+          if pgrep -f "cleona-daemon" > /dev/null 2>&1; then
+            echo "Daemon already running (PID $(pgrep -f cleona-daemon))"
+          else
+            # Clean up stale files from previous runs
+            rm -f ~/.cleona/cleona.sock ~/.cleona/cleona.lock ~/.cleona/cleona.pid
+            nohup ~/cleona-daemon > /tmp/cleona-daemon-ci.log 2>&1 &
+            echo "Started daemon (PID $!), waiting for socket..."
+            for i in $(seq 1 45); do
+              [ -S ~/.cleona/cleona.sock ] && break
+              sleep 1
+            done
+            if [ ! -S ~/.cleona/cleona.sock ]; then
+              echo "ERROR: Socket not ready after 45s"
+              tail -30 /tmp/cleona-daemon-ci.log
+              exit 1
+            fi
+            echo "Socket ready"
+          fi
+          # Wait for network convergence (peer connections)
+          sleep 15
+          REMOTE
+
+      - name: Start IPC watcher
+        run: |
+          scp scripts/ci-ipc-watcher.py cleona@${{ vars.NODE1_HOST }}:/tmp/ci-ipc-watcher.py
+          ssh cleona@${{ vars.NODE1_HOST }} bash -s << 'REMOTE'
+          set -e
+          pkill -f ci-ipc-watcher.py 2>/dev/null || true
+          sleep 1
+          nohup python3 /tmp/ci-ipc-watcher.py > /tmp/ci-ipc-watcher.log 2>&1 &
+          sleep 2
+          if [ -f /tmp/ci-ipc-watcher.pid ]; then
+            echo "Watcher running (PID $(cat /tmp/ci-ipc-watcher.pid))"
+          else
+            echo "ERROR: Watcher failed to start"
+            cat /tmp/ci-ipc-watcher.log
+            exit 1
+          fi
+          REMOTE
+
+      - name: Export ContactSeeds
+        id: seeds
+        run: |
+          scp scripts/ci-export-seeds.py cleona@${{ vars.NODE1_HOST }}:/tmp/ci-export-seeds.py
+          SEEDS=$(ssh cleona@${{ vars.NODE1_HOST }} \
+            "python3 /tmp/ci-export-seeds.py --bootstrap-id ${{ vars.BOOTSTRAP_NODE_ID }} --bootstrap-addr ${{ vars.BOOTSTRAP_ADDR }}")
+          echo "=== Exported Seeds ==="
+          echo "$SEEDS" | sed 's/\(cleona:\/\/[0-9a-f]\{12\}\).\{100\}/\1.../g'
+          # Parse key=value lines into GitHub outputs
+          while IFS='=' read -r key value; do
+            [ -z "$key" ] && continue
+            echo "${key}=${value}" >> "$GITHUB_OUTPUT"
+          done <<< "$SEEDS"
+
+  # ── Job 2: macOS build + integration test (Phase 1+2+3) ─────────────
+  macos-test:
+    name: macOS — Cross-Node Test
+    runs-on: macos-14
+    needs: setup-node1
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja autoconf automake libtool pkg-config libvpx
+
+      - name: Cache native lib sources
+        uses: actions/cache@v4
+        with:
+          path: /tmp/macos-libs-build-*
+          key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
+          restore-keys: macos-native-libs-
+
+      - name: Build native dylibs
+        run: ./scripts/build-macos-libs.sh --arch arm64
+        timeout-minutes: 30
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Flutter dependencies
+        run: flutter pub get
+
+      - name: Build macOS app
+        run: flutter build macos --debug --dart-define=NETWORK_CHANNEL=beta
+
+      - name: Place dylibs in app bundle
+        run: |
+          APP_PATH="build/macos/Build/Products/Debug/Cleona.app"
+          FRAMEWORKS="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$FRAMEWORKS"
+          for f in build/macos-libs/arm64/*.dylib; do
+            cp "$f" "$FRAMEWORKS/"
+          done
+
+      - name: Run integration test
+        env:
+          BOOTSTRAP_CONTACT_SEED: ${{ vars.BOOTSTRAP_CONTACT_SEED }}
+          ALICE_CONTACT_SEED: ${{ needs.setup-node1.outputs.alice_seed }}
+          ALLYCAT_CONTACT_SEED: ${{ needs.setup-node1.outputs.allycat_seed }}
+        run: |
+          echo "=== Phase 3 Seeds ==="
+          echo "ALICE_CONTACT_SEED set: $( [ -n \"$ALICE_CONTACT_SEED\" ] && echo yes || echo no )"
+          echo "ALLYCAT_CONTACT_SEED set: $( [ -n \"$ALLYCAT_CONTACT_SEED\" ] && echo yes || echo no )"
+          flutter test integration_test/app_test_ci.dart -d macos --timeout 180s 2>&1 | tee test-output.log
+          EXIT_CODE=${PIPESTATUS[0]}
+          exit $EXIT_CODE
+
+      - name: Collect crash logs on failure
+        if: failure()
+        run: |
+          echo "=== Crash Reports ==="
+          find ~/Library/Logs/DiagnosticReports -name "Cleona*" -mmin -15 2>/dev/null | head -5 | while read f; do
+            echo "--- $f ---"
+            head -50 "$f"
+          done
+          echo "=== Test Output ==="
+          tail -80 test-output.log 2>/dev/null || true
+
+      - name: Upload test artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cross-node-test-failure-logs
+          path: |
+            test-output.log
+            ~/Library/Logs/DiagnosticReports/Cleona*
+          retention-days: 7
+
+  # ── Job 3: Cleanup (stop watcher, collect logs) ─────────────────────
+  cleanup:
+    name: Cleanup Node 1
+    runs-on: [self-hosted, bootstrap]
+    needs: macos-test
+    if: always()
+    timeout-minutes: 3
+    steps:
+      - name: Stop IPC watcher + collect logs
+        run: |
+          ssh cleona@${{ vars.NODE1_HOST }} bash -s << 'REMOTE'
+          if [ -f /tmp/ci-ipc-watcher.pid ]; then
+            kill $(cat /tmp/ci-ipc-watcher.pid) 2>/dev/null || true
+            rm -f /tmp/ci-ipc-watcher.pid
+            echo "Watcher stopped"
+          fi
+          echo "=== Watcher Log ==="
+          cat /tmp/ci-ipc-watcher.log 2>/dev/null || echo "(no log)"
+          echo "=== Daemon Log (last 30 lines) ==="
+          tail -30 /tmp/cleona-daemon-ci.log 2>/dev/null || echo "(no log)"
+          REMOTE

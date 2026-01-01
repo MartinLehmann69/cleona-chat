@@ -8,7 +8,12 @@
 //   - Programmatic ContactSeed import via CleonaService API (no GUI taps)
 //   - Peer connection verification (peer count > 0)
 //
-// Both phases run in a single testWidgets — Flutter integration tests
+// Phase 3: Cross-node CR + messaging (runs when ALICE/ALLYCAT_CONTACT_SEED set)
+//   - Send CR to Alice (Node 1 identity 1) → auto-accepted by IPC watcher
+//   - Send CR to AllyCat (Node 1 identity 2) → auto-accepted by IPC watcher
+//   - Send test messages to both, receive CI-ACK messages back
+//
+// All phases run in a single testWidgets — Flutter integration tests
 // don't share widget trees across testWidgets blocks.
 //
 // Run: flutter test integration_test/app_test_ci.dart -d macos
@@ -40,6 +45,11 @@ void main() {
 
   final contactSeedUri = Platform.environment['BOOTSTRAP_CONTACT_SEED'];
   final hasContactSeed = contactSeedUri != null && contactSeedUri.isNotEmpty;
+
+  final aliceSeedUri = Platform.environment['ALICE_CONTACT_SEED'];
+  final allyCatSeedUri = Platform.environment['ALLYCAT_CONTACT_SEED'];
+  final hasPhase3 = aliceSeedUri != null && aliceSeedUri.isNotEmpty &&
+      allyCatSeedUri != null && allyCatSeedUri.isNotEmpty;
 
   testWidgets('CI Integration Test', (tester) async {
     // ── Phase 1: Startup Smoke ──────────────────────────────────────
@@ -159,5 +169,114 @@ void main() {
 
     expect(peerConnected, isTrue,
         reason: '2.5 Peer-Count > 0 nach ContactSeed-Import (60s Timeout)');
+
+    // ── Phase 3: Cross-Node CR + Messaging ──────────────────────────
+    if (!hasPhase3) {
+      printOnFailure('Phase 3 skipped: ALICE/ALLYCAT_CONTACT_SEED not set');
+      return;
+    }
+
+    // 3.1 Parse Alice's and AllyCat's ContactSeeds
+    final aliceSeed = ContactSeed.fromUri(aliceSeedUri);
+    final allyCatSeed = ContactSeed.fromUri(allyCatSeedUri);
+    expect(aliceSeed, isNotNull, reason: '3.1 Alice ContactSeed parsed');
+    expect(allyCatSeed, isNotNull, reason: '3.1 AllyCat ContactSeed parsed');
+
+    // Helper: import seed + send CR
+    Future<void> importAndSendCR(ContactSeed cs) async {
+      final sp = cs.seedPeers
+          .map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses))
+          .toList();
+      service.addPeersFromContactSeed(
+        cs.nodeIdHex,
+        cs.ownAddresses,
+        sp,
+        targetDeviceIdHex: cs.deviceIdHex,
+        targetDxkB64: cs.deviceX25519Pk != null
+            ? base64.encode(cs.deviceX25519Pk!)
+            : null,
+        targetDmkB64: cs.deviceMlKemPk != null
+            ? base64.encode(cs.deviceMlKemPk!)
+            : null,
+      );
+      await service.sendContactRequest(
+        cs.nodeIdHex,
+        seedDeviceIdHex: cs.deviceIdHex,
+        seedDxkB64: cs.deviceX25519Pk != null
+            ? base64.encode(cs.deviceX25519Pk!)
+            : null,
+        seedDmkB64: cs.deviceMlKemPk != null
+            ? base64.encode(cs.deviceMlKemPk!)
+            : null,
+      );
+    }
+
+    // 3.2 Send CRs to Alice and AllyCat
+    await importAndSendCR(aliceSeed!);
+    await tester.pump(const Duration(seconds: 2));
+    await importAndSendCR(allyCatSeed!);
+    await tester.pump(const Duration(seconds: 2));
+
+    // 3.3 Wait for both contacts to be accepted (120s timeout)
+    var aliceAccepted = false;
+    var allyCatAccepted = false;
+    for (var i = 0; i < 24; i++) {
+      await tester.pump(const Duration(seconds: 5));
+      for (final c in service.acceptedContacts) {
+        if (c.nodeIdHex == aliceSeed.nodeIdHex) aliceAccepted = true;
+        if (c.nodeIdHex == allyCatSeed.nodeIdHex) allyCatAccepted = true;
+      }
+      if (aliceAccepted && allyCatAccepted) break;
+    }
+
+    expect(aliceAccepted, isTrue,
+        reason: '3.3 Alice accepted CR within 120s');
+    expect(allyCatAccepted, isTrue,
+        reason: '3.3 AllyCat accepted CR within 120s');
+
+    // 3.4 Send test messages to Alice and AllyCat
+    final aliceMsg = await service.sendTextMessage(
+        aliceSeed.nodeIdHex, 'CI-PING-Alice');
+    expect(aliceMsg, isNotNull, reason: '3.4 Message to Alice queued');
+
+    await tester.pump(const Duration(seconds: 1));
+
+    final allyCatMsg = await service.sendTextMessage(
+        allyCatSeed.nodeIdHex, 'CI-PING-AllyCat');
+    expect(allyCatMsg, isNotNull, reason: '3.4 Message to AllyCat queued');
+
+    // 3.5 Wait for CI-ACK messages from the IPC watcher (120s timeout)
+    var aliceAck = false;
+    var allyCatAck = false;
+    for (var i = 0; i < 24; i++) {
+      await tester.pump(const Duration(seconds: 5));
+
+      final aliceConv = service.conversations[aliceSeed.nodeIdHex];
+      if (aliceConv != null) {
+        for (final msg in aliceConv.messages) {
+          if (msg.text.startsWith('CI-ACK-')) {
+            aliceAck = true;
+            break;
+          }
+        }
+      }
+
+      final allyCatConv = service.conversations[allyCatSeed.nodeIdHex];
+      if (allyCatConv != null) {
+        for (final msg in allyCatConv.messages) {
+          if (msg.text.startsWith('CI-ACK-')) {
+            allyCatAck = true;
+            break;
+          }
+        }
+      }
+
+      if (aliceAck && allyCatAck) break;
+    }
+
+    expect(aliceAck, isTrue,
+        reason: '3.5 Received CI-ACK from Alice within 120s');
+    expect(allyCatAck, isTrue,
+        reason: '3.5 Received CI-ACK from AllyCat within 120s');
   });
 }
