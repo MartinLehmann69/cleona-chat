@@ -50,6 +50,8 @@ _OQS_SIG_free
 _OQS_SIG_keypair
 _OQS_SIG_sign
 _OQS_SIG_verify
+_OQS_randombytes_custom_algorithm
+_OQS_randombytes_switch_algorithm
 
 # libzstd
 _ZSTD_compress

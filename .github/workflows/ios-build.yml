@@ -286,7 +286,10 @@ jobs:
             pilot(
               api_key: api_key,
               ipa: ENV['IPA_PATH'],
-              skip_waiting_for_build_processing: true
+              distribute_external: true,
+              groups: ["CleonaTestUser", "CleonaWeitereTestUser"],
+              skip_waiting_for_build_processing: false,
+              notify_external_testers: true
             )
           end
           FASTFILE
