@@ -55,13 +55,19 @@ class SectionCard extends StatelessWidget {
                 ),
               ),
             ),
-            ...children.asMap().entries.map((e) {
-              final isFirst = e.key == 0;
-              return Padding(
-                padding: EdgeInsets.only(top: isFirst ? 0 : 0),
-                child: e.value._build(context, isFirst),
-              );
-            }),
+            Material(
+              type: MaterialType.transparency,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: children.asMap().entries.map((e) {
+                  final isFirst = e.key == 0;
+                  return Padding(
+                    padding: EdgeInsets.only(top: isFirst ? 0 : 0),
+                    child: e.value._build(context, isFirst),
+                  );
+                }).toList(),
+              ),
+            ),
           ],
         ),
       ),

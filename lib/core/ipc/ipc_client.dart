@@ -326,8 +326,12 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   void _handleEvent(IpcEvent event) {
+    // Binary updates live on the primary identity's service — never filter.
+    final isGlobalEvent = event.event == 'update_state_changed' ||
+        event.event == 'update_available';
     // Event for a different identity — track unread counts, handle calls
-    if (event.identityId != null &&
+    if (!isGlobalEvent &&
+        event.identityId != null &&
         activeIdentityId != null &&
         event.identityId != activeIdentityId) {
       if (event.event == 'incoming_call') {
@@ -2154,6 +2158,16 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   // §19.6: Update availability (daemon→GUI via IPC)
   void Function(UpdateManifest manifest, bool inNetworkAvailable)? onUpdateAvailable;
   void Function(BinaryUpdateState state, double progress)? onUpdateStateChanged;
+
+  Future<bool> startInNetworkUpdate() async {
+    final resp = await _sendRequest('start_in_network_update');
+    return resp.success;
+  }
+
+  Future<bool> applyUpdate() async {
+    final resp = await _sendRequest('apply_update');
+    return resp.success;
+  }
 
   @override
   void renameDevice(String deviceId, String newName) {

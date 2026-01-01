@@ -375,6 +375,7 @@ class _MultiServiceDaemon {
 
   Future<void> startAll() async {
     if (_running) return;
+    _running = true;
     log.info('Dienst wird gestartet...');
 
     // §3.7: Initialize crypto subsystem (shared sequence — S106 fix)
@@ -688,7 +689,7 @@ class _MultiServiceDaemon {
     // §19.6 Auto-download + auto-install for daemon (no GUI to click).
     // Only the first service to detect the update triggers the download —
     // all services share the same binary, so one download suffices.
-    String? autoDownloadingVersion;
+    bool updateApplyInProgress = false;
 
     // Create and start a CleonaService for each identity
     for (final ctx in _contexts.values) {
@@ -707,44 +708,26 @@ class _MultiServiceDaemon {
       }
       // Wire badge count to tray icon
       service.onBadgeCountChanged = (count) => _updateTrayBadge();
-      // §19.6: wire auto-download BEFORE startService() so the callback is
+      // §19.6: wire update callbacks BEFORE startService() so they are
       // already set when startService() fires onUpdateAvailable for a cached
-      // manifest.
+      // manifest.  Flow: banner visible → user clicks "Download" → auto-install.
       service.onUpdateAvailable = (manifest, inNetworkAvailable) {
-        if (inNetworkAvailable && autoDownloadingVersion != manifest.version) {
-          autoDownloadingVersion = manifest.version;
-          log.info('Auto-download: v${manifest.version} available in-network — starting download');
-          service.startInNetworkUpdate(manifest);
-        }
+        log.info('Update available: v${manifest.version} (inNetwork=$inNetworkAvailable)');
       };
       service.onUpdateStateChanged = (state, progress) {
+        if (state == BinaryUpdateState.failed) {
+          log.warn('Download failed — clearing lock so next check retries');
+          updateApplyInProgress = false;
+        }
         if (state == BinaryUpdateState.ready) {
           final mgr = service.binaryUpdateManager;
-          if (mgr == null) {
-            log.warn('Auto-install: binaryUpdateManager is null');
-            return;
+          if (mgr != null && !updateApplyInProgress) {
+            updateApplyInProgress = true;
+            log.info('Update v${mgr.targetVersion} downloaded and verified — auto-installing');
+            _applyAndRestart(mgr, log, shutdownAll).then((ok) {
+              if (!ok) updateApplyInProgress = false;
+            });
           }
-          log.info('Auto-install: ready for v${mgr.targetVersion} — resolving verified path');
-          () async {
-            try {
-              final path = await mgr.getVerifiedBinaryPath(
-                  Platform.operatingSystem, mgr.targetVersion ?? '');
-              if (path == null) {
-                log.warn('Auto-install: getVerifiedBinaryPath returned null');
-                return;
-              }
-              log.info('Auto-install: verified path=$path, applying to ${Platform.resolvedExecutable}');
-              final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
-              if (ok) {
-                log.info('Auto-update applied: v${mgr.targetVersion} — exiting for restart');
-                exit(0);
-              } else {
-                log.warn('Auto-install: applyDesktopUpdate returned false');
-              }
-            } catch (e) {
-              log.error('Auto-install error: $e');
-            }
-          }();
         }
       };
       await service.startService();
@@ -764,6 +747,7 @@ class _MultiServiceDaemon {
       services: _services,
       socketPath: socketPath,
       defaultIdentityId: primaryCtx.userIdHex,
+      profileDir: config.baseDir,
     );
     ipcServer.onCreateIdentity = _createIdentityAtRuntime;
     ipcServer.onDeleteIdentity = _deleteIdentityAtRuntime;
@@ -772,8 +756,36 @@ class _MultiServiceDaemon {
     ipcServer.onCalDAVServerSetEnabled = setCalDAVServerEnabled;
     ipcServer.onCalDAVServerRegenerateToken = regenerateCalDAVServerToken;
     ipcServer.onCalDAVServerSetPort = setCalDAVServerPort;
+    ipcServer.onApplyUpdate = () async {
+      final primarySvc = _services[primaryCtx.userIdHex];
+      if (primarySvc == null) {
+        log.warn('apply_update: no primary service');
+        return;
+      }
+      final mgr = primarySvc.binaryUpdateManager;
+      if (mgr == null) {
+        log.warn('apply_update: no binaryUpdateManager');
+        return;
+      }
+      if (mgr.state != BinaryUpdateState.ready) {
+        log.warn('apply_update: state is ${mgr.state}, not ready');
+        return;
+      }
+      if (updateApplyInProgress) {
+        log.info('apply_update: already in progress');
+        return;
+      }
+      updateApplyInProgress = true;
+      log.info('apply_update: user confirmed — applying v${mgr.targetVersion}');
+      final ok = await _applyAndRestart(mgr, log, shutdownAll);
+      if (!ok) updateApplyInProgress = false;
+    };
+    ipcServer.onCommandDispatched = (cmd) {
+      log.info('IPC cmd: $cmd');
+    };
     await ipcServer.start();
     _ipcServer = ipcServer;
+    log.info('IPC server started — port file written, profileDir=${config.baseDir}');
 
     // PID file already written early (Guard 0 needs it before init completes).
 
@@ -1621,6 +1633,51 @@ String? _findIconPath({bool beta = false}) {
     }
   }
   return null;
+}
+
+Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void> Function() shutdownAll) async {
+  try {
+    final path = await mgr.getVerifiedBinaryPath(
+        Platform.operatingSystem, mgr.targetVersion ?? '');
+    if (path == null) {
+      log.warn('getVerifiedBinaryPath returned null');
+      return false;
+    }
+    final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
+    if (ok) {
+      log.info('Update applied: v${mgr.targetVersion} — spawning restart helper');
+      await CLogger.flushAll();
+      if (Platform.isLinux) {
+        final cmdlineBytes = File('/proc/self/cmdline').readAsBytesSync();
+        final cmdParts = String.fromCharCodes(cmdlineBytes)
+            .split('\x00')
+            .where((s) => s.isNotEmpty)
+            .toList();
+        final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
+        await Process.start('/bin/bash', [
+          '-c',
+          'sleep 2 && exec $quotedCmd',
+        ], mode: ProcessStartMode.detached);
+      } else if (Platform.isWindows) {
+        final batPath = mgr.windowsUpdateBatPath;
+        if (batPath != null) {
+          final winPath = batPath.replaceAll('/', '\\');
+          log.info('Spawning update-apply.bat: $winPath');
+          await Process.start('cmd.exe', ['/c', 'start', '/MIN', '', winPath],
+              mode: ProcessStartMode.detached);
+        }
+      }
+      log.info('Shutting down daemon before exit...');
+      await shutdownAll();
+      return true;
+    } else {
+      log.warn('applyDesktopUpdate returned false');
+      return false;
+    }
+  } catch (e) {
+    log.error('Apply error: $e');
+    return false;
+  }
 }
 
 class _CalDAVServerConfig {

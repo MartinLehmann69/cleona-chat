@@ -16,6 +16,9 @@ import 'package:cleona/core/update/update_manifest.dart';
 
 Uint8List _sha256InIsolate(Uint8List binary) => SodiumFFI().sha256(binary);
 
+Future<Uint8List> _sha256InIsolateAsync(Uint8List binary) =>
+    Isolate.run(() => _sha256InIsolate(binary));
+
 /// §19.6 — orchestrates in-network binary updates: checks a verified
 /// [UpdateManifest] against the DHT binary tag, fetches erasure-coded
 /// fragments from peers, assembles + verifies the binary, and hands a
@@ -57,6 +60,7 @@ class BinaryUpdateManager {
   double _progress = 0.0;
   String? _errorMessage;
   bool _cancelled = false;
+  String? _windowsUpdateBatPath;
 
   int _highestSeenMonotoneSeq = 0;
 
@@ -77,6 +81,7 @@ class BinaryUpdateManager {
   double get progress => _progress;
   String? get errorMessage => _errorMessage;
   String? get targetVersion => _targetVersion;
+  String? get windowsUpdateBatPath => _windowsUpdateBatPath;
 
   /// Check for an available in-network update from a verified manifest.
   /// Returns true if [manifest] describes a newer version reachable via
@@ -86,6 +91,13 @@ class BinaryUpdateManager {
     String currentVersion,
     String platform,
   ) async {
+    if (_state == BinaryUpdateState.downloading ||
+        _state == BinaryUpdateState.assembling ||
+        _state == BinaryUpdateState.verifying ||
+        _state == BinaryUpdateState.ready) {
+      return _targetVersion != null &&
+          _checker.isNewer(manifest.version, currentVersion);
+    }
     _setState(BinaryUpdateState.checking, 0.0);
     try {
       if (!shouldUseInNetworkUpdate()) {
@@ -296,7 +308,7 @@ class BinaryUpdateManager {
   ) async {
     _setState(BinaryUpdateState.verifying, 0.0);
     try {
-      final hash = await Isolate.run(() => _sha256InIsolate(binary));
+      final hash = await _sha256InIsolateAsync(binary);
       final hashHex = bytesToHex(hash);
       if (hashHex.toLowerCase() != expectedHash.toLowerCase()) {
         _fail('Hash mismatch: expected=$expectedHash got=$hashHex');
@@ -356,6 +368,7 @@ class BinaryUpdateManager {
 
     try {
       if (!dir.existsSync()) dir.createSync(recursive: true);
+      if (destFile.existsSync()) destFile.deleteSync();
       await srcFile.copy(destPath);
       return destPath;
     } catch (e) {
@@ -421,7 +434,7 @@ class BinaryUpdateManager {
   Future<bool> applyDesktopUpdate(String currentBinaryPath) async {
     final verifiedPath = _verifiedBinaryPathSync();
     if (verifiedPath == null) {
-      _log.warn('applyDesktopUpdate: no verified binary available');
+      _fail('applyDesktopUpdate: no verified binary available');
       return false;
     }
     try {
@@ -442,48 +455,79 @@ class BinaryUpdateManager {
           header[0] == 0x1F && header[1] == 0x8B;
 
       if (isZip && Platform.isWindows) {
+        // Windows: can't overwrite running .exe files. Write a .bat script
+        // that waits for daemon+GUI to exit, then extracts the ZIP, then
+        // restarts the daemon. The caller spawns this script and exits.
+        final appDir = currentFile.parent.path.replaceAll('/', '\\');
+        final bakDir = '$appDir.update-bak'.replaceAll('/', '\\');
+        final zipSrc = verifiedPath.replaceAll('/', '\\');
+        final tmpZip = '$zipSrc.zip';
+        final zipDest = File('$verifiedPath.zip');
+        if (zipDest.existsSync()) zipDest.deleteSync();
+        File(verifiedPath).copySync(zipDest.path);
+
+        final batPath = '$_updateDir/update-apply.bat'.replaceAll('/', '\\');
+        final batLog = '$_updateDir/update-apply.log'.replaceAll('/', '\\');
+        final home = Platform.environment['USERPROFILE'] ?? 'C:\\Users\\Cleona';
+        final pidFile = '$home\\.cleona\\cleona.pid';
+        File(batPath).writeAsStringSync(
+          '@echo off\r\n'
+          'echo [%date% %time%] update-apply.bat started > "$batLog"\r\n'
+          'echo [%date% %time%] Waiting 5s for processes to exit... >> "$batLog"\r\n'
+          'ping -n 6 127.0.0.1 >nul\r\n'
+          'echo [%date% %time%] Force-killing remaining processes... >> "$batLog"\r\n'
+          'for /F "usebackq" %%P in ("$pidFile") do (\r\n'
+          '  echo [%date% %time%] Killing daemon PID %%P >> "$batLog"\r\n'
+          '  taskkill /F /PID %%P >nul 2>&1\r\n'
+          ')\r\n'
+          'wmic process where "name=\'cleona.exe\'" call terminate >nul 2>&1\r\n'
+          'wmic process where "name=\'cleona-daemon.exe\'" call terminate >nul 2>&1\r\n'
+          'ping -n 3 127.0.0.1 >nul\r\n'
+          'del "$pidFile" >nul 2>&1\r\n'
+          'echo [%date% %time%] Backing up... >> "$batLog"\r\n'
+          'if exist "$bakDir" rmdir /S /Q "$bakDir"\r\n'
+          'robocopy "$appDir" "$bakDir" /E /NFL /NDL /NJH /NJS >> "$batLog" 2>&1\r\n'
+          'if %ERRORLEVEL% geq 8 (\r\n'
+          '  echo [%date% %time%] Backup FAILED — aborting update >> "$batLog"\r\n'
+          '  goto start_app\r\n'
+          ')\r\n'
+          'echo [%date% %time%] Cleaning app dir before extraction... >> "$batLog"\r\n'
+          'powershell -NoProfile -WindowStyle Hidden -Command "Remove-Item -Path \'$appDir\\*\' -Recurse -Force -ErrorAction SilentlyContinue" >> "$batLog" 2>&1\r\n'
+          'echo [%date% %time%] Extracting update... >> "$batLog"\r\n'
+          'powershell -NoProfile -WindowStyle Hidden -Command "Expand-Archive -Path \'$tmpZip\' -DestinationPath \'$appDir\' -Force" >> "$batLog" 2>&1\r\n'
+          'if %ERRORLEVEL% neq 0 (\r\n'
+          '  echo [%date% %time%] Extraction FAILED, restoring backup... >> "$batLog"\r\n'
+          '  robocopy "$bakDir" "$appDir" /MIR /NFL /NDL /NJH /NJS >> "$batLog" 2>&1\r\n'
+          '  goto cleanup\r\n'
+          ')\r\n'
+          'echo [%date% %time%] Extraction successful. >> "$batLog"\r\n'
+          ':cleanup\r\n'
+          'if exist "$tmpZip" del /Q "$tmpZip"\r\n'
+          ':start_app\r\n'
+          'echo [%date% %time%] Starting daemon... >> "$batLog"\r\n'
+          'start "" "$appDir\\cleona-daemon.exe"\r\n'
+          'echo [%date% %time%] Waiting for daemon... >> "$batLog"\r\n'
+          'ping -n 5 127.0.0.1 >nul\r\n'
+          'echo [%date% %time%] Starting GUI... >> "$batLog"\r\n'
+          'start "" "$appDir\\cleona.exe"\r\n'
+          'echo [%date% %time%] DONE >> "$batLog"\r\n',
+        );
+        _windowsUpdateBatPath = batPath;
+        _log.info('Wrote update-apply.bat: $batPath');
+      } else if (isGzip && Platform.isLinux) {
+        // Linux tar.gz: full bundle replacement (daemon + GUI + libs + data).
         final appDir = currentFile.parent.path;
         final bakDir = '$appDir.update-bak';
 
         try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
 
-        final robocopyBak = await Process.run('robocopy', [
-          appDir.replaceAll('/', '\\'),
-          bakDir.replaceAll('/', '\\'),
-          '/E', '/NFL', '/NDL', '/NJH', '/NJS',
-        ]);
-        if (robocopyBak.exitCode > 7) {
-          _log.error('Directory backup failed (robocopy exit ${robocopyBak.exitCode})');
+        final cpBak = await Process.run('cp', ['-a', appDir, bakDir]);
+        if (cpBak.exitCode != 0) {
+          _fail('Directory backup failed: ${cpBak.stderr}');
           return false;
         }
         _log.info('Backed up app directory to $bakDir');
 
-        final tmpZip = '$verifiedPath.zip'.replaceAll('/', '\\');
-        final destPath = appDir.replaceAll('/', '\\');
-        File(verifiedPath).copySync('$verifiedPath.zip');
-        final result = await Process.run('powershell', [
-          '-NoProfile', '-Command',
-          "Expand-Archive -Path '$tmpZip' -DestinationPath '$destPath' -Force",
-        ]);
-        try { File('$verifiedPath.zip').deleteSync(); } catch (_) {}
-        if (result.exitCode != 0) {
-          _log.error('ZIP extraction failed (exit ${result.exitCode}): ${result.stderr}');
-          final robocopyRestore = await Process.run('robocopy', [
-            bakDir.replaceAll('/', '\\'),
-            appDir.replaceAll('/', '\\'),
-            '/E', '/NFL', '/NDL', '/NJH', '/NJS',
-          ]);
-          if (robocopyRestore.exitCode <= 7) {
-            _log.info('Restored app directory from backup after extraction failure');
-          }
-          try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
-          return false;
-        }
-        _log.info('Extracted ZIP bundle to $appDir (${File(verifiedPath).lengthSync()}B)');
-      } else if (isGzip && Platform.isLinux) {
-        // Linux tar.gz: extract to temp, find the target binary by basename,
-        // install it with the same rename-to-.bak + copy pattern.
-        final targetName = currentFile.uri.pathSegments.last; // e.g. "cleona-daemon"
         final tmpDir = Directory('$_updateDir/extract-tmp');
         if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
         tmpDir.createSync(recursive: true);
@@ -492,43 +536,45 @@ class BinaryUpdateManager {
             'tar', ['-xzf', verifiedPath, '-C', tmpDir.path],
           );
           if (tarResult.exitCode != 0) {
-            _log.error('tar extraction failed (exit ${tarResult.exitCode}): ${tarResult.stderr}');
+            _fail('tar extraction failed (exit ${tarResult.exitCode}): ${tarResult.stderr}');
             tmpDir.deleteSync(recursive: true);
             return false;
           }
 
-          // Find the target binary anywhere in the extracted tree
-          final findResult = await Process.run(
-            'find', [tmpDir.path, '-name', targetName, '-type', 'f'],
-          );
-          final candidates = (findResult.stdout as String)
-              .split('\n')
-              .where((l) => l.trim().isNotEmpty)
-              .toList();
-          if (candidates.isEmpty) {
-            _log.error('tar.gz does not contain "$targetName" — cannot auto-install');
-            tmpDir.deleteSync(recursive: true);
+          // tar.gz may have a top-level directory (e.g. "cleona-chat/")
+          final topEntries = tmpDir.listSync();
+          final sourceDir = topEntries.length == 1 && topEntries.first is Directory
+              ? (topEntries.first as Directory).path
+              : tmpDir.path;
+
+          // rsync extracted bundle into app directory
+          final rsyncResult = await Process.run('rsync', [
+            '-a', '--delete', '$sourceDir/', '$appDir/',
+          ]);
+          if (rsyncResult.exitCode != 0) {
+            await Process.run('rsync', ['-a', '--delete', '$bakDir/', '$appDir/']);
+            _log.info('Restored app directory from backup after rsync failure');
+            try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
+            _fail('rsync to app dir failed: ${rsyncResult.stderr}');
             return false;
           }
-          final extractedBinary = candidates.first;
-          _log.info('Found $targetName in archive: $extractedBinary');
 
-          if (currentFile.existsSync()) {
-            currentFile.renameSync(bakPath);
-            _log.info('Backed up current binary to $bakPath');
+          // Ensure binaries are executable
+          for (final name in ['cleona-daemon', 'cleona']) {
+            final bin = File('$appDir/$name');
+            if (bin.existsSync()) {
+              Process.runSync('chmod', ['+x', bin.path]);
+            }
           }
-          File(extractedBinary).copySync(currentBinaryPath);
-          Process.runSync('chmod', ['+x', currentBinaryPath]);
-          _log.info('Installed $targetName from tar.gz (${File(currentBinaryPath).lengthSync()}B)');
+          _log.info('Extracted full Linux bundle to $appDir');
         } finally {
           if (tmpDir.existsSync()) {
             try { tmpDir.deleteSync(recursive: true); } catch (_) {}
           }
         }
       } else if (isGzip || isZip) {
-        // macOS DMG or other archive on wrong platform — refuse instead of clobbering
-        _log.warn('applyDesktopUpdate: archive format (${isGzip ? "gzip" : "zip"}) '
-            'not supported on ${Platform.operatingSystem} — skipping');
+        _fail('applyDesktopUpdate: archive format (${isGzip ? "gzip" : "zip"}) '
+            'not supported on ${Platform.operatingSystem}');
         return false;
       } else {
         // Raw binary (direct ELF/Mach-O) — simple copy
@@ -552,7 +598,7 @@ class BinaryUpdateManager {
       _log.info('Applied update v$_targetVersion — restart required');
       return true;
     } catch (e) {
-      _log.error('applyDesktopUpdate failed: $e');
+      _fail('applyDesktopUpdate failed: $e');
       return false;
     }
   }

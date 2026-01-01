@@ -50,6 +50,9 @@ class IpcServer {
   /// Shared secret for TCP loopback auth (Windows only). Null on Unix socket.
   String? _authToken;
 
+  /// Debug callback: fires for every dispatched command so the daemon logger can trace IPC.
+  void Function(String command)? onCommandDispatched;
+
   /// Callback to create a new identity at runtime (returns nodeIdHex or null).
   Future<String?> Function(String displayName)? onCreateIdentity;
   /// Callback to delete an identity at runtime.
@@ -67,6 +70,9 @@ class IpcServer {
   DateTime? _lastManualReconnect;
   static const Duration _manualReconnectCooldown = Duration(seconds: 30);
 
+  /// Callback to apply a downloaded update and restart (daemon-side).
+  Future<void> Function()? onApplyUpdate;
+
   /// Local CalDAV server control — wired by the daemon. All four are fired
   /// by the `caldav_server_*` IPC commands.
   Map<String, dynamic> Function()? onCalDAVServerGetState;
@@ -78,9 +84,10 @@ class IpcServer {
     required Map<String, CleonaService> services,
     required this.socketPath,
     required String defaultIdentityId,
+    String? profileDir,
   })  : _services = Map.of(services),
         _defaultIdentityId = defaultIdentityId,
-        _log = CLogger.get('ipc-server');
+        _log = CLogger.get('ipc-server', profileDir: profileDir);
 
   Future<void> start() async {
     // Ensure parent directory exists with owner-only permissions.
@@ -711,6 +718,7 @@ class IpcServer {
   }
 
   Future<void> _dispatchCommand(_ClientState client, IpcRequest req) async {
+    onCommandDispatched?.call(req.command);
     try {
       switch (req.command) {
         // ── Identity management commands ─────────────────────────────
@@ -826,6 +834,22 @@ class IpcServer {
           final service = _resolveService(client, req);
           if (service != null) {
             final state = service.getStateSnapshot();
+            // Update fields always come from the primary service (the one
+            // that owns the BinaryUpdateManager).  Without this, a
+            // get_state while the active identity differs from the primary
+            // returns updateState=idle, clobbering in-progress GUI state.
+            final primarySvc = _services[_defaultIdentityId];
+            if (primarySvc != null && primarySvc != service) {
+              final primarySnap = primarySvc.getStateSnapshot();
+              if (primarySnap.containsKey('updateState')) {
+                state['updateState'] = primarySnap['updateState'];
+                state['updateProgress'] = primarySnap['updateProgress'];
+                state['updateTargetVersion'] = primarySnap['updateTargetVersion'];
+              }
+              if (primarySnap.containsKey('updateManifest')) {
+                state['updateManifest'] = primarySnap['updateManifest'];
+              }
+            }
             // Add identities list to state
             state['identities'] = _services.entries.map((e) => {
               'identityId': e.key,
@@ -2593,6 +2617,8 @@ class IpcServer {
         case 'get_seeded_platforms':
         case 'reload_manifest':
         case 'get_update_status':
+        case 'start_in_network_update':
+        case 'apply_update':
           await _handlePolls(client, req);
           break;
 
@@ -3787,11 +3813,14 @@ class IpcServer {
           break;
 
         // §19.6 — In-network update IPC commands
+        // Binary-update subsystem lives on the primary identity's service
+        // only (first service to start gets node.binaryRendezvousManager).
+        // Always resolve to primary, never to the client's active identity.
         case 'seed_binary':
           {
-            final service = _resolveService(client, req);
+            final service = _services[_defaultIdentityId];
             if (service == null) {
-              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
               break;
             }
             final platform = req.params['platform'] as String?;
@@ -3812,9 +3841,9 @@ class IpcServer {
 
         case 'get_seeded_platforms':
           {
-            final service = _resolveService(client, req);
+            final service = _services[_defaultIdentityId];
             if (service == null) {
-              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
               break;
             }
             _sendResponse(client, IpcResponse(
@@ -3824,9 +3853,9 @@ class IpcServer {
 
         case 'reload_manifest':
           {
-            final service = _resolveService(client, req);
+            final service = _services[_defaultIdentityId];
             if (service == null) {
-              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
               break;
             }
             final result = service.reloadManifest();
@@ -3839,14 +3868,42 @@ class IpcServer {
 
         case 'get_update_status':
           {
-            final service = _resolveService(client, req);
+            final service = _services[_defaultIdentityId];
             if (service == null) {
-              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
               break;
             }
             _sendResponse(client, IpcResponse(
                 id: req.id, success: true, data: service.getUpdateStatus()));
           }
+          break;
+
+        case 'start_in_network_update':
+          {
+            final service = _services[_defaultIdentityId];
+            _log.info('IPC: start_in_network_update received '
+                '(activeId=${client.activeIdentityId}, primaryId=$_defaultIdentityId, '
+                'service=${service != null})');
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
+              break;
+            }
+            final manifest = service.latestManifest;
+            if (manifest == null) {
+              _log.warn('IPC: start_in_network_update — no manifest on primary service');
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No update manifest available'));
+              break;
+            }
+            _log.info('IPC: start_in_network_update — starting download v${manifest.version}');
+            _sendResponse(client, IpcResponse(id: req.id, success: true));
+            service.startInNetworkUpdate(manifest);
+          }
+          break;
+
+        case 'apply_update':
+          _log.info('IPC: apply_update received — triggering daemon-side apply');
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          onApplyUpdate?.call();
           break;
 
     }

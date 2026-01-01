@@ -183,6 +183,11 @@ class CleonaNode {
   /// (shared contacts + shared group members). Architecture Section 3.3.7.
   Set<String> Function(Uint8List recipientUserId)? getMutualPeerIds;
 
+  /// Callback: resolve contact device IDs (wired by CleonaService).
+  /// If userIdHex is null → return ALL contact device IDs.
+  /// If userIdHex is set → return device IDs for that specific contact.
+  List<String>? Function(String? userIdHex)? resolveContactDeviceIds;
+
   /// All registered identities: userIdHex → IdentityContext.
   /// Keyed by userId (stable identity), not deviceNodeId (per-device routing).
   final Map<String, IdentityContext> _identities = {};
@@ -796,6 +801,13 @@ class CleonaNode {
       final peer = routingTable.getPeer(hexToBytes(hex));
       return peer?.idPowVerified ?? false;
     };
+    dvRouting.isDirectRouteAdvertisable = (destHex) {
+      final peer = routingTable.getPeer(hexToBytes(destHex));
+      if (peer == null) return false;
+      final inbound = peer.freshestInboundAt;
+      if (inbound == null) return false;
+      return DateTime.now().difference(inbound).inMinutes < 10;
+    };
 
     // DV-table sits *next* to the routing table on disk (Architektur §2.7.3).
     // Order matters: routes/neighbors reference nodeIds that must already be
@@ -881,6 +893,22 @@ class CleonaNode {
         final directPeer = routingTable.getPeer(peerBytes);
         if (directPeer != null) {
           peers.add(directPeer);
+        }
+      }
+      // Bug 5 fix: if secondary index is incomplete (e.g. device re-deployed
+      // without _touchPeer userId), resolve via contact records.
+      if (peers.isEmpty) {
+        final deviceIds = resolveContactDeviceIds?.call(peerHex);
+        if (deviceIds != null) {
+          for (final devHex in deviceIds) {
+            final p = routingTable.getPeer(hexToBytes(devHex));
+            if (p != null && !peers.any((e) => _bytesEqual(e.nodeId, p.nodeId))) {
+              peers.add(p);
+              if (p.userIdHex == null) {
+                routingTable.setPeerUserId(p, peerBytes);
+              }
+            }
+          }
         }
       }
       if (peers.isEmpty) return;
@@ -3316,6 +3344,45 @@ class CleonaNode {
         }
       }
 
+      // Bug 4 fix: PEER_LIST_WANT for contact devices in routing table but
+      // lacking fresh IPv6. The DV→K-bucket mechanism above skips peers
+      // already in the routing table — but if their address set is stale
+      // (no IPv6), the relay path breaks when the IPv4 changes (CGNAT).
+      if (result.changed) {
+        final allContactDevices = resolveContactDeviceIds?.call(null);
+        if (allContactDevices != null && allContactDevices.isNotEmpty) {
+          final ipv6Wants = <Uint8List>[];
+          final now2 = DateTime.now();
+          for (final devHex in allContactDevices) {
+            final peer = routingTable.getPeer(hexToBytes(devHex));
+            if (peer == null) continue;
+            final hasIpv6 = peer.addresses.any((a) =>
+                a.type == PeerAddressType.ipv6Global &&
+                a.lastSuccess != null &&
+                now2.difference(a.lastSuccess!).inMinutes < 30);
+            if (hasIpv6) continue;
+            final lastWant = _dvSeedWantCooldown[devHex];
+            if (lastWant != null && now2.difference(lastWant).inSeconds < 300) continue;
+            _dvSeedWantCooldown[devHex] = now2;
+            ipv6Wants.add(hexToBytes(devHex));
+            if (ipv6Wants.length >= 5) break;
+          }
+          if (ipv6Wants.isNotEmpty) {
+            final wantData = proto.PeerListWant();
+            for (final id in ipv6Wants) {
+              wantData.wantedNodeIds.add(id);
+            }
+            _sendInfra(
+              messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+              innerPayload: wantData.writeToBuffer(),
+              recipientDeviceId: senderDeviceId,
+            );
+            _log.info('DV: IPv6 WANT for ${ipv6Wants.length} contact devices '
+                'from ${fromHex.substring(0, 8)}');
+          }
+        }
+      }
+
       // Reciprocal welcome: empty/minimal update from a known neighbor
       // signals a peer restart — respond with our full table.
       if (entries.isEmpty && dvRouting.neighbors.containsKey(fromHex)) {
@@ -3824,6 +3891,20 @@ class CleonaNode {
       if (hopId == null) continue;
       // §3.7.3 relay loop prevention: skip routes through the excluded node
       if (excludeNextHopHex != null && bytesToHex(hopId) == excludeNextHopHex) continue;
+      // Bug 2 fix: when relaying, also exclude the originator and visited
+      // devices as next-hop candidates — prevents silent false-success at
+      // nodes where _resolveDeviceHexFromAddress returned null (CGNAT).
+      if (isRelay) {
+        final hopHex = bytesToHex(hopId);
+        if (packet.senderDeviceId.isNotEmpty &&
+            hopHex == bytesToHex(Uint8List.fromList(packet.senderDeviceId))) {
+          continue;
+        }
+        if (packet.visitedDeviceIds.any((v) =>
+            bytesToHex(Uint8List.fromList(v)) == hopHex)) {
+          continue;
+        }
+      }
       attempts++;
       _log.info('sendToDevice ${destHex.substring(0, 8)}: DV route #$attempts '
           'via hop=${bytesToHex(hopId).substring(0, 8)} '

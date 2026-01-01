@@ -9,7 +9,6 @@
 //
 // Reference: docs/design/skins-final-browser-preview.html
 
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
@@ -233,8 +232,7 @@ class _GlobalUpdateBanner extends StatelessWidget {
           children: [
             Expanded(child: _content(state, progress, manifest, locale, cs)),
             if (state == BinaryUpdateState.idle ||
-                state == BinaryUpdateState.failed ||
-                state == BinaryUpdateState.ready)
+                state == BinaryUpdateState.failed)
               _actionButton(appState, state, locale, cs),
             if (state == BinaryUpdateState.idle)
               IconButton(
@@ -284,7 +282,15 @@ class _GlobalUpdateBanner extends StatelessWidget {
               style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
         ]);
       case BinaryUpdateState.ready:
-        return const SizedBox.shrink();
+        return Row(children: [
+          const SizedBox(
+            width: 16, height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 8),
+          Text('${locale.get('update_installing')}...',
+              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+        ]);
       case BinaryUpdateState.failed:
         return Text(locale.get('update_failed'),
             style: TextStyle(color: cs.error, fontSize: 13));
@@ -293,15 +299,6 @@ class _GlobalUpdateBanner extends StatelessWidget {
 
   Widget _actionButton(CleonaAppState appState, BinaryUpdateState state,
       AppLocale locale, ColorScheme cs) {
-    if (state == BinaryUpdateState.ready) {
-      final label = Platform.isAndroid
-          ? locale.get('update_ready_install')
-          : locale.get('update_ready_restart');
-      return TextButton(
-        onPressed: appState.applyUpdate,
-        child: Text(label, style: TextStyle(color: cs.onPrimaryContainer)),
-      );
-    }
     if (state == BinaryUpdateState.failed) {
       return TextButton(
         onPressed: appState.startInNetworkUpdate,

@@ -870,10 +870,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   BinaryUpdateState _updateState = BinaryUpdateState.idle;
   double _updateProgress = 0.0;
   bool _updateBannerDismissed = false;
+  bool _updateApplyPending = false;
 
   BinaryUpdateState get updateState => _updateState;
   double get updateProgress => _updateProgress;
   bool get updateBannerDismissed => _updateBannerDismissed;
+  bool get updateApplyPending => _updateApplyPending;
 
   void dismissUpdateBanner() {
     _updateBannerDismissed = true;
@@ -885,19 +887,39 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  /// Starts the in-network binary update using the service that most
-  /// recently reported [_availableUpdateManifest]. No-op if no update (or
-  /// its owning service) is currently known.
+  /// Starts the in-network binary update. In IPC mode (Linux/Windows desktop)
+  /// sends the command to the daemon; in-process (Android/iOS) calls the
+  /// service directly.
   Future<void> startInNetworkUpdate() async {
+    final ipc = _ipcClient;
+    debugPrint('[update] startInNetworkUpdate: ipc=${ipc != null}, '
+        'manifest=${_availableUpdateManifest?.version}, '
+        'state=$_updateState');
+    if (ipc != null) {
+      final ok = await ipc.startInNetworkUpdate();
+      debugPrint('[update] IPC startInNetworkUpdate returned: $ok');
+      return;
+    }
     final manifest = _availableUpdateManifest;
     final source = _availableUpdateSourceService;
-    if (manifest == null || source == null) return;
+    if (manifest == null || source == null) {
+      debugPrint('[update] in-process fallback: manifest=${manifest != null}, source=${source != null} — no-op');
+      return;
+    }
     await source.startInNetworkUpdate(manifest);
   }
 
   /// Called when the user taps "Install" (Android) or "Restart" (desktop) on
   /// the update-ready banner.
   Future<void> applyUpdate() async {
+    // IPC/daemon mode: tell daemon to apply the update and restart
+    final ipc = _ipcClient;
+    if (ipc != null) {
+      _updateApplyPending = true;
+      notifyListeners();
+      await ipc.applyUpdate();
+      return;
+    }
     final source = _availableUpdateSourceService;
     if (source == null) return;
     if (Platform.isAndroid) {
@@ -1057,6 +1079,38 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       } catch (_) {}
       return true;
     }
+  }
+
+  void _spawnGuiRestartHelper() {
+    () async {
+      try {
+        if (Platform.isLinux) {
+          final cmdlineBytes = File('/proc/self/cmdline').readAsBytesSync();
+          final cmdParts = String.fromCharCodes(cmdlineBytes)
+              .split('\x00')
+              .where((s) => s.isNotEmpty)
+              .toList();
+          final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
+          await Process.start('/bin/bash', ['-c', 'sleep 3 && exec $quotedCmd'],
+              mode: ProcessStartMode.detached);
+        }
+        // Windows: no separate restart helper needed — update-apply.bat
+        // starts both daemon and GUI after extraction.
+      } catch (e) {
+        _guiUpdateLog('Failed to spawn restart helper: $e');
+      }
+      _guiUpdateLog('exit(0)');
+      exit(0);
+    }();
+  }
+
+  void _guiUpdateLog(String msg) {
+    final line = '${DateTime.now().toIso8601String()} [gui-update] $msg';
+    debugPrint(line);
+    try {
+      final home = Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'] ?? '.';
+      File('$home/.cleona/gui-update.log').writeAsStringSync('$line\n', mode: FileMode.append);
+    } catch (_) {}
   }
 
   void _logDaemonCrash() {
@@ -1401,21 +1455,29 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           notifyListeners();
         };
         ipcClient.onUpdateStateChanged = (state, progress) {
+          _guiUpdateLog('state: ${_updateState.name} -> ${state.name} (progress=$progress)');
           _updateState = state;
           _updateProgress = progress;
           notifyListeners();
         };
         ipcClient.onDaemonDied = () {
+          _guiUpdateLog('onDaemonDied: updateState=${_updateState.name}, applyPending=$_updateApplyPending');
+          if (_updateApplyPending || _updateState == BinaryUpdateState.ready) {
+            _guiUpdateLog('Daemon restarting for update — spawning GUI restart helper');
+            _spawnGuiRestartHelper();
+            return;
+          }
           debugPrint('[main] Daemon process gone — logging crash info before exit');
           _logDaemonCrash();
           exit(0);
         };
         ipcClient.onIpcStalled = () {
-          // Daemon process is still alive but IPC retries (3× short backoff)
-          // were exhausted — typically a daemon mid-restart or PQ keygen
-          // taking longer than 3.5 s. Don't exit. Tear the dead client down
-          // and re-arm the longer-window connect retry; the next successful
-          // connect will rebuild the IPC bridge in place.
+          _guiUpdateLog('onIpcStalled: updateState=${_updateState.name}, applyPending=$_updateApplyPending');
+          if (_updateApplyPending || _updateState == BinaryUpdateState.ready) {
+            _guiUpdateLog('IPC stalled during update — spawning GUI restart helper');
+            _spawnGuiRestartHelper();
+            return;
+          }
           debugPrint('[main] IPC stalled (daemon alive) — re-arming retry');
           _ipcClient = null;
           _service = null;

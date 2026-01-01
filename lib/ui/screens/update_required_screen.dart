@@ -56,7 +56,8 @@ class UpdateRequiredScreen extends StatelessWidget {
     final locale = AppLocale.of(context);
     final cs = Theme.of(context).colorScheme;
     final isActive = updateState != BinaryUpdateState.idle &&
-        updateState != BinaryUpdateState.failed;
+        updateState != BinaryUpdateState.failed &&
+        updateState != BinaryUpdateState.ready;
 
     return Scaffold(
       body: SafeArea(

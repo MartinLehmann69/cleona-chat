@@ -69,6 +69,11 @@ class DvRoutingTable {
   // Callback: fired when a route changes (for propagation)
   void Function(String destHex, int cost)? onRouteChanged;
 
+  // Advertisement filter: returns false for direct routes that should NOT be
+  // advertised (e.g. stale — no inbound for >10min). Prevents propagating
+  // routes to peers that switched networks without triggering Poison-Churn.
+  bool Function(String destHex)? isDirectRouteAdvertisable;
+
   // D3 Phase 2: callback to query admission-PoW status of a neighbor.
   // Injected by CleonaNode after construction.
   bool Function(String nodeIdHex)? isAdmitted;
@@ -507,6 +512,11 @@ class DvRoutingTable {
       if (best.nextHopHex == neighborHex) return;
 
       if (best.isAlive) {
+        // Bug 1 fix: suppress advertisement of stale direct routes
+        if (best.isDirect && isDirectRouteAdvertisable != null &&
+            !isDirectRouteAdvertisable!(destHex)) {
+          return;
+        }
         result.add(RouteEntry(
           destinationHex: destHex,
           hopCount: best.hopCount,
@@ -553,6 +563,11 @@ class DvRoutingTable {
       if (best.nextHopHex == neighborHex) continue;
 
       if (best.isAlive) {
+        // Bug 1 fix: suppress advertisement of stale direct routes
+        if (best.isDirect && isDirectRouteAdvertisable != null &&
+            !isDirectRouteAdvertisable!(destHex)) {
+          continue;
+        }
         result.add(RouteEntry(
           destinationHex: destHex,
           hopCount: best.hopCount,
@@ -584,6 +599,11 @@ class DvRoutingTable {
       final best = routes.first;
 
       if (best.isAlive) {
+        // Bug 1 fix: suppress advertisement of stale direct routes
+        if (best.isDirect && isDirectRouteAdvertisable != null &&
+            !isDirectRouteAdvertisable!(destHex)) {
+          return;
+        }
         result.add(RouteEntry(
           destinationHex: destHex,
           hopCount: best.hopCount,

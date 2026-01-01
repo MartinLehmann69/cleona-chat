@@ -465,6 +465,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Update checking (Architecture Section 17.5.5)
   Timer? _updateCheckTimer;
   UpdateManifest? _latestManifest;
+  UpdateManifest? get latestManifest => _latestManifest;
   /// Callback when a new version is available. UI should show banner/prompt.
   /// [inNetworkAvailable] is true when the update can additionally be
   /// fetched via §19.6 in-network binary distribution (not just the
@@ -475,7 +476,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.146';
+  static const String kCurrentAppVersion = '3.1.148';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1067,6 +1068,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Mutual Peer Selection for S&F (Architecture Section 3.3.7).
     node.getMutualPeerIds = _computeMutualPeerIds;
+
+    // Contact device resolution for onRouteDown userId→device fallback
+    // and PEER_LIST_WANT IPv6 refresh.
+    node.resolveContactDeviceIds = getContactDeviceIds;
 
     // D1 (§4.3 Trust anchor): Contact-Pubkey-Lookup fuer den Contact-Match/
     // Continuity-Pfad des Resolvers. Multi-Identity: Services teilen einen
@@ -2552,6 +2557,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
     _log.info('S&F proactive push: sent ${envelopes.length} stored messages '
         'to ${deviceHex.substring(0, 8)} (user ${matchedUserHex.substring(0, 8)})');
+  }
+
+  /// Returns device node IDs for a contact identified by userIdHex.
+  /// If userIdHex is null, returns ALL contact device IDs (for iteration).
+  /// Used by CleonaNode.onRouteDown to resolve userId→devices when the
+  /// routing table's secondary index is incomplete.
+  List<String>? getContactDeviceIds(String? userIdHex) {
+    if (userIdHex == null) {
+      final all = <String>[];
+      for (final c in _contacts.values) {
+        all.addAll(c.deviceNodeIds);
+      }
+      return all;
+    }
+    final contact = _contacts[userIdHex];
+    if (contact == null) return null;
+    return contact.deviceNodeIds.toList();
   }
 
   /// §4.11: build RendezvousContact list from accepted contacts.
@@ -11266,9 +11288,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final store = _binaryFragmentStore;
     if (updater == null || store == null) return;
 
-    final budgetBytes = (Platform.isAndroid || Platform.isIOS)
-        ? BinaryFragmentStore.kMobileBudgetBytes
-        : BinaryFragmentStore.kDesktopBudgetBytes;
+    final currentPlatform = Platform.operatingSystem;
+    final hasCrossPlatform = ['android', 'linux', 'windows', 'macos', 'ios']
+        .where((p) => p != currentPlatform)
+        .any((p) => store.storedVersionsSync(p).isNotEmpty);
+    final budgetBytes = hasCrossPlatform
+        ? BinaryFragmentStore.kBootstrapBudgetBytes
+        : (Platform.isAndroid || Platform.isIOS)
+            ? BinaryFragmentStore.kMobileBudgetBytes
+            : BinaryFragmentStore.kDesktopBudgetBytes;
 
     try {
       updater.gc(kCurrentAppVersion, budgetBytes);
@@ -11293,8 +11321,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final version = kCurrentAppVersion;
     final existing = _binaryFragmentStore!.storedVersionsSync(platform);
     if (existing.contains(version)) {
-      _log.debug('[update] Already seeded $platform/$version');
-      return;
+      final frags = _binaryFragmentStore!.availableFragmentsSync(platform, version);
+      if (frags.isNotEmpty) {
+        _log.debug('[update] Already seeded $platform/$version (${frags.length} fragments)');
+        return;
+      }
+      _log.info('[update] $platform/$version directory exists but 0 fragments — re-seeding');
     }
     try {
       final binaryPath = await _resolveCurrentBinaryPath();
@@ -11522,6 +11554,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (expectedHash == null || signatureB64 == null || originalSize == null) {
       _log.warn('startInNetworkUpdate: manifest v${manifest.version} has no '
           'binaryHash/signature/size for platform=$platform — cannot verify, aborting');
+      onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
       return;
     }
     final Uint8List signatureBytes;
@@ -11529,6 +11562,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       signatureBytes = base64Decode(signatureB64);
     } catch (e) {
       _log.warn('startInNetworkUpdate: malformed binarySignature for platform=$platform: $e');
+      onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
       return;
     }
 
@@ -11547,6 +11581,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final resolved = await node.binaryRendezvousManager?.resolve(platform);
       if (resolved == null || resolved.isEmpty) {
         _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
+        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
         return;
       }
 
@@ -11593,6 +11628,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       } while (added);
       if (fragmentSources.isEmpty) {
         _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
+        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
         return;
       }
 
@@ -12656,6 +12692,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         innerPayload: Uint8List.fromList(ack.writeToBuffer()),
         recipientDeviceId: senderDeviceId,
       );
+
+      // Bug 3 fix: push-on-store — if the recipient is currently confirmed
+      // (reachable), push immediately rather than waiting for retrieve-poll.
+      if (stored) {
+        final contact = _contacts[recipientHex];
+        if (contact != null) {
+          for (final devHex in contact.deviceNodeIds) {
+            if (node.isPeerConfirmed(devHex)) {
+              _pushStoredMessagesTo(devHex);
+              break;
+            }
+          }
+        } else if (acceptAnyPeerStore) {
+          final recipientPeer = node.routingTable.getPeer(recipientUserId);
+          if (recipientPeer != null) {
+            final devHex = bytesToHex(recipientPeer.nodeId);
+            if (node.isPeerConfirmed(devHex)) {
+              _pushStoredMessagesTo(devHex);
+            }
+          }
+        }
+      }
     } catch (e) {
       _log.debug('PEER_STORE error: $e');
     }

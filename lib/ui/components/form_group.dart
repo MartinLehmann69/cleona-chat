@@ -100,7 +100,13 @@ class FormGroup extends StatelessWidget {
                 ),
               ),
             ),
-            ...rows,
+            Material(
+              type: MaterialType.transparency,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: rows,
+              ),
+            ),
           ],
         ),
       ),
