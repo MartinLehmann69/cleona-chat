@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:3c22c01bddb6, 2026-07-08). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:639a1c3cc39a, 2026-07-08). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7360,7 +7360,9 @@ Users in high-threat environments should use the physical transfer path (§19.6.
 
 **iOS special case:** The web app can download an IPA, but iOS does not install it (no sideloading, except EU-DMA markets from iOS 17.4). The web app detects iOS and shows: "On iOS, Cleona is available through the App Store" + Store link.
 
-**Platform-specific installation (roadmap):** The actual installation mechanism (replacing a running binary, OS-level permissions, SmartScreen/Gatekeeper/Notarization) is platform-specific and outside the scope of this section. §19.6.2 delivers the verified binary; the installation UX is a per-platform implementation detail tracked separately: Linux (replace AppImage + restart daemon), Android (intent to package installer), Windows (UAC-elevated replacement), macOS (DMG mount + drag-to-Applications pattern). Each platform path will be specified when implemented.
+**Platform-specific installation (implemented):** Once §19.6.2 delivers the verified binary, installation is platform-specific: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it, writes an `update-pending.json` marker, and requires a daemon restart. **Android** — `ApkInstaller` copies the verified binary to `cacheDir`, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission). **Windows** — same desktop flow as Linux (backup + replace + restart). **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
+
+**No user-facing rollback (architectural decision, 2026-07-08).** Cleona does NOT offer a rollback/downgrade mechanism to the user, for three reasons: (1) **Forward-only database migrations.** Drift/SQLite schema migrations are irreversible — a newer version may alter tables that the older binary cannot read, causing data loss or crashes on downgrade. (2) **Cryptographic protocol evolution.** Newer versions may rotate KEM parameters, key formats, or message envelope fields. A rolled-back binary may fail to decrypt messages sent by peers who already upgraded, silently dropping traffic. (3) **Monotone sequence enforcement.** The `minMonotoneSeq` field in signed update manifests prevents downgrade attacks (§19.6.2). Accepting a rollback would require bypassing this security gate, weakening the update chain's integrity. Instead: if a release introduces a critical bug, the maintainer publishes a hotfix release (new version, forward migration) within the same distribution pipeline. The Beta cluster provides early detection; the 6h DHT manifest refresh cycle bounds worst-case exposure. Desktop nodes retain a `.bak` backup internally for crash recovery (auto-restore if the app fails within 30s of an update), but this is a safety net, not a user-facing feature — it does not survive across database migrations.
 
 #### 19.6.7 Physical Binary Transfer
 
