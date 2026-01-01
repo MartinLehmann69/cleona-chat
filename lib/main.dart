@@ -15,6 +15,7 @@ import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/core/calls/call_integration_channel.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/ipc/ipc_client.dart';
@@ -32,6 +33,7 @@ import 'package:cleona/ui/screens/chat_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
+import 'package:cleona/core/update/install_source.dart';
 import 'dart:async';
 import 'dart:ui' show PlatformDispatcher;
 import 'package:cleona/core/calls/video_engine.dart';
@@ -52,11 +54,22 @@ import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:cleona/ui/components/connection_sheet.dart';
 import 'package:cleona/ui/components/crash_report_dialog.dart';
+import 'package:cleona/ui/components/pending_security_dialogs.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:path_provider/path_provider.dart' as pp;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // §19.6: hand the Android platform call to lib/core, which must stay
+  // Flutter-free — the daemon is a pure-Dart AOT binary and cannot link
+  // dart:ui (S299). Registered here, in the only entry point that actually
+  // has a Flutter binding; the daemon leaves it null and falls back to
+  // `sideload`, exactly as the previous MissingPluginException branch did.
+  InstallSourceDetector.installerPackageNameProvider = () async {
+    const channel = MethodChannel('chat.cleona/update');
+    return channel.invokeMethod<String?>('getInstallerPackageName');
+  };
 
   // §16.2 (V3.1.117): stamp the Dart heartbeat as early as possible — before
   // FFI/keyring init, which can be slow or crash. The Kotlin watchdog must
@@ -498,6 +511,24 @@ class _LoadingScreen extends StatelessWidget {
   }
 }
 
+/// §7.5: an outstanding "rotation quorum not met" warning for one contact —
+/// see [ICleonaService.onRotationCoAuthWarning]. Purely a UI-side record;
+/// there is no daemon-side counterpart to keep in sync (unlike the pairing /
+/// rotation-approval lists, nothing here is ever "answered").
+class CoAuthWarning {
+  final String contactNodeIdHex;
+  final String displayName;
+  final int tokensPresent;
+  final int tokensRequired;
+
+  const CoAuthWarning({
+    required this.contactNodeIdHex,
+    required this.displayName,
+    required this.tokensPresent,
+    required this.tokensRequired,
+  });
+}
+
 class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   static CleonaAppState? _instance;
 
@@ -887,6 +918,145 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   void undismissUpdateBanner() {
     _updateBannerDismissed = false;
     notifyListeners();
+  }
+
+  // ── §7.1 LD-2 / §7.5: pending pairing + rotation-approval catch-up, and
+  // the §7.5 co-authorization warning banner ────────────────────────────
+  //
+  // Single source of truth for state that arrives via fire-and-forget daemon
+  // events (`onDevicePairRequest` / `onRotationApprovalRequest` /
+  // `onRotationCoAuthWarning`). Both transport wiring blocks below (IPC and
+  // in-process) funnel into the private handlers here instead of setting the
+  // callback fields directly in two places with drifting logic — so the
+  // global live dialog (works regardless of which screen is open, same
+  // pattern as [_showIncomingCallScreen]) and the persistent list in
+  // Settings → Devices (read via `context.watch<CleonaAppState>()`) always
+  // agree on what is still outstanding.
+
+  List<Map<String, dynamic>> _pendingPairRequests = [];
+  List<Map<String, dynamic>> _pendingRotationApprovals = [];
+  final List<CoAuthWarning> _coAuthWarnings = [];
+
+  List<Map<String, dynamic>> get pendingPairRequests => _pendingPairRequests;
+  List<Map<String, dynamic>> get pendingRotationApprovals =>
+      _pendingRotationApprovals;
+  List<CoAuthWarning> get coAuthWarnings => List.unmodifiable(_coAuthWarnings);
+
+  bool _showingGlobalPairDialog = false;
+  bool _showingGlobalRotationDialog = false;
+
+  /// Re-fetches both catch-up lists from the active service. No-op with no
+  /// active service. Called at startup/reconnect/identity-switch (the actual
+  /// catch-up — see [ICleonaService.getPendingPairRequests] /
+  /// [ICleonaService.getPendingRotationApprovals]) AND after every live event
+  /// and every user decision, so the daemon's now-authoritative state is
+  /// always what these lists show — nothing here hand-mutates them.
+  Future<void> refreshPendingSecurityRequests() async {
+    final svc = _service;
+    if (svc == null) return;
+    final results = await Future.wait([
+      svc.getPendingPairRequests(),
+      svc.getPendingRotationApprovals(),
+    ]);
+    _pendingPairRequests = results[0];
+    _pendingRotationApprovals = results[1];
+    notifyListeners();
+  }
+
+  /// §7.5: dismiss a co-auth warning banner. Purely a UI acknowledgement —
+  /// there is nothing to answer (unlike the pairing/rotation prompts), so
+  /// this never touches the service.
+  void dismissCoAuthWarning(String contactNodeIdHex) {
+    _coAuthWarnings.removeWhere((w) => w.contactNodeIdHex == contactNodeIdHex);
+    notifyListeners();
+  }
+
+  Future<void> _handleDevicePairRequest(String deviceIdHex) async {
+    await refreshPendingSecurityRequests();
+    final svc = _service;
+    if (svc == null || _showingGlobalPairDialog) return;
+    // Re-check against the just-refreshed list: the request may already be
+    // gone again (LD-9 auto-approve, or it lost a race with another client's
+    // decision) between the event firing and this refresh completing.
+    final stillPending = _pendingPairRequests
+        .any((e) => e['deviceIdHex'] == deviceIdHex);
+    if (!stillPending) return;
+    _showGlobalDialog((ctx) {
+      _showingGlobalPairDialog = true;
+      return showIncomingPairRequestDialog(
+        context: ctx,
+        service: svc,
+        deviceIdHex: deviceIdHex,
+      ).whenComplete(() {
+        _showingGlobalPairDialog = false;
+        unawaited(refreshPendingSecurityRequests());
+      });
+    });
+  }
+
+  /// [kind] unterscheidet Schluesselrotation von Geraetesatz-Aenderung (§7.5,
+  /// Proto-Feld `approval_kind`). Er wird bis hierher durchgereicht, damit der
+  /// Dialog benennen kann, worum es geht — sonst holte man Zustimmung unter
+  /// falscher Beschreibung ein. Die Beschriftung im Dialog steht noch aus
+  /// (braucht eigene i18n-Keys in allen 34 Locales); bis dahin liegt der Wert
+  /// hier vor und wird protokolliert.
+  Future<void> _handleRotationApprovalRequest(
+      String rotationHashHex, String requestingDeviceIdHex,
+      RotationApprovalKind kind, List<String> newDeviceNodeIds) async {
+    await refreshPendingSecurityRequests();
+    final svc = _service;
+    if (svc == null || _showingGlobalRotationDialog) return;
+    final entry = _pendingRotationApprovals
+        .firstWhereOrNull((e) => e['rotationHashHex'] == rotationHashHex);
+    if (entry == null) return; // already answered/expired before we refreshed
+    final expiresAtMs = entry['expiresAtMs'] as int;
+    // Bis der Dialog den Anlass beschriftet, bleibt er wenigstens im Log
+    // nachvollziehbar — eine Geraetesatz-Aenderung darf nicht unbemerkt als
+    // Schluesselrotation durchgehen (§7.5).
+    debugPrint('§7.5 Approval-Anfrage: kind=${kind.wireName} '
+        'devices=${newDeviceNodeIds.length} hash=${rotationHashHex.substring(0, 8)}');
+    _showGlobalDialog((ctx) {
+      _showingGlobalRotationDialog = true;
+      return showRotationApprovalDialog(
+        context: ctx,
+        service: svc,
+        rotationHashHex: rotationHashHex,
+        requestingDeviceIdHex: requestingDeviceIdHex,
+        expiresAtMs: expiresAtMs,
+      ).whenComplete(() {
+        _showingGlobalRotationDialog = false;
+        unawaited(refreshPendingSecurityRequests());
+      });
+    });
+  }
+
+  void _handleRotationCoAuthWarning(String contactNodeIdHex,
+      String displayName, int tokensPresent, int tokensRequired) {
+    // A repeat broadcast for the same contact replaces rather than stacks —
+    // the banner shows the latest token count, not a growing pile of alerts
+    // for one ongoing incident.
+    _coAuthWarnings.removeWhere((w) => w.contactNodeIdHex == contactNodeIdHex);
+    _coAuthWarnings.add(CoAuthWarning(
+      contactNodeIdHex: contactNodeIdHex,
+      displayName: displayName,
+      tokensPresent: tokensPresent,
+      tokensRequired: tokensRequired,
+    ));
+    notifyListeners();
+  }
+
+  /// Shows a dialog against `navigatorKey`'s current context regardless of
+  /// which screen is on top. Buffers like [_showIncomingCallScreen] for the
+  /// case where the event races the very first frame (Navigator not attached
+  /// yet).
+  void _showGlobalDialog(Future<void> Function(BuildContext) show) {
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) {
+      WidgetsBinding.instance
+          .addPostFrameCallback((_) => _showGlobalDialog(show));
+      return;
+    }
+    show(ctx);
   }
 
   Future<void> retryInstallPermission() async {
@@ -1471,6 +1641,22 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onGroupCallStarted = (_) => notifyListeners();
         ipcClient.onGroupCallEnded = (_) => notifyListeners();
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
+        // §7.1 LD-2 / §7.5: see [refreshPendingSecurityRequests] doc for why
+        // these funnel through the shared handlers instead of setting
+        // per-transport UI logic here.
+        ipcClient.onDevicePairRequest = (deviceIdHex) {
+          unawaited(_handleDevicePairRequest(deviceIdHex));
+        };
+        ipcClient.onRotationApprovalRequest =
+            (hashHex, requesterHex, kind, newDeviceNodeIds) {
+          unawaited(_handleRotationApprovalRequest(
+              hashHex, requesterHex, kind, newDeviceNodeIds));
+        };
+        ipcClient.onRotationCoAuthWarning =
+            (contactHex, displayName, tokensPresent, tokensRequired) {
+          _handleRotationCoAuthWarning(
+              contactHex, displayName, tokensPresent, tokensRequired);
+        };
         // §19.6: Desktop update notification from daemon via IPC
         ipcClient.onUpdateAvailable = (manifest, inNetworkAvailable) {
           final prev = _availableUpdateManifest;
@@ -1526,6 +1712,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Force Navigator rebuild when transitioning from loading to home
         navigatorKey = GlobalKey<NavigatorState>();
         notifyListeners();
+        // §7.1 LD-2 / §7.5: catch-up for requests that arrived while no GUI
+        // was connected to receive the live event.
+        unawaited(refreshPendingSecurityRequests());
         // Precache the active skin's hero image after the first home-screen frame.
         final activeIdForPrecache = IdentityManager().getActiveIdentity();
         _scheduleSkinPrecache(activeIdForPrecache?.skinId);
@@ -1911,6 +2100,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _queryPublicIp(); // §27: discover own public IPv4/IPv6 for external reachability
     navigatorKey = GlobalKey<NavigatorState>();
     notifyListeners();
+    // §7.1 LD-2 / §7.5: catch-up for requests that arrived while no GUI was
+    // connected to receive the live event.
+    unawaited(refreshPendingSecurityRequests());
     // Precache the active skin's hero image after the first home-screen frame.
     _scheduleSkinPrecache(activeId?.skinId);
 
@@ -2046,6 +2238,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
         _scheduleSkinPrecache(identity.skinId);
+        // §7.1 LD-2 / §7.5: these lists are per-identity daemon state — a
+        // switch without this would keep showing the PREVIOUS identity's
+        // pending requests until the next live event happened to refresh.
+        unawaited(refreshPendingSecurityRequests());
         return;
       }
       debugPrint('[switchIdentity] WARNING: IPC switch FAILED for '
@@ -2061,6 +2257,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
         _scheduleSkinPrecache(identity.skinId);
+        unawaited(refreshPendingSecurityRequests());
         return;
       }
       debugPrint('[switchIdentity] WARNING: in-process switch FAILED — '
@@ -2128,6 +2325,34 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onGroupCallStarted = (_) => notifyListeners();
     service.onGroupCallEnded = (_) => notifyListeners();
 
+    // §7.1 LD-2 / §7.5: in-process mode wires one [CleonaService] per
+    // identity (unlike IPC, which only ever forwards events for whichever
+    // identity is currently switched-to server-side — see
+    // `IpcClient._handleEvent`'s identityId filter). `_pendingPairRequests` /
+    // `_pendingRotationApprovals` are refreshed from `_service` (the ACTIVE
+    // identity) elsewhere, so acting on an event from a BACKGROUND identity's
+    // `service` here would refresh/act against the wrong identity's request.
+    // Mirror the IPC behaviour instead: silently drop events for identities
+    // that are not currently active. A background identity's request is not
+    // lost — it stays queryable via `getPendingPairRequests()` /
+    // `getPendingRotationApprovals()` once the user switches to it.
+    service.onDevicePairRequest = (deviceIdHex) {
+      if (!identical(service, _service)) return;
+      unawaited(_handleDevicePairRequest(deviceIdHex));
+    };
+    service.onRotationApprovalRequest =
+        (hashHex, requesterHex, kind, newDeviceNodeIds) {
+      if (!identical(service, _service)) return;
+      unawaited(_handleRotationApprovalRequest(
+          hashHex, requesterHex, kind, newDeviceNodeIds));
+    };
+    service.onRotationCoAuthWarning =
+        (contactHex, displayName, tokensPresent, tokensRequired) {
+      if (!identical(service, _service)) return;
+      _handleRotationCoAuthWarning(
+          contactHex, displayName, tokensPresent, tokensRequired);
+    };
+
     // §19.6: a newer signed manifest was verified (any newer version, not
     // only hard-blocking ones) and — if it carries a DHT binary tag — the
     // in-network binary-distribution availability has already been checked.
@@ -2159,6 +2384,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // calls are no longer silently audio-only.
     service.createVideoEngine = (sharedSecret, onFrame) =>
         _createVideoEngine(sharedSecret, onFrame);
+
+    // V3.2 / §10.4 stage 7: CallKit (iOS) and the self-managed
+    // ConnectionService (Android). Constructed here rather than inside
+    // CallService because the MethodChannel implementation pulls in dart:ui,
+    // which would break `dart compile exe lib/service_daemon.dart`. The daemon
+    // keeps the no-op, which is correct there: it has no system call UI.
+    service.callIntegration = MethodChannelCallIntegration();
 
     service.onVideoUnavailable = (reason) {
       debugPrint('[video] $reason');
@@ -2413,7 +2645,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     final action = data['action'] as String?;
     if (action == null) return;
     final nav = navigatorKey.currentState;
-    if (nav == null) return;
+    if (nav == null) {
+      debugPrint('[gui_action] $action DROPPED: navigatorKey.currentState=null');
+      return;
+    }
 
     switch (action) {
       case 'open_identity_detail':
@@ -2422,17 +2657,25 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
             ? IdentityManager().loadIdentities().firstWhereOrNull(
                 (i) => i.nodeIdHex == idParam || i.id == idParam)
             : IdentityManager().getActiveIdentity();
-        if (identity != null && _service != null) {
-          nav.push(MaterialPageRoute(
-            builder: (_) => MultiProvider(
-              providers: [
-                ChangeNotifierProvider.value(value: this),
-                if (_appLocale != null) ChangeNotifierProvider.value(value: _appLocale!),
-              ],
-              child: IdentityDetailScreen(service: _service!, identity: identity),
-            ),
-          ));
+        if (identity == null) {
+          debugPrint('[gui_action] open_identity_detail DROPPED: '
+              'identity=null (idParam=$idParam, '
+              'identityCount=${IdentityManager().loadIdentities().length})');
+          break;
         }
+        if (_service == null) {
+          debugPrint('[gui_action] open_identity_detail DROPPED: _service=null');
+          break;
+        }
+        nav.push(MaterialPageRoute(
+          builder: (_) => MultiProvider(
+            providers: [
+              ChangeNotifierProvider.value(value: this),
+              if (_appLocale != null) ChangeNotifierProvider.value(value: _appLocale!),
+            ],
+            child: IdentityDetailScreen(service: _service!, identity: identity),
+          ),
+        ));
         break;
       case 'open_settings':
         if (_service != null) {

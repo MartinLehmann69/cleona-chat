@@ -590,6 +590,34 @@ class IpcServer {
         identityId: identityId,
       ));
     };
+
+    // §7.5: the Primary asks this Linked Device to countersign — either an
+    // Emergency Key Rotation or a device-set change. The daemon does NOT
+    // decide — it only asks. Without an explicit `approve_rotation` /
+    // `reject_rotation` from the user nothing is ever sent back (fail-closed;
+    // see _handleRotationApprovalRequest).
+    //
+    // `approvalKind` and `newDeviceNodeIdHexes` cross the socket with the
+    // event because the GUI is the component that phrases the question. An
+    // event without them forces the dialog to guess, and the only guess it
+    // can make ("key rotation") is wrong for exactly the case the device-set
+    // proof was built for.
+    final originalOnRotationApprovalRequest = service.onRotationApprovalRequest;
+    service.onRotationApprovalRequest =
+        (rotationHashHex, requestingDeviceIdHex, kind, newDeviceNodeIdHexes) {
+      originalOnRotationApprovalRequest?.call(
+          rotationHashHex, requestingDeviceIdHex, kind, newDeviceNodeIdHexes);
+      _broadcastEvent(IpcEvent(
+        event: 'rotation_approval_request',
+        data: {
+          'rotationHashHex': rotationHashHex,
+          'requestingDeviceIdHex': requestingDeviceIdHex,
+          'approvalKind': kind.wireName,
+          'newDeviceNodeIdHexes': newDeviceNodeIdHexes,
+        },
+        identityId: identityId,
+      ));
+    };
   }
 
   /// Generate a cryptographically secure 32-char hex token.
@@ -725,11 +753,13 @@ class IpcServer {
       switch (req.command) {
         // ── Identity management commands ─────────────────────────────
         case 'list_identities':
+          final guiActiveNodeId = IdentityManager().getActiveIdentity()?.nodeIdHex;
           final identities = _services.entries.map((e) => {
             'identityId': e.key,
             'displayName': e.value.displayName,
             'nodeIdHex': e.value.nodeIdHex,
             'isActive': e.key == client.activeIdentityId,
+            'isGuiActive': e.key == guiActiveNodeId,
           }).toList();
           _sendResponse(client, IpcResponse(
             id: req.id,
@@ -859,6 +889,10 @@ class IpcServer {
               'nodeIdHex': e.value.nodeIdHex,
             }).toList();
             state['activeIdentityId'] = client.activeIdentityId;
+            // GUI-global active identity — from IdentityManager (last_profile.json),
+            // independent of this IPC connection's routing state.
+            final guiActive = IdentityManager().getActiveIdentity();
+            state['guiActiveIdentityId'] = guiActive?.nodeIdHex ?? '';
             // Add isAdult and canReviewReports from IdentityManager
             final identityId = _resolveIdentityId(client, req);
             if (identityId != null) {
@@ -1345,6 +1379,28 @@ class IpcServer {
             req.params['localAlias'] as String?,
           );
           _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        // §14.7.4: unilateral, receiver-side. Deliberately NOT routed through
+        // the CHAT_CONFIG_UPDATE consent flow (§14.7.1) — a partner must not
+        // be able to veto this node's own visibility.
+        case 'set_withhold_delivery_status':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final withholdEntityId = req.params['entityIdHex'] as String?;
+          final withholdValue = req.params['withhold'] as bool?;
+          if (withholdEntityId == null || withholdValue == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false,
+                error: 'Missing param: entityIdHex or withhold'));
+            break;
+          }
+          final withholdOk =
+              service.setWithholdDeliveryStatus(withholdEntityId, withholdValue);
+          _sendResponse(client, IpcResponse(id: req.id, success: withholdOk));
           break;
 
         case 'accept_name_change':
@@ -2489,6 +2545,75 @@ class IpcServer {
           }
           final pairSent = await service.sendDevicePairRequest();
           _sendResponse(client, IpcResponse(id: req.id, success: pairSent));
+          break;
+
+        // §7.5: explicit user decision on a pending rotation-approval
+        // request. These two commands are the ONLY way a Device-Sig
+        // countersignature (or a rejection) is ever produced — the daemon
+        // never decides on its own, and a timeout decides nothing either.
+        case 'approve_rotation':
+        case 'reject_rotation':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final rotationHashHex = req.params['rotationHashHex'] as String?;
+            if (rotationHashHex == null || rotationHashHex.isEmpty) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'rotationHashHex required'));
+              break;
+            }
+            final ok = req.command == 'approve_rotation'
+                ? await service.approveRotation(rotationHashHex)
+                : await service.rejectRotation(rotationHashHex);
+            _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: ok,
+              error: ok ? null : 'Unknown or expired rotation request',
+            ));
+          }
+          break;
+
+        // §7.5: catch-up for rotation-approval requests. The
+        // `onRotationApprovalRequest` event fires once and is lost on a GUI
+        // that starts or reconnects after it — without this the request
+        // expires without the user ever being asked. Expired entries are
+        // filtered service-side.
+        case 'get_pending_rotation_approvals':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final pending = await service.getPendingRotationApprovals();
+            _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: true,
+              data: {'pendingRotationApprovals': pending},
+            ));
+          }
+          break;
+
+        // §7.1 LD-2: catch-up for pending device-pairing requests. The
+        // `device_pair_request` event fires once and is lost on a GUI that
+        // starts or reconnects after it — without this the Primary has no
+        // way to show the request as pending until the requester asks again.
+        case 'get_pending_pair_requests':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final pending = await service.getPendingPairRequests();
+            _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: true,
+              data: {'pendingPairRequests': pending},
+            ));
+          }
           break;
 
         case 'rotate_identity_keys':

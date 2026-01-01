@@ -501,6 +501,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                       _loadFrTally(msg.id, service,
                                           force: true);
                                     },
+                              channelPostTexts: sys_ch.SystemChannels.isBugLogChannel(widget.conversationId)
+                                  ? messages.map((m) => m.text).toList()
+                                  : null,
                             );
                             final isFr = sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId);
                             if (!isFr && df.needsDateSeparator(
@@ -1967,7 +1970,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               onTap: () async {
                                 Navigator.pop(dlg);
                                 await service.inviteToChannel(widget.conversationId, c.nodeIdHex);
-                                setDialogState(() {});
+                                if (dlg.mounted) setDialogState(() {});
                               },
                             )).toList(),
                           ),
@@ -2182,6 +2185,19 @@ class _ChatScreenState extends State<ChatScreen> {
     final canEdit = (!widget.isGroup && !widget.isChannel) || canEditGroup || canEditChannel;
     final isDm = !widget.isGroup && !widget.isChannel;
 
+    // §14.7.4: receiver-side, unilateral, local. Deliberately NOT part of
+    // `config` above — that one travels through the CHAT_CONFIG_UPDATE consent
+    // flow (§14.7.1), where a DM partner could reject the change. Nobody gets
+    // to veto this node's own visibility, so it is applied on its own path and
+    // is NOT gated by `canEdit`: a plain group member must be able to set it
+    // even though every other switch in this dialog is locked for them.
+    // Channels are absent by design — CHANNEL_POST is not ack-worthy, so no
+    // delivery signal exists there to withhold.
+    final showDeliveryDisclosure = !widget.isChannel;
+    bool deliveryStatusVisible = !(widget.isGroup
+        ? (group?.withholdDeliveryStatus ?? false)
+        : (service.getContact(widget.conversationId)?.withholdDeliveryStatus ?? false));
+
     final config = ChatConfig(
       allowDownloads: conv.config.allowDownloads,
       allowForwarding: conv.config.allowForwarding,
@@ -2200,9 +2216,17 @@ class _ChatScreenState extends State<ChatScreen> {
           ]),
           content: SizedBox(
             width: 320,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
+            // A bare Column here overflows instead of scrolling: the dialog
+            // already carries ten rows (four switches, two pickers, the
+            // notification block plus its ringtone row, and the role hint),
+            // which exceeds an AlertDialog's content height on a 768 px
+            // window. What gets cut off is the bottom — including the Save
+            // button — so the settings become unreachable rather than merely
+            // ugly. Adding the §14.7.4 switch made a tight layout tighter.
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
                 SwitchListTile(
                   title: Text(locale.get('allow_downloads')),
                   subtitle: Text(locale.get('files_saveable')),
@@ -2257,6 +2281,14 @@ class _ChatScreenState extends State<ChatScreen> {
                   value: config.typingIndicators,
                   onChanged: canEdit ? (v) => setDialogState(() => config.typingIndicators = v) : null,
                 ),
+                if (showDeliveryDisclosure)
+                  SwitchListTile(
+                    title: Text(locale.get('delivery_receipts')),
+                    subtitle: Text(locale.get('delivery_status_visible')),
+                    value: deliveryStatusVisible,
+                    // No `canEdit` guard — see §14.7.4 note above.
+                    onChanged: (v) => setDialogState(() => deliveryStatusVisible = v),
+                  ),
                 const Divider(),
                 SwitchListTile(
                   title: Text(locale.get('chat_notifications')),
@@ -2301,7 +2333,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.outline, fontStyle: FontStyle.italic),
                     ),
                   ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [
@@ -2314,6 +2347,13 @@ class _ChatScreenState extends State<ChatScreen> {
                 Navigator.pop(ctx);
                 service.updateConversationNotifications(widget.conversationId,
                     enabled: notifyEnabled, soundName: notifySoundName);
+                // §14.7.4: applied unconditionally, like the notification
+                // settings above — it is this node's own preference, not a
+                // negotiated conversation policy.
+                if (showDeliveryDisclosure) {
+                  service.setWithholdDeliveryStatus(
+                      widget.conversationId, !deliveryStatusVisible);
+                }
                 if (canEdit) {
                   service.updateChatConfig(widget.conversationId, config);
                 }
@@ -3259,6 +3299,10 @@ class _MessageBubble extends StatefulWidget {
   final Map<String, int>? frTally;
   final void Function(int option)? onFrVote;
 
+  /// F5-R1: all post texts in the Bug Log channel for crash-report
+  /// duplicate aggregation (§9.5.2 counter).
+  final List<String>? channelPostTexts;
+
   const _MessageBubble({
     required this.message,
     this.isEditing = false,
@@ -3271,6 +3315,7 @@ class _MessageBubble extends StatefulWidget {
     this.browserOpenMode = BrowserOpenMode.normal,
     this.frTally,
     this.onFrVote,
+    this.channelPostTexts,
   });
 
   @override
@@ -3447,6 +3492,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
         timestamp: ts,
         frTally: widget.frTally,
         onVote: widget.onFrVote,
+        channelPostTexts: widget.channelPostTexts,
       );
       if (!_hasMenu) return post;
       final colorScheme = Theme.of(context).colorScheme;

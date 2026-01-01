@@ -180,7 +180,7 @@ class IdentityResolver {
     Uint8List Function(Uint8List ed25519Pk)? deriveUserId,
   })  : _log = CLogger.get('resolver', profileDir: profileDir),
         _deriveUserId = deriveUserId ??
-            ((pk) => HdWallet.computeUserId(pk, NetworkSecret.secret));
+            ((pk) => HdWallet.computeUserId(pk, NetworkSecret.identitySecret));
 
   /// Auflöse `userId` zu einer Liste authorisierter Devices.
   /// Bei Cache-Hit (frisch < 1h) sofortige Rückgabe ohne DHT-Lookup.
@@ -278,8 +278,13 @@ class IdentityResolver {
     // das alte Verhalten.
     final results = await Future.wait(
       authManifest.authorizedDeviceNodeIds.map((deviceId) async {
-        final liveFuture = _lookupLiveness(userId, deviceId, anchorPk);
-        final kemFuture = _lookupDeviceKem(userId, deviceId, anchorPk);
+        // P6: der Anker ist das ganze Manifest — die Zertifikatskette eines
+        // delegiert signierten Records wird ueber `delegationFor(deviceId)`
+        // daraus aufgeloest, statt aus dem Record. `anchorPk == null` heisst
+        // legacy-unverified (§4.3 Transition) → kein Anker weitergeben.
+        final anchorManifest = anchorPk != null ? authManifest : null;
+        final liveFuture = _lookupLiveness(userId, deviceId, anchorManifest);
+        final kemFuture = _lookupDeviceKem(userId, deviceId, anchorManifest);
         final live = await liveFuture;
         final kem = await kemFuture;
 
@@ -289,7 +294,11 @@ class IdentityResolver {
         // dokumentiert schwach, endet mit Phase 2.
         DeviceKemRecord? validatedKem;
         if (kem != null) {
-          if (anchorPk != null || kem.verify(kem.userEd25519Pk)) {
+          // §7.1.4: der selbstreferenzielle Legacy-Zweig kann eine delegierte
+          // Kette nicht pruefen (die ML-DSA-Haelfte des Zertifikats braucht
+          // einen echten Anker). Fail-closed statt Ed25519-only-Abkuerzung.
+          if (anchorPk != null ||
+              (!kem.isDelegatedSigned && kem.verify(kem.userEd25519Pk))) {
             validatedKem = kem;
           }
         }
@@ -377,8 +386,8 @@ class IdentityResolver {
   /// Filterung passiert VOR der best-Selektion, damit ein forged Record
   /// mit hoher seq den echten nicht verdraengt. Hoechste seq gewinnt
   /// (Tie-Break ueber publishedAtMs). Spec §4.3.
-  Future<DeviceKemRecord?> _lookupDeviceKem(
-      Uint8List userId, Uint8List deviceId, Uint8List? anchorPk) async {
+  Future<DeviceKemRecord?> _lookupDeviceKem(Uint8List userId,
+      Uint8List deviceId, AuthManifest? anchorManifest) async {
     final body = Uint8List.fromList((proto.IdentityKemRetrieveRequest()
           ..userId = userId
           ..deviceId = deviceId)
@@ -412,9 +421,13 @@ class IdentityResolver {
               '(${_shortHex(userId)}/${_shortHex(deviceId)}) — verworfen');
           continue;
         }
-        if (anchorPk != null &&
-            (!_bytesEqual(r.userEd25519Pk, anchorPk) ||
-                !r.verify(anchorPk))) {
+        // §7.1.4: die Sig darf vom delegierten Geraeteschluessel kommen —
+        // dann verifiziert `verifyAnchored` erst die Zertifikatskette gegen
+        // den Anker (P6: Zertifikat aus dem Manifest). Die Bindung
+        // `userEd25519Pk == Anker` bleibt in beiden Pfaden bestehen.
+        if (anchorManifest != null &&
+            (!_bytesEqual(r.userEd25519Pk, anchorManifest.userEd25519Pk) ||
+                !r.verifyAnchored(anchorManifest))) {
           continue; // forged/foreign record — vor Selektion aussortieren
         }
         if (best == null ||
@@ -557,8 +570,8 @@ class IdentityResolver {
 
   /// D1: mit Anker zaehlen nur Liveness-Records, deren Ed25519-Sig gegen
   /// den verankerten User-Pk verifiziert (Filterung VOR best-Selektion).
-  Future<LivenessRecord?> _lookupLiveness(
-      Uint8List userId, Uint8List deviceNodeId, Uint8List? anchorPk) async {
+  Future<LivenessRecord?> _lookupLiveness(Uint8List userId,
+      Uint8List deviceNodeId, AuthManifest? anchorManifest) async {
     final body = Uint8List.fromList((proto.IdentityLiveRetrieveRequest()
           ..userId = userId
           ..deviceNodeId = deviceNodeId)
@@ -593,7 +606,10 @@ class IdentityResolver {
               'verworfen');
           continue;
         }
-        if (anchorPk != null && !r.verify(anchorPk)) {
+        // §7.1.4: delegiert signierte Records laufen ueber die
+        // Zertifikatskette (Anker → Cert → delegierter PK → Record); das Cert
+        // kommt seit P6 aus dem Manifest, nicht aus dem Record.
+        if (anchorManifest != null && !r.verifyAnchored(anchorManifest)) {
           continue; // forged — Adressen eines Angreifers nie uebernehmen
         }
         if (best == null ||

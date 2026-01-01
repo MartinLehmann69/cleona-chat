@@ -50,6 +50,13 @@ import Network
       SessionBehaviourHandler.register(with: sessionBehaviourRegistrar)
     }
 
+    // Call integration (V3.2): CallKit — iOS counterpart to Android's
+    // self-managed ConnectionService. Same MethodChannel contract
+    // ("chat.cleona/call_integration") on both platforms.
+    if let callKitRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CallKitHandler") {
+      CallKitHandler.register(with: callKitRegistrar)
+    }
+
     // Deep link drain: Dart calls consumePendingDeepLink to pick up
     // cleona:// URIs that opened the app (cold or warm start).
     if let deepLinkRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "DeepLinkHandler") {

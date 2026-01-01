@@ -249,7 +249,7 @@ class SystemChannelRecordStore {
       // author admission. Rotated authors verify via the AuthManifest
       // rotation chain when a chainVerifier is wired.
       final derived = HdWallet.computeUserId(
-          Uint8List.fromList(record.authorEd25519Pk), NetworkSecret.secret);
+          Uint8List.fromList(record.authorEd25519Pk), NetworkSecret.identitySecret);
       if (_hex(derived) != _hex(record.authorUserId)) {
         final chain = chainVerifier;
         if (chain == null ||

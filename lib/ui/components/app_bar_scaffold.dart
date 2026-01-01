@@ -66,6 +66,7 @@ class AppBarScaffold extends StatelessWidget {
                 actions: actions,
               ),
               const _GlobalUpdateBanner(),
+              const _GlobalCoAuthWarningBanner(),
               Expanded(
                 child: SafeArea(
                   top: false,
@@ -353,6 +354,74 @@ class _GlobalUpdateBanner extends StatelessWidget {
       onPressed: appState.startInNetworkUpdate,
       child: Text(locale.get('update_download'),
           style: TextStyle(color: cs.onPrimaryContainer)),
+    );
+  }
+}
+
+/// §7.5: "rotation quorum not met" warnings — the elevated "possible Primary
+/// theft" signal. Shown the same way as [_GlobalUpdateBanner] (every screen,
+/// via the shared [AppBarScaffold]) rather than as a one-shot dialog: unlike
+/// the pairing/rotation-approval prompts this is purely informational (there
+/// is nothing to answer), so it must stay visible until the user explicitly
+/// acknowledges it — a transient dialog the user could miss while looking
+/// elsewhere would defeat the point of a theft warning.
+class _GlobalCoAuthWarningBanner extends StatelessWidget {
+  const _GlobalCoAuthWarningBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.watch<CleonaAppState>();
+    final warnings = appState.coAuthWarnings;
+    if (warnings.isEmpty) return const SizedBox.shrink();
+
+    final locale = AppLocale.read(context);
+    final cs = Theme.of(context).colorScheme;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final w in warnings)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            color: cs.errorContainer,
+            child: Row(
+              children: [
+                Icon(Icons.gpp_maybe, size: 18, color: cs.onErrorContainer),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        locale.get('rotation_coauth_warning_title'),
+                        style: TextStyle(
+                          color: cs.onErrorContainer,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                      Text(
+                        locale.tr('rotation_coauth_warning_body', {
+                          'name': w.displayName,
+                          'present': '${w.tokensPresent}',
+                          'required': '${w.tokensRequired}',
+                        }),
+                        style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+                IconButton(
+                  icon: Icon(Icons.close, size: 18, color: cs.onErrorContainer),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () =>
+                      appState.dismissCoAuthWarning(w.contactNodeIdHex),
+                ),
+              ],
+            ),
+          ),
+      ],
     );
   }
 }

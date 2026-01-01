@@ -79,6 +79,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   List<ContactInfo> _acceptedContacts = [];
   List<ContactInfo> _pendingContacts = [];
   List<ContactInfo> _pendingOutgoingContacts = [];
+  List<ContactInfo> _storedForDeliveryContacts = [];
 
   // Cached call state
   CallInfo? _currentCall;
@@ -613,6 +614,29 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final pairDeviceHex = event.data['deviceIdHex'] as String? ?? '';
         onDevicePairRequest?.call(pairDeviceHex);
         break;
+      case 'rotation_approval_request':
+        // §7.5: the Primary wants a Device-Sig countersignature — for an
+        // Emergency Key Rotation or for a device-set change, told apart by
+        // `approvalKind`. The GUI must ask the user, naming the right
+        // occasion; ignoring the event means nothing is sent back, which is
+        // the safe default.
+        final rotationHashHex = event.data['rotationHashHex'] as String? ?? '';
+        final rotationRequesterHex =
+            event.data['requestingDeviceIdHex'] as String? ?? '';
+        // A daemon that predates the field sends no `approvalKind`;
+        // `fromWireName` maps that to `keyRotation`, which is what such a
+        // daemon could only ever have meant.
+        final approvalKind = RotationApprovalKind.fromWireName(
+            event.data['approvalKind'] as String?);
+        final newDeviceNodeIdHexes =
+            (event.data['newDeviceNodeIdHexes'] as List<dynamic>? ?? const [])
+                .whereType<String>()
+                .toList();
+        if (rotationHashHex.isNotEmpty) {
+          onRotationApprovalRequest?.call(rotationHashHex,
+              rotationRequesterHex, approvalKind, newDeviceNodeIdHexes);
+        }
+        break;
       case 'update_available':
         final manifestData = event.data['manifest'] as Map<String, dynamic>?;
         final inNetwork = event.data['inNetworkAvailable'] as bool? ?? false;
@@ -760,6 +784,14 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final pendingOut = state['pendingOutgoingContacts'] as List<dynamic>?;
     if (pendingOut != null) {
       _pendingOutgoingContacts = pendingOut
+          .map((c) => ContactInfo.fromJson(c as Map<String, dynamic>))
+          .toList();
+    }
+
+    final storedForDelivery =
+        state['storedForDeliveryContacts'] as List<dynamic>?;
+    if (storedForDelivery != null) {
+      _storedForDeliveryContacts = storedForDelivery
           .map((c) => ContactInfo.fromJson(c as Map<String, dynamic>))
           .toList();
     }
@@ -1027,8 +1059,19 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   List<ContactInfo> get pendingOutgoingContacts => _pendingOutgoingContacts;
 
   @override
+  List<ContactInfo> get storedForDeliveryContacts => _storedForDeliveryContacts;
+
+  @override
   ContactInfo? getContact(String nodeIdHex) {
-    for (final c in [..._acceptedContacts, ..._pendingContacts, ..._pendingOutgoingContacts]) {
+    // S299: _storedForDeliveryContacts belongs in this aggregation. Without
+    // it a contact whose CR a seed peer had accepted was not resolvable in
+    // the GUI process at all — not merely missing from a list.
+    for (final c in [
+      ..._acceptedContacts,
+      ..._pendingContacts,
+      ..._pendingOutgoingContacts,
+      ..._storedForDeliveryContacts
+    ]) {
       if (c.nodeIdHex == nodeIdHex) return c;
     }
     return null;
@@ -1886,6 +1929,24 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return contact != null;
   }
 
+  /// §14.7.4: withhold this node's delivery status from a contact or group.
+  /// Mirrors the daemon-side setting into the local cache so the toggle
+  /// reflects immediately; the daemon remains authoritative.
+  @override
+  bool setWithholdDeliveryStatus(String entityIdHex, bool withhold) {
+    final group = _groups[entityIdHex];
+    final contact = group == null ? getContact(entityIdHex) : null;
+    if (group == null && contact == null) return false;
+    group?.withholdDeliveryStatus = withhold;
+    contact?.withholdDeliveryStatus = withhold;
+    onStateChanged?.call();
+    _sendRequest('set_withhold_delivery_status', params: {
+      'entityIdHex': entityIdHex,
+      'withhold': withhold,
+    });
+    return true;
+  }
+
   @override
   void acceptContactNameChange(String nodeIdHex, bool accept) {
     _sendRequest('accept_name_change', params: {
@@ -2204,6 +2265,28 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
+  /// §7.1 LD-2: [ICleonaService] surface for [approveDevicePair] — same call,
+  /// named to match the interface so callers typed against `ICleonaService`
+  /// (desktop IPC and in-process alike) can use it without knowing which
+  /// transport they are on.
+  @override
+  Future<bool> approvePairRequest(String requestingDeviceIdHex) =>
+      approveDevicePair(requestingDeviceIdHex);
+
+  /// §7.1 LD-2: catch-up for pending device-pairing requests — see
+  /// [ICleonaService.getPendingPairRequests] for the field contract.
+  @override
+  Future<List<Map<String, dynamic>>> getPendingPairRequests() async {
+    final resp = await _sendRequest('get_pending_pair_requests');
+    if (!resp.success) return const [];
+    final list =
+        resp.data['pendingPairRequests'] as List<dynamic>? ?? const [];
+    return list
+        .whereType<Map<String, dynamic>>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
   /// §7.1: Query whether this identity runs as a Linked Device.
   Future<Map<String, dynamic>> getLinkedDeviceStatus() async {
     final resp = await _sendRequest('get_linked_device_status');
@@ -2280,6 +2363,43 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   void Function(String contactNodeIdHex, String displayName)?
       onRotationRejectionAlert;
+
+  /// §7.5: the daemon parked a rotation-approval request and waits for an
+  /// explicit user decision. Answer with [approveRotation] / [rejectRotation]
+  /// — not answering sends nothing (silence is not consent). `kind` says
+  /// whether this is a key rotation or a device-set change and MUST be shown
+  /// to the user; the last argument lists the devices remaining after a
+  /// device-set change.
+  @override
+  void Function(String rotationHashHex, String requestingDeviceIdHex,
+          RotationApprovalKind kind, List<String> newDeviceNodeIdHexes)?
+      onRotationApprovalRequest;
+
+  @override
+  Future<bool> approveRotation(String rotationHashHex) async {
+    final resp = await _sendRequest('approve_rotation',
+        params: {'rotationHashHex': rotationHashHex});
+    return resp.success;
+  }
+
+  @override
+  Future<bool> rejectRotation(String rotationHashHex) async {
+    final resp = await _sendRequest('reject_rotation',
+        params: {'rotationHashHex': rotationHashHex});
+    return resp.success;
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getPendingRotationApprovals() async {
+    final resp = await _sendRequest('get_pending_rotation_approvals');
+    if (!resp.success) return const [];
+    final list =
+        resp.data['pendingRotationApprovals'] as List<dynamic>? ?? const [];
+    return list
+        .whereType<Map<String, dynamic>>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
 
   @override
   Future<String> createPoll({

@@ -5,6 +5,31 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/storage/atomic_json_writer.dart';
+import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+
+/// Outer `NetworkPacketV3.senderDeviceId` embedded in a stored envelope, or
+/// `null` if the bytes don't parse (defensive — every store site writes
+/// canonical `NetworkPacketV3` bytes, so a parse failure here means
+/// corrupted/foreign data, not a normal case).
+///
+/// §7.1 P3: this is the "Merkmal aus dem Inhalt" that distinguishes a
+/// device's own placed message from someone else's — `PeerRetrieve.
+/// requesterNodeId` alone cannot: before Linked-Device pairing completes,
+/// both devices derive the identical userId from the shared seed, so a
+/// requesting device retrieving its OWN just-placed message looks
+/// byte-identical, at the `requesterNodeId` level, to the intended
+/// recipient device retrieving it. The outer sender-device-id is unencrypted
+/// (needed for routing before KEM-decap) and is authored per-device, so it
+/// is the one field that tells the two apart.
+Uint8List? _envelopeSenderDeviceId(Uint8List wrappedEnvelope) {
+  try {
+    final pkt = proto.NetworkPacketV3.fromBuffer(wrappedEnvelope);
+    final sd = pkt.senderDeviceId;
+    return sd.isEmpty ? null : Uint8List.fromList(sd);
+  } catch (_) {
+    return null;
+  }
+}
 
 String _sha256Hex(Uint8List data) =>
     bytesToHex(SodiumFFI().sha256(data));
@@ -30,6 +55,16 @@ class _HeldMessage {
   /// the recipient has requested it; after a grace window the message is
   /// garbage-collected by [PeerMessageStore.pruneExpired].
   DateTime? _retrievedAt;
+
+  /// Correlates a [PeerMessageStore.peekRetrievable] call with the matching
+  /// [PeerMessageStore.markRetrieved] across the `await` on the transport.
+  ///
+  /// Deliberately NOT persisted (absent from toJson/fromJson): the stamp is
+  /// only meaningful for a PEER_RETRIEVE_RESPONSE that is in flight right now,
+  /// and a daemon restart aborts every in-flight delivery anyway. Persisting it
+  /// would resurrect a stamp whose send can no longer complete, so the first
+  /// markRetrieved after a restart could mark messages that were never sent.
+  DateTime? _retrieveAttemptAt;
 
   _HeldMessage({
     required this.storeIdHex,
@@ -256,6 +291,82 @@ class PeerMessageStore {
     return result;
   }
 
+  /// Return envelopes eligible for retrieve WITHOUT marking them, stamping
+  /// each selected message with [attemptAt]. The caller must call
+  /// [markRetrieved] with the SAME [attemptAt] after a successful send.
+  ///
+  /// S300 — the stamp is what keeps the peek/mark split exact across the
+  /// `await sendInfraTo` that sits between the two calls. Without it
+  /// [markRetrieved] swept every non-expired message of the recipient,
+  /// including one that a PEER_STORE arriving during the send had just added
+  /// (`handleIncomingPeerStoreInfra` runs in the same event loop between the
+  /// microtasks). That message never travelled in the response, yet carried
+  /// `_retrievedAt` and was deleted by [pruneExpired] after the 60s grace —
+  /// a silent loss. Same mechanism as [peekMessages]/[commitPushAttempt].
+  ///
+  /// [excludeSenderDeviceId], when given, skips (neither returns nor stamps)
+  /// any held message whose outer `NetworkPacketV3.senderDeviceId` equals it
+  /// — §7.1 P3: a device must never retrieve back a message it authored
+  /// itself. This matters for the shared pre-pairing mailbox (`sendToUser`
+  /// §7.2 LD-11 bootstrap): the requesting device's own general S&F poll can
+  /// reach a peer holding the copy it just placed for its future twin, and
+  /// `requesterNodeId` is identical on both devices before pairing — so it
+  /// cannot serve as the distinguishing signal (see
+  /// [_envelopeSenderDeviceId]). Passing the caller's own device is correct
+  /// unconditionally, not just for pairing: no device legitimately retrieves
+  /// content it authored. Excluded here (pre-stamp) rather than filtered
+  /// post-hoc, so a skipped message is not spuriously marked retrieved by
+  /// the matching [markRetrieved] call.
+  List<Uint8List> peekRetrievable(Uint8List recipientUserId, {
+    required DateTime attemptAt,
+    Uint8List? excludeSenderDeviceId,
+  }) {
+    final recipientHex = bytesToHex(recipientUserId);
+    final list = _messages[recipientHex];
+    if (list == null || list.isEmpty) return [];
+    final result = <Uint8List>[];
+    for (final m in list) {
+      if (m.isExpired) continue;
+      if (excludeSenderDeviceId != null) {
+        final authorDeviceId = _envelopeSenderDeviceId(m.wrappedEnvelope);
+        if (authorDeviceId != null &&
+            bytesToHex(authorDeviceId) == bytesToHex(excludeSenderDeviceId)) {
+          continue;
+        }
+      }
+      m._retrieveAttemptAt = attemptAt;
+      result.add(m.wrappedEnvelope);
+    }
+    return result;
+  }
+
+  /// Mark exactly those messages as retrieved that the matching
+  /// [peekRetrievable] call stamped with [attemptAt].
+  /// Called after a successful send of the PEER_RETRIEVE_RESPONSE.
+  ///
+  /// Correlating on the timestamp rather than on the returned envelopes keeps
+  /// the two calls exact across the `await` in between: a message stored
+  /// during the send carries no stamp and is not marked, and a concurrent
+  /// retrieve carries a different stamp.
+  ///
+  /// `_retrievedAt ??= now` stays: the 60s grace window (a lost RESPONSE must
+  /// still be answerable by a second retrieve) is measured from the FIRST
+  /// retrieve, so a repeat retrieve must not extend the deletion window.
+  void markRetrieved(Uint8List recipientUserId, DateTime attemptAt) {
+    final recipientHex = bytesToHex(recipientUserId);
+    final list = _messages[recipientHex];
+    if (list == null) return;
+    final now = DateTime.now();
+    var count = 0;
+    for (final m in list) {
+      if (m.isExpired) continue;
+      if (m._retrieveAttemptAt != attemptAt) continue;
+      m._retrievedAt ??= now;
+      count++;
+    }
+    if (count > 0) _dirty = true;
+  }
+
   /// Peek at stored messages for a recipient WITHOUT removing them.
   ///
   /// Returns only messages that haven't been pushed recently (rate-limited
@@ -266,15 +377,36 @@ class PeerMessageStore {
   /// Architecture: S&F messages persist until confirmed delivery (PEER_RETRIEVE)
   /// or TTL expiry (7 days). Push is event-driven (peer comes online) and
   /// rate-limited + count-limited to prevent flooding.
+  /// Selects pushable messages and stamps them with [attemptAt] so a
+  /// concurrent push cannot pick the same message again while this one is
+  /// still in flight.
+  ///
+  /// S299 — the push BUDGET is deliberately not consumed here. It used to be
+  /// (`pushCount++` sat right next to `lastPushedAt = now`), while the caller
+  /// discarded the transport result. Field measurement on Node2 showed what
+  /// that costs: `_buildInfraPacket` drops any KEM-path message to a device
+  /// whose Device-KEM record is missing and `sendInfraTo` returns false —
+  /// 6415 such drops across nine message types, 87 of them exactly this
+  /// `PEER_RETRIEVE_RESPONSE`. Each one burned one of three push attempts
+  /// against a packet that never left the machine, and the budget is
+  /// persisted, so after three drops the message was unreachable by push for
+  /// the rest of its 7-day TTL. Call [commitPushAttempt] with the same
+  /// [attemptAt] once the transport reported success.
+  ///
+  /// The timestamp stamp stays unconditional on purpose: a failed attempt
+  /// should not be retried immediately. The dominant failure here is a
+  /// persistent condition (no KEM record), so re-attempting before the next
+  /// interval would spin without any chance of succeeding.
   List<Uint8List> peekMessages(Uint8List recipientUserId, {
     int pushIntervalSeconds = 300,
     int maxPushCount = 3,
+    DateTime? attemptAt,
   }) {
     final recipientHex = bytesToHex(recipientUserId);
     final list = _messages[recipientHex];
     if (list == null || list.isEmpty) return [];
 
-    final now = DateTime.now();
+    final now = attemptAt ?? DateTime.now();
     final interval = Duration(seconds: pushIntervalSeconds);
     final result = <Uint8List>[];
 
@@ -283,12 +415,34 @@ class PeerMessageStore {
       if (m.pushCount >= maxPushCount) continue;
       if (m.lastPushedAt != null && now.difference(m.lastPushedAt!) < interval) continue;
       m.lastPushedAt = now;
-      m.pushCount++;
       result.add(m.wrappedEnvelope);
     }
 
     if (result.isNotEmpty) _dirty = true;
     return result;
+  }
+
+  /// Consumes one push-budget unit for every message stamped with
+  /// [attemptAt] by the matching [peekMessages] call. Returns how many
+  /// messages were charged.
+  ///
+  /// Call this only after the transport actually succeeded. Correlating on
+  /// the timestamp rather than on the returned envelopes keeps the two calls
+  /// exact across the `await` in between: a message stored during the send
+  /// carries no stamp and is not charged, and a concurrent push carries a
+  /// different stamp.
+  int commitPushAttempt(Uint8List recipientUserId, DateTime attemptAt) {
+    final list = _messages[bytesToHex(recipientUserId)];
+    if (list == null || list.isEmpty) return 0;
+    var charged = 0;
+    for (final m in list) {
+      if (m.lastPushedAt == attemptAt) {
+        m.pushCount++;
+        charged++;
+      }
+    }
+    if (charged > 0) _dirty = true;
+    return charged;
   }
 
   /// Check if we have messages for a given recipient.

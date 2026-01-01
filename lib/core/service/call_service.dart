@@ -7,6 +7,7 @@ import 'package:cleona/core/calls/jitter_buffer.dart';
 import 'package:cleona/core/calls/voice_codec.dart';
 import 'package:cleona/core/calls/voice_session.dart';
 import 'package:cleona/core/calls/audio_permissions.dart';
+import 'package:cleona/core/calls/call_integration.dart';
 import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/foreground_service.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
@@ -78,6 +79,70 @@ class CallService {
   void Function()? onCancelCallNotificationAndroid;
   void Function(bool speaker)? onSetCallAudioModeAndroid;
   void Function()? onResetCallAudioModeAndroid;
+
+  /// §10.4 stage 7 (V3.2): CallKit / self-managed `ConnectionService`.
+  ///
+  /// Injected, not constructed here, for the same reason [createVideoEngine]
+  /// is: the `MethodChannel` implementation imports
+  /// `package:flutter/services.dart` and therefore `dart:ui`, which this file
+  /// must not pull in — `dart compile exe lib/service_daemon.dart` fails
+  /// outright if it does. A Flutter-context caller (`main.dart`) assigns a
+  /// `MethodChannelCallIntegration`; the daemon keeps the no-op, which is
+  /// correct there anyway since it has no system call UI.
+  ///
+  /// Best-effort by construction — never load-bearing: every method answers
+  /// `false` instead of throwing where the platform has no such concept
+  /// (Linux, Windows, Android < API 26).
+  ///
+  /// The setter re-attaches the OS-intent callbacks. Without that, injecting
+  /// the real implementation after [init] would silently drop them and the
+  /// system UI's answer and hang-up buttons would do nothing — a failure that
+  /// only shows up on a device, which is the worst place to find it.
+  CallIntegration get callIntegration => _callIntegration;
+  set callIntegration(CallIntegration value) {
+    _callIntegration = value;
+    _attachCallIntegrationCallbacks();
+  }
+
+  CallIntegration _callIntegration = NoopCallIntegration();
+
+  /// Resolves the name the system call UI shows. Left injectable rather than
+  /// reaching into the contact manager from here: [CallSession] carries only
+  /// `peerNodeIdHex`, and contact resolution is not this file's concern.
+  /// Falls back to a short hex so the system UI never shows an empty caller.
+  String Function(String peerNodeIdHex)? resolveCallDisplayName;
+
+  /// §10.4 stage 7 (V3.2). The OS drives these; they are requests, not
+  /// confirmations. Each is routed into the SAME `CallManager` entry point the
+  /// in-app buttons use, so there is exactly one answer path and one teardown
+  /// path regardless of where the intent came from. Re-run whenever
+  /// [callIntegration] is replaced.
+  void _attachCallIntegrationCallbacks() {
+    _callIntegration.onAnswerCall = (callId) {
+      final call = callManager.currentCall;
+      if (call == null || call.callIdHex != callId) return;
+      callManager.acceptCall();
+    };
+    _callIntegration.onEndCall = (callId) {
+      final call = callManager.currentCall;
+      if (call == null || call.callIdHex != callId) return;
+      // Ringing but not yet accepted is a rejection, anything later is a
+      // hang-up — the same distinction the in-app UI makes.
+      if (call.state == CallState.ringing &&
+          call.direction == CallDirection.incoming) {
+        callManager.rejectCall(reason: 'declined');
+      } else {
+        callManager.hangup();
+      }
+    };
+  }
+
+  String _displayNameFor(CallSession call) {
+    final resolved = resolveCallDisplayName?.call(call.peerNodeIdHex);
+    if (resolved != null && resolved.isNotEmpty) return resolved;
+    final hex = call.peerNodeIdHex;
+    return hex.length >= 8 ? hex.substring(0, 8) : hex;
+  }
   void Function(String reason)? onVideoUnavailable;
 
   /// §10.4 / E5 — an inbound CALL_INVITE was refused because the caller runs
@@ -110,25 +175,40 @@ class CallService {
           skipL3: true,
           outLegs: outLegs,
         );
+    _attachCallIntegrationCallbacks();
+
     callManager.onIncomingCall = (session) {
+      callIntegration.reportIncomingCall(
+        callId: session.callIdHex,
+        displayName: _displayNameFor(session),
+        hasVideo: session.isVideo,
+      );
       onIncomingCall?.call(session.toCallInfo());
       onStateChanged?.call();
     };
     callManager.onCallAccepted = (session) {
       _startVoiceSession(session);
       _startVideoEngine(session);
+      // Only now is there audio. On Android this is what moves the Telecom
+      // connection out of RINGING/DIALING — without it the system UI shows a
+      // call that rings forever and the connection leaks.
+      callIntegration.reportCallConnected(session.callIdHex);
       onCallAccepted?.call(session.toCallInfo());
       onStateChanged?.call();
     };
     callManager.onCallRejected = (session, reason) {
       _stopVoiceSession();
       _stopVideoEngine();
+      callIntegration.endCall(session.callIdHex);
       onCallRejected?.call(session.toCallInfo(), reason);
       onStateChanged?.call();
     };
     callManager.onCallEnded = (session) {
       _stopVoiceSession();
       _stopVideoEngine();
+      // Unconditional: a locally ended call that is not reported leaves the OS
+      // believing a call is still running.
+      callIntegration.endCall(session.callIdHex);
       onCallEnded?.call(session.toCallInfo());
       onStateChanged?.call();
     };
@@ -143,7 +223,9 @@ class CallService {
       } catch (_) {}
     };
 
+    final prevRouteDown = _ctx.node.onRouteDownForCalls;
     _ctx.node.onRouteDownForCalls = (peerHex) {
+      prevRouteDown?.call(peerHex);
       // 1:1 calls send directly to peerDeviceId — no cachedRoute to
       // invalidate. The hook remains for future group-call integration.
     };
@@ -229,6 +311,14 @@ class CallService {
       notificationSound.stopRingback();
       return null;
     }
+    // §10.4 stage 7: only after the invite actually went out — reporting an
+    // outgoing call that then fails to start would leave a dialing entry in
+    // the system UI with nothing to end it.
+    callIntegration.reportOutgoingCall(
+      callId: session.callIdHex,
+      displayName: _displayNameFor(session),
+      hasVideo: session.isVideo,
+    );
     return session.toCallInfo();
   }
 

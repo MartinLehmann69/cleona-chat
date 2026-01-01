@@ -515,6 +515,7 @@ class PeerAddress {
   /// Used to decide whether a peer's ULA is potentially reachable. Conservative:
   /// "any ULA" rather than "ULA in the same /48 prefix" — good enough for now,
   /// avoids dropping records on home networks where the prefix is stable.
+  static bool hasAnyUlaAddress() => _hasAnyUlaAddress();
   static bool _hasAnyUlaAddress() {
     for (final ip in currentLocalIps) {
       if (!ip.contains(':')) continue;
@@ -1673,3 +1674,8 @@ Uint8List _hexToBytes(String hex) {
 /// Shared hex conversion utilities
 String bytesToHex(Uint8List bytes) => _bytesToHex(bytes);
 Uint8List hexToBytes(String hex) => _hexToBytes(hex);
+
+/// Convenience getter for `bytesToHex(Uint8List.fromList(this))`.
+extension HexOnListInt on List<int> {
+  String get hex => bytesToHex(Uint8List.fromList(this));
+}

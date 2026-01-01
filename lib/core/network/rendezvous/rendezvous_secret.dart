@@ -30,7 +30,6 @@ const String _fcNostrSalt = 'cleona-nostr-fc-v1';
 const String _binaryTagSalt = 'cleona-rv-binary-v1';
 const String _binaryKeySalt = 'cleona-rv-binary-key-v1';
 const String _binaryNostrSalt = 'cleona-nostr-binary-v1';
-const String _inviteBinarySalt = 'cleona-invite-binary-v1';
 
 /// First-Contact Rendezvous role of the URI creator (§4.11.10).
 const String kFcRoleOwner = 'owner';
@@ -282,20 +281,6 @@ Uint8List deriveBinaryNostrSecretKey(
     networkSecret,
     salt: Uint8List.fromList(utf8.encode(_binaryNostrSalt)),
     info: Uint8List.fromList(utf8.encode(deviceHex)),
-    length: 32,
-  );
-}
-
-/// Derives the encryption key for binary-distribution records scoped to a
-/// single-use invite nonce (out-of-band physical transfer / QR flow).
-Uint8List deriveInviteBinaryKey(
-    Uint8List networkSecret, Uint8List inviteNonce) {
-  final nonceHex =
-      inviteNonce.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-  return SodiumFFI().hkdfSha256(
-    networkSecret,
-    salt: Uint8List.fromList(utf8.encode(_inviteBinarySalt)),
-    info: Uint8List.fromList(utf8.encode(nonceHex)),
     length: 32,
   );
 }

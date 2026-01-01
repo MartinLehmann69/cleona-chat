@@ -327,6 +327,39 @@ class V3FrameCodec {
     return packet;
   }
 
+  /// Re-sign a parsed NetworkPacketV3 with a fresh timestamp.
+  /// Used by outbox flush (§5.1) and L1-retry (AckTracker) to keep
+  /// the packet inside the 60s replay window and signature-valid.
+  static void refreshTimestampAndSign(
+      proto.NetworkPacketV3 packet, device_sig.DeviceKeyPair deviceKeys) {
+    // Capture the packet flavor BEFORE the clear below: the presence of an
+    // ML-DSA sig on the incoming packet is the ONLY evidence of how it was
+    // originally signed, and clearDeviceMlDsaSig() destroys it. Reading the
+    // field after the clear always yields empty, which silently collapses the
+    // decision to "sign whenever payload is non-empty" — that would attach a
+    // ~3.3 KB ML-DSA-65 signature to infra packets that must not carry one,
+    // adding several UDP fragments (1200 B threshold) on the retry path.
+    final hadMlDsa = packet.deviceMlDsaSig.isNotEmpty;
+    packet.timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
+    packet.clearDeviceEd25519Sig();
+    packet.clearDeviceMlDsaSig();
+    packet.clearNetworkTag();
+    final saveTtl = packet.ttl;
+    final saveHop = packet.hopCount;
+    final saveVisited = List<List<int>>.from(packet.visitedDeviceIds);
+    packet.clearTtl();
+    packet.clearHopCount();
+    packet.visitedDeviceIds.clear();
+    final unsigned = packet.writeToBuffer();
+    packet.ttl = saveTtl;
+    packet.hopCount = saveHop;
+    packet.visitedDeviceIds.addAll(saveVisited.map((e) => e));
+    packet.deviceEd25519Sig = deviceKeys.signEd25519(unsigned);
+    if (hadMlDsa) {
+      packet.deviceMlDsaSig = deviceKeys.signMlDsa(unsigned);
+    }
+  }
+
   // ───────────────────────── Receiver (Outer) ───────────────────────
 
   /// Verify the Device-Sig on a parsed NetworkPacketV3. Strips sigs+tag,

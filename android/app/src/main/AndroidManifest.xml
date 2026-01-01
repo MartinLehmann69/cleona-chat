@@ -11,6 +11,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- V3.2 (Architektur §10.4, "Call integration"): self-managed -->
+    <!-- ConnectionService. Normal protection level, kein Runtime-Dialog. -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.NFC" />
@@ -108,6 +111,18 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="persistent_p2p_messaging_daemon" />
+        </service>
+
+        <!-- V3.2 self-managed ConnectionService (Architektur §10.4, Staging -->
+        <!-- Zeile 7). Telecom bindet diesen Service; die Permission wird -->
+        <!-- vom System gehalten, nicht von Cleona angefordert. -->
+        <service
+            android:name=".CleonaConnectionService"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
         </service>
 
         <meta-data

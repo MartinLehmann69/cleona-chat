@@ -30,7 +30,14 @@ class InviteLink {
   final Map<String, String> binarySignatures;
   final String version;
   final String? fallbackUrl;
-  final String? inviteNonce;
+
+  /// Per-platform binary sizes in bytes, from the maintainer-signed
+  /// UpdateManifest (§19.6.4). The browser assembler needs the original size
+  /// to trim Reed-Solomon block padding; carrying it in the link removes the
+  /// HEAD request against the serving node's complete-binary endpoint, which
+  /// failed precisely when the fragment path was needed. A tampered size
+  /// yields a SHA-256 mismatch, so no separate signature is required.
+  final Map<String, int>? binarySizes;
 
   const InviteLink({
     required this.nodeIp,
@@ -40,7 +47,7 @@ class InviteLink {
     required this.binarySignatures,
     required this.version,
     this.fallbackUrl,
-    this.inviteNonce,
+    this.binarySizes,
   });
 
   /// Generate the full invite link URL.
@@ -57,8 +64,9 @@ class InviteLink {
     if (fallbackUrl != null && fallbackUrl!.isNotEmpty) {
       frag.write('&f=${Uri.encodeComponent(fallbackUrl!)}');
     }
-    if (inviteNonce != null && inviteNonce!.isNotEmpty) {
-      frag.write('&n=${Uri.encodeComponent(inviteNonce!)}');
+    if (binarySizes != null && binarySizes!.isNotEmpty) {
+      final zParam = base64.encode(utf8.encode(jsonEncode(binarySizes)));
+      frag.write('&z=${Uri.encodeComponent(zParam)}');
     }
 
     return 'http://$host:$nodePort$_path#$frag';
@@ -107,6 +115,20 @@ class InviteLink {
       final sigMap = jsonDecode(mJson) as Map<String, dynamic>;
       final sigs = sigMap.map((k, v) => MapEntry(k, v as String));
 
+      // `z=` is optional: links generated before it existed simply omit it,
+      // and the assembler falls back to a HEAD request.
+      Map<String, int>? sizes;
+      final zParam = params['z'];
+      if (zParam != null && zParam.isNotEmpty) {
+        try {
+          final zJson = utf8.decode(base64.decode(zParam));
+          final zMap = jsonDecode(zJson) as Map<String, dynamic>;
+          sizes = zMap.map((k, v) => MapEntry(k, (v as num).toInt()));
+        } catch (_) {
+          sizes = null;
+        }
+      }
+
       return InviteLink(
         nodeIp: host,
         nodePort: port,
@@ -115,7 +137,7 @@ class InviteLink {
         binarySignatures: sigs,
         version: version,
         fallbackUrl: params['f'],
-        inviteNonce: params['n'],
+        binarySizes: sizes,
       );
     } catch (_) {
       return null;

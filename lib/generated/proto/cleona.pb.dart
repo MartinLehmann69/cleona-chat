@@ -7817,6 +7817,7 @@ class DeliveryReceipt extends $pb.GeneratedMessage {
   factory DeliveryReceipt({
     $core.List<$core.int>? messageId,
     $fixnum.Int64? deliveredAt,
+    $core.bool? withholdDeliveryStatus,
   }) {
     final $result = create();
     if (messageId != null) {
@@ -7824,6 +7825,9 @@ class DeliveryReceipt extends $pb.GeneratedMessage {
     }
     if (deliveredAt != null) {
       $result.deliveredAt = deliveredAt;
+    }
+    if (withholdDeliveryStatus != null) {
+      $result.withholdDeliveryStatus = withholdDeliveryStatus;
     }
     return $result;
   }
@@ -7834,6 +7838,7 @@ class DeliveryReceipt extends $pb.GeneratedMessage {
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'DeliveryReceipt', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'deliveredAt', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
+    ..aOB(3, _omitFieldNames ? '' : 'withholdDeliveryStatus')
     ..hasRequiredFields = false
   ;
 
@@ -7875,6 +7880,21 @@ class DeliveryReceipt extends $pb.GeneratedMessage {
   $core.bool hasDeliveredAt() => $_has(1);
   @$pb.TagNumber(2)
   void clearDeliveredAt() => clearField(2);
+
+  /// §14.7.4: receiver withholds its delivery status from the sender's UI.
+  /// Encoded as "withhold", not "disclose", on purpose: proto3 scalars default
+  /// to false when absent, so a receipt from a node that predates this field
+  /// (or any future encoder that omits it) means "disclose" — the behaviour
+  /// that was in place before the flag existed. The inverse naming would turn
+  /// every legacy receipt into a suppressed status.
+  @$pb.TagNumber(3)
+  $core.bool get withholdDeliveryStatus => $_getBF(2);
+  @$pb.TagNumber(3)
+  set withholdDeliveryStatus($core.bool v) { $_setBool(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasWithholdDeliveryStatus() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearWithholdDeliveryStatus() => clearField(3);
 }
 
 class ReadReceipt extends $pb.GeneratedMessage {
@@ -15144,6 +15164,7 @@ class LivenessRecordProto extends $pb.GeneratedMessage {
     $fixnum.Int64? sequenceNumber,
     $fixnum.Int64? publishedAtMs,
     $core.List<$core.int>? ed25519Sig,
+    $core.List<$core.int>? signerEd25519Pk,
   }) {
     final $result = create();
     if (userId != null) {
@@ -15167,6 +15188,9 @@ class LivenessRecordProto extends $pb.GeneratedMessage {
     if (ed25519Sig != null) {
       $result.ed25519Sig = ed25519Sig;
     }
+    if (signerEd25519Pk != null) {
+      $result.signerEd25519Pk = signerEd25519Pk;
+    }
     return $result;
   }
   LivenessRecordProto._() : super();
@@ -15181,6 +15205,7 @@ class LivenessRecordProto extends $pb.GeneratedMessage {
     ..aInt64(5, _omitFieldNames ? '' : 'sequenceNumber')
     ..aInt64(6, _omitFieldNames ? '' : 'publishedAtMs')
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'signerEd25519Pk', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -15261,6 +15286,30 @@ class LivenessRecordProto extends $pb.GeneratedMessage {
   $core.bool hasEd25519Sig() => $_has(6);
   @$pb.TagNumber(7)
   void clearEd25519Sig() => clearField(7);
+
+  ///  P5 (§7.1.4 vs §4.3): ein gekoppeltes Geraet haelt den User-SK nicht und
+  ///  kann nach einer Rotation nicht mehr unter dem User-Anker signieren. Es
+  ///  signiert deshalb mit seinem delegierten Geraeteschluessel und nennt hier
+  ///  den benutzten PK. Leer = wie bisher direkt unter dem User-Schluessel
+  ///  signiert (Primary-Pfad).
+  ///
+  ///  P6 (Arbeitsregel #5): das Delegationszertifikat wird NICHT mitgeschickt.
+  ///  Es kostete ~5,3 KB pro Record (ML-DSA-PK 1952 B + ML-DSA-Sig 3309 B) und
+  ///  fragmentierte jeden Liveness-Republish (alle 15 min an bis zu 10
+  ///  Replikatoren). Der Empfaenger holt das Zertifikat stattdessen aus dem
+  ///  AuthManifest, das er fuer diesen User ohnehin haelt
+  ///  (`AuthManifest.delegationFor(deviceId)`). Das schwaecht nichts: schon P5
+  ///  war ohne Anker fail-closed, weil die ML-DSA-Haelfte des Zertifikats sonst
+  ///  nicht pruefbar ist — die Manifest-Abhaengigkeit bestand bereits und wird
+  ///  hier nur explizit. Feld 9 bleibt reserviert.
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get signerEd25519Pk => $_getN(7);
+  @$pb.TagNumber(8)
+  set signerEd25519Pk($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasSignerEd25519Pk() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearSignerEd25519Pk() => clearField(8);
 }
 
 class IdentityAuthRetrieveRequest extends $pb.GeneratedMessage {
@@ -16772,6 +16821,7 @@ class DeviceKemRecordV3 extends $pb.GeneratedMessage {
     $fixnum.Int64? publishedAtMs,
     $core.List<$core.int>? ed25519Sig,
     $core.List<$core.int>? userEd25519Pk,
+    $core.List<$core.int>? signerEd25519Pk,
   }) {
     final $result = create();
     if (userId != null) {
@@ -16801,6 +16851,9 @@ class DeviceKemRecordV3 extends $pb.GeneratedMessage {
     if (userEd25519Pk != null) {
       $result.userEd25519Pk = userEd25519Pk;
     }
+    if (signerEd25519Pk != null) {
+      $result.signerEd25519Pk = signerEd25519Pk;
+    }
     return $result;
   }
   DeviceKemRecordV3._() : super();
@@ -16817,6 +16870,7 @@ class DeviceKemRecordV3 extends $pb.GeneratedMessage {
     ..a<$fixnum.Int64>(7, _omitFieldNames ? '' : 'publishedAtMs', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'userEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'signerEd25519Pk', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -16921,6 +16975,19 @@ class DeviceKemRecordV3 extends $pb.GeneratedMessage {
   $core.bool hasUserEd25519Pk() => $_has(8);
   @$pb.TagNumber(9)
   void clearUserEd25519Pk() => clearField(9);
+
+  /// P5: siehe LivenessRecordProto — delegierte Signatur eines gekoppelten
+  /// Geraets. Leer = direkt unter dem User-Schluessel signiert.
+  /// P6: das Zertifikat wird nicht mitgeschickt, der Empfaenger zieht es aus
+  /// dem AuthManifest (siehe LivenessRecordProto). Feld 11 bleibt reserviert.
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get signerEd25519Pk => $_getN(9);
+  @$pb.TagNumber(10)
+  set signerEd25519Pk($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasSignerEd25519Pk() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearSignerEd25519Pk() => clearField(10);
 }
 
 ///  ── PeerListEntry V3 (§5.x PEER_LIST_PUSH) ──────────────────────────────
@@ -17511,6 +17578,7 @@ class FirstCrStoreAckV3 extends $pb.GeneratedMessage {
   factory FirstCrStoreAckV3({
     $core.bool? accepted,
     $core.String? rejectReason,
+    $core.List<$core.int>? recipientUserId,
   }) {
     final $result = create();
     if (accepted != null) {
@@ -17518,6 +17586,9 @@ class FirstCrStoreAckV3 extends $pb.GeneratedMessage {
     }
     if (rejectReason != null) {
       $result.rejectReason = rejectReason;
+    }
+    if (recipientUserId != null) {
+      $result.recipientUserId = recipientUserId;
     }
     return $result;
   }
@@ -17528,6 +17599,7 @@ class FirstCrStoreAckV3 extends $pb.GeneratedMessage {
   static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'FirstCrStoreAckV3', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
     ..aOB(1, _omitFieldNames ? '' : 'accepted')
     ..aOS(2, _omitFieldNames ? '' : 'rejectReason')
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'recipientUserId', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -17569,6 +17641,15 @@ class FirstCrStoreAckV3 extends $pb.GeneratedMessage {
   $core.bool hasRejectReason() => $_has(1);
   @$pb.TagNumber(2)
   void clearRejectReason() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get recipientUserId => $_getN(2);
+  @$pb.TagNumber(3)
+  set recipientUserId($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasRecipientUserId() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearRecipientUserId() => clearField(3);
 }
 
 class FirstCrDeliverV3 extends $pb.GeneratedMessage {
@@ -18114,7 +18195,6 @@ class RotationApprovalToken extends $pb.GeneratedMessage {
   void clearDeviceMlDsaSig() => clearField(4);
 }
 
-/// TwinSync payload for ROTATION_APPROVAL_REQUEST (Primary → Linked).
 class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
   factory RotationApprovalRequestPayload({
     $core.List<$core.int>? rotationHash,
@@ -18122,6 +18202,8 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     $core.List<$core.int>? newMlDsaPk,
     $core.List<$core.int>? newX25519Pk,
     $core.List<$core.int>? newMlKemPk,
+    ApprovalKindV3? approvalKind,
+    $core.Iterable<$core.List<$core.int>>? newDeviceNodeIds,
   }) {
     final $result = create();
     if (rotationHash != null) {
@@ -18139,6 +18221,12 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     if (newMlKemPk != null) {
       $result.newMlKemPk = newMlKemPk;
     }
+    if (approvalKind != null) {
+      $result.approvalKind = approvalKind;
+    }
+    if (newDeviceNodeIds != null) {
+      $result.newDeviceNodeIds.addAll(newDeviceNodeIds);
+    }
     return $result;
   }
   RotationApprovalRequestPayload._() : super();
@@ -18151,6 +18239,8 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'newX25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'newMlKemPk', $pb.PbFieldType.OY)
+    ..e<ApprovalKindV3>(6, _omitFieldNames ? '' : 'approvalKind', $pb.PbFieldType.OE, defaultOrMaker: ApprovalKindV3.APPROVAL_KIND_KEY_ROTATION, valueOf: ApprovalKindV3.valueOf, enumValues: ApprovalKindV3.values)
+    ..p<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'newDeviceNodeIds', $pb.PbFieldType.PY)
     ..hasRequiredFields = false
   ;
 
@@ -18219,6 +18309,20 @@ class RotationApprovalRequestPayload extends $pb.GeneratedMessage {
   $core.bool hasNewMlKemPk() => $_has(4);
   @$pb.TagNumber(5)
   void clearNewMlKemPk() => clearField(5);
+
+  @$pb.TagNumber(6)
+  ApprovalKindV3 get approvalKind => $_getN(5);
+  @$pb.TagNumber(6)
+  set approvalKind(ApprovalKindV3 v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasApprovalKind() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearApprovalKind() => clearField(6);
+
+  /// Nur bei APPROVAL_KIND_DEVICE_SET_CHANGE gesetzt — die Geraeteliste nach
+  /// der Aenderung, damit der Dialog benennen kann, was entfernt wird.
+  @$pb.TagNumber(7)
+  $core.List<$core.List<$core.int>> get newDeviceNodeIds => $_getList(6);
 }
 
 /// TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).

@@ -38,6 +38,7 @@ class ContactsScreen extends StatelessWidget {
     final accepted = svc.acceptedContacts;
     final pending = svc.pendingContacts;
     final pendingOutgoing = svc.pendingOutgoingContacts;
+    final storedForDelivery = svc.storedForDeliveryContacts;
 
     return AppBarScaffold(
       title: 'Kontakte',
@@ -143,6 +144,53 @@ class ContactsScreen extends StatelessWidget {
                       width: 44, height: 44,
                       decoration: const BoxDecoration(color: Colors.blueGrey, shape: BoxShape.circle),
                       child: const Icon(Icons.hourglass_top, color: Colors.white, size: 22),
+                    ),
+                  ),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (value) {
+                      if (value == 'report') {
+                        _showContactIssueReport(context, svc, contact);
+                      } else if (value == 'delete') {
+                        _confirmDelete(context, svc, contact.nodeIdHex, contact.displayName);
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      PopupMenuItem(value: 'report', child: Row(children: [
+                        Icon(Icons.contact_support, size: 18, color: Theme.of(context).colorScheme.tertiary),
+                        const SizedBox(width: 8),
+                        Text(locale.get('contact_issue_report_menu')),
+                      ])),
+                      PopupMenuItem(value: 'delete', child: Text(locale.get('contact_delete'))),
+                    ],
+                  ),
+                )),
+            const Divider(),
+          ],
+
+          // §5.5b / §8.1.1 step 3 (Arch:3665): outgoing CRs a seed peer has
+          // confirmed storing. These are NOT lost and NOT still retrying —
+          // the seed peer has taken over and will hand the CR to the
+          // recipient when they come online. Before S299 this status had no
+          // section at all, so a successful store made the contact vanish.
+          if (storedForDelivery.isNotEmpty) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(
+                '${locale.get('contact_stored_header')} (${storedForDelivery.length})',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            ...storedForDelivery.map((contact) => ContactTile(
+                  name: contact.displayName,
+                  status: locale.get('contact_stored_status'),
+                  verificationLevel: _mapVerification(contact.verificationLevel),
+                  avatarOverride: ProfileAvatar(
+                    base64: contact.profilePictureBase64,
+                    radius: 22,
+                    fallback: Container(
+                      width: 44, height: 44,
+                      decoration: const BoxDecoration(color: Colors.teal, shape: BoxShape.circle),
+                      child: const Icon(Icons.cloud_done, color: Colors.white, size: 22),
                     ),
                   ),
                   trailing: PopupMenuButton<String>(

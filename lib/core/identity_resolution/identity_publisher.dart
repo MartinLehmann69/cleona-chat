@@ -173,6 +173,12 @@ class IdentityPublisher {
     this.dhtHandler,
     this.dhtRpc,
   }) : _log = CLogger.get('publisher', profileDir: identity.profileDir) {
+    // §7 (Einleitung): "the auth manifest lists all authorised DeviceIDs of a
+    // UserID". Until the owner calls `setAuthorizedDevices()` the only device
+    // we can attest to is ourselves, so seed the list with it. This device is
+    // authorised by construction and stays in the list across every later
+    // `setAuthorizedDevices()` call.
+    _authorizedDeviceNodeIds.add(identity.deviceNodeId);
     // 2026-05-08 diagnostic wave: emit an "alive" marker at construction
     // time so every newly-instantiated publisher leaves a trace in the
     // per-identity log. This is the topmost diagnostic — if THIS line is
@@ -180,7 +186,8 @@ class IdentityPublisher {
     // (cleona_service.dart:705 path skipped or threw silently).
     _log.info('IdentityPublisher constructed for "${identity.displayName}" '
         '(userId=${bytesToHex(identity.userId).substring(0, 8)}, '
-        'deviceNodeId=${bytesToHex(identity.deviceNodeId).substring(0, 8)})');
+        'deviceNodeId=${bytesToHex(identity.deviceNodeId).substring(0, 8)}, '
+        'role=${identity.isLinkedDevice ? "linked" : (identity.restoreAwaitingPairing ? "awaiting-pairing" : "primary")})');
   }
 
   // §7.1 LD-2: delegation certs to embed in the next AuthManifest publish.
@@ -219,9 +226,247 @@ class IdentityPublisher {
     }
   }
 
+  /// §7.1 LD-2 / §7.4: retract a delegation cert. Mirror of [addDelegation].
+  ///
+  /// [deviceIdHex] is the hex of the delegation's `deviceId`, which is the
+  /// device **node** id (`_addDeviceDelegation` keys the cert by it).
+  ///
+  /// Load-bearing for Device Revocation. Dropping the device from
+  /// `_authorizedDeviceNodeIds` alone only stops contacts from *addressing*
+  /// it: `IdentityDhtHandler.getDelegatedKeys` reads the delegation list, and
+  /// `V3FrameCodec` accepts any key it returns as an authentic signature by
+  /// this User. A cert left in the manifest therefore keeps the revoked device
+  /// able to sign as the user until the cert's own `maxValidUntilMs` — up to
+  /// 30 days. The resolver's node-id filter does not close that: it constrains
+  /// addresses and KEM records, not signature verification.
+  ///
+  /// Takes hex rather than bytes deliberately: the callers hold hex map keys,
+  /// and a `hexToBytes` that throws on a malformed key would abort the
+  /// retraction and silently leave the revoked delegation published — failing
+  /// open in exactly the path that must fail closed.
+  ///
+  /// Returns true when a cert was actually removed.
+  bool removeDelegation(String deviceIdHex) {
+    final before = _deviceDelegations.length;
+    _deviceDelegations.removeWhere((d) => bytesToHex(d.deviceId) == deviceIdHex);
+    if (_deviceDelegations.length == before) return false;
+    _log.info('removeDelegation: retracted delegation for '
+        '${_hexShort(deviceIdHex)} — ${_deviceDelegations.length} '
+        'delegation(s) left, triggering Auth re-publish');
+    if (_running) {
+      _publishAuthAndStartLiveness();
+    }
+    return true;
+  }
+
+  /// §7.5: drop a linked device's Device-Sig pubkeys. Mirror of
+  /// [addLinkedDeviceSigKeys].
+  ///
+  /// Also load-bearing for revocation, for a second reason: contacts verify a
+  /// §7.5 rotation quorum against the `deviceSigKeys` cached from the last
+  /// manifest (`verifyRotationCoAuth`'s `cachedDeviceSigKeys`). A revoked
+  /// device still listed there is still a valid countersigner, so its
+  /// approval token would keep counting towards the quorum that exists to
+  /// detect a stolen Primary.
+  ///
+  /// Returns true when an entry was actually removed.
+  bool removeLinkedDeviceSigKeys(String deviceNodeIdHex) {
+    final before = _linkedDeviceSigKeys.length;
+    _linkedDeviceSigKeys
+        .removeWhere((d) => bytesToHex(d.deviceNodeId) == deviceNodeIdHex);
+    if (_linkedDeviceSigKeys.length == before) return false;
+    _log.info('removeLinkedDeviceSigKeys: dropped sig keys for '
+        '${_hexShort(deviceNodeIdHex)} — ${_linkedDeviceSigKeys.length + 1} '
+        'device sig key(s) left, triggering Auth re-publish');
+    if (_running) {
+      _publishAuthAndStartLiveness();
+    }
+    return true;
+  }
+
+  static String _hexShort(String hex) =>
+      hex.length <= 8 ? hex : hex.substring(0, 8);
+
   /// §7.5: set the device-set change proof (for device removals).
+  ///
+  /// Prefer [deviceSetChangeProofProvider] — see the trap documented there.
+  /// A proof handed in here is still validated against the manifest actually
+  /// being signed and dropped when it does not match.
   void setDeviceSetChangeProof(DeviceSetChangeProof? proof) {
     _deviceSetChangeProof = proof;
+  }
+
+  /// §7.5: supplies the device-set change proof for the manifest that is being
+  /// signed *right now*. Invoked from [_publishAuthManifestNow] with the exact
+  /// device list and sequence number that go into the signature.
+  ///
+  /// WHY A PROVIDER AND NOT JUST A FIELD — the receiver
+  /// (`IdentityDhtHandler.handleAuthPublish`) does not read the proof's hash,
+  /// it RECOMPUTES it:
+  ///
+  ///     computeDeviceSetChangeHash(
+  ///       userId: m.userId,
+  ///       newDeviceNodeIds: m.authorizedDeviceNodeIds,
+  ///       newSeq: m.sequenceNumber)
+  ///
+  /// so a proof is only verifiable if it was built over the very device list
+  /// and the very seq of the manifest carrying it. Neither is knowable before
+  /// the publish: `seq` is drawn by `identity.bumpAuthManifestSeq()` inside
+  /// the publish, and `IdentityContext.recoverAuthSeq` can additionally jump
+  /// the counter by +100 from an unrelated async path. A proof computed ahead
+  /// of time therefore silently carries a hash the receiver will not
+  /// reproduce — it reads as `quorumNotMet`, i.e. as the theft alarm the proof
+  /// exists to prevent.
+  ///
+  /// Returning null is always allowed and always safe: no proof means the
+  /// receiver falls back to the plain shrink warning. It must NEVER return a
+  /// proof whose `approvals` were not genuinely countersigned by the devices'
+  /// own Device-Sig keys — a fabricated proof is worse than none, because it
+  /// makes the shrink detection permanently blind.
+  DeviceSetChangeProof? Function(List<Uint8List> deviceNodeIds, int seq)?
+      deviceSetChangeProofProvider;
+
+  /// §7.5: sequence number handed out by [reserveAuthSeq] and consumed by the
+  /// next [_publishAuthManifestNow].
+  int? _reservedAuthSeq;
+
+  /// §7.5: draw the sequence number the next Auth publish will carry, ahead of
+  /// that publish.
+  ///
+  /// [deviceSetChangeProofProvider] documents why a proof can only be built
+  /// against the exact `seq` of the manifest carrying it. Collecting the
+  /// countersignatures takes minutes — a human has to tap "approve" on another
+  /// device — so the service cannot wait for the publish to draw the number:
+  /// it has to ask the other devices to sign over a `seq` that is already
+  /// fixed. This reserves it.
+  ///
+  /// Repeated calls return the same reservation until it is consumed.
+  ///
+  /// The reservation is consumed by the NEXT auth publish, whichever one that
+  /// is — including a publish triggered by something unrelated in the
+  /// meantime. That is deliberate. A reservation that survived an unrelated
+  /// publish would hand the same number to two manifests, and the receiver's
+  /// replay guard (`m.sequenceNumber <= existing.sequenceNumber`) would drop
+  /// the second one outright — losing the manifest, not just the proof.
+  /// Losing the reservation instead costs only the proof: the hash no longer
+  /// describes the manifest, `_resolveDeviceSetChangeProof` drops it, and the
+  /// publish degrades to the documented no-proof path.
+  int reserveAuthSeq() => _reservedAuthSeq ??= identity.bumpAuthManifestSeq();
+
+  /// Resolve the proof for the manifest about to be signed and verify it
+  /// describes that manifest. Fails closed: a mismatching proof is dropped,
+  /// never published.
+  DeviceSetChangeProof? _resolveDeviceSetChangeProof(
+      List<Uint8List> deviceNodeIds, int seq) {
+    final proof =
+        deviceSetChangeProofProvider?.call(deviceNodeIds, seq) ??
+            _deviceSetChangeProof;
+    if (proof == null) return null;
+    final expected = computeDeviceSetChangeHash(
+      userId: identity.userId,
+      newDeviceNodeIds: deviceNodeIds,
+      newSeq: seq,
+    );
+    if (!_bytesEqual(proof.changeHash, expected)) {
+      _log.warn('§7.5: dropping device-set change proof — its changeHash does '
+          'not describe this manifest (seq=$seq, '
+          '${deviceNodeIds.length} device(s)). Publishing it would be read as '
+          'quorumNotMet, i.e. as a theft alarm. Build the proof from the '
+          'provider callback, which receives this seq and device list.');
+      return null;
+    }
+    return proof;
+  }
+
+  // §7 (Einleitung): the authorised DeviceIDs of this UserID. Fed by the
+  // owning service from its device registry (`CleonaService._devices`), which
+  // is the same set `sendToUser`'s §7.2 self fan-out routes to — manifest and
+  // fan-out therefore describe one device set, not two.
+  //
+  // Always contains this device's own node id (seeded in the constructor,
+  // re-inserted by every `setAuthorizedDevices()` call).
+  final List<Uint8List> _authorizedDeviceNodeIds = [];
+
+  /// Read-only view of the device set the next publish will attest to.
+  List<Uint8List> get authorizedDeviceNodeIds =>
+      List.unmodifiable(_authorizedDeviceNodeIds);
+
+  /// §7 (Einleitung): replace the authorised device set. [deviceNodeIds] are
+  /// device **node** ids (not the service's per-device UUIDs). Duplicates are
+  /// collapsed, empty entries dropped, and this device's own node id is always
+  /// present — it is authorised by construction and dropping it would make the
+  /// publisher attest a manifest that excludes the very device that signed it.
+  ///
+  /// Triggers an immediate Auth re-publish when the set actually changed and
+  /// this device is the Primary (only the Primary publishes, see
+  /// `_isPrimaryDevice`).
+  void setAuthorizedDevices(List<Uint8List> deviceNodeIds) {
+    final next = <String, Uint8List>{};
+    final ownHex = bytesToHex(identity.deviceNodeId);
+    next[ownHex] = identity.deviceNodeId;
+    for (final d in deviceNodeIds) {
+      if (d.isEmpty) continue;
+      next[bytesToHex(d)] = d;
+    }
+    final before = _authorizedDeviceNodeIds.map(bytesToHex).toSet();
+    final changed = before.length != next.length ||
+        !before.containsAll(next.keys);
+    if (!changed) return;
+    _authorizedDeviceNodeIds
+      ..clear()
+      ..addAll(next.values);
+    _log.info('setAuthorizedDevices: ${_authorizedDeviceNodeIds.length} '
+        'device(s) — ${next.keys.map((h) => h.substring(0, 8)).join(",")}');
+    if (_running && _isPrimaryDevice) {
+      _publishAuthAndStartLiveness();
+    }
+  }
+
+  /// §7.1.1/§7.1.3: this device holds the User signing authority (Primary)
+  /// iff it is not a delegate. `IdentityContext.isLinkedDevice` is
+  /// `linkedDeviceKeys != null`, i.e. it flips exactly when the device has
+  /// accepted a `DeviceDelegationCert` — the one event that makes it a
+  /// delegate.
+  ///
+  /// Deliberately NOT `identity.masterSeed != null`: per §7.1.3 the seed
+  /// "remains on disk (not wiped)" after pairing, so a paired device would
+  /// still test as Primary under that condition and the collision this role
+  /// split exists to remove would survive. The seed check in
+  /// `_handleDevicePairRequestV3` answers a different question ("can I issue
+  /// a delegation?"), not "am I the authoritative publisher?".
+  ///
+  /// §7.1.3 (P2): a device restored from the seed phrase cannot be told
+  /// apart from a device replacing a lost one — both look identical at
+  /// restore time, neither is `isLinkedDevice` yet. Left unguarded, both
+  /// would test Primary here and race the still-running original device for
+  /// the single `SHA-256("auth" + userId)` DHT slot. The restore screen asks
+  /// the user which case this is; `identity.restoreAwaitingPairing` carries
+  /// the "additional device, original still runs" answer. While it is true,
+  /// this device withholds the AuthManifest publish — Liveness and
+  /// DeviceKem are unaffected (see `_doPublishAuthAndStartLiveness`), since
+  /// those live under per-device keys and don't collide. The flag stops
+  /// mattering the moment pairing succeeds: `isLinkedDevice` then already
+  /// makes this `false` on its own, so no explicit reset is needed here.
+  bool get _isPrimaryDevice =>
+      !identity.isLinkedDevice && !identity.restoreAwaitingPairing;
+
+  /// §7.1.4/§4.3: signing material for this device's own DHT records
+  /// (Liveness + DeviceKem). `null` on a Primary — it signs directly with the
+  /// User-SK. On a Linked Device the User-SK is stale after an LD-8 rotation
+  /// (§7.1.1 keeps the new User-SK on the Primary), so the records are signed
+  /// with the delegated key and name it via `signer_ed25519_pk`.
+  ///
+  /// P6: the certificate is NOT attached — the receiver resolves it out of the
+  /// AuthManifest the Primary publishes (`delegationFor(deviceId)`). Attaching
+  /// it cost ~5.3 KB on every 15-minute liveness republish to up to 10
+  /// replicators (Arbeitsregel #5).
+  DelegatedSigner? _delegatedSigner() {
+    final ld = identity.linkedDeviceKeys;
+    if (ld == null) return null;
+    return DelegatedSigner(
+      ed25519Pk: ld.delegatedEd25519Pk,
+      ed25519Sk: ld.delegatedEd25519Sk,
+    );
   }
 
   /// §7.5: build the complete device_sig_keys list (Primary + Linked).
@@ -233,12 +478,36 @@ class IdentityPublisher {
         deviceNodeId: identity.deviceNodeId,
         deviceEd25519Pk: ownSigPks.ed25519Pk,
         deviceMlDsaPk: ownSigPks.mlDsaPk,
-        isPrimary: true,
+        // §7.5: the flag states a role, not "this entry is me". A delegate
+        // that marks itself Primary makes every manifest carry a second
+        // Primary, and — because a Linked Device only knows itself — makes
+        // the receiver-side shrink check read a 1-entry device set as a
+        // shrink from the Primary's N-entry one.
+        isPrimary: _isPrimaryDevice,
       ));
     }
     result.addAll(_linkedDeviceSigKeys);
     return result;
   }
+
+  /// §7.5: how many devices the next manifest will list as eligible
+  /// countersigners — the `device_sig_keys` length the receiver will see.
+  int get deviceSigKeyCount => _buildDeviceSigKeys().length;
+
+  /// §7.5: the same count, evaluated as if the given device node ids had
+  /// already been retracted.
+  ///
+  /// The owning service needs this number BEFORE it calls
+  /// [removeLinkedDeviceSigKeys] / [setAuthorizedDevices], because those calls
+  /// trigger the very publish whose proof it has to prepare. Deriving it by
+  /// hand ("count minus one") would be wrong whenever the revoked device never
+  /// registered Device-Sig keys: the count would not drop, the receiver would
+  /// see no shrink, and the service would nevertheless demand a quorum for a
+  /// change nobody is going to question.
+  int deviceSigKeyCountExcluding(Set<String> deviceNodeIdHexes) =>
+      _buildDeviceSigKeys()
+          .where((d) => !deviceNodeIdHexes.contains(bytesToHex(d.deviceNodeId)))
+          .length;
 
   void setForeground(bool foreground) {
     _foreground = foreground;
@@ -490,12 +759,74 @@ class IdentityPublisher {
   Future<void> _doPublishAuthAndStartLiveness() async {
     if (!_running) return;
     _log.info('publish-cycle starting (peerCount=${routingTable.peerCount}, '
-        'coldStartTimedOut=$_coldStartTimedOut)');
-    final seq = identity.bumpAuthManifestSeq();
+        'coldStartTimedOut=$_coldStartTimedOut, '
+        'role=${_isPrimaryDevice ? "primary" : (identity.isLinkedDevice ? "linked" : "awaiting-pairing")})');
+    // §7 (Einleitung) publish role: the auth-key is `SHA-256("auth" || userId)`
+    // — ONE slot per identity, shared by every device of that identity. If each
+    // device published its own manifest there, the winner would be decided by
+    // sequence number alone (`identity_dht_handler.handleAuthPublish`) and the
+    // device set would never converge: whichever device republished last would
+    // erase the others. So only the Primary — the holder of the User signing
+    // authority, and the only device that learns of new delegations — publishes
+    // the manifest. Linked Devices still publish their own Liveness and
+    // DeviceKem records, which live under per-device keys
+    // (`SHA-256("live"|"kem" || userId || deviceNodeId)`) and therefore do not
+    // collide.
+    //
+    // Consequence, deliberate: the manifest's 24 h TTL (`authTtl`) is refreshed
+    // only by the Primary. A Primary offline for >24 h lets the manifest expire
+    // on every replicator (`identity_dht_handler._prune`), and the identity
+    // falls back to the resolver's cached/legacy paths until the Primary
+    // returns. A Linked Device cannot cover that gap: the TTL is measured from
+    // the signed `publishedAtMs`, so keeping the record alive requires a fresh
+    // User-signature, which is exactly the authority a delegate does not have.
+    if (_isPrimaryDevice) {
+      await _publishAuthManifestNow();
+      _scheduleAuthRefresh();
+    } else if (identity.restoreAwaitingPairing) {
+      _log.info('Auth-Manifest publish skipped: this device was restored as '
+          '"additional device" and is not paired yet (§7.1.3 P2) — '
+          'publishing now would race the original device for the auth-key '
+          'slot (§7). Liveness + DeviceKem still published.');
+    } else {
+      _log.info('Auth-Manifest publish skipped: this device is a Linked '
+          'Device — the Primary owns the auth-key slot (§7). '
+          'Liveness + DeviceKem still published.');
+    }
+    _scheduleLiveness(initialDelay: livenessInitialOffset);
+    // Ersten Liveness-Publish sofort nach dem Auth durchziehen (dasselbe
+    // closest-Set, kein Doppel-Schedule). Wenn `livenessInitialOffset > 0`
+    // gilt nur das Refresh-Tempo, der Bootstrap-Publish soll noch JETZT raus,
+    // sonst entsteht ein Adress-Loch zwischen Start und erstem Tick.
+    await _publishLivenessNow();
+    // Welle 5 (§3.5b + §4.3): Device-KEM-Record gleich mit publishen — derselbe
+    // Trust-Anchor (User-Master-Ed25519-Sig), aber eigener Key-Space ("kem").
+    // Skipped wenn Provider nicht gesetzt (Subagent-A-Wiring noch offen).
+    await _publishDeviceKemNow();
+    _scheduleDeviceKemRefresh();
+  }
+
+  /// Signs and broadcasts one AuthManifest. Primary-only — see the role gate
+  /// in `_doPublishAuthAndStartLiveness`.
+  Future<void> _publishAuthManifestNow() async {
+    // §7.5: consume a reservation if one is outstanding — see [reserveAuthSeq].
+    // Cleared unconditionally, so a reservation is never reused by a later
+    // publish (that would collide with the receiver's replay guard).
+    final seq = _reservedAuthSeq ?? identity.bumpAuthManifestSeq();
+    _reservedAuthSeq = null;
     await identity.persistIdentityResolutionState();
+    // §7.5: the device list is captured once and used for BOTH the signature
+    // and the change-proof hash. Two separate `List.from` copies could differ
+    // if `setAuthorizedDevices` ran in between, and the proof would then
+    // describe a device set the manifest does not carry.
+    final devicesForManifest = List<Uint8List>.from(_authorizedDeviceNodeIds);
     final manifest = AuthManifest.sign(
       identity,
-      <Uint8List>[identity.deviceNodeId],
+      // §7 (Einleitung): all authorised DeviceIDs, fed by the owning service
+      // via `setAuthorizedDevices()`. A defensive copy — `AuthManifest` keeps
+      // the list by reference and a later `setAuthorizedDevices()` must not
+      // mutate an already-signed manifest out from under its signature.
+      devicesForManifest,
       ttlSeconds: authTtl.inSeconds,
       sequenceNumber: seq,
       // SR-2 (§7.4b step 4): embed the persisted founding→current rotation
@@ -511,7 +842,8 @@ class IdentityPublisher {
           .toList(),
       deviceDelegations: _deviceDelegations,
       deviceSigKeys: _buildDeviceSigKeys(),
-      deviceSetChangeProof: _deviceSetChangeProof,
+      deviceSetChangeProof:
+          _resolveDeviceSetChangeProof(devicesForManifest, seq),
     );
     await _broadcastAuthManifest(manifest);
     // D4 (§4.3 Publisher self-verify): exactly ONE delayed self-lookup per
@@ -522,18 +854,6 @@ class IdentityPublisher {
       _selfVerifyTimer = null;
       unawaited(_selfVerifyAuth(manifest));
     });
-    _scheduleAuthRefresh();
-    _scheduleLiveness(initialDelay: livenessInitialOffset);
-    // Ersten Liveness-Publish sofort nach dem Auth durchziehen (dasselbe
-    // closest-Set, kein Doppel-Schedule). Wenn `livenessInitialOffset > 0`
-    // gilt nur das Refresh-Tempo, der Bootstrap-Publish soll noch JETZT raus,
-    // sonst entsteht ein Adress-Loch zwischen Start und erstem Tick.
-    await _publishLivenessNow();
-    // Welle 5 (§3.5b + §4.3): Device-KEM-Record gleich mit publishen — derselbe
-    // Trust-Anchor (User-Master-Ed25519-Sig), aber eigener Key-Space ("kem").
-    // Skipped wenn Provider nicht gesetzt (Subagent-A-Wiring noch offen).
-    await _publishDeviceKemNow();
-    _scheduleDeviceKemRefresh();
   }
 
   Future<void> _broadcastAuthManifest(AuthManifest m) async {
@@ -775,6 +1095,7 @@ class IdentityPublisher {
       userEd25519Pk: identity.ed25519PublicKey,
       ttlSeconds: deviceKemTtl.inSeconds,
       sequenceNumber: seq,
+      delegatedSigner: _delegatedSigner(),
     );
 
     // Self-store: see `_broadcastAuthManifest` for rationale.

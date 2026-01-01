@@ -501,6 +501,20 @@ final $typed_data.Uint8List messageTypeV3Descriptor = $convert.base64Decode(
     'VjNfU1lTQ0hBTl9ESUdFU1QQ5gESGQoUTVRWM19TWVNDSEFOX1NVTU1BUlkQ5wESFgoRTVRWM1'
     '9TWVNDSEFOX1dBTlQQ6AESFgoRTVRWM19TWVNDSEFOX1BVU0gQ6QE=');
 
+@$core.Deprecated('Use approvalKindV3Descriptor instead')
+const ApprovalKindV3$json = {
+  '1': 'ApprovalKindV3',
+  '2': [
+    {'1': 'APPROVAL_KIND_KEY_ROTATION', '2': 0},
+    {'1': 'APPROVAL_KIND_DEVICE_SET_CHANGE', '2': 1},
+  ],
+};
+
+/// Descriptor for `ApprovalKindV3`. Decode as a `google.protobuf.EnumDescriptorProto`.
+final $typed_data.Uint8List approvalKindV3Descriptor = $convert.base64Decode(
+    'Cg5BcHByb3ZhbEtpbmRWMxIeChpBUFBST1ZBTF9LSU5EX0tFWV9ST1RBVElPThAAEiMKH0FQUF'
+    'JPVkFMX0tJTkRfREVWSUNFX1NFVF9DSEFOR0UQAQ==');
+
 @$core.Deprecated('Use contentMetadataDescriptor instead')
 const ContentMetadata$json = {
   '1': 'ContentMetadata',
@@ -1897,13 +1911,15 @@ const DeliveryReceipt$json = {
   '2': [
     {'1': 'message_id', '3': 1, '4': 1, '5': 12, '10': 'messageId'},
     {'1': 'delivered_at', '3': 2, '4': 1, '5': 4, '10': 'deliveredAt'},
+    {'1': 'withhold_delivery_status', '3': 3, '4': 1, '5': 8, '10': 'withholdDeliveryStatus'},
   ],
 };
 
 /// Descriptor for `DeliveryReceipt`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List deliveryReceiptDescriptor = $convert.base64Decode(
     'Cg9EZWxpdmVyeVJlY2VpcHQSHQoKbWVzc2FnZV9pZBgBIAEoDFIJbWVzc2FnZUlkEiEKDGRlbG'
-    'l2ZXJlZF9hdBgCIAEoBFILZGVsaXZlcmVkQXQ=');
+    'l2ZXJlZF9hdBgCIAEoBFILZGVsaXZlcmVkQXQSOAoYd2l0aGhvbGRfZGVsaXZlcnlfc3RhdHVz'
+    'GAMgASgIUhZ3aXRoaG9sZERlbGl2ZXJ5U3RhdHVz');
 
 @$core.Deprecated('Use readReceiptDescriptor instead')
 const ReadReceipt$json = {
@@ -3241,6 +3257,10 @@ const LivenessRecordProto$json = {
     {'1': 'sequence_number', '3': 5, '4': 1, '5': 3, '10': 'sequenceNumber'},
     {'1': 'published_at_ms', '3': 6, '4': 1, '5': 3, '10': 'publishedAtMs'},
     {'1': 'ed25519_sig', '3': 7, '4': 1, '5': 12, '10': 'ed25519Sig'},
+    {'1': 'signer_ed25519_pk', '3': 8, '4': 1, '5': 12, '10': 'signerEd25519Pk'},
+  ],
+  '9': [
+    {'1': 9, '2': 10},
   ],
 };
 
@@ -3251,7 +3271,8 @@ final $typed_data.Uint8List livenessRecordProtoDescriptor = $convert.base64Decod
     'YS5QZWVyQWRkcmVzc1Byb3RvUglhZGRyZXNzZXMSHwoLdHRsX3NlY29uZHMYBCABKAVSCnR0bF'
     'NlY29uZHMSJwoPc2VxdWVuY2VfbnVtYmVyGAUgASgDUg5zZXF1ZW5jZU51bWJlchImCg9wdWJs'
     'aXNoZWRfYXRfbXMYBiABKANSDXB1Ymxpc2hlZEF0TXMSHwoLZWQyNTUxOV9zaWcYByABKAxSCm'
-    'VkMjU1MTlTaWc=');
+    'VkMjU1MTlTaWcSKgoRc2lnbmVyX2VkMjU1MTlfcGsYCCABKAxSD3NpZ25lckVkMjU1MTlQa0oE'
+    'CAkQCg==');
 
 @$core.Deprecated('Use identityAuthRetrieveRequestDescriptor instead')
 const IdentityAuthRetrieveRequest$json = {
@@ -3500,6 +3521,10 @@ const DeviceKemRecordV3$json = {
     {'1': 'published_at_ms', '3': 7, '4': 1, '5': 4, '10': 'publishedAtMs'},
     {'1': 'ed25519_sig', '3': 8, '4': 1, '5': 12, '10': 'ed25519Sig'},
     {'1': 'user_ed25519_pk', '3': 9, '4': 1, '5': 12, '10': 'userEd25519Pk'},
+    {'1': 'signer_ed25519_pk', '3': 10, '4': 1, '5': 12, '10': 'signerEd25519Pk'},
+  ],
+  '9': [
+    {'1': 11, '2': 12},
   ],
 };
 
@@ -3511,7 +3536,8 @@ final $typed_data.Uint8List deviceKemRecordV3Descriptor = $convert.base64Decode(
     'NvbmRzGAUgASgEUgp0dGxTZWNvbmRzEicKD3NlcXVlbmNlX251bWJlchgGIAEoBFIOc2VxdWVu'
     'Y2VOdW1iZXISJgoPcHVibGlzaGVkX2F0X21zGAcgASgEUg1wdWJsaXNoZWRBdE1zEh8KC2VkMj'
     'U1MTlfc2lnGAggASgMUgplZDI1NTE5U2lnEiYKD3VzZXJfZWQyNTUxOV9waxgJIAEoDFINdXNl'
-    'ckVkMjU1MTlQaw==');
+    'ckVkMjU1MTlQaxIqChFzaWduZXJfZWQyNTUxOV9waxgKIAEoDFIPc2lnbmVyRWQyNTUxOVBrSg'
+    'QICxAM');
 
 @$core.Deprecated('Use peerListEntryV3Descriptor instead')
 const PeerListEntryV3$json = {
@@ -3621,13 +3647,15 @@ const FirstCrStoreAckV3$json = {
   '2': [
     {'1': 'accepted', '3': 1, '4': 1, '5': 8, '10': 'accepted'},
     {'1': 'reject_reason', '3': 2, '4': 1, '5': 9, '10': 'rejectReason'},
+    {'1': 'recipient_user_id', '3': 3, '4': 1, '5': 12, '10': 'recipientUserId'},
   ],
 };
 
 /// Descriptor for `FirstCrStoreAckV3`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List firstCrStoreAckV3Descriptor = $convert.base64Decode(
     'ChFGaXJzdENyU3RvcmVBY2tWMxIaCghhY2NlcHRlZBgBIAEoCFIIYWNjZXB0ZWQSIwoNcmVqZW'
-    'N0X3JlYXNvbhgCIAEoCVIMcmVqZWN0UmVhc29u');
+    'N0X3JlYXNvbhgCIAEoCVIMcmVqZWN0UmVhc29uEioKEXJlY2lwaWVudF91c2VyX2lkGAMgASgM'
+    'Ug9yZWNpcGllbnRVc2VySWQ=');
 
 @$core.Deprecated('Use firstCrDeliverV3Descriptor instead')
 const FirstCrDeliverV3$json = {
@@ -3737,6 +3765,8 @@ const RotationApprovalRequestPayload$json = {
     {'1': 'new_ml_dsa_pk', '3': 3, '4': 1, '5': 12, '10': 'newMlDsaPk'},
     {'1': 'new_x25519_pk', '3': 4, '4': 1, '5': 12, '10': 'newX25519Pk'},
     {'1': 'new_ml_kem_pk', '3': 5, '4': 1, '5': 12, '10': 'newMlKemPk'},
+    {'1': 'approval_kind', '3': 6, '4': 1, '5': 14, '6': '.cleona.ApprovalKindV3', '10': 'approvalKind'},
+    {'1': 'new_device_node_ids', '3': 7, '4': 3, '5': 12, '10': 'newDeviceNodeIds'},
   ],
 };
 
@@ -3745,7 +3775,9 @@ final $typed_data.Uint8List rotationApprovalRequestPayloadDescriptor = $convert.
     'Ch5Sb3RhdGlvbkFwcHJvdmFsUmVxdWVzdFBheWxvYWQSIwoNcm90YXRpb25faGFzaBgBIAEoDF'
     'IMcm90YXRpb25IYXNoEiQKDm5ld19lZDI1NTE5X3BrGAIgASgMUgxuZXdFZDI1NTE5UGsSIQoN'
     'bmV3X21sX2RzYV9waxgDIAEoDFIKbmV3TWxEc2FQaxIiCg1uZXdfeDI1NTE5X3BrGAQgASgMUg'
-    'tuZXdYMjU1MTlQaxIhCg1uZXdfbWxfa2VtX3BrGAUgASgMUgpuZXdNbEtlbVBr');
+    'tuZXdYMjU1MTlQaxIhCg1uZXdfbWxfa2VtX3BrGAUgASgMUgpuZXdNbEtlbVBrEjsKDWFwcHJv'
+    'dmFsX2tpbmQYBiABKA4yFi5jbGVvbmEuQXBwcm92YWxLaW5kVjNSDGFwcHJvdmFsS2luZBItCh'
+    'NuZXdfZGV2aWNlX25vZGVfaWRzGAcgAygMUhBuZXdEZXZpY2VOb2RlSWRz');
 
 @$core.Deprecated('Use rotationApprovalResponsePayloadDescriptor instead')
 const RotationApprovalResponsePayload$json = {

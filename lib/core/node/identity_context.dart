@@ -207,6 +207,18 @@ class IdentityContext {
   /// Self-declaration: user claims to be 18+ (from IdentityManager).
   bool isAdult;
 
+  /// §7.1.3 (P2): true iff this identity was restored from the seed phrase
+  /// AND the user told the restore screen they still have another device
+  /// running with this identity ("additional device"). Read by
+  /// `IdentityPublisher._isPrimaryDevice` to withhold the AuthManifest
+  /// publish until pairing completes — see `Identity.restoreAwaitingPairing`
+  /// (identity_manager.dart) for the full rationale, this is its runtime
+  /// mirror. Mutable (not `final`) for the same reason `linkedDeviceKeys` is:
+  /// pairing can complete while this IdentityContext instance is already
+  /// running, and the publisher must see the change on its next cycle
+  /// without a restart.
+  bool restoreAwaitingPairing;
+
   IdentityContext({
     required this.profileDir,
     required this.displayName,
@@ -216,6 +228,7 @@ class IdentityContext {
     this.masterSeed,
     DateTime? createdAt,
     this.isAdult = false,
+    this.restoreAwaitingPairing = false,
   })  : _baseDir = baseDir ?? _resolveBaseDir(),
         createdAt = createdAt ?? DateTime.now(),
         _log = CLogger.get('identity', profileDir: profileDir);
@@ -258,6 +271,7 @@ class IdentityContext {
       masterSeed: masterSeed,
       createdAt: identity.createdAt,
       isAdult: identity.isAdult,
+      restoreAwaitingPairing: identity.restoreAwaitingPairing,
     );
     await ctx.initKeys();
     identity.nodeIdHex = ctx.userIdHex;
@@ -350,7 +364,7 @@ class IdentityContext {
     // stable anchor (§3.1 / SR-2). For never-rotated identities the founding
     // key IS the current key (byte-identical to the previous behaviour);
     // after a soft re-key the userId stays pinned to the chain's first link.
-    userId = HdWallet.computeUserId(foundingEd25519Pk, NetworkSecret.secret);
+    userId = HdWallet.computeUserId(foundingEd25519Pk, NetworkSecret.identitySecret);
 
     // Compute Device-Node-ID from the daemon-global Device-Sig keypair
     // (§3.1, §3.5). Multi-Identity sharing: all IdentityContexts in this
@@ -365,7 +379,7 @@ class IdentityContext {
     final deviceFileEnc = FileEncryption(baseDir: _baseDir, key: sharedFileEncKey);
     final deviceBundle = DeviceKeysStore.loadOrCreate(baseDir: _baseDir, fileEnc: deviceFileEnc);
     deviceNodeId = HdWallet.computeDeviceNodeId(
-        deviceBundle.sig.ed25519PublicKey, NetworkSecret.secret);
+        deviceBundle.sig.ed25519PublicKey, NetworkSecret.identitySecret);
 
     _log.info('Identity "$displayName" User-ID: ${userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${deviceNodeIdHex.substring(0, 16)}...');
@@ -543,6 +557,16 @@ class IdentityContext {
   /// §7.1 LD-8: Linked-Device delegation rotation after Primary's emergency
   /// key rotation. Updates User-PKs, User-KEM-SK, delegation keys, and
   /// rotation chain — WITHOUT receiving the master seed.
+  ///
+  /// [ed25519SecretKey]/[mlDsaSecretKey] are deliberately NOT updated: the new
+  /// User-Sig-SK is created from fresh entropy on the Primary and is carried
+  /// by neither `DevicePairApproveV3` nor the LD-8 message — that is the load-
+  /// bearing boundary of §7.1.1, not an omission. The consequence is that from
+  /// here on `ed25519SecretKey` no longer matches `ed25519PublicKey`, so it
+  /// MUST NOT sign anything that a receiver checks against the User-PK. The
+  /// device's own DHT records (Liveness, DeviceKem) therefore go out under the
+  /// delegated key plus certificate chain (§7.1.4); `signingEd25519Sk` /
+  /// `signingMlDsaSk` already route every inner-sig to the delegated keys.
   void rotateDelegation({
     required Uint8List newUserEd25519Pk,
     required Uint8List newUserMlDsaPk,
@@ -557,12 +581,26 @@ class IdentityContext {
     final linkContent = Uint8List(newUserEd25519Pk.length + newUserMlDsaPk.length);
     linkContent.setRange(0, newUserEd25519Pk.length, newUserEd25519Pk);
     linkContent.setRange(newUserEd25519Pk.length, linkContent.length, newUserMlDsaPk);
+    // §7.4b: the link is only a continuity proof if the OLD User-SK we still
+    // hold actually belongs to `ed25519PublicKey`. On the SECOND and every
+    // later delegation rotation it does not (see the doc comment above), and
+    // signing anyway would emit a link that looks like a proof but verifies
+    // against nothing — worse than an absent one, because a resolver
+    // classifies a manifest carrying a broken chain as `forged`. Fail closed
+    // and leave the signature empty; only the Primary can produce a valid
+    // link for a key it holds.
+    final candidateSig = SodiumFFI().signEd25519(linkContent, ed25519SecretKey);
+    final canProveLink =
+        SodiumFFI().verifyEd25519(linkContent, candidateSig, ed25519PublicKey);
+    if (!canProveLink) {
+      _log.warn('LD-8: stale User-Sig-SK (does not match current User-PK) — '
+          'rotation-chain link stored WITHOUT signature (§7.1.1 boundary)');
+    }
     rotationChain.add(StoredRotationLink(
       oldEd25519Pk: ed25519PublicKey,
       newEd25519Pk: newUserEd25519Pk,
       newMlDsaPk: newUserMlDsaPk,
-      oldSignatureEd25519:
-          SodiumFFI().signEd25519(linkContent, ed25519SecretKey),
+      oldSignatureEd25519: canProveLink ? candidateSig : Uint8List(0),
     ));
 
     previousX25519Sk = x25519SecretKey;

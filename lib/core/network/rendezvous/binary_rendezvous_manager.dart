@@ -108,6 +108,7 @@ class BinaryRendezvousManager {
   final String? _profileDir;
 
   Uint8List? _networkSecret;
+  Uint8List? _previousNetworkSecret;
   Uint8List? _deviceId;
   List<RendezvousAddress> Function()? _addressProvider;
 
@@ -126,16 +127,34 @@ class BinaryRendezvousManager {
   List<RendezvousProvider> get providers =>
       List.unmodifiable(_providers);
 
+  /// [previousNetworkSecret] — the outgoing secret during a rotation
+  /// (Architecture 13.2). Pass `NetworkSecret.previousSecret`; `null` outside a
+  /// transition window, which leaves behaviour unchanged.
   void init({
     required Uint8List networkSecret,
     required Uint8List deviceId,
     required List<RendezvousAddress> Function() addressProvider,
+    Uint8List? previousNetworkSecret,
   }) {
     _networkSecret = networkSecret;
+    _previousNetworkSecret = previousNetworkSecret;
     _deviceId = deviceId;
     _addressProvider = addressProvider;
     _loadSeq();
   }
+
+  /// Secrets to publish under and resolve against (R-2).
+  ///
+  /// Binary discovery is the load-bearing case for this: it is how a node
+  /// finds the update that carries it across a secret rotation. If a rotated
+  /// publisher and an un-rotated resolver use different tags, the un-rotated
+  /// build cannot discover the very binary that would keep it in the network
+  /// past the transition window. See [InfraRendezvousManager] for the general
+  /// rationale (the rendezvous epoch is a time window, not a secret version).
+  List<Uint8List> get _tagSecrets => [
+        ?_networkSecret,
+        ?_previousNetworkSecret,
+      ];
 
   void _loadSeq() {
     final dir = _profileDir;
@@ -195,33 +214,38 @@ class BinaryRendezvousManager {
       seq: _seq,
     );
 
-    final nostrSk = deriveBinaryNostrSecretKey(secret, devId);
-    final nostrKp = secp256k1KeypairFromSecret(nostrSk);
-
     var publishCount = 0;
-    for (final epoch in [currentEpoch, nextEpoch]) {
-      final tag = computeBinaryTag(secret, epoch, record.platform);
-      final key = deriveBinaryKey(secret, epoch);
-      final encrypted = encryptBinaryRecord(scopedRecord, key, tag);
+    // R-2: publish under every active secret; the Nostr signing key is
+    // secret-derived, so it is re-derived per secret.
+    for (final tagSecret in _tagSecrets) {
+      final nostrSk = deriveBinaryNostrSecretKey(tagSecret, devId);
+      final nostrKp = secp256k1KeypairFromSecret(nostrSk);
 
-      for (final provider in _providers) {
-        if (!provider.isAvailable) continue;
-        try {
-          if (provider is NostrProvider) {
-            await provider.publishWithKey(tag, encrypted, nostrKp.secretKey);
-          } else {
-            await provider.publish(tag, encrypted);
+      for (final epoch in [currentEpoch, nextEpoch]) {
+        final tag = computeBinaryTag(tagSecret, epoch, record.platform);
+        final key = deriveBinaryKey(tagSecret, epoch);
+        final encrypted = encryptBinaryRecord(scopedRecord, key, tag);
+
+        for (final provider in _providers) {
+          if (!provider.isAvailable) continue;
+          try {
+            if (provider is NostrProvider) {
+              await provider.publishWithKey(tag, encrypted, nostrKp.secretKey);
+            } else {
+              await provider.publish(tag, encrypted);
+            }
+            publishCount++;
+          } catch (e) {
+            _log.debug('Binary-RV publish failed: $e');
           }
-          publishCount++;
-        } catch (e) {
-          _log.debug('Binary-RV publish failed: $e');
         }
       }
     }
 
     _log.info('Binary-RV: published to $publishCount provider-epoch pairs '
         '(platform=${record.platform}, seq=$_seq, '
-        '${publicAddresses.length} public addresses)');
+        '${publicAddresses.length} public addresses, '
+        '${_tagSecrets.length} secret(s))');
   }
 
   Future<void> publishAll(List<BinaryAvailabilityRecord> records) async {
@@ -268,47 +292,52 @@ class BinaryRendezvousManager {
     final results = <ResolvedBinaryEndpoint>[];
     final seenDevices = <String, int>{};
 
-    for (final epoch in [currentEpoch, prevEpoch]) {
-      final tag = computeBinaryTag(secret, epoch, platform);
-      final key = deriveBinaryKey(secret, epoch);
+    // R-2: resolve under every active secret — an un-rotated publisher is only
+    // findable under the old tag, and it is exactly the peer that needs to be
+    // found so it can fetch the update.
+    for (final tagSecret in _tagSecrets) {
+      for (final epoch in [currentEpoch, prevEpoch]) {
+        final tag = computeBinaryTag(tagSecret, epoch, platform);
+        final key = deriveBinaryKey(tagSecret, epoch);
 
-      final allSigned = <SignedEndpointRecord>[];
-      for (final p in _providers.where((p) => p.isAvailable)) {
-        try {
-          if (p is NostrProvider) {
-            allSigned.addAll(await p.resolveMulti(tag));
-          } else {
-            final single = await p.resolve(tag);
-            if (single != null) allSigned.add(single);
-          }
-        } catch (_) {}
-      }
-
-      for (final signed in allSigned) {
-        final rec = decryptBinaryRecord(signed, key, tag);
-        if (rec == null || rec.addresses.isEmpty) continue;
-        final devHex = rec.deviceId
-            .map((b) => b.toRadixString(16).padLeft(2, '0'))
-            .join();
-        final endpoint = ResolvedBinaryEndpoint(
-          addresses: rec.addresses,
-          deviceIdHex: devHex,
-          platform: rec.platform,
-          version: rec.version,
-          binaryHash: rec.binaryHash,
-          hasFullBinary: rec.hasFullBinary,
-          fragmentIndices: rec.fragmentIndices,
-          seq: rec.seq,
-        );
-        if (seenDevices.containsKey(devHex)) {
-          final existingIdx = seenDevices[devHex]!;
-          if (rec.seq > results[existingIdx].seq) {
-            results[existingIdx] = endpoint;
-          }
-          continue;
+        final allSigned = <SignedEndpointRecord>[];
+        for (final p in _providers.where((p) => p.isAvailable)) {
+          try {
+            if (p is NostrProvider) {
+              allSigned.addAll(await p.resolveMulti(tag));
+            } else {
+              final single = await p.resolve(tag);
+              if (single != null) allSigned.add(single);
+            }
+          } catch (_) {}
         }
-        seenDevices[devHex] = results.length;
-        results.add(endpoint);
+
+        for (final signed in allSigned) {
+          final rec = decryptBinaryRecord(signed, key, tag);
+          if (rec == null || rec.addresses.isEmpty) continue;
+          final devHex = rec.deviceId
+              .map((b) => b.toRadixString(16).padLeft(2, '0'))
+              .join();
+          final endpoint = ResolvedBinaryEndpoint(
+            addresses: rec.addresses,
+            deviceIdHex: devHex,
+            platform: rec.platform,
+            version: rec.version,
+            binaryHash: rec.binaryHash,
+            hasFullBinary: rec.hasFullBinary,
+            fragmentIndices: rec.fragmentIndices,
+            seq: rec.seq,
+          );
+          if (seenDevices.containsKey(devHex)) {
+            final existingIdx = seenDevices[devHex]!;
+            if (rec.seq > results[existingIdx].seq) {
+              results[existingIdx] = endpoint;
+            }
+            continue;
+          }
+          seenDevices[devHex] = results.length;
+          results.add(endpoint);
+        }
       }
     }
 

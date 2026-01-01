@@ -114,6 +114,19 @@ class IdentityDhtHandler {
         if (!m.verify(m.userEd25519Pk, m.userMlDsaPk)) return;
         incomingVerified = true;
       }
+    } else if (m.deviceDelegations.isNotEmpty || m.deviceSigKeys.isNotEmpty) {
+      // A-2 (§7.1.1): a manifest without embedded User-PKs is unverifiable
+      // by construction, so it must not be able to smuggle in device-bound
+      // authority. `AuthManifest.sign()` populates userEd25519Pk/userMlDsaPk
+      // unconditionally and is the only signing path (the sole other
+      // constructor is `fromProto`) — a genuine manifest therefore never
+      // combines "no embedded keys" with delegations or device sig keys.
+      // Legacy stock without those fields stays accepted.
+      _log.warn('A-2: AuthManifest for ${hex.substring(0, 16)}... dropped — '
+          'device-bound fields without embedded User-PKs '
+          '(delegations=${m.deviceDelegations.length}, '
+          'sigKeys=${m.deviceSigKeys.length})');
+      return;
     }
 
     final existing = _storedAuthManifests[hex];
@@ -160,9 +173,18 @@ class IdentityDhtHandler {
         );
         final result = verifyRotationCoAuth(
           tokens: proof.approvals,
+          // Pre-change pubkeys: the incoming manifest nominates its own
+          // `deviceSigKeys`, so counting tokens against those would let the
+          // shrinking party also pick who vouches for the shrink.
           cachedDeviceSigKeys: existing.deviceSigKeys,
           rotationHash: changeHash,
-          preRotationDeviceCount: proof.previousDeviceCount,
+          occasion: CoAuthOccasion.deviceSetChange,
+          // Quorum over what REMAINS, not over `existing` — the removed
+          // devices cannot consent to their own removal, and a one-device
+          // remainder can never produce the two signatures the key-rotation
+          // quorum demands. `proof.previousDeviceCount` stays purely
+          // descriptive (it is the sender's claim, not a verified quantity).
+          remainingDeviceCount: m.deviceSigKeys.length,
         );
         if (result == RotationCoAuthResult.quorumNotMet) {
           _log.warn('§7.5 DEVICE-SET SHRINK with INSUFFICIENT proof for '
@@ -183,33 +205,85 @@ class IdentityDhtHandler {
   }
 
   /// §7.1 LD-4: extract delegated signing PKs from a cached AuthManifest.
+  ///
+  /// A-2 (§7.1.1): the result is consumed by `V3FrameCodec` as the fallback
+  /// after a failed User-Sig — a key returned here makes a frame count as
+  /// authentically sent by [userId]. Expiry alone is therefore not enough:
+  ///
+  /// 1. A manifest WITHOUT embedded User-PKs cannot prove a delegation at
+  ///    all (there is nothing to verify the cert against), so it yields
+  ///    nothing. `AuthManifest.sign()` always embeds the User-PKs, hence no
+  ///    legitimately signed manifest ever lands in this branch.
+  /// 2. Every cert must carry a valid HYBRID signature (Ed25519 AND ML-DSA)
+  ///    by the User-Key: "Forging a delegation requires breaking both
+  ///    signature schemes" (§7.1.1). Only reached on the rare post-User-Sig-
+  ///    failure path, so the ML-DSA cost is not on the hot path.
   List<({Uint8List edPk, Uint8List mlDsaPk})> getDelegatedKeys(Uint8List userId) {
     final m = _storedAuthManifests[bytesToHex(userId)];
     if (m == null || m.deviceDelegations.isEmpty) return const [];
+    if (!m.hasEmbeddedKeys) return const [];
     return m.deviceDelegations
-        .where((d) => !d.isExpired())
+        .where((d) =>
+            !d.isExpired() && d.verify(m.userEd25519Pk, m.userMlDsaPk))
         .map((d) => (edPk: d.delegatedEd25519Pk, mlDsaPk: d.delegatedMlDsaPk))
         .toList();
   }
 
   // ── Liveness API ──────────────────────────────────────────────
 
-  void handleLivePublish(LivenessRecord r) {
+  /// A-4 (§2.4.1a Empfaenger-Pipeline [11''], §4.3 D1): spiegelbildlich zu
+  /// [handleKemPublish]. Liefert `true` NUR, wenn der Record gegen den
+  /// verankerten User-Pk signaturverifiziert UND neu angenommen wurde.
+  /// Der Wire-Layer benutzt den Rueckgabewert als Gate fuer das Seeding der
+  /// Routing-Tabelle — ein unverifizierter Record darf dort keine Adressen
+  /// platzieren (§2.3.5: „The Closed-Network HMAC alone never authenticates
+  /// user-bound claims").
+  ///
+  /// Ohne Anker (kein AuthManifest mit embedded Keys fuer diese userId)
+  /// traegt der Record nichts, womit er sich authentisieren koennte:
+  /// [LivenessRecord] hat KEIN Pubkey-Feld — nur userId, deviceNodeId,
+  /// addresses, seq und die Ed25519-Sig. „claimed userPk" ist also
+  /// ausschliesslich ueber den Anker aufloesbar. Der Record wird in dem Fall
+  /// weiterhin gespeichert (Transition/Cold-Start: ein Replikator muss auch
+  /// fuer User liefern koennen, deren Manifest er noch nicht geholt hat),
+  /// aber als UNVERIFIZIERT gemeldet.
+  bool handleLivePublish(LivenessRecord r) {
     // D1: liegt fuer den User ein verankertes AuthManifest vor, muss die
     // Liveness-Sig gegen den Anker verifizieren — sonst kann ein forged
-    // Record mit hoher seq den echten verdraengen. Ohne Anker (Manifest
-    // fehlt noch / legacy) gilt das bisherige Verhalten (Transition).
-    final anchor = _anchorFor(r.userId);
-    if (anchor != null && !r.verify(anchor)) return;
+    // Record mit hoher seq den echten verdraengen.
+    //
+    // §7.1.4: „gegen den Anker" heisst seit der delegierten Signatur nicht
+    // mehr zwingend „direkt". Ein Linked Device signiert mit seinem
+    // delegierten Schluessel; `verifyAnchored` laeuft dann Anker →
+    // Zertifikat → delegierter PK → Record. Ohne diesen Pfad wuerde JEDER
+    // Empfaenger die Records eines gekoppelten Geraets nach einer
+    // Emergency-Rotation verwerfen und das Geraet damit fuer alle Kontakte
+    // unauffindbar machen.
+    //
+    // P6: das Zertifikat kommt aus genau diesem Manifest
+    // (`delegationFor(deviceNodeId)`) statt aus dem Record. Kennt das Manifest
+    // die Delegation nicht, ist der Record ein Drop — fail-closed.
+    final anchorManifest = _anchorManifestFor(r.userId);
+    if (anchorManifest != null && !r.verifyAnchored(anchorManifest)) {
+      return false;
+    }
+    final anchor = anchorManifest?.userEd25519Pk;
     final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceNodeId)}';
     final existing = _storedLiveness[key];
     if (existing != null && r.sequenceNumber <= existing.sequenceNumber) {
-      return;
+      return false; // Replay-Schutz
     }
     _storedLiveness[key] = r;
     _enforceLivenessCap();
     _persistAsync();
+    return anchor != null;
   }
+
+  /// A-4: hat dieser Node einen Trust-Anker (AuthManifest mit embedded Keys)
+  /// fuer [userId]? Der Wire-Layer unterscheidet damit „Sig-Pruefung
+  /// fehlgeschlagen" (Anker vorhanden → droppen, kein Nachfassen noetig) von
+  /// „konnte gar nicht geprueft werden" (kein Anker → AUTH_RETRIEVE anstossen).
+  bool hasAnchorFor(Uint8List userId) => _anchorFor(userId) != null;
 
   LivenessRecord? getLiveness(Uint8List userId, Uint8List deviceNodeId) {
     final key = '${bytesToHex(userId)}:${bytesToHex(deviceNodeId)}';
@@ -222,30 +296,50 @@ class IdentityDhtHandler {
   /// Trust-Anchor: ed25519_sig vom User-Master-Key. Sig-Verification erfolgt
   /// im Wire-Layer (cleona_node.dart) bevor wir hier landen — derselbe
   /// Pattern wie bei AuthManifest/Liveness.
-  void handleKemPublish(DeviceKemRecord r) {
+  bool handleKemPublish(DeviceKemRecord r) {
     // D1: mit verankertem AuthManifest muss der embedded userEd25519Pk dem
     // Anker entsprechen UND die Sig gegen ihn verifizieren (schliesst den
     // selbstreferenziellen Check). Ohne Anker: Transition-Verhalten.
-    final anchor = _anchorFor(r.userId);
-    if (anchor != null &&
-        (!_pkEqual(r.userEd25519Pk, anchor) || !r.verify(anchor))) {
-      return;
+    //
+    // §7.1.4: die Anker-Bindung des eingebetteten userEd25519Pk gilt in
+    // BEIDEN Pfaden — auch ein delegiert signierter Record behauptet weiter,
+    // zu diesem User zu gehoeren. Nur die Sig-Pruefung selbst laeuft dann
+    // ueber die Zertifikatskette.
+    final anchorManifest = _anchorManifestFor(r.userId);
+    if (anchorManifest != null) {
+      final anchor = anchorManifest.userEd25519Pk;
+      if (!_pkEqual(r.userEd25519Pk, anchor) ||
+          !r.verifyAnchored(anchorManifest)) {
+        return false;
+      }
     }
     final key = '${bytesToHex(r.userId)}:${bytesToHex(r.deviceId)}';
     final existing = _storedKemRecords[key];
     if (existing != null && r.sequenceNumber <= existing.sequenceNumber) {
-      return; // Replay-Schutz / monotonic-seq
+      return false;
     }
     _storedKemRecords[key] = r;
     _enforceKemCap();
     _persistAsync();
+    return true;
   }
 
   /// D1: verankerter User-Pk aus dem gespeicherten AuthManifest (nur wenn
   /// es embedded Keys traegt — die wurden bei handleAuthPublish verifiziert).
-  Uint8List? _anchorFor(Uint8List userId) {
+  Uint8List? _anchorFor(Uint8List userId) =>
+      _anchorManifestFor(userId)?.userEd25519Pk;
+
+  /// D1 + §7.1.4: das verankernde AuthManifest selbst. Die delegierte
+  /// Signaturkette braucht BEIDE User-Pks — das Delegationszertifikat ist
+  /// hybrid signiert (§7.1.1), eine reine Ed25519-Pruefung waere genau die
+  /// Abkuerzung, die eine gefaelschte Delegation billig macht.
+  ///
+  /// P6: sie braucht ausserdem das Zertifikat selbst, das seit P6 nicht mehr
+  /// im Record steckt, sondern in `deviceDelegations` dieses Manifests. Damit
+  /// ist das ganze Manifest — nicht nur sein Pk — der Anker.
+  AuthManifest? _anchorManifestFor(Uint8List userId) {
     final m = _storedAuthManifests[bytesToHex(userId)];
-    return (m != null && m.hasEmbeddedKeys) ? m.userEd25519Pk : null;
+    return (m != null && m.hasEmbeddedKeys) ? m : null;
   }
 
   static bool _pkEqual(Uint8List a, Uint8List b) {

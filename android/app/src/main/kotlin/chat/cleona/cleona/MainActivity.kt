@@ -396,6 +396,17 @@ class MainActivity : FlutterActivity() {
                         }
                     }.start()
                 }
+                "getInstallerPackageName" -> {
+                    val installer = if (android.os.Build.VERSION.SDK_INT >= 30) {
+                        try {
+                            packageManager.getInstallSourceInfo(packageName).installingPackageName
+                        } catch (e: Exception) { null }
+                    } else {
+                        @Suppress("DEPRECATION")
+                        packageManager.getInstallerPackageName(packageName)
+                    }
+                    result.success(installer)
+                }
                 else -> result.notImplemented()
             }
         }
@@ -481,6 +492,11 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
+
+        // Call integration (V3.2): self-managed ConnectionService — architecture
+        // §10.4 "Session behaviour" table, row "Call integration"; staging
+        // table row 7. Everything lives in CleonaCallIntegration.
+        CleonaCallIntegration.register(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
         // Session behaviour (V1.10): AudioFocus, interruption, proximity —
         // architecture §10.4 "Session behaviour" table. See the class-level

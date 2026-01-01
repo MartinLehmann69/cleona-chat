@@ -56,6 +56,64 @@ class CLogger {
   static final RegExp _logFileRe =
       RegExp(r'^cleona_(\d{4}-\d{2}-\d{2})(?:\.(\d+))?\.log$');
 
+  /// Whether console sinks (stdout/stderr) may still be written to.
+  ///
+  /// A daemon started WITHOUT a console — Windows autostart, the E2E VBS
+  /// wrapper (`WScript.Shell.Run(exe, 0, False)`), any service manager — has
+  /// no valid stdout/stderr handle. Dart's stdout/stderr are ASYNCHRONOUSLY
+  /// buffered, so the write fails later during flush inside
+  /// `_StdConsumer.addStream`, i.e. OUTSIDE the try/catch guarding the call.
+  /// The resulting unhandled zone error is reported via the zone handler,
+  /// which logs at ERROR level — which writes to stderr again, producing the
+  /// next failure. That feedback loop, not a single write, is what kills the
+  /// daemon (measured 2026-08-05: dead within 151s, no cleona.port; with
+  /// redirected handles the same build runs indefinitely).
+  ///
+  /// Once a console write fails, all console output is switched off process-
+  /// wide. File buffers and the ring buffer are unaffected — nothing that is
+  /// diagnostically relevant is lost, because without a console the lines had
+  /// nowhere to go anyway.
+  static bool consoleEnabled = true;
+
+  /// Disable console output permanently after a failed write.
+  /// Deliberately silent: reporting this problem through the logger is exactly
+  /// the recursion this guard exists to break.
+  static void disableConsole(String sink) {
+    consoleEnabled = false;
+    _ring.add('${DateTime.now().toIso8601String()} [WARN ] [clogger] console '
+        'sink "$sink" failed — console output disabled process-wide '
+        '(no valid stdout/stderr handle). File logging continues.');
+  }
+
+  static bool _sinkWatchRegistered = false;
+
+  /// Watches this process's console sinks and disables console output as soon
+  /// as one of them dies.
+  ///
+  /// A failed stdout/stderr flush NEVER surfaces at the call site: Dart flushes
+  /// asynchronously in `_StdConsumer`, so the try/catch around `print`/
+  /// `stderr.writeln` in [_log] cannot see it. That is precisely why W-1 killed
+  /// the Windows daemon despite those guards — the error escaped to the zone,
+  /// the zone handler logged it, and the log wrote to the same dead sink.
+  ///
+  /// The `done` future is where the error does surface, and it does so in every
+  /// process type. Measured 2026-08-05 against a sink whose reader is gone:
+  /// bare Dart VM and a compiled Flutter release binary both deliver
+  /// `FileSystemException` here — and in the Flutter case
+  /// `PlatformDispatcher.onError` is never reached, so the §16.2 invariant
+  /// (single global error sink) stays untouched rather than being duplicated
+  /// into every entry point (daemon, GUI, foreground service, iOS).
+  ///
+  /// MUST run before the first console write. Measured: if the flush error
+  /// happens first, the future is already completed with an unhandled error and
+  /// a `catchError` attached afterwards never fires.
+  static void _watchConsoleSinks() {
+    if (_sinkWatchRegistered) return;
+    _sinkWatchRegistered = true;
+    stdout.done.catchError((e) { disableConsole('stdout-done'); return null; });
+    stderr.done.catchError((e) { disableConsole('stderr-done'); return null; });
+  }
+
   /// Ring buffer of the most recent log lines (across all modules).
   /// Used by the crash reporter (§9.5) to attach log context to reports.
   static const int _ringCapacity = 500;
@@ -157,19 +215,28 @@ class CLogger {
     // On Android this avoids main-thread I/O flooding; on Windows it
     // prevents the console window from scrolling endlessly with packet-
     // level noise that makes the machine look like "die Hölle ist los".
-    if (level != LogLevel.debug && level != LogLevel.trace) {
+    // Register the sink watch BEFORE the first console write — see
+    // [_watchConsoleSinks]: attaching it after the first failed flush is too
+    // late, the future has already completed with an unhandled error.
+    if (!_sinkWatchRegistered) _watchConsoleSinks();
+
+    if (consoleEnabled && level != LogLevel.debug && level != LogLevel.trace) {
       try {
         // ignore: avoid_print
         print(line);
-      } catch (_) {}
+      } catch (_) {
+        disableConsole('print');
+      }
     }
 
     // ERROR-level: also write to stderr directly (synchronous, no buffer).
     // Survives logger/buffer failure modes; lands in the wrapper's stderr-capture
     // so a stack trace is visible even when the process dies before the 2s
     // periodic flush runs. See C-3 (B-4 daemon crash without trace).
-    if (level == LogLevel.error) {
-      try { stderr.writeln(line); } catch (_) {}
+    if (consoleEnabled && level == LogLevel.error) {
+      try { stderr.writeln(line); } catch (_) {
+        disableConsole('stderr');
+      }
     }
 
     // Ring buffer for crash reporter. TRACE is deliberately excluded: the
@@ -187,7 +254,7 @@ class CLogger {
     final buffer = profileDir != null ? _buffers[profileDir] : null;
     if (buffer != null) {
       buffer.writeln(line);
-    } else if (_blindModulesWarned.add(module)) {
+    } else if (consoleEnabled && _blindModulesWarned.add(module)) {
       // B1 (2026-07-27) Selbst-Alarm: ein Modul ohne profileDir loggt ins
       // Nichts — die Zeile geht nur in Konsole + Ring-Buffer, NIE in
       // logs/cleona_*.log. Genau so verschwanden alle [resolver]-Zeilen

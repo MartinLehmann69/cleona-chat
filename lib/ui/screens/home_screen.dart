@@ -2226,7 +2226,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                 onTap: () async {
                   Navigator.pop(ctx);
                   await service.inviteToChannel(channelIdHex, c.nodeIdHex);
-                  refreshParent(() {});
+                  if (ctx.mounted) refreshParent(() {});
                 },
               );
             },

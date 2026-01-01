@@ -1,11 +1,15 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:collection/collection.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/identity_resolution/device_delegation.dart';
+import 'package:cleona/main.dart' show CleonaAppState;
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
-/// §7.1 LD-9/LD-10/LD-11: Cert status, renewal, soft migration.
+/// §7.1 LD-9/LD-10/LD-11: Cert-Status, Renewal, Kopplung.
 class DeviceManagementScreen extends StatefulWidget {
   final ICleonaService service;
   const DeviceManagementScreen({super.key, required this.service});
@@ -18,6 +22,12 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
   List<DeviceRecord> _devices = [];
   String _localDeviceId = '';
 
+  /// §7.5: redraws the "time remaining" text on any pending rotation-approval
+  /// card every second. Purely a display tick — [CleonaAppState] owns the
+  /// actual pending-request state (see [_ticker]'s doc for why this screen
+  /// does not also subscribe to the raw service callbacks).
+  Timer? _ticker;
+
   @override
   void initState() {
     super.initState();
@@ -25,6 +35,28 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     widget.service.onStateChanged = () {
       if (mounted) _refresh();
     };
+    // §7.1 LD-2 / §7.5: this screen reads the pending-pairing /
+    // pending-rotation-approval lists from [CleonaAppState] (via
+    // `context.watch` in build()) rather than subscribing to
+    // `widget.service.onDevicePairRequest` / `onRotationApprovalRequest`
+    // directly — those are single-slot callback fields already claimed by
+    // [CleonaAppState] in main.dart (so the live global dialog keeps working
+    // whether or not this screen happens to be open); a second assignment
+    // here would silently steal the slot back while this screen is mounted.
+    // A refresh on open still catches up in case this screen is opened long
+    // after the last event fired, with no live event to trigger a redraw.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<CleonaAppState>().refreshPendingSecurityRequests();
+    });
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
   }
 
   void _refresh() {
@@ -231,8 +263,8 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
-  /// §7.1 LD-10: soft migration confirmation dialog
-  void _showSoftMigrationDialog() {
+  /// §7.1 LD-10: Bestaetigungsdialog fuer die Kopplungsanfrage
+  void _showPairingDialog() {
     final locale = AppLocale.read(context);
     showDialog(
       context: context,
@@ -414,11 +446,19 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
             ],
           ],
 
-          // §7.1 LD-10: soft migration button (legacy twin → linked device)
-          if (!status.isLinkedDevice && _devices.length > 1) ...[
+          // §7.1: Kopplung anfordern. Der Normalweg fuer jedes Zweitgeraet —
+          // es wird per Seed-Phrase eingerichtet und meldet sich hier beim
+          // Primary an, das ihm Delegationsschluessel ausstellt (§7.1.1).
+          //
+          // KEIN `_devices.length > 1`-Guard: ein Geraet, das noch nicht
+          // gekoppelt ist, kennt per Definition nur sich selbst. Die alte
+          // Bedingung blendete den Button also ausgerechnet auf den Geraeten
+          // aus, fuer die er gebaut wurde — Kopplung war ueber diesen Screen
+          // nie ausloesbar.
+          if (!status.isLinkedDevice) ...[
             const SizedBox(height: 12),
             OutlinedButton.icon(
-              onPressed: _showSoftMigrationDialog,
+              onPressed: _showPairingDialog,
               icon: const Icon(Icons.link, size: 16),
               label: Text(locale.get('linked_device_request_pairing')),
             ),
@@ -434,10 +474,201 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
+  String _formatReceivedAt(BuildContext context, int receivedAtMs) {
+    final locale = AppLocale.read(context);
+    final date = DateTime.fromMillisecondsSinceEpoch(receivedAtMs);
+    final formatted = '${date.day}.${date.month}.${date.year} '
+        '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
+    return locale.tr('pending_request_received_at', {'date': formatted});
+  }
+
+  /// §7.1 LD-2: persistent list of pairing requests still waiting for a
+  /// decision — the catch-up counterpart to the live dialog in
+  /// [showIncomingPairRequestDialog], for requests that arrived while this
+  /// screen (or the whole GUI) was not open to show it.
+  Widget _buildPendingPairingSection(BuildContext context, CleonaAppState appState) {
+    final pending = appState.pendingPairRequests;
+    if (pending.isEmpty) return const SizedBox.shrink();
+    final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(locale.get('device_pending_pairing_section_title'),
+              style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          for (final entry in pending)
+            Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(locale.get('device_pending_pairing_id_label'),
+                        style: theme.textTheme.labelSmall),
+                    SelectableText(entry['deviceIdHex'] as String,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+                    const SizedBox(height: 4),
+                    Text(_formatReceivedAt(context, entry['receivedAtMs'] as int),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant)),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(Icons.warning_amber_rounded,
+                            size: 14, color: theme.colorScheme.error),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(locale.get('device_pending_pairing_verify_hint'),
+                              style: theme.textTheme.bodySmall),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton(
+                        onPressed: () async {
+                          final deviceIdHex = entry['deviceIdHex'] as String;
+                          final ok = await widget.service.approvePairRequest(deviceIdHex);
+                          if (!context.mounted) return;
+                          await context.read<CleonaAppState>().refreshPendingSecurityRequests();
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                            content: Text(locale.get(ok
+                                ? 'device_pending_pairing_approved_snack'
+                                : 'device_pending_pairing_failed_snack')),
+                          ));
+                        },
+                        child: Text(locale.get('accept')),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// §7.5: persistent list of rotation-approval requests still waiting for a
+  /// decision — the catch-up counterpart to the live dialog in
+  /// [showRotationApprovalDialog].
+  Widget _buildPendingRotationSection(BuildContext context, CleonaAppState appState) {
+    final pending = appState.pendingRotationApprovals;
+    if (pending.isEmpty) return const SizedBox.shrink();
+    final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(locale.get('device_rotation_approval_section_title'),
+              style: theme.textTheme.titleSmall),
+          const SizedBox(height: 8),
+          for (final entry in pending)
+            Builder(builder: (context) {
+              final hashHex = entry['rotationHashHex'] as String;
+              final requesterHex = entry['requestingDeviceIdHex'] as String;
+              final expiresAtMs = entry['expiresAtMs'] as int;
+              final remainingMs = expiresAtMs - nowMs;
+              final expired = remainingMs <= 0;
+              final totalSeconds = remainingMs > 0 ? remainingMs ~/ 1000 : 0;
+              final timeLabel = '${totalSeconds ~/ 60}:'
+                  '${(totalSeconds % 60).toString().padLeft(2, '0')}';
+              final requesterName = _devices
+                  .where((d) => d.deviceNodeIdHex == requesterHex)
+                  .map((d) => d.deviceName)
+                  .firstOrNull;
+
+              return Card(
+                margin: const EdgeInsets.only(bottom: 8),
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(locale.get('device_rotation_approval_requester_label'),
+                          style: theme.textTheme.labelSmall),
+                      Text(
+                        requesterName != null
+                            ? '$requesterName (${requesterHex.substring(0, 12)}…)'
+                            : requesterHex,
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        expired
+                            ? locale.get('device_rotation_approval_expired')
+                            : locale.tr('device_rotation_approval_remaining',
+                                {'time': timeLabel}),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: expired
+                              ? theme.colorScheme.error
+                              : theme.colorScheme.onSurface,
+                        ),
+                      ),
+                      if (!expired) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            TextButton(
+                              onPressed: () async {
+                                final ok = await widget.service.rejectRotation(hashHex);
+                                if (!context.mounted) return;
+                                await context.read<CleonaAppState>().refreshPendingSecurityRequests();
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                  content: Text(locale.get(ok
+                                      ? 'device_rotation_approval_rejected_snack'
+                                      : 'device_rotation_approval_failed_snack')),
+                                ));
+                              },
+                              child: Text(locale.get('reject')),
+                            ),
+                            const SizedBox(width: 8),
+                            FilledButton(
+                              onPressed: () async {
+                                final ok = await widget.service.approveRotation(hashHex);
+                                if (!context.mounted) return;
+                                await context.read<CleonaAppState>().refreshPendingSecurityRequests();
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                                  content: Text(locale.get(ok
+                                      ? 'device_rotation_approval_approved_snack'
+                                      : 'device_rotation_approval_failed_snack')),
+                                ));
+                              },
+                              child: Text(locale.get('accept')),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
     final theme = Theme.of(context);
+    final appState = context.watch<CleonaAppState>();
 
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('device_management_title'))),
@@ -445,6 +676,12 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
         child: ListView(
           children: [
             const SizedBox(height: 8),
+
+            _buildPendingPairingSection(context, appState),
+            _buildPendingRotationSection(context, appState),
+            if (appState.pendingPairRequests.isNotEmpty ||
+                appState.pendingRotationApprovals.isNotEmpty)
+              const Divider(height: 24),
 
             // Device list
             ..._devices.map((device) {

@@ -38,6 +38,16 @@ class Identity {
   bool isAdult;
   /// Opt-in: participate in channel moderation jury (only visible if isAdult).
   bool reviewEnabled;
+  /// §7.1.3 (P2): true iff this identity was created via seed-phrase restore
+  /// AND the user told the restore screen they still have another device
+  /// running with this identity ("additional device", not "device
+  /// replacement"). Gates `IdentityPublisher._isPrimaryDevice` — while this
+  /// is true, the device does not publish an AuthManifest (it would collide
+  /// with the still-running original device under the single `SHA-256("auth"
+  /// + userId)` DHT slot). Cleared implicitly once the device pairs and
+  /// becomes `isLinkedDevice`; always false for freshly-created identities
+  /// (never set outside the restore flow).
+  bool restoreAwaitingPairing;
 
   Identity({
     required this.id,
@@ -50,6 +60,7 @@ class Identity {
     this.skinId,
     this.isAdult = false,
     this.reviewEnabled = true,
+    this.restoreAwaitingPairing = false,
   });
 
   Map<String, dynamic> toJson() => {
@@ -63,6 +74,7 @@ class Identity {
         if (skinId != null) 'skinId': skinId,
         if (isAdult) 'isAdult': true,
         if (!reviewEnabled) 'reviewEnabled': false,
+        if (restoreAwaitingPairing) 'restoreAwaitingPairing': true,
       };
 
   static Identity fromJson(Map<String, dynamic> json) => Identity(
@@ -76,6 +88,7 @@ class Identity {
         skinId: json['skinId'] as String?,
         isAdult: json['isAdult'] as bool? ?? false,
         reviewEnabled: json['reviewEnabled'] as bool? ?? true,
+        restoreAwaitingPairing: json['restoreAwaitingPairing'] as bool? ?? false,
       );
 }
 
@@ -425,7 +438,14 @@ class IdentityManager {
 
   /// Create a new identity. Uses HD-Wallet index if master seed exists.
   /// Async because PQ keygen runs in a background isolate (ANR prevention).
-  Future<Identity> createIdentity(String displayName) async {
+  ///
+  /// [restoreAwaitingPairing] (§7.1.3, P2): pass `true` only from the
+  /// seed-phrase restore flow when the user said they still have another
+  /// device running with this identity. Defaults to `false` — fresh
+  /// installs and manually-added identities are always Primary from the
+  /// start, this parameter must never flip for those paths.
+  Future<Identity> createIdentity(String displayName,
+      {bool restoreAwaitingPairing = false}) async {
     final identities = loadIdentities();
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
@@ -455,6 +475,7 @@ class IdentityManager {
       port: port,
       createdAt: DateTime.now(),
       hdIndex: hdIndex,
+      restoreAwaitingPairing: restoreAwaitingPairing,
     );
 
     identities.add(identity);
@@ -464,7 +485,15 @@ class IdentityManager {
 
   /// Create an identity at a specific HD-Wallet index (§6.4.3 registry recovery).
   /// Unlike [createIdentity], this targets an exact [hdIndex] instead of auto-incrementing.
-  Future<Identity> createIdentityAtIndex(int hdIndex, String displayName) async {
+  ///
+  /// [restoreAwaitingPairing] (§7.1.3, P2): the caller (registry recovery /
+  /// restore-index-probing, both only ever reached from the seed-phrase
+  /// restore flow) forwards the same choice the user made for the primary
+  /// identity — every identity recovered in the same restore run describes
+  /// the same physical device and the same "additional device vs. lost
+  /// device" fact.
+  Future<Identity> createIdentityAtIndex(int hdIndex, String displayName,
+      {bool restoreAwaitingPairing = false}) async {
     final identities = loadIdentities();
     if (identities.any((i) => i.hdIndex == hdIndex)) {
       throw StateError('Identity with hdIndex=$hdIndex already exists');
@@ -487,6 +516,7 @@ class IdentityManager {
       port: port,
       createdAt: DateTime.now(),
       hdIndex: hdIndex,
+      restoreAwaitingPairing: restoreAwaitingPairing,
     );
 
     identities.add(identity);

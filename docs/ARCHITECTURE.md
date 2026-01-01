@@ -1,18 +1,26 @@
 # CLEONA CHAT
 
-## Architecture & Technical Specification — v3.0
+## Architecture & Technical Specification — 3.2.0
 
-**Status:** v3.0 Major Architecture Refactor (2026-05-01+)
-**Predecessor:** v2.2 (archived, see git history)
+**Document version:** 3.2.0 — tracks the app version (`pubspec.yaml`,
+`kCurrentAppVersion` in `lib/core/service/cleona_service.dart`). Bump this
+together with those two.
+**Architecture generation:** v3.0 major refactor (2026-05-01+), predecessor
+v2.2 (archived, see git history). References to "V3.0" throughout this document
+mean the generation, not the release.
+**Filename:** stays `Cleona_Chat_Architecture_v3_0.md` — 73 references plus the
+
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:77edf6af847f, 2026-08-06). -->
+<!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
+
+publishing pipeline depend on it (`scripts/sync-to-git.sh:26` `MASTER_ARCH`, the
+generated `ARCHITECTURE.md` header at `:243`, and the hookify rule
+`block-master-arch-write`). The name is a stable identifier, not a version.
 
 **v3.0 key features:**
 - **2-layer wire format**: Outer Frame (routing, device-signed) wraps Inner Frame (identity, KEM-encrypted)
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
-
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:46dec5fc022d, 2026-07-31). -->
-<!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
-
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
 - **MessageQueue retired**: when "routes exhausted" the sender stops; S&F + mailbox pull take over offline delivery
 - **Onion-routing hook**: Outer-Frame format prepared for later multi-layer encryption, not active in V3.0
@@ -420,7 +428,12 @@ UDP-Packet bytes
           │     DELIVERY_RECEIPT and call frames inside the 60s window)
           │   → no false positives: relay re-wraps (ttl-1) produce a new
           │     networkTag (multi-path duplicates unaffected); sender-rebuilt
-          │     retransmits carry a fresh timestampMs → fresh tag
+          │     retransmits carry a fresh timestampMs → fresh tag.
+          │     All sender-side re-sends (outbox flush §5.1, L1-retry via
+          │     AckTracker) MUST refresh timestampMs AND recompute the
+          │     Outer-Device-Sig — a stale timestamp causes a silent
+          │     replay-window drop at the receiver, and the corresponding
+          │     AckTracker timeout falsely marks the route DOWN (§5.8)
           ▼
   [4] Verify Device-Sig (deviceEd25519Sig + optional deviceMlDsaSig)
           │   → fetch senderDevicePubkeys from RoutingTable or 2D-DHT (DeviceKemRecord/AuthManifest)
@@ -947,6 +960,8 @@ UserID properties:
 deviceId = SHA-256(network_secret || ed25519_device_pubkey)    // 32 bytes
 ```
 
+**Normative — which secret `network_secret` means here.** Both derivations use the **pinned** identity secret (`NetworkSecret.identitySecret`, `identitySecretVersion = 1`), never the rotating `NetworkSecret.secret`. Neither `userId` nor `deviceId` is persisted; both are recomputed on every identity load. If they followed a secret rotation (§13.2), the first rotated build would silently re-mint every identity in the network. `identitySecretVersion` **must never be changed**; the rule and its blast radius are specified in §13.2, and `test/smoke/smoke_identity_secret_pin.dart` fails closed if any identity-derivation call site reverts to the rotating secret.
+
 DeviceID properties:
 - **Per-Device**: freshly generated on first daemon start, never shared between devices
 - **Routing identifier**: Kademlia-Buckets are keyed by deviceId, DV-Routing operates on deviceIds
@@ -1401,11 +1416,25 @@ Identity resolution answers the question: *"which devices currently host this Us
    value = DeviceKemRecord { userId, deviceId, deviceX25519Pk, deviceMlKemPk,
                              ttl=7d, seq, publishedAtMs, ed25519Sig, userEd25519Pk }
    ```
-   - signed by the user master Ed25519 key (same trust anchor as AuthManifest — the user vouches for the device's KEM-PK)
+   - signed **either** by the user master Ed25519 key (Primary) **or** by the device's delegated Ed25519 subkey (linked device). The trust anchor is the user key in both cases; only the signer differs. See "Delegated record signing" below
    - refreshed every 3 days by the IdentityPublisher (well within the 7-day TTL)
    - returns the device's KEM pubkey set, sufficient for KEM-encap when sending an InfrastructureFrame to this device (§2.3.5)
    - **separated from LivenessRecord** because Device-KEM-PK changes only at device-key-reset (multi-year cadence) while Liveness must refresh every 15 min — different lifecycles. Co-locating them would re-publish the KEM-PK every 15 min for no semantic gain
    - **TTL raised to 7 days** to match the Mailbox/S&F retention window: a contact that has been offline up to 7 days remains KEM-resolvable, so a Deferred-Key-Exchange First-CR (§8.1.1) can still be encrypted and the First-CR-Mailbox (§5.5b) filled. The longer TTL is also **traffic-negative** — fewer republishes for a key that only changes at multi-year cadence
+
+**Delegated record signing.** `LivenessRecord` and `DeviceKemRecord` are per-device records, so a linked device must be able to publish them without the master seed — which it does not have after an emergency rotation (§7.1.1). It therefore signs with its delegated Ed25519 subkey and sets `signer_ed25519_pk`. The delegation certificate is **not** carried in the record: the receiver looks it up in the AuthManifest it already holds for that user (`delegationFor(deviceId)`). Embedding it would add ~5.4 KB per record and push it past the fragmentation threshold on a path that republishes every 15 minutes.
+
+Verification order is normative — each step gates the next:
+
+1. the certificate verifies **hybrid** (Ed25519 **and** ML-DSA) under the anchored user pubkeys,
+2. the delegated pubkey in the certificate equals `signer_ed25519_pk`,
+3. the certificate has not expired,
+4. the certificate names **exactly the device** whose record arrived,
+5. the record verifies against the delegated pubkey.
+
+`signer_ed25519_pk` is inside the record's signature scope, so it cannot be stripped or swapped to downgrade a delegated record to a direct one.
+
+**Fail-closed:** an anchored manifest without a matching delegation entry causes a drop. A record for which no anchored manifest exists at all follows the unchanged transition behaviour (stored, reported unverified, no routing seed) — restricting that further would make linked devices unreachable, which is the regression this mechanism exists to prevent.
 
 **Resolution cascade** (in IdentityResolver, `lib/core/identity_resolution/identity_resolver.dart`):
 
@@ -2112,7 +2141,13 @@ This places nodes with different `network_secret` values in entirely separate DH
 
 **Secret rotation**: see §13.2.
 
-**Obfuscation**: the network secret is not embedded in the binary as a plaintext constant — it is derived at runtime from the maintainer key, which itself is reconstructed from `assets/cleona_maintainer_public.pem` (public) and an app-internal salt slot. This is not crypto-secure (anyone with reverse-engineering can extract it), but it raises the bar for trivial forks (e.g. decompile + recompile) — they have to actively modify the secret-derivation path, which is plainly recognizable as tampering.
+**Key-material isolation**: the network secret is not part of the published source. The material lives exclusively in `lib/core/crypto/network_secret_material.dart` — interleaved XOR pairs at permuted positions, reassembled at runtime by `NetworkSecret._reassemble`. The publishing pipeline substitutes that one file with an all-zero placeholder before anything reaches the public repository (`sync-to-git.sh` step [3b]), and two independent gates fail closed if a real table byte survives: tripwire [4h] on the staging tree, and check [6b] of `dry-run-cleonagit-push.sh` on the post-sync state. Both re-read the byte signatures from the real file at run time, so a future rotation is covered automatically and no secret is ever written into a script.
+
+This is deliberately **not** a cryptographic protection, and the distinction is load-bearing. The client must compute a valid HMAC, so the client must be able to derive the secret, so anyone holding an official binary can recover it. What the isolation buys is narrower and should be stated precisely: the secret is not obtainable by *reading the published source*. That moves the cost of a working fork from `git clone` to binary reverse engineering. Everything needed to audit the construction — derivation, HMAC, rotation logic — remains in the published `network_secret.dart`.
+
+**Status of secret V1 (as of 2026-08).** V1 was present in the published source repository before the isolation described above existed, and must therefore be treated as **publicly known** until rotation to V2 completes (§13.2). Statements elsewhere in this document that predicate a defence on outsiders not holding the secret do not describe reality for V1 — see the note in §13.1.7.
+
+**Identity derivation is pinned and does not follow the rotation.** `userId` and `deviceNodeId` are derived from `NetworkSecret.identitySecret` (`identitySecretVersion`, pinned to 1), never from the rotating `NetworkSecret.secret`. See §3.1 and §13.2 for the normative rule and the reasoning. Wire-level and rendezvous-tag uses continue to follow the rotation.
 
 **Threat-model addendum — confidentiality of routing metadata** (V3.0 BOOT-subset, §2.4.1a):
 
@@ -2401,7 +2436,9 @@ nostr_sk = HKDF-SHA-256(
 
 **Publish triggers**: same as §4.11.7 (startup, network change, 4h refresh, epoch boundary). No contact-add/remove trigger (infra is contact-independent).
 
-**Security**: anyone who knows the network secret can resolve all infra nodes. This is by design — the network secret is the Closed Network admission token (§4.10). An outsider sees opaque blobs under opaque tags on Nostr. The infra tag does not correlate with any contact-rendezvous tag (different salt, different IKM path).
+**Security**: anyone who knows the network secret can resolve all infra nodes. This is by design — the network secret is the Closed Network admission token (§4.10). An outsider sees opaque blobs under opaque tags on Nostr. The infra tag does not correlate with any contact-rendezvous tag (different salt, different IKM path). Note that for secret V1 this means *everyone*, since V1 is publicly known (§4.10 status note).
+
+**Behaviour across a secret rotation (normative).** The infra tag is secret-derived, so a rotation moves it. The rendezvous epoch does **not** absorb that: `epochString` is a 6-hour time window and the `[current, previous]` fallback below walks time, not secret versions. `InfraRendezvousManager` therefore accepts `previousNetworkSecret` and iterates publish and resolve over every active secret, so rotated and un-rotated nodes stay mutually discoverable for the whole transition window. The Nostr signing key (`deriveInfraNostrSecretKey`) is secret-derived as well and is re-derived per secret. Outside a transition `NetworkSecret.previousSecret` is null and behaviour is unchanged. Because external rendezvous is the only entry path for nodes behind CGNAT/DS-Lite, losing it across a rotation would strand exactly the peers with the worst reachability. See §13.2 and `test/smoke/smoke_rendezvous_secret_rotation.dart`.
 
 **Infrastructure daemon integration**: `cleona-daemon --bootstrap` initializes an `InfraRendezvousManager` at startup (no `RendezvousManager` — no user identity, no contacts). It publishes the daemon's externally reachable addresses under the infra tag. This is the only rendezvous path available to identity-less infrastructure nodes.
 
@@ -2489,13 +2526,15 @@ Only ONE of S&F or Erasure fires per message. The 10 KB threshold reflects the c
 
 **Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed in two phases:
 
-**Phase A — Direct delivery (parallel).** All parked entries are dispatched via Layer 1+2 concurrently (`Future.wait`), prioritized: oldest user messages first, system messages (CR, KEY_ROTATION) last. Each send registers an AckTracker entry with `hopCount ≥ 2` (minimum 8 s timeout) to cover relay/NAT RTTs.
+**Phase A — Direct delivery (parallel).** All parked entries are re-signed before dispatch: `timestampMs` is refreshed to `now` and the Outer-Device-Sig (Ed25519 + ML-DSA) is recomputed over the updated frame — the original `timestampMs` lies within the signature scope (§2.2) and the replay window (§2.4 step [3], 60 s) would reject stale timestamps. The re-signed entries are dispatched via Layer 1+2 concurrently (`Future.wait`), prioritized: oldest user messages first, system messages (CR, KEY_ROTATION) last. Each send registers an AckTracker entry with `hopCount ≥ 2` (minimum 8 s timeout) to cover relay/NAT RTTs. The serialized bytes stored in the outbox are updated to the re-signed version so that subsequent retries (L1-Retry via AckTracker) also carry a valid timestamp and signature.
 
 **Phase B — Offline placement (deferred).** Entries without DELIVERY_RECEIPT after Phase A are placed via Layer 3 (S&F or Erasure per §5.1 size rule). Phase B runs asynchronously.
 
 **System-message dedup.** Semantically idempotent message types — `CONTACT_REQUEST`, `CR_RESPONSE`, `KEY_ROTATION_BROADCAST` — use **latest-wins** dedup in the outbox: a new entry for the same `(recipientUserIdHex, messageType)` tuple replaces the previous entry of the same type for the same recipient.
 
 On L1+2 send success, the message status is set to `sent` (single checkmark) and the AckTracker is registered for proper receipt tracking — the outbox entry is retained until the actual `DELIVERY_RECEIPT` confirms delivery (V3.1.130+; prior: L1+2 success falsely set `delivered`). On L3 placement, the entry is cleared (`queuedOffline`); on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
+
+The status model above describes a **single** recipient. Whether the `sent → delivered` step may be *shown* at all is governed by the receiver's disclosure setting (§14.7.4); the transport-level handling of the receipt is unaffected by it. For group fan-outs the per-recipient legs must be aggregated — see §14.7.4 "Groups".
 
 **Contact liveness tracking.** `_contactLastAckedAt` stores the timestamp of the last proven end-to-end exchange per contact. This map is the authoritative input for AUTO-REPAIR (see below) and stale-contact warnings.
 
@@ -2616,7 +2655,7 @@ For messages > 10 KB (see §5.1 size rule), if the receiver is offline, the mess
 
 **ACK-verified placement (D-c fix, V3.1.120):** the sender counts `FRAGMENT_STORE_ACK`s per **distinct fragment index** (matched on `(messageId, fragmentIndex)` — no protocol change needed; the sender previously discarded ACKs). **Conditional ACK (V3.1.139 fix):** the replicator sends `FRAGMENT_STORE_ACK` only when the fragment was actually accepted — either freshly stored or an idempotent duplicate (same key AND same bytes). Budget-exceeded, quota-exceeded, or generation-conflict rejections produce **no ACK**; the sender's per-index completer times out after 8 s and the `ErasurePlacementCoordinator` retries with a fresh peer in the next wave. Pre-fix: the ACK was unconditional, so the coordinator could count K=7 confirmed indices even when replicators had silently rejected the fragments (dedup collision, budget exceeded) — the placement reported success while fewer than K fragments were actually stored. Wave 1 is the classic 10-fragments-×-3-replica spread; the sender then waits up to 8 s (edge-driven completers, no polling). Placement succeeds only when **≥K=7 distinct indices** are confirmed by at least one replicator each; 7–9 confirmed logs an "erasure placement fragile" warning. Unconfirmed indices are re-sent in up to 2 additional waves (+1 copy per fragment per wave, respecting the 5-copies-per-fragment bound) to fresh replicators from a deeper closest-peer pool (30, confirmed-first per the §5.5 Phase-1 ranking rationale). Below K after the wave budget, placement counts as **failed** and the message is parked in the outbox for re-attempt on the next edge. Pre-fix the placement was fire-and-forget and "success" meant "dispatched" (2026-07-03 field evidence: 222 FRAGMENT_STOREs sent, 0 received by the addressed replicator, unnoticed — the message was unreconstructable while the sender reported `queuedOffline`). The same ACK now also cancels the replicator-side proactive-push retry backoffs (previously a dead code path — every replicator burned all 3 push attempts even after the owner had acknowledged).
 
-**Replicator-side proactive push (V3.1.138):** When a replicator stores a fragment via `FRAGMENT_STORE`, it resolves the fragment's `mailboxId` to the owner by checking both primary and fallback mailbox salts (§5.6), then immediately attempts to forward the fragment to the owner via `FRAGMENT_PUSH` (an `InfrastructureFrame` carrying the fragment payload). The push uses a 3-attempt budget with exponential backoff (500 ms, 2 s, 4 s). If the owner is currently unreachable, the push budget is consumed without delivery. **Re-arm on owner reappearance (V3.1.138 fix):** when the replicator subsequently confirms the mailbox owner as a live peer (`onPeerConfirmed` edge — direct PONG, relay-PONG, or any verified inbound from the owner's DeviceID), the push budget is reset and a new push attempt is triggered. This closes a gap where fragments placed while the owner was offline were never delivered if the owner came online after the initial push budget was exhausted but before the next startup poll. The re-arm fires at most once per 60 s per mailbox to prevent push storms during rapid peer-flap. The `FRAGMENT_STORE_ACK` from the placement sender still cancels remaining push attempts for that fragment (no double-delivery).
+**Replicator-side proactive push (V3.1.138):** When a replicator stores a fragment via `FRAGMENT_STORE`, it resolves the fragment's `mailboxId` to the owner by checking both primary and fallback mailbox salts (§5.6), then immediately attempts to forward the fragment to the owner via `FRAGMENT_PUSH` (an `InfrastructureFrame` carrying the fragment payload). The push uses a 3-attempt budget with exponential backoff (500 ms, 2 s, 4 s). If the owner is currently unreachable, the push budget is consumed without delivery. **Re-arm on owner reappearance (V3.1.138 fix):** when the replicator subsequently confirms the mailbox owner as a live peer (`onPeerConfirmed` edge — direct PONG, relay-PONG, or any verified inbound from the owner's DeviceID), the push budget is reset and a new push attempt is triggered. This closes a gap where fragments placed while the owner was offline were never delivered if the owner came online after the initial push budget was exhausted but before the next startup poll. The re-arm fires at most once per 60 s **node-wide** (a single timestamp, not one per mailbox) to prevent push storms during rapid peer-flap. The gate sits inside the re-arm function itself, so every trigger inherits it — a trigger added outside it would bypass the limit, which is how the KEM-healing path once did. The `FRAGMENT_STORE_ACK` from the placement sender still cancels remaining push attempts for that fragment (no double-delivery). The `FRAGMENT_PUSH` payload must carry all fields the receiver needs for reassembly: `mailboxId`, `messageId`, `fragmentIndex`, `totalFragments`, `fragmentData`, `requiredFragments` (= K), and `originalSize`. Omitting `requiredFragments` or `originalSize` causes the receiver to store the fragment with proto3-default 0, which blocks `_tryReassemble` — and dedup prevents a later correct copy from overwriting the defective metadata.
 
 ### 5.5 Store-and-Forward on Network Peers
 
@@ -2641,7 +2680,7 @@ No contact check on the recipient. The HMAC (criterion 1) ensures only official 
 
 **Placement is ACK-verified.** A `PEER_STORE` is not fire-and-forget: the storage peer answers every store with `PEER_STORE_ACK{accepted}` — both on rate-limit rejection and after storing — and the sender waits up to 8 s per store. Placement counts as successful when at least one peer ACKs; on zero ACKs the message is parked in the one-shot outbox (§5.1). Because delivery of the store itself is what the ACK measures, `PEER_STORE` and `FRAGMENT_STORE` are exempt from the fire-and-forget cascade cut-off (§4.4) and may use the neighbour relay fallback — the tier that carries CGNAT and mobile senders, which is precisely the situation in which the offline path is reached at all. They remain excluded from the §5.10.4 unacked-packet counter, which is a separate concern: counting three stores per message there would trigger premature mesh-refresh cycles. The sender must also evaluate the send result rather than only the ACK timeout — a store that never left the machine (no route, or no Device-KEM record for the storage peer, §2.4.1) is otherwise indistinguishable from a lost ACK and costs a full 8 s before the next wave. The missing-record case is recoverable rather than terminal: `want_kem_record` on the `DHT_PING` (§5.10.2) fetches the record from the storage peer itself within one round-trip, so a peer reachable but not yet KEM-resolvable becomes usable without falling back to a plaintext path — the shortcut that §6.2 shows to be unsafe for guardian shares.
 
-**Receiver pull.** On coming online: `PEER_RETRIEVE` to all confirmed peers. Each peer checks its local S&F store and delivers held messages for the requesting user. Dedup via `messageId`.
+**Receiver pull.** On coming online: `PEER_RETRIEVE` to all confirmed peers. Each peer checks its local S&F store and delivers held messages for the requesting user. Dedup via `messageId`. The storage peer marks a message as retrieved only after the `PEER_RETRIEVE_RESPONSE` was successfully sent — a send that fails (no route, no Device-KEM record) leaves the message in the store for the next retrieve or push attempt.
 
 **Storage limits.** Per recipient: max 30 messages on a storage peer. On overflow: oldest-first eviction. Global per storage peer: max 3000 messages / 100 MB total. New stores are rejected when limits are reached.
 
@@ -2660,24 +2699,41 @@ S&F (§5.5) stores on arbitrary network peers and requires no contact relationsh
 | `MTV3_FIRST_CR_DELIVER` | 224 | SeedPeer → Recipient | Push stored CRs on recipient connect |
 
 ```protobuf
-message FirstCrStore {
-  bytes recipient_device_id = 1;  // 32B: delivery target
-  bytes encrypted_payload = 2;    // opaque KEM-encrypted First-CR (InfrastructureFrame bytes)
-  int64 stored_at_ms = 3;
-  bytes sender_device_id = 4;     // 32B: for dedup and rate-limiting
+message FirstCrStoreV3 {
+  bytes  recipient_user_id   = 1;  // 32B: target userId (echoed in the ACK)
+  bytes  recipient_device_id = 2;  // 32B: delivery target
+  bytes  encrypted_cr_blob   = 3;  // opaque KEM-encrypted First-CR (InfrastructureFrame bytes)
+  bytes  sender_device_id    = 4;  // 32B: informational only — see note below
+  uint64 timestamp_ms        = 5;
+  uint64 ttl_ms              = 6;  // capped at 7 days (604800000)
 }
 
-message FirstCrDeliver {
-  repeated bytes encrypted_payloads = 1;  // stored CRs, each an opaque InfrastructureFrame blob
+message FirstCrStoreAckV3 {
+  bool   accepted          = 1;
+  string reject_reason     = 2;  // see reject semantics below
+  bytes  recipient_user_id = 3;  // echo from FirstCrStoreV3 (V3.2 correlation)
+}
+
+message FirstCrDeliverV3 {
+  bytes  encrypted_cr_blob = 1;  // one stored CR per DELIVER
+  bytes  sender_device_id  = 2;  // original sender
+  uint64 stored_at_ms      = 3;  // when the SeedPeer received the STORE
 }
 ```
+
+> **`sender_device_id` is not an identity claim** (S299). The SeedPeer keys
+> dedup and the criterion-4 rate limit off the **authenticated frame sender**
+> (`packet.sender_device_id`), never off this payload field — the payload is
+> attacker-chosen, and keying either mechanism to it lets a participant rotate
+> the key and defeat both. For legitimate stores the two are identical: the
+> frame sender is the end-to-end originator, not the relay hop.
 
 **Flow**:
 
 1. Scanner (A) builds First-CR (KEM-encrypted under B's Device-KEM-PK, see §8.1.1 rev3 step 6)
 2. A sends First-CR to recipient (B) via normal routing cascade (§4.4 sendToDevice)
-3. If no `DELIVERY_RECEIPT` after 15 seconds: A sends `FIRST_CR_STORE` to each reachable SeedPeer from the ContactSeed. `FIRST_CR_STORE` is sent as a **direct infrastructure message** (`sendInfraTo`) to **every known address** of each seed peer (IPv4 + IPv6, private + public — fire-and-forget to all, first-ACK-wins) — **not** via the DV relay cascade (`sendToDevice`). This multi-address send is critical for DS-Lite/CGNAT scanners: the seed peer's private IPv4 is unreachable from mobile data, but its global IPv6 is. This is architecturally critical: the D3 admission gate (§13.1.2) applies to relay candidacy, but a direct infra send to a known address bypasses the relay path entirely. The scanner knows the seed peer's addresses from the ContactSeed; it does not need to relay through the seed peer to reach it.
-4. SeedPeer validates (see acceptance criteria below) and stores; responds with `FIRST_CR_STORE_ACK`. Receipt of ≥1 ACK transitions the CR to `storedForDelivery` on the scanner — the canonical success signal for asynchronous ContactSeeds (§8.1.1 CR Bootstrap Delivery Lifecycle).
+3. If no `DELIVERY_RECEIPT` after 15 seconds: A sends `FIRST_CR_STORE` to each reachable SeedPeer from the ContactSeed. `FIRST_CR_STORE` is sent as a **direct infrastructure message** (`sendInfraDirect` — note: the similarly named `sendInfraTo` is itself cascade-based, so the direct primitive is the one meant here) to **every known address** of each seed peer (IPv4 + IPv6, private + public — fire-and-forget to all, first-ACK-wins) — **not** via the DV relay cascade (`sendToDevice`). The seed peers are those imported from the scanned ContactSeed (routing-table flag `isProtectedSeed`), **not** the current DV-neighbour set: a ContactSeed seed that is no longer a DV neighbour must still be used, and protected seeds from unrelated older ContactSeeds must not. The DV cascade remains a **documented fallback** for the one case direct cannot cover — a seed peer that is itself behind an unpinholed NAT — and is used only after the direct fanout failed on every known address of that seed. This multi-address send is critical for DS-Lite/CGNAT scanners: the seed peer's private IPv4 is unreachable from mobile data, but its global IPv6 is. This is architecturally critical: the D3 admission gate (§13.1.2) applies to relay candidacy, but a direct infra send to a known address bypasses the relay path entirely. The scanner knows the seed peer's addresses from the ContactSeed; it does not need to relay through the seed peer to reach it.
+4. SeedPeer validates (see acceptance criteria below) and stores; responds with `FIRST_CR_STORE_ACK` echoing `recipient_user_id` from the original `FIRST_CR_STORE`. Receipt of ≥1 ACK transitions the CR for the matching recipient (O(1) lookup in the contact store by userId) to `storedForDelivery` on the scanner — the canonical success signal for asynchronous ContactSeeds (§8.1.1 CR Bootstrap Delivery Lifecycle). Without the echo field (old seed peer), the scanner does not guess — the CR stays `pending_outgoing` and is re-deposited on the next retry cycle (seed-side dedup prevents storage overflow).
 5. When B sends any firstParty packet to the SeedPeer (PONG, DV-Update, DHT-Request — **not** relayed packets): SeedPeer checks mailbox for B's `deviceId` → pushes `FIRST_CR_DELIVER`
 6. B receives, decrypts with Device-KEM-SK, processes as normal First-CR (§8.1.1 step 8)
 
@@ -2687,7 +2743,11 @@ message FirstCrDeliver {
 2. `recipient_device_id` is in the SeedPeer's routing table — the SeedPeer "knows" the recipient. This is guaranteed by construction: the ContactSeed-generator selected this SeedPeer from its own routing table (freshness < 30 min), so the SeedPeer has bidirectional contact with the generator's device.
 3. Budget: max 10 CRs per recipient, max 1 MB total mailbox per node
 4. Rate limit: max 5 `FIRST_CR_STORE` per sender per hour
-5. No duplicate: `SHA-256(encrypted_payload)` dedup
+5. No duplicate: dedup on the `(authenticated frame sender, recipient_device_id)` pair — a re-deposit **replaces** its predecessor rather than adding to the bucket.
+
+**Enforcement order matters** (S299). Dedup runs **before** the budget check. A re-deposit from a known sender is count-neutral, so a full mailbox must not reject it — otherwise the "seed-side dedup prevents storage overflow" guarantee in step 4 does not hold precisely when it is needed. Budgets are then enforced by **oldest-first eviction, not by rejection**: a rejecting mailbox stays blocked for the full 7-day TTL and takes every other recipient down with it, while an evicting one recovers on the sender's next retry cycle. Criterion 2 is what makes criterion 3 effective — without it an attacker invents N recipient IDs and exhausts the node budget through N empty buckets.
+
+**Reject semantics** (S299 — previously unspecified). When a criterion fails the SeedPeer answers `FIRST_CR_STORE_ACK { accepted: false, reject_reason }` rather than staying silent, so the condition is diagnosable in the sender's log. Defined reasons: `unknown_recipient` (criterion 2), `rate_limited` (criterion 4), `quota_exceeded` (criterion 3 — reachable only if eviction cannot free space). A rejection is **not** a delivery failure the sender must repair: the CR stays `pending_outgoing` and is re-deposited on the next retry cycle (step 4), which is the same handling as an ACK that never arrives. The sender therefore treats "rejected" and "no answer" identically by design; the reason exists for diagnosis, not for control flow.
 
 **Storage**:
 
@@ -2728,7 +2788,7 @@ The receiver polls **both** (primary + fallback) on every mailbox poll, so no se
 - The receiver then fetches and decrypts the full message via S&F pull or fragment reassembly
 
 **Polling schedule** (event-driven, not periodic):
-- At daemon startup: aggressive polling, 10× every 3s after discovery-complete (~30s total). Each round sends both `FRAGMENT_RETRIEVE` (erasure) and `PEER_RETRIEVE` (S&F) to all confirmed peers.
+- At daemon startup: two sweeps after discovery-complete — immediate and 15 s later (catches peers that joined the routing table after Kademlia bootstrap). Late-confirmed peers are polled individually via `onPeerNewlyConfirmed` (dedup via `_postDiscoveryPolledPeers`). Each sweep sends both `FRAGMENT_RETRIEVE` (erasure) and `PEER_RETRIEVE` (S&F) to all confirmed peers not yet polled.
 - After restore broadcast: aggressive polling, 10× every 3s (same scope: fragments + S&F)
 - On `onNetworkChanged`: one-shot re-poll (edge-triggered, no timer)
 - Steady state: **push-first** — relay nodes forward fragments immediately (< 1s); **no timer-based polling** (Arbeitsregel #5)
@@ -2867,9 +2927,19 @@ message DhtPing {
 
 **Hot-path receiver behaviour** (§5.10.2 + §5.12 hot path): when `_handleDhtPingInfra` sees `pkRecoveryHint == true`, it sends the regular `DHT_PONG` and **additionally** a `PEER_LIST_PUSH` (Self-Broadcast carrying its own PeerInfo with current PKs) to the sender. The sender's `_handlePeerListPushInfra` accepts the new PK under the §5.10.5 carve-out, which clears `pkStale` and lifts reputation suppression. **Healing in 1 RTT.**
 
-**First-contact KEM bootstrap** (`want_kem_record`). A peer known by address alone cannot send a single KEM-path message: DeviceKemRecord distribution is otherwise DHT-only (§3.5b), and for that peer the DHT is not yet reachable — every DHT_STORE, FRAGMENT_STORE, PEER_STORE and RELAY_* falls into the sender-side drop for a missing PK. To break that, `DhtPing` carries `want_kem_record`; the responder then attaches its signed `DeviceKemRecord` to the `DHT_PONG`. The attached record is verified exactly like a DHT-fetched one (§4.3: Ed25519 over the record against the claimed user master key) and lands in the same replica cache — no second code path and no second trust rule.
+**KEM-record acquisition** (`want_kem_record`). A peer known by address alone cannot send a single KEM-path message: DeviceKemRecord distribution is otherwise DHT-only (§3.5b), and for that peer the DHT is not yet reachable — every DHT_STORE, FRAGMENT_STORE, PEER_STORE and RELAY_* falls into the sender-side drop for a missing PK. To break that, `DhtPing` carries `want_kem_record`; the responder then attaches its signed `DeviceKemRecord` to the `DHT_PONG`. The attached record is verified exactly like a DHT-fetched one (§4.3: Ed25519 over the record against the claimed user master key) and lands in the same replica cache — no second code path and no second trust rule.
 
-The attachment is gated by the flag alone, and that gate is about traffic, not about security: the initiator sets `want_kem_record` **only** when its own `DeviceKemRecord` lookup for that device just missed. A peer that already holds the record never asks. No second condition on the transport is needed — `DHT_PING` is in the BOOT allow-list, so it is *always* built as a plaintext InfrastructureFrame; a KEM-path ping does not exist, and a check for one would be a branch that can never be false.
+The attachment is gated by the flag alone, and that gate is about traffic, not about security: the initiator sets `want_kem_record` **only** when its own `DeviceKemRecord` lookup for that device just missed. A peer that already holds the record never asks.
+
+**Two triggers, one mechanism** (S299). The flag is set (a) when the initiator is about to ping a peer anyway and holds no record for it — the first-contact case above — and (b) **when a send just failed for exactly that reason.** `_buildInfraPacket` drops every KEM-path message to a device whose record is missing; that drop is the most precise signal in the system that the record is needed, and until S299 it was the only such signal that led nowhere. Measured on Node2 over a single day: 1241 such drops across 45 devices, of which only 10 ever received an acquisition ping — the demand signal and the acquisition path were simply not connected. On the drop, the sender emits one BOOT-path `DHT_PING` carrying `want_kem_record` to a known address of the target, if it has one.
+
+**The dropped packet stays dropped.** Trigger (b) restores the *ability* to send to that device; it does not resurrect the packet that failed, and it introduces no queue and no retry chain. Whoever owned that message owns the retry — for S&F that is the next push interval (§5.5), whose budget is charged only on a successful transport and therefore survives the drop. **Re-push on record arrival:** when a DeviceKemRecord is accepted via any acquisition path (PONG, DHT fetch, IDENTITY_KEM_RESPONSE), the service layer re-triggers `_pushStoredMessagesTo` for that device — closing the window between KEM-healing and the next edge-driven push trigger.
+
+**Throttle: one probe per target device per 60 s**, counted per device, not per message type and not per packet. A fan-out to ten replicators drops ten times in one burst; without a per-device gate that burst becomes a probe burst, which is the amplification this section refuses elsewhere. The window is independent of the Stage-2 stale-PK cooldown above — a missing record and a rotated key are unrelated conditions and must not mask each other.
+
+**No address, no probe.** With no usable address for the target the drop stays silent and acquisition remains the DHT's job (§4.3). The probe repairs a known gap; it is not a discovery mechanism.
+
+**Amplification:** the probe is a small `DHT_PING`, the answer ≈1.4 KB. The initiator asked for it, the response goes only to the device it addressed, and the per-device throttle bounds it. There is no reflection vector — the responder answers the source of the ping, never a third party. No second condition on the transport is needed — `DHT_PING` is in the BOOT allow-list, so it is *always* built as a plaintext InfrastructureFrame; a KEM-path ping does not exist, and a check for one would be a branch that can never be false.
 
 The record is ≈1.4 KB (1184 B ML-KEM-768 PK dominating), which takes the PONG past the 1200-byte threshold and onto the app-level fragmentation path — in the very first exchange with a peer, before any route exists, where the Fragment-NACK retry is the only backstop. Attaching it unconditionally would also give every network member a ~4-5x amplification lever against any responder, and would hit the **bootstrap node hardest**, since answering first contacts is essentially all it does. Making it opt-in confines that cost to the exchange that actually buys something. The flag is of course forgeable — that is not what it is for; an attacker who sets it pays one authenticated request per kilobyte instead of getting it for free.
 
@@ -3167,7 +3237,7 @@ Device keys are **not** derived from the recovery phrase — they are generated 
 
 **Pairing over NFC** (alternative): identical delegation flow, but the initial contact between devices is conveyed via NFC pairing tap instead of QR.
 
-**Pairing from Settings** (soft migration, §7.1.3): existing twin-devices (legacy seed-on-every-device model) can initiate pairing from Settings → Devices → "Request Pairing". The Primary approves, the device receives delegation keys and transitions to `isLinkedDevice=true` — the seed remains on disk but is no longer used for signing.
+**Pairing from Settings** (§7.1.3): a second device initiates pairing from Settings → Devices → "Request Pairing". The Primary approves, the device receives delegation keys and transitions to `isLinkedDevice=true` — the seed remains on disk but is no longer used for signing.
 
 **Twin-Discovery**: after pairing, devices automatically discover each other via the 2D-DHT (each device publishes its own liveness; other devices see liveness records bearing the same UserID).
 
@@ -3237,17 +3307,17 @@ The signature is over the same `ApplicationFrameV3` fields as before — only th
 
 **Auth-Manifest distribution**: the `DeviceDelegationCert` is embedded in Auth-Manifest field 11 (repeated). The IdentityPublisher adds it on approval; resolvers extract it in the D1 cascade. Contacts that have resolved the sender's Auth-Manifest use the embedded certs to populate `lookupDelegatedKeys`.
 
-#### 7.1.3 Soft Migration (Legacy Twin → Linked Device)
+#### 7.1.3 Pairing a Second Device
 
-Existing twin-devices (seed-on-every-device, pre-LD model) can migrate to the delegation model without re-pairing from scratch:
+A second device receives the identity through the 24-word phrase and then requests delegation keys from the Primary:
 
-1. On the legacy twin: Settings → Devices → "Request Pairing" sends `MTV3_DEVICE_PAIR_REQUEST` to own userId
+1. On the second device: Settings → Devices → "Request Pairing" sends `MTV3_DEVICE_PAIR_REQUEST` to own userId
 2. The Primary device (= the device the user designates as authoritative, typically the device that originally generated the seed) receives the request and shows the approval dialog
 3. On approval, the Primary derives delegation keys (§7.1.1) and sends `MTV3_DEVICE_PAIR_APPROVE`
-4. The twin receives the delegation, persists it to `linked_device_keys.json.enc`, and sets `identity.linkedDeviceKeys` — `isLinkedDevice` becomes `true`
+4. The second device receives the delegation, persists it to `linked_device_keys.json.enc`, and sets `identity.linkedDeviceKeys` — `isLinkedDevice` becomes `true`
 5. The master seed remains on disk (not wiped) but is no longer used for signing — all Inner-Sigs switch to the delegated keys
 
-**Non-destructive**: the seed is kept as a local backup. The user can explicitly wipe it later via a future "Destroy local seed" action (not yet implemented). The migration is one-way: once delegated, the device cannot self-promote back to Primary without the seed.
+**Non-destructive**: the seed is kept as a local backup. The user can explicitly wipe it later via a future "Destroy local seed" action (not yet implemented). Delegation is one-way: once delegated, the device cannot self-promote back to Primary without the seed.
 
 **IPC**: `send_device_pair_request` (IPC command) → `CleonaService.sendDevicePairRequest()`. On Android (in-process): `service.sendDevicePairRequest()` directly. Status: `get_linked_device_status` returns `{isLinkedDevice, delegationCaps, expiresAtMs, deviceIdHex}`.
 
@@ -3266,7 +3336,7 @@ When the Primary device performs an **emergency key rotation** (§7.4b variant b
 **Receiver (Linked Device):** on receiving `delegationRotation=true`:
 1. Checks `targetDeviceId` matches own Device-Node-ID (device-targeting; other devices silently ignore).
 2. Verifies the delegation cert against the **current** (pre-rotation) User-PKs.
-3. Appends a rotation chain link (old Ed25519 SK signs `newEd25519Pk || newMlDsaPk`) — the linked device still holds the seed-derived Ed25519-SK for this purpose.
+3. Appends a rotation chain link (old Ed25519 SK signs `newEd25519Pk || newMlDsaPk`) — **only while the device still holds a User-SK that matches its current User-PK.** A linked device holds the seed-derived Ed25519-SK until the first emergency rotation; from the second delegation rotation onward it does not, and the link is stored **unsigned** rather than signed with a stale key. A chain with a broken link is judged `forged` by resolvers, so a signature that verifies against nothing is worse than none. If a linked device's chain is ever to be published, the Primary must supply the signed link in the LD-8 message — this is not the case today and remains an open gap.
 4. Updates: User-PKs, User-KEM-SK, delegation keys, keeps old KEM-SK as `previous` for 7-day transit-message grace.
 5. Persists new `LinkedDeviceKeys` to `linked_device_keys.json.enc`.
 6. Triggers Auth-Manifest republish + PeerInfo broadcast.
@@ -3400,7 +3470,10 @@ Both flavors are **hard cuts** in user-perception terms — no Twin-Sync of old 
 
 1. **AuthManifest extension (field 12):** every Auth-Manifest now carries `repeated AuthorizedDeviceSigningKeys device_sig_keys` — the Device-Sig Ed25519 + ML-DSA pubkeys for each authorized device (Primary + all Linked). Contacts cache these on resolution.
 
-2. **Quorum formula:** `max(2, ceil(N/2))` where N = total authorized devices. N=1 → no co-auth (single-device identity, same threat model as before). N=2 → both must sign. N=3 → 2. This is the minimum number of `RotationApprovalToken` entries required in a `KeyRotationBroadcast`.
+2. **Quorum formula, per occasion.** For **key rotation**: `max(2, ceil(N/2))` where N = total authorized devices. N=1 → no co-auth (single-device identity, same threat model as before). N=2 → both must sign. N=3 → 2. This is the minimum number of `RotationApprovalToken` entries required in a `KeyRotationBroadcast`. Loosening this would let a stolen Primary of a two-device identity rotate alone.
+   For a **device-set change**: the quorum counts the **remaining** devices M, not the pre-change count — `M=0 → 0`, `M=1 → 1`, `M≥2 → max(2, ceil(M/2))`. Removing one of two devices leaves one, so a quorum of 2 over the pre-change count was unreachable by construction and the proof could never be produced.
+   The count is over **distinct `deviceNodeId`s**, not over tokens: two tokens from one device are one consent. Counting tokens allowed a single device to satisfy the quorum by submitting its own token twice.
+   The occasion is carried in `RotationApprovalRequestPayload.approval_kind`; without it the approving device would describe every request as a key rotation and consent would be obtained under a false description.
 
 3. **Rotation flow (sender-side):**
    - Primary generates new keys (unchanged from §7.4b steps 1-2).
@@ -3525,7 +3598,9 @@ The CR/CRR path is thereby consistent with RESTORE_BROADCAST (§6.3, H-2) and Em
 
 **Cross-reference §8.3:** Key-Change-Detection (§8.3) is the **only** permitted reaction path to an identity-key change of a known contact and MUST be traversed by **all** overwrite paths (RESTORE, KEY_ROTATION, CONTACT_REQUEST, CONTACT_REQUEST_RESPONSE) whenever `ed25519Pk` changes.
 
-**CR-from-accepted-contact suppression (V3.1.130+):** if a CR arrives for a contact that is already `accepted` but the outer Device-Sig is unverified (`skippedBootstrap`), the CR is silently dropped. An `accepted` contact is **never** downgraded to `pending` — neither by the F4-Gate path nor by the Restlücke-A (missing stored key) path. The `accepted→pending` transition is architecturally forbidden; all four sub-paths within the `accepted`-contact branch now terminate with `return`. A legitimate re-install from the same sender will be handled by the next direct-path CR (verified outer-sig), which triggers Same-Seed-Reinstall or §8.3 Key-Change-Detection as appropriate.
+**CR-from-accepted-contact suppression (V3.1.130+, amended V3.2):** if a CR arrives for a contact that is already `accepted` but the outer Device-Sig is unverified (`skippedBootstrap`), the CR is silently dropped and no DELIVERY_RECEIPT is emitted for the drop (the generic post-handler auto-receipt is suppressed by handler return value). An `accepted` contact is **never** downgraded to `pending` — neither by the F4-Gate path nor by the Restlücke-A (missing stored key) path. The `accepted→pending` transition is architecturally forbidden; all four sub-paths within the `accepted`-contact branch now terminate with `return`. **Exception — Same-Keys shortcut (V3.2):** if the CR's User-Keys are identical to the stored keys (verified via `constantTimeEquals` against the contact's trust anchor), the CR is not dropped — the sender demonstrably holds the same identity and the overwrite is trust-neutral (no key change, no §8.3 trigger). This covers the common Same-Seed-Reinstall case arriving via relay/S&F (where `skippedBootstrap` is structurally inevitable). A legitimate re-install from a different sender (changed keys) will be handled by the next direct-path CR (verified outer-sig), which triggers §8.3 Key-Change-Detection as appropriate.
+
+**Rationale (V3.2 amendment):** The prior design assumed "the next direct-path CR" as recovery path, but relay- and S&F-delivered CRs carry `skippedBootstrap` structurally (no Device-Sig-PK available without prior direct contact). Emitting a DELIVERY_RECEIPT for a dropped CR caused the sender's retry loop to sleep 24h (`lastAckedAt` check in `_retryPendingContactRequests`), creating a deadlock: every retry via the same non-direct path is dropped again and re-receipted. The receipt suppression breaks the deadlock; the Same-Keys shortcut restores connectivity for the dominant case (reinstall from seed phrase).
 
 **Mixed-Net:** Receiver-side hardening — an RC-1 receiver protects itself regardless of the sender build. Legacy builds still overwrite silently on receive; enforcement via `minRequiredVersion` (§19.5.7 Phase-2 pattern), as with SR-2.
 
@@ -3648,8 +3723,8 @@ Peers are sorted by **stability tier (§4.9.2) first, then by public-address ava
 After `addPeersFromContactSeed` (§8.1.1), the scanner waits until at least one seed peer reaches `idPowVerified=true` (triggered by the §5.11 new-neighbor Self-Broadcast) or a timeout of 5 seconds:
 
 1. **Layer 1+2 (target online):** `sendToDevice` — direct addresses from ContactSeed + relay via admitted seed peers (§13.1.2 protected-seed fallback if admission pending).
-2. **If no `DELIVERY_RECEIPT` within 15 s (target offline):** Layer 3 — `FIRST_CR_STORE` to each reachable seed peer (§5.5b). `FIRST_CR_STORE` is a **direct infrastructure send** (`sendInfraTo`) to the seed peer's known address — **not** via the DV relay cascade (`sendToDevice`) — and therefore not subject to the D3 relay gate (§13.1.2). The scanner knows the seed peer's addresses from the ContactSeed.
-3. **`FIRST_CR_STORE_ACK` from ≥1 seed peer** → message status `storedForDelivery`. The CR is safely parked. Sender shows "zugestellt (gespeichert)" / "delivered (stored)".
+2. **If no `DELIVERY_RECEIPT` within 15 s (target offline):** Layer 3 — `FIRST_CR_STORE` to each reachable seed peer (§5.5b). `FIRST_CR_STORE` is a **direct infrastructure send** (`sendInfraDirect`) to the seed peer's known address — **not** via the DV relay cascade (`sendToDevice`) — and therefore not subject to the D3 relay gate (§13.1.2). The scanner knows the seed peer's addresses from the ContactSeed.
+3. **`FIRST_CR_STORE_ACK` from ≥1 seed peer** → message status `storedForDelivery`. The CR is safely parked. Sender shows "zugestellt (gespeichert)" / "delivered (stored)" — a **contact in this state must remain visible in the contact list** (own section, i18n `contact_stored_header` / `contact_stored_status`) and must stay resolvable via `getContact`. Before S299 the status had no UI getter and no IPC field, so a successful store made the contact disappear entirely: success was indistinguishable from losing the request. A `storedForDelivery` contact is deliberately retry-still — the seed peer has taken over — which is exactly why it needs its own visible state rather than falling back into `pending_outgoing`.
 4. **`DELIVERY_RECEIPT` from target** → message status `delivered`. The target has the CR.
 5. **Neither within retry budget** → status stays `pending_outgoing`, retry timer continues (exponential backoff 10 s → 600 s cap for seed-based CRs, 1200 s cap for seedless CRs that rely on DHT re-resolve).
 
@@ -4673,11 +4748,16 @@ The last two are the part that matters for large frames. `sendBulkViaTLS` establ
 
 ### 10.4 Native Voice Session (OS voice processing, per platform)
 
-> **Implementation status — 2026-07-30: design approved, code NOT written.**
-> `native/cleona_audio/` and `lib/core/calls/audio_engine*.dart` still contain the
-> superseded stack (miniaudio + speexdsp) documented under *Superseded stack* below.
-> Nothing in this section is deployed. The staging plan is at the end of §10.4.
-> This marker must be removed stage by stage, never wholesale.
+> **Implementation status — 2026-07-31: stages 0-6 implemented, stage 7 open.**
+> The superseded stack is gone: `native/cleona_audio/` and
+> `lib/core/calls/audio_engine*.dart` were deleted in work package V3.1. All five
+> platform voice backends exist behind the `cleona_voice` ABI, Opus is in place,
+> and the group mixer runs on the new ABI (stages 0-6 of the staging plan at the
+> end of §10.4).
+> **Stage 7 — CallKit / self-managed `ConnectionService` — is NOT deployed.**
+> Until it is, calls do not integrate with the system telephony UI.
+> This marker is removed stage by stage, never wholesale; it may only be struck
+> once stage 7 is verified on real devices.
 
 Cleona performs **no audio DSP of its own**. Echo cancellation, noise suppression
 and automatic gain control come from the operating system's voice-communication
@@ -5195,7 +5275,9 @@ All frames are encrypted with the call key and distributed via the Overlay Multi
 
 ### 10.6 Native Video Stack
 
-> **Implementation status — 2026-07-30: design approved for the direction, code NOT written.** `lib/core/calls/video_engine.dart`, `vpx_ffi.dart` and `native/cleona_vpx/` still contain the superseded stack. The staging plan is at the end of this section, and stage 1 is **not a video change at all** — see *Prerequisite*.
+> **Implementation status — 2026-07-31: implemented across all five backends; two gaps named below.** `vpx_ffi.dart` and `native/cleona_vpx/` were deleted in work package V3.1; `lib/core/calls/video_engine.dart` now drives the `cleona_video` ABI and no pixels cross it (I10). All five backends implement that ABI including **Erratum 7** (decode-only sessions, so a device without a camera can still see the others). Linux, Windows and Android are verified against the conformance harness on real hardware; **Apple is built and linked but its conformance run has not been executed on a device with a camera**, so Erratum 7 is unproven there.
+> **Not implemented: the group-video grid.** `onGroupVideoTexture` has no UI consumer — remote streams are decoded and then discarded. Group video therefore has no picture regardless of backend state.
+> The *Prerequisite* below (the dead TLS escalation on Android) is unchanged and still open. This marker is removed stage by stage, never wholesale.
 
 Video follows the same principle as §10.4: the platform captures, the platform's hardware codec encodes and decodes, and Cleona handles only the encrypted bitstream. Cleona performs **no pixel processing**.
 
@@ -5214,7 +5296,7 @@ A VP8 keyframe at 640×480 falls squarely in that size class, and `processReceiv
 
 | Platform | Capture | Encode / Decode |
 |---|---|---|
-| Android | CameraX (already real, `CameraXHandler.kt`) | MediaCodec |
+| Android | Camera2 (`VideoSession.kt`) | MediaCodec |
 | iOS | AVCaptureSession | VideoToolbox |
 | macOS | AVCaptureSession | VideoToolbox |
 | Windows | Media Foundation `IMFSourceReader` | Media Foundation Transform (hardware MFT) |
@@ -6175,7 +6257,7 @@ After initialization completes, the node performs a single poll to collect misse
 2. Simultaneously, send `PEER_RETRIEVE` to all recently-confirmed peers to collect Store-and-Forward whole messages (§5.5).
 3. Process and deduplicate all received messages (§5.7).
 
-After this initial poll, the node switches to pure push-based operation. No further polling occurs during normal operation (except after network changes — see §12.3 — or Restore Broadcasts — see §6.3). **Complementary push-side:** when a confirmed peer comes online (detected via `onPeerConfirmed` — PONG, relay traffic, or verified inbound), the local node checks whether it holds stored fragments or S&F messages for that peer and pushes them proactively (§5.4 replicator-side proactive push, §5.5 S&F). This ensures delivery even when the owner's startup poll completed before the replicator confirmed the owner as a peer. **Push-on-Store (V3.1.148):** additionally, when a `PEER_STORE` is accepted (`handleIncomingPeerStoreInfra`) and the intended recipient is *already* a confirmed peer at that moment, the store-host pushes immediately via `PEER_RETRIEVE_RESPONSE` — no waiting for the next `onPeerConfirmed` edge or the recipient's retrieve-poll. This closes a timing gap where a store placed while the recipient was online (but hadn't polled yet, or had already polled before the store arrived) sat idle until the recipient's next network-change cycle.
+After this initial poll, the node switches to pure push-based operation. No further polling occurs during normal operation (except after network changes — see §12.3 — or Restore Broadcasts — see §6.3). **Complementary push-side:** when a confirmed peer comes online (detected via `onPeerConfirmed` — PONG, relay traffic, or verified inbound), the local node checks whether it holds stored fragments or S&F messages for that peer and pushes them proactively (§5.4 replicator-side proactive push, §5.5 S&F). This ensures delivery even when the owner's startup poll completed before the replicator confirmed the owner as a peer. **Push-on-Store (V3.1.148):** additionally, when a `PEER_STORE` is accepted (`handleIncomingPeerStoreInfra`) and the intended recipient is *already* a confirmed peer at that moment, the store-host pushes immediately via `PEER_RETRIEVE_RESPONSE` — no waiting for the next `onPeerConfirmed` edge or the recipient's retrieve-poll. This closes a timing gap where a store placed while the recipient was online (but hadn't polled yet, or had already polled before the store arrived) sat idle until the recipient's next network-change cycle. **Re-push on KEM healing (S299):** when a DeviceKemRecord is newly acquired for a device (§5.10.2 trigger b), the store-host re-triggers S&F push and §5.4 replicator-side push for that device — prior attempts that dropped at `_buildInfraPacket` for a missing record are now retryable. This is the third push trigger alongside `onPeerConfirmed` and Push-on-Store.
 
 #### 12.2.3 Sync Priority During Startup
 
@@ -6285,7 +6367,7 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 - Doze-whitelisting is requested at first launch via `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. A foreground service protects only against process kill and App Standby — it does **not** exempt from Doze network suspension. Without the whitelist, Android suspends network access after ~30 minutes of screen-off idle, and UDP packets do not reach the socket regardless of WakeLock state. Since Cleona relies exclusively on push-based UDP delivery (no FCM, no WorkManager), the whitelist is a prerequisite for reliable background notification delivery, not an optional optimization. The request targets only Cleona's own package and does not affect other apps. Users who decline are informed that messages will arrive only when the app is next opened.
 - Real-time delivery on Android requires the Dart isolate to be running inside the foreground service process. If the OS kills the process or the user swipes the app from Recents, `START_STICKY` restarts the Kotlin service but does **not** restart the Dart engine — delivery is suspended until the user next opens the app. The service-owned headless engine (§12.5) mitigates the resurrection gap by booting a Dart engine from the service's `onStartCommand` path.
 
-**Reconsideration triggers:** This decision should be revisited only if (1) Android adds a peer-to-peer wake API that does not require a third party, or (2) the user-stated "no third party" constraint is relaxed. Neither is on any visible roadmap.
+**Reconsideration triggers:** This decision should be revisited only if Android or iOS add a peer-to-peer wake API that does not require a third party. The "no central server" constraint is not negotiable — all variants that require a developer-operated relay server are permanently excluded (see iOS APNs rejection above). No such peer-to-peer wake API is on any visible OS roadmap.
 
 **Basic decision B2 — two-process model on Android (REJECTED, S120, 2026-07-03):** The current in-process architecture (§16.2) runs all networking inside the single Flutter-Activity-plus-FGS process. B2 asked whether the daemon engine (`CleonaService` networking core, today the `cleona-daemon` binary on Linux, §15.2) should instead run in a *separate process* owned by the Foreground Service, decoupled from the Activity lifecycle. S119 deferred this, gated on memory profiling. **S120 performed that profiling (Pixel 8 Pro, v3.1.116-beta, 7h40m-old process, background, FGS active, no kill-loop) and the two-process model is rejected on the evidence:**
 
@@ -6295,6 +6377,17 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 - The Problem-10 restarts were watchdog self-kills and FGS-timeout crashes (§16.2), not memory (LMK) kills.
 
 Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB. **What survives of B2 (PROMOTED, S254, 2026-07-22):** the single-process service-owned headless engine is now a planned feature (see §12.5 Android delivery mechanisms). Field testing (S254) confirmed that the resurrection gap is a primary cause of unreliable background notifications: (1) swipe-from-Recents destroys the Activity and with it the FlutterEngine + Dart isolate, leaving the FGS as an empty Kotlin shell; (2) `START_STICKY` restarts the service but not the Dart engine; (3) the Kotlin watchdog detects the stale heartbeat after ~3 min but only downgrades the notification to "Pausiert" without recovery. The current mitigation caches the FlutterEngine via `FlutterEngineCache` so it survives Activity destruction (swipe-from-Recents); the full headless-engine boot from `onStartCommand` for cold FGS restarts is planned as a follow-up.
+
+**iOS APNs — also rejected (Architecture Decision 2026-08-05).** A separate evaluation considered using Apple Push Notification service (APNs) to eliminate the 5–30 minute BGTaskScheduler delay on iOS. APNs would deliver a content-free "wake up" signal to the iPhone; the app would then connect to the P2P network and retrieve messages normally. The push itself would carry no message content — E2E encryption would remain intact. After architectural review, this was also rejected:
+
+| Aspect | Finding |
+|---|---|
+| Apple provides the relay server? | **No.** Apple provides only the delivery infrastructure (APNs gateway at `api.push.apple.com`). The server that *calls* that API — receiving wake requests from Cleona peers and forwarding them to Apple — must be operated by us. Apple does not host developer logic. |
+| Cost? | APNs delivery itself is free (included in Apple Developer Program). But the relay server requires hosting, monitoring, and maintenance — ongoing operational cost for a project that has no server infrastructure by design. |
+| Code impact? | **All 5 platforms**, not just iOS. The iPhone needs APNs registration + device-token distribution. Every *sender* platform (Linux, Windows, macOS, Android, iOS) needs code to contact the relay server when the recipient is an offline iPhone. This is a new network request to a central server, embedded in every platform's send path. |
+| Architectural impact? | Introduces a central, developer-operated server into a serverless P2P architecture. The relay is a single point of failure — if it goes down, iOS background delivery regresses to BGTaskScheduler. Unlike Bootstrap (§4.8), which is temporary infrastructure for network entry, the relay would be permanent infrastructure required for ongoing message delivery. |
+
+**Decision:** APNs push for iOS is rejected. The BGTaskScheduler dual-task strategy (§12.5) remains the canonical iOS background delivery mechanism. The 5–30 minute delay is accepted as the architectural price for serverless P2P on Apple's most restrictive platform. This decision is final — the "no central server" constraint is not negotiable, and there is no variant of APNs that works without one.
 
 **BGTaskScheduler distinction (iOS):** The iOS background delivery described in §12.5 (BGAppRefreshTask + BGProcessingTask, dual-task strategy) is **not** a push wakeup and does not fall under this rejection. BGTaskScheduler is an OS-controlled pull mechanism: the operating system wakes the app periodically, the app actively connects to the P2P network and retrieves pending messages. No third-party server, no APNs, no Firebase. The limitations (OS-controlled timing, bounded execution time) are accepted — they are the price for background delivery without central infrastructure.
 
@@ -6509,13 +6602,15 @@ Nodes can temporarily or permanently ban other nodes based on accumulated misbeh
 | Attack | Layer(s) | Mitigation |
 |--------|----------|------------|
 | Spam flood (bulk messages) | 1+2 | PoW makes each packet expensive; rate limiter drops excess |
-| Sybil (outsider, no secret) | HMAC | without the network secret no valid IDs exist — the closed-network filter holds |
+| Sybil (outsider, no secret) | HMAC | without the network secret no valid IDs exist — the closed-network filter holds (**but see the V1 status note below**) |
 | Sybil (insider, extracted secret) | §13.1.8 | ID minting is CPU-bound (22-bit admission PoW per identity, Phase 2); minted IDs without PoW are excluded from relay/DV/DHT roles and share collective rate-limit quota (D5). Global caps, KEX gate (§8.2), moderation costs (§9.4), D1 record anchor (§4.3), and D4 replicator diversity remain effective |
 | Fragment storage exhaustion | 4 | Per-source budget prevents monopolization |
 | Relay abuse (relay others' traffic) | 2+3 | Rate limiter per source; relay traffic counts against relay node's budget |
 | DHT poisoning (fake entries) | 3+4 | DHT/infrastructure ops are PoW-exempt (§13.1.2) — addressed instead by per-source storage quota + record-ownership proof on DHT-STORE; low-reputation entries deprioritized. (Storage-poisoning hardening tracked in the security review.) |
 | Startup burst (legitimate new peer) | 2+3 | Rate limiter generates `recordGood` for accepted packets; score-gate prevents banning peers with score >= 0.5 |
 | Ban-DoS by framing (forge victim's Device-ID) | 5 | `recordBad` requires a verified outer device-sig in the same packet; sig-invalid and unproven-sender frames drop silently without attribution (§13.1.4 attribution precondition) |
+
+**Status note — secret V1 is publicly known.** V1 shipped in the published source repository before the key-material isolation of §4.10 existed. Until rotation to V2 completes (§13.2), the "outsider without secret" row above **does not describe reality**: there is no outsider. For V1, every defence in this section that assumes secret-holding is insider-grade in the sense of §13.1.8, and the full load is carried by mechanisms that do not depend on secrecy — admission PoW, reputation, the KEX gate (§8.2), global caps and collective quotas. The isolation restores the outsider/insider distinction from V2 onward.
 
 #### 13.1.8 Threat-Model Addendum — Insider Sybil
 
@@ -6557,7 +6652,7 @@ The `network_secret` (see §4.10) is Cleona's closed-network authentication. Whe
    )
    ```
 
-2. New Cleona builds (v3.0+) embed the `epoch=2` tag and can derive both secrets — old and new.
+2. New builds carry the V2 tables in `network_secret_material.dart` (§4.10) alongside V1 and can derive both secrets. **A rotation is a code change and a full release, not a configuration flip**: add `kNetworkSecretBetaTableV2` / `...LiveTableV2`, add a `case 2:` to `NetworkSecret._secretForVersion`, then set `currentSecretVersion = 2` and `previousSecretVersion = 1`. Because a rotation must reach every platform before the window closes, it is bound to the 5-script release pipeline and to the store review times of the Apple and Google channels.
 
 3. **Dual-secret window** (typically 90 days): the daemon accepts HMAC under either the old or the new secret. This gives users time to update their builds.
 
@@ -6567,11 +6662,18 @@ The `network_secret` (see §4.10) is Cleona's closed-network authentication. Whe
 
 6. **EPOCH_EXPIRED update hint**: when the window is closed, a one-generation-old secret (`expiredHintSecretVersion`) is retained solely for **detecting** expired peers. When the daemon receives a packet whose HMAC fails against both current and previous secrets but matches the expired-hint secret, it responds with a compact `EPOCH_EXPIRED` packet (magic `CEEP`, 16 bytes on wire) wrapped with the expired peer's old secret — so the expired peer can verify the HMAC and display an update notification. Rate-limited to 1 hint per source-IP per hour (amplification prevention). The receive-side parser (`NetworkSecret.parseEpochExpiredPayload`) is shipped in the **current** build so that future secret rotations can notify today's builds.
 
-**Hard-block update mechanism** (§19.5.7) complements secret rotation: the `UpdateManifest` can set `minRequiredVersion`, and old versions are placed into `ReducedMode` (no send/receive of user messages).
+**What the dual-secret window does NOT cover (normative).** The window is defined on **packet acceptance only**. Two other layers derive from the network secret and need their own treatment; both are specified here because getting either wrong breaks the network at the *start* of the rotation, not at the end of the window:
+
+- **Identity derivation must not rotate.** `userId = SHA-256(secret || founding_ed25519_pk)` and `deviceNodeId = SHA-256(secret || device_ed25519_pk)` are recomputed on every identity load and are never persisted. Had they followed `currentSecretVersion`, the first V2 build would have re-minted every identity in the network: contacts would no longer recognise each other, group membership keyed by `userId` would dissolve, Auth-Manifest and Liveness records would sit under stale DHT keys, and the System-Channel author binding `computeUserId(inlinePk) == authorUserId` (§9.5.7) would fail for every pre-rotation record. Identity derivation therefore uses `NetworkSecret.identitySecret`, pinned by `identitySecretVersion = 1`, which **must never be changed**. Channel separation survives the pin because V1 already differs between beta and live. The pin costs nothing in security terms: anyone able to mint IDs under V2 can mint them under V1 just as well, and ID minting is insider-defeated either way (§13.1.8) — the real cost barrier is admission PoW. Guarded by `test/smoke/smoke_identity_secret_pin.dart`.
+
+- **Rendezvous tags must be published under both secrets.** Infra (§4.11.9) and binary (§19.6.5) lookup tags are secret-derived, and the rendezvous *epoch* does not absorb a rotation — `epochString` is a 6-hour **time** window, and the `[current, previous]` fallback in `resolve()` walks time, not secret versions. Without dual publishing, a rotated node publishes under the V2 tag while un-rotated nodes only ever query the V1 tag, for the entire 90-day window, even though both sides still interoperate on the packet level. Both managers therefore accept `previousNetworkSecret` and iterate publish and resolve over every active secret; the Nostr signing key is secret-derived too and is re-derived per secret. This matters most for **binary** rendezvous: it is how an un-rotated build discovers the update that keeps it in the network past the window. Outside a transition `previousSecret` is null and behaviour is unchanged. Guarded by `test/smoke/smoke_rendezvous_secret_rotation.dart`.
+
+**Hard-block update mechanism** (§19.5.7) complements secret rotation: the `UpdateManifest` can set `minRequiredVersion`, and old versions are placed into `ReducedMode` (no send/receive of user messages). Because a build cut off after the window can no longer use the in-network update path (§19.6.2 requires mesh access), the update pressure must be built **inside** the window — the rotation release and the `minRequiredVersion` manifest belong to the same step, not to the clean-up afterwards.
 
 **Implementation**:
-- `network_secret` derivation in `lib/core/crypto/network_secret.dart`
-- Embedded `epoch` tag in `assets/cleona_maintainer_public.pem` companion metadata
+- Derivation, HMAC and rotation logic in `lib/core/crypto/network_secret.dart` (published)
+- Key material in `lib/core/crypto/network_secret_material.dart` (never published, §4.10)
+- Identity pin: `identitySecretVersion` / `identitySecret`, used by all nine identity-derivation call sites
 - Three secret tiers: `secret` (current), `previousSecret` (transition window), `expiredHintSecret` (detection-only)
 - Outbound: `outboundSecret` = previous during transition, current after
 - HMAC verification: tries current → previous → (if both fail) expired-hint for CEEP response
@@ -6695,7 +6797,7 @@ Each conversation has configurable policies beyond expiry and editing: download 
 
 **Out-of-order delivery handling:** Since config updates and group invites are sent as separate fire-and-forget messages, a `CHAT_CONFIG_UPDATE` may arrive before the `GROUP_INVITE` that establishes the group on the receiver. To handle this, config updates for unknown groups are buffered in `_pendingGroupConfigs`. When the `GROUP_INVITE` subsequently arrives, buffered configs are applied if the sender has owner/admin role. This eliminates race conditions in asynchronous message delivery.
 
-**Key resolution for fan-out:** When broadcasting to group/channel members, `_resolveMemberKeys()` resolves encryption keys by preferring the contact's keys (most up-to-date from key exchange) with fallback to the `GroupMemberInfo` keys (from the original `GROUP_INVITE` protobuf). This prevents delivery failures when member keys in the group record are stale or empty.
+**Key resolution for fan-out:** When broadcasting to group/channel members, `_resolveMemberKeys()` resolves encryption keys by preferring the contact's keys (most up-to-date from key exchange) with fallback to the `GroupMemberInfo` keys (from the original `GROUP_INVITE` protobuf). The resolved keys — X25519, ML-KEM-768, and Ed25519 (for L3 mailbox anchoring) — are passed as overrides to `sendToUser()`, which checks overrides first, then contact-record, then fails. This ensures that transitive group members (invited by another admin, not in the sender's contact list) are reachable for pairwise fan-out without requiring a prior contact exchange.
 
 #### 14.7.2 Configurable Settings
 
@@ -6718,6 +6820,33 @@ Each identity profile has a configurable download directory for saved files:
 The download directory is stored per-identity in `chat_policies.json` and can be changed in the chat settings screen.
 
 **Self-copy protection:** When the source file already resides in the download directory, `File.copySync()` to the same path would truncate the file to 0 bytes. The save function uses `p.canonicalize()` to compare source and target paths and skips the copy if they are identical, showing an "already in download folder" notification instead.
+
+#### 14.7.4 Delivery-Status Disclosure
+
+A receiver decides per conversation whether its arrival confirmations may be rendered as a delivery symbol on the sender's side. The setting is available for **contacts and groups**; it defaults to *disclose*. Channels are deliberately out of scope (see "Channels" below).
+
+**This setting is unilateral and local.** Unlike every other setting in §14.7 it is *not* part of the negotiated `ChatConfig`: it is never proposed, never confirmed, and never rejected. A partner must not be able to veto the receiver's decision about the receiver's own visibility. It is therefore not distributed as configuration at all — it rides as a bit on each `DELIVERY_RECEIPT` (`DeliveryReceipt.withhold_delivery_status`, field 3). This costs zero additional traffic (working rule 5) and needs no state synchronisation.
+
+The bit is encoded as **withhold**, not as *disclose*, on purpose: proto3 scalars default to `false` when absent, so a receipt from a node that predates the field — or any encoder that omits it — reads as "disclose", which is the behaviour that was in place before the flag existed. The inverse naming would silently turn every legacy receipt into a suppressed status. The local setting mirrors that encoding (`ContactInfo.withholdDeliveryStatus`, `GroupInfo.withholdDeliveryStatus`, default `false`).
+
+**Layer separation (normative).** `DELIVERY_RECEIPT` is a transport primitive of RUDP Light, not a user-facing feature. Its absence marks the used addresses unreachable, tears the route down after three consecutive timeouts (Route DOWN + Poison Reverse, propagated network-wide), drives the RUDP-Light retry budget and finally triggers the offline cascade (`ack_tracker.dart` `_handleTimeout`). The receipt is therefore **always** emitted for ack-worthy types (§2.4.3), whatever the disclosure setting says. Suppressing it would not hide a status — it would tear down a healthy route and place the message in S&F for seven days.
+
+The split is consequently:
+
+| Layer | Behaviour |
+|---|---|
+| Transport (`AckTracker`, route health, outbox) | consumes every receipt unconditionally — `disclose` is ignored |
+| Service/UI (`sent → delivered`) | upgrades **only** when `disclose` is set; otherwise the message stays at `sent` and no delivery symbol appears |
+
+**Groups.** Disclosure is decided per member, so a group message reaches a visible `delivered` only when *every* member's leg is confirmed **and** disclosing. A leg whose receipt carries `disclose = false` must never contribute to a visible delivery state — otherwise the aggregate symbol would reveal exactly what that member chose to withhold. A partial indicator ("3 of 5") counts disclosing members only.
+
+**Channels.** `CHANNEL_POST` is not ack-worthy (`AckTracker.isAckWorthyV3`), so channels carry no delivery signal at all and there is nothing to disclose or withhold. Introducing one would mean one receipt per subscriber per post — O(N) traffic against working rule 5. The setting is therefore not offered for channels.
+
+**UI.** The switch lives in the chat settings dialog (`_showChatSettings`), directly below the read-receipt and typing-indicator pair, and is phrased positively ("delivery status visible" — on means disclose). Two properties set it apart from every other switch in that dialog and must not be "tidied up" into consistency: it is **not** gated by the owner/admin `canEdit` check, because a plain group member has to be able to govern their own visibility; and it is applied on its own path rather than through `updateChatConfig`, which would route it into the §14.7.1 consent flow. Channels hide it entirely. The message-status icons need no special casing — `_statusIcon` already covers all nine `MessageStatus` values.
+
+**Interaction with read receipts — currently unresolved.** The two settings are independent, and read receipts win. `MessageStatusGuard.canTransitionTo` permits `sent → read` directly (any terminal state is reachable from a non-terminal one), so a receiver who withholds delivery status but leaves `read_receipts_enabled` on still reveals arrival — via the stronger signal. That is arguably coherent (a user who discloses "read" has disclosed strictly more than "delivered"), but nobody has decided it: a user who switches delivery status off may well expect *no* arrival signal at all. Until this is settled, the honest reading is that withholding delivery status only takes full effect when read receipts are off as well. Options if it is revisited: gate the `read` upgrade on the same flag, or surface the dependency in the UI.
+
+**Scope of the guarantee.** This is a policy guarantee inside the Closed Network Model (§3 — only official builds hold the network secret), **not** a cryptographic one. The sending device inevitably learns that the packet arrived, because RUDP Light depends on precisely that signal; only the *display* is withheld. `READ_RECEIPT` and `TYPING_INDICATOR` differ in kind: those are separate semantic events that are suppressed at the source and never leave the receiver (§14.7.2), so their guarantee is genuine.
 
 ### 14.8 Media Auto-Archive
 
@@ -7050,6 +7179,11 @@ abstract class ICleonaService {
     required MessageType type,
     required Uint8List payload,
     bool requireOnline = false,  // if true: skip offline-fallback, return false directly
+    // Key overrides for non-contact group/channel members whose KEM keys
+    // were received via GROUP_INVITE. Override > contact-record > fail.
+    Uint8List? recipientX25519PkOverride,
+    Uint8List? recipientMlKemPkOverride,
+    Uint8List? recipientEd25519PkOverride,
   });
 }
 
@@ -7545,6 +7679,10 @@ Development uses a three-directory model to separate working code from secrets a
 
 **Reproducible builds:** Users can verify that official binaries match the published source by building from source and comparing the unsigned output. The Ed25519 release signature is a separate verification step (authenticity, not integrity). The maintainer's private key is never needed by verifiers.
 
+**One documented exception:** `lib/core/crypto/network_secret_material.dart` carries an all-zero placeholder in the published source (§4.10), so a build from public source differs from the official binary in exactly that constant data — 64 bytes of table plus one boolean — and in nothing else. The divergence is confined to the single file whose content, by construction, cannot be published; a verifier wanting bit-equality can extract the tables from the official binary and substitute them. This exception is deliberately kept minimal because reproducible builds are the practical defence against a **compromised maintainer key** (§19.4): a stolen key can sign a malicious binary, and independent rebuilders are what makes that visible. Any future change that widens the source/binary divergence weakens that defence and must be weighed against it.
+
+A consequence worth stating plainly: a build from the published source cannot join the official network. That follows directly from the Closed Network Model (§4.10) and is intended, but it does mean auditors and contributors cannot test a self-built binary against the live network. Auditing the cryptography does not require it — derivation, HMAC, signatures, KEM and rotation logic are all published.
+
 **Distribution channels (external, for initial installation):** GitHub Releases (signed artifacts: Linux tar.gz/AppImage/deb/rpm, Windows Inno Setup installer + ZIP for In-App-Update, Android APK, macOS DMG), Apple TestFlight (iOS, uploaded automatically by Apple CI via Fastlane), Google Play (maintainer-signed APK), project website (cleona.org — Astro/Tailwind static site, download page fetches latest GitHub Release assets dynamically via GitHub API, deployed automatically by `release-build.sh` Phase 9 via SFTP). F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
 
 **Linux packaging:** Three formats built from the Flutter Linux bundle via `scripts/build-linux-packages.sh`: AppImage (universal, no installation), .deb (Debian/Ubuntu/Mint), .rpm (Fedora/openSUSE/RHEL). All install to `/opt/cleona/` with a wrapper script in `/usr/bin/cleona-chat` and a `.desktop` entry for application menu integration.
@@ -7586,11 +7724,13 @@ Fork protection for donations operates in two layers:
 
 **Primary protection (network-level):** The Closed Network Model (Section 4.10) ensures that only official maintainer-signed builds can participate in the Cleona network. A forked build without the correct network secret is cryptographically isolated — it cannot connect to any existing Cleona users. An app with zero connectivity generates zero donations. This is the primary defense and renders most fork-based donation scams impractical.
 
+**Applicability:** this holds from secret V2 onward. For V1 the secret is publicly known (§4.10 status note, §13.1.7), so the network-level protection is **not currently effective** against a fork — until the rotation completes, the in-app Ed25519 signature check on the donation addresses described below is the only active layer.
+
 **Secondary protection (in-app verification):** Donation targets (IBAN, BTC address) are additionally signed with the Ed25519 maintainer keypair. The public key is embedded in the app (`assets/cleona_maintainer_public.pem`), the private key is kept offline by the maintainer. On the donation screen, the app verifies the Ed25519 signature and displays a trust indicator: green checkmark ("Official Cleona donation address") when the signature matches, or a red warning when it does not. This catches the edge case where someone modifies only the donation addresses in an otherwise official build without re-signing.
 
 **Implementation details:** The donation config (address + base64-encoded signature) is stored in `lib/ui/screens/donation_screen.dart`. To update the address, the maintainer signs the new address with the private key: `echo -n "new_address" | openssl pkeyutl -sign -inkey cleona_maintainer_private.pem -rawin -out sig.bin && base64 sig.bin`. The app uses libsodium's `crypto_sign_verify_detached` (via `SodiumFFI.verifyEd25519()`) for verification.
 
-**Residual risk:** A determined attacker who reverse-engineers the network secret from an official build AND replaces both the donation addresses and the maintainer public key could theoretically create a functional fork with redirected donations. This requires significant reverse engineering effort and is mitigated by secret rotation (Section 13.2), binary obfuscation (Section 4.10), and legal protection (Sections 19.1, 19.3).
+**Residual risk:** A determined attacker who reverse-engineers the network secret from an official build AND replaces both the donation addresses and the maintainer public key could theoretically create a functional fork with redirected donations. From V2 onward this requires binary reverse engineering and is mitigated by secret rotation (Section 13.2), key-material isolation (Section 4.10), and legal protection (Sections 19.1, 19.3). **For V1 no reverse engineering is required at all** — the secret is readable in the published source history — so the effort estimate above does not apply until the rotation completes.
 
 #### 19.5.5 App-Wide Code Signing
 
@@ -7739,10 +7879,24 @@ Full binary updates are expensive on mobile data. Delta updates reduce the volum
 
 An existing user (Alice) generates a link containing everything a new user (Bob) needs: network access, download source, verification.
 
+**`z=` — per-platform binary sizes (normative).** The link carries `binarySizes` from the maintainer-signed `UpdateManifest`, base64-encoded JSON like `h=` and `m=`. The browser assembler needs the original size to trim Reed-Solomon block padding. Before `z=` existed it obtained that size from a HEAD request against the serving node's **complete-binary** endpoint — which meant the fragment path failed precisely when it was needed, because a node without a complete binary answers 404 there. `z=` is optional on parse: links generated earlier still work and fall back to the HEAD. No separate signature is required — a tampered size yields a SHA-256 mismatch and the download is rejected.
+
+**On-demand foreign-platform acquisition (normative).** The link points at the **inviter's** node, not at a bootstrap, and a node self-seeds only its own platform (`maxFragments` 2 on Android, 8 elsewhere — far below the K of 21/35 needed for reassembly). A cross-platform invite (Android inviter, Linux visitor) therefore 404s on `GET /cleona/binary/linux` and would dead-end into the external `f=` fallback, i.e. exactly the gatekeeper §19.6 exists to avoid. That 404 instead asks the serving node to fetch the missing platform from the network, verify it against the manifest, and serve it; the browser polls `GET /cleona/status/<platform>` and retries. Implementation: `lib/core/update/foreign_binary_acquirer.dart`, guarded by `test/smoke/smoke_foreign_binary_acquire.dart`.
+
+The trigger is an **unauthenticated** HTTP request from anyone who can reach the node's port. Content safety is not at stake — every byte is checked against the maintainer-signed hash and signature, so a forged binary cannot pass. What is at stake is the node's bandwidth and disk, and that is **bounded rather than gated**: there is deliberately no on/off setting, because a bound that always holds is worth more than a switch nobody finds, and a disabled path is a second behaviour to maintain and test for no gain.
+
+- **Platform whitelist** — the path segment reaches a file store and is validated against a fixed list, never interpolated.
+- **Full binaries only.** Sources advertising `hasFullBinary` are used; Reed-Solomon reassembly is not attempted for foreign platforms. A node holding a foreign complete binary is exactly what is being looked for (§19.6.1 principle 5), and skipping reassembly avoids both the padding-trim size dependency and the shared-state problem below.
+- **One acquisition node-wide at a time**, 10-minute cooldown per platform after a failure.
+- **One foreign binary stored at a time**, evicted after a 24 h TTL by the hourly binary GC.
+- **Excluded from the bootstrap-budget exemption.** Cross-platform content normally switches the fragment store to the unlimited budget; an on-demand acquisition carries an `.ondemand` marker and does **not** trigger that, so a single visitor cannot permanently unbound a user's storage.
+- **Not advertised network-wide.** `_buildBinaryAvailabilityRecords` skips platforms carrying the `.ondemand` marker, so a binary fetched for one visitor is never promoted on the network-wide binary tag (§19.6.5). Without this the node would advertise itself as a download source for a platform it does not run, for the full 24 h TTL, purely because someone opened its invite link — contradicting the cap, the TTL and the budget exclusion above. The binary stays retrievable for the visitor who triggered it; it is simply not promoted.
+- **Strictly separated from the installer path.** The acquirer deliberately does not use `BinaryUpdateManager`: that manager carries one shared mutable state (two concurrent platforms would corrupt each other's status, and `cancel()` would kill both), and on a successful `verify()` it fires `onUpdateReady` and copies the result into `update/verified/`, which feeds *this* node's installer. An Android APK is a ZIP, and the desktop installer's is-zip branch would unpack it over the application directory.
+
 **Link format (HTTP, works in any browser):**
 
 ```
-http://<node-ip>:<port>/cleona#s=<ContactSeed>&h=<BinaryHashMap>&m=<BinarySignatures>&v=<Version>
+http://<node-ip>:<port>/cleona#s=<ContactSeed>&h=<BinaryHashMap>&m=<BinarySignatures>&v=<Version>&z=<BinarySizeMap>
 ```
 
 | Parameter | Content | Purpose |
@@ -7779,6 +7933,12 @@ The `installSource` is persisted in the encrypted database at first launch (immu
 Extension of the existing Nostr usage (§4.11.6) with a third publish category alongside contact rendezvous (§4.11.6) and infrastructure rendezvous (§4.11.9).
 
 **Problem:** Cleona nodes have dynamic IPs (new every 24h). An invite link cannot contain fixed IPs. Nostr solves this: nodes publish their current IP, Bob looks them up on Nostr.
+
+**Behaviour across a secret rotation (normative).** `computeBinaryTag` is secret-derived, so the same rule as §4.11.9 applies — and here it is load-bearing rather than merely convenient: binary discovery is how an un-rotated build finds the update that keeps it in the network past the transition window (§13.2). If publisher and resolver used different tags, the build that most needs the update would be the one unable to discover it. `BinaryRendezvousManager` therefore accepts `previousNetworkSecret` and iterates publish and resolve over every active secret, re-deriving the Nostr signing key per secret. Guarded by `test/smoke/smoke_rendezvous_secret_rotation.dart`.
+
+**Known gap — invite-scoped records are half-implemented (R-2b, open).** The publish side runs: `_publishInviteScopedRecords` fires on every invite-link creation, one record per platform, to every configured Nostr provider. The resolve side does not exist — `resolveInviteScopedRecords` has **no caller anywhere in the repository**, and the mechanism this section describes below ("Bob can decrypt it with the key from the link") is not implemented either: `InviteLink` carries `s`/`h`/`m`/`v`/`f`/`n` and has no key field, so nothing conveys `invite_binary_key` to Bob. The records are therefore written and never read, which contradicts working rule 5 (no unnecessary network traffic).
+
+Rotation compatibility is a *consequence* of this gap, not a separate defect: `deriveInviteBinaryKey` re-derives the key from the current network secret on both sides, so a rotation would desynchronise them — but only once a resolver exists at all. Completing the path as specified (key transported in the link) removes the rotation problem by construction, because the key then travels with the invite instead of being re-derived. The alternative is to delete the publish side; the invite link already carries `nodeIp:nodePort` and the `f=` fallback URL, so invite-based download works without the Nostr path except in the case this feature exists for — Alice's address having rotated before Bob clicks. Decision pending.
 
 **Who publishes:** Only nodes that are **directly reachable** publish binary availability records. The address filter from §4.11.7 applies analogously:
 

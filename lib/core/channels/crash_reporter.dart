@@ -13,15 +13,38 @@ import 'system_channels.dart';
 class CrashReporter {
   final CleonaService _service;
   final CLogger _log = CLogger.get('CrashReporter');
+  static const _rateLimitFile = 'crash_rate_limit.json';
 
   /// Tracks reports-per-hour and reports-per-day for rate limiting.
+  /// Persisted across restarts to prevent burst-on-restart (F5-R2).
   final List<DateTime> _reportTimestamps = [];
+  bool _loaded = false;
 
   CrashReporter(this._service);
 
   // ── Rate limiting ─────────────────────────────────────────────────
 
+  void _ensureLoaded() {
+    if (_loaded) return;
+    _loaded = true;
+    try {
+      final json = _service.fileEnc.readJsonFile(
+          '${_service.profileDir}/$_rateLimitFile');
+      if (json == null) return;
+      final list = json['ts'] as List<dynamic>?;
+      if (list == null) return;
+      final now = DateTime.now();
+      for (final ms in list) {
+        final t = DateTime.fromMillisecondsSinceEpoch(ms as int);
+        if (now.difference(t).inHours < 24) _reportTimestamps.add(t);
+      }
+    } catch (e) {
+      _log.debug('Failed to load rate-limit timestamps: $e');
+    }
+  }
+
   bool get isRateLimited {
+    _ensureLoaded();
     final now = DateTime.now();
     _reportTimestamps.removeWhere(
         (t) => now.difference(t).inHours >= 24);
@@ -34,7 +57,24 @@ class CrashReporter {
     return false;
   }
 
-  void _recordReport() => _reportTimestamps.add(DateTime.now());
+  void _recordReport() {
+    _reportTimestamps.add(DateTime.now());
+    _persistTimestamps();
+  }
+
+  void _persistTimestamps() {
+    try {
+      final now = DateTime.now();
+      _reportTimestamps.removeWhere((t) => now.difference(t).inHours >= 24);
+      final ms = _reportTimestamps
+          .map((t) => t.millisecondsSinceEpoch)
+          .toList();
+      _service.fileEnc.writeJsonFile(
+          '${_service.profileDir}/$_rateLimitFile', {'ts': ms});
+    } catch (e) {
+      _log.debug('Failed to persist rate-limit timestamps: $e');
+    }
+  }
 
   // ── Report building ───────────────────────────────────────────────
 

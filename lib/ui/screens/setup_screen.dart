@@ -1,4 +1,4 @@
-// ignore_for_file: depend_on_referenced_packages, use_build_context_synchronously
+// ignore_for_file: depend_on_referenced_packages, use_build_context_synchronously, deprecated_member_use
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -341,6 +341,12 @@ class _RestoreScreenState extends State<_RestoreScreen> {
   int _contactsRestored = 0;
   int _messagesRestored = 0;
   bool _restoreStarted = false;
+  // §7.1.3 (P2): null = user has not answered yet (forced choice, no
+  // preselected default — see `_restore()` validation). `true` = "I still
+  // have my other device" (this device withholds the AuthManifest publish
+  // until paired). `false` = "my old device is gone" (this device takes
+  // over immediately, today's behaviour).
+  bool? _isAdditionalDevice;
 
   @override
   Widget build(BuildContext context) {
@@ -414,6 +420,35 @@ class _RestoreScreenState extends State<_RestoreScreen> {
                   ),
                 ),
 
+                const SizedBox(height: 24),
+                Text(
+                  locale.get('restore_device_question_title'),
+                  style: Theme.of(context).textTheme.titleSmall,
+                  textAlign: TextAlign.left,
+                ),
+                const SizedBox(height: 4),
+                Card(
+                  margin: EdgeInsets.zero,
+                  child: Column(
+                    children: [
+                      RadioListTile<bool>(
+                        value: true,
+                        groupValue: _isAdditionalDevice,
+                        title: Text(locale.get('restore_additional_device_label')),
+                        subtitle: Text(locale.get('restore_additional_device_subtitle')),
+                        onChanged: (v) => setState(() => _isAdditionalDevice = v),
+                      ),
+                      RadioListTile<bool>(
+                        value: false,
+                        groupValue: _isAdditionalDevice,
+                        title: Text(locale.get('restore_replacement_device_label')),
+                        subtitle: Text(locale.get('restore_replacement_device_subtitle')),
+                        onChanged: (v) => setState(() => _isAdditionalDevice = v),
+                      ),
+                    ],
+                  ),
+                ),
+
                 if (_error != null) ...[
                   const SizedBox(height: 12),
                   Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
@@ -480,6 +515,14 @@ class _RestoreScreenState extends State<_RestoreScreen> {
       return;
     }
 
+    // §7.1.3 (P2): forced choice, no default — publishing behaviour depends
+    // on it (see IdentityPublisher._isPrimaryDevice), so an unanswered
+    // question must not silently resolve to either case.
+    if (_isAdditionalDevice == null) {
+      setState(() => _error = locale.get('please_select_device_option'));
+      return;
+    }
+
     setState(() {
       _loading = true;
       _error = null;
@@ -488,7 +531,8 @@ class _RestoreScreenState extends State<_RestoreScreen> {
     try {
       final identityMgr = IdentityManager();
       identityMgr.restoreFromPhrase(words);
-      await identityMgr.createIdentity(name);
+      await identityMgr.createIdentity(name,
+          restoreAwaitingPairing: _isAdditionalDevice!);
 
       setState(() => _restoreStarted = true);
 

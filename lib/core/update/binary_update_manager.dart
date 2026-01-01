@@ -101,7 +101,20 @@ class BinaryUpdateManager {
     _setState(BinaryUpdateState.checking, 0.0);
     try {
       if (!shouldUseInNetworkUpdate()) {
-        _log.info('In-network updates disabled (Play Store install) — skipping');
+        // Name the ACTUAL reason. This used to say "(Play Store install)"
+        // unconditionally — but InstallSourceDetector fails safe *towards*
+        // playStore (install_source.dart: "Detection failures fail safe towards
+        // InstallSource.playStore, i.e. towards disabling self-update"), so a
+        // detection failure produced a log line asserting a Play Store install
+        // that never happened. Field case S297/F9: a sideloaded build on
+        // Samsung never offered an update across 3.1.157/.158/.159, and this
+        // line would have sent the reader looking in the wrong place.
+        // WARN, not INFO: this silently disables the entire update path.
+        final why = (Platform.isIOS || Platform.isMacOS)
+            ? 'platform uses the store update path'
+            : 'install source = ${InstallSourceDetector.cached?.name ?? "not yet detected"} '
+                '(note: detection failures report playStore by design)';
+        _log.warn('In-network updates disabled — $why');
         _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
@@ -116,7 +129,12 @@ class BinaryUpdateManager {
       final tag = manifest.dhtBinaryTag?[platform];
       final hash = manifest.binaryHashes?[platform];
       if (tag == null && hash == null) {
-        _log.debug('No dhtBinaryTag or binaryHash for platform=$platform in manifest');
+        // INFO, not DEBUG: a manifest that carries no artefact for this
+        // platform is an anomaly on the publishing side, not a routine
+        // outcome — unlike the "not newer" case below, which is the normal
+        // steady state and stays at DEBUG so the 6h check does not spam.
+        _log.info('In-network update unavailable: manifest v${manifest.version} '
+            'has neither dhtBinaryTag nor binaryHash for platform=$platform');
         _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }

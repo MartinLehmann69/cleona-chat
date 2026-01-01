@@ -657,5 +657,26 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   const MessageTypeV3._($core.int v, $core.String n) : super(v, n);
 }
 
+/// TwinSync payload for ROTATION_APPROVAL_REQUEST (Primary → Linked).
+/// Anlass einer Genehmigungsanfrage. Ohne den Diskriminator meldet das
+/// gekoppelte Geraet jede Anfrage als "Emergency Key Rotation genehmigen?" —
+/// eine Geraetesatz-Aenderung wuerde also unter falscher Beschreibung
+/// bestaetigt (§7.5). Feld 6 default 0 = Rotation, damit alte Sender
+/// unveraendert interpretiert werden.
+class ApprovalKindV3 extends $pb.ProtobufEnum {
+  static const ApprovalKindV3 APPROVAL_KIND_KEY_ROTATION = ApprovalKindV3._(0, _omitEnumNames ? '' : 'APPROVAL_KIND_KEY_ROTATION');
+  static const ApprovalKindV3 APPROVAL_KIND_DEVICE_SET_CHANGE = ApprovalKindV3._(1, _omitEnumNames ? '' : 'APPROVAL_KIND_DEVICE_SET_CHANGE');
+
+  static const $core.List<ApprovalKindV3> values = <ApprovalKindV3> [
+    APPROVAL_KIND_KEY_ROTATION,
+    APPROVAL_KIND_DEVICE_SET_CHANGE,
+  ];
+
+  static final $core.Map<$core.int, ApprovalKindV3> _byValue = $pb.ProtobufEnum.initByValue(values);
+  static ApprovalKindV3? valueOf($core.int value) => _byValue[value];
+
+  const ApprovalKindV3._($core.int v, $core.String n) : super(v, n);
+}
+
 
 const _omitEnumNames = $core.bool.fromEnvironment('protobuf.omit_enum_names');

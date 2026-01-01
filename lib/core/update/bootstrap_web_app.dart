@@ -1,8 +1,7 @@
 /// Bootstrap assembler web app served at `GET /cleona` (Architecture §19.6.6).
 ///
 /// Self-contained HTML+JS — no external dependencies (no CDN scripts, no
-/// external fetches besides same-origin binary/fragment downloads and, when
-/// applicable, WebSocket connections to public Nostr relays, both explicitly
+/// external fetches besides same-origin binary/fragment downloads, as
 /// permitted by §19.6.6). Runs entirely in Bob's browser — Bob does not have
 /// Cleona installed yet — to:
 ///
@@ -42,7 +41,7 @@ class BootstrapWebApp {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss://relay.damus.io wss://nos.lol wss://relay.snort.social wss://relay.primal.net; base-uri 'none'; form-action 'none'; frame-ancestors 'none';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';">
 <title>Cleona — Install</title>
 <style>
   :root {
@@ -198,8 +197,8 @@ class BootstrapWebApp {
 
   <div class="footnote">
     This page runs entirely in your browser — nothing is sent anywhere
-    except to Cleona nodes and public Nostr relays while looking for a copy
-    of the installer. The download is verified against a cryptographic
+    except to the Cleona node that served this page. The download is
+    verified against a cryptographic
     signature from the Cleona maintainer before it is offered to you. Your
     browser may warn about this being an "insecure" download because it is
     served over plain HTTP — Cleona nodes have no fixed domain name, so no
@@ -723,87 +722,6 @@ function renderPlatformPicker(detected) {
 }
 
 // ============================================================================
-// Nostr binary discovery (§19.6.5) — best-effort additional-node lookup.
-//
-// The invite link (§19.6.4 format: s/h/m/v/f only) does not carry the
-// `invite_binary_key` needed to compute the record's `d` tag or decrypt its
-// content — that key is derived from network_secret, which Bob does not
-// have yet. queryNostrRelay() below is a complete, working NIP-33 query
-// implementation, ready for a future link revision that adds an invite
-// nonce; until then discoverAdditionalNodes() intentionally returns no
-// candidates instead of querying relays with a tag no publisher would ever
-// use, and the assembler falls back to the node that served this page —
-// which is the expected path during the network's bootstrap phase anyway
-// (§19.6.1 principle 5: bootstrap nodes hold complete binaries for every
-// platform).
-// ============================================================================
-
-var NOSTR_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://nos.lol',
-  'wss://relay.snort.social',
-  'wss://relay.primal.net'
-];
-
-function queryNostrRelay(relayUrl, dTag, timeoutMs) {
-  return new Promise(function (resolve) {
-    var events = [];
-    var settled = false;
-    var ws = null;
-    var timer = setTimeout(finish, timeoutMs);
-
-    function finish() {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      try { if (ws) ws.close(); } catch (e) { /* ignore */ }
-      resolve(events);
-    }
-
-    try {
-      ws = new WebSocket(relayUrl);
-    } catch (e) {
-      finish();
-      return;
-    }
-
-    var subId = 'cleona-' + Math.random().toString(36).slice(2, 10);
-    ws.onopen = function () {
-      var filter = { kinds: [30078], '#d': [dTag], limit: 20 };
-      try { ws.send(JSON.stringify(['REQ', subId, filter])); } catch (e) { finish(); }
-    };
-    ws.onmessage = function (ev) {
-      try {
-        var msg = JSON.parse(ev.data);
-        if (msg[0] === 'EVENT' && msg[1] === subId) {
-          events.push(msg[2]);
-        } else if (msg[0] === 'EOSE' && msg[1] === subId) {
-          finish();
-        }
-      } catch (e) { /* ignore malformed relay message */ }
-    };
-    ws.onerror = finish;
-    ws.onclose = finish;
-  });
-}
-
-async function discoverAdditionalNodes(platform, timeoutMs) {
-  if (!PARAMS.n) {
-    log('Nostr: this invite link has no invite-scoped key (n=) — using the serving node directly.');
-    return [];
-  }
-  setStatus('Looking for additional download sources on Nostr…');
-  var dTag = PARAMS.n + ':' + platform;
-  var lists = await Promise.all(NOSTR_RELAYS.map(function (r) {
-    return queryNostrRelay(r, dTag, timeoutMs || 4000);
-  }));
-  var flat = [];
-  lists.forEach(function (list) { list.forEach(function (ev) { flat.push(ev); }); });
-  log('Nostr: found ' + flat.length + ' candidate record(s) across ' + NOSTR_RELAYS.length + ' relays.');
-  return flat;
-}
-
-// ============================================================================
 // HTTP download (§19.6.6: GET /cleona/binary/<platform>, GET
 // /cleona/fragment/<platform>/<index>) with progress reporting.
 // ============================================================================
@@ -840,6 +758,19 @@ async function fetchWithProgress(url, onProgress) {
   return out;
 }
 
+// Per-platform binary size from the invite link's `z=` parameter (§19.6.4).
+// Returns null when the link predates the parameter or omits this platform.
+function linkBinarySize(platform) {
+  if (!PARAMS.z) return null;
+  try {
+    var sizes = JSON.parse(bytesToUtf8(base64ToBytes(PARAMS.z)));
+    var v = sizes[platform];
+    return (typeof v === 'number' && v > 0) ? v : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function headContentLength(url) {
   try {
     var resp = await fetch(url, { method: 'HEAD', cache: 'no-store' });
@@ -848,6 +779,38 @@ async function headContentLength(url) {
     return len ? parseInt(len, 10) : null;
   } catch (e) {
     return null;
+  }
+}
+
+// §19.6.4: this node may not hold our platform (an Android inviter cannot
+// serve a Linux visitor). The 404 above asks it to fetch one; poll its
+// progress here. Same-origin, bounded, and only while the user is actively
+// installing — it ends with the attempt, it is not background polling.
+async function waitForForeignAcquisition(origin, platform) {
+  var deadline = Date.now() + 300000; // 5 min ceiling
+  var announced = false;
+  for (;;) {
+    var st;
+    try {
+      var resp = await fetch(origin + '/cleona/status/' + encodeURIComponent(platform),
+                             { cache: 'no-store' });
+      if (!resp.ok) return false;
+      st = await resp.json();
+    } catch (e) {
+      return false;
+    }
+    if (st.state === 'ready') { log('This node finished fetching the ' + platform + ' build.'); return true; }
+    if (st.state === 'failed' || st.state === 'idle') {
+      if (st.error) log('Node could not fetch a ' + platform + ' build: ' + st.error);
+      return false;
+    }
+    if (!announced) {
+      announced = true;
+      log('This node does not hold a ' + platform + ' build yet — it is fetching one from the network.');
+    }
+    setStatus('This node is fetching the ' + platform + ' build for you…');
+    if (Date.now() > deadline) { log('Gave up waiting for the node to fetch a ' + platform + ' build.'); return false; }
+    await new Promise(function (r) { setTimeout(r, 2000); });
   }
 }
 
@@ -866,15 +829,21 @@ async function downloadViaFragments(origin, platform) {
   if (!rs) throw new Error('No Reed-Solomon parameters known for platform "' + platform + '"');
   var n = rs.n, k = rs.k;
 
-  // Fragment endpoints carry no total-size metadata (§19.6.6), and the
-  // Nostr binary-availability record (§19.6.5) does not include one either.
-  // The original size is required to trim Reed-Solomon block padding, so a
-  // HEAD to the complete-binary endpoint is the only way to learn it — this
-  // succeeds whenever *any* directly reachable node advertises a complete
-  // binary for this platform, which is the common bootstrap-phase case.
-  var originalSize = await headContentLength(origin + '/cleona/binary/' + encodeURIComponent(platform));
+  // Fragment endpoints carry no total-size metadata (§19.6.6). The original
+  // size is required to trim Reed-Solomon block padding; it comes from the
+  // signed invite link (`z=`, §19.6.4) and falls back to a HEAD on the
+  // complete-binary endpoint for links generated before that parameter
+  // existed.
+  // Preferred source: the maintainer-signed size from the invite link (`z=`).
+  // Falls back to a HEAD against this node for links generated before `z=`
+  // existed. A wrong size cannot forge a binary — it produces a SHA-256
+  // mismatch and the download is rejected.
+  var originalSize = linkBinarySize(platform);
   if (originalSize === null) {
-    throw new Error('This node cannot report the exact binary size, so fragments cannot be safely trimmed after assembly');
+    originalSize = await headContentLength(origin + '/cleona/binary/' + encodeURIComponent(platform));
+  }
+  if (originalSize === null) {
+    throw new Error('The binary size is neither in the invite link nor reported by this node, so fragments cannot be safely trimmed after assembly');
   }
 
   var fragments = new Map();
@@ -1044,11 +1013,19 @@ async function startForPlatform(platform) {
     binary = await downloadCompleteBinary(origin, platform);
     log('Downloaded complete binary (' + formatBytes(binary.length) + ')');
   } catch (e) {
+    if (e.status === 404 && await waitForForeignAcquisition(origin, platform)) {
+      try {
+        binary = await downloadCompleteBinary(origin, platform);
+        log('Downloaded complete binary (' + formatBytes(binary.length) + ')');
+        await verifyAndOffer(binary, expectedHash, platform, PARAMS.v);
+        return;
+      } catch (e3) {
+        log('Retry after acquisition failed (' + e3.message + ').');
+      }
+    }
     log('Complete binary unavailable (' + e.message + ') — trying erasure fragments…');
     setStatus('Full binary unavailable — assembling from fragments…');
     try {
-      var candidates = await discoverAdditionalNodes(platform, 4000);
-      candidates.forEach(function (c) { log('Nostr candidate record received.'); });
       binary = await downloadViaFragments(origin, platform);
       log('Assembled binary from fragments (' + formatBytes(binary.length) + ')');
     } catch (e2) {

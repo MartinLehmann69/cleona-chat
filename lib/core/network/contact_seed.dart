@@ -98,7 +98,7 @@ class ContactSeed {
     final anchor = foundingEd25519Pk ?? userEd25519Pk;
     if (anchor == null || anchor.length != 32) return null;
     final derived =
-        HdWallet.computeUserId(anchor, NetworkSecret.secret);
+        HdWallet.computeUserId(anchor, NetworkSecret.identitySecret);
     return bytesToHex(derived) == nodeIdHex.toLowerCase();
   }
 

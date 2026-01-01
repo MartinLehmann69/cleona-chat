@@ -30,7 +30,7 @@ enum InstallSource {
 /// towards *disabling* self-update, rather than risking a Play Store policy
 /// violation on a misdetected install.
 class InstallSourceDetector {
-  static const _kStorageKey = 'install_source';
+  static const _kStorageKey = 'install_source_v2';
 
   static const _buildTimeOverride =
       String.fromEnvironment('INSTALL_SOURCE', defaultValue: 'auto');
@@ -86,22 +86,41 @@ class InstallSourceDetector {
     }
   }
 
+  /// Supplies Android's `installerPackageName`. Injected by the Flutter app
+  /// layer (`main.dart`) — deliberately NOT implemented here.
+  ///
+  /// S299: this used to be a direct `MethodChannel` call, which pulled
+  /// `package:flutter/services.dart` into `lib/core`. Because
+  /// `cleona_service.dart` reaches this file, the whole Flutter tree — and
+  /// with it `dart:ui` — landed in the dependency graph of the **daemon**,
+  /// which is a pure-Dart AOT binary (`dart compile exe`). The consequence
+  /// was not a degraded feature but a hard build failure: the daemon could
+  /// not be compiled at all, and ten standalone smoke files died with
+  /// "Dart library 'dart:ui' is not available on this platform".
+  ///
+  /// Keeping the platform call on the app side preserves the invariant that
+  /// `lib/core` is Flutter-free. When the hook is unset — daemon, tests,
+  /// every non-Android platform — detection falls back to `sideload`, which
+  /// is the same answer the old `MissingPluginException` branch produced.
+  static Future<String?> Function()? installerPackageNameProvider;
+
   static Future<InstallSource> _detectViaPackageManager() async {
+    final provider = installerPackageNameProvider;
+    if (provider == null) {
+      _log.info('Install source: no platform provider registered '
+          '(daemon mode), assuming sideload');
+      return InstallSource.sideload;
+    }
     try {
-      final result = await Process.run('pm', ['dump', AppPaths.packageName]);
-      if (result.exitCode != 0) {
-        _log.warn(
-            'pm dump failed (exit ${result.exitCode}), defaulting to playStore');
-        return InstallSource.playStore;
-      }
-      final match = RegExp(r'installerPackageName=(\S+)')
-          .firstMatch(result.stdout.toString());
-      return match?.group(1) == 'com.android.vending'
+      final installer = await provider();
+      _log.info('Install source: installerPackageName=$installer');
+      if (installer == null || installer.isEmpty) return InstallSource.sideload;
+      return installer == 'com.android.vending'
           ? InstallSource.playStore
           : InstallSource.sideload;
     } catch (e) {
-      _log.warn('Install source detection failed, defaulting to playStore: $e');
-      return InstallSource.playStore;
+      _log.warn('Install source detection failed: $e');
+      return InstallSource.sideload;
     }
   }
 

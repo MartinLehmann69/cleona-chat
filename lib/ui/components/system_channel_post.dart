@@ -18,6 +18,10 @@ class SystemChannelPost extends StatefulWidget {
   final Map<String, int>? frTally;
   final void Function(int option)? onVote;
 
+  /// All post texts in the channel — used by crash_report cards to count
+  /// crash_duplicate replies with the same fingerprint (F5-R1, §9.5.2).
+  final List<String>? channelPostTexts;
+
   const SystemChannelPost({
     super.key,
     required this.text,
@@ -25,6 +29,7 @@ class SystemChannelPost extends StatefulWidget {
     required this.timestamp,
     this.frTally,
     this.onVote,
+    this.channelPostTexts,
   });
 
   @override
@@ -76,7 +81,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
       return _buildCrashReport(context, json, colorScheme);
     }
     if (type == 'crash_duplicate') {
-      return _buildDuplicate(context, json, colorScheme);
+      return const SizedBox.shrink();
     }
     if (type == 'contact_issue') {
       return _buildContactIssue(context, json, colorScheme);
@@ -170,6 +175,22 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
     );
   }
 
+  int _countDuplicates(String fingerprint) {
+    final texts = widget.channelPostTexts;
+    if (texts == null) return 0;
+    int count = 0;
+    for (final t in texts) {
+      if (!t.contains(fingerprint)) continue;
+      try {
+        final j = jsonDecode(t) as Map<String, dynamic>;
+        if (j['type'] == 'crash_duplicate' && j['fingerprint'] == fingerprint) {
+          count++;
+        }
+      } catch (_) {}
+    }
+    return count;
+  }
+
   Widget _buildCrashReport(
       BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
     final report = CrashReport.fromJson(json);
@@ -244,6 +265,8 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               children: [
                 _chip(cs, report.platform),
                 _chip(cs, '${report.peerCount} peers'),
+                if (_countDuplicates(report.fingerprint) > 0)
+                  _chip(cs, '${_countDuplicates(report.fingerprint)}× reported'),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -259,46 +282,6 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
     );
   }
 
-  Widget _buildDuplicate(
-      BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
-    final dupe = CrashDuplicateReply.fromJson(json);
-    if (dupe == null) return _plainFallback(cs);
-
-    final fp = dupe.fingerprint.length > 12
-        ? dupe.fingerprint.substring(0, 12)
-        : dupe.fingerprint;
-
-    return Card(
-      color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        child: Row(
-          children: [
-            Icon(Icons.add_circle_outline, size: 16, color: cs.outline),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Text(
-                '+1  (v${dupe.appVersion}, ${dupe.platform})',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: cs.onSurface.withValues(alpha: 0.7),
-                ),
-              ),
-            ),
-            Text(
-              fp,
-              style: TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 10,
-                color: cs.outline,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 
   Widget _buildContactIssue(
       BuildContext context, Map<String, dynamic> json, ColorScheme cs) {

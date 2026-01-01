@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/constant_time.dart';
+import 'package:cleona/core/crypto/network_secret_material.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
@@ -87,23 +88,27 @@ class NetworkSecret {
   static const int transitionDays = 90;
 
   // ---------------------------------------------------------------------------
-  // V1 key material (Architecture 17.5.6).
-  // Interleaved pairs at permuted positions — run _reassemble() to recover
-  // the 16-byte secret.  See scripts/gen_secret_table.dart for generation.
-  // ---------------------------------------------------------------------------
-  static const _betaTable = [0x67, 0x7f, 0x8d, 0x00, 0x7d, 0xf4, 0x13, 0x86, 0x53, 0x52, 0xb1, 0xb4, 0x31, 0x99, 0x77, 0xcb, 0xef, 0x45, 0x85, 0x72, 0x15, 0x15, 0x1b, 0x75, 0x1b, 0xb5, 0x59, 0xc5, 0x29, 0x51, 0x6f, 0x56];
-  static const _liveTable = [0x67, 0x9b, 0x8d, 0x81, 0x7d, 0xd6, 0x13, 0xb4, 0x53, 0x71, 0xb1, 0xdc, 0x31, 0x0c, 0x77, 0x89, 0xef, 0xfe, 0x85, 0xb2, 0x15, 0x0f, 0x1b, 0x77, 0x1b, 0xa6, 0x59, 0xcb, 0x29, 0x02, 0x6f, 0x99];
-  static const _perm = [11, 4, 14, 1, 8, 13, 2, 7, 15, 6, 9, 0, 5, 10, 3, 12];
-
-  // ---------------------------------------------------------------------------
-  // V2 key material would go here when rotating:
+  // Key material (Architecture 4.10 / 13.2) lives in network_secret_material.dart
+  // and is NEVER inlined here — the publishing pipeline substitutes that file
+  // with an all-zero placeholder and fails closed if any real table byte
+  // survives into the public staging tree (sync-to-git.sh [3b] + [4h]).
   //
   // When rotating to V2:
   // 1. Generate new secret: HMAC-SHA256(maintainer_key, "cleona-network-beta-v2")[:16]
-  // 2. Generate V2 tables via scripts/gen_secret_table.dart
-  // 3. Set currentSecretVersion = 2, previousSecretVersion = 1
-  // 4. After 90 days: set previousSecretVersion = 0, expiredHintSecretVersion = 1
+  // 2. Generate V2 tables via scripts/gen_secret_table.dart, add them to
+  //    network_secret_material.dart as kNetworkSecretBetaTableV2 / ...LiveTableV2
+  // 3. Add a `case 2:` to _secretForVersion below
+  // 4. Set currentSecretVersion = 2, previousSecretVersion = 1
+  // 5. After 90 days: set previousSecretVersion = 0, expiredHintSecretVersion = 1
   // ---------------------------------------------------------------------------
+
+  /// Whether this build carries real closed-network key material.
+  ///
+  /// `false` for builds made from the published source (Architecture 4.10) —
+  /// such a build derives an all-zero secret and cannot join the official
+  /// network. Exposed so higher layers can surface that state instead of
+  /// presenting it as an ordinary connectivity failure.
+  static bool get hasKeyMaterial => kNetworkSecretMaterialPresent;
 
   static Uint8List? _cached;
   static Uint8List? _cachedPrevious;
@@ -134,6 +139,43 @@ class NetworkSecret {
   /// Whether dual-secret acceptance is active.
   static bool get isInTransition => previousSecretVersion > 0;
 
+  /// Secret version used for **identity derivation** (`userId`, `deviceNodeId`).
+  ///
+  /// Deliberately decoupled from [currentSecretVersion] and pinned to the
+  /// founding epoch. Rotating the wire filter (Architecture 13.2) must not
+  /// re-mint every identity in the network.
+  ///
+  /// Why this cannot follow the rotation: `userId = SHA-256(secret || pk)` is
+  /// recomputed on every identity load and never persisted
+  /// (`identity_context.dart`). A version bump here would change every `userId`
+  /// and `deviceNodeId` at once — contacts would no longer recognise each
+  /// other, group membership keyed by `userId` would break, Auth-Manifest and
+  /// Liveness records would sit under stale DHT keys, and the System-Channel
+  /// author binding `computeUserId(inlinePk) == authorUserId` (9.5.7) would
+  /// fail for every pre-rotation record. That break would land on the FIRST V2
+  /// build, not at the end of the transition window — the dual-secret window
+  /// covers packet acceptance only, never identity.
+  ///
+  /// Channel separation is unaffected: V1 already differs between beta and
+  /// live, so identities stay in disjoint address spaces per channel.
+  ///
+  /// Security cost of pinning: none. Anyone able to mint IDs under V2 can mint
+  /// them under V1 just as well — ID minting is insider-defeated either way
+  /// (13.1.8); the real cost barrier is admission PoW.
+  ///
+  /// **Never change this constant.** Guarded by
+  /// `test/smoke/smoke_identity_secret_pin.dart`.
+  static const int identitySecretVersion = 1;
+
+  static Uint8List? _cachedIdentity;
+
+  /// The secret used for identity derivation — see [identitySecretVersion].
+  ///
+  /// Use this for `HdWallet.computeUserId` / `HdWallet.computeDeviceNodeId`.
+  /// Never use [secret] for those: it follows the rotation.
+  static Uint8List get identitySecret =>
+      _cachedIdentity ??= _secretForVersion(identitySecretVersion);
+
   /// The secret to use for all outbound packets.
   /// During transition: the PREVIOUS (old) secret — ensures backward
   /// compatibility with un-updated peers who only know the old secret.
@@ -143,20 +185,23 @@ class NetworkSecret {
   /// Returns the secret for the given version.
   static Uint8List _secretForVersion(int version) {
     // Currently only version 1 exists.
-    // When adding V2, add a case here.
+    // When adding V2, add a case here (see rotation checklist above).
     switch (version) {
       case 1:
-        return _reassemble(channel);
+        return _reassemble(
+          channel == NetworkChannel.live
+              ? kNetworkSecretLiveTableV1
+              : kNetworkSecretBetaTableV1,
+        );
       default:
         throw ArgumentError('Unknown secret version: $version');
     }
   }
 
-  static Uint8List _reassemble(NetworkChannel ch) {
-    final table = ch == NetworkChannel.live ? _liveTable : _betaTable;
+  static Uint8List _reassemble(List<int> table) {
     final result = Uint8List(16);
     for (var i = 0; i < 16; i++) {
-      result[_perm[i]] = table[2 * i] ^ table[2 * i + 1];
+      result[kNetworkSecretPerm[i]] = table[2 * i] ^ table[2 * i + 1];
     }
     return result;
   }
@@ -334,5 +379,6 @@ class NetworkSecret {
     _cached = null;
     _cachedPrevious = null;
     _cachedExpiredHint = null;
+    _cachedIdentity = null;
   }
 }

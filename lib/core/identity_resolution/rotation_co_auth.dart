@@ -150,13 +150,63 @@ Uint8List computeDeviceSetChangeHash({
   return SodiumFFI().sha256(buf.toBytes());
 }
 
-/// Minimum countersigs required for a given device count.
+/// Minimum countersigs required for an Emergency KEY ROTATION over [
+/// totalDevices] devices — every device of the identity survives a key
+/// rotation, so "total" and "remaining" are the same set here.
+///
 /// N=1 → 0 (single device, no co-auth possible).
 /// N>=2 → max(2, ceil(N/2)) — at least Primary + 1 Linked.
+///
+/// UNCHANGED ON PURPOSE. [deviceSetChangeQuorum] relaxes the floor of 2 for
+/// its own case only; applying that relaxation here would let a stolen Primary
+/// of a two-device identity rotate the User keys on its own signature alone,
+/// which is precisely the attack §7.5 was written against.
 int rotationQuorum(int totalDevices) {
   if (totalDevices <= 1) return 0;
   final half = (totalDevices + 1) ~/ 2; // ceil(N/2)
   return half < 2 ? 2 : half;
+}
+
+/// Minimum countersigs required for a DEVICE-SET CHANGE, counted over the
+/// devices that REMAIN after the change.
+///
+/// WHY THIS IS NOT [rotationQuorum]. A device-set change is the one co-auth
+/// occasion whose signer set shrinks with the event being authorised. Charging
+/// it `max(2, …)` over the pre-change count made it unsatisfiable in the most
+/// common multi-device setup there is: removing one of two devices leaves ONE
+/// device, and one device cannot produce two countersignatures. The proof was
+/// therefore never constructible for N_pre=2 — the mechanism was dead exactly
+/// where users meet it first.
+///
+/// Counting over the remainder fixes that without inventing a signature: with
+/// one device left, that device's own consent IS the complete set of consents
+/// obtainable, and it is what the receiver can verify against the pubkeys
+/// cached from the PRE-change manifest. What this cannot do — and does not
+/// claim to do — is protect a two-device identity against the theft of one of
+/// its two devices: the survivor is then the thief's device. That limit is
+/// inherent to the situation, not to the formula; no quorum over one signer
+/// can distinguish the two cases.
+///
+/// M=0 → 0 (nothing left that could sign).
+/// M=1 → 1 (the sole survivor's consent).
+/// M>=2 → max(2, ceil(M/2)) — same shape as [rotationQuorum].
+int deviceSetChangeQuorum(int remainingDevices) {
+  if (remainingDevices <= 0) return 0;
+  if (remainingDevices == 1) return 1;
+  final half = (remainingDevices + 1) ~/ 2; // ceil(M/2)
+  return half < 2 ? 2 : half;
+}
+
+/// Which of the two §7.5 occasions a set of approval tokens belongs to.
+/// Decides the denominator of the quorum — see [verifyRotationCoAuth].
+enum CoAuthOccasion {
+  /// Emergency Key Rotation: quorum over the full device set
+  /// ([rotationQuorum]).
+  keyRotation,
+
+  /// Device-set change: quorum over the remaining devices
+  /// ([deviceSetChangeQuorum]).
+  deviceSetChange,
 }
 
 /// Result of verifying rotation co-authorization.
@@ -171,32 +221,69 @@ enum RotationCoAuthResult {
   singleDevice,
 }
 
-/// Verify rotation approval tokens against cached Device-Sig pubkeys.
+/// Verify approval tokens against cached Device-Sig pubkeys.
+///
+/// [cachedDeviceSigKeys] is always the PRE-change set — the pubkeys the
+/// receiver had before this manifest/broadcast arrived. Tokens are only ever
+/// counted against those, for both occasions: the keys carried by the incoming
+/// record are asserted by the very sender under suspicion, so verifying
+/// against them would let anyone who can write a manifest also nominate its
+/// approvers.
+///
+/// [occasion] selects the DENOMINATOR of the quorum, and only that:
+///  * [CoAuthOccasion.keyRotation] — [rotationQuorum] over
+///    `cachedDeviceSigKeys.length`. Every device survives a key rotation, so
+///    the pre-change count is also the set that could have signed.
+///  * [CoAuthOccasion.deviceSetChange] — [deviceSetChangeQuorum] over
+///    [remainingDeviceCount], the number of devices left AFTER the change.
+///    Devices that were just removed obviously cannot be required to consent
+///    to their own removal, and demanding two signatures from a one-device
+///    remainder made the proof unbuildable (see [deviceSetChangeQuorum]).
+///
+/// [remainingDeviceCount] is ignored for [CoAuthOccasion.keyRotation]. It must
+/// be the count of devices in the incoming record that are able to
+/// countersign, i.e. its `device_sig_keys` length — the sender computes its
+/// quorum from the same quantity, so both sides agree without transmitting it.
+///
+/// (This replaces the former `preRotationDeviceCount` parameter, which was
+/// never read in the body: callers passed a number that had no effect on the
+/// result, so the quorum silently ran over the cached count in every case.)
 RotationCoAuthResult verifyRotationCoAuth({
   required List<RotationApprovalToken> tokens,
   required List<DeviceSigInfo> cachedDeviceSigKeys,
   required Uint8List rotationHash,
-  required int preRotationDeviceCount,
+  CoAuthOccasion occasion = CoAuthOccasion.keyRotation,
+  int remainingDeviceCount = 0,
 }) {
   if (cachedDeviceSigKeys.isEmpty) return RotationCoAuthResult.legacy;
   final n = cachedDeviceSigKeys.length;
   if (n <= 1) return RotationCoAuthResult.singleDevice;
   if (tokens.isEmpty) return RotationCoAuthResult.quorumNotMet;
 
-  final required = rotationQuorum(n);
-  var valid = 0;
+  final required = occasion == CoAuthOccasion.deviceSetChange
+      ? deviceSetChangeQuorum(remainingDeviceCount)
+      : rotationQuorum(n);
+  // Count DISTINCT signing devices, not valid tokens. The quorum asks "how
+  // many devices consented"; a plain token counter answers "how many valid
+  // signatures were attached", and those differ by exactly the repetition an
+  // attacker controls. Whoever holds ONE device's Device-Sig key can list its
+  // token twice and clear a quorum of 2 — the entire mechanism, for both
+  // occasions, with a single stolen device. The signature is genuine each
+  // time, so nothing else in this function would notice.
+  final approvers = <String>{};
   for (final token in tokens) {
     final deviceHex = _bytesToHex(token.deviceNodeId);
+    if (approvers.contains(deviceHex)) continue;
     final info = cachedDeviceSigKeys
         .where((d) => _bytesToHex(d.deviceNodeId) == deviceHex)
         .firstOrNull;
     if (info == null) continue;
     if (!_bytesEqual(token.rotationHash, rotationHash)) continue;
     if (token.verify(info.deviceEd25519Pk, info.deviceMlDsaPk)) {
-      valid++;
+      approvers.add(deviceHex);
     }
   }
-  return valid >= required
+  return approvers.length >= required
       ? RotationCoAuthResult.quorumMet
       : RotationCoAuthResult.quorumNotMet;
 }

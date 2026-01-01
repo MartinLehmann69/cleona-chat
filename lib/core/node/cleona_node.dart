@@ -736,13 +736,41 @@ class CleonaNode {
   /// online. Keyed by recipientDeviceIdHex. Each entry holds the opaque
   /// encrypted blob, the sender's deviceId, and a timestamp. Max 50
   /// entries total, 7-day TTL, evicted on periodic tick.
-  final Map<String, List<_FirstCrMailboxEntry>> _firstCrMailbox = {};
+  final Map<String, List<FirstCrMailboxEntry>> _firstCrMailbox = {};
+
+  /// §5.5b re-entrancy guard for [deliverFirstCrMailbox], keyed by
+  /// recipientDeviceIdHex. A peer coming online emits a burst (PONG,
+  /// ROUTE_UPDATE, PEER_LIST within milliseconds) and _touchPeer fires the
+  /// delivery per packet. Without this guard every packet starts its own
+  /// instance, all of them read the same not-yet-drained bucket and push
+  /// duplicate FIRST_CR_DELIVERs (Arbeitsregel #5), and a late-finishing
+  /// instance can resurrect entries an earlier one already delivered.
+  final Set<String> _firstCrDeliverInFlight = {};
   static const int _firstCrMailboxMaxEntries = 50;
   static const Duration _firstCrMailboxTtl = Duration(days: 7);
 
+  /// §5.5b acceptance criterion 3 (Arch:2699) — "max 10 CRs per recipient,
+  /// max 1 MB total mailbox per node". Enforced with oldest-first eviction
+  /// rather than a hard reject (S299): a rejecting mailbox stays blocked for
+  /// the full 7-day TTL, an evicting one recovers on the sender's next
+  /// retry cycle.
+  static const int _firstCrMailboxMaxPerRecipient = 10;
+  static const int _firstCrMailboxMaxBytes = 1024 * 1024;
+
+  /// §5.5b acceptance criterion 4 (Arch:2697) — sliding 1-hour window per
+  /// authenticated sender. Pruned lazily on access and on the maintenance
+  /// tick, so an idle node does not retain sender history.
+  static const int _firstCrMailboxMaxStoresPerSenderPerHour = 5;
+  final Map<String, List<DateTime>> _firstCrStoreRateLog = {};
+
   /// Callback for FIRST_CR_STORE_ACK — the service layer registers this
   /// so it can update contact status to storedForDelivery.
-  void Function(Uint8List senderDeviceId, bool accepted)? onFirstCrStoreAck;
+  void Function(Uint8List senderDeviceId, bool accepted, Uint8List recipientUserId)? onFirstCrStoreAck;
+
+  /// §5.10.2: fires when a DeviceKemRecord is newly accepted for a device
+  /// (any acquisition path: PONG, DHT fetch, IDENTITY_KEM_RESPONSE).
+  /// Service layer chains this to re-trigger S&F push + fragment push.
+  void Function(String deviceHex)? onDeviceKemRecordReceived;
 
   CleonaNode({
     required this.profileDir,
@@ -1127,7 +1155,7 @@ class CleonaNode {
       storagePath: '$profileDir/identity_dht_storage.json',
       // D1 (§4.3 Trust anchor): Store-Time-Verifikation eingehender
       // AuthManifests gegen Founding-Key-Hash/Rotationsketten-Anker.
-      deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.secret),
+      deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.identitySecret),
     );
     await identityDhtHandler.start();
     identityResolver = IdentityResolver(
@@ -2401,7 +2429,37 @@ class CleonaNode {
         try {
           final p = proto.LivenessRecordProto.fromBuffer(frame.payload);
           final live = LivenessRecord.fromProto(p);
-          identityDhtHandler.handleLivePublish(live);
+          // A-4 (§2.4.1a [11''], §4.3 D1): the record only seeds the routing
+          // table when handleLivePublish signature-verified it against the
+          // user's trust anchor. `LivenessRecord` carries no pubkey of its
+          // own, so "verify against the claimed userPk" is resolvable ONLY
+          // through a cached AuthManifest with embedded keys. The
+          // Closed-Network HMAC on the packet says nothing about the
+          // user-bound claim inside it (§2.3.5).
+          final hadAnchor = identityDhtHandler.hasAnchorFor(live.userId);
+          final verified = identityDhtHandler.handleLivePublish(live);
+          if (!verified) {
+            if (!hadAnchor) {
+              // No anchor: the record was accepted into the replica store
+              // (cold-start transition) but MUST NOT touch routing. Fetch the
+              // AuthManifest so the next Liveness for this user is checkable.
+              // Fire-and-forget + throttled — an ungated retrieve storm on
+              // every unanchored LIVE_PUBLISH would violate Arbeitsregel #5.
+              unawaited(_probeForAuthManifest(live.userId));
+            } else {
+              _log.debug('LIVE_PUBLISH drop: sig/seq rejected against anchor '
+                  '(user=${bytesToHex(live.userId).substring(0, 8)} '
+                  'device=${bytesToHex(live.deviceNodeId).substring(0, 8)})');
+            }
+            // Deliberately delayed seeding, and that is acceptable: the
+            // Liveness seed is only an ACCELERATOR (§4.3). Routes are built
+            // independently by the regular BOOT cascade (`_touchPeer` at
+            // hopCount == 0, which alone may promote a DV direct neighbor)
+            // and by the publisher's own self-store on its node. Losing the
+            // shortcut costs one round-trip, accepting forged addresses
+            // costs identity substitution (§4.3 Threat Model D1).
+            return true;
+          }
           // Welle 5 §4.3 (multi-identity routability): also seed the
           // routing-table with the announced device — Liveness carries
           // userId + deviceId + concrete addresses, which is exactly the
@@ -2457,7 +2515,9 @@ class CleonaNode {
                 'device=${bytesToHex(r.deviceId).substring(0, 8)})');
             return true;
           }
-          identityDhtHandler.handleKemPublish(r);
+          if (identityDhtHandler.handleKemPublish(r)) {
+            onDeviceKemRecordReceived?.call(bytesToHex(r.deviceId));
+          }
         } catch (e) {
           _log.debug('KEM_PUBLISH drop: parse/verify error: $e');
         }
@@ -2522,9 +2582,23 @@ class CleonaNode {
       // + remote (addr, port). The IdentityResolver-side awaiter receives a
       // `(type, payload)` tuple it decodes with the typed proto's
       // `fromBuffer`.
+      // S299: these three carry AuthManifest / LivenessRecord /
+      // DeviceKemRecordV3 payloads — NOT a DhtPong. They used to share the
+      // DHT_PONG case below, so every one of them ran through
+      // `DhtPong.fromBuffer` and logged
+      //   "§5.10.2: PONG kem_record ignored (InvalidProtocolBufferException:
+      //    Protocol message tag had invalid wire type.)"
+      // Measured on Node2 in one day: 93 + 73 + 69 = 235 such frames against
+      // 234 of those log lines — the errors were entirely this mis-scoping,
+      // not a broken KEM path. The noise made the §5.10.2 mechanism look
+      // dead in every log it appeared in.
       case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE:
       case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
       case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE:
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort,
+            wasDirect: wasDirect);
+        return true;
+
       case proto.MessageTypeV3.MTV3_DHT_PONG:
         // §5.10.2 first-contact KEM bootstrap: a PONG may carry the
         // responder's DeviceKemRecord because we asked for it via
@@ -2542,9 +2616,12 @@ class CleonaNode {
             final pong = proto.DhtPong.fromBuffer(frame.payload);
             if (pong.hasKemRecord()) {
               final rec = DeviceKemRecord.fromProto(pong.kemRecord);
-              identityDhtHandler.handleKemPublish(rec);
-              _log.info('§5.10.2: DeviceKemRecord received on PONG from '
-                  '${bytesToHex(senderDeviceId).substring(0, 8)} — cached');
+              if (identityDhtHandler.handleKemPublish(rec)) {
+                onDeviceKemRecordReceived?.call(
+                    bytesToHex(rec.deviceId));
+                _log.info('§5.10.2: DeviceKemRecord received on PONG from '
+                    '${bytesToHex(senderDeviceId).substring(0, 8)} — cached');
+              }
             }
           } catch (e) {
             // Unparseable or malformed record: the PONG itself is still a
@@ -3034,7 +3111,7 @@ class CleonaNode {
     final pk = peer.deviceEd25519PublicKey;
     final nonce = peer.deviceIdPowNonce;
     if (pk == null || pk.isEmpty || nonce == null || nonce.isEmpty) return;
-    final boundId = HdWallet.computeDeviceNodeId(pk, NetworkSecret.secret);
+    final boundId = HdWallet.computeDeviceNodeId(pk, NetworkSecret.identitySecret);
     if (bytesToHex(boundId) != bytesToHex(peer.nodeId)) {
       _log.warn('D3: Admission-Nonce fuer ${peer.nodeIdHex.substring(0, 8)} '
           'verworfen — Device-PK gehoert nicht zur Wire-Identitaet');
@@ -3714,52 +3791,297 @@ class CleonaNode {
     try {
       final store = proto.FirstCrStoreV3.fromBuffer(frame.payload);
       final recipHex = bytesToHex(Uint8List.fromList(store.recipientDeviceId));
-      final senderHex = bytesToHex(Uint8List.fromList(store.senderDeviceId));
+      // S299 (A4): key the sender identity off the AUTHENTICATED frame
+      // sender, not off `store.sender_device_id` from the payload. The
+      // payload field is attacker-chosen, and it feeds the dedup key — a
+      // participant holding the network secret could otherwise fill the
+      // mailbox with freely invented sender IDs and defeat both dedup and
+      // any future per-sender rate limit (§5.5b criterion 4, Arch:2700).
+      // Safe for relayed stores: `packet.senderDeviceId` is the end-to-end
+      // originator, not the relay hop, so it equals the payload field on
+      // every legitimate path. Caveat: on the BOOT path an unknown
+      // Device-Sig PK only yields a lenient pass (see :1756-1758), so this
+      // is defence-in-depth, not a complete spoof barrier.
+      final senderHex = bytesToHex(senderDeviceId);
       final ttlMs = store.ttlMs.toInt();
       final ttl = ttlMs > 0 && ttlMs <= 604800000
           ? Duration(milliseconds: ttlMs)
           : _firstCrMailboxTtl;
 
-      // Quota check — total across all recipients.
-      var totalEntries = 0;
-      for (final list in _firstCrMailbox.values) {
-        totalEntries += list.length;
-      }
-      if (totalEntries >= _firstCrMailboxMaxEntries) {
-        _log.info('FIRST_CR_STORE reject: quota ($totalEntries >= '
-            '$_firstCrMailboxMaxEntries) from ${senderHex.substring(0, 8)}');
+      // §5.5b acceptance criterion 2 (Arch:2696): the SeedPeer must "know"
+      // the recipient. Without this, criterion 3's per-recipient budget is
+      // trivially bypassed — an attacker invents N recipient IDs and fills
+      // the node budget through N empty buckets. Legitimate stores pass by
+      // construction: the seed peers listed in a ContactSeed are the
+      // recipient's own peers, so the recipient is in their routing table.
+      if (routingTable.getPeer(Uint8List.fromList(store.recipientDeviceId)) ==
+          null) {
+        _log.info('FIRST_CR_STORE reject: recipient ${recipHex.substring(0, 8)} '
+            'not in routing table (from ${senderHex.substring(0, 8)})');
         _sendFirstCrStoreAck(senderDeviceId, from, fromPort, false,
-            reason: 'quota_exceeded');
+            reason: 'unknown_recipient');
         return;
       }
 
-      // Dedup — same sender→recipient pair replaces the old entry.
+      // §5.5b acceptance criterion 4 (Arch:2697): max 5 FIRST_CR_STORE per
+      // sender per hour. Sliding window, same shape as the §5.5 S&F limiter
+      // (cleona_service.dart:13562). Only meaningful because A4 keys the
+      // sender off the authenticated frame rather than the payload.
+      if (!_checkFirstCrSenderRateLimit(senderHex)) {
+        _log.info('FIRST_CR_STORE reject: rate limit from '
+            '${senderHex.substring(0, 8)}');
+        _sendFirstCrStoreAck(senderDeviceId, from, fromPort, false,
+            reason: 'rate_limited');
+        return;
+      }
+
+      // Dedup FIRST — same sender→recipient pair replaces the old entry.
+      // S299: this used to run AFTER the quota check, which meant a full
+      // mailbox rejected even a count-neutral replacement from a known
+      // sender. §5.5b (Arch:2691) promises "seed-side dedup prevents storage
+      // overflow" — that promise only holds if dedup runs first.
       final dedupKey = '$senderHex:$recipHex';
       final bucket = _firstCrMailbox.putIfAbsent(recipHex, () => []);
       bucket.removeWhere((e) => e.dedupKey == dedupKey);
 
-      bucket.add(_FirstCrMailboxEntry(
+      // §5.5b acceptance criterion 3 (Arch:2699): "max 10 CRs per recipient,
+      // max 1 MB total mailbox per node". S299: the previous implementation
+      // used a single GLOBAL 50-entry counter with a hard reject and no
+      // eviction — one filled mailbox blocked First-CRs for EVERY recipient
+      // for up to 7 days (TTL was the only way out). Per-recipient budgets
+      // plus oldest-first eviction bound the blast radius to one recipient
+      // and keep the mailbox self-healing; the evicted CR is re-deposited by
+      // the sender's next retry cycle (Arch:2691).
+      while (bucket.length >= _firstCrMailboxMaxPerRecipient) {
+        final evicted = bucket.removeAt(0);
+        _log.info('FIRST_CR_STORE evict (per-recipient budget): '
+            '${bytesToHex(evicted.senderDeviceId).substring(0, 8)} → '
+            '${recipHex.substring(0, 8)}');
+      }
+
+      bucket.add(FirstCrMailboxEntry(
         recipientDeviceId: Uint8List.fromList(store.recipientDeviceId),
-        senderDeviceId: Uint8List.fromList(store.senderDeviceId),
+        // A4: store the authenticated sender, not the payload claim — this
+        // is what FIRST_CR_DELIVER later hands the recipient as the CR's
+        // origin, so it must be the identity we actually verified.
+        senderDeviceId: Uint8List.fromList(senderDeviceId),
         encryptedCrBlob: Uint8List.fromList(store.encryptedCrBlob),
         storedAt: DateTime.now(),
         ttl: ttl,
       ));
 
+      // Node-wide backstop: entry count and byte budget, both oldest-first.
+      // Bytes are the criterion the architecture actually names (1 MB); the
+      // 50-entry cap stays as a cheap secondary bound.
+      final totalEntries = _trimFirstCrMailboxToNodeBudget();
+
       _log.info('§5.5b FIRST_CR_STORE: stored CR from ${senderHex.substring(0, 8)} '
           'for ${recipHex.substring(0, 8)} (ttl=${ttl.inHours}h, total=$totalEntries)');
       _saveFirstCrMailbox();
-      _sendFirstCrStoreAck(senderDeviceId, from, fromPort, true);
+      _sendFirstCrStoreAck(senderDeviceId, from, fromPort, true,
+          recipientUserId: Uint8List.fromList(store.recipientUserId));
     } catch (e) {
       _log.debug('FIRST_CR_STORE parse error: $e');
     }
   }
 
+  /// §5.10.2 trigger (b): last time we asked a device for its
+  /// DeviceKemRecord after a send to it was dropped for the missing record.
+  final Map<String, DateTime> _lastKemProbeAt = {};
+
+  /// One probe per target device per 60 s. Counted per DEVICE, not per
+  /// message type and not per packet: a fan-out to ten replicators drops ten
+  /// times in one burst, and a per-packet gate would turn that burst into a
+  /// probe burst. Independent of the Stage-2 stale-PK cooldown — missing
+  /// record and rotated key are unrelated conditions and must not mask each
+  /// other.
+  static const Duration _kemProbeMinInterval = Duration(seconds: 60);
+
+  /// Ask [deviceId] for its DeviceKemRecord via a BOOT-path `DHT_PING`
+  /// carrying `want_kem_record` (§5.10.2). No chicken-and-egg: `DHT_PING` is
+  /// in the BOOT allow-list, so it is built as a plaintext
+  /// InfrastructureFrame and needs no KEM record itself.
+  ///
+  /// Silent no-op when we hold no usable address for the device — acquisition
+  /// then remains the DHT's job (§4.3). This probe repairs a known gap; it is
+  /// not a discovery mechanism.
+  Future<void> _probeForKemRecord(Uint8List deviceId) async {
+    final hex = bytesToHex(deviceId);
+    final last = _lastKemProbeAt[hex];
+    final now = DateTime.now();
+    if (last != null && now.difference(last) < _kemProbeMinInterval) return;
+
+    final peer = routingTable.getPeer(deviceId);
+    if (peer == null) return;
+    final targets = peer.allConnectionTargets();
+    if (targets.isEmpty) return;
+    final target = targets.first;
+    if (target.ip.isEmpty || target.ip == '0.0.0.0' || target.ip == '::') {
+      return;
+    }
+
+    _lastKemProbeAt[hex] = now;
+    final ping = proto.DhtPing()
+      ..senderId = primaryIdentity.deviceNodeId
+      ..wantKemRecord = true;
+    try {
+      await sendInfraDirect(
+        messageType: proto.MessageTypeV3.MTV3_DHT_PING,
+        innerPayload: Uint8List.fromList(ping.writeToBuffer()),
+        recipientDeviceId: deviceId,
+        addr: InternetAddress(target.ip),
+        port: target.port,
+      );
+      _log.info('§5.10.2: KEM-record probe → ${hex.substring(0, 8)} '
+          'at ${target.ip}:${target.port} (after send-drop)');
+    } catch (e) {
+      _log.debug('§5.10.2: KEM-record probe to ${hex.substring(0, 8)} '
+          'failed: $e');
+    }
+  }
+
+  /// A-4 (§4.3 D1): last time we fetched the AuthManifest for a userId whose
+  /// LivenessRecord arrived without a local trust anchor.
+  final Map<String, DateTime> _lastAuthAnchorProbeAt = {};
+
+  /// One anchor fetch per userId per 60 s. Same shape and reasoning as
+  /// [_kemProbeMinInterval]: a replicator fan-out delivers the same
+  /// LIVE_PUBLISH from up to K peers in one burst, and a per-packet gate
+  /// would turn that burst into a retrieve storm (Arbeitsregel #5).
+  static const Duration _authAnchorProbeMinInterval = Duration(seconds: 60);
+
+  /// Fetch the AuthManifest for [userId] from the K-closest replicators so
+  /// subsequent LivenessRecords for that user become verifiable (§4.3 D1).
+  ///
+  /// The response is fed through `handleAuthPublish`, i.e. through the SAME
+  /// store-time verification an IDENTITY_AUTH_PUBLISH takes — a forged
+  /// manifest cannot enter here on easier terms than anywhere else.
+  ///
+  /// Sequential with early exit rather than a K-wide parallel fan-out: the
+  /// first honest replicator ends the probe, so the common case costs one
+  /// packet, not ten.
+  Future<void> _probeForAuthManifest(Uint8List userId) async {
+    final hex = bytesToHex(userId);
+    final last = _lastAuthAnchorProbeAt[hex];
+    final now = DateTime.now();
+    if (last != null &&
+        now.difference(last) < _authAnchorProbeMinInterval) {
+      return;
+    }
+
+    // 2D-DHT auth key = SHA-256("auth" || userId), same derivation as
+    // IdentityPublisher/IdentityResolver use to place and find the record.
+    final authKey = SodiumFFI()
+        .sha256(Uint8List.fromList([...'auth'.codeUnits, ...userId]));
+    final closest = routingTable.findClosestPeers(authKey, count: 5);
+    if (closest.isEmpty) return; // nothing to ask — no throttle burnt
+
+    _lastAuthAnchorProbeAt[hex] = now;
+    final body = Uint8List.fromList(
+        (proto.IdentityAuthRetrieveRequest()..userId = userId)
+            .writeToBuffer());
+    for (final peer in closest) {
+      try {
+        final response = await dhtRpc.sendAndWait(
+            proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE, body, peer);
+        if (response == null) continue;
+        if (response.type !=
+            proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE) {
+          continue;
+        }
+        final m = AuthManifest.fromProto(
+            proto.AuthManifestProto.fromBuffer(response.payload));
+        // Bind the answer to the REQUESTED userId before it reaches the
+        // crypto check — a replicator must not be able to answer with a
+        // different (self-consistent) user's manifest.
+        if (!_bytesEqual(m.userId, userId)) continue;
+        identityDhtHandler.handleAuthPublish(m);
+        if (identityDhtHandler.hasAnchorFor(userId)) {
+          _log.info('A-4: trust anchor for ${hex.substring(0, 8)} acquired '
+              'via AUTH_RETRIEVE (seq=${m.sequenceNumber})');
+          return;
+        }
+      } catch (e) {
+        _log.debug('A-4: anchor probe for ${hex.substring(0, 8)} failed: $e');
+      }
+    }
+  }
+
+  /// §5.5b acceptance criterion 4 (Arch:2697) — "max 5 FIRST_CR_STORE per
+  /// sender per hour". Sliding window keyed on the AUTHENTICATED frame
+  /// sender (see A4 in [_handleFirstCrStore]); keying it on the payload
+  /// field would let an attacker rotate the key and defeat the limit.
+  /// Pure and static for the same reason as [trimFirstCrMailboxToBudget]:
+  /// the window is the contract, and it needs a test that does not depend on
+  /// wall-clock timing — hence the injectable [now].
+  static bool firstCrRateLimitAllows(
+      Map<String, List<DateTime>> rateLog, String senderHex,
+      {DateTime? now}) {
+    final at = now ?? DateTime.now();
+    final cutoff = at.subtract(const Duration(hours: 1));
+    final log = rateLog.putIfAbsent(senderHex, () => []);
+    log.removeWhere((ts) => ts.isBefore(cutoff));
+    if (log.length >= _firstCrMailboxMaxStoresPerSenderPerHour) return false;
+    log.add(at);
+    return true;
+  }
+
+  bool _checkFirstCrSenderRateLimit(String senderHex) =>
+      firstCrRateLimitAllows(_firstCrStoreRateLog, senderHex);
+
+  /// §5.5b node-wide mailbox budget (Arch:2699 — "max 1 MB total mailbox per
+  /// node"). Evicts oldest-first across ALL recipients until both the byte
+  /// budget and the entry backstop hold. Returns the resulting entry count.
+  ///
+  /// S299: replaces the previous hard reject on a global 50-entry counter.
+  /// A rejecting mailbox stays blocked for the full 7-day TTL and takes every
+  /// other recipient down with it; an evicting one recovers on the sender's
+  /// next retry cycle (Arch:2691).
+  /// Pure and static so the §5.5b budget invariants are smoke-testable
+  /// without standing up a node (see `test/smoke/smoke_first_cr_mailbox.dart`).
+  /// [onEvict] receives the recipient hex of each evicted entry.
+  static int trimFirstCrMailboxToBudget(
+      Map<String, List<FirstCrMailboxEntry>> mailbox,
+      {void Function(String recipientHex)? onEvict}) {
+    int entries() => mailbox.values.fold<int>(0, (s, l) => s + l.length);
+    int bytes() => mailbox.values.fold<int>(
+        0, (s, l) => s + l.fold<int>(0, (b, e) => b + e.encryptedCrBlob.length));
+
+    while (entries() > _firstCrMailboxMaxEntries ||
+        bytes() > _firstCrMailboxMaxBytes) {
+      String? oldestKey;
+      DateTime? oldestAt;
+      for (final entry in mailbox.entries) {
+        if (entry.value.isEmpty) continue;
+        final at = entry.value.first.storedAt;
+        if (oldestAt == null || at.isBefore(oldestAt)) {
+          oldestAt = at;
+          oldestKey = entry.key;
+        }
+      }
+      if (oldestKey == null) break; // nothing evictable — avoid a spin
+      mailbox[oldestKey]!.removeAt(0);
+      if (mailbox[oldestKey]!.isEmpty) mailbox.remove(oldestKey);
+      onEvict?.call(oldestKey);
+    }
+    return entries();
+  }
+
+  int _trimFirstCrMailboxToNodeBudget() => trimFirstCrMailboxToBudget(
+        _firstCrMailbox,
+        onEvict: (hex) => _log.info(
+            'FIRST_CR_STORE evict (node budget): ${hex.substring(0, 8)}'),
+      );
+
   void _sendFirstCrStoreAck(Uint8List recipientDeviceId,
-      InternetAddress addr, int port, bool accepted, {String reason = ''}) {
+      InternetAddress addr, int port, bool accepted,
+      {String reason = '', Uint8List? recipientUserId}) {
     final ack = proto.FirstCrStoreAckV3()
       ..accepted = accepted
       ..rejectReason = reason;
+    if (recipientUserId != null && recipientUserId.isNotEmpty) {
+      ack.recipientUserId = recipientUserId;
+    }
     sendInfraDirect(
       messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE_ACK,
       innerPayload: Uint8List.fromList(ack.writeToBuffer()),
@@ -3777,7 +4099,8 @@ class CleonaNode {
           '${bytesToHex(senderDeviceId).substring(0, 8)}: '
           'accepted=${ack.accepted}'
           '${ack.rejectReason.isNotEmpty ? " reason=${ack.rejectReason}" : ""}');
-      onFirstCrStoreAck?.call(senderDeviceId, ack.accepted);
+      onFirstCrStoreAck?.call(senderDeviceId, ack.accepted,
+          Uint8List.fromList(ack.recipientUserId));
     } catch (e) {
       _log.debug('FIRST_CR_STORE_ACK parse error: $e');
     }
@@ -3785,31 +4108,63 @@ class CleonaNode {
 
   /// §5.5b: Deliver stored CRs when the target device's first packet
   /// arrives (called from _touchPeer on hopCount==0 contact).
-  void deliverFirstCrMailbox(Uint8List deviceId, InternetAddress addr, int port) {
+  Future<void> deliverFirstCrMailbox(Uint8List deviceId, InternetAddress addr, int port) async {
     final hex = bytesToHex(deviceId);
-    final bucket = _firstCrMailbox.remove(hex);
+    final bucket = _firstCrMailbox[hex];
     if (bucket == null || bucket.isEmpty) return;
 
-    var delivered = 0;
-    for (final entry in bucket) {
-      if (entry.isExpired) continue;
-      final deliver = proto.FirstCrDeliverV3()
-        ..encryptedCrBlob = entry.encryptedCrBlob
-        ..senderDeviceId = entry.senderDeviceId
-        ..storedAtMs = Int64(entry.storedAt.millisecondsSinceEpoch);
-      sendInfraDirect(
-        messageType: proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER,
-        innerPayload: Uint8List.fromList(deliver.writeToBuffer()),
-        recipientDeviceId: deviceId,
-        addr: addr,
-        port: port,
-      );
-      delivered++;
-    }
-    if (delivered > 0) {
-      _log.info('§5.5b FIRST_CR_DELIVER: pushed $delivered stored CRs '
-          'to ${hex.substring(0, 8)} at ${addr.address}:$port');
-      _saveFirstCrMailbox();
+    // Re-entrancy guard: Set.add returns false when the key is already
+    // present, so a second concurrent call for the same recipient bails out
+    // instead of re-sending the same CRs from the same bucket.
+    if (!_firstCrDeliverInFlight.add(hex)) return;
+    try {
+      // Iterate a snapshot: the loop suspends on every send, and the live
+      // list may gain entries (FIRST_CR_STORE) or lose them (eviction tick)
+      // meanwhile. The bucket itself is mutated only once, at the end.
+      final snapshot = List.of(bucket);
+      var delivered = 0;
+      // Identity set: FirstCrMailboxEntry defines neither == nor hashCode,
+      // so Object identity applies — these are the very same instances that
+      // still sit in the live bucket, hence contains() matches exactly them
+      // and never a newly stored look-alike.
+      final deliveredEntries = <FirstCrMailboxEntry>{};
+      final failed = <FirstCrMailboxEntry>[];
+      for (final entry in snapshot) {
+        if (entry.isExpired) continue;
+        final deliver = proto.FirstCrDeliverV3()
+          ..encryptedCrBlob = entry.encryptedCrBlob
+          ..senderDeviceId = entry.senderDeviceId
+          ..storedAtMs = Int64(entry.storedAt.millisecondsSinceEpoch);
+        final ok = await sendInfraDirect(
+          messageType: proto.MessageTypeV3.MTV3_FIRST_CR_DELIVER,
+          innerPayload: Uint8List.fromList(deliver.writeToBuffer()),
+          recipientDeviceId: deviceId,
+          addr: addr,
+          port: port,
+        );
+        if (ok) {
+          delivered++;
+          deliveredEntries.add(entry);
+        } else {
+          failed.add(entry);
+        }
+      }
+      // Surgical removal instead of reassigning the whole bucket: only the
+      // entries this instance actually delivered (plus expired ones) go,
+      // everything stored while we were suspended stays.
+      final live = _firstCrMailbox[hex];
+      if (live != null) {
+        live.removeWhere((e) => deliveredEntries.contains(e) || e.isExpired);
+        if (live.isEmpty) _firstCrMailbox.remove(hex);
+      }
+      if (delivered > 0 || snapshot.length != failed.length) {
+        _log.info('§5.5b FIRST_CR_DELIVER: pushed $delivered stored CRs '
+            'to ${hex.substring(0, 8)} at ${addr.address}:$port'
+            '${failed.isNotEmpty ? ' (${failed.length} failed, kept)' : ''}');
+        _saveFirstCrMailbox();
+      }
+    } finally {
+      _firstCrDeliverInFlight.remove(hex);
     }
   }
 
@@ -3821,6 +4176,16 @@ class CleonaNode {
       return bucket.isEmpty;
     });
     if (_firstCrMailbox.length != before) _saveFirstCrMailbox();
+
+    // S299: prune the criterion-4 rate window here too, so an idle node does
+    // not retain sender history indefinitely. Deliberately NOT persisted —
+    // a restart legitimately clears the window (same stance as the §5.5
+    // S&F limiter).
+    final cutoff = DateTime.now().subtract(const Duration(hours: 1));
+    _firstCrStoreRateLog.removeWhere((_, log) {
+      log.removeWhere((ts) => ts.isBefore(cutoff));
+      return log.isEmpty;
+    });
   }
 
   /// §5.5b: Handle FIRST_CR_DELIVER — a seed peer is forwarding a
@@ -4995,6 +5360,15 @@ class CleonaNode {
             '_buildInfraPacket: no Device-KEM-PK for ${bytesToHex(recipientDeviceId).substring(0, 8)} '
             '— dropping $t (drop #$n)');
       }
+      // §5.10.2 trigger (b), S299: this drop is the most precise signal in
+      // the system that we need this device's DeviceKemRecord. Until now it
+      // was the only such signal that led nowhere — measured on Node2 in one
+      // day: 1241 drops across 45 devices, of which only 10 ever received an
+      // acquisition ping. Ask for the record instead of only counting the
+      // loss. Fire-and-forget, throttled per device, no retry chain: the
+      // dropped packet stays dropped, this only restores the ability to
+      // send to that device at all.
+      unawaited(_probeForKemRecord(recipientDeviceId));
       return null;
     }
     return V3FrameCodec.buildInfrastructureFrame(
@@ -5397,9 +5771,19 @@ class CleonaNode {
 
     // §5.5b: Deliver stored First-CR-Mailbox entries to this device.
     if (isUdp && isAuthoritative && ip.isNotEmpty && ip != '0.0.0.0' && ip != '::') {
+      // Fire-and-forget, but the error path must be attached to the FUTURE:
+      // a synchronous try/catch around an async call only ever sees failures
+      // raised before the first await (e.g. InternetAddress parsing). Anything
+      // sendInfraDirect throws later would escape as an unhandled async error.
       try {
-        deliverFirstCrMailbox(peerId, InternetAddress(ip), port);
-      } catch (_) {}
+        unawaited(deliverFirstCrMailbox(peerId, InternetAddress(ip), port)
+            .catchError((Object e) {
+          _log.warn('§5.5b FIRST_CR_DELIVER failed for '
+              '${bytesToHex(peerId).substring(0, 8)} at $ip:$port: $e');
+        }));
+      } catch (e) {
+        _log.warn('§5.5b FIRST_CR_DELIVER dispatch failed for $ip:$port: $e');
+      }
     }
   }
 
@@ -5539,8 +5923,15 @@ class CleonaNode {
     // treat as unknown — don't block private targets based on bad data.
     final effectivePublicIp = (myPublicIp != null && _isPrivateIp(myPublicIp)) ? null : myPublicIp;
     return targets.where((addr) {
-      // IPv6 global: no NAT context needed — always routable
-      if (addr.ip.contains(':') && !addr.ip.toLowerCase().startsWith('fe80:')) return true;
+      if (addr.ip.contains(':')) {
+        final lower = addr.ip.toLowerCase();
+        if (lower.startsWith('fe80:')) return false;
+        // ULA (fc/fd): only reachable if we also have a ULA address
+        if (lower.startsWith('fc') || lower.startsWith('fd')) {
+          return PeerAddress.hasAnyUlaAddress();
+        }
+        return true; // IPv6 global: no NAT context needed
+      }
       if (!_isPrivateIp(addr.ip)) return true;
       // Private-to-private: allow if both are in the same address class.
       // §4.7: CGNAT (100.64/10) has zero routing relationship to RFC 1918
@@ -5630,10 +6021,16 @@ class CleonaNode {
     final list = <proto.PeerAddressProto>[];
     for (final ip in _localIps) {
       if (ip.isEmpty || ip == '0.0.0.0' || ip == '::') continue;
+      final t = PeerAddress.classifyIp(ip);
+      if (t == PeerAddressType.ipv6Ula ||
+          t == PeerAddressType.ipv6LinkLocal ||
+          t == PeerAddressType.ipv6SiteLocal) {
+        continue;
+      }
       list.add(proto.PeerAddressProto()
         ..ip = ip
         ..port = port
-        ..addressType = PeerAddress.typeToProto(PeerAddress.classifyIp(ip)));
+        ..addressType = PeerAddress.typeToProto(t));
     }
     final pubV4 = _advertisedPublicIp;
     final pubPort = _advertisedPublicPort ?? port;
@@ -5951,6 +6348,18 @@ class CleonaNode {
     dvRouting.updateDefaultGateway();
     peerMessageStore.pruneExpired();
     _evictExpiredFirstCrMailbox();
+
+    // §5.10.2 trigger (b): drop probe timestamps older than the throttle
+    // window. Unbounded otherwise — one entry per device we ever failed to
+    // encrypt to, and on a busy node that is every peer we lack a record for.
+    final probeCutoff = DateTime.now().subtract(_kemProbeMinInterval);
+    _lastKemProbeAt.removeWhere((_, at) => at.isBefore(probeCutoff));
+    // A-4: same unbounded-growth argument for the anchor-probe throttle —
+    // one entry per user whose Liveness we could not verify.
+    final anchorProbeCutoff =
+        DateTime.now().subtract(_authAnchorProbeMinInterval);
+    _lastAuthAnchorProbeAt
+        .removeWhere((_, at) => at.isBefore(anchorProbeCutoff));
     // V3.0: messageQueue.pruneExpired() entfällt — keine persistente SendQueue.
     _saveRoutingTable();
     // Snapshot the DV-table together with the routing table so the two
@@ -7010,7 +7419,7 @@ class CleonaNode {
       final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
       for (final entry in json.entries) {
         final list = (entry.value as List<dynamic>)
-            .map((e) => _FirstCrMailboxEntry.fromJson(e as Map<String, dynamic>))
+            .map((e) => FirstCrMailboxEntry.fromJson(e as Map<String, dynamic>))
             .where((e) => !e.isExpired)
             .toList();
         if (list.isNotEmpty) _firstCrMailbox[entry.key] = list;
@@ -7884,14 +8293,14 @@ class FrameDedupCache {
 
 /// §5.5b First-CR-Mailbox entry stored on a seed peer until the target
 /// device comes online and retrieves it.
-class _FirstCrMailboxEntry {
+class FirstCrMailboxEntry {
   final Uint8List recipientDeviceId;
   final Uint8List senderDeviceId;
   final Uint8List encryptedCrBlob;
   final DateTime storedAt;
   final Duration ttl;
 
-  _FirstCrMailboxEntry({
+  FirstCrMailboxEntry({
     required this.recipientDeviceId,
     required this.senderDeviceId,
     required this.encryptedCrBlob,
@@ -7912,8 +8321,8 @@ class _FirstCrMailboxEntry {
     'ttlMs': ttl.inMilliseconds,
   };
 
-  factory _FirstCrMailboxEntry.fromJson(Map<String, dynamic> j) =>
-      _FirstCrMailboxEntry(
+  factory FirstCrMailboxEntry.fromJson(Map<String, dynamic> j) =>
+      FirstCrMailboxEntry(
         recipientDeviceId: base64Decode(j['recipientDeviceId'] as String),
         senderDeviceId: base64Decode(j['senderDeviceId'] as String),
         encryptedCrBlob: base64Decode(j['encryptedCrBlob'] as String),

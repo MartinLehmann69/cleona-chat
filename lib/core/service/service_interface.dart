@@ -11,6 +11,43 @@ import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/node/identity_context.dart';
 
+/// §7.5: what a `ROTATION_APPROVAL_REQUEST` is actually asking the user for.
+///
+/// Both occasions travel the same wire channel (`TwinSyncType`
+/// `ROTATION_APPROVAL_REQUEST`/`_RESPONSE`) and produce the same
+/// countersignature format, but they are two different questions to the human:
+/// "your identity keys are being replaced" versus "a device is being removed
+/// from your identity". Without this discriminator a Linked Device announces
+/// every request as an Emergency Key Rotation, so a device-set change would be
+/// confirmed under a false description — a genuine signature for something the
+/// user was never asked about. Mirrors `proto.ApprovalKindV3`.
+enum RotationApprovalKind {
+  /// Emergency Key Rotation. The hash is `computeRotationHash(...)` over the
+  /// new User pubkeys.
+  keyRotation('key_rotation'),
+
+  /// Device-set change (the §7.5 shrink proof). The hash is
+  /// `computeDeviceSetChangeHash(...)` over the REMAINING device node ids and
+  /// the sequence number of the manifest that will carry the proof.
+  deviceSetChange('device_set_change');
+
+  const RotationApprovalKind(this.wireName);
+
+  /// Stable identifier on the IPC boundary. Deliberately a string and not the
+  /// enum index: the IPC payload is JSON and must not silently re-map when a
+  /// value is inserted into this enum.
+  final String wireName;
+
+  /// Unknown/absent names map to [keyRotation] — the same fallback the proto
+  /// default (`APPROVAL_KIND_KEY_ROTATION = 0`) gives for senders that predate
+  /// the field, so old and new peers read an unmarked request identically.
+  static RotationApprovalKind fromWireName(String? name) =>
+      RotationApprovalKind.values.firstWhere(
+        (k) => k.wireName == name,
+        orElse: () => RotationApprovalKind.keyRotation,
+      );
+}
+
 /// Abstract interface for the Cleona service.
 /// Both CleonaService (direct) and IpcClient (remote) implement this.
 abstract class ICleonaService {
@@ -84,6 +121,13 @@ abstract class ICleonaService {
   List<ContactInfo> get acceptedContacts;
   List<ContactInfo> get pendingContacts;
   List<ContactInfo> get pendingOutgoingContacts;
+
+  /// §5.5b / §8.1.1 step 3: outgoing CRs a seed peer has confirmed storing
+  /// (`FIRST_CR_STORE_ACK`). Arch:3665 requires the sender to show these as
+  /// "zugestellt (gespeichert)". Before S299 the status existed but had no
+  /// getter, so the contact vanished from the UI the moment the store
+  /// succeeded — success looked exactly like losing the request.
+  List<ContactInfo> get storedForDeliveryContacts;
   ContactInfo? getContact(String nodeIdHex);
   List<Conversation> get sortedConversations;
   List<PeerSummary> get peerSummaries;
@@ -218,6 +262,10 @@ abstract class ICleonaService {
   Future<bool> acceptContactRequest(String nodeIdHex);
   void deleteContact(String nodeIdHex, {required String source});
   void renameContact(String nodeIdHex, String? localAlias);
+
+  /// §14.7.4: withhold this node's delivery status from a contact or group.
+  /// Returns false when [entityIdHex] is neither (e.g. a channel).
+  bool setWithholdDeliveryStatus(String entityIdHex, bool withhold);
   /// Set/clear a contact's birthday (local metadata only, never broadcast).
   /// Pass null for all three to clear. Triggers calendar birthday re-sync.
   bool setContactBirthday(String nodeIdHex, {int? month, int? day, int? year});
@@ -308,6 +356,43 @@ abstract class ICleonaService {
   LinkedDeviceStatus get linkedDeviceStatus;
   Future<bool> sendDevicePairRequest();
   Future<bool> requestDelegationRenewal();
+
+  /// §7.1 LD-2: the user (on this, the Primary, device) approved a pending
+  /// pairing request. Derives delegation keys and sends
+  /// `MTV3_DEVICE_PAIR_APPROVE` to the requester. False if `deviceIdHex` is
+  /// not (or no longer) a pending request.
+  ///
+  /// The caller MUST have shown `deviceIdHex` to the user in plain text and
+  /// obtained an explicit approval first (§7.1 step 2) — there is no
+  /// reject counterpart: declining is simply not calling this, and the
+  /// request either sits in [getPendingPairRequests] until the requester
+  /// retries, or ages out of that catch-up view (see its doc).
+  Future<bool> approvePairRequest(String requestingDeviceIdHex);
+
+  /// §7.1 LD-2: the pairing requests currently awaiting a decision on this
+  /// (Primary) device, oldest first.
+  ///
+  /// Analogous to [getPendingRotationApprovals] (§7.5): [onDevicePairRequest]
+  /// is a fire-and-forget event, so a GUI that is not running (or not yet
+  /// connected) when the request arrives never sees it. Unlike §7.5,
+  /// nothing here is a security-authoritative deadline —
+  /// [approvePairRequest] keeps working on an entry after it drops out of
+  /// this list, and the requesting device can simply ask again (§7.1 LD-9
+  /// already overwrites the pending entry on retry, resetting the clock
+  /// below). The cutoff exists only to stop the GUI from presenting a
+  /// long-forgotten request as if it just arrived — which is exactly the
+  /// condition under which a user approves without actually performing the
+  /// device-ID comparison §7.1 step 2 depends on.
+  ///
+  /// Each entry is a plain JSON-serializable map with these keys:
+  ///   * `deviceIdHex`   (String) — pass this to [approvePairRequest]; it is
+  ///                     also the value the user must compare in plain text
+  ///                     against the requesting device before approving.
+  ///   * `receivedAtMs`  (int)    — arrival time, epoch milliseconds.
+  ///   * `expiresAtMs`   (int)    — epoch milliseconds after which the entry
+  ///                     stops being returned here (display cutoff, not a
+  ///                     security boundary — see above).
+  Future<List<Map<String, dynamic>>> getPendingPairRequests();
 
   // Guardian Recovery (Shamir SSS)
   Future<bool> setupGuardians(List<String> guardianNodeIds);
@@ -463,6 +548,66 @@ abstract class ICleonaService {
   /// MTV3_ROTATION_REJECTION_ALERT. Strongest possible theft signal.
   void Function(String contactNodeIdHex, String displayName)?
       onRotationRejectionAlert;
+
+  /// §7.5: fired on a Linked Device when the Primary requests a Device-Sig
+  /// countersignature. The UI MUST ask the user and then call
+  /// [approveRotation] or [rejectRotation] with the same `rotationHashHex`.
+  /// Without a decision the daemon sends NOTHING — a timeout is neither
+  /// approval nor rejection (silence is not consent).
+  ///
+  /// [kind] says what is actually being asked and MUST be reflected in the
+  /// dialog text — see [RotationApprovalKind]. For
+  /// [RotationApprovalKind.deviceSetChange] the last argument lists the
+  /// device node ids (hex) that remain after the change, so the dialog can
+  /// name what disappears; it is empty for a key rotation.
+  ///
+  /// Args: hash hex, requesting device-id hex, occasion, remaining device
+  /// node ids (hex).
+  void Function(String rotationHashHex, String requestingDeviceIdHex,
+          RotationApprovalKind kind, List<String> newDeviceNodeIdHexes)?
+      onRotationApprovalRequest;
+
+  /// §7.5: user approved the pending rotation — creates and sends the
+  /// Device-Sig countersignature. False if the hash is unknown or expired.
+  Future<bool> approveRotation(String rotationHashHex);
+
+  /// §7.5 point 5: user rejected the pending rotation — answers
+  /// `rejected=true` and alerts the contacts directly (bypassing the possibly
+  /// compromised Primary). False if the hash is unknown or expired.
+  Future<bool> rejectRotation(String rotationHashHex);
+
+  /// §7.5: the rotation-approval requests currently awaiting a user decision
+  /// on this device, newest last.
+  ///
+  /// [onRotationApprovalRequest] is a fire-and-forget event: a GUI that is not
+  /// running (or not yet connected) when the request arrives never sees it,
+  /// and the request then expires unanswered without the user ever being
+  /// asked. This getter is the catch-up path — call it once after connecting
+  /// and render the result exactly like a live event.
+  ///
+  /// Entries whose TTL has already elapsed are never returned. Each entry is a
+  /// plain JSON-serializable map with these keys:
+  ///   * `rotationHashHex`       (String) — pass this to [approveRotation] /
+  ///                             [rejectRotation]; it is also the identity of
+  ///                             the request, so a live event and a catch-up
+  ///                             entry for the same rotation de-duplicate on it.
+  ///   * `requestingDeviceIdHex` (String) — device-node-id of the Primary that
+  ///                             asked, same value the event carries.
+  ///   * `approvalKind`          (String) — [RotationApprovalKind.wireName].
+  ///                             The dialog MUST branch on this: a catch-up
+  ///                             entry that renders every request as "approve
+  ///                             key rotation?" asks for consent under a
+  ///                             false description, which is exactly what the
+  ///                             discriminator exists to prevent.
+  ///   * `newDeviceNodeIdHexes`  (`List<String>`) — devices remaining after
+  ///                             the change; only populated for
+  ///                             `device_set_change`, empty otherwise.
+  ///   * `receivedAtMs`          (int)    — arrival time, epoch milliseconds.
+  ///   * `expiresAtMs`           (int)    — epoch milliseconds at which the
+  ///                             entry is dropped. Nothing is sent on expiry —
+  ///                             a countdown may be shown, but running out is
+  ///                             not a rejection.
+  Future<List<Map<String, dynamic>>> getPendingRotationApprovals();
 
   /// H-2 (§6.3.5): fired for every accepted Restore Broadcast — the
   /// "[Name] has set up a new device" notification. `identityKeyChanged`

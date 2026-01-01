@@ -331,6 +331,34 @@ class UiMessage {
   /// Example: {"👍": {"aabb...", "ccdd..."}, "❤️": {"aabb..."}}
   Map<String, Set<String>> reactions = {};
 
+  /// §5.8/§14.7.4 fan-out delivery tracking: recipientUserIdHex → the wire
+  /// messageId that carried this message to that recipient.
+  ///
+  /// A 1:1 message reuses `id` as its wire messageId, so the receipt matches
+  /// on `id` alone and this map stays empty. A group message has one leg per
+  /// member, and each leg needs its OWN wire id: `AckTracker._pending` is
+  /// keyed by messageId alone, so reusing one id across N members would make
+  /// each `trackSend` evict the previous member's pending entry (timer +
+  /// completer) and break RUDP-Light route-failure detection for everyone
+  /// but the last member. Empty for non-fan-out messages.
+  Map<String, String> fanoutLegs = {};
+
+  /// Recipients whose DELIVERY_RECEIPT arrived (subset of `fanoutLegs` keys).
+  Set<String> deliveredBy = {};
+
+  /// Recipients whose receipt carried `withholdDeliveryStatus` (§14.7.4).
+  /// Their leg must never contribute to a visible `delivered`, otherwise the
+  /// aggregate symbol would reveal exactly what they chose to withhold.
+  Set<String> withheldBy = {};
+
+  /// §14.7.4: aggregate over all fan-out legs — `true` only when every leg is
+  /// confirmed AND every recipient discloses. Callers must not upgrade the
+  /// status to `delivered` unless this holds.
+  bool get isFullyDelivered =>
+      fanoutLegs.isNotEmpty &&
+      withheldBy.isEmpty &&
+      deliveredBy.length >= fanoutLegs.length;
+
   UiMessage({
     required this.id,
     required this.conversationId,
@@ -364,7 +392,13 @@ class UiMessage {
     this.pollId,
     this.membershipMismatch = false,
     Map<String, Set<String>>? reactions,
-  }) : reactions = reactions ?? {};
+    Map<String, String>? fanoutLegs,
+    Set<String>? deliveredBy,
+    Set<String>? withheldBy,
+  })  : reactions = reactions ?? {},
+        fanoutLegs = fanoutLegs ?? {},
+        deliveredBy = deliveredBy ?? {},
+        withheldBy = withheldBy ?? {};
 
   bool get hasLinkPreview =>
       linkPreviewUrl != null && linkPreviewUrl!.isNotEmpty;
@@ -408,6 +442,9 @@ class UiMessage {
         if (pollId != null) 'pollId': pollId,
         if (reactions.isNotEmpty)
           'reactions': reactions.map((emoji, senders) => MapEntry(emoji, senders.toList())),
+        if (fanoutLegs.isNotEmpty) 'fanoutLegs': fanoutLegs,
+        if (deliveredBy.isNotEmpty) 'deliveredBy': deliveredBy.toList(),
+        if (withheldBy.isNotEmpty) 'withheldBy': withheldBy.toList(),
       };
 
   static UiMessage fromJson(Map<String, dynamic> json) => UiMessage(
@@ -448,7 +485,14 @@ class UiMessage {
         linkPreviewThumbnailBase64: json['linkPreviewThumbnailBase64'] as String?,
         pollId: json['pollId'] as String?,
         reactions: _parseReactions(json['reactions']),
+        fanoutLegs: (json['fanoutLegs'] as Map<String, dynamic>?)
+            ?.map((k, v) => MapEntry(k, v as String)),
+        deliveredBy: _parseHexSet(json['deliveredBy']),
+        withheldBy: _parseHexSet(json['withheldBy']),
       );
+
+  static Set<String>? _parseHexSet(dynamic raw) =>
+      raw == null ? null : (raw as List<dynamic>).map((e) => e as String).toSet();
 
   static Map<String, Set<String>> _parseReactions(dynamic raw) {
     if (raw == null) return {};
@@ -686,6 +730,12 @@ class GroupInfo {
   DateTime createdAt;
   int membershipEpoch;
 
+  /// §14.7.4: withhold this node's delivery status from the other members'
+  /// UI. Purely local and unilateral — never negotiated, never distributed as
+  /// configuration; it rides as a bit on each outgoing DELIVERY_RECEIPT.
+  /// Default false = disclose.
+  bool withholdDeliveryStatus;
+
   GroupInfo({
     required this.groupIdHex,
     required this.name,
@@ -695,6 +745,7 @@ class GroupInfo {
     required this.ownerNodeIdHex,
     DateTime? createdAt,
     this.membershipEpoch = 0,
+    this.withholdDeliveryStatus = false,
   })  : members = members ?? {},
         createdAt = createdAt ?? DateTime.now();
 
@@ -707,6 +758,7 @@ class GroupInfo {
         'createdAt': createdAt.millisecondsSinceEpoch,
         'members': members.map((k, v) => MapEntry(k, v.toJson())),
         'membershipEpoch': membershipEpoch,
+        'withholdDeliveryStatus': withholdDeliveryStatus,
       };
 
   static GroupInfo fromJson(Map<String, dynamic> json) {
@@ -726,6 +778,7 @@ class GroupInfo {
       createdAt: DateTime.fromMillisecondsSinceEpoch(json['createdAt'] as int? ?? 0),
       members: membersMap,
       membershipEpoch: json['membershipEpoch'] as int? ?? 0,
+      withholdDeliveryStatus: json['withholdDeliveryStatus'] as bool? ?? false,
     );
   }
 }
@@ -1250,6 +1303,19 @@ class ContactInfo {
   /// rev3: userEd25519Pk trust-anchor from v2 ContactSeed (base64url, no padding).
   String? seedEpB64;
 
+  /// §5.5b: node-IDs (hex, lowercase) of the seed peers imported from THIS
+  /// contact's scanned ContactSeed. The First-CR-Mailbox fanout must deposit
+  /// only on these — Arch §5.5b flow step 3: "The seed peers are those
+  /// imported from the scanned ContactSeed ..., and protected seeds from
+  /// unrelated older ContactSeeds must not [be used]." Without this list the
+  /// fanout can only see the global `isProtectedSeed` flag, which is the
+  /// union over every ContactSeed ever scanned.
+  ///
+  /// Empty for contacts created before this field existed (and for contacts
+  /// that never came from a ContactSeed) — see the legacy fallback in
+  /// `_seedPeerIdsForTarget`.
+  List<String> seedPeerIdsHex;
+
   /// §8.3 — the stored trust anchor violated an invariant and must not be
   /// used. Set by the central anchor setter and by the load-time audit;
   /// cleared only by an explicitly confirmed re-anchor.
@@ -1269,6 +1335,12 @@ class ContactInfo {
 
   /// Human-readable reason for [trustAnchorQuarantined] (log + UI).
   String? trustAnchorQuarantineReason;
+
+  /// §14.7.4: withhold this node's delivery status from this contact's UI.
+  /// Purely local and unilateral — never negotiated (unlike everything in
+  /// `ChatConfig`), never distributed as configuration; it rides as a bit on
+  /// each outgoing DELIVERY_RECEIPT. Default false = disclose.
+  bool withholdDeliveryStatus;
 
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
@@ -1297,9 +1369,12 @@ class ContactInfo {
     this.seedDxkB64,
     this.seedDmkB64,
     this.seedEpB64,
+    List<String>? seedPeerIdsHex,
     this.trustAnchorQuarantined = false,
     this.trustAnchorQuarantineReason,
-  }) : deviceNodeIds = deviceNodeIds ?? {};
+    this.withholdDeliveryStatus = false,
+  })  : deviceNodeIds = deviceNodeIds ?? {},
+        seedPeerIdsHex = seedPeerIdsHex ?? [];
 
   String get nodeIdHex => bytesToHex(nodeId);
 
@@ -1327,9 +1402,11 @@ class ContactInfo {
         if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
         if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
         if (seedEpB64 != null) 'seedEpB64': seedEpB64,
+        if (seedPeerIdsHex.isNotEmpty) 'seedPeerIdsHex': seedPeerIdsHex,
         if (trustAnchorQuarantined) 'trustAnchorQuarantined': true,
         if (trustAnchorQuarantineReason != null)
           'trustAnchorQuarantineReason': trustAnchorQuarantineReason,
+        if (withholdDeliveryStatus) 'withholdDeliveryStatus': true,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -1370,10 +1447,15 @@ class ContactInfo {
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,
         seedEpB64: json['seedEpB64'] as String?,
+        seedPeerIdsHex: json['seedPeerIdsHex'] != null
+            ? (json['seedPeerIdsHex'] as List).cast<String>().toList()
+            : null,
         trustAnchorQuarantined:
             json['trustAnchorQuarantined'] as bool? ?? false,
         trustAnchorQuarantineReason:
             json['trustAnchorQuarantineReason'] as String?,
+        withholdDeliveryStatus:
+            json['withholdDeliveryStatus'] as bool? ?? false,
       );
 }
 

@@ -848,6 +848,13 @@ message ReachabilityResponse {
 message DeliveryReceipt {
   bytes message_id = 1;
   uint64 delivered_at = 2;
+  // §14.7.4: receiver withholds its delivery status from the sender's UI.
+  // Encoded as "withhold", not "disclose", on purpose: proto3 scalars default
+  // to false when absent, so a receipt from a node that predates this field
+  // (or any future encoder that omits it) means "disclose" — the behaviour
+  // that was in place before the flag existed. The inverse naming would turn
+  // every legacy receipt into a suppressed status.
+  bool withhold_delivery_status = 3;
 }
 
 message ReadReceipt {
@@ -1676,6 +1683,23 @@ message LivenessRecordProto {
   int64 sequence_number = 5;
   int64 published_at_ms = 6;
   bytes ed25519_sig = 7;
+  // P5 (§7.1.4 vs §4.3): ein gekoppeltes Geraet haelt den User-SK nicht und
+  // kann nach einer Rotation nicht mehr unter dem User-Anker signieren. Es
+  // signiert deshalb mit seinem delegierten Geraeteschluessel und nennt hier
+  // den benutzten PK. Leer = wie bisher direkt unter dem User-Schluessel
+  // signiert (Primary-Pfad).
+  //
+  // P6 (Arbeitsregel #5): das Delegationszertifikat wird NICHT mitgeschickt.
+  // Es kostete ~5,3 KB pro Record (ML-DSA-PK 1952 B + ML-DSA-Sig 3309 B) und
+  // fragmentierte jeden Liveness-Republish (alle 15 min an bis zu 10
+  // Replikatoren). Der Empfaenger holt das Zertifikat stattdessen aus dem
+  // AuthManifest, das er fuer diesen User ohnehin haelt
+  // (`AuthManifest.delegationFor(deviceId)`). Das schwaecht nichts: schon P5
+  // war ohne Anker fail-closed, weil die ML-DSA-Haelfte des Zertifikats sonst
+  // nicht pruefbar ist — die Manifest-Abhaengigkeit bestand bereits und wird
+  // hier nur explizit. Feld 9 bleibt reserviert.
+  bytes signer_ed25519_pk = 8;
+  reserved 9;
 }
 
 message IdentityAuthRetrieveRequest {
@@ -2168,6 +2192,12 @@ message DeviceKemRecordV3 {
   uint64 published_at_ms      = 7;
   bytes  ed25519_sig          = 8;   // signed by user master Ed25519 key
   bytes  user_ed25519_pk      = 9;   // for in-place verify
+  // P5: siehe LivenessRecordProto — delegierte Signatur eines gekoppelten
+  // Geraets. Leer = direkt unter dem User-Schluessel signiert.
+  // P6: das Zertifikat wird nicht mitgeschickt, der Empfaenger zieht es aus
+  // dem AuthManifest (siehe LivenessRecordProto). Feld 11 bleibt reserviert.
+  bytes  signer_ed25519_pk    = 10;
+  reserved 11;
 }
 
 // ── PeerListEntry V3 (§5.x PEER_LIST_PUSH) ──────────────────────────────
@@ -2231,6 +2261,7 @@ message FirstCrStoreV3 {
 message FirstCrStoreAckV3 {
   bool    accepted            = 1;
   string  reject_reason       = 2;   // "quota_exceeded" | "ttl_exceeded" | ...
+  bytes   recipient_user_id   = 3;   // echo from FirstCrStoreV3 (V3.2 correlation)
 }
 
 message FirstCrDeliverV3 {
@@ -2297,12 +2328,26 @@ message RotationApprovalToken {
 }
 
 // TwinSync payload for ROTATION_APPROVAL_REQUEST (Primary → Linked).
+// Anlass einer Genehmigungsanfrage. Ohne den Diskriminator meldet das
+// gekoppelte Geraet jede Anfrage als "Emergency Key Rotation genehmigen?" —
+// eine Geraetesatz-Aenderung wuerde also unter falscher Beschreibung
+// bestaetigt (§7.5). Feld 6 default 0 = Rotation, damit alte Sender
+// unveraendert interpretiert werden.
+enum ApprovalKindV3 {
+  APPROVAL_KIND_KEY_ROTATION     = 0;
+  APPROVAL_KIND_DEVICE_SET_CHANGE = 1;
+}
+
 message RotationApprovalRequestPayload {
   bytes rotation_hash    = 1;  // the hash to countersign
   bytes new_ed25519_pk   = 2;  // new User-PKs (for display in approval dialog)
   bytes new_ml_dsa_pk    = 3;
   bytes new_x25519_pk    = 4;
   bytes new_ml_kem_pk    = 5;
+  ApprovalKindV3 approval_kind = 6;  // P4: Anlass, siehe oben
+  // Nur bei APPROVAL_KIND_DEVICE_SET_CHANGE gesetzt — die Geraeteliste nach
+  // der Aenderung, damit der Dialog benennen kann, was entfernt wird.
+  repeated bytes new_device_node_ids = 7;
 }
 
 // TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).

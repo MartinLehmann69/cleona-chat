@@ -35,6 +35,56 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 /// then slipped past Guard 2 to the IPC-socket check).
 RandomAccessFile? _machineGlobalLockRaf;
 
+/// Process name behind [targetPid], or `null` when the process does not exist
+/// or cannot be queried.
+///
+/// Used by Guard 0 to decide whether a PID from `cleona.pid` still belongs to a
+/// daemon. Two properties matter and neither is optional:
+///
+///  * **Platform-correct.** The previous implementation called `kill -0` on
+///    every platform. Windows has no `kill` (verified on the test VM: `where
+///    kill` finds nothing), so `Process.runSync` threw `ProcessException` —
+///    swallowed by a `catch (_)` meant for corrupt PID files, which made
+///    Guard 0 a silent no-op there. Guard 1/2 still covered Windows (§15.1
+///    names the machine-global lock as the authority), but the defence-in-depth
+///    layer was missing.
+///  * **Name-checked, not just alive-checked.** PIDs are recycled. A stale
+///    `cleona.pid` whose number now belongs to an unrelated process would
+///    otherwise block every future start. Callers compare against their OWN
+///    process name rather than a hardcoded string, which stays correct for both
+///    the AOT binary (`cleona-daemon`) and `dart run lib/service_daemon.dart`
+///    in development.
+String? _processNameOf(int targetPid) {
+  try {
+    if (Platform.isWindows) {
+      // tasklist exits 0 even when nothing matches and reports the miss as
+      // localized prose ("INFORMATION: Es konnten keine ..." on the German
+      // test VM), so the text is useless as a signal. The CSV row is not:
+      //   "cleona-daemon.exe","4840","Console","1","123.456 K"
+      // Field 0 is the image name, field 1 the quoted PID.
+      final r = Process.runSync(
+          'tasklist', ['/FI', 'PID eq $targetPid', '/NH', '/FO', 'CSV']);
+      if (r.exitCode != 0) return null;
+      final line = (r.stdout as String)
+          .split('\n')
+          .firstWhere((l) => l.contains('"$targetPid"'), orElse: () => '');
+      if (line.isEmpty) return null;
+      final name = line.split('","').first.replaceAll('"', '').trim();
+      return name.isEmpty ? null : name;
+    }
+    // Linux/macOS: `ps` exits non-zero when the PID is gone. `comm` is the
+    // executable name without arguments, capped at 15 chars on Linux —
+    // "cleona-daemon" (13) fits, and self-comparison makes the cap harmless
+    // even if it did not.
+    final r = Process.runSync('ps', ['-p', '$targetPid', '-o', 'comm=']);
+    if (r.exitCode != 0) return null;
+    final name = (r.stdout as String).trim();
+    return name.isEmpty ? null : name;
+  } on ProcessException {
+    return null; // query tool unavailable — treat as "cannot confirm alive"
+  }
+}
+
 /// Cleona service daemon — runs independently of the GUI.
 /// One daemon, one port, one node — all identities active simultaneously.
 void main(List<String> args) {
@@ -76,8 +126,13 @@ void main(List<String> args) {
       if (pidFile.existsSync()) {
         final otherPid = int.parse(pidFile.readAsStringSync().trim());
         if (otherPid != pid) {
-          final result = Process.runSync('kill', ['-0', '$otherPid']);
-          if (result.exitCode == 0) {
+          // Guard 0 may only fire when the PID still belongs to a daemon of
+          // OUR kind. Comparing against our own process name covers both the
+          // compiled binary and `dart run` without hardcoding either, and it
+          // keeps a recycled PID in a stale cleona.pid from locking us out.
+          final otherName = _processNameOf(otherPid);
+          final ownName = _processNameOf(pid);
+          if (otherName != null && ownName != null && otherName == ownName) {
             stderr.writeln(
               'ERROR: Cleona daemon already running (PID $otherPid). '
               'Stop the running process first before starting a new one.');
@@ -95,7 +150,29 @@ void main(List<String> args) {
     // flock is inode-based; deleting the file lets a second process create a
     // new inode and acquire its own lock, defeating the guard.
     final lockFile = File('${config.baseDir}/cleona.lock');
-    final lockRaf = lockFile.openSync(mode: FileMode.write);
+    // openSync gets its OWN try. Two reasons, both measured:
+    //  1. It really can throw — a non-writable baseDir yields
+    //     PathAccessException (EACCES), and `Directory.createSync` above is a
+    //     no-op on an existing-but-unwritable dir, so it does not shield us.
+    //  2. An escaping FileSystemException does NOT crash the daemon: the zone
+    //     handler treats `is IOException` as survivable (see isSurvivable
+    //     below), so there is no exit — and CLogger's 2s flush timer keeps the
+    //     event loop alive. The result is a half-initialised zombie with no
+    //     IPC and no port file. Same failure shape as W-1: not a clean death,
+    //     but a wrong survival.
+    // The catch below must stay separate from the lock() catch: an open error
+    // is NOT "another daemon holds the lock", and reporting it as such sends
+    // whoever reads the log hunting for a process that does not exist.
+    final RandomAccessFile lockRaf;
+    try {
+      lockRaf = lockFile.openSync(mode: FileMode.write);
+    } on FileSystemException catch (e) {
+      stderr.writeln('ERROR: Cannot open lock file ${lockFile.path}: '
+          '${e.osError?.message ?? e.message}');
+      log.info('Lock file open failed: $e — exiting.');
+      await CLogger.flushAll();
+      exit(1);
+    }
     try {
       await lockRaf.lock(FileLock.exclusive);
       lockRaf.writeStringSync('$pid\n');
@@ -132,7 +209,20 @@ void main(List<String> args) {
       try {
         globalLock.parent.createSync(recursive: true);
       } catch (_) {}
-      _machineGlobalLockRaf = globalLock.openSync(mode: FileMode.write);
+      // Same split as Guard 1, and here it matters more: at this point we
+      // ALREADY hold the Guard-1 flock on cleona.lock. A zombie surviving an
+      // open error would keep holding it, so every later start would fail with
+      // "Another Cleona daemon holds the lock file" while no daemon is running
+      // — a self-inflicted permanent lockout with a misleading message.
+      try {
+        _machineGlobalLockRaf = globalLock.openSync(mode: FileMode.write);
+      } on FileSystemException catch (e) {
+        stderr.writeln('ERROR: Cannot open machine-global lock $globalLockPath: '
+            '${e.osError?.message ?? e.message}');
+        log.info('Machine-global lock open failed: $e — exiting.');
+        await CLogger.flushAll();
+        exit(1);
+      }
       try {
         await _machineGlobalLockRaf!.lock(FileLock.exclusive);
         _machineGlobalLockRaf!.writeStringSync('$pid\n');
@@ -297,7 +387,18 @@ void main(List<String> args) {
     // NOT terminate the daemon — they occur routinely when peers are
     // temporarily unreachable. Only truly unexpected errors exit(99).
     final msg = 'UNHANDLED ASYNC ERROR: $error\nStack:\n$stack';
-    try { stderr.writeln(msg); } catch (_) {}
+    // A failed console write arrives here as an unhandled async error (Dart's
+    // stdout/stderr flush asynchronously, so the exception escapes the
+    // try/catch at the call site). Reporting it through stderr/CLogger below
+    // would write to the same dead sink and generate the next error — the
+    // feedback loop that killed the Windows daemon before it ever wrote
+    // cleona.port. Shut the console down first, then report to file only.
+    if (error is FileSystemException && CLogger.consoleEnabled) {
+      CLogger.disableConsole('zone');
+    }
+    if (CLogger.consoleEnabled) {
+      try { stderr.writeln(msg); } catch (_) { CLogger.disableConsole('zone'); }
+    }
     try {
       final log = CLogger.get('daemon', profileDir: zoneLogBaseDir);
       log.error(msg);
@@ -682,6 +783,7 @@ class _MultiServiceDaemon {
     final infraRv = InfraRendezvousManager(profileDir: config.baseDir);
     infraRv.init(
       networkSecret: NetworkSecret.secret,
+      previousNetworkSecret: NetworkSecret.previousSecret,
       deviceId: _contexts.values.first.nodeId,
       addressProvider: () => node.currentSelfAddresses()
           .map((a) => RendezvousAddress(a.ip, a.port))

@@ -30,6 +30,20 @@ class BinaryHttpServer {
   /// Single fragment for `GET /cleona/fragment/<platform>/<index>`.
   Uint8List? Function(String platform, int index)? fragmentProvider;
 
+  /// Invoked when `GET /cleona/binary/<platform>` 404s, i.e. a visitor needs a
+  /// platform this node does not hold (§19.6.4). Fire-and-forget: the node may
+  /// start acquiring it, the visitor polls `/cleona/status/<platform>`.
+  void Function(String platform)? onForeignBinaryRequested;
+
+  /// JSON body for `GET /cleona/status/<platform>` — acquisition progress.
+  Map<String, dynamic>? Function(String platform)? foreignStatusProvider;
+
+  /// Platforms accepted in a path segment. The segment reaches a file store,
+  /// so it is validated against a fixed list rather than interpolated.
+  static const Set<String> _knownPlatforms = {
+    'android', 'linux', 'windows', 'macos', 'ios',
+  };
+
   BinaryHttpServer({String? profileDir})
       : _log = CLogger.get('http-srv', profileDir: profileDir);
 
@@ -179,12 +193,21 @@ class BinaryHttpServer {
         return;
       }
       if (segments.length == 3 && segments[0] == 'cleona' && segments[1] == 'binary') {
+        if (!_knownPlatforms.contains(segments[2])) {
+          _sendResponse(client, 404);
+          _logRequest(method, path, 404, 0);
+          return;
+        }
         _serveBinary(client, path, method, segments[2]);
+        return;
+      }
+      if (segments.length == 3 && segments[0] == 'cleona' && segments[1] == 'status') {
+        _serveForeignStatus(client, path, method, segments[2]);
         return;
       }
       if (segments.length == 4 && segments[0] == 'cleona' && segments[1] == 'fragment') {
         final index = int.tryParse(segments[3]);
-        if (index == null) {
+        if (index == null || !_knownPlatforms.contains(segments[2])) {
           _sendResponse(client, 404);
           _logRequest(method, path, 404, 0);
           return;
@@ -223,6 +246,14 @@ class BinaryHttpServer {
       filePath = null;
     }
     if (filePath == null) {
+      // §19.6.4: this node does not hold that platform. Ask the service to
+      // acquire it; the visitor polls /cleona/status/<platform>. Gating,
+      // rate limiting and storage caps live in the acquirer, not here.
+      try {
+        onForeignBinaryRequested?.call(platform);
+      } catch (e) {
+        _log.debug('onForeignBinaryRequested threw for $platform: $e');
+      }
       _sendResponse(client, 404);
       _logRequest(method, path, 404, 0);
       return;
@@ -256,6 +287,30 @@ class BinaryHttpServer {
       _sendResponse(client, 404);
       _logRequest(method, path, 404, 0);
     }
+  }
+
+  /// `GET /cleona/status/<platform>` — on-demand acquisition progress
+  /// (§19.6.4). Always 200 with a JSON body so the browser can poll without
+  /// special-casing errors; unknown platforms report `idle`.
+  void _serveForeignStatus(
+      Socket client, String path, String method, String platform) {
+    Map<String, dynamic>? status;
+    if (_knownPlatforms.contains(platform)) {
+      try {
+        status = foreignStatusProvider?.call(platform);
+      } catch (e) {
+        _log.debug('foreignStatusProvider threw for $platform: $e');
+      }
+    }
+    final body = utf8.encode(jsonEncode(status ?? {'state': 'idle'}));
+    if (method == 'HEAD') {
+      _sendResponse(client, 200,
+          contentType: 'application/json', bodyLength: body.length);
+    } else {
+      _sendResponse(client, 200,
+          contentType: 'application/json', body: Uint8List.fromList(body));
+    }
+    _logRequest(method, path, 200, body.length);
   }
 
   void _streamFile(Socket client, File file, int fileLength, String mime,
