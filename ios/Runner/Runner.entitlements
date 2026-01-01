@@ -45,8 +45,15 @@
 	     visible edit either way, not a silent gap. UNGEPRUEFT: no Apple
 	     device or Xcode available in this session; Apple DTS staff has
 	     stated this entitlement is not consulted on macOS (see the session
-	     report), so it is NOT added to macos/Runner/*.entitlements. -->
-	<key>com.apple.developer.networking.multicast</key>
-	<true/>
+	     report), so it is NOT added to macos/Runner/*.entitlements.
+
+	     S397 (25.09.2026, owner decision C): the key is REMOVED until Apple
+	     grants the capability. The release build (TestFlight signing) failed
+	     with "Provisioning profile 'Cleona Distribution' doesn't include the
+	     Multicast Networking capability"; the unsigned VERIFY build did not
+	     notice. The owner requests the grant in parallel; once granted, put
+	     back:  <key>com.apple.developer.networking.multicast</key><true/>
+	     Meanwhile iOS reaches devices in the same WLAN over the other ways
+	     of the ladder (public address, neighbour, post box). -->
 </dict>
 </plist>
