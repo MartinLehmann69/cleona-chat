@@ -32,12 +32,24 @@ class FileEncryption {
       if (bytes.length == 32) return Uint8List.fromList(bytes);
     }
 
-    // Generate new random key
+    // S106 defence-in-depth: if KeyMigration renamed db.key to
+    // .db.key.migrated, use that instead of creating a new random key
+    // (which would make all existing .enc files unreadable).
+    final migratedFile = File('$baseDir/.db.key.migrated');
+    if (migratedFile.existsSync()) {
+      final bytes = migratedFile.readAsBytesSync();
+      if (bytes.length == 32) {
+        stderr.writeln('[FileEncryption] WARNING: db.key missing but '
+            '.db.key.migrated exists — using migrated key as fallback');
+        return Uint8List.fromList(bytes);
+      }
+    }
+
+    // Genuine fresh install — generate new random key
     final key = _sodium.randomBytes(32);
     Directory(baseDir).createSync(recursive: true);
     keyFile.writeAsBytesSync(key);
 
-    // Restrict permissions (owner-only read/write)
     if (Platform.isLinux || Platform.isMacOS) {
       Process.runSync('chmod', ['600', keyFile.path]);
     }

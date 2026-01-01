@@ -153,17 +153,17 @@ class IdentityManager {
   }
 
   void _storeMasterSeed(Uint8List seed) {
-    // §3.7: store in OS keyring (primary)
+    // S106 fix: dual-write — keyring (primary) AND file (ground-truth).
+    // Prevents seed loss when keyring becomes unreadable (baseDir change,
+    // hostname change, secret-tool daemon unavailable).
     if (KeyringService.isInitialized) {
       KeyringService.instance.store('master_seed', seed);
-    } else {
-      // Fallback: legacy file-based storage
-      final fileEnc = FileEncryption(baseDir: baseDir);
-      fileEnc.writeJsonFile('$baseDir/master_seed.json', {
-        'seed': _bytesToHex(seed),
-        'version': 1,
-      });
     }
+    final fileEnc = FileEncryption(baseDir: baseDir);
+    fileEnc.writeJsonFile('$baseDir/master_seed.json', {
+      'seed': _bytesToHex(seed),
+      'version': 1,
+    });
   }
 
   /// Store the seed phrase words (for backup display in Settings).

@@ -3,9 +3,12 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/device_keys_store.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/key_migration.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/platform/app_paths.dart';
@@ -217,10 +220,45 @@ class IdentityContext {
         _log = CLogger.get('identity', profileDir: profileDir);
 
   static String _resolveBaseDir(String profileDir) {
-    // profileDir is e.g. ~/.cleona/identities/identity-1 or ~/.cleona/Alice
-    // baseDir is ~/.cleona
     final home = AppPaths.home;
     return '$home/.cleona';
+  }
+
+  // ── Shared startup sequence (S106 fix) ──────────────────────────────
+  // Single source of truth for crypto init + IdentityContext creation.
+  // All entry points (service_daemon, headless, main.dart) use these
+  // instead of duplicating the init sequence.
+
+  /// §3.7: Initialize crypto subsystem — keyring + migration.
+  /// Call once at daemon/app startup before any key access.
+  /// On Android/iOS: call MobileKeyringService.init() BEFORE this.
+  static Future<void> initCrypto(String baseDir) async {
+    await KeyringService.init(baseDir);
+    KeyMigration.migrateIfNeeded(baseDir);
+    KeyMigration.repairIfNeeded(baseDir);
+  }
+
+  /// Create a fully-configured IdentityContext from an Identity record.
+  /// Ensures masterSeed, hdIndex, baseDir, networkChannel are always set.
+  static Future<IdentityContext> createFromIdentity({
+    required Identity identity,
+    required String baseDir,
+    required Uint8List? masterSeed,
+    String? overrideDisplayName,
+  }) async {
+    final ctx = IdentityContext(
+      profileDir: identity.profileDir,
+      baseDir: baseDir,
+      displayName: overrideDisplayName ?? identity.displayName,
+      networkChannel: NetworkSecret.channel.name,
+      hdIndex: identity.hdIndex,
+      masterSeed: masterSeed,
+      createdAt: identity.createdAt,
+      isAdult: identity.isAdult,
+    );
+    await ctx.initKeys();
+    identity.nodeIdHex = ctx.userIdHex;
+    return ctx;
   }
 
   /// nodeIdHex returns the per-device routing ID (used by transport layer).

@@ -1592,13 +1592,27 @@ class Transport {
     _iosNativeRxCount = 0;
     _iosDiagTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       final peek = _iosUdpSender?.recvPeek() ?? -999;
-      _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount nativeRx=$_iosNativeRxCount peek=$peek');
-      if (peek == -9 && !_reconnecting) {
+      final peek6 = _iosUdpSender?.recvPeek6() ?? -999;
+      _log.info('iOS UDP diag: rxEvents=$_iosRxEventCount nativeRx=$_iosNativeRxCount peek=$peek peek6=$peek6');
+      if ((peek == -9 || peek6 == -9) && !_reconnecting) {
         _log.warn('iOS UDP socket dead (EBADF) — triggering reconnect');
         _iosRxEventCount = 0;
         _iosNativeRxCount = 0;
         onUdpSocketDead?.call();
         return;
+      }
+      // Silence watchdog: if both Dart kqueue and native poll have received
+      // nothing for 30+ seconds, the sockets are alive but deaf — reconnect.
+      if (_lastUdpReceiveMs > 0 && !_reconnecting) {
+        final silenceMs = DateTime.now().millisecondsSinceEpoch - _lastUdpReceiveMs;
+        if (silenceMs > 30000) {
+          _log.warn('iOS UDP silence watchdog: ${silenceMs ~/ 1000}s without receive — triggering recovery');
+          _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
+          onUdpSocketDead?.call();
+          _iosRxEventCount = 0;
+          _iosNativeRxCount = 0;
+          return;
+        }
       }
       _iosRxEventCount = 0;
       _iosNativeRxCount = 0;
@@ -1626,8 +1640,19 @@ class Transport {
 
   void _iosNativeRecvPoll() {
     if (_iosUdpSender == null) return;
+    // Poll IPv4 fd
+    _iosNativeRecvPollFd(false);
+    // Poll IPv6 fd
+    if (_iosUdpSender!.hasIpv6) {
+      _iosNativeRecvPollFd(true);
+    }
+  }
+
+  void _iosNativeRecvPollFd(bool ipv6) {
     for (var i = 0; i < 100; i++) {
-      final result = _iosUdpSender!.recvFrom();
+      final result = ipv6
+          ? _iosUdpSender!.recvFrom6()
+          : _iosUdpSender!.recvFrom();
       if (result == null) break;
       _iosNativeRxCount++;
       _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;

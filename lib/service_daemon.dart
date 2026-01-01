@@ -3,8 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
-import 'package:cleona/core/crypto/key_migration.dart';
-import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -352,10 +350,8 @@ class _MultiServiceDaemon {
     if (_running) return;
     log.info('Dienst wird gestartet...');
 
-    // §3.7: Initialize OS keyring before any key access
-    await KeyringService.init(config.baseDir);
-    KeyMigration.migrateIfNeeded(config.baseDir);
-    KeyMigration.repairIfNeeded(config.baseDir);
+    // §3.7: Initialize crypto subsystem (shared sequence — S106 fix)
+    await IdentityContext.initCrypto(config.baseDir);
 
     // Load all identities
     final mgr = IdentityManager(baseDir: config.baseDir);
@@ -386,23 +382,15 @@ class _MultiServiceDaemon {
     final routingDir = config.baseDir;
     Directory(routingDir).createSync(recursive: true);
 
-    // Create primary identity context (first identity)
+    // Create primary identity context (shared sequence — S106 fix)
     final primaryId = identities.first;
-    // Load master seed if available (for HD-Wallet key derivation)
     final masterSeed = mgr.loadMasterSeed();
 
-    final primaryCtx = IdentityContext(
-      profileDir: primaryId.profileDir,
+    final primaryCtx = await IdentityContext.createFromIdentity(
+      identity: primaryId,
       baseDir: config.baseDir,
-      displayName: primaryId.displayName,
-      networkChannel: NetworkSecret.channel.name,
-      hdIndex: primaryId.hdIndex,
       masterSeed: masterSeed,
-      createdAt: primaryId.createdAt,
-      isAdult: primaryId.isAdult,
     );
-    await primaryCtx.initKeys();
-    primaryId.nodeIdHex = primaryCtx.userIdHex;
 
     // Create ONE shared node
     final node = CleonaNode(
@@ -417,28 +405,20 @@ class _MultiServiceDaemon {
     // Register primary identity
     _contexts[primaryCtx.userIdHex] = primaryCtx;
 
-    // Create contexts for all other identities. initKeys() runs in isolates
-    // (PQ-Keygen 15-30s on fresh profiles) — parallelize so total startup
-    // time does not scale linearly with identity count.
-    final secondaryPairs = <({Identity id, IdentityContext ctx})>[];
+    // Create contexts for all other identities (shared sequence — S106 fix).
+    // initKeys() runs in isolates (PQ-Keygen 15-30s on fresh profiles) —
+    // parallelize so total startup time does not scale linearly with identity count.
+    final secondaryFutures = <Future<IdentityContext>>[];
     for (var i = 1; i < identities.length; i++) {
-      final id = identities[i];
-      final ctx = IdentityContext(
-        profileDir: id.profileDir,
+      secondaryFutures.add(IdentityContext.createFromIdentity(
+        identity: identities[i],
         baseDir: config.baseDir,
-        displayName: id.displayName,
-        networkChannel: NetworkSecret.channel.name,
-        hdIndex: id.hdIndex,
         masterSeed: masterSeed,
-        createdAt: id.createdAt,
-        isAdult: id.isAdult,
-      );
-      secondaryPairs.add((id: id, ctx: ctx));
+      ));
     }
-    await Future.wait(secondaryPairs.map((p) => p.ctx.initKeys()));
-    for (final p in secondaryPairs) {
-      p.id.nodeIdHex = p.ctx.userIdHex;
-      _contexts[p.ctx.userIdHex] = p.ctx;
+    final secondaryCtxs = await Future.wait(secondaryFutures);
+    for (final ctx in secondaryCtxs) {
+      _contexts[ctx.userIdHex] = ctx;
     }
 
     // Register all identities with the node (before start, so routing table rejects them)
@@ -509,6 +489,7 @@ class _MultiServiceDaemon {
           // Wave 2B.3 (§6 Reed-Solomon erasure + S&F mailbox):
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE ||
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
           // §5.5 Store-and-Forward on mutual peers:
           mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
@@ -868,17 +849,11 @@ class _MultiServiceDaemon {
     final mgr = IdentityManager(baseDir: config.baseDir);
     final identity = await mgr.createIdentity(displayName);
 
-    final ctx = IdentityContext(
-      profileDir: identity.profileDir,
-      displayName: displayName,
-      networkChannel: NetworkSecret.channel.name,
-      hdIndex: identity.hdIndex,
+    final ctx = await IdentityContext.createFromIdentity(
+      identity: identity,
+      baseDir: config.baseDir,
       masterSeed: mgr.loadMasterSeed(),
-      createdAt: identity.createdAt,
-      isAdult: identity.isAdult,
     );
-    await ctx.initKeys();
-    identity.nodeIdHex = ctx.userIdHex;
     // Update nodeIdHex in persisted identities list
     final identities = mgr.loadIdentities();
     for (final id in identities) {

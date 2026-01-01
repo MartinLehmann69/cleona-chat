@@ -294,15 +294,23 @@ class _FileKeyringFallback extends KeyringService {
 
   String _pathFor(String name) => '$_baseDir/.$name.keyring';
 
+  Uint8List? _v1Key;
+
   Uint8List _deriveKey() {
     if (_encKey != null) return _encKey!;
-    // Derive a machine-local key from hostname + baseDir.
-    // Not strong against a local attacker who can read the binary,
-    // but prevents plaintext seed leakage via backup copies or
-    // accidental file exposure.
-    final material = utf8.encode('${Platform.localHostname}:$_baseDir:cleona-file-keyring-v1');
+    // S106 fix: key derivation no longer depends on baseDir. A path
+    // change (profileDir vs baseDir, deploy to different location) used
+    // to silently break all stored secrets.
+    final material = utf8.encode('${Platform.localHostname}:cleona-file-keyring-v2');
     _encKey = SodiumFFI().sha256(Uint8List.fromList(material));
     return _encKey!;
+  }
+
+  Uint8List _deriveKeyV1() {
+    if (_v1Key != null) return _v1Key!;
+    final material = utf8.encode('${Platform.localHostname}:$_baseDir:cleona-file-keyring-v1');
+    _v1Key = SodiumFFI().sha256(Uint8List.fromList(material));
+    return _v1Key!;
   }
 
   @override
@@ -337,18 +345,21 @@ class _FileKeyringFallback extends KeyringService {
       final blob = file.readAsBytesSync();
       if (blob.isEmpty) return null;
 
-      // Migration: files shorter than nonce+tag (40 bytes) or failing
-      // decryption are legacy plaintext — decrypt fails, return raw bytes
-      // and re-encrypt on next store.
       if (blob.length < 40) return Uint8List.fromList(blob);
+      final sodium = SodiumFFI();
+      final nonce = Uint8List.fromList(blob.sublist(0, 24));
+      final ciphertext = Uint8List.fromList(blob.sublist(24));
+      // Try v2 key first (baseDir-independent)
       try {
-        final sodium = SodiumFFI();
-        final key = _deriveKey();
-        final nonce = Uint8List.fromList(blob.sublist(0, 24));
-        final ciphertext = Uint8List.fromList(blob.sublist(24));
-        return sodium.secretBoxDecrypt(ciphertext, key, nonce);
+        return sodium.secretBoxDecrypt(ciphertext, _deriveKey(), nonce);
+      } catch (_) {}
+      // Fallback: v1 key (baseDir-dependent, pre-S106)
+      try {
+        final plaintext = sodium.secretBoxDecrypt(ciphertext, _deriveKeyV1(), nonce);
+        _log.info('File keyring "$name": migrating from v1 to v2 key');
+        store(name, plaintext);
+        return plaintext;
       } catch (_) {
-        // Legacy plaintext file — return as-is; next store() will encrypt.
         _log.info('File keyring "$name": migrating plaintext to encrypted');
         return Uint8List.fromList(blob);
       }

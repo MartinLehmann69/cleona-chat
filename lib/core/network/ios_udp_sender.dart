@@ -149,16 +149,21 @@ class IosUdpSender {
   }
 
   int recvPeek() => _recvPeek?.call(_fd) ?? -999;
+  int recvPeek6() => (_fd6 >= 0) ? (_recvPeek?.call(_fd6) ?? -999) : -999;
 
-  /// Non-blocking native recvfrom(). Returns null on EAGAIN/error.
-  /// Bypasses Dart's kqueue event delivery which dies after burst sends.
-  IosRecvResult? recvFrom() {
+  /// Non-blocking native recvfrom() on IPv4 fd. Returns null on EAGAIN/error.
+  IosRecvResult? recvFrom() => _recvFromFd(_fd);
+
+  /// Non-blocking native recvfrom() on IPv6 fd. Returns null on EAGAIN/error.
+  IosRecvResult? recvFrom6() => (_fd6 >= 0) ? _recvFromFd(_fd6) : null;
+
+  IosRecvResult? _recvFromFd(int fd) {
     if (_recvFrom == null) return null;
     final buf = calloc<ffi.Uint8>(65536);
     final srcIp = calloc<ffi.Uint8>(46); // INET6_ADDRSTRLEN
     final srcPort = calloc<ffi.Int32>(1);
     try {
-      final n = _recvFrom(_fd, buf, 65536, srcIp, 46, srcPort);
+      final n = _recvFrom(fd, buf, 65536, srcIp, 46, srcPort);
       if (n <= 0) return null;
       final data = Uint8List(n);
       data.setAll(0, buf.asTypedList(n));

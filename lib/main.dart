@@ -20,7 +20,6 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
-import 'package:cleona/core/crypto/key_migration.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/keyring_mobile.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
@@ -109,14 +108,12 @@ void main() async {
     debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
     OqsFFI().init();
     debugPrint('[main] OqsFFI OK.');
-    // §3.7: Initialize OS keyring + migrate pre-keyring profiles
+    // §3.7: Initialize OS keyring + migrate (shared sequence — S106 fix)
     debugPrint('[main] Initializing KeyringService...');
     if (Platform.isAndroid || Platform.isIOS) {
       await MobileKeyringService.init(AppPaths.dataDir);
     }
-    await KeyringService.init(AppPaths.dataDir);
-    KeyMigration.migrateIfNeeded(AppPaths.dataDir);
-    KeyMigration.repairIfNeeded(AppPaths.dataDir);
+    await IdentityContext.initCrypto(AppPaths.dataDir);
     debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
   } catch (e, stack) {
     startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
@@ -1242,37 +1239,23 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (needsSave) mgr.saveIdentities(identities);
     }
 
+    // Create identity contexts (shared sequence — S106 fix)
     final masterSeed = mgr.loadMasterSeed();
     final firstId = identities.first;
 
-    // Create primary identity context
-    final primaryCtx = IdentityContext(
-      profileDir: firstId.profileDir,
-      displayName: firstId.displayName,
-      networkChannel: NetworkSecret.channel.name,
-      hdIndex: firstId.hdIndex,
+    final primaryCtx = await IdentityContext.createFromIdentity(
+      identity: firstId,
+      baseDir: _baseDir,
       masterSeed: masterSeed,
-      createdAt: firstId.createdAt,
-      isAdult: firstId.isAdult,
     );
-    await primaryCtx.initKeys();
-    firstId.nodeIdHex = primaryCtx.userIdHex;
     _inProcessContexts[primaryCtx.userIdHex] = primaryCtx;
 
-    // Create contexts for ALL additional identities
     for (var i = 1; i < identities.length; i++) {
-      final id = identities[i];
-      final ctx = IdentityContext(
-        profileDir: id.profileDir,
-        displayName: id.displayName,
-        networkChannel: NetworkSecret.channel.name,
-        hdIndex: id.hdIndex,
+      final ctx = await IdentityContext.createFromIdentity(
+        identity: identities[i],
+        baseDir: _baseDir,
         masterSeed: masterSeed,
-        createdAt: id.createdAt,
-        isAdult: id.isAdult,
       );
-      await ctx.initKeys();
-      id.nodeIdHex = ctx.userIdHex;
       _inProcessContexts[ctx.userIdHex] = ctx;
     }
 
@@ -2306,18 +2289,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (_inProcessNode != null) {
         final mgr = IdentityManager();
         final identity = await mgr.createIdentity(displayName);
-        final masterSeed = mgr.loadMasterSeed();
-        final ctx = IdentityContext(
-          profileDir: identity.profileDir,
-          displayName: displayName,
-          networkChannel: NetworkSecret.channel.name,
-          hdIndex: identity.hdIndex,
-          masterSeed: masterSeed,
-          createdAt: identity.createdAt,
-          isAdult: identity.isAdult,
+        final ctx = await IdentityContext.createFromIdentity(
+          identity: identity,
+          baseDir: _baseDir,
+          masterSeed: mgr.loadMasterSeed(),
         );
-        await ctx.initKeys();
-        identity.nodeIdHex = ctx.userIdHex;
 
         _inProcessContexts[ctx.userIdHex] = ctx;
         _inProcessNode!.registerIdentity(ctx);

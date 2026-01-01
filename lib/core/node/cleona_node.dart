@@ -671,16 +671,21 @@ class CleonaNode {
         } catch (_) {}
       }
 
-      // Mass route-down → infer network change (e.g. ISP IP reassignment, WiFi switch).
+      // Mass route-down → infer possible network change (e.g. ISP IP reassignment).
+      // V3.1.111: removed force:true — let onNetworkChanged check IPs normally.
+      // On bootstrap nodes, offline peers cause constant ACK timeouts that
+      // trivially hit the 3-in-30s threshold with unchanged IPs, creating a
+      // false-positive feedback loop (markAllRoutesStale → revalidation →
+      // epoch bump → full-table catch-up → more ACK tracking → repeat).
       _routeDownTimestamps.add(DateTime.now());
       _routeDownTimestamps.removeWhere((t) =>
           DateTime.now().difference(t).inSeconds > 30);
       if (_routeDownTimestamps.length >= 3 && !_networkChangeInProgress) {
         _log.info('Mass route-down detected (${_routeDownTimestamps.length} in 30s) '
-            '— inferring network change');
+            '— checking for network change');
         _routeDownTimestamps.clear();
         _networkChangeInProgress = true;
-        onNetworkChanged(force: true).whenComplete(() => _networkChangeInProgress = false);
+        onNetworkChanged().whenComplete(() => _networkChangeInProgress = false);
       }
 
       // Per-device routing table bookkeeping.
@@ -4417,16 +4422,16 @@ class CleonaNode {
   // ── Maintenance ────────────────────────────────────────────────────
 
   void _maintenance() {
-    // Prune peers older than 4 hours — synchronize DV neighbors
+    // V3.1.111: 4h→24h so overnight-offline peers survive until morning.
+    // evictStalePeers() catches zombies with high failure rates sooner.
     final peersBefore = routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
-    // Debug: log peer ages before prune
     for (final peer in routingTable.allPeers) {
       final age = DateTime.now().difference(peer.lastSeen);
-      if (age.inHours >= 4) {
+      if (age.inHours >= 24) {
         _log.info('Maintenance: peer ${peer.nodeIdHex.substring(0, 8)} age=${age.inSeconds}s will be pruned');
       }
     }
-    final pruned = routingTable.prune(const Duration(hours: 4));
+    final pruned = routingTable.prune(const Duration(hours: 24));
     if (pruned > 0) {
       _log.info('Maintenance: pruned $pruned stale peers');
       final peersAfter = routingTable.allPeers.map((p) => p.nodeIdHex).toSet();
@@ -5391,10 +5396,12 @@ class CleonaNode {
       _dvPropagationDebounce = Timer(const Duration(seconds: 2), _flushDvUpdates);
       return;
     }
-    final changes = _dvPendingChanges.length;
+    // V3.1.111: pass changed destinations to buildDeltaFor instead of
+    // discarding the set and sending the full table via buildUpdateFor.
+    final changedDests = Set<String>.from(_dvPendingChanges);
     _dvPendingChanges.clear();
 
-    // For each neighbor an individual update (Split Horizon).
+    // For each neighbor an individual delta update (Split Horizon).
     // §4.4: only send to confirmed peers.
     var sent = 0;
     var heldDown = 0;
@@ -5409,7 +5416,7 @@ class CleonaNode {
         continue;
       }
 
-      final entries = dvRouting.buildUpdateFor(neighborHex);
+      final entries = dvRouting.buildDeltaFor(neighborHex, changedDests);
       if (entries.isEmpty) continue;
 
       final peer = routingTable.getPeer(hexToBytes(neighborHex));
@@ -5428,8 +5435,8 @@ class CleonaNode {
           Timer(_dvHoldDownDuration, _flushDvUpdates);
     }
     if (sent > 0) {
-      _log.debug('DV: Flush sent updates to $sent neighbors '
-          '($changes pending changes, $heldDown held-down)');
+      _log.debug('DV: Flush sent delta updates to $sent neighbors '
+          '(${changedDests.length} changed dests, $heldDown held-down)');
     }
   }
 

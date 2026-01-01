@@ -46,6 +46,7 @@
 // before registerIdentity is called for any identity, so the constraint is
 // trivially satisfied.
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/admission_pow.dart';
@@ -104,13 +105,31 @@ class DeviceKeysStore {
   static DeviceKeyBundle loadOrCreate(
       {required String baseDir, required FileEncryption fileEnc}) {
     final path = '$baseDir/$_filename';
+    final encFile = File('$path.enc');
     final existing = fileEnc.readBinaryFile(path);
 
+    if (existing == null && encFile.existsSync()) {
+      // S106 defence-in-depth: .enc file exists but decrypt failed.
+      // Most likely cause: wrong encryption key (seed-derived vs db.key
+      // mismatch). Try legacy db.key as fallback before giving up.
+      final legacyEnc = FileEncryption(baseDir: baseDir);
+      final legacy = legacyEnc.readBinaryFile(path);
+      if (legacy != null) {
+        final bundle = _hasMagic(legacy) ? _decodeVersioned(legacy)
+            : legacy.length == _v1Length
+                ? DeviceKeyBundle(sig: DeviceKeyPair.deserialize(legacy), kem: DeviceKemKeyPair.generate())
+                : throw DeviceKeysStoreException('unrecognised legacy container: ${legacy.length} bytes');
+        fileEnc.writeBinaryFile(path, _encodeBundle(bundle));
+        return bundle;
+      }
+      throw DeviceKeysStoreException(
+          'device_keys.bin.enc exists (${encFile.lengthSync()} bytes) but '
+          'cannot be decrypted with seed-derived key or legacy db.key — '
+          'will NOT regenerate (would change deviceNodeId and break routing)');
+    }
+
     if (existing == null) {
-      // Fresh install — generate both keypairs, persist v2, return.
-      // Die Admission-Nonce (D3) wird NICHT hier berechnet (sync-Pfad) —
-      // [ensureAdmissionNonce] grindet sie nach dem Start im Isolate und
-      // schreibt den Container als v3 um.
+      // Genuine fresh install — no .enc file on disk.
       final fresh = DeviceKeyBundle(
         sig: DeviceKeyPair.generate(),
         kem: DeviceKemKeyPair.generate(),

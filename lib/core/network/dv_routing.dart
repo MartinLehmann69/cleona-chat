@@ -366,23 +366,12 @@ class DvRoutingTable {
     final neighborConnType = _neighbors[fromHex];
     if (neighborConnType == null) return const RouteUpdateResult.noChange();
 
-    final revalidated = revalidateRoutesVia(fromHex);
+    // V3.1.111: revalidation (un-staling) is NOT a topology change.
+    // The stale penalty is a local selection bias — neighbors never saw
+    // the inflated cost, so removing it restores the cost they already
+    // know. No epoch bump, no update propagation needed.
+    revalidateRoutesVia(fromHex);
     final updatedDests = <String>{};
-    if (revalidated > 0) {
-      // Revalidation changed costs — snapshot which dests had their best
-      // route affected would require a before/after diff. Conservative:
-      // mark all revalidated destinations as changed.
-      _routes.forEach((destHex, routes) {
-        for (final r in routes) {
-          final isMatch = r.nextHopHex == fromHex ||
-              (r.isDirect && r.destinationHex == fromHex);
-          if (isMatch) {
-            updatedDests.add(destHex);
-            break;
-          }
-        }
-      });
-    }
 
     final linkCost = connectionTypeCost(neighborConnType);
 
@@ -535,6 +524,50 @@ class DvRoutingTable {
         ));
       }
     });
+
+    return result;
+  }
+
+  /// V3.1.111: Delta update — only the specified destinations (with Split Horizon).
+  /// Used by _flushDvUpdates to send only changed routes instead of the full table.
+  List<RouteEntry> buildDeltaFor(String neighborHex, Set<String> changedDests) {
+    final result = <RouteEntry>[];
+    final now = DateTime.now();
+
+    for (final destHex in changedDests) {
+      final routes = _routes[destHex];
+      if (routes == null || routes.isEmpty) {
+        // Destination was removed — send Poison Reverse so neighbor drops it
+        result.add(RouteEntry(
+          destinationHex: destHex,
+          hopCount: 1,
+          cost: Route.infinity,
+          connType: ConnectionType.publicUdp,
+        ));
+        continue;
+      }
+
+      final best = routes.first;
+
+      // Split Horizon
+      if (best.nextHopHex == neighborHex) continue;
+
+      if (best.isAlive) {
+        result.add(RouteEntry(
+          destinationHex: destHex,
+          hopCount: best.hopCount,
+          cost: best.cost,
+          connType: best.connType,
+        ));
+      } else if (now.difference(best.lastConfirmed).inMinutes <= 5) {
+        result.add(RouteEntry(
+          destinationHex: destHex,
+          hopCount: best.hopCount,
+          cost: Route.infinity,
+          connType: best.connType,
+        ));
+      }
+    }
 
     return result;
   }

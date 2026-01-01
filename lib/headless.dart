@@ -1,10 +1,9 @@
 import 'dart:async';
 import 'dart:io';
-import 'package:cleona/core/crypto/key_migration.dart';
-import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
+import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
@@ -74,23 +73,35 @@ void main(List<String> args) {
     }
     File(pidPath).writeAsStringSync('$pid\n');
 
-    // Init crypto + keyring
+    // Init crypto + keyring (shared sequence — S106 fix)
     SodiumFFI();
     OqsFFI().init();
-    await KeyringService.init(config.profileDir);
-    KeyMigration.migrateIfNeeded(config.profileDir);
-    KeyMigration.repairIfNeeded(config.profileDir);
+    final baseDir = config.baseDir;
+    await IdentityContext.initCrypto(baseDir);
 
-    // Create identity context
-    final identity = IdentityContext(
-      profileDir: config.profileDir,
-      displayName: config.name,
+    // Load identity from IdentityManager (shared sequence — S106 fix)
+    final mgr = IdentityManager(baseDir: baseDir);
+    final identities = mgr.loadIdentities();
+    if (identities.isEmpty) {
+      stderr.writeln('ERROR: No identities found in $baseDir');
+      exit(1);
+    }
+    final activeId = identities.firstWhere(
+      (id) => id.profileDir == config.profileDir,
+      orElse: () => identities.first,
     );
-    await identity.initKeys();
+    final masterSeed = mgr.loadMasterSeed();
+
+    final identity = await IdentityContext.createFromIdentity(
+      identity: activeId,
+      baseDir: baseDir,
+      masterSeed: masterSeed,
+      overrideDisplayName: config.name,
+    );
 
     // Create shared node
     final node = CleonaNode(
-      profileDir: config.profileDir,
+      profileDir: baseDir,
       port: config.port,
     );
     node.manualPublicIp = config.publicIp;
@@ -352,17 +363,29 @@ Future<void> _exportContactSeed(_HeadlessConfig config) async {
   SodiumFFI();
   OqsFFI().init();
 
-  final profileDir = config.profileDir;
-  if (!Directory(profileDir).existsSync()) {
-    stderr.writeln('ERROR: Profile directory does not exist: $profileDir');
+  final baseDir = config.baseDir;
+  if (!Directory(config.profileDir).existsSync()) {
+    stderr.writeln('ERROR: Profile directory does not exist: ${config.profileDir}');
     exit(1);
   }
 
-  final identity = IdentityContext(
-    profileDir: profileDir,
-    displayName: config.name,
+  await IdentityContext.initCrypto(baseDir);
+  final mgr = IdentityManager(baseDir: baseDir);
+  final identities = mgr.loadIdentities();
+  if (identities.isEmpty) {
+    stderr.writeln('ERROR: No identities found in $baseDir');
+    exit(1);
+  }
+  final activeId = identities.firstWhere(
+    (id) => id.profileDir == config.profileDir,
+    orElse: () => identities.first,
   );
-  await identity.initKeys();
+  final identity = await IdentityContext.createFromIdentity(
+    identity: activeId,
+    baseDir: baseDir,
+    masterSeed: mgr.loadMasterSeed(),
+    overrideDisplayName: config.name,
+  );
 
   // Local IPs (non-loopback, non-link-local)
   final interfaces = await NetworkInterface.list();
@@ -529,6 +552,7 @@ void _queryPublicIpFallback(CleonaNode node, CLogger log, {Duration delay = Dura
 
 class _HeadlessConfig {
   final String profileDir;
+  final String baseDir;
   final int port;
   final String name;
   final String? sendCr;
@@ -538,6 +562,7 @@ class _HeadlessConfig {
 
   _HeadlessConfig({
     required this.profileDir,
+    required this.baseDir,
     required this.port,
     required this.name,
     this.sendCr,
@@ -597,12 +622,14 @@ _HeadlessConfig _parseArgs(List<String> args) {
 
   final home = AppPaths.home;
   profileDir ??= '$home/.cleona/$name';
+  final baseDir = '$home/.cleona';
   // Default bootstrap port based on network channel (Architecture 17.5):
   // Live = 8080, Beta = 8081
   port ??= NetworkSecret.channel.defaultBootstrapPort;
 
   return _HeadlessConfig(
     profileDir: profileDir,
+    baseDir: baseDir,
     port: port,
     name: name,
     sendCr: sendCr,
