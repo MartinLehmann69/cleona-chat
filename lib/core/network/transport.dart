@@ -1187,7 +1187,7 @@ class Transport {
     if (_lastUdpReceiveMs == 0) return;
     if (_reconnecting) return;
     final silenceMs = DateTime.now().millisecondsSinceEpoch - _lastUdpReceiveMs;
-    if (silenceMs > 120000) {
+    if (silenceMs > 30000) {
       _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
       _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
       onUdpSocketDead?.call();

@@ -152,13 +152,15 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Inject force_load into Pods xcconfigs
+      - name: Inject force_load into Flutter xcconfigs
         run: |
-          # Xcode build-setting resolution: xcconfig > project.pbxproj.
-          # CocoaPods generates Pods-Runner.{debug,release,profile}.xcconfig
-          # which set OTHER_LDFLAGS. We append -force_load to each one.
-          # flutter build ipa does NOT regenerate these xcconfigs (only
-          # Generated.xcconfig is regenerated). So the flags persist.
+          # flutter build ipa reruns "pod install" internally, which regenerates
+          # Pods-Runner.*.xcconfig — wiping any injection there. But Flutter's
+          # own ios/Flutter/{Debug,Release}.xcconfig are NOT regenerated (only
+          # Generated.xcconfig is). The Runner target's base configuration
+          # chain is: Runner buildSettings < Flutter/Release.xcconfig <
+          # Generated.xcconfig < Pods-Runner.release.xcconfig. Appending
+          # OTHER_LDFLAGS here adds to the inherited chain from Pods.
           DEVICE_A="$(pwd)/ios/CleonaNative/libcleona_all_device.a"
           if [ ! -f "$DEVICE_A" ]; then
             echo "ERROR: $DEVICE_A not found"
@@ -166,33 +168,16 @@ jobs:
             exit 1
           fi
           FORCE_FLAG="-force_load $DEVICE_A"
-          XCCONFIG_DIR="ios/Pods/Target Support Files/Pods-Runner"
-          INJECTED=0
-          for xcconfig in "$XCCONFIG_DIR"/Pods-Runner.*.xcconfig; do
-            [ -f "$xcconfig" ] || continue
-            CONFIG_NAME=$(basename "$xcconfig")
-            if grep -q 'force_load.*libcleona_all' "$xcconfig"; then
-              echo "  $CONFIG_NAME: already has force_load — skipping"
-              continue
-            fi
-            # Append to existing OTHER_LDFLAGS line, or add a new one
-            if grep -q '^OTHER_LDFLAGS' "$xcconfig"; then
-              sed -i '' "s|^OTHER_LDFLAGS = \(.*\)|OTHER_LDFLAGS = \1 $FORCE_FLAG|" "$xcconfig"
-            else
+          for xcconfig in ios/Flutter/Debug.xcconfig ios/Flutter/Release.xcconfig; do
+            if ! grep -q 'force_load' "$xcconfig"; then
               echo "OTHER_LDFLAGS = \$(inherited) $FORCE_FLAG" >> "$xcconfig"
+              echo "  $(basename $xcconfig): injected"
             fi
-            echo "  $CONFIG_NAME: injected force_load"
-            INJECTED=$((INJECTED + 1))
           done
-          echo "Injected into $INJECTED xcconfig files"
-          if [ "$INJECTED" -eq 0 ]; then
-            echo "ERROR: No xcconfig files found or modified!"
-            ls -la "$XCCONFIG_DIR/" 2>/dev/null || echo "Dir not found"
-            exit 1
-          fi
-          # Verify
           echo "--- Verification ---"
-          grep 'force_load' "$XCCONFIG_DIR"/*.xcconfig || echo "WARNING: force_load not found in any xcconfig!"
+          cat ios/Flutter/Release.xcconfig
+          echo "---"
+          cat ios/Flutter/Debug.xcconfig
 
       - name: Install distribution certificate
         env:
