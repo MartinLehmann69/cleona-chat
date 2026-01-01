@@ -10,7 +10,7 @@ v2.2 (archived, see git history). References to "V3.0" throughout this document
 mean the generation, not the release.
 **Filename:** stays `Cleona_Chat_Architecture_v3_0.md` — 73 references plus the
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:77edf6af847f, 2026-08-06). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:687723f7d3be, 2026-08-08). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 publishing pipeline depend on it (`scripts/sync-to-git.sh:26` `MASTER_ARCH`, the
@@ -1861,7 +1861,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 **Connection strategies** (order tried when sending to a peer):
 
-1. Same-subnet LAN address (private IPv4 in the local /24)
+1. Same-subnet LAN address (private IPv4 in the local /24, inbound-evidenced — see the priority table; without evidence it ranks with the other-subnet/public group)
 2. Other-subnet LAN address (private IPv4 in another /24, RFC 1918)
 3. Public IPv6 (when both sender and receiver have global IPv6)
 4. Public IPv4 + UPnP hole
@@ -1882,12 +1882,15 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 | Priority | Address type | Rationale |
 |---|---|---|
-| 1 | Same-subnet LAN (private IPv4 same /24, IPv6 link-local) | Direct L2 path, <1ms, no NAT, no routing, no cost |
+| 1 | Same-subnet LAN — IPv6 link-local unconditionally; private IPv4 in the local /24 **only with inbound evidence** (`PeerAddress.lastReceivedAt` set) | Direct L2 path, <1ms, no NAT, no routing, no cost. The evidence requirement exists because RFC 1918 ranges are not globally unique: the factory-default LAN ranges of the common consumer routers are shared by millions of households, so a gossiped foreign address out of such a range routinely hits a *different* device on the receiver's LAN, or nothing at all. "Same /24" is then a name collision, not a reachability statement, and the "<1ms direct L2" rationale is simply false for it. Without evidence the address ranks priority 3. `successCount` does not qualify as evidence: it increments on the kernel accept of a UDP `send` and would confirm itself. |
 | 2 | Global IPv6 | End-to-end routable without NAT, no pinhole maintenance. **IPv6-First (V3.1.94):** DS-Lite/CGNAT bypass — on mobile carriers IPv6 is the only native path; IPv4 is tunneled through carrier NAT and unreliable. Promoted from priority 3 because IPv6 has objectively fewer failure modes than any IPv4 path (no NAT, no pinhole timeout, no CGNAT drop). |
 | 3 | Other-subnet LAN (private IPv4 other /24, IPv6 ULA/site-local) / Public IPv4 (port-mapped via UPnP/PCP/NAT-PMP) | Routed L3 or port-mapped. LAN paths preferred over hole-punched/CGNAT IPv4 — a relay peer on the private network typically has a wired internet connection. |
 | 4 | Hole-punched IPv4 | Short-lived, NAT-dependent, requires keepalive |
 | 5 | CGNAT/DS-Lite IPv4 (100.64.0.0/10, 192.0.0.0/24) | Carrier NAT; rarely directly reachable. Includes DS-Lite well-known prefix (RFC 7335). |
 | 6 | Relay (multi-hop via DV routing) | Additive latency (sum of individual links) |
+
+*A section is omitted from the public edition.*
+
 
 **Cost optimization for relay:** When a peer is reachable via both a private and a public address, the private address is preferred (priority 3 < priority 4/5). This is architecturally intentional: a relay peer on the private network (e.g. bootstrap) typically has a wired internet connection. The path Phone → (LAN) → Relay → (wired internet) → Target is cheaper and faster than Phone → (mobile data) → Target. Mobile devices benefit most because mobile data traffic incurs both financial cost and higher latency. When the peer has both IPv6 global (priority 2) and LAN (priority 3), IPv6 is tried first — on mobile networks LAN addresses are unreachable anyway (`isReachableFromCurrentNetwork` filters them); on WiFi the latency difference is negligible.
 
@@ -1918,7 +1921,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 > **V3.1.71 regression (fixed in V3.1.72):** the four V3.1.71 gates used *direct-confirmed* to suppress **all** outbound, including `_sendV3ViaHop` and relay-forward. This silently dropped (a) every first-contact CR to an as-yet-unconfirmed target, and (b) the first message to any established LAN/IPv6 peer that had been idle > TTL — because the idle-traffic elimination simultaneously removed the keepalive that kept those peer types confirmed. The send/relay decision now uses *reachable*; *direct-confirmed* gates only proactive periodic direct traffic.
 
-**Single-success-return for confirmed peers** (V3.1.86): `_sendV3ViaHop` sends to the peer's known addresses in priority order. For **confirmed** peers (at least one prior successful exchange), the function returns immediately after the first successful UDP send — it does not continue to remaining addresses. For **unconfirmed** peers, all addresses are attempted (scatter-shot) to maximize first-contact probability, followed by a TLS fallback. Previously, large payloads (≥ 2 UDP fragments) were sent to ALL known addresses of a confirmed peer, causing 3–4× amplification per send (e.g. a 6-fragment route update sent to 4 addresses = 24 UDP packets instead of 6).
+**Single-success-return for confirmed peers** (V3.1.86): `_sendV3ViaHop` sends to the peer's known addresses in priority order. For **confirmed** peers (at least one prior successful exchange), the function returns immediately after the first successful UDP send — it does not continue to remaining addresses. For **unconfirmed** peers, addresses are attempted scatter-shot to maximize first-contact probability, followed by a TLS fallback. The scatter is bounded by `_maxSprayTargets` = 3 (V3.1.158): the list is sorted priority-ASC with receive-confirmed first, so three covers "the proven one plus two plausible alternatives". A fragmented payload (>1200 B) narrows this to a single target **only when that target carries current inbound evidence** (`lastReceivedAt` younger than 2 min) — the same evidence class as the single-success-return above. Without it the full scatter applies (V3.2.2). The narrowing must not be made unconditional: a UDP `send` to an unreachable address still returns the kernel accept, the remaining-targets fallback is gated on that accept, and there is no ACK-driven retry across addresses inside `_sendV3ViaHop`. An unconditional cap of 1 therefore does not defer delivery to the next target — it discards it (regression in V3.2.0/V3.2.1, fixed in V3.2.2). Previously, large payloads (≥ 2 UDP fragments) were sent to ALL known addresses of a confirmed peer, causing 3–4× amplification per send (e.g. a 6-fragment route update sent to 4 addresses = 24 UDP packets instead of 6).
 
 **Sender-side per-hop outbound pacing** (V3.1.155): `_sendV3ViaHop` enforces a per-hop send budget of **150 packets / 10 s** per destination hop. If a hop's budget is exhausted, the send returns `false` without transmitting. The budget map is cleared on `onNetworkChanged()`. This complements the receiver-side rate limiter (§13.1.3) — the receiver protects itself, the hop-budget prevents the sender from flooding a single neighbor that serves as relay for many destinations (e.g. 200+ stale DV-route peers routed through one Bootstrap neighbor generating 1200+ relay sends in one startup burst). **The budget covers mesh-maintenance traffic only.** Real-time paths — live-media frames (§10.3) and call signaling (§10.1) — are dispatched with `paced: false`: they are neither blocked by the budget nor counted towards it. Rationale: a 1:1 call emits 50 frames/s to a single hop, i.e. 500 packets per 10 s window against a 150-packet budget. Under the budget, call audio was dropped from the third second of every window onward, and every dropped frame additionally fell through the cascade into the default-GW and 5-neighbour relay spray — turning a throttle into an amplifier. Field evidence (V3.1.156, Pixel 8 Pro): 1719 budget drops in one day on an idle phone with no call active at all.
 

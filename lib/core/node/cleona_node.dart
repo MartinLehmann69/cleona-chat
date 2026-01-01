@@ -4835,23 +4835,65 @@ class CleonaNode {
   /// zusammensetzbar, nicht bloss unzuverlaessig.
   static const int maxGossipPeersPerPush = 26;
 
+  /// Fenster, innerhalb dessen ein `lastReceivedAt` als *aktueller*
+  /// Eingangsbeleg fuer genau diese Adresse gilt. Identisch mit dem
+  /// Early-Return in [_sendV3ViaHop] — beide Stellen beantworten dieselbe
+  /// Frage ("ist dieses Ziel nachweislich das lebende?") und duerfen nicht
+  /// auseinanderlaufen.
+  static const Duration _inboundProofWindow = Duration(minutes: 2);
+
+  /// True, wenn [addr] einen aktuellen Eingangsbeleg traegt — wir haben auf
+  /// GENAU dieser Adresse innerhalb von [_inboundProofWindow] etwas vom Peer
+  /// empfangen. Das ist die einzige Evidenzklasse, die einen Deckel von 1
+  /// traegt; `successCount` genuegt NICHT, denn ein UDP-`send` zaehlt dort
+  /// bereits beim Kernel-Accept hoch (peer_info.dart:33) und beweist keine
+  /// Zustellung.
+  static bool _hasInboundProof(PeerAddress? addr, DateTime now) {
+    final lr = addr?.lastReceivedAt;
+    if (lr == null) return false;
+    return now.difference(lr) < _inboundProofWindow;
+  }
+
   /// Teilt die Sendeziele in (primary, fallback) — Arbeitsregel 5 / §4.6.
   ///
-  /// Fragmentierte Payloads gehen an EIN Ziel pro Versuch: `sendUdpSerialized`
+  /// Fragmentierte Payloads gehen an EIN Ziel pro Versuch, **aber nur wenn
+  /// dieses Ziel einen aktuellen Eingangsbeleg hat**. `sendUdpSerialized`
   /// fragmentiert pro Ziel neu und wiederholt bei >8 Fragmenten zusaetzlich
-  /// Fragment 0, drei Ziele verdreifachen also die PAKETzahl. Der Zustellbeweis
-  /// leistet das DELIVERY_RECEIPT (§5.3), nicht der Spray.
+  /// Fragment 0, drei Ziele verdreifachen also die PAKETzahl — diese Ersparnis
+  /// ist real, sie darf aber nur dort eingekauft werden, wo das erste Ziel
+  /// nachweislich lebt.
+  ///
+  /// **Warum die Bedingung nicht weggelassen werden darf (Regression 3.2.0,
+  /// `c7264ebe`):** der Deckel stand vorher bedingungslos auf 1. Seine
+  /// Begruendung war, eine funktionierende Adresse stehe "by construction"
+  /// oben. Das stimmt nicht: `PeerAddress.priority` (peer_info.dart:387-404)
+  /// stuft JEDE private IPv4 aus dem eigenen /24 auf Prioritaet 1 hoch, also
+  /// vor globales IPv6 (2) und vor die echte public IPv4 (3) — auch dann,
+  /// wenn die Adresse einem voellig fremden Geraet gehoert. Da
+  /// `192.168.178.0/24` die Fritzbox-Werkseinstellung ist, kollidiert die
+  /// private Adresse des Bootstraps mit dem Heimnetz eines Grossteils der
+  /// Nutzer. Der Fallback rettet das nicht: er haengt an `udpSentAny`, und ein
+  /// `sendto()` auf eine unerreichbare RFC1918-Adresse liefert den
+  /// Kernel-Accept, ohne dass je ein Paket ankommt. Ergebnis in 3.2.1: jede
+  /// Nutznachricht (>1200 B, also praktisch jede) ging an genau ein totes Ziel
+  /// und war verloren. §4.6 verlangt fuer unbestaetigte Ziele ausdruecklich
+  /// "all addresses are attempted (scatter-shot)".
   ///
   /// Sichtbar fuer Tests, und zwar wegen einer Invariante, die beim Bauen
   /// dieses Deckels genau einmal gebrochen war: **primary + fallback muessen
   /// zusammen ALLE Ziele in unveraenderter Reihenfolge ergeben.** Ein
   /// Fallback, der einen anderen Offset ueberspringt als der Deckel nimmt,
   /// verliert Ziele still — siehe smoke_spray_cap.
+  ///
+  /// [now] ist injizierbar, damit der Beleg-Zweig ohne Wanduhr testbar ist.
   static (List<PeerAddress>, List<PeerAddress>) partitionSprayTargets(
     List<PeerAddress> targets, {
     required bool isLargePayload,
+    DateTime? now,
   }) {
-    final cap = isLargePayload ? 1 : _maxSprayTargets;
+    final first = targets.isEmpty ? null : targets.first;
+    final proven = _hasInboundProof(first, now ?? DateTime.now());
+    final cap = (isLargePayload && proven) ? 1 : _maxSprayTargets;
     return (targets.take(cap).toList(), targets.skip(cap).toList());
   }
 
@@ -5101,9 +5143,7 @@ class CleonaNode {
             used.add(addr);
             // Confirmed peers with recent bidirectional proof: early-return
             // on the first proven address — skip remaining targets.
-            if (isConfirmed && addr.lastReceivedAt != null &&
-                DateTime.now().difference(addr.lastReceivedAt!) <
-                    const Duration(minutes: 2)) {
+            if (isConfirmed && _hasInboundProof(addr, DateTime.now())) {
               return;
             }
           }
@@ -5115,25 +5155,26 @@ class CleonaNode {
       }
     }
 
-    // Arbeitsregel 5 / §4.6 — Spray-Deckel: fuer fragmentierte Payloads EIN
-    // Ziel pro Versuch. Der Deckel auf _maxSprayTargets ist damit begruendet,
-    // dass eine funktionierende Adresse "by construction" oben steht
-    // (allConnectionTargets sortiert nach priority ASC, §4.6). Das
-    // rechtfertigt, drei statt fuenfzehn Ziele zu nehmen — es rechtfertigt
-    // nicht, an alle drei zu senden, obwohl das erste Ziel den Kernel-Accept
-    // schon hat.
+    // Arbeitsregel 5 / §4.6 — Spray-Deckel. Fuer fragmentierte Payloads EIN
+    // Ziel pro Versuch, aber nur wenn dieses Ziel einen aktuellen
+    // Eingangsbeleg traegt (siehe partitionSprayTargets). Sonst
+    // _maxSprayTargets, wie §4.6 es fuer unbestaetigte Ziele verlangt
+    // ("all addresses are attempted (scatter-shot)").
     //
-    // Bei einem fragmentierten Payload wird daraus der Faktor drei auf der
-    // PAKETzahl, denn sendUdpSerialized fragmentiert pro Ziel neu
-    // (transport.dart:1084) und wiederholt bei >8 Fragmenten zusaetzlich
-    // Fragment 0 (:1129). Eine 90-Fragment-Nachricht ging so als 3 x 91 = 273
-    // Pakete raus — genau der Burst, den dieser Sendepfad ueberleben soll.
-    // Belegt im Feld-Log: `frags=14 confirmed=false targets=<7 Ziele>`.
+    // Die Ersparnis, um die es geht, ist real: sendUdpSerialized fragmentiert
+    // pro Ziel neu (transport.dart:1084) und wiederholt bei >8 Fragmenten
+    // zusaetzlich Fragment 0 (:1129) — eine 90-Fragment-Nachricht ging als
+    // 3 x 91 = 273 Pakete raus.
     //
-    // Der Zustellbeweis leistet ohnehin nicht der Spray, sondern das
-    // DELIVERY_RECEIPT (§5.3). Faellt das aus, laeuft die Kaskade weiter — der
-    // Fallback unten bedient die uebersprungenen Ziele, es geht keine
-    // Erreichbarkeit verloren, sie kommt nur nach dem ACK-Timeout statt sofort.
+    // Sie darf aber nur dort eingekauft werden, wo das erste Ziel nachweislich
+    // lebt. Der `else`-Zweig unten ist KEIN Ersatz dafuer: er greift nur, wenn
+    // kein einziges Primaerziel den Kernel-Accept bekam. Eine unerreichbare
+    // RFC1918-Adresse bekommt ihn aber immer — sie ist genau der Fall, den der
+    // Fallback nicht abdeckt, und dieselbe Zeile weiter unten (:5209) sagt es
+    // fuer den Unconfirmed-Pfad auch aus: "a UDP 'ok' is only a local buffer
+    // write — the packet may be black-holed". Ein ACK-getriebener Nachschlag
+    // auf Ziel 2..n existiert in dieser Funktion nicht; der Deckel ist damit
+    // endgueltig, nicht aufgeschoben.
     final (primary, sprayFallback) =
         partitionSprayTargets(targets, isLargePayload: isLargePayload);
     await sendTo(primary);

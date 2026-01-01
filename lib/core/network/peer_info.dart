@@ -397,10 +397,35 @@ class PeerAddress {
     // IPv4
     if (_isCgnat(ip)) return 4;
     if (!_isPrivateIp(ip)) return 3;
-    for (final localIp in currentLocalIps) {
-      if (_sameSubnet(ip, localIp)) return 1;
+    // Stufe 1 nur MIT Eingangsbeleg (§4.6 Prioritaetstabelle, V3.2.2).
+    //
+    // Die Stufe-1-Begruendung im Masterdokument ist eine physikalische
+    // Aussage — "Direct L2 path, <1ms, no NAT". Sie gilt fuer eine Adresse im
+    // eigenen /24 nur, wenn dort auch dieser Peer sitzt. RFC-1918-Bereiche
+    // sind nicht global eindeutig: 192.168.178.0/24 ist die
+    // Fritzbox-Werkseinstellung, 192.168.0.0/24 und 192.168.1.0/24 sind es bei
+    // den meisten anderen Herstellern. Eine gegossipte Fremdadresse aus so
+    // einem Bereich trifft im Heimnetz des Empfaengers ein ANDERES Geraet oder
+    // gar nichts — "gleiches /24" ist dann eine Namenskollision und keine
+    // Erreichbarkeitsaussage.
+    //
+    // Ohne diese Bedingung gewinnt die Kollision gegen globales IPv6 (2) und
+    // gegen die echte public IPv4 (3) und steht als erstes Sendeziel. Genau
+    // das war die Bedingung, unter der der Spray-Deckel aus 3.2.0 zum
+    // Totalausfall wurde (siehe CleonaNode.partitionSprayTargets).
+    //
+    // Beleg ist `lastReceivedAt`, NICHT `successCount`: letzteres zaehlt schon
+    // beim Kernel-Accept eines UDP-`send` hoch (:33) und wuerde sich selbst
+    // bestaetigen. Ohne Beleg landet die Adresse auf 3 — sie bleibt also im
+    // Rennen (Erstkontakt im LAN funktioniert weiter, Local Discovery setzt
+    // den Beleg mit der ersten Antwort), sie draengt sich nur nicht mehr vor
+    // die nachweislich routbaren Pfade.
+    if (lastReceivedAt != null) {
+      for (final localIp in currentLocalIps) {
+        if (_sameSubnet(ip, localIp)) return 1;
+      }
     }
-    return 3; // Other private subnet
+    return 3; // Other private subnet, oder same-/24 ohne Eingangsbeleg
   }
 
   /// Check if IP is in CGNAT range (100.64.0.0/10) or carrier NAT (192.0.0.0/24).
