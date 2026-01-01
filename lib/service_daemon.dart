@@ -503,7 +503,8 @@ class _MultiServiceDaemon {
     // (post-Wave-1 cluster — e.g. routing/DHT chatter that the node hasn't
     // node-locally dispatched yet) get logged and dropped because their
     // service-side handlers don't exist yet.
-    node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
+    node.onInfrastructureFramePayload =
+        (frame, senderDeviceId, from, port, snapshot, wasDirect) {
       // Service-routed Identity-Layer messageTypes (Welle 5 + 6): CR-Bootstrap,
       // RESTORE_BROADCAST, Emergency KEY_ROTATION_BROADCAST. Everything else
       // either lives in the node-local infra dispatch or has no handler yet.
@@ -617,7 +618,9 @@ class _MultiServiceDaemon {
             // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
             // carries accepted=false when the storage peer rejected the
             // store (recipient not its contact, budget, rate limit).
-            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId);
+            // Befund 15: wasDirect gates confirmRoute in the handler.
+            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId,
+                wasDirect: wasDirect);
             break;
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
             service.handleIncomingPeerRetrieveInfra(
@@ -699,9 +702,7 @@ class _MultiServiceDaemon {
         node: node,
         displayName: ctx.displayName,
       );
-      // §4.8 / §5.5 F4: bootstrap nodes accept S&F stores for any recipient.
       if (config.bootstrapMode) {
-        service.acceptAnyPeerStore = true;
         service.onContactRequestReceived = (nodeId, name) {
           log.info('Bootstrap auto-accept contact: $name ($nodeId)');
           service.acceptContactRequest(nodeId);

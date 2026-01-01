@@ -180,6 +180,7 @@ class IpcServer {
           'displayName': service.displayName,
           'peerCount': service.peerCount,
           'confirmedPeerCount': service.confirmedPeerCount,
+          'reachablePeerCount': service.reachablePeerCount,
           'hasPortMapping': service.hasPortMapping,
           'isRunning': service.isRunning,
           'mobileFallbackActive': service.node.transport.isMobileFallbackActive,

@@ -29,8 +29,9 @@ class AndroidUdpSender {
   final int _fd4;
   final int _fd6;
   final _SendtoFdDart _sendtoFd;
+  final _SendtoFdDart _sendtoFd6;
 
-  AndroidUdpSender._(this._fd4, this._fd6, this._sendtoFd);
+  AndroidUdpSender._(this._fd4, this._fd6, this._sendtoFd, this._sendtoFd6);
 
   static ffi.DynamicLibrary? _libCache;
 
@@ -46,13 +47,15 @@ class AndroidUdpSender {
         lib.lookupFunction<_FindUdp6FdC, _FindUdp6FdDart>('cleona_find_udp6_fd');
     final sendtoFd =
         lib.lookupFunction<_SendtoFdC, _SendtoFdDart>('cleona_udp_sendto_fd');
+    final sendtoFd6 =
+        lib.lookupFunction<_SendtoFdC, _SendtoFdDart>('cleona_udp_sendto_fd6');
 
     final fd4 = findFd4(localPort);
     if (fd4 < 0) return null;
 
     final fd6 = findFd6(localPort);
 
-    return AndroidUdpSender._(fd4, fd6, sendtoFd);
+    return AndroidUdpSender._(fd4, fd6, sendtoFd, sendtoFd6);
   }
 
   bool get hasIpv6 => _fd6 >= 0;
@@ -78,7 +81,7 @@ class AndroidUdpSender {
     final dataPtr = calloc<ffi.Uint8>(data.length);
     try {
       dataPtr.asTypedList(data.length).setAll(0, data);
-      return _sendtoFd(_fd6, ipPtr.cast(), destPort, dataPtr, data.length);
+      return _sendtoFd6(_fd6, ipPtr.cast(), destPort, dataPtr, data.length);
     } finally {
       calloc.free(ipPtr);
       calloc.free(dataPtr);
@@ -110,6 +113,17 @@ class AndroidUdpSender {
   }
 
   /// Whether this errno indicates the socket/route is dead (not just peer-specific).
+  ///
+  /// NOTE: -2 is deliberately NOT included here. cleona_net.c's
+  /// cleona_udp_sendto_fd/fd6 return -2 as a sentinel (not a real errno)
+  /// when inet_pton() fails to parse the destination address — a
+  /// per-destination data problem (malformed/unparsable peer address),
+  /// not evidence that the socket or route itself is dead. Counting it
+  /// here fed the global ZeroSendDeadEdgeDetector and caused a healthy
+  /// socket to be rebooted on an unrelated per-peer parse failure
+  /// (Befund 7). This restores the behavior from before commit
+  /// f3542023; do not re-add e == 2 here. A per-address backoff for
+  /// bad addresses belongs in cleona_node.dart, not in this classifier.
   static bool isSocketDeadErrno(int negErrno) {
     final e = negErrno.abs();
     return e == 100 || // ENETDOWN

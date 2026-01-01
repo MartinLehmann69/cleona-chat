@@ -16,14 +16,20 @@ import android.media.MediaFormat
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
+import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -62,6 +68,14 @@ class MainActivity : FlutterActivity() {
     // Deep link: cleona:// URI from ACTION_VIEW intent, drained by Dart.
     private var pendingDeepLink: String? = null
 
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        return FlutterEngineCache.getInstance().get(CleonaApplication.ENGINE_ID)
+    }
+
+    override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        // Engine is owned by CleonaApplication, do not destroy
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -87,6 +101,10 @@ class MainActivity : FlutterActivity() {
                     val title = call.argument<String>("title") ?: "Cleona Chat"
                     val text = call.argument<String>("text") ?: ""
                     CleonaForegroundService.updateNotification(this, title, text)
+                    result.success(true)
+                }
+                "acquireWakeLock" -> {
+                    CleonaForegroundService.acquireWakeLock()
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -162,6 +180,19 @@ class MainActivity : FlutterActivity() {
                             runOnUiThread { result.success(null) } // non-fatal
                         }
                     }.start()
+                }
+                "startLoopSound" -> {
+                    val asset = call.argument<String>("asset")
+                    if (asset == null) {
+                        result.error("INVALID_ARGS", "asset required", null)
+                        return@setMethodCallHandler
+                    }
+                    startLoopSound(asset)
+                    result.success(null)
+                }
+                "stopSound" -> {
+                    stopLoopSound()
+                    result.success(null)
                 }
                 "updateBadge" -> {
                     val count = call.argument<Int>("count") ?: 0
@@ -373,6 +404,13 @@ class MainActivity : FlutterActivity() {
         // POST_NOTIFICATIONS Runtime-Permission (API 33+)
         requestNotificationPermission()
 
+        // §12.5 S254: request Doze-whitelist exemption so UDP delivery works
+        // in Deep Doze. The system shows its own dialog — no custom UI needed.
+        // Delayed by 5s so the notification permission dialog can be dismissed first.
+        Handler(Looper.getMainLooper()).postDelayed({
+            requestBatteryOptimizationExemption()
+        }, 5000)
+
         // Create message notification channel (separate from foreground service)
         createMessageNotificationChannel()
 
@@ -563,6 +601,9 @@ class MainActivity : FlutterActivity() {
         manager.notify(conversationId.hashCode(), notification)
     }
 
+    @Volatile
+    private var loopingPlayer: MediaPlayer? = null
+
     private fun playAssetSound(asset: String) {
         try {
             val afd: AssetFileDescriptor = assets.openFd("flutter_assets/$asset")
@@ -574,6 +615,33 @@ class MainActivity : FlutterActivity() {
             mp.setOnCompletionListener { it.release() }
         } catch (e: Exception) {
             // Sound playback is non-fatal
+        }
+    }
+
+    private fun startLoopSound(asset: String) {
+        stopLoopSound()
+        try {
+            val afd: AssetFileDescriptor = assets.openFd("flutter_assets/$asset")
+            val mp = MediaPlayer()
+            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+            afd.close()
+            mp.isLooping = true
+            mp.prepare()
+            mp.start()
+            loopingPlayer = mp
+        } catch (e: Exception) {
+            // Sound playback is non-fatal
+        }
+    }
+
+    private fun stopLoopSound() {
+        val mp = loopingPlayer
+        loopingPlayer = null
+        if (mp != null) {
+            try {
+                if (mp.isPlaying) mp.stop()
+                mp.release()
+            } catch (_: Exception) {}
         }
     }
 
@@ -640,6 +708,20 @@ class MainActivity : FlutterActivity() {
                     NOTIFICATION_PERMISSION_CODE
                 )
             }
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        try {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.w("Cleona", "Battery optimization exemption request failed: ${e.message}")
         }
     }
 

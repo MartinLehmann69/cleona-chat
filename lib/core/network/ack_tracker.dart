@@ -113,6 +113,13 @@ class AckTracker {
   /// sender (= the recipient); `viaNextHopHex` is the relay we sent through.
   void Function(String destDeviceIdHex, String viaNextHopHex)? onRelayRouteConfirmed;
 
+  /// L3 fix (S258): resolve peer addresses for failure scoring when
+  /// [usedAddresses] was empty at track time. Wired by CleonaNode.
+  /// Befund 3: receives the *device* hex of the hop actually used for the
+  /// send (`viaNextHopHex`), so the wiring tries a deviceId routing-table
+  /// lookup first and falls back to the userId-based lookup.
+  List<PeerAddress> Function(String peerHex)? onResolveAddresses;
+
   AckTracker({required DhtRpc rttSource, String? profileDir})
       : _rttSource = rttSource,
         _log = CLogger.get('ack-tracker', profileDir: profileDir);
@@ -253,11 +260,21 @@ class AckTracker {
     final entry = _pending.remove(messageIdHex);
     if (entry == null) return;
 
-    // Mark all used addresses as failed (only for direct sends)
-    if (entry.viaNextHopHex == null) {
-      for (final addr in entry.usedAddresses) {
-        addr.recordFailure();
-      }
+    // Mark addresses as failed for address-level scoring.
+    // L3 fix (S258): resolve from routing table when usedAddresses is empty.
+    // Befund 3: only score when a real wire send happened (viaNextHopHex
+    // set), and score the addresses of the hop that was actually used —
+    // NOT the recipient. Penalizing the recipient's addresses for a failed
+    // relay-hop send (or for a send that never left the machine) corrupts
+    // the address-level scoring.
+    var failAddrs = entry.usedAddresses;
+    if (failAddrs.isEmpty &&
+        onResolveAddresses != null &&
+        entry.viaNextHopHex != null) {
+      failAddrs = onResolveAddresses!(entry.viaNextHopHex!);
+    }
+    for (final addr in failAddrs) {
+      addr.recordFailure();
     }
 
     if (!entry.completer.isCompleted) {

@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import java.io.File
@@ -45,6 +46,14 @@ class CleonaForegroundService : Service() {
         /// shows the persistent "microphone in use" indicator.
         fun demoteAfterCall(context: Context) {
             instance?._demoteAfterCall()
+        }
+
+        /// §12.5 S254: re-acquire the timed WakeLock (30s) to keep the CPU
+        /// active during a packet-processing window. Called from the Dart
+        /// heartbeat timer on each tick to extend the lock while the isolate
+        /// is alive. No-op if the service is not running.
+        fun acquireWakeLock() {
+            instance?.wakeLock?.acquire(30_000L)
         }
 
         /// Update the foreground notification text from anywhere.
@@ -91,6 +100,12 @@ class CleonaForegroundService : Service() {
     // degraded "pausiert" text; cleared when a fresh heartbeat is seen.
     private var pausedNotificationShown = false
 
+    // §12.5 S254: timed PARTIAL_WAKE_LOCK keeps the CPU active during
+    // incoming-packet processing. 30s timeout prevents battery drain if
+    // the release call is missed. Reference-counted so nested acquires
+    // extend rather than conflict.
+    private var wakeLock: PowerManager.WakeLock? = null
+
     private fun baseServiceType(): Int = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE ->
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
@@ -135,10 +150,21 @@ class CleonaForegroundService : Service() {
         // _promoteForCall() upgrades to MICROPHONE on demand.
         desiredType = baseServiceType()
         startForegroundWithDesiredType()
+        // §12.5 S254: timed PARTIAL_WAKE_LOCK for incoming-packet processing.
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "cleona:fgs-packet-processing"
+        ).apply {
+            setReferenceCounted(false)
+            acquire(30_000L)
+        }
     }
 
     override fun onDestroy() {
         watchdogHandler.removeCallbacks(watchdogRunnable)
+        try { wakeLock?.release() } catch (_: Exception) {}
+        wakeLock = null
         if (instance === this) instance = null
         super.onDestroy()
     }

@@ -698,6 +698,11 @@ class DvRoutingTable {
         orElse: () => routes.first,
       );
     }
+    // Befund 17: a confirmation must never revive a DEAD route
+    // (cost=infinity after markRouteDown). Reviving is exclusively the
+    // job of addDirectNeighbor / route updates / relay hints — otherwise
+    // a late ACK resurrects a zombie route that keeps failing.
+    if (!target.isAlive) return;
     target.consecutiveFailures = 0;
     target.lastConfirmed = DateTime.now();
     target.ackConfirmed = true;

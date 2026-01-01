@@ -65,6 +65,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   int _port = 0;
   int _peerCount = 0;
   int _confirmedPeerCount = 0;
+  int _reachablePeerCount = 0;
   bool _hasPortMapping = false;
   bool _mobileFallbackActive = false;
   int _fragmentCount = 0;
@@ -369,6 +370,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         // Lightweight notification — update basic fields, schedule coalesced refresh
         _peerCount = event.data['peerCount'] as int? ?? _peerCount;
         _confirmedPeerCount = event.data['confirmedPeerCount'] as int? ?? _confirmedPeerCount;
+        _reachablePeerCount = event.data['reachablePeerCount'] as int? ?? _reachablePeerCount;
         _hasPortMapping = event.data['hasPortMapping'] as bool? ?? _hasPortMapping;
         _mobileFallbackActive = event.data['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
         _isRunning = event.data['isRunning'] as bool? ?? _isRunning;
@@ -657,6 +659,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _port = state['port'] as int? ?? _port;
     _peerCount = state['peerCount'] as int? ?? _peerCount;
     _confirmedPeerCount = state['confirmedPeerCount'] as int? ?? _confirmedPeerCount;
+    _reachablePeerCount = state['reachablePeerCount'] as int? ?? _reachablePeerCount;
     _mobileFallbackActive = state['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
     _fragmentCount = state['fragmentCount'] as int? ?? _fragmentCount;
     _isRunning = state['isRunning'] as bool? ?? _isRunning;
@@ -966,6 +969,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   int get peerCount => _peerCount;
   @override
   int get confirmedPeerCount => _confirmedPeerCount;
+  @override
+  int get reachablePeerCount => _reachablePeerCount;
   @override
   bool get hasPortMapping => _hasPortMapping;
   @override

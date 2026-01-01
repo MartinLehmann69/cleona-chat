@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ed695f460292, 2026-07-21). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:5630a498aa08, 2026-07-23). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -93,7 +93,7 @@ V3.0 changes several fundamental structures compared to v2.2. The changes are no
 
 **3. Default-Gateway as routing-layer fallback** (§5.1, §4.4). v2.2 explicitly removed the Default-Gateway fallback from the send path ("hard cut, bundled with Sec H-5 KEM v2") and replaced it with identity resolution alone — which resulted in five parallel fragile conditions for a successful send. V3.0 restores the Default-Gateway as a clean routing-layer last resort, without weakening the 2D-DHT resolver. The resolver remains the fast path; the Default-Gateway is the resilience tier.
 
-**4. MessageQueue retired** (§5.5, §5.6). v2.2 held failed sends for 7 days in a local MessageQueue and retried periodically — often with the same (potentially wrong) ID that had already failed on the first attempt. V3.0 removes the MessageQueue entirely: when "all routes exhausted" the sender stops, S&F (on contact peers, §5.5) plus mailbox pull (the receiver pulls upon coming online) take over offline delivery. There is no longer any sender-side retry.
+**4. MessageQueue retired** (§5.5, §5.6). v2.2 held failed sends for 7 days in a local MessageQueue and retried periodically — often with the same (potentially wrong) ID that had already failed on the first attempt. V3.0 removes the MessageQueue entirely: when "all routes exhausted" the sender stops, S&F on network peers (§5.5) plus mailbox pull (the receiver pulls upon coming online) take over offline delivery. There is no longer any sender-side retry.
 
 **5. Onion-routing hook prepared, not active** (§2.5). The Outer-Frame format has a `payloadType` discriminator: `payload` can be an ApplicationFrame (V3.0 default) or a nested NetworkPacket (onion layer). This makes multi-hop onion routing activatable in a later version **without another hard break**. V3.0 implements only 1 hop. When activation occurs later, a taboo list is firmly planned: live calls, DHT infrastructure, hole punch, routing updates must never traverse onion layers — latency and functionality forbid it.
 
@@ -313,7 +313,7 @@ message InfrastructureFrame {
 | 2D-DHT identity resolution — RETRIEVE side | IDENTITY_AUTH_RETRIEVE/RESPONSE, IDENTITY_LIVE_RETRIEVE/RESPONSE, IDENTITY_KEM_RETRIEVE/RESPONSE | **BOOT** |
 | 2D-DHT identity resolution — PUBLISH side | IDENTITY_AUTH_PUBLISH, IDENTITY_LIVE_PUBLISH, IDENTITY_KEM_PUBLISH | **BOOT** |
 | Fragment storage | FRAGMENT_STORE, FRAGMENT_STORE_ACK, FRAGMENT_RETRIEVE, FRAGMENT_RETRIEVE_RESPONSE, FRAGMENT_DELETE | KEM |
-| S&F on contact peers (§5.5) | PEER_STORE, PEER_STORE_ACK, PEER_RETRIEVE, PEER_RETRIEVE_RESPONSE | KEM |
+| S&F on network peers (§5.5) | PEER_STORE, PEER_STORE_ACK, PEER_RETRIEVE, PEER_RETRIEVE_RESPONSE | KEM |
 | Peer-list gossip | PEER_LIST_PUSH, PEER_LIST_SUMMARY, PEER_LIST_WANT, PEER_KEY_REQUEST, PEER_KEY_RESPONSE | **BOOT** |
 | Routing — DV updates | ROUTE_UPDATE | **BOOT** |
 | Reachability probes | REACHABILITY_QUERY, REACHABILITY_RESPONSE | **BOOT** |
@@ -1140,7 +1140,7 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 
 **Use cases**:
 
-1. **Infrastructure-Frame KEM** (§2.3.5) — DHT pings, routing probes, NAT/hole-punch, reachability queries, peer-list gossip, fragment storage, S&F on contact peers (§5.5), 2D-DHT identity-resolution operations. Sender encapsulates under recipient Device-KEM-PK; recipient decapsulates with Device-KEM-PrivKey.
+1. **Infrastructure-Frame KEM** (§2.3.5) — DHT pings, routing probes, NAT/hole-punch, reachability queries, peer-list gossip, fragment storage, S&F on network peers (§5.5), 2D-DHT identity-resolution operations. Sender encapsulates under recipient Device-KEM-PK; recipient decapsulates with Device-KEM-PrivKey.
 2. **First-Contact-Request bootstrap** (§8.1.1) — when Alice scans Bob's ContactSeed she knows his DeviceID and userEd25519Pk (from the QR/URI). She resolves his Device-KEM-PK via DHT lookup (primary, §4.3) or DEVICE_KEM_REQUEST/OFFER handshake (fallback, §8.1.1 rev3). She does not yet know his User-KEM-PK (which she only learns from CONTACT_REQUEST_RESPONSE). The CONTACT_REQUEST itself is therefore wrapped as `InfrastructureFrame.payload` (KEM under Bob's Device-KEM-PK), with Alice's full user-signed ApplicationFrame carried as the inner payload.
 3. **Onion routing** (§2.5, future) — the per-hop KEM subject that makes the onion-hook structurally tragfähig. Without a Device-KEM-Keypair the §2.5 onion construction had no concrete cryptographic subject.
 
@@ -1488,7 +1488,7 @@ A manifest is **verified** iff (a) its hybrid signature validates against the **
 2. **Rotation chain** (soft re-key, §7.4b): the chain starts at a founding pubkey whose hash equals the userId; each link carries the old key's Ed25519 signature over the successor pubkeys (reusing the `KeyRotationBroadcast` link shape, Appendix A); the final link's pubkeys equal the embedded ones.
 3. **Contact match:** the embedded pubkeys equal the stored contact pubkeys for this userId (contacts track rotations via KEY_ROTATION_BROADCAST, so their stored key is current).
 
-**Contact continuity (mandatory):** if the userId is a stored contact, path 3 MUST hold (or a valid rotation chain must bridge old→new); a mismatch triggers a **self-heal check**: if path 1 (founding-key binding `SHA-256(network_secret || embeddedPk) == userId`) verifies for the AuthManifest's embedded pubkey, the stored contact key is updated to the AuthManifest key automatically (local-only, no network traffic). This covers stale contact keys caused by delete+re-add scenarios where the contact was re-added from a fresh CR but the stored key was not yet updated. If neither path 1 nor a valid rotation chain bridges the mismatch, the record is rejected and the existing key-change-detection event (§8.3) is raised. **Resolver continuity (TOFU):** once a verified manifest is cached, later manifests must verify against the cached anchor or present a valid chain — a higher `seq` alone never replaces a verified anchor.
+**Contact continuity (mandatory):** if the userId is a stored contact, path 3 MUST hold (or a valid rotation chain must bridge old→new); a mismatch triggers a **self-heal check** using the full `verifySelfCertified()` check. If any of the three equivalent bound paths (founding-key hash, rotation chain, contact match) binds the AuthManifest key to the userId, the stored contact key is automatically updated (locally, no network traffic): (a) stale contact keys from delete+re-add (path 1 — founding-key binding), (b) legitimate emergency key rotation where the founding hash no longer matches but the rotation chain is valid (path 2), (c) keys already updated via KEY_ROTATION_BROADCAST where the contact match applies (path 3). If none of the three paths binds, the record is rejected and the key-change-detection event (§8.3) fires. **Resolver continuity (TOFU):** once a verified manifest is cached, later manifests must verify against the cached anchor or present a valid chain — a higher `seq` alone never replaces a verified anchor.
 
 **Selection rule:** verified beats legacy-unverified; highest `seq` within the class.
 
@@ -1577,12 +1577,12 @@ Cleona's routing layer operates exclusively on **DeviceIDs**. The routing table 
 - **Stale-Direct-Route Advertisement Filter (V3.1.148)**: `buildUpdateFor`/`buildDeltaFor`/`buildFullUpdate` suppress direct routes whose destination has not sent inbound traffic within 10 minutes (`isDirectRouteAdvertisable` callback). This prevents propagating routes to peers that switched networks (CGNAT IP reassignment) without triggering Poison-Churn — the route simply disappears from advertisements and ages out at neighbors via the standard 5-minute grace window. Previously, a direct route remained advertised as long as `isAlive` was true (no explicit timeout failure), causing neighbors to route into stale addresses until 3× ACK timeout eventually fired `markRouteDown`. The filter is Data-Plane-only (suppresses control-plane advertisement), not a routing decision — `sendToDevice` trusts direct routes and relies on DELIVERY_RECEIPT (RUDP Light) 3× timeout for route-down detection.
 - **Poison Reverse**: when a route fails, it is advertised with `cost=65535` (infinity) to all neighbors — accelerating loop detection.
 - **Cost sanity bounds**: an advertised route is rejected if its claimed `cost` is non-positive or below `hopCount × minLinkCost` (minLinkCost = 1) — a path of *h* hops cannot physically cost less than *h* (cost is cumulative and every link costs ≥ 1). This blocks gross under-bidding (a neighbor advertising `cost=1` for a 5-hop path to attract traffic). It does **not** catch a plausible-but-false `cost=hopCount` claim (see threat model below). The bound applies only to *advertised* entries on the wire, never to internally derived routes.
-- **Confirmed beats unconfirmed (all route classes)**: routes are sorted in two tiers — a route over which an end-to-end `DELIVERY_RECEIPT` has returned (`ackConfirmed=true`) outranks **any** route that has not, regardless of advertised cost; within a tier the existing cost ordering (incl. the direct-route DV-3 bias) and hopCount decide. This is a lexicographic partition, **not** an additive bias — so the direct-vs-relay balance among *unproven* routes is unchanged (an additive relay bias would distort it and was rejected during implementation). A receipt — even one that returns over a relay path (`wasDirect=false`) — marks the **specific route used** (via its `nextHop`) `ackConfirmed`, so a route earns its preference by demonstrated delivery, not by the advertisement alone; the default-gateway "relay-confirmed beats unconfirmed" rule (below) now holds *between competing relay routes* too. At first contact all routes to a destination share one tier → cost-only ordering until the first receipt proves one.
+- **Confirmed beats unconfirmed (all route classes)**: routes are sorted in two tiers — a route over which an end-to-end `DELIVERY_RECEIPT` has returned (`ackConfirmed=true`) outranks **any** route that has not, regardless of advertised cost; within a tier the existing cost ordering (incl. the direct-route DV-3 bias) and hopCount decide. This is a lexicographic partition, **not** an additive bias — so the direct-vs-relay balance among *unproven* routes is unchanged (an additive relay bias would distort it and was rejected during implementation). A receipt — even one that returns over a relay path (`wasDirect=false`) — marks the **specific route used** (via its `nextHop`) `ackConfirmed`, so a route earns its preference by demonstrated delivery, not by the advertisement alone. `wasDirect` is derived from the receipt packet's `hopCount == 0` — **never** from the source address (a relayed receipt arrives with the relay's real IP, not `0.0.0.0`; V3.1.152). The route used by a send is attributed **per send** (returned by `sendToDevice`), never via shared mutable state — concurrent sends (multi-device fan-out, relay forwarding, infra timers) must not cross-attribute their hops. The default-gateway "relay-confirmed beats unconfirmed" rule (below) now holds *between competing relay routes* too. At first contact all routes to a destination share one tier → cost-only ordering until the first receipt proves one.
 
 **Route-down detection** (RUDP Light, §5.8):
 - After 3 consecutive `DELIVERY_RECEIPT` timeouts, a specific route is marked DOWN.
 - **Surgical**: only the specific route via a concrete `nextHop`, not all routes to the device. If alternative routes exist, the device remains reachable.
-- **Recovery**: dead routes stay 5 minutes in the table (`cost=infinity`) — they can be revived by new neighbor updates.
+- **Recovery**: dead routes stay 5 minutes in the table (`cost=infinity`) — they can be revived by new neighbor updates, direct inbound traffic (hopCount == 0 → `addDirectNeighbor` revive), or re-learned relay hints. A **confirmation alone never revives a dead route**: `confirmRoute` on a route with `cost=infinity` is a no-op (V3.1.152) — otherwise a relayed acknowledgement could flip a dead route to `ackConfirmed`, making it the sort leader (Tier 1) and a permanent poison source in advertisements while blocking the 5-minute pruning.
 
 **Three-Tier Capacity** (max ~2,140 routing entries):
 
@@ -1645,7 +1645,7 @@ sendToDevice(packet, deviceId):
 - **Wormhole (attacker faithfully forwards but observes/correlates):** **not prevented.** Detecting it would require signed path-vectors (S-BGP-style), disproportionate here — a wormhole sees only routing metadata (the same class of insider leakage discussed in §4.10), while message content stays KEM-encrypted and user-signed end-to-end.
 - **Reverse attack (on-path receipt-dropping forces a victim off a good direct route onto relay):** on-path dropping is not generically preventable; surgical route-down (§5.8) plus the multipath fallback bound the damage. This affects deliverability, not confidentiality.
 
-**Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: erasure-coded S&F on contact peers (§5.5) plus a mailbox entry (§5.6) for receiver pull-up.
+**Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: S&F or Erasure (§5.1 size rule) plus a mailbox entry (§5.6) for receiver pull-up.
 
 **MessageQueue no longer exists.** v2.2's MessageQueue retried the same send for 7 days. v3.0 stops after cascade exhaustion. The receiver pulls offline messages from the mailbox itself.
 
@@ -1830,7 +1830,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 
 1. **direct-confirmed** — `_confirmedPeers` map: timestamp of the last *direct* (hopCount == 0) packet received from the peer; valid for **72 hours** (TTL, V3.1.149 — previously 1h which expired overnight and forced re-discovery every morning). Refreshed by *any* directly-received packet (incl. PONG, DELIVERY_RECEIPT) and by the once-per-hour liveness-PING sweep on the DV Safety-Net (§4.4). It is an **inbound** observation ("I recently heard directly from X") and only a *hint* — not proof — that the *outbound* direct path works (asymmetric NAT).
 2. **reachable** — an alive DV route exists, **direct or via relay** (`Route.isAlive`, `dvRouting.hasAliveRouteTo`). This is the deliverability state.
-3. **delivered** — `Route.ackConfirmed`: a DELIVERY_RECEIPT (RUDP-Light) returned over the route. The only *proof* of outbound reachability; supersedes the heuristics and drives address scoring and "route DOWN" detection.
+3. **delivered** — `Route.ackConfirmed`: a DELIVERY_RECEIPT (RUDP-Light) returned over the route. Additionally, a **directly received** (hopCount == 0) solicited infrastructure response — DHT_PONG or PEER_STORE_ACK, both answers to our own requests — confirms the direct route to its sender (V3.1.152: replacement for the removed receive-pipeline confirmation). A response that arrives **relayed** (hopCount > 0) proves nothing about the direct path and never confirms it. DELIVERY_RECEIPT remains the only proof of *application* delivery and drives address scoring and "route DOWN" detection.
 
 **Which state gates which decision:**
 
@@ -1871,7 +1871,7 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 
 **Bridging architecture** (dual-stack nodes as IPv4↔IPv6 bridges):
 - A node with both IPv4 and global IPv6 automatically becomes a bridge between IPv4-only and IPv6-only nodes.
-- When sender (IPv4-only) and receiver (IPv6-only) share contact peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
+- When sender (IPv4-only) and receiver (IPv6-only) share network peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
 - **Invariant:** A dual-stack relay node MUST forward incoming packets on IPv6 to recipients on IPv4 (and vice versa). The relay-forward logic (`_sendV3ViaHop`) selects the best address of the next hop independent of the IP version of the incoming packet — the bridge function follows implicitly from address selection.
 
 **CGNAT address reachability (V3.1.90+, updated V3.1.94):** The `isReachableFromCurrentNetwork` filter and `_filterNatContext` distinguish RFC 1918 private addresses from CGNAT addresses (RFC 6598 `100.64.0.0/10` + RFC 7335 `192.0.0.0/24` DS-Lite). A node on a CGNAT address **must not** send to RFC 1918 targets and vice versa — these address spaces have zero routing relationship. Cross-class private-to-private is permitted only within RFC 1918 (e.g. two RFC 1918 ranges behind the same gateway, common in home/lab networks). This eliminates guaranteed-futile UDP sends that waste traffic and obscure real delivery failures in logs.
@@ -2417,13 +2417,15 @@ Layer 2 — Per-Device Routing (§4.4)
 
 Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
   if Layer 2 returned false for ALL resolved devices (or Layer 1 was empty):
-    → Erasure-coded backup on K=10 closest DHT nodes (§5.4)
-    → S&F copy on up to 3 contact peers (§5.5, receiver-validated)
+    → if payload ≤ 10 KB: S&F — complete copy on up to 3 network peers (§5.5)
+    → if payload > 10 KB:  Erasure — Reed-Solomon N=10 K=7 on DHT-closest peers (§5.4)
     → For First-CRs (no shared contacts exist): First-CR-Mailbox on SeedPeers (§5.5b)
     → Mailbox entry (§5.6) for receiver pull
     → Sender is done if placement succeeded; on placement failure the message is parked in the outbox (§5.1) for re-attempt
     → Receiver will poll on next coming-online
 ```
+
+Only ONE of S&F or Erasure fires per message. The 10 KB threshold reflects the crossover where fragmenting across 10 peers becomes more efficient than 3 complete copies.
 
 **Comparison with v2.2's "Direct → Relay → S&F" pattern**:
 - v2.2 chained Direct/Relay/S&F as three attempt stages WITHIN the send operation
@@ -2433,7 +2435,35 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
 
 **Sender-side retries no longer exist.** Once all Layer-2 routes are exhausted and Layer-3 (S&F + Mailbox) has been triggered, the sender has done its duty. The receiver will pull the message from its mailbox on next coming-online. The outbox (see below) provides **crash-safety** rather than retry semantics: every ACK-worthy message is persisted at send time and removed when the corresponding `DELIVERY_RECEIPT` arrives. If the daemon is killed between Layer-2 dispatch and Layer-3 placement — or between Layer-2 dispatch and receipt of the `DELIVERY_RECEIPT` — the outbox entry survives and the full cascade is re-attempted once on the next `onNetworkChanged` edge. This is distinct from v2.2's `MessageQueue`, which retried against reachable network on a timer.
 
-**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed: each entry re-attempts the **full cascade** (Layer 1+2 first — the recipient may now be online — then Layer 3 on Layer-2 failure). On L1+2 send success, the message status is set to `sent` (single checkmark) and the AckTracker is registered for proper receipt tracking — the outbox entry is retained until the actual `DELIVERY_RECEIPT` confirms delivery (V3.1.130+; prior: L1+2 success falsely set `delivered`). On L3 placement, the entry is cleared (`queuedOffline`); on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
+**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed in two phases:
+
+**Phase A — Direct delivery (parallel).** All parked entries are dispatched via Layer 1+2 concurrently (`Future.wait`), prioritized: oldest user messages first, system messages (CR, KEY_ROTATION) last. Each send registers an AckTracker entry with `hopCount ≥ 2` (minimum 8 s timeout) to cover relay/NAT RTTs.
+
+**Phase B — Offline placement (deferred).** Entries without DELIVERY_RECEIPT after Phase A are placed via Layer 3 (S&F or Erasure per §5.1 size rule). Phase B runs asynchronously.
+
+**System-message dedup.** Semantically idempotent message types — `CONTACT_REQUEST`, `CR_RESPONSE`, `KEY_ROTATION_BROADCAST` — use **latest-wins** dedup in the outbox: a new entry for the same `(recipientUserIdHex, messageType)` tuple replaces the previous entry of the same type for the same recipient.
+
+On L1+2 send success, the message status is set to `sent` (single checkmark) and the AckTracker is registered for proper receipt tracking — the outbox entry is retained until the actual `DELIVERY_RECEIPT` confirms delivery (V3.1.130+; prior: L1+2 success falsely set `delivered`). On L3 placement, the entry is cleared (`queuedOffline`); on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
+
+**Contact liveness tracking.** `_contactLastAckedAt` stores the timestamp of the last proven end-to-end exchange per contact. This map is the authoritative input for AUTO-REPAIR (see below) and stale-contact warnings.
+
+Sources that update `_contactLastAckedAt`:
+- **DELIVERY_RECEIPT** (`_handleDeliveryReceiptV3`): updates liveness directly on receipt, regardless of whether AckTracker still holds a matching entry.
+- **Any verified ApplicationFrame** from the contact (text, reaction, read receipt).
+- **CR ACCEPTED** (`acceptContactRequest`): the accept roundtrip proves bidirectional reachability.
+- **CR_RESPONSE accepted** (sender side): proves the pending contact is reachable.
+
+AckTracker timeout governs route-failure/route-down logic (§2.4.5) and is deliberately short (RTT-based). Contact liveness is a separate, long-lived signal — a late receipt proves the contact is alive even if the specific route was already marked DOWN.
+
+`_contactLastAckedAt` is persisted as a contact field (encrypted with the contact store) and survives daemon restarts. It is device-local and excluded from twin-sync (liveness evidence is per-device).
+
+**AUTO-REPAIR (stale contact re-establishment).** When a contact has no `_contactLastAckedAt` entry or the entry is older than 7 days, the daemon sends a re-contact CR to re-establish the relationship.
+
+Invariants:
+1. **One-shot per guard period.** `_autoRepairAttempted` is a per-contact flag. Once set, no further AUTO-REPAIR fires until the flag is cleared.
+2. **Flag cleared only by liveness proof.** The flag is cleared when `_contactLastAckedAt` is updated by a DELIVERY_RECEIPT or a verified ApplicationFrame — i.e. when outgoing messages provably reach the contact. `acceptContactRequest` does NOT clear the flag.
+3. **Both fields persisted.** `_contactLastAckedAt` and `_autoRepairAttempted` are contact fields, encrypted with the contact store. Daemon restart does not reset them.
+4. **acceptContactRequest sets liveness.** On acceptance of a re-contact CR, `_contactLastAckedAt = now` is set. This prevents immediate re-triggering of the stale threshold. The `_autoRepairAttempted` flag remains set until a subsequent DELIVERY_RECEIPT or ApplicationFrame proves end-to-end delivery.
 
 **Cascade latency budget.** Layer 2 attempts routes sequentially — each route waits for `DELIVERY_RECEIPT` or ACK timeout (`max(2 × RTT × hopCount, 8s)`, capped 30s) before trying the next. With up to 3 alive routes per device, the worst-case Layer-2 latency per device is ~30s (typical: 8–16s). Layer 3 begins only after Layer 2 is exhausted for ALL resolved devices. For latency-sensitive sends (call setup), `sendToUser` accepts `requireOnline=true` — Layer 3 is skipped entirely and the call returns `false` immediately on Layer-2 failure. **Speculative Layer-3 placement is intentionally omitted.** Placing erasure fragments while Layer 2 is still running would waste storage bandwidth for messages that may yet be delivered directly. The sequential model trades worst-case placement latency (~30s) for storage efficiency — fragments are placed only on confirmed send failure. This is acceptable because the delay affects only the *placement* timing, not the *delivery* timing to the receiver.
 
@@ -2504,7 +2534,9 @@ When a node receives a relayed packet (`hopCount > 0`) from sender S, the transp
 
 ### 5.4 Erasure Coding (Offline Delivery)
 
-If the receiver is offline, the message is stored on the K=10 closest DHT nodes as Reed-Solomon erasure-coded fragments. The receiver pulls the fragments on coming online and reassembles them.
+For messages > 10 KB (see §5.1 size rule), if the receiver is offline, the message is stored on the K=10 closest DHT nodes as Reed-Solomon erasure-coded fragments. The receiver pulls the fragments on coming online and reassembles them.
+
+**Exception from the size rule:** `RESTORE_BROADCAST` uses Erasure Coding regardless of payload size. Rationale: Restore Broadcast is sent after a profile wipe — the recipient has an empty routing table afterwards and polls mailbox fragments via DHT-Closest. Emergency `KEY_ROTATION_BROADCAST` uses no L3 path (neither S&F nor Erasure) — it uses the 24h retry timer (§26.6.2 Packet C).
 
 **Parameters**:
 - **N=10, K=7** (Reed-Solomon code rate): 10 fragments are produced, at least 7 must be available for reassembly
@@ -2519,7 +2551,7 @@ If the receiver is offline, the message is stored on the K=10 closest DHT nodes 
 **Encoded payload (V3.0)**: each fragment carries a slice of the complete V3 `NetworkPacket` bytes (Outer-Device-Sig + KEM-payload + Inner). The sender does not build a separate "offline-delivery envelope" — the canonical packet is identical-or-equivalent to one of the per-device packets already built for direct delivery in §2.4.
 
 - For **ApplicationFrame** payloads (User-KEM-targeted, see §3.3): one erasure-coded copy per recipient **user** suffices, because the inner KEM-ciphertext is identical across all devices of the recipient user (KEM is User-PK-keyed). All devices polling the user's mailbox find the same fragments and reassemble independently.
-- For **InfrastructureFrame** payloads on the §2.3.5 Identity-Layer Infrastructure list (`RESTORE_BROADCAST`, Emergency `KEY_ROTATION_BROADCAST`): KEM is **Device**-PK-keyed (§3.5b), so the encoded blob can only reach one specific device. The sender takes the per-device packet built for the contact's first-resolved device as the canonical erasure-source; other devices of the same contact pick up via subsequent Direct-Send retries or via S&F on contact peers (§5.5).
+- For **InfrastructureFrame** payloads on the §2.3.5 Identity-Layer Infrastructure list (`RESTORE_BROADCAST`, Emergency `KEY_ROTATION_BROADCAST`): KEM is **Device**-PK-keyed (§3.5b), so the encoded blob can only reach one specific device. The sender takes the per-device packet built for the contact's first-resolved device as the canonical erasure-source; other devices of the same contact pick up via subsequent Direct-Send retries or via S&F on network peers (§5.5).
 
 **Receiver polling**:
 - At daemon startup: mailbox + fragment lookup for own UserID
@@ -2530,55 +2562,40 @@ If the receiver is offline, the message is stored on the K=10 closest DHT nodes 
 
 **Erasure is push-based**: the sender places fragments on send-failure, not on every send. Storage efficiency stays bounded. If erasure placement fails (**fewer than K=7 distinct fragment indices confirmed** after the wave budget below, or zero DHT peers reachable at placement time), the serialized packet is parked in the persistent outbox (§5.1) and placement is re-attempted on the next `onNetworkChanged` edge — the sender does not silently drop unplaceable messages.
 
-**ACK-verified placement (D-c fix, V3.1.120):** the sender counts `FRAGMENT_STORE_ACK`s per **distinct fragment index** (matched on `(messageId, fragmentIndex)` — no protocol change needed; the sender previously discarded ACKs). **Conditional ACK (V3.1.139 fix):** the replicator sends `FRAGMENT_STORE_ACK` only when the fragment was actually accepted — either freshly stored or an idempotent duplicate (same key AND same bytes). Budget-exceeded, quota-exceeded, or generation-conflict rejections produce **no ACK**; the sender's per-index completer times out after 8 s and the `ErasurePlacementCoordinator` retries with a fresh peer in the next wave. Pre-fix: the ACK was unconditional, so the coordinator could count K=7 confirmed indices even when replicators had silently rejected the fragments (dedup collision, budget exceeded) — the placement reported success while fewer than K fragments were actually stored. Wave 1 is the classic 10-fragments-×-3-replica spread; the sender then waits up to 8 s (edge-driven completers, no polling). Placement succeeds only when **≥K=7 distinct indices** are confirmed by at least one replicator each; 7–9 confirmed logs an "erasure placement fragile" warning. Unconfirmed indices are re-sent in up to 2 additional waves (+1 copy per fragment per wave, respecting the 5-copies-per-fragment bound) to fresh replicators from a deeper closest-peer pool (30, confirmed-first per the §5.5 Phase-1 ranking rationale). Below K after the wave budget, placement counts as **failed** and the message is parked in the outbox unless §5.5 S&F succeeded. Pre-fix the placement was fire-and-forget and "success" meant "dispatched" (2026-07-03 field evidence: 222 FRAGMENT_STOREs sent, 0 received by the addressed replicator, unnoticed — the message was unreconstructable while the sender reported `queuedOffline`). The same ACK now also cancels the replicator-side proactive-push retry backoffs (previously a dead code path — every replicator burned all 3 push attempts even after the owner had acknowledged).
+**ACK-verified placement (D-c fix, V3.1.120):** the sender counts `FRAGMENT_STORE_ACK`s per **distinct fragment index** (matched on `(messageId, fragmentIndex)` — no protocol change needed; the sender previously discarded ACKs). **Conditional ACK (V3.1.139 fix):** the replicator sends `FRAGMENT_STORE_ACK` only when the fragment was actually accepted — either freshly stored or an idempotent duplicate (same key AND same bytes). Budget-exceeded, quota-exceeded, or generation-conflict rejections produce **no ACK**; the sender's per-index completer times out after 8 s and the `ErasurePlacementCoordinator` retries with a fresh peer in the next wave. Pre-fix: the ACK was unconditional, so the coordinator could count K=7 confirmed indices even when replicators had silently rejected the fragments (dedup collision, budget exceeded) — the placement reported success while fewer than K fragments were actually stored. Wave 1 is the classic 10-fragments-×-3-replica spread; the sender then waits up to 8 s (edge-driven completers, no polling). Placement succeeds only when **≥K=7 distinct indices** are confirmed by at least one replicator each; 7–9 confirmed logs an "erasure placement fragile" warning. Unconfirmed indices are re-sent in up to 2 additional waves (+1 copy per fragment per wave, respecting the 5-copies-per-fragment bound) to fresh replicators from a deeper closest-peer pool (30, confirmed-first per the §5.5 Phase-1 ranking rationale). Below K after the wave budget, placement counts as **failed** and the message is parked in the outbox for re-attempt on the next edge. Pre-fix the placement was fire-and-forget and "success" meant "dispatched" (2026-07-03 field evidence: 222 FRAGMENT_STOREs sent, 0 received by the addressed replicator, unnoticed — the message was unreconstructable while the sender reported `queuedOffline`). The same ACK now also cancels the replicator-side proactive-push retry backoffs (previously a dead code path — every replicator burned all 3 push attempts even after the owner had acknowledged).
 
 **Replicator-side proactive push (V3.1.138):** When a replicator stores a fragment via `FRAGMENT_STORE`, it resolves the fragment's `mailboxId` to the owner by checking both primary and fallback mailbox salts (§5.6), then immediately attempts to forward the fragment to the owner via `FRAGMENT_PUSH` (an `InfrastructureFrame` carrying the fragment payload). The push uses a 3-attempt budget with exponential backoff (500 ms, 2 s, 4 s). If the owner is currently unreachable, the push budget is consumed without delivery. **Re-arm on owner reappearance (V3.1.138 fix):** when the replicator subsequently confirms the mailbox owner as a live peer (`onPeerConfirmed` edge — direct PONG, relay-PONG, or any verified inbound from the owner's DeviceID), the push budget is reset and a new push attempt is triggered. This closes a gap where fragments placed while the owner was offline were never delivered if the owner came online after the initial push budget was exhausted but before the next startup poll. The re-arm fires at most once per 60 s per mailbox to prevent push storms during rapid peer-flap. The `FRAGMENT_STORE_ACK` from the placement sender still cancels remaining push attempts for that fragment (no double-delivery).
 
-### 5.5 Store-and-Forward on Contact Peers
+### 5.5 Store-and-Forward on Network Peers
 
-In addition to erasure-coded fragments, on failure the sender also stores a **complete copy** of the message on up to 3 **contact peers** — peers from the sender's own accepted-contact list that have alive routes. The sender selects by route quality (most alive routes first), falling back to well-connected routing-table peers if no contacts are currently reachable. This way the message is held on intentionally trustworthy nodes, not only on random DHT replicators.
+S&F stores a **complete copy** of the message (≤ 10 KB, see §5.1 size rule) on up to 3 **network peers**. Acceptance is independent of whether the recipient is a contact of the storage peer — the Closed-Network HMAC (criterion 1) is the trust boundary.
 
-**Sender-side peer selection** (`_findMutualPeerDeviceIds`):
-- **Phase 1**: Iterate own accepted contacts (excluding the recipient), filter for alive DV routes, rank by number of alive routes, pick top 3.
-- **Phase 1 ranking (V3.1.117 field amendment)**: candidates that are *confirmed* (bidirectional UDP contact within the confirmation TTL) rank strictly above candidates that merely have alive DV routes — relay routes without traffic are never pruned and can point at devices that have been offline for days (2026-07-03 field evidence: an S&F copy was placed on a days-dead contact device).
-- **Phase 2 (structurally guaranteed)**: Confirmed routing-table peers (e.g. Bootstrap) occupy **reserved slots** at the tail of the candidate pool — Phase 1 is capped to `limit − safTargetCopies` entries, Phase 2 fills the remaining `safTargetCopies` slots. No global re-sort across phases; waves process the pool sequentially (Phase-1 mutual-peer preference first, Phase-2 infra fallback guaranteed at the tail). Phase 1 contacts may all reject the store because the recipient is not *their* contact (receiver-enforced criterion 3); the wave-retry mechanism (F1) then falls through to Phase 2 candidates in the same pool. Pre-fix (V3.1.124), Phase 2 was gated on `candidates.isEmpty`; second fix (V3.1.200): `sort + take(limit)` displaced Phase 2 when Phase 1 had ≥ `limit` confirmed contacts (2026-07-14 field evidence: 9/9 Phase-1 candidates, Bootstrap with `acceptAnyPeerStore` excluded, 0/9 stores accepted, 134 budget rejections on Bootstrap in one day). **Infrastructure exception (F4, V3.1.117):** bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
-- **Observability**: if the total number of selected peers (Phase 1 + Phase 2) is less than 3, the sender logs a warning (`S&F: only N/3 mutual peers — offline delivery fragile`). In small networks where only one or two relay peers are available, S&F redundancy is reduced and delivery depends on those peers remaining online until the recipient polls. The warning aids operational diagnosis without altering the placement logic.
+**Sender-side peer selection** (`_findStoragePeerDeviceIds`):
 
-**Storage-peer validation (receiver-side):** On receiving a `PEER_STORE` infrastructure message, the storage peer validates:
+- **Tier 1 (preferred):** Own accepted contacts (excluding the recipient) with alive DV routes, ranked by route quality (confirmed > alive-only). Contacts are more likely to know the recipient and offer implicit trust.
+- **Tier 2 (guaranteed fallback):** Confirmed routing-table peers (bidirectional UDP contact within TTL) with at least one alive DV route. Only confirmed peers qualify for Tier 2 — the receiver polls confirmed peers via PEER_RETRIEVE, and push-on-store also requires confirmed status. Tier 2 fills reserved slots (`safTargetCopies`) at the end of the candidate pool; Tier 1 is capped at `limit - safTargetCopies` entries so Tier 2 is never displaced.
+- Tier-1 ranking: peers with `isPeerConfirmed` rank above peers with only alive DV routes.
+- If the combined pool has fewer than 3 entries: log `S&F: only N/3 storage peers — offline delivery fragile`.
 
-1. Valid Closed-Network HMAC (official builds)
+**Storage-peer validation (receiver-side).** On receiving a `PEER_STORE`:
+
+1. Valid Closed-Network HMAC (official builds only)
 2. Valid outer Device-Sig (sender authentication)
-3. `recipientUserId` is a **known contact** of the storage peer (exists in the peer's local contact store with status `accepted`)
-4. Per-recipient budget: max 30 messages
-5. Per-sender rate limit: max 10 stores per hour
-6. Dedup via `SHA-256(wrappedEnvelope)`
+3. Per-recipient budget: max 30 messages
+4. Per-sender rate limit: max 10 stores per hour
+5. Dedup via `SHA-256(wrappedEnvelope)` — on hash match: **idempotent ACK** (accepted=true, no duplicate entry). The per-send `storeId` serves ACK correlation only and is not the dedup key. StoreId retransmits (same storeId) also return idempotent accepted=true.
 
-Criterion 3 transforms "mutual" from a sender-side heuristic into a **receiver-enforced property**: only peers that are genuinely contacts of both sender and recipient will accept a store. No contact-list exchange is needed — the check is a local lookup in the storage peer's own contact DB. Stores for unknown recipients are rejected with `PEER_STORE_ACK{accepted:false}`; the sender detects this (or a missing ACK) and tries the next candidate. This is consistent with the First-CR-Mailbox (§5.5b), which already validates `recipient_device_id is in the SeedPeer's routing table`. **Exception:** infrastructure nodes (bootstrap, `acceptAnyPeerStore`) skip criterion 3 and accept within budgets — see the Phase-2 infrastructure exception above.
+No contact check on the recipient. The HMAC (criterion 1) ensures only official Cleona builds can inject stores. Budgets (criteria 3+4) prevent abuse.
 
-**ACK-verified placement (F1, V3.1.117):** the sender assigns a distinct `store_id` per candidate, waits up to 8 s for each `PEER_STORE_ACK`, counts only `accepted:true`, and draws replacement candidates in waves (pool 3×3) until 3 confirmed copies exist or the pool is exhausted. Placement counts as successful from ≥1 confirmed copy; anything less than 3 logs an "offline delivery fragile" warning. Pre-F1 the store was fire-and-forget and "success" meant "attempted" — rejected or lost stores were indistinguishable from placed ones (2026-07-03 field evidence: all three copies of a message were rejected/lost while the sender reported `queuedOffline`).
+**Receiver pull.** On coming online: `PEER_RETRIEVE` to all confirmed peers. Each peer checks its local S&F store and delivers held messages for the requesting user. Dedup via `messageId`.
 
-**S&F storage**:
-- Same inner frame (`ApplicationFrame`) as the original send target
-- Outer wrap to the storage peer as a `PEER_STORE` InfrastructureFrame (Device-KEM-encrypted)
-- The storage peer holds the message for at most 7 days or until the receiver retrieves it
-
-**Receiver pull**:
-- On coming online: `PEER_RETRIEVE` to all confirmed peers
-- Confirmed peers check their local S&F store and return stored messages
-- Dedup via `messageId`
-
-**Connection to the disappearance of MessageQueue**:
-- v2.2 additionally maintained a local MessageQueue at the sender for 7-day retry of the same message
-- v3.0 removes this queue entirely — S&F takes over the responsibility
-- Benefit: receiver-pull instead of sender-push, less traffic, less ID confusion
-
-**Storage limit**: per receiver, max 30 stored messages on a single storage peer. On overflow: oldest-first eviction. Global limit per storage peer: max 3000 messages / 100 MB total across all recipients; on infrastructure nodes (`acceptAnyPeerStore`) the message cap is 10000. New stores are rejected when either global limit is reached.
+**Storage limits.** Per recipient: max 30 messages on a storage peer. On overflow: oldest-first eviction. Global per storage peer: max 3000 messages / 100 MB total. New stores are rejected when limits are reached.
 
 ### 5.5b First-CR-Mailbox (Store-and-Forward for Non-Contacts)
 
-Regular S&F (§5.5) requires contact peers (peers that are contacts of the recipient, enforced receiver-side). For First-Contact-Requests this precondition is never met — the sender and receiver do not know each other yet. The First-CR-Mailbox extends S&F to cover this gap.
+S&F (§5.5) stores on arbitrary network peers and requires no contact relationship. For First-Contact-Requests a deterministic mechanism exists: the **First-CR-Mailbox** on SeedPeers. SeedPeers are the only peers known to BOTH sides before the CR completes — regular S&F on random network peers would be unfindable for the receiver who does not yet know the sender or its storage peers.
 
-**Mechanism**: The SeedPeers listed in the ContactSeed (§8.1.1) serve as the "contact peers" for the First-CR. They are the only nodes known to both sides: the ContactSeed-generator selected them from its routing table, and the scanner learned about them from the QR/URI. Any node can be a SeedPeer — there is no special bootstrap role, no hardcoded addresses, no central infrastructure.
+**Mechanism**: The SeedPeers listed in the ContactSeed (§8.1.1) serve as the storage peers for the First-CR. They are the only nodes known to both sides: the ContactSeed-generator selected them from its routing table, and the scanner learned about them from the QR/URI. Any node can be a SeedPeer — there is no special bootstrap role, no hardcoded addresses, no central infrastructure.
 
 **New message types** (Infrastructure-Level, §2.3.5 selector list):
 
@@ -2653,7 +2670,7 @@ The receiver polls **both** (primary + fallback) on every mailbox poll, so no se
 
 **Mailbox storage**:
 - Key: mailbox_id_*
-- Value: small per-recipient records keyed by `mailboxId` — encrypted fragments (erasure path) or a wrapped envelope (S&F). The hosting node learns only the recipient `mailboxId` and a `messageId`; the **senderUserId, message type and content stay inside the KEM-encrypted payload** and are not visible to the host.
+- Value: small per-recipient records keyed by `mailboxId` — encrypted fragments (erasure, > 10 KB) or a wrapped envelope (S&F, ≤ 10 KB). The hosting node learns only the recipient `mailboxId` and a `messageId`; the **senderUserId, message type and content stay inside the KEM-encrypted payload** and are not visible to the host.
 - The receiver then fetches and decrypts the full message via S&F pull or fragment reassembly
 
 **Polling schedule** (event-driven, not periodic):
@@ -2800,7 +2817,7 @@ message DhtPing {
 
 #### 5.10.3 Stage 3 — Alternative Route (Recap)
 
-After 3× ACK timeout on the cheapest route, the AckTracker marks that route DOWN (surgical, §4.4) and `sendToDevice` falls through to the next-cheaper route — up to 3 packets there. Stage 3 reuses the existing DV cascade unchanged. When the entire DV route cascade is exhausted without a DELIVERY_RECEIPT, `onRetryExhausted` fires and the message enters the Layer-3 offline path: Store-and-Forward placement on mutual contact peers plus Reed-Solomon erasure coding on DHT peers (§5.4–§5.5). If the offline placement itself fails — for example because the sender has zero connectivity or insufficient mutual peers — the message is parked in the persistent outbox (`outbox.json.enc`) so that it survives a daemon crash and is retried on the next network-join event (§5.1).
+After 3× ACK timeout on the cheapest route, the AckTracker marks that route DOWN (surgical, §4.4) and `sendToDevice` falls through to the next-cheaper route — up to 3 packets there. Stage 3 reuses the existing DV cascade unchanged. When the entire DV route cascade is exhausted without a DELIVERY_RECEIPT, `onRetryExhausted` fires and the message enters the Layer-3 offline path: S&F or Erasure placement (§5.1 size rule) on network/DHT peers (§5.4–§5.5). If the offline placement itself fails — for example because the sender has zero connectivity or insufficient storage peers — the message is parked in the persistent outbox (`outbox.json.enc`) so that it survives a daemon crash and is retried on the next network-join event (§5.1).
 
 #### 5.10.4 Stage 4 — Mesh-State Refresh
 
@@ -2950,7 +2967,7 @@ The Restore Broadcast is the mechanism that makes Cleona's recovery truly unique
 1. User recovers their user-identity private key via recovery phrase or Social Recovery.
 2. App performs a complete profile wipe and re-derives user keys from the seed; a fresh per-device signing keypair is generated (§3.5).
 3. App connects to the network using the recovered `userId` and the fresh `deviceId`. The Identity Resolver (§4.3) is updated so that other peers can re-discover this device.
-4. App emits a `RESTORE_BROADCAST` `InfrastructureFrame` per contact device, KEM-encrypted under the contact's Device-KEM-PK (§3.5b), Outer-signed under the recovering peer's fresh Device-Sig-Keys (rotation-stable per §3.5b). The body carries an old-Ed25519 signature for inner authenticity. The frame is additionally erasure-coded into the DHT (§5.4) so offline contacts pick it up via Mailbox-Pull when they come online — the encoded blob is the canonical NetworkPacket built for the contact's first-resolved device (per §5.4: InfraFrame KEM is device-PK-keyed, so one encoded copy reaches at most one device of the contact; further devices of the same contact pick up via subsequent Direct-Send retries or via S&F on contact peers, §5.5).
+4. App emits a `RESTORE_BROADCAST` `InfrastructureFrame` per contact device, KEM-encrypted under the contact's Device-KEM-PK (§3.5b), Outer-signed under the recovering peer's fresh Device-Sig-Keys (rotation-stable per §3.5b). The body carries an old-Ed25519 signature for inner authenticity. The frame is additionally erasure-coded into the DHT (§5.4, InfraFrame exception) so offline contacts pick it up via Mailbox-Pull when they come online — the encoded blob is the canonical NetworkPacket built for the contact's first-resolved device (per §5.4: InfraFrame KEM is device-PK-keyed, so one encoded copy reaches at most one device of the contact; further devices of the same contact pick up via subsequent Direct-Send retries).
 5. Every node that processes the broadcast checks: "Is this `userId` in my contact list?"
 6. If yes, the contact's app automatically responds with: their contact information (so the recovering user rebuilds their contact list), the encrypted chat history of their shared conversation, group memberships with member crypto keys and profile data.
 7. For anti-abuse protection the recovery is made **visible and authenticated**, not silently followed: the inner hybrid signature (H-2) binds the proof to both the contact's stored Ed25519 and ML-DSA keys, and a restore that actually changes the contact's identity key routes through §8.3 Key-Change-Detection (verification reset + warning, §6.3.5). (Guardian-quorum gating of data release is documented as an aspiration in §6.3.5 but is **not** cryptographically enforced — see there.)
@@ -4597,7 +4614,7 @@ Audio capture and playback are platform-agnostic and routed through **`libcleona
 
 The 250 ms AEC tail covers typical headset and integrated-laptop-mic echo paths. AGC is intentionally off — gain swings introduced by AGC are perceptually worse than a slightly-low input level on the kinds of devices Cleona targets.
 
-**Directed start and Capture-Isolate pattern:** Each `cleona_audio_start_directed(engine, direction)` call opens only the requested devices: direction 1 = capture-only (Capture Isolate), direction 2 = playback-only (Main Isolate). The legacy `cleona_audio_start(engine)` remains as a direction=0 (both) alias for non-call callers. The Capture-Isolate architecture is unchanged: a dedicated Dart isolate consumes 20 ms frames from the native capture ring buffer, runs AES-256-GCM encryption with the Call Session Key (§10.1.1), and forwards ciphertext to the main isolate via `SendPort`. The Main Isolate owns the playback engine exclusively. This split eliminates double-device contention on platforms where the audio backend enforces exclusive device access (notably Android AAudio in low-latency mode).
+**Shared-engine Capture-Isolate pattern:** Both capture and playback run on a **single** `cleona_audio_engine_t` instance created with `cleona_audio_start_directed(engine, 0)` (direction=0, both devices). The Main Isolate creates and owns the engine and writes decrypted PCM into the playback ring (`playbackWrite`). The Capture Isolate receives the engine pointer address (native heap, same process) and reads captured frames from the capture ring (`captureRead`), encrypts them with AES-256-GCM under the Call Session Key (§10.1.1), and returns ciphertext to the main isolate via `SendPort`. Sharing a single engine is mandatory for AEC: the `far_end_ring` inside the engine connects the playback callback's output to the capture callback's echo-cancellation reference — with separate engines the AEC reference was always silence. The SPSC ring buffers use C11 atomics and are safe for cross-isolate access (each ring has exactly one producer thread and one consumer thread). Shutdown order: `cleona_audio_stop()` (closes rings, unblocks `captureRead` → isolate exits) → `Isolate.kill` (belt-and-suspenders) → `cleona_audio_destroy()`.
 
 **Why no codec:** With 16 kHz mono PCM at 640 bytes/frame, the on-wire bandwidth before AES-GCM overhead is ~256 kbps per direction. This is well within consumer broadband and 4G/5G mobile budgets, and the simplicity buys the project (a) a single ciphertext path, (b) no codec licensing concerns, (c) trivial AEC reference signal (the same PCM that goes to playback). A codec layer (Opus) can be added later behind the shim if metered-data deployments need it.
 
@@ -5775,7 +5792,7 @@ After this initial poll, the node switches to pure push-based operation. No furt
 Within the startup poll window, operations are strictly prioritized:
 
 1. Retrieve own pending message fragments from DHT mailbox (highest priority).
-2. Retrieve Store-and-Forward whole messages from contact peers (§5.5).
+2. Retrieve Store-and-Forward whole messages from network peers (§5.5).
 3. Send own queued outbound `ApplicationFrame`s from the persistent Store-and-Forward + Mailbox-Pull buffer (§5.5 / §5.6).
 4. Exchange peer list deltas with contacted peers (Mesh Discovery propagation, §4.5).
 5. Update DHT routing table with fresh peer information (§4.4).
@@ -5875,8 +5892,8 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 
 **Implications for users:**
 - Persistent notification stays visible — this is the architecturally honest signal that Cleona is reachable in the background.
-- Doze-whitelisting remains the user's choice via Android system settings; Cleona no longer requests or surfaces it (foreground-service-type apps are typically Doze-exempt for the duration of their foreground state regardless of whitelist).
-- Real-time delivery on Android requires the app to be running. Without the foreground service (e.g., if the OS kills it), messages are picked up at the next WorkManager wake-up window (≥15 min OS-imposed minimum, see §12.5).
+- Doze-whitelisting is requested at first launch via `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. A foreground service protects only against process kill and App Standby — it does **not** exempt from Doze network suspension. Without the whitelist, Android suspends network access after ~30 minutes of screen-off idle, and UDP packets do not reach the socket regardless of WakeLock state. Since Cleona relies exclusively on push-based UDP delivery (no FCM, no WorkManager), the whitelist is a prerequisite for reliable background notification delivery, not an optional optimization. The request targets only Cleona's own package and does not affect other apps. Users who decline are informed that messages will arrive only when the app is next opened.
+- Real-time delivery on Android requires the Dart isolate to be running inside the foreground service process. If the OS kills the process or the user swipes the app from Recents, `START_STICKY` restarts the Kotlin service but does **not** restart the Dart engine — delivery is suspended until the user next opens the app. The service-owned headless engine (§12.5) mitigates the resurrection gap by booting a Dart engine from the service's `onStartCommand` path.
 
 **Reconsideration triggers:** This decision should be revisited only if (1) Android adds a peer-to-peer wake API that does not require a third party, or (2) the user-stated "no third party" constraint is relaxed. Neither is on any visible roadmap.
 
@@ -5887,13 +5904,28 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 - The dominant consumers are process-model-independent: (1) a never-used resident whisper.cpp context in the main isolate — the full ggml-base model (144 MB, fully resident) plus ~560 MB VSS of untouched KV/compute buffers, loaded eagerly at service start although every actual transcription loads and frees its own context in a worker isolate (fixed in V3.1.117: main isolate only probes library + model-file presence); (2) debug-build overhead in the beta flavor (~80 MB `kernel_blob.bin` + JIT code + a larger JIT Dart heap) absent from release builds.
 - The Problem-10 restarts were watchdog self-kills and FGS-timeout crashes (§16.2), not memory (LMK) kills.
 
-Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB. **What survives of B2:** only the *single-process* service-owned-engine variant (the FGS boots a Dart engine after a START_STICKY resurrection so delivery resumes without user interaction) remains a candidate — as a delivery fix for the resurrection gap, not a memory fix. It is considered only if post-Block-E field testing shows genuine process kills with dead resurrections are frequent enough to cost real delivery.
+Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB. **What survives of B2 (PROMOTED, S254, 2026-07-22):** the single-process service-owned headless engine is now a planned feature (see §12.5 Android delivery mechanisms). Field testing (S254) confirmed that the resurrection gap is a primary cause of unreliable background notifications: (1) swipe-from-Recents destroys the Activity and with it the FlutterEngine + Dart isolate, leaving the FGS as an empty Kotlin shell; (2) `START_STICKY` restarts the service but not the Dart engine; (3) the Kotlin watchdog detects the stale heartbeat after ~3 min but only downgrades the notification to "Pausiert" without recovery. The current mitigation caches the FlutterEngine via `FlutterEngineCache` so it survives Activity destruction (swipe-from-Recents); the full headless-engine boot from `onStartCommand` for cold FGS restarts is planned as a follow-up.
 
 **BGTaskScheduler distinction (iOS):** The iOS background delivery described in §12.5 (BGAppRefreshTask + BGProcessingTask, dual-task strategy) is **not** a push wakeup and does not fall under this rejection. BGTaskScheduler is an OS-controlled pull mechanism: the operating system wakes the app periodically, the app actively connects to the P2P network and retrieves pending messages. No third-party server, no APNs, no Firebase. The limitations (OS-controlled timing, bounded execution time) are accepted — they are the price for background delivery without central infrastructure.
 
 ### 12.5 Platform-Specific Background Behavior
 
-**Android:** The in-process architecture runs all networking within the Flutter app. A foreground service (`CleonaForegroundService`, type `dataSync`) keeps the process alive and the UDP socket open for pushed messages. When the OS suspends the app (Doze mode), WorkManager schedules periodic wake-ups (minimum 15-minute OS interval). The foreground service with persistent notification provides near-instant delivery. Without it, messages arrive during the next WorkManager wake-up. **Lifecycle save:** `CleonaAppState` implements `WidgetsBindingObserver` and calls both `saveState()` (conversations, contacts, groups, channels) **and `saveNetworkState()`** (routing table, DV routing table, peer addresses) when `AppLifecycleState.paused` is received. `saveState()` prevents data loss (e.g., media message types reverting to TEXT); `saveNetworkState()` prevents cold-start peer loss — without it, Android process kills lose the learned topology and the node restarts with routes=0, peers=0.
+**Android:** The in-process architecture runs all networking within the Flutter app's Dart isolate. A foreground service (`CleonaForegroundService`, type `specialUse` on API 34+ / `dataSync` on pre-34) keeps the process alive. Three mechanisms ensure background delivery:
+
+1. **Doze-whitelisting:** At first launch, the app requests `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. Without it, Android suspends network access in Deep Doze (~30 min after screen-off) and no UDP packets reach the socket — the foreground service alone does not exempt from Doze network suspension.
+
+2. **Timed WakeLock:** The service acquires a `PARTIAL_WAKE_LOCK` (30s, reference-counted) around each incoming-packet processing window. This keeps the CPU active long enough to decrypt and notify, without holding a permanent lock that drains the battery. The lock is released after the processing callback completes or the 30s timeout expires, whichever comes first.
+
+3. **Engine lifecycle (Application-owned, V3.1.152+):** The `FlutterEngine` is created in `CleonaApplication.onCreate()` (Application subclass, process-scoped) and placed in `FlutterEngineCache` before any Activity starts. `MainActivity.provideFlutterEngine()` returns this pre-created engine — the Flutter embedding marks `isFlutterEngineFromHost = true`, ensuring `shouldDestroyEngineWithHost()` returns `false` for all Activities. The Dart entrypoint is NOT executed in the Application (MethodChannels are not yet registered at that point); it runs after `configureFlutterEngine()` via the normal `doInitialFlutterViewRun()` path. **Share intent isolation:** Android's share chooser sends `ACTION_SEND` with `FLAG_ACTIVITY_MULTIPLE_TASK`, which would create a second Activity instance attaching to the same engine — triggering a fatal `AssertionError` in the Flutter embedding's exclusive-activity eviction logic. `ShareTrampolineActivity` intercepts all share intents, strips the problematic flags, and forwards to `MainActivity` with `SINGLE_TOP | CLEAR_TOP`, ensuring exactly one Activity instance. The trampoline is declared with `noHistory=true`, `excludeFromRecents=true`, and the empty `taskAffinity` that was previously on MainActivity. **Lifecycle observer:** Share and deep-link draining uses a single `WidgetsBindingObserver` (`LifecycleDrainObserver`) instead of per-receiver `SystemChannels.lifecycle.setMessageHandler` calls — the handler setter pattern overwrote the framework's own lifecycle handler, freezing `WidgetsBinding.lifecycleState` and silently breaking all `didChangeAppLifecycleState` observers app-wide. For cold FGS restarts (process kill + `START_STICKY`), a service-owned headless engine boot is planned as follow-up.
+
+**Notification suppression layers** (evaluated in order for each incoming message):
+- L1: Foreground active conversation — chat is on screen, no banner needed.
+- L2: Per-conversation/type notification setting (direct: on, group: on, channel: off).
+- L3: Stale backlog — message older than 60s (sender clock) AND the service is in startup catch-up phase (first 30s after init). After the catch-up phase ends, no age-based suppression applies. This catches startup re-poll and daemon restart catch-up without suppressing Doze-delayed or S&F messages during normal operation.
+- L4: Per-conversation debounce — at most one notification every 2s per conversation.
+- L5: `_isAppResumed` gate — suppresses Android system notifications (sound + vibrate still play in-app) when the Flutter Activity is in foreground.
+
+**Lifecycle save:** `CleonaAppState` implements `WidgetsBindingObserver` and calls both `saveState()` (conversations, contacts, groups, channels) **and `saveNetworkState()`** (routing table, DV routing table, peer addresses) when `AppLifecycleState.paused` is received. `saveState()` prevents data loss (e.g., media message types reverting to TEXT); `saveNetworkState()` prevents cold-start peer loss — without it, Android process kills lose the learned topology and the node restarts with routes=0, peers=0.
 
 **iOS:** No daemon process — the app runs in-process like Android. In the foreground, the node is fully active (UDP socket open, real-time delivery). In the background, Cleona uses Apple's `BGTaskScheduler` framework for periodic message retrieval via two independent task types (dual-task strategy):
 
@@ -5905,7 +5937,7 @@ Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB.
   1. Load persisted routing table (peers, addresses, scores — saved on `AppLifecycleState.paused`)
   2. Open UDP socket on the persisted port
   3. Contact known peers: PING top-3 peers (sorted by score)
-  4. Retrieve Store-and-Forward: ask contact peers for pending messages
+  4. Retrieve Store-and-Forward: ask network peers for pending messages
   5. Fetch Reed-Solomon fragments from DHT (for messages that arrived while offline)
   6. Decrypt received messages + display as local iOS notifications (`UNUserNotificationCenter`)
   7. Persist routing table + messages
@@ -6580,7 +6612,7 @@ Mapping to wire layers:
 - Camera: CameraX (delivers I420 + rotationDegrees; Dart-side rotation before VP8 encode)
 - Notifications: Android NotificationManager
 - Incoming Call Notification: channel `cleona_calls` (IMPORTANCE_HIGH, CATEGORY_CALL, `fullScreenIntent=true`) — launches Activity and routes to CallScreen even when backgrounded or screen-locked. Auto-cancels on accept/reject/hangup/60 s timeout. Sound via NotificationSoundService Dart loop (not notification channel sound).
-- Ringtone Looping: Dart-side async loop calling `playSound` MethodChannel repeatedly (500 ms gap); vibration loops 500 ms pulses at 1000 ms intervals until `stopRingtone()`.
+- Ringtone Looping: single native `MediaPlayer` with `isLooping=true` via `startLoopSound` MethodChannel; stopped immediately via `stopSound` MethodChannel (`mp.stop()` + `mp.release()`). Vibration loops 500 ms pulses at 1000 ms intervals until `stopRingtone()`.
 - Audio: libcleona_audio (miniaudio with AAudio/OpenSL ES backend)
 - Native libs: jniLibs for arm64-v8a + x86_64 (cross-compiled via `scripts/build-android-libs.sh`)
 
@@ -6675,7 +6707,7 @@ Future<bool> _offlineFallback(ApplicationFrame frame, Uint8List userId) async {
   // Erasure-coded across K=10 closest DHT replicators
   await erasureBackup.store(frame, userId);
 
-  // S&F copy on up to 3 contact peers (receiver-validated)
+  // S&F copy on up to 3 network peers (§5.5, ≤ 10 KB)
   await sfStore.distribute(frame, userId);
 
   // Mailbox notification
@@ -6773,10 +6805,21 @@ Flutter UI with ThemeExtensions, 5 token primitives, 6 component classes, 10 Ski
 - Android: NotificationManager
 - iOS: UNUserNotificationCenter
 
-**Suppression layers** (evaluated in order, first match suppresses):
-- Layer 1: per-conversation disabled
-- Layer 2: quiet hours
-- Layer 3: system DND (Do Not Disturb)
+**Suppression layers** (evaluated in order for each incoming message; first match suppresses):
+
+*In-app gating (sound + vibrate + Android banner):*
+- L1 — **Active conversation**: the chat the user is currently viewing is on screen (`_isAppResumed && _activeConversationId == conversationId`). No in-app sound/vibrate, no Android banner.
+- L2 — **Per-conversation/type setting**: `conv.notificationsEnabled` checked against defaults (direct: on, group: on, channel: off). Overridable per conversation and as global default per type.
+- L3 — **Stale backlog**: message older than 60s (sender clock) during the startup catch-up phase (first 30s after service init). After catch-up, no age-based suppression. See §12.5 for rationale.
+- L4 — **Per-conversation debounce**: at most one notification every 2s per conversation. Protects against group-chat burst storms.
+
+*Android system notification gate (additional, after L1–L4):*
+- L5 — **App-resumed gate**: `_isAppResumed` suppresses `NotificationManager.notify()` but not in-app sound/vibrate. Ensures no banner when the user is actively using the app (any conversation, not just the active one).
+
+*Platform-level (not controlled by Cleona):*
+- System DND (Do Not Disturb)
+- Per-app notification channel settings
+- Per-app notification permission (POST_NOTIFICATIONS, Android 13+)
 - Layer 4: active call (notifications are held back during a call)
 
 ### 15.6 Tray (Linux/Windows)
@@ -6825,7 +6868,9 @@ Cleona follows a strict minimum-permissions approach. No permission is requested
 | `INTERNET` | Normal (auto-granted) | Always | UDP/TLS P2P communication |
 | `ACCESS_NETWORK_STATE` | Normal (auto-granted) | Always | Network change detection |
 | `FOREGROUND_SERVICE` | Normal (auto-granted) | Always | Keep daemon alive for message delivery |
-| `FOREGROUND_SERVICE_DATA_SYNC` | Normal (auto-granted) | Always | Foreground service type for Android 14+ |
+| `FOREGROUND_SERVICE_SPECIAL_USE` | Normal (auto-granted) | Always | Foreground service type for Android 14+ (subtype: `persistent_p2p_messaging_daemon`). Falls back to `DATA_SYNC` on pre-34 devices. |
+| `WAKE_LOCK` | Normal (auto-granted) | Always | Timed CPU wake lock (30s) for incoming-packet processing windows (§12.5) |
+| `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` | Special | First launch | Doze-whitelisting for uninterrupted UDP delivery in Deep Doze (§12.5) |
 | `FOREGROUND_SERVICE_MICROPHONE` | Normal (auto-granted) | Always | Allows promoting the foreground service to MICROPHONE type during voice/video calls (see §10.4) |
 | `VIBRATE` | Normal (auto-granted) | Always | Message/call vibration alerts |
 | `CAMERA` | Dangerous (runtime) | First photo/video capture or QR scan | Media capture, video calls, contact verification |
@@ -6835,7 +6880,7 @@ Cleona follows a strict minimum-permissions approach. No permission is requested
 
 **Hardware feature:** `android.hardware.nfc` is declared as `required="false"` — Cleona installs and runs on devices without NFC. The NFC contact exchange button is hidden on devices without NFC hardware.
 
-**Foreground service (canonical background-delivery path):** `CleonaForegroundService` boots as type `dataSync` and keeps the UDP socket alive for incoming message and call delivery. This is the **only** mechanism Cleona uses for background delivery on Android — push wake-up via FCM, UnifiedPush, WebPush or per-peer rotation has been architecturally evaluated and rejected (see §12.4 / ADR "Push Wake-Up Rejected"). During an active voice/video call the service is runtime-promoted to `dataSync|microphone` via the 3-arg `startForeground()` overload, after `RECORD_AUDIO` has been granted; it is demoted back to `dataSync` when the call ends. The manifest declares `foregroundServiceType="dataSync|microphone"` so the runtime promotion is permitted; calling `startForeground()` with the 2-arg overload at boot would implicitly inherit the `microphone` type and crash on freshly installed apps that have never granted `RECORD_AUDIO`. The persistent notification shows live connection status, e.g. "Connected — X peers", "Mobile — X peers", "Searching for peers…", or "Offline — no network" (actual strings come from i18n in 34 languages — see §17). Updated dynamically via MethodChannel (`updateServiceNotification`) on every state change, with dedup to avoid redundant updates. Channel importance: `IMPORTANCE_LOW` (no sound, no vibration, no badge).
+**Foreground service (canonical background-delivery path):** `CleonaForegroundService` boots as type `specialUse` (API 34+, `PROPERTY_SPECIAL_USE_FGS_SUBTYPE = "persistent_p2p_messaging_daemon"`) or `dataSync` (pre-34 fallback) and keeps the UDP socket alive for incoming message and call delivery. This is the **only** mechanism Cleona uses for background delivery on Android — push wake-up via FCM, UnifiedPush, WebPush or per-peer rotation has been architecturally evaluated and rejected (see §12.4 / ADR "Push Wake-Up Rejected"). During an active voice/video call the service is runtime-promoted to `dataSync|microphone` via the 3-arg `startForeground()` overload, after `RECORD_AUDIO` has been granted; it is demoted back to `dataSync` when the call ends. The manifest declares `foregroundServiceType="dataSync|microphone"` so the runtime promotion is permitted; calling `startForeground()` with the 2-arg overload at boot would implicitly inherit the `microphone` type and crash on freshly installed apps that have never granted `RECORD_AUDIO`. The persistent notification shows live connection status, e.g. "Connected — X peers", "Mobile — X peers", "Searching for peers…", or "Offline — no network" (actual strings come from i18n in 34 languages — see §17). Updated dynamically via MethodChannel (`updateServiceNotification`) on every state change, with dedup to avoid redundant updates. Channel importance: `IMPORTANCE_LOW` (no sound, no vibration, no badge).
 
 **Lifecycle invariants (Problem-10 hardening, V3.1.117):**
 - `startForeground` is idempotent in `onStartCommand` (re-issued on every entry; no "already running" short-circuit that could skip a needed re-promotion after an OS kill).
@@ -7562,14 +7607,14 @@ For environments where network-based distribution is compromised or unavailable.
 | **libvpx** | `vpx_ffi.dart` (via cleona_vpx shim) | VP8 video codec (I420/YUV 4:2:0, CBR, real-time) | For video calls. Adaptive bitrate. Error-resilient mode. |
 | **miniaudio** | via `libcleona_audio` C shim | Cross-platform audio capture + playback (PulseAudio/ALSA on Linux, AAudio/OpenSL on Android, WASAPI on Windows, Core Audio on macOS/iOS) | Single-header library, version 0.11.21, vendored at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. See §10.4. |
 | **speexdsp** | via `libcleona_audio` C shim | Acoustic Echo Cancellation + Noise Suppression for the audio capture path | Version 1.2.1, **vendored as full source** under `native/cleona_audio/vendor/speexdsp/` (SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`), statically linked. AEC tail = 250 ms @ 16 kHz. |
-| **cleona_net** | `native_udp_sender.dart` via `libcleona_net` C shim (v1.2.0) | Direct-syscall UDP send-path for IPv4 and IPv6. Wraps POSIX `sendto` on Linux and Win32 `WSASendTo` on Windows synchronously. `NativeUdpSender` (IPv4) + `NativeUdpSender6` (IPv6, `AF_INET6`/`IPV6_V6ONLY`). Required on both desktop platforms (no runtime fallback). See §4.5.2 for the architectural rationale and §20.3a below for the build details. |
+| **cleona_net** | `native_udp_sender.dart` via `libcleona_net` C shim (v1.3.0). On Android, `AndroidUdpSender` uses the fd-based variants (`cleona_udp_sendto_fd` / `cleona_udp_sendto_fd6`) to send on existing Dart socket fds. | Direct-syscall UDP send-path for IPv4 and IPv6. Wraps POSIX `sendto` on Linux and Win32 `WSASendTo` on Windows synchronously. `NativeUdpSender` (IPv4) + `NativeUdpSender6` (IPv6, `AF_INET6`/`IPV6_V6ONLY`). Required on both desktop platforms (no runtime fallback). See §4.5.2 for the architectural rationale and §20.3a below for the build details. |
 | **cleona_pow** | `proof_of_work.dart` (inline FFI) | PoW SHA-256 iteration loop in C — calls `crypto_hash_sha256` in a tight loop without per-iteration Dart↔C transitions | Links against libsodium. Build: `cmake -B build -S native/cleona_pow && cmake --build build`. Graceful fallback: platforms without the library use the Dart-side iteration loop transparently. |
 
 The **cleona_net** entry in the table above deserves a longer explanation because, unlike the other native libraries in this list, it does not unlock a feature that would otherwise be unavailable — Dart already ships a perfectly working `RawDatagramSocket`. We introduced the shim because Dart's implementation on Windows silently drops roughly 89 percent of sustained UDP send calls during the LAN-Discovery subnet-scan phase, while the very same workload (200-15000 packets at up to 500 pps to many different destinations) goes through with zero drops when issued by PowerShell's `.NET UdpClient`. The forensic chain that established this is documented at §4.5.2 — pktmon-counters on the Windows TCPIP layer confirm the dropped sends never reach the kernel, and raising the kernel `SO_SNDBUF` to 4 MB did not change the drop rate. The defect therefore lives inside Dart's Windows I/O implementation (likely the IOCP-based UDP send path), below where any Dart-level workaround can reach. Linux is unaffected — Dart's POSIX path uses blocking `sendto` and behaves identically to the C shim. We build and link the shim on Linux as well for the **discovery send path** (`LocalDiscovery`, port 41338). The **main data-port** transport (`Transport.sendUdp`), however, uses the native sender **only on Windows** (V3.1.72 for IPv4, V3.1.145 for IPv6). On Windows, `Transport` holds both a `NativeUdpSender` (IPv4) and a `NativeUdpSender6` (IPv6) — the IPv6 sender was added to prevent a Dart VM crash (`GetStackPointerForStackBounds failed`) when sending to IPv6 destinations without a valid route (see §4.5.2). Both native senders are closed and reopened during `reconnectUdpSockets()` and disposed on shutdown. Rationale for the Windows-only restriction: `cleona_udp_open` binds a real `SO_REUSEADDR` UDP socket on the given port; when opened on the *data* port in addition to Dart's receive socket, the Linux kernel delivered inbound datagrams to the send-only native socket — which is never read — starving the Dart `RawDatagramSocket` and breaking **all** inbound processing (no PONG → no peer ever confirmed → dead mesh). This was a regression introduced by commit `2fbc879` (it extended the Windows send-fix to the main port without updating this section). Because Dart's POSIX send path is unaffected (stated above), the Linux main port now uses `RawDatagramSocket` for both send and receive — exactly **one** socket per data port. `Transport.start()` enforces this with a `/proc/net/udp` self-check that logs an error if a second IPv4 socket ever binds the data port again. A behavioural regression guard lives in `test/smoke/smoke_udp_receive_path.dart`.
 
 The native library is a hard dependency on Linux and Windows desktop builds. If `libcleona_net.so` (Linux) or `cleona_net.dll` (Windows) is missing at daemon startup, the daemon refuses to start and prints a clear error message naming the expected file path. There is no fallback to the Dart send path. This is deliberate: a silent fallback would mask a broken build or a missed deployment step exactly the way the Windows drops themselves went unnoticed for weeks, and we would risk discarding a working architectural fix as "useless" because operations look identical to the un-fixed state.
 
-Android, iOS, and macOS builds do not include `libcleona_net` and continue to use Dart's `RawDatagramSocket` directly. On those platforms the Dart-RawDatagramSocket implementation has no observed drop pattern, so introducing the shim there would only enlarge the trusted native-code surface without functional benefit. If a regression appears on one of those platforms in a future release, the shim can be extended (Phase 2) — the C source is platform-agnostic POSIX on those targets.
+iOS and macOS desktop builds do not include `libcleona_net` and continue to use Dart's `RawDatagramSocket` directly — on those platforms the Dart-RawDatagramSocket implementation has no observed drop pattern. **Android** ships `libcleona_net.so` since V3.1.139 — `AndroidUdpSender` locates the Dart socket's IPv4 and IPv6 file descriptors via `cleona_find_udp4_fd` / `cleona_find_udp6_fd` and sends via `cleona_udp_sendto_fd` (IPv4) and `cleona_udp_sendto_fd6` (IPv6, added V3.1.152). The dual-function approach mirrors `IosUdpSender`'s design: one fd per protocol family, scope-id stripping on IPv6, negative errno on failure. Without the IPv6 variant, DS-Lite devices (common in Germany) lost their only directly routable path — `inet_pton(AF_INET)` silently failed for every IPv6 address (return value -2), and the error was not recognized by `isSocketDeadErrno`, so dead addresses were retried indefinitely. V3.1.152 adds errno 2 (inet_pton parse failure) to the dead-socket detector as defence-in-depth.
 
 ### 20.3a Build Mechanics for cleona_net
 
@@ -7854,7 +7899,7 @@ Conceptually a good fit — Windows allows background services without restricti
 
 **Tier 4 — Android**
 
-The first platform where the OS actively works against Cleona's architecture. There is no separate daemon — everything runs in-process. Background message delivery relies on a Foreground Service with a persistent notification (all push-based alternatives were evaluated and rejected — see §12.4). Google's battery optimization (Doze, App Standby) can delay or kill background processes despite the Foreground Service contract. Mobile networks typically use CGNAT/DS-Lite, making direct peer connections unreliable and forcing the relay cascade (Direct → Relay → Store-and-Forward). **User impact:** messages generally arrive promptly while the app is in foreground or the Foreground Service is active, but aggressive OEM battery management (Samsung, Xiaomi, Huawei) may occasionally delay delivery. Users must exempt Cleona from battery optimization for reliable background operation.
+The first platform where the OS actively works against Cleona's architecture. There is no separate daemon — everything runs in-process. Background message delivery relies on three mechanisms: a Foreground Service with persistent notification (all push-based alternatives rejected — see §12.4), a Doze-whitelist exemption requested at first launch (§12.5), and Application-owned `FlutterEngine` (created in `CleonaApplication.onCreate()`, returned via `provideFlutterEngine()`) that keeps the Dart isolate alive across Activity destruction and share-intent restarts (§12.5). Mobile networks typically use CGNAT/DS-Lite, making direct peer connections unreliable and forcing the relay cascade (Direct → Relay → Store-and-Forward). **User impact:** with Doze-whitelisting granted, messages arrive promptly in foreground and background. Without it, Deep Doze suspends network access after ~30 min of screen-off idle and messages arrive only when the device wakes. OEM battery management (Samsung, Xiaomi, Huawei) may impose additional restrictions beyond stock Android Doze — Cleona surfaces a setup hint linking to dontkillmyapp.com for affected devices.
 
 **Tier 5 — iOS**
 
@@ -8080,7 +8125,7 @@ enum MessageType {
   FRAGMENT_RETRIEVE_RESPONSE = 123;
   FRAGMENT_DELETE            = 124;
 
-  // ── Store-and-Forward on Contact Peers ─────────────────────
+  // ── Store-and-Forward on Network Peers ─────────────────────
   PEER_STORE                 = 130;
   PEER_STORE_ACK             = 131;
   PEER_RETRIEVE              = 132;

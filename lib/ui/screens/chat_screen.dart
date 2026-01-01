@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:video_player/video_player.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:record/record.dart';
@@ -286,6 +287,9 @@ class _ChatScreenState extends State<ChatScreen> {
     if (widget.isChannel) {
       final channel = service?.channels[widget.conversationId];
       if (channel != null) {
+        if (sys_ch.SystemChannels.isSystemChannel(widget.conversationId)) {
+          return locale.get('channel_public');
+        }
         return locale.tr('subscribers_count', {'count': '${channel.members.length}'});
       }
     } else if (widget.isGroup) {
@@ -1213,7 +1217,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   IconButton(
                     icon: const Icon(Icons.attach_file),
                     tooltip: locale.get('attach_file'),
-                    onPressed: () => _pickAndSendFile(service),
+                    onPressed: () => _showAttachmentPicker(service),
                   ),
                   IconButton(
                     icon: const Icon(Icons.content_paste),
@@ -1741,6 +1745,7 @@ class _ChatScreenState extends State<ChatScreen> {
         builder: (ctx, setDialogState) {
           final currentChannel = service.channels[widget.conversationId];
           if (currentChannel == null) return const SizedBox();
+          final isSysChannel = sys_ch.SystemChannels.isSystemChannel(widget.conversationId);
           final myRole = currentChannel.members[service.nodeIdHex]?.role ?? 'subscriber';
           final canManage = myRole == 'owner' || myRole == 'admin';
           final isOwner = myRole == 'owner';
@@ -1849,72 +1854,77 @@ class _ChatScreenState extends State<ChatScreen> {
                       },
                     ),
                   const Divider(),
-                  Text(locale.tr('members_count', {'count': '${currentChannel.members.length}'}),
-                      style: Theme.of(context).textTheme.titleSmall),
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: currentChannel.members.values.map((m) {
-                        final isSelf = m.nodeIdHex == service.nodeIdHex;
-                        return ListTile(
-                          dense: true,
-                          leading: Icon(
-                            m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
-                            size: 20,
-                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? Theme.of(context).colorScheme.primary : null,
-                          ),
-                          title: Text('${m.displayName}${isSelf ? " (Du)" : ""}'),
-                          subtitle: Text(
-                            m.role == 'owner' ? locale.get('role_owner') : m.role == 'admin' ? locale.get('role_admin') : locale.get('role_subscriber'),
-                            style: TextStyle(fontSize: 11, color: m.role == 'owner' ? Colors.amber.shade700 : null),
-                          ),
-                          trailing: !isSelf && canManage
-                              ? PopupMenuButton<String>(
-                                  iconSize: 18,
-                                  padding: EdgeInsets.zero,
-                                  onSelected: (action) async {
-                                    if (action == 'remove') {
-                                      await service.removeFromChannel(widget.conversationId, m.nodeIdHex);
-                                      setDialogState(() {});
-                                    } else if (action.startsWith('role_')) {
-                                      final newRole = action.substring(5);
-                                      await service.setChannelRole(widget.conversationId, m.nodeIdHex, newRole);
-                                      setDialogState(() {});
-                                    }
-                                  },
-                                  itemBuilder: (_) => [
-                                    if (isOwner && m.role != 'admin')
-                                      PopupMenuItem(value: 'role_admin', child: Row(children: [
-                                        const Icon(Icons.shield, size: 18), const SizedBox(width: 8), Text(locale.get('make_admin')),
-                                      ])),
-                                    if (isOwner && m.role != 'subscriber')
-                                      PopupMenuItem(value: 'role_subscriber', child: Row(children: [
-                                        const Icon(Icons.person, size: 18), const SizedBox(width: 8), Text(locale.get('make_subscriber')),
-                                      ])),
-                                    if (isOwner)
-                                      PopupMenuItem(value: 'role_owner', child: Row(children: [
-                                        const Icon(Icons.star, size: 18, color: Colors.amber), const SizedBox(width: 8), Text(locale.get('transfer_ownership')),
-                                      ])),
-                                    if (canManage)
-                                      PopupMenuItem(value: 'remove', child: Row(children: [
-                                        const Icon(Icons.person_remove, size: 18, color: Colors.red),
-                                        const SizedBox(width: 8),
-                                        Text(locale.get('remove'), style: const TextStyle(color: Colors.red)),
-                                      ])),
-                                  ],
-                                )
-                              : null,
-                        );
-                      }).toList(),
+                  if (isSysChannel) ...[
+                    Text(locale.get('channel_public'),
+                        style: Theme.of(context).textTheme.titleSmall),
+                  ] else ...[
+                    Text(locale.tr('members_count', {'count': '${currentChannel.members.length}'}),
+                        style: Theme.of(context).textTheme.titleSmall),
+                    const SizedBox(height: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: currentChannel.members.values.map((m) {
+                          final isSelf = m.nodeIdHex == service.nodeIdHex;
+                          return ListTile(
+                            dense: true,
+                            leading: Icon(
+                              m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
+                              size: 20,
+                              color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? Theme.of(context).colorScheme.primary : null,
+                            ),
+                            title: Text('${m.displayName}${isSelf ? " (Du)" : ""}'),
+                            subtitle: Text(
+                              m.role == 'owner' ? locale.get('role_owner') : m.role == 'admin' ? locale.get('role_admin') : locale.get('role_subscriber'),
+                              style: TextStyle(fontSize: 11, color: m.role == 'owner' ? Colors.amber.shade700 : null),
+                            ),
+                            trailing: !isSelf && canManage
+                                ? PopupMenuButton<String>(
+                                    iconSize: 18,
+                                    padding: EdgeInsets.zero,
+                                    onSelected: (action) async {
+                                      if (action == 'remove') {
+                                        await service.removeFromChannel(widget.conversationId, m.nodeIdHex);
+                                        setDialogState(() {});
+                                      } else if (action.startsWith('role_')) {
+                                        final newRole = action.substring(5);
+                                        await service.setChannelRole(widget.conversationId, m.nodeIdHex, newRole);
+                                        setDialogState(() {});
+                                      }
+                                    },
+                                    itemBuilder: (_) => [
+                                      if (isOwner && m.role != 'admin')
+                                        PopupMenuItem(value: 'role_admin', child: Row(children: [
+                                          const Icon(Icons.shield, size: 18), const SizedBox(width: 8), Text(locale.get('make_admin')),
+                                        ])),
+                                      if (isOwner && m.role != 'subscriber')
+                                        PopupMenuItem(value: 'role_subscriber', child: Row(children: [
+                                          const Icon(Icons.person, size: 18), const SizedBox(width: 8), Text(locale.get('make_subscriber')),
+                                        ])),
+                                      if (isOwner)
+                                        PopupMenuItem(value: 'role_owner', child: Row(children: [
+                                          const Icon(Icons.star, size: 18, color: Colors.amber), const SizedBox(width: 8), Text(locale.get('transfer_ownership')),
+                                        ])),
+                                      if (canManage)
+                                        PopupMenuItem(value: 'remove', child: Row(children: [
+                                          const Icon(Icons.person_remove, size: 18, color: Colors.red),
+                                          const SizedBox(width: 8),
+                                          Text(locale.get('remove'), style: const TextStyle(color: Colors.red)),
+                                        ])),
+                                    ],
+                                  )
+                                : null,
+                          );
+                        }).toList(),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
             actions: [
-              if (canManage)
+              if (canManage && !isSysChannel)
                 TextButton.icon(
                   icon: const Icon(Icons.person_add, size: 18),
                   label: Text(locale.get('invite')),
@@ -2319,15 +2329,65 @@ class _ChatScreenState extends State<ChatScreen> {
     return '${ms ~/ (24 * 60 * 60 * 1000)} Tage';
   }
 
-  Future<void> _pickAndSendFile(ICleonaService? service) async {
+  void _showAttachmentPicker(ICleonaService? service) {
     if (service == null) return;
+    final locale = AppLocale.read(context);
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetCtx) {
+        return SafeArea(
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library),
+                title: Text(locale.get('pick_photo_video')),
+                onTap: () { Navigator.pop(sheetCtx); _pickMedia(service); },
+              ),
+              ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: Text(locale.get('pick_camera')),
+                onTap: () { Navigator.pop(sheetCtx); _captureFromCamera(service); },
+              ),
+              ListTile(
+                leading: const Icon(Icons.insert_drive_file),
+                title: Text(locale.get('pick_file')),
+                onTap: () { Navigator.pop(sheetCtx); _pickFile(service); },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _pickMedia(ICleonaService service) async {
+    final result = await FilePicker.platform.pickFiles(type: FileType.media);
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.first.path;
+    if (path == null) return;
+    await service.sendMediaMessage(widget.conversationId, path);
+    _scrollToBottom();
+  }
+
+  Future<void> _captureFromCamera(ICleonaService service) async {
+    final picker = ImagePicker();
+    final photo = await picker.pickImage(source: ImageSource.camera);
+    if (photo == null) return;
+    await service.sendMediaMessage(widget.conversationId, photo.path);
+    _scrollToBottom();
+  }
+
+  Future<void> _pickFile(ICleonaService service) async {
     final result = await FilePicker.platform.pickFiles();
     if (result == null || result.files.isEmpty) return;
     final path = result.files.first.path;
     if (path == null) return;
-
     await service.sendMediaMessage(widget.conversationId, path);
+    _scrollToBottom();
+  }
 
+  void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(

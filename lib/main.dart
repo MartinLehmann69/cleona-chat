@@ -41,9 +41,9 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
 import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/disk_space.dart';
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/platform/share_receiver.dart';
-import 'package:cleona/core/platform/deep_link_receiver.dart';
+import 'package:cleona/core/platform/lifecycle_drain_observer.dart';
 import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
@@ -373,13 +373,9 @@ class _CleonaAppState extends State<CleonaApp> {
             state._sessionReducedMode = true;
           }
           state._boot();
-          // Bug #U16: Android Share-Sheet-Empfang. Kontext + Service werden
-          // lazy beim Share-Event ausgewertet (Identity-Wechsel andert Service).
-          ShareReceiver.init(
-            contextProvider: () => navigatorKey.currentContext!,
-            serviceProvider: () => state.service,
-          );
-          DeepLinkReceiver.init(
+          // Bug #U16 + lifecycle-hijack fix: single observer drains both
+          // shares and deep links on resume (and once on cold start).
+          LifecycleDrainObserver.register(
             contextProvider: () => navigatorKey.currentContext!,
             serviceProvider: () => state.service,
           );
@@ -582,12 +578,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   List<ConnectivityResult> get connectivityResults => _connectivityResults;
 
   /// Number of peers with confirmed bidirectional UDP contact this session.
-  /// Combines OS connectivity with actual P2P reachability for the status icon.
   int get confirmedPeerCount {
-    // In-process: read directly from node
     if (_inProcessNode != null) return _inProcessNode!.confirmedPeerIds.length;
-    // Desktop daemon: IPC client carries confirmedPeerCount
     if (_ipcClient != null) return _ipcClient!.confirmedPeerCount;
+    return 0;
+  }
+
+  // ── UI peer counter (S252) ─────────────────────────────────────────
+  // Confirmed + relay-reachable peers. Must be used by ALL UI surfaces
+  // that display a peer count (Home badge, Settings, Contacts, Status).
+  // Matches NetworkStats.activePeerCount and Connection Sheet list.
+  int get reachablePeerCount {
+    if (_inProcessNode != null) return _inProcessNode!.reachablePeerIds.length;
+    if (_ipcClient != null) return _ipcClient!.reachablePeerCount;
     return 0;
   }
 
@@ -731,7 +734,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _connectivityResults.contains(ConnectivityResult.ethernet) ||
         _connectivityResults.contains(ConnectivityResult.vpn);
     final hasMobile = _connectivityResults.contains(ConnectivityResult.mobile);
-    final peers = confirmedPeerCount;
+    final peers = reachablePeerCount;
 
     final String text;
     if (!hasNetwork) {
@@ -1675,6 +1678,21 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       notifyListeners();
     };
 
+    // Wire Android/iOS disk space query for dynamic S&F storage budget.
+    // Must be set BEFORE startService() so the initial _updateBudget()
+    // in mailboxStore.load() gets the real free-disk value.
+    if (Platform.isAndroid) {
+      DiskSpace.platformQueryFn = (path) async {
+        const ch = MethodChannel('chat.cleona/storage');
+        return await ch.invokeMethod<int>('getFreeDiskSpace', path) ?? 0;
+      };
+    } else if (Platform.isIOS) {
+      DiskSpace.platformQueryFn = (path) async {
+        const ch = MethodChannel('chat.cleona/storage');
+        return await ch.invokeMethod<int>('getFreeDiskSpace', path) ?? 0;
+      };
+    }
+
     // Create and start a CleonaService for EACH identity
     for (final ctx in _inProcessContexts.values) {
       final service = CleonaService(
@@ -1724,7 +1742,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     };
 
-    node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
+    node.onInfrastructureFramePayload =
+        (frame, senderDeviceId, from, port, snapshot, wasDirect) {
       final mt = frame.messageType;
       final isServiceRouted =
           mt == proto.MessageTypeV3.MTV3_CONTACT_REQUEST ||
@@ -1817,7 +1836,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
             // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
             // carries accepted=false when the storage peer rejected the
             // store (recipient not its contact, budget, rate limit).
-            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId);
+            // Befund 15: wasDirect gates confirmRoute in the handler.
+            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId,
+                wasDirect: wasDirect);
             break;
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
             service.handleIncomingPeerRetrieveInfra(
@@ -1889,6 +1910,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // during degraded states and fed the kill loop (Problem 10).
       if (Platform.isAndroid) {
         try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${now.millisecondsSinceEpoch}'); } catch (_) {}
+        // §12.5 S254: refresh the timed WakeLock every 5s so the CPU stays
+        // active as long as the Dart isolate is alive. The 30s timeout on
+        // the Kotlin side acts as a dead-man switch if ticks stop arriving.
+        try {
+          const channel = MethodChannel('chat.cleona/service');
+          channel.invokeMethod('acquireWakeLock');
+        } catch (_) {}
       }
       final last = _heartbeatLastAt;
       _heartbeatLastAt = now;
@@ -2138,6 +2166,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       service.notificationSound.onPlaySoundAndroid = (filename) async {
         const channel = MethodChannel('chat.cleona/notification');
         await channel.invokeMethod('playSound', {'asset': 'assets/sounds/$filename'});
+      };
+      service.notificationSound.onStartLoopSoundAndroid = (asset) async {
+        const channel = MethodChannel('chat.cleona/notification');
+        await channel.invokeMethod('startLoopSound', {'asset': asset});
+      };
+      service.notificationSound.onStopSoundAndroid = () async {
+        const channel = MethodChannel('chat.cleona/notification');
+        await channel.invokeMethod('stopSound');
       };
 
       // Vibration via platform channel

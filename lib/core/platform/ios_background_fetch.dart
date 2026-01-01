@@ -198,8 +198,11 @@ class IosBackgroundFetch {
       // Wire infrastructure frame handler.
       // Capture node as non-null local for the closure.
       final nodeRef = node;
-      node.onInfrastructureFramePayload = (frame, senderDeviceId, from, port, snapshot) {
-        // Simplified: route to all services (background fetch is short-lived)
+      node.onInfrastructureFramePayload =
+          (frame, senderDeviceId, from, port, snapshot, wasDirect) {
+        // Simplified: route to all services (background fetch is short-lived).
+        // wasDirect (Befund 15+16) is unused here — none of the routed types
+        // performs confirmRoute in this short-lived background context.
         for (final service in services) {
           _routeInfraFrame(service, nodeRef, frame, senderDeviceId, from, port, snapshot);
         }

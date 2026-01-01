@@ -5,12 +5,12 @@ import 'package:cleona/core/network/clogger.dart';
 /// Platform-aware free disk space detection.
 ///
 /// Linux/macOS: uses `df` command.
-/// Android: uses a callback set by the Flutter app (Platform Channel to StatFs).
+/// Android/iOS: uses a callback set by the Flutter app (Platform Channel to StatFs/NSFileManager).
 /// Fallback: returns 0 (caller uses minBudget).
 class DiskSpace {
   static final _log = CLogger.get('disk-space');
 
-  /// Optional platform query function set by Flutter GUI on Android.
+  /// Optional platform query function set by Flutter GUI on Android/iOS.
   /// Signature: `Future<int> queryFn(String path)` returning free bytes.
   /// Set this from main.dart or wherever Flutter services are initialized.
   static Future<int> Function(String path)? platformQueryFn;
@@ -19,8 +19,8 @@ class DiskSpace {
   /// Returns 0 on failure (caller should use fallback budget).
   static Future<int> getFreeDiskSpace(String path) async {
     try {
-      if (Platform.isAndroid) {
-        return await _getAndroidFreeSpace(path);
+      if (Platform.isAndroid || Platform.isIOS) {
+        return await _getPlatformChannelFreeSpace(path);
       }
       if (Platform.isWindows) {
         return await _getWindowsFreeSpace(path);
@@ -66,8 +66,8 @@ class DiskSpace {
     return bytes ?? 0;
   }
 
-  /// Android: use platform query function set by Flutter app.
-  static Future<int> _getAndroidFreeSpace(String path) async {
+  /// Android/iOS: use platform query function set by Flutter app.
+  static Future<int> _getPlatformChannelFreeSpace(String path) async {
     final queryFn = platformQueryFn;
     if (queryFn == null) {
       _log.debug('No platform query function set — using default budget');

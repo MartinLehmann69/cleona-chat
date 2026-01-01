@@ -47,7 +47,7 @@
 
 set -euo pipefail
 
-PRIVATE_KEY="${CLEONA_MAINTAINER_KEY:-$HOME/Schreibtisch/cleona_maintainer_private.pem}"
+PRIVATE_KEY="${CLEONA_MAINTAINER_KEY:-$HOME/CleonaPrivat/keys/cleona_maintainer_private.pem}"
 
 # Platforms supported by §19.6.2 in-network distribution, in the fixed order
 # used everywhere below (JSON map key order). Must stay stable — the signed

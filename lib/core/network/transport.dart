@@ -953,25 +953,49 @@ class Transport {
   }
 
   /// Whether a send failure (return value <= 0 from _udpSendRaw) should count
-  /// toward the dead-edge detector. On Android with native errno, only
-  /// socket/route-level errors (ENETUNREACH, ENETDOWN, EBADF) count. Peer-
-  /// specific errors (EHOSTUNREACH, ECONNREFUSED) indicate the peer is
+  /// toward the dead-edge detector. On Android/iOS with native errno, only
+  /// socket/route-level errors (ENETUNREACH, ENETDOWN, EBADF, ...) count.
+  /// Peer-specific errors (EHOSTUNREACH, ECONNREFUSED) indicate the peer is
   /// offline, not the local socket — those are normal and must NOT trigger
   /// dead-edge escalation.
+  ///
+  /// Befund 11: before this iOS branch existed, `_androidUdpSender == null`
+  /// was true on every iOS device (that sender is Android-only), so this
+  /// method always returned `true` on iOS regardless of the actual errno —
+  /// every peer-specific send failure (e.g. EHOSTUNREACH) incorrectly
+  /// escalated to "socket dead". The iOS check below must run before the
+  /// Android/legacy fallback so a live `_iosUdpSender` gets real Darwin
+  /// errno classification instead of falling into that catch-all.
   bool _shouldCountAsSocketDead(int sendResult) {
-    if (_androidUdpSender == null) return true; // no errno info → legacy path
     if (sendResult == 0) return true; // Dart socket 0-return (no native sender used)
     if (sendResult > 0) return false; // success (should never be called with this)
+    if (_iosUdpSender != null) {
+      return IosUdpSender.isSocketDeadErrnoDarwin(sendResult);
+    }
+    if (_androidUdpSender == null) return true; // no errno info → legacy path
     return AndroidUdpSender.isSocketDeadErrno(sendResult);
   }
 
   /// Send a NetworkPacketV3 via UDP to a specific address.
-  /// For wire bytes >1200, automatically fragments. Computes and sets the
-  /// in-frame `network_tag` (Closed-Network HMAC) before serialization;
-  /// the caller is responsible for filling all other Outer-Frame fields
-  /// (sigs, PoW, routing ids — Architecture v3.0 §2.4 sender steps 8-10).
+  /// Serializes the packet (via [serializeWithTag]) and delegates to
+  /// [sendUdpSerialized]. For callers that send the same packet to many
+  /// addresses, prefer serializing once and calling [sendUdpSerialized]
+  /// directly to avoid redundant protobuf serialization.
   Future<bool> sendUdp(
     proto.NetworkPacketV3 packet,
+    InternetAddress address,
+    int remotePort,
+  ) async {
+    final data = serializeWithTag(packet);
+    return sendUdpSerialized(data, address, remotePort);
+  }
+
+  /// Send pre-serialized wire bytes via UDP to a specific address.
+  /// For wire bytes >1200, automatically fragments. The caller is
+  /// responsible for producing [serialized] via [serializeWithTag] (which
+  /// computes and embeds the Closed-Network HMAC `network_tag`).
+  Future<bool> sendUdpSerialized(
+    Uint8List serialized,
     InternetAddress address,
     int remotePort,
   ) async {
@@ -1004,7 +1028,7 @@ class Transport {
     }
 
     try {
-      final data = serializeWithTag(packet);
+      final data = serialized;
 
       // Fragment if payload exceeds UDP-safe size. Fragments still use the
       // 8-byte prefix HMAC (UdpFragmenter packets have their own framing —

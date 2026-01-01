@@ -74,7 +74,7 @@ class ContactsScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Port: ${svc.port} | Peers: ${svc.confirmedPeerCount}',
+                    'Port: ${svc.port} | Peers: ${svc.reachablePeerCount}',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],

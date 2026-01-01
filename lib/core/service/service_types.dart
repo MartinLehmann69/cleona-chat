@@ -66,7 +66,7 @@ enum MessageStatus {
   storedInNetwork,
   delivered,
   read,
-  /// L3 artefacts placed (Erasure + S&F) — waiting for recipient pull.
+  /// L3 artefact placed (S&F or Erasure, §5.1 size rule) — waiting for recipient pull.
   queuedOffline,
   /// No connectivity at send time — L3 placement impossible; message is
   /// parked in the local one-shot outbox.
@@ -1180,6 +1180,14 @@ class ContactInfo {
   int? birthdayDay;
   int? birthdayYear;
 
+  /// A5/A6: Last verified liveness proof from this contact (DELIVERY_RECEIPT
+  /// or ApplicationFrame). Device-local — excluded from twin-sync.
+  DateTime? lastAckedAt;
+  /// A6: Guard for AUTO-REPAIR — only cleared by liveness proof
+  /// (DELIVERY_RECEIPT / ApplicationFrame), never by acceptContactRequest.
+  /// Device-local — excluded from twin-sync.
+  bool autoRepairAttempted;
+
   /// First-CR-Bootstrap seed (§8.1.1, persisted from QR/NFC scan).
   /// Required for retrying a `pending_outgoing` first-contact CR — the
   /// recipient's User-KEM-PK is unknown until CR-Response arrives, so the
@@ -1213,6 +1221,8 @@ class ContactInfo {
     this.birthdayMonth,
     this.birthdayDay,
     this.birthdayYear,
+    this.lastAckedAt,
+    this.autoRepairAttempted = false,
     this.seedDeviceIdHex,
     this.seedDxkB64,
     this.seedDmkB64,
@@ -1239,6 +1249,8 @@ class ContactInfo {
         if (birthdayMonth != null) 'birthdayMonth': birthdayMonth,
         if (birthdayDay != null) 'birthdayDay': birthdayDay,
         if (birthdayYear != null) 'birthdayYear': birthdayYear,
+        if (lastAckedAt != null) 'lastAckedAt': lastAckedAt!.millisecondsSinceEpoch,
+        if (autoRepairAttempted) 'autoRepairAttempted': autoRepairAttempted,
         if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
         if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
         if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
@@ -1275,6 +1287,10 @@ class ContactInfo {
         birthdayMonth: json['birthdayMonth'] as int?,
         birthdayDay: json['birthdayDay'] as int?,
         birthdayYear: json['birthdayYear'] as int?,
+        lastAckedAt: json['lastAckedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['lastAckedAt'] as int)
+            : null,
+        autoRepairAttempted: (json['autoRepairAttempted'] as bool?) ?? false,
         seedDeviceIdHex: json['seedDeviceIdHex'] as String?,
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,

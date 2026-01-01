@@ -8,39 +8,29 @@ import 'package:cleona/core/service/service_interface.dart';
 
 class ShareReceiver {
   static const _channel = MethodChannel('chat.cleona/share');
-  static bool _wired = false;
 
-  static void init({
-    required BuildContext Function() contextProvider,
-    required ICleonaService? Function() serviceProvider,
-  }) {
-    if (!Platform.isAndroid || _wired) return;
-    _wired = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _drain(contextProvider, serviceProvider);
-    });
-    SystemChannels.lifecycle.setMessageHandler((msg) async {
-      if (msg == 'AppLifecycleState.resumed') {
-        await _drain(contextProvider, serviceProvider);
-      }
-      return null;
-    });
-  }
-
-  static Future<void> _drain(
+  /// Called by [LifecycleDrainObserver] on resume and via post-frame callback
+  /// on cold start.  No lifecycle handler of its own — the observer covers it.
+  ///
+  /// Returns `true` once the service was ready for this attempt (whether or
+  /// not a payload was actually pending), `false` if the service was still
+  /// null — in that case the native stash is left untouched (checked BEFORE
+  /// `consumePendingShare` is invoked) so a later retry can still recover it.
+  static Future<bool> drainPending(
     BuildContext Function() contextProvider,
     ICleonaService? Function() serviceProvider,
   ) async {
+    final service = serviceProvider();
+    if (service == null) return false;
     try {
       final raw = await _channel.invokeMethod<Map<Object?, Object?>>('consumePendingShare');
-      if (raw == null) return;
+      if (raw == null) return true;
       final text = (raw['text'] as String?) ?? '';
       final files = ((raw['files'] as List?) ?? const []).cast<String>();
-      if (text.isEmpty && files.isEmpty) return;
-      final service = serviceProvider();
-      if (service == null) return;
+      if (text.isEmpty && files.isEmpty) return true;
       await _promptAndSend(contextProvider(), service, text, files);
     } catch (_) {/* Share-Empfang darf App-Start nie brechen. */}
+    return true;
   }
 
   static Future<void> _promptAndSend(

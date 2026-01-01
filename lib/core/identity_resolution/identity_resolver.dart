@@ -130,8 +130,11 @@ class IdentityResolver {
   Uint8List? Function(Uint8List userId)? contactEd25519PkLookup;
 
   /// D1: Key-Change-Detection-Hook (§8.3) — feuert bei contactMismatch.
-  void Function(Uint8List userId, Uint8List embeddedEd25519Pk)?
-      onContactKeyMismatch;
+  /// Third param: the AuthManifest whose embedded key triggered the mismatch
+  /// — gives the caller direct access (Self-Heal needs it, separate lookups
+  /// for it don't work reliably).
+  void Function(Uint8List userId, Uint8List embeddedEd25519Pk,
+      AuthManifest manifest)? onContactKeyMismatch;
 
   /// D1 TOFU-Anchor-Cache: userIdHex → verankerter userEd25519Pk. Ein einmal
   /// verifizierter Anker wird nie durch hoehere seq allein ersetzt — nur
@@ -433,7 +436,7 @@ class IdentityResolver {
             _log.warn('D1: AuthManifest fuer Kontakt '
                 '${bytesToHex(userId).substring(0, 16)}... widerspricht '
                 'gespeichertem Key — verworfen (seq=${m.sequenceNumber})');
-            onContactKeyMismatch?.call(userId, m.userEd25519Pk);
+            onContactKeyMismatch?.call(userId, m.userEd25519Pk, m);
             continue;
           case AnchorStatus.legacy:
             if (_better(m, bestLegacy)) bestLegacy = m;

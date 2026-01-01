@@ -62,6 +62,28 @@ import Network
       }
     }
 
+    // Storage channel: free disk space query for dynamic S&F storage budget.
+    if let storageRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "StorageHandler") {
+      let storageChannel = FlutterMethodChannel(
+        name: "chat.cleona/storage",
+        binaryMessenger: storageRegistrar.messenger()
+      )
+      storageChannel.setMethodCallHandler { (call, result) in
+        if call.method == "getFreeDiskSpace" {
+          do {
+            let path = call.arguments as? String ?? NSHomeDirectory()
+            let attrs = try FileManager.default.attributesOfFileSystem(forPath: path)
+            let freeBytes = (attrs[.systemFreeSize] as? Int64) ?? 0
+            result(freeBytes)
+          } catch {
+            result(Int64(0))
+          }
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+    }
+
     // Set up the MethodChannel for background fetch communication with Dart.
     // The FlutterEngine is now available via the plugin registry's messenger.
     guard let messenger = engineBridge.pluginRegistry.registrar(forPlugin: "BackgroundFetchPlugin")?.messenger() else {

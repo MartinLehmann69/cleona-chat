@@ -91,11 +91,16 @@ class NotificationSoundService {
   String? _profileDir;
   String? _soundsDir;
   Process? _loopingProcess;
-  bool _androidLoopActive = false;
   bool _vibrateLoopActive = false;
 
-  /// Android: callback for sound playback via platform channel (set by Flutter app).
+  /// Android: callback for one-shot sound playback via platform channel.
   Future<void> Function(String filename)? onPlaySoundAndroid;
+
+  /// Android: callback for looping sound playback (ringtone/ringback).
+  Future<void> Function(String filename)? onStartLoopSoundAndroid;
+
+  /// Android: callback to stop looping sound immediately.
+  Future<void> Function()? onStopSoundAndroid;
 
   /// Android: callback for vibration via platform channel (set by Flutter app).
   Future<void> Function(int durationMs)? onVibrateAndroid;
@@ -217,8 +222,11 @@ class NotificationSoundService {
   Future<void> _startLoop(String filename) async {
     await _stopLoop();
     if (Platform.isAndroid) {
-      _androidLoopActive = true;
-      _runAndroidSoundLoop(filename);
+      if (onStartLoopSoundAndroid != null) {
+        try {
+          await onStartLoopSoundAndroid!('assets/sounds/$filename');
+        } catch (_) {}
+      }
       return;
     }
     if (_soundsDir == null) return;
@@ -243,22 +251,15 @@ class NotificationSoundService {
     } catch (_) {}
   }
 
-  void _runAndroidSoundLoop(String filename) async {
-    while (_androidLoopActive) {
-      if (onPlaySoundAndroid != null) {
-        try {
-          await onPlaySoundAndroid!(filename);
-        } catch (_) {}
-      }
-      if (!_androidLoopActive) break;
-      await Future.delayed(const Duration(milliseconds: 500));
-    }
-  }
-
   /// Stop the looping sound.
   Future<void> _stopLoop() async {
-    _androidLoopActive = false;
     _vibrateLoopActive = false;
+    if (Platform.isAndroid) {
+      if (onStopSoundAndroid != null) {
+        try { await onStopSoundAndroid!(); } catch (_) {}
+      }
+      return;
+    }
     if (_loopingProcess != null) {
       _loopingProcess!.kill();
       _loopingProcess = null;

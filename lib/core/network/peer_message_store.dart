@@ -1,13 +1,18 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/storage/atomic_json_writer.dart';
 
+String _sha256Hex(Uint8List data) =>
+    bytesToHex(SodiumFFI().sha256(data));
+
 /// A single held message for Store-and-Forward delivery.
 class _HeldMessage {
   final String storeIdHex;
+  final String envelopeHashHex;
   final Uint8List wrappedEnvelope;
   final DateTime storedAt;
   final DateTime expiresAt;
@@ -28,6 +33,7 @@ class _HeldMessage {
 
   _HeldMessage({
     required this.storeIdHex,
+    required this.envelopeHashHex,
     required this.wrappedEnvelope,
     required this.storedAt,
     required this.expiresAt,
@@ -37,6 +43,7 @@ class _HeldMessage {
 
   Map<String, dynamic> toJson() => {
     'storeId': storeIdHex,
+    'envelopeHash': envelopeHashHex,
     'envelope': base64Encode(wrappedEnvelope),
     'storedAt': storedAt.millisecondsSinceEpoch,
     'expiresAt': expiresAt.millisecondsSinceEpoch,
@@ -51,9 +58,11 @@ class _HeldMessage {
   };
 
   static _HeldMessage fromJson(Map<String, dynamic> json) {
+    final envelope = base64Decode(json['envelope'] as String);
     final m = _HeldMessage(
       storeIdHex: json['storeId'] as String,
-      wrappedEnvelope: base64Decode(json['envelope'] as String),
+      envelopeHashHex: (json['envelopeHash'] as String?) ?? _sha256Hex(envelope),
+      wrappedEnvelope: envelope,
       storedAt: DateTime.fromMillisecondsSinceEpoch(json['storedAt'] as int),
       expiresAt: DateTime.fromMillisecondsSinceEpoch(json['expiresAt'] as int),
     );
@@ -75,10 +84,10 @@ class PeerMessageStore {
   /// Max messages per recipient (budget, §5.5).
   static const maxMessagesPerRecipient = 30;
 
-  /// Max size per wrapped envelope (300 KB).
-  /// V3.1.7: Raised from 100 KB to 300 KB to match relay payload limit —
-  /// inline images (< 256 KB) stored as S&F backup during relay forwarding.
-  static const maxEnvelopeSize = 300 * 1024;
+  /// Max size per wrapped envelope (12 KB).
+  /// L3 Redesign: S&F only for messages ≤10 KB canonical; 12 KB envelope
+  /// allows for KEM+signature overhead. Larger payloads use Erasure Coding.
+  static const maxEnvelopeSize = 12 * 1024;
 
   /// Default TTL: 7 days.
   static const defaultTtlMs = 7 * 24 * 60 * 60 * 1000;
@@ -100,6 +109,9 @@ class PeerMessageStore {
 
   /// Known store IDs for dedup.
   final Set<String> _knownStoreIds = {};
+
+  /// Known envelope content hashes for dedup (same content, different storeId).
+  final Set<String> _knownEnvelopeHashes = {};
 
   bool _dirty = false;
   Timer? _flushTimer;
@@ -136,6 +148,7 @@ class PeerMessageStore {
           _messages[recipientHex] = msgs;
           for (final m in msgs) {
             _knownStoreIds.add(m.storeIdHex);
+            _knownEnvelopeHashes.add(m.envelopeHashHex);
           }
         }
       }
@@ -164,10 +177,17 @@ class PeerMessageStore {
       return false;
     }
 
-    // Dedup
+    // StoreId dedup — idempotent ACK: return true so sender sees success
     if (_knownStoreIds.contains(storeIdHex)) {
-      _log.debug('PEER_STORE rejected: duplicate $storeIdHex');
-      return false;
+      _log.debug('PEER_STORE dedup (idempotent ACK): $storeIdHex');
+      return true;
+    }
+
+    // Envelope-hash dedup: same content under different storeId
+    final envelopeHash = _sha256Hex(wrappedEnvelope);
+    if (_knownEnvelopeHashes.contains(envelopeHash)) {
+      _log.debug('PEER_STORE dedup (envelope hash): $envelopeHash');
+      return true;
     }
 
     final recipientHex = bytesToHex(recipientUserId);
@@ -177,6 +197,7 @@ class PeerMessageStore {
     if (list.length >= maxMessagesPerRecipient) {
       final evicted = list.removeAt(0);
       _knownStoreIds.remove(evicted.storeIdHex);
+      _knownEnvelopeHashes.remove(evicted.envelopeHashHex);
       _log.debug('PEER_STORE evicted oldest for ${recipientHex.substring(0, 8)} '
           '(${list.length}/$maxMessagesPerRecipient)');
     }
@@ -196,11 +217,13 @@ class PeerMessageStore {
 
     list.add(_HeldMessage(
       storeIdHex: storeIdHex,
+      envelopeHashHex: envelopeHash,
       wrappedEnvelope: Uint8List.fromList(wrappedEnvelope),
       storedAt: DateTime.now(),
       expiresAt: DateTime.now().add(Duration(milliseconds: ttlMs)),
     ));
     _knownStoreIds.add(storeIdHex);
+    _knownEnvelopeHashes.add(envelopeHash);
     _dirty = true;
 
     _log.debug('Stored message $storeIdHex for ${recipientHex.substring(0, 8)} '
@@ -297,6 +320,7 @@ class PeerMessageStore {
                     _retrieveGraceMs);
         if (shouldRemove) {
           _knownStoreIds.remove(m.storeIdHex);
+          _knownEnvelopeHashes.remove(m.envelopeHashHex);
           return true;
         }
         return false;

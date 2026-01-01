@@ -178,11 +178,6 @@ class CleonaNode {
   /// `node.statsCollector` in their getNetworkStats().
   final NetworkStatsCollector statsCollector = NetworkStatsCollector();
 
-  /// Callback for mutual peer computation (wired by CleonaService).
-  /// Returns nodeIdHex set of peers likely known to the recipient
-  /// (shared contacts + shared group members). Architecture Section 3.3.7.
-  Set<String> Function(Uint8List recipientUserId)? getMutualPeerIds;
-
   /// Callback: resolve contact device IDs (wired by CleonaService).
   /// If userIdHex is null → return ALL contact device IDs.
   /// If userIdHex is set → return device IDs for that specific contact.
@@ -345,12 +340,19 @@ class CleonaNode {
   /// (Outer Device-Sig-Verify). InfrastructureFrame senderUserId is empty
   /// (no user-identity claim at this layer); inner-handlers that need a
   /// userId attach it after parsing the wrapped payload.
+  ///
+  /// Befund 15+16: `wasDirect` is true only when the OUTER packet arrived
+  /// with `hopCount == 0` from a real UDP source address. Handlers that
+  /// treat an infra reply as proof of outbound reachability
+  /// (`confirmRoute`) MUST gate on it — relayed replies prove only that
+  /// *some* path works, not the direct route.
   void Function(
     proto.InfrastructureFrameV3 frame,
     Uint8List senderDeviceId,
     InternetAddress sourceAddr,
     int sourcePort,
     SenderIdentitySnapshot snapshot,
+    bool wasDirect,
   )? onInfrastructureFramePayload;
 
   // State
@@ -862,8 +864,9 @@ class CleonaNode {
     // §5.1 Layer 3 trigger: when ALL ACK retries are exhausted for a message,
     // forward to service layer for offline cascade (S&F + Erasure).
     // onRetryExhausted fires once after maxRetries consecutive timeouts.
-    // onRetryNeeded (per-timeout) is intentionally unwired — V3 does not
-    // re-send via alternative DV routes (the cascade handles offline delivery).
+    // onRetryNeeded (per-timeout) is wired below to the §5.1 L1 direct
+    // retry — re-send via resolved devices on each intermediate timeout
+    // while the retry budget lasts.
     ackTracker.onRetryExhausted =
         (messageIdHex, serializedPacket, recipientUserId) {
       // Fire-and-forget: service handler is async but errors are
@@ -956,7 +959,11 @@ class CleonaNode {
       // Per-device routing table bookkeeping.
       for (final peer in peers) {
         final deviceHex = bytesToHex(peer.nodeId);
-        if (viaNextHopHex != null) {
+        // Befund 10: since Fix 1, direct sends carry viaNextHopHex == destHex
+        // (no longer null). A timed-out DIRECT route to this device must run
+        // the direct-failure branch below, not the relay bookkeeping.
+        final isDirectDown = viaNextHopHex == deviceHex;
+        if (viaNextHopHex != null && !isDirectDown) {
           final relayHex = peer.relayViaNodeId != null ? bytesToHex(peer.relayViaNodeId!) : null;
           if (relayHex == viaNextHopHex) {
             peer.consecutiveRelayFailures = 3;
@@ -1024,6 +1031,27 @@ class CleonaNode {
       if (!_isLocalIdentity(viaNextHopHex)) {
         dvRouting.confirmRelayNeighbor(viaNextHopHex);
       }
+    };
+
+    // L3 fix (S258): resolve peer addresses for ACK timeout scoring.
+    // Befund 3: peerHex is now the DEVICE hex of the hop actually used for
+    // the send (viaNextHopHex from sendToDeviceTracked) — try the deviceId
+    // lookup first, then fall back to the legacy userId-based resolution.
+    ackTracker.onResolveAddresses = (peerHex) {
+      final peerBytes = hexToBytes(peerHex);
+      final peers = <PeerInfo>[];
+      final byDevice = routingTable.getPeer(peerBytes);
+      if (byDevice != null) {
+        peers.add(byDevice);
+      } else {
+        peers.addAll(routingTable.getAllPeersForUserId(peerBytes));
+      }
+      final addrs = <PeerAddress>[];
+      for (final p in peers) {
+        addrs.addAll(p.allConnectionTargets().where(
+            (a) => a.isReachableFromCurrentNetwork));
+      }
+      return addrs;
     };
 
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
@@ -1802,11 +1830,10 @@ class CleonaNode {
       _zeroPeerRecoveryTimer?.cancel();
       _zeroPeerRecoveryTimer = null;
 
-      // DV-3 bias fix: receiving a direct packet (hopCount=0) proves
-      // bidirectional reachability — same as DELIVERY_RECEIPT. Without
-      // this, infra-only peers (Bootstrap ↔ Node) never get ackConfirmed,
-      // the +10 bias makes indirect routes win, and relay loops form.
-      dvRouting.confirmRoute(senderHex);
+      // L3 fix (S258): confirmRoute REMOVED from receive pipeline.
+      // Inbound packets prove receive-path only, NOT outbound reachability.
+      // ackConfirmed is set by DELIVERY_RECEIPT (RUDP Light §5.8),
+      // DHT_PONG and PEER_STORE_ACK (infra ACK mechanisms).
 
       // Cross-subnet fix (2026-05-06): for same-subnet peers, LAN multicast
       // Discovery → `_onDiscoveryReceived` → `_touchPeer` populates
@@ -1887,10 +1914,10 @@ class CleonaNode {
     // symmetry for NAT-asymmetric scenarios (e.g. mobile sends via
     // Bootstrap, we can relay back via Bootstrap).
     if (senderDeviceId.isNotEmpty && packet.hopCount > 0 && from.address != '0.0.0.0') {
-      final relayNeighborHex = _learnReverseRelayPath(senderHex, from.address, fromPort);
-      if (relayNeighborHex != null) {
-        dvRouting.confirmRoute(senderHex, viaNextHopHex: relayNeighborHex);
-      }
+      // L3 fix (S258): relay-path learning kept, confirmRoute removed.
+      // Inbound relay proves only the inbound path, not outbound via same
+      // relay. DELIVERY_RECEIPT is the only outbound proof for relay routes.
+      _learnReverseRelayPath(senderHex, from.address, fromPort);
     }
 
     // [6] Routing decision: am I the next hop?
@@ -2009,6 +2036,11 @@ class CleonaNode {
     int fromPort,
     SenderIdentitySnapshot snapshot,
   ) {
+    // Befund 15+16: direct = hopCount==0 AND a real UDP source address.
+    // Relayed packets (hopCount>0) and reassembled/S&F deliveries
+    // (from=0.0.0.0) must not let infra replies confirm direct routes.
+    final wasDirect =
+        packet.hopCount == 0 && from.address != '0.0.0.0';
     if (packet.payloadType ==
         proto.PayloadTypeV3.PAYLOAD_INFRASTRUCTURE_FRAME) {
       // Receiver pipeline (§2.4.1 [8'-14']) — inline KEM-decap with the
@@ -2038,7 +2070,7 @@ class CleonaNode {
       // else falls through to the consumer hook so the service / future
       // node-local handlers can pick it up.
       if (_dispatchInfrastructureFrameLocal(
-          frame, senderDeviceId, from, fromPort)) {
+          frame, senderDeviceId, from, fromPort, wasDirect)) {
         return;
       }
       final hook = onInfrastructureFramePayload;
@@ -2048,7 +2080,7 @@ class CleonaNode {
             '(messageType=${frame.messageType.name})');
         return;
       }
-      hook(frame, senderDeviceId, from, fromPort, snapshot);
+      hook(frame, senderDeviceId, from, fromPort, snapshot, wasDirect);
       return;
     }
 
@@ -2081,7 +2113,7 @@ class CleonaNode {
           'from ${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)}');
       final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
       if (_dispatchInfrastructureFrameLocal(
-          frame, senderDeviceId, from, fromPort)) {
+          frame, senderDeviceId, from, fromPort, wasDirect)) {
         return;
       }
       final hook = onInfrastructureFramePayload;
@@ -2091,7 +2123,7 @@ class CleonaNode {
             '(messageType=${frame.messageType.name})');
         return;
       }
-      hook(frame, senderDeviceId, from, fromPort, snapshot);
+      hook(frame, senderDeviceId, from, fromPort, snapshot, wasDirect);
       return;
     }
 
@@ -2235,7 +2267,8 @@ class CleonaNode {
       proto.InfrastructureFrameV3 frame,
       Uint8List senderDeviceId,
       InternetAddress from,
-      int fromPort) {
+      int fromPort,
+      bool wasDirect) {
     // §5.10.4 — any infrastructure frame from this device proves it's alive,
     // so the unACK'd-packets counter for it can come down. Especially for
     // DHT_PONG (Stage-2 reply) and PEER_LIST_PUSH (Stage-4 reply) where the
@@ -2413,7 +2446,8 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_STORE_RESPONSE:
-        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort);
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort,
+            wasDirect: wasDirect);
         return true;
 
       // S123 Erasure-F1: FRAGMENT_STORE_ACK must reach the service-layer
@@ -2428,7 +2462,8 @@ class CleonaNode {
       // `onInfrastructureFramePayload`, mirroring MTV3_PEER_STORE_ACK which
       // was never listed in this switch at all.
       case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
-        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort);
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort,
+            wasDirect: wasDirect);
         return false;
 
       // ── DHT request side (DHT_PING / DHT_FIND_NODE) ──────────────────
@@ -3666,7 +3701,8 @@ class CleonaNode {
       proto.MessageTypeV3 v3ResponseType,
       proto.InfrastructureFrameV3 frame,
       InternetAddress from,
-      int fromPort) {
+      int fromPort,
+      {required bool wasDirect}) {
     // F2 (S123 UDP-dead RCA): every type bridged here (DHT_PONG,
     // DHT_FIND_NODE/FIND_VALUE/STORE_RESPONSE, FRAGMENT_STORE_ACK,
     // IDENTITY_*_RESPONSE) is a reply to something WE sent — proof our
@@ -3698,6 +3734,15 @@ class CleonaNode {
         }
       } catch (_) {
         // Unparseable PONG body — proceed with DhtRpc bridge regardless.
+      }
+      // L3 fix (S258): PONG is a response to our PING — proves outbound
+      // reachability. Replaces removed receive-pipeline confirmRoute.
+      // Befund 16: only when the PONG arrived DIRECTLY (hopCount==0, real
+      // source address) — a relayed PONG must not confirm a direct route.
+      if (wasDirect) {
+        final pongSenderHex =
+            bytesToHex(Uint8List.fromList(frame.senderDeviceId));
+        dvRouting.confirmRoute(pongSenderHex);
       }
     }
 
@@ -3839,11 +3884,17 @@ class CleonaNode {
   /// Route a fully-built [NetworkPacketV3] to the device identified by
   /// [deviceId]. Iterates DV routes cheapest-first (max 3), then falls back
   /// to the default-gateway last-resort path (Architecture §4.7). Sets
-  /// `nextHopDeviceId` per attempt. Returns true on first kernel-accepted
-  /// send. No ACK tracking here — that lives in the service layer alongside
-  /// inner ApplicationFrame state. Returns false when the cascade is
-  /// exhausted; callers (cleona_service.sendToUser) own S&F orchestration.
-  Future<bool> sendToDevice(
+  /// `nextHopDeviceId` per attempt. Returns `(ok: true, viaHopHex: hop)`
+  /// on first kernel-accepted send, where `viaHopHex` is the next-hop
+  /// device hex actually used (destHex for direct sends, relay-hop hex for
+  /// relay sends, null for loopback). The service layer passes `viaHopHex`
+  /// to [AckTracker.trackSend] for surgical Route-DOWN on timeout.
+  /// No ACK tracking here — that lives in the service layer alongside
+  /// inner ApplicationFrame state. Returns `(ok: false, viaHopHex: null)`
+  /// when the cascade is exhausted; callers (cleona_service.sendToUser)
+  /// own S&F orchestration. Callers that do not need the hop use the
+  /// [sendToDevice] wrapper.
+  Future<({bool ok, String? viaHopHex})> sendToDeviceTracked(
       proto.NetworkPacketV3 packet, Uint8List deviceId,
       {String? excludeNextHopHex,
       bool isRelay = false,
@@ -3874,7 +3925,7 @@ class CleonaNode {
       );
       onApplicationFramePayload?.call(
           packet, InternetAddress('0.0.0.0'), 0, loopbackSnapshot);
-      return true;
+      return (ok: true, viaHopHex: null);
     }
 
     // §5.10.4 — wire-bound send: bump the unACK'd counter and check whether
@@ -3931,7 +3982,10 @@ class CleonaNode {
           '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
       final ok = await _sendV3ViaHop(packet, hopId);
       if (ok) {
-        return true;
+        return (
+          ok: true,
+          viaHopHex: route.isDirect ? destHex : bytesToHex(hopId),
+        );
       }
     }
     // Confirmed DV neighbor: fire-and-forget direct send, but do NOT stop
@@ -3990,7 +4044,7 @@ class CleonaNode {
       _log.warn('sendToDevice ${destHex.substring(0, 8)}: relay cascade '
           'exhausted (routes=${dvRouting.routesTo(destHex).length}), '
           'skipping neighbor spray for relayed packet');
-      return false;
+      return (ok: false, viaHopHex: null);
     }
 
     // §4.7 Relay-Candidate Reachability Filter (Part 1):
@@ -4027,7 +4081,7 @@ class CleonaNode {
           _log.info('sendToDevice ${destHex.substring(0, 8)}: '
               'fall through to default-GW ${gwHex.substring(0, 8)}');
           final ok = await _sendV3ViaHop(packet, gwBytes);
-          if (ok) return true;
+          if (ok) return (ok: true, viaHopHex: gwHex);
         }
       }
     }
@@ -4041,7 +4095,7 @@ class CleonaNode {
     if (!expectsReply) {
       _log.debug('sendToDevice ${destHex.substring(0, 8)}: fire-and-forget '
           '— skipping neighbor relay spray');
-      return false;
+      return (ok: false, viaHopHex: null);
     }
 
     // Last-resort neighbor relay: try up to _kMaxNeighborSpray eligible
@@ -4069,13 +4123,26 @@ class CleonaNode {
           'trying neighbor ${neighborHex.substring(0, 8)} as relay '
           '($neighborsTried/$kMaxNeighborSpray)');
       final ok = await _sendV3ViaHop(packet, nBytes);
-      if (ok) return true;
+      if (ok) return (ok: true, viaHopHex: neighborHex);
     }
 
     _log.warn('sendToDevice ${destHex.substring(0, 8)}: cascade exhausted '
         '(routes=${routes.length}, neighbors=$neighborsTried/$kMaxNeighborSpray)');
-    return false;
+    return (ok: false, viaHopHex: null);
   }
+
+  /// Backwards-compatible wrapper around [sendToDeviceTracked] for callers
+  /// that do not need the used next-hop (relay forwarding, infra sends).
+  Future<bool> sendToDevice(
+          proto.NetworkPacketV3 packet, Uint8List deviceId,
+          {String? excludeNextHopHex,
+          bool isRelay = false,
+          bool expectsReply = true}) async =>
+      (await sendToDeviceTracked(packet, deviceId,
+              excludeNextHopHex: excludeNextHopHex,
+              isRelay: isRelay,
+              expectsReply: expectsReply))
+          .ok;
 
   /// Internal: emit [packet] to the address(es) of the hop identified by
   /// [hopDeviceId]. Protocol Escalation per §4.1: UDP (auto-fragments
@@ -4125,7 +4192,10 @@ class CleonaNode {
 
     // §4.1 Protocol Escalation: always try UDP first (Transport.sendUdp
     // auto-fragments payloads >1200B with CFRA + NACK retry).
-    final wireSize = packet.writeToBuffer().length;
+    // Serialize once — reused for wireSize calculation and all UDP sends
+    // below, avoiding redundant protobuf serialization per address.
+    final serialized = transport.serializeWithTag(packet);
+    final wireSize = serialized.length;
     final isLargePayload = wireSize > maxFragmentPacketSize;
     // §4.1.1 Size-based TLS preference: payloads that need many UDP
     // fragments (>10) are unreliable through CGNAT — carrier NAT drops
@@ -4164,8 +4234,8 @@ class CleonaNode {
     var udpSocketError = false;
     for (final addr in targets) {
       try {
-        final ok = await transport.sendUdp(
-            packet, InternetAddress(addr.ip), addr.port);
+        final ok = await transport.sendUdpSerialized(
+            serialized, InternetAddress(addr.ip), addr.port);
         if (ok) {
           udpSentAny = true;
           // Confirmed peers with recent bidirectional proof: early-return

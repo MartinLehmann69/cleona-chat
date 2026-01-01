@@ -5,7 +5,7 @@
 // logic can be smoke-tested without sockets, timers, or a running node:
 // the actual FRAGMENT_STORE send + ACK-wait is injected via [sendAndWait]
 // (mirrors the Completer+timeout pattern used by the pre-existing F1
-// S&F path `_storeSafOnContactPeers` in cleona_service.dart) — this class
+// S&F path `_storeSafOnNetworkPeers` in cleona_service.dart) — this class
 // only decides WHO gets WHICH fragment in WHICH wave, and counts distinct
 // confirmed fragment indices.
 //

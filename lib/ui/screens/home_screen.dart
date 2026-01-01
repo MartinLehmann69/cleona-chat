@@ -280,10 +280,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         // Network Stats — combined health indicator + peer count, opens stats page
         IconButton(
           icon: Badge(
-            label: Text('${service.confirmedPeerCount}'),
-            backgroundColor: service.confirmedPeerCount >= 10
+            label: Text('${service.reachablePeerCount}'),
+            backgroundColor: service.reachablePeerCount >= 10
                 ? Colors.green
-                : service.confirmedPeerCount >= 3
+                : service.reachablePeerCount >= 3
                     ? Colors.orange
                     : colorScheme.error,
             textColor: Colors.white,
@@ -792,6 +792,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               // Fall back to plain 64-char hex Node-ID
               if (seed == null && input.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(input)) {
                 seed = ContactSeed(nodeIdHex: input, displayName: '');
+              }
+
+              if (seed == null && input.isNotEmpty) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                    content: Text(locale.get('qr_invalid')),
+                  ),
+                );
+                return;
               }
 
               if (seed != null && service != null) {
@@ -2034,6 +2044,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
               actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('ok')))],
             );
           }
+          final isSysChannel = sys_ch.SystemChannels.isSystemChannel(channelIdHex);
           final myRole = currentChannel.members[service.nodeIdHex]?.role ?? 'subscriber';
           final canManage = myRole == 'owner' || myRole == 'admin';
           final isOwner = myRole == 'owner';
@@ -2050,72 +2061,76 @@ class _ConversationListViewState extends State<_ConversationListView> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(locale.tr('subscribers_count', {'count': '${currentChannel.members.length}'}),
-                      style: theme.textTheme.titleSmall),
-                  const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: currentChannel.members.values.map((m) {
-                        final isSelf = m.nodeIdHex == service.nodeIdHex;
-                        return ListTile(
-                          dense: true,
-                          leading: Icon(
-                            m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
-                            size: 20,
-                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? theme.colorScheme.primary : null,
-                          ),
-                          title: Text('${m.displayName}${isSelf ? " ${locale.get('you_suffix')}" : ""}'),
-                          subtitle: Text(
-                            m.role == 'owner' ? locale.get('role_owner') : m.role == 'admin' ? locale.get('role_admin') : locale.get('role_subscriber'),
-                            style: TextStyle(fontSize: 11, color: m.role == 'owner' ? Colors.amber.shade700 : null),
-                          ),
-                          trailing: !isSelf && canManage
-                              ? PopupMenuButton<String>(
-                                  iconSize: 18,
-                                  padding: EdgeInsets.zero,
-                                  onSelected: (action) async {
-                                    if (action == 'remove') {
-                                      await service.removeFromChannel(channelIdHex, m.nodeIdHex);
-                                      setDialogState(() {});
-                                    } else if (action.startsWith('role_')) {
-                                      final newRole = action.substring(5);
-                                      await service.setChannelRole(channelIdHex, m.nodeIdHex, newRole);
-                                      setDialogState(() {});
-                                    }
-                                  },
-                                  itemBuilder: (_) => [
-                                    if (isOwner && m.role != 'admin')
-                                      PopupMenuItem(value: 'role_admin', child: Row(children: [
-                                        Icon(Icons.shield, size: 18), SizedBox(width: 8), Text(locale.get('make_admin')),
-                                      ])),
-                                    if (isOwner && m.role != 'subscriber')
-                                      PopupMenuItem(value: 'role_subscriber', child: Row(children: [
-                                        Icon(Icons.person, size: 18), SizedBox(width: 8), Text(locale.get('make_subscriber')),
-                                      ])),
-                                    if (isOwner)
-                                      PopupMenuItem(value: 'role_owner', child: Row(children: [
-                                        Icon(Icons.star, size: 18, color: Colors.amber), SizedBox(width: 8), Text(locale.get('transfer_ownership')),
-                                      ])),
-                                    if (canManage)
-                                      PopupMenuItem(value: 'remove', child: Row(children: [
-                                        Icon(Icons.person_remove, size: 18, color: Colors.red),
-                                        SizedBox(width: 8),
-                                        Text(locale.get('remove'), style: TextStyle(color: Colors.red)),
-                                      ])),
-                                  ],
-                                )
-                              : null,
-                        );
-                      }).toList(),
+                  if (isSysChannel) ...[
+                    Text(locale.get('channel_public'), style: theme.textTheme.titleSmall),
+                  ] else ...[
+                    Text(locale.tr('subscribers_count', {'count': '${currentChannel.members.length}'}),
+                        style: theme.textTheme.titleSmall),
+                    const SizedBox(height: 8),
+                    ConstrainedBox(
+                      constraints: const BoxConstraints(maxHeight: 280),
+                      child: ListView(
+                        shrinkWrap: true,
+                        children: currentChannel.members.values.map((m) {
+                          final isSelf = m.nodeIdHex == service.nodeIdHex;
+                          return ListTile(
+                            dense: true,
+                            leading: Icon(
+                              m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
+                              size: 20,
+                              color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? theme.colorScheme.primary : null,
+                            ),
+                            title: Text('${m.displayName}${isSelf ? " ${locale.get('you_suffix')}" : ""}'),
+                            subtitle: Text(
+                              m.role == 'owner' ? locale.get('role_owner') : m.role == 'admin' ? locale.get('role_admin') : locale.get('role_subscriber'),
+                              style: TextStyle(fontSize: 11, color: m.role == 'owner' ? Colors.amber.shade700 : null),
+                            ),
+                            trailing: !isSelf && canManage
+                                ? PopupMenuButton<String>(
+                                    iconSize: 18,
+                                    padding: EdgeInsets.zero,
+                                    onSelected: (action) async {
+                                      if (action == 'remove') {
+                                        await service.removeFromChannel(channelIdHex, m.nodeIdHex);
+                                        setDialogState(() {});
+                                      } else if (action.startsWith('role_')) {
+                                        final newRole = action.substring(5);
+                                        await service.setChannelRole(channelIdHex, m.nodeIdHex, newRole);
+                                        setDialogState(() {});
+                                      }
+                                    },
+                                    itemBuilder: (_) => [
+                                      if (isOwner && m.role != 'admin')
+                                        PopupMenuItem(value: 'role_admin', child: Row(children: [
+                                          Icon(Icons.shield, size: 18), SizedBox(width: 8), Text(locale.get('make_admin')),
+                                        ])),
+                                      if (isOwner && m.role != 'subscriber')
+                                        PopupMenuItem(value: 'role_subscriber', child: Row(children: [
+                                          Icon(Icons.person, size: 18), SizedBox(width: 8), Text(locale.get('make_subscriber')),
+                                        ])),
+                                      if (isOwner)
+                                        PopupMenuItem(value: 'role_owner', child: Row(children: [
+                                          Icon(Icons.star, size: 18, color: Colors.amber), SizedBox(width: 8), Text(locale.get('transfer_ownership')),
+                                        ])),
+                                      if (canManage)
+                                        PopupMenuItem(value: 'remove', child: Row(children: [
+                                          Icon(Icons.person_remove, size: 18, color: Colors.red),
+                                          SizedBox(width: 8),
+                                          Text(locale.get('remove'), style: TextStyle(color: Colors.red)),
+                                        ])),
+                                    ],
+                                  )
+                                : null,
+                          );
+                        }).toList(),
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
             actions: [
-              if (canManage)
+              if (canManage && !isSysChannel)
                 TextButton.icon(
                   icon: const Icon(Icons.person_add, size: 18),
                   label: Text(locale.get('invite')),
@@ -2706,7 +2721,7 @@ class _IdentityCreatingTab extends StatelessWidget {
 // ── Connection Status Icon (P2P-aware) ──────────────────────────────
 //
 // Combines OS-level connectivity (connectivity_plus) with actual P2P
-// reachability (confirmedPeerCount from CleonaNode). Four states:
+// reachability (reachablePeerCount from CleonaAppState). Four states:
 //
 //   Offline:   No network (OS reports none)
 //   Searching: Network available but 0 confirmed P2P peers
@@ -2767,7 +2782,7 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
   ///   offline (skeleton)             — No network at all
   ConnectionTier _computeTier() {
     final results = widget.appState.connectivityResults;
-    final confirmedPeers = widget.appState.confirmedPeerCount;
+    final confirmedPeers = widget.appState.reachablePeerCount;
     final hasNetwork = results.isNotEmpty &&
         !results.contains(ConnectivityResult.none);
     final hasWifi = results.contains(ConnectivityResult.wifi) ||

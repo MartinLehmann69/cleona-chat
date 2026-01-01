@@ -41,8 +41,17 @@ abstract class ICleonaService {
   Uint8List get foundingEd25519Pk;
   int get peerCount;
   /// Peers with confirmed bidirectional UDP contact this session.
-  /// Used for P2P-aware connection status icon.
+  /// Used internally for directConns stats and bug-report metadata.
   int get confirmedPeerCount;
+  // ┌─────────────────────────────────────────────────────────────────┐
+  // │ UI peer counter — SINGLE SOURCE for Home badge, Settings,     │
+  // │ Contacts, Connection-Status, and Android Foreground-Notif.     │
+  // │ Must match NetworkStats.activePeerCount and the Connection     │
+  // │ Sheet list (peerSummaries). All three use reachablePeerIds.    │
+  // │ Do NOT use confirmedPeerCount in UI — it excludes relay peers  │
+  // │ and WILL drift vs. Network Stats. See S252.                   │
+  // └─────────────────────────────────────────────────────────────────┘
+  int get reachablePeerCount;
   /// True if UPnP/PCP successfully opened an inbound port mapping OR an
   /// observed public address matches our port. Distinguishes "fully
   /// reachable (green Hulk)" from "behind-NAT outbound-only (yellow Hulk)".

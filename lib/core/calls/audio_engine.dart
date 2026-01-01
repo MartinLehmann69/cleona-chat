@@ -15,41 +15,25 @@ import 'package:cleona/core/calls/audio_engine_shim.dart';
 class _CaptureInit {
   final SendPort frameSendPort; // Send encrypted frames back to main
   final Uint8List sharedSecret; // AES-256 key
-  _CaptureInit(this.frameSendPort, this.sharedSecret);
+  final int engineAddress; // Shared native engine pointer (direction=0)
+  _CaptureInit(this.frameSendPort, this.sharedSecret, this.engineAddress);
 }
 
 /// Commands sent from main isolate to control the capture isolate.
 enum _CaptureCommand { mute, unmute, stop }
 
 /// Top-level function that runs in the capture isolate.
-/// Owns its own AudioEngineShim handle and SodiumFFI instance.
+/// Uses the SHARED native engine (created by main isolate with direction=0)
+/// so that AEC has proper far-end reference from the playback ring.
 void _captureIsolateEntry(_CaptureInit init) {
-  // Bug 2026-04-26: previously the parent created the command ReceivePort and
-  // tried to send it across `Isolate.spawn` — newer Dart SDKs reject this
-  // ("object is unsendable - _ReceivePortImpl"). The receive-port has to live
-  // in the isolate that owns it. So the child now creates its own command RX
-  // and ships its SendPort back to the parent as the first wire message; the
-  // ready-flag follows as the second message before any audio frames.
   final commandPort = ReceivePort();
   final frameSendPort = init.frameSendPort;
   frameSendPort.send(commandPort.sendPort);
 
   final shim = AudioEngineShim.load();
-  final engine = shim.create(
-    sampleRate: AudioEngine.sampleRate,
-    channels: AudioEngine.channels,
-    frameSamples: AudioEngine.samplesPerFrame,
-    ringCapacityFrames: 8,
-  );
+  final engine =
+      Pointer<CleonaAudioEngine>.fromAddress(init.engineAddress);
   if (engine.address == 0) {
-    frameSendPort.send(null);
-    commandPort.close();
-    return;
-  }
-
-  final startRc = shim.startDirected(engine, 1);
-  if (startRc != 0) {
-    shim.destroy(engine);
     frameSendPort.send(null);
     commandPort.close();
     return;
@@ -58,7 +42,6 @@ void _captureIsolateEntry(_CaptureInit init) {
   final sodium = SodiumFFI();
   final sharedSecret = init.sharedSecret;
 
-  // Signal success (second handshake message after the SendPort)
   frameSendPort.send(true);
 
   var running = true;
@@ -77,16 +60,14 @@ void _captureIsolateEntry(_CaptureInit init) {
     }
   });
 
-  // Allocate one PCM buffer (320 int16 samples = 640 bytes)
   final pcmPtr = calloc<Int16>(AudioEngine.samplesPerFrame);
 
   while (running) {
     final r = shim.captureRead(engine, pcmPtr, /*timeout_ms*/ 100);
-    if (r == -1) break; // engine stopped
+    if (r == -1) break; // engine stopped (ring closed)
     if (r == 0) continue; // timeout — retry
 
     if (!muted) {
-      // Read PCM data — view it as Uint8List for AES-GCM
       final pcmData = Uint8List.fromList(
           pcmPtr.cast<Uint8>().asTypedList(AudioEngine.frameSize));
 
@@ -104,10 +85,8 @@ void _captureIsolateEntry(_CaptureInit init) {
     }
   }
 
-  // Cleanup
   calloc.free(pcmPtr);
-  shim.stop(engine);
-  shim.destroy(engine);
+  // Engine lifecycle managed by main isolate — do NOT stop/destroy here.
 }
 
 // ── AudioEngine ───────────────────────────────────────────────────────────
@@ -115,16 +94,16 @@ void _captureIsolateEntry(_CaptureInit init) {
 /// Audio engine using the cross-platform cleona_audio shim
 /// (miniaudio + speex AEC/NS).
 ///
-/// Captures microphone audio at 16 kHz mono 16-bit PCM in a separate isolate,
-/// encrypts each 20ms frame (640 bytes) with AES-256-GCM, and provides
-/// encrypted frames for sending over UDP. Incoming encrypted frames are
-/// decrypted and pushed to the playback ring in the main isolate.
+/// A single native engine instance (direction=0, capture+playback) is shared
+/// between the main isolate (playback writes) and the capture isolate
+/// (capture reads). This ensures the speexdsp AEC has proper far-end
+/// reference from the playback ring — required for echo cancellation.
 class AudioEngine {
   final Uint8List sharedSecret; // 32 bytes AES-256 key
   final CLogger _log;
   final SodiumFFI _sodium = SodiumFFI();
 
-  // Shim handle (main isolate — playback only; capture-isolate has its own)
+  // Shim handle — single shared engine for capture+playback (AEC needs both)
   late final AudioEngineShim _shim;
   Pointer<CleonaAudioEngine>? _engine;
 
@@ -162,10 +141,12 @@ class AudioEngine {
   }
 
   /// Start audio capture (in isolate) and playback (in main isolate).
+  /// Both share one native engine (direction=0) so AEC works.
   Future<bool> start() async {
     if (_running) return true;
 
-    // Open playback engine in main isolate
+    // Single engine for both capture and playback — AEC needs the
+    // far_end_ring to connect playback output to the capture callback.
     _engine = _shim.create(
       sampleRate: sampleRate,
       channels: channels,
@@ -176,7 +157,7 @@ class AudioEngine {
       _log.error('cleona_audio_create failed');
       return false;
     }
-    final startRc = _shim.startDirected(_engine!, 2);
+    final startRc = _shim.startDirected(_engine!, 0);
     if (startRc != 0) {
       _log.error('cleona_audio_start failed: rc=$startRc');
       _shim.destroy(_engine!);
@@ -186,7 +167,7 @@ class AudioEngine {
 
     _playbackPcmPtr = calloc<Int16>(samplesPerFrame);
 
-    // Start capture isolate (which has its OWN shim handle)
+    // Capture isolate shares the same native engine via pointer address.
     final ok = await _startCaptureIsolate();
     if (!ok) {
       _log.error('Capture isolate failed to start');
@@ -200,17 +181,18 @@ class AudioEngine {
 
     _running = true;
     _log.info(
-        'Audio engine started (cross-platform shim, capture in isolate)');
+        'Audio engine started (shared engine, AEC active)');
     return true;
   }
 
   Future<bool> _startCaptureIsolate() async {
     _frameReceivePort = ReceivePort();
-    final init = _CaptureInit(_frameReceivePort!.sendPort, sharedSecret);
+    final init = _CaptureInit(
+      _frameReceivePort!.sendPort,
+      sharedSecret,
+      _engine!.address,
+    );
 
-    // Two-stage handshake: child sends back its command SendPort first,
-    // then a ready-flag (true/null), then audio frames. See the
-    // _captureIsolateEntry comment for the rationale.
     final commandPortCompleter = Completer<SendPort>();
     final readyCompleter = Completer<bool>();
 
@@ -219,7 +201,6 @@ class AudioEngine {
         if (message is SendPort) {
           commandPortCompleter.complete(message);
         } else {
-          // Child died before sending the command port.
           commandPortCompleter.completeError(
               StateError('capture isolate did not send command port'));
         }
@@ -260,7 +241,6 @@ class AudioEngine {
       return false;
     }
 
-    // Apply current mute state
     if (_muted) {
       _captureCommandPort?.send(_CaptureCommand.mute);
     }
@@ -276,7 +256,6 @@ class AudioEngine {
     if (pcmData == null) return;
     if (pcmData.length != frameSize) return;
 
-    // Copy decrypted PCM bytes into the int16 pointer
     final byteView = _playbackPcmPtr!.cast<Uint8>().asTypedList(frameSize);
     byteView.setAll(0, pcmData);
 
@@ -288,7 +267,6 @@ class AudioEngine {
     if (packet.length < 16 + cryptoAeadAes256GcmABytes) return null;
 
     try {
-      // Skip seqNum(4), extract nonce(12), then ciphertext
       final nonce = Uint8List.sublistView(packet, 4, 16);
       final ciphertext = Uint8List.sublistView(packet, 16);
       return _sodium.aesGcmDecrypt(ciphertext, sharedSecret, nonce);
@@ -299,6 +277,8 @@ class AudioEngine {
   }
 
   /// Stop audio engine.
+  /// Shutdown order: close rings (wakes blocked captureRead) → wait for
+  /// capture isolate exit → destroy native engine. Prevents use-after-free.
   void stop() {
     if (!_running) return;
     _running = false;
@@ -306,7 +286,20 @@ class AudioEngine {
     _frameSubscription?.cancel();
     _frameSubscription = null;
 
+    // Signal capture isolate to exit, then close rings to unblock captureRead.
     _captureCommandPort?.send(_CaptureCommand.stop);
+
+    // stop() closes the capture_ring, which makes captureRead return -1
+    // and breaks the isolate's while loop. The isolate exits cleanly.
+    if (_engine != null) {
+      try {
+        _shim.stop(_engine!);
+      } catch (e) {
+        _log.warn('cleona_audio stop threw: $e');
+      }
+    }
+
+    // Kill isolate (belt-and-suspenders after ring close).
     _captureIsolate?.kill(priority: Isolate.beforeNextEvent);
     _captureIsolate = null;
     _captureCommandPort = null;
@@ -315,10 +308,9 @@ class AudioEngine {
 
     if (_engine != null) {
       try {
-        _shim.stop(_engine!);
         _shim.destroy(_engine!);
       } catch (e) {
-        _log.warn('cleona_audio stop/destroy threw: $e');
+        _log.warn('cleona_audio destroy threw: $e');
       }
       _engine = null;
     }

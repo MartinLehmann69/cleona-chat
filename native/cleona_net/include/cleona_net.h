@@ -133,6 +133,23 @@ CLEONA_NET_EXPORT int cleona_udp_sendto_fd(
     int len);
 
 /*
+ * Send on an EXISTING file descriptor to an IPv6 destination.
+ * Used on Android/iOS where Dart's RawDatagramSocket owns the fd and we
+ * just need native sendto() for errno visibility.
+ *
+ * Scope-id suffixes (%eth0) are stripped before parsing.
+ *
+ * Returns: bytes sent on success, or negative errno on failure.
+ * Does NOT close or modify the fd in any way.
+ */
+CLEONA_NET_EXPORT int cleona_udp_sendto_fd6(
+    int fd,
+    const char* dest_ip6,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len);
+
+/*
  * Find an open UDP4 socket fd bound to [local_port] in this process.
  * Scans /proc/self/fd + getsockname(). POSIX-only (Linux/Android).
  *

@@ -19,6 +19,7 @@ import 'package:cleona/core/dht/channel_index.dart';
 import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
 import 'package:cleona/core/dht/mailbox_store.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/identity_resolution/auth_manifest.dart';
 import 'package:cleona/core/identity_resolution/device_delegation.dart';
 import 'package:cleona/core/identity_resolution/rotation_co_auth.dart';
 import 'package:cleona/core/identity_resolution/linked_device_keys.dart';
@@ -197,12 +198,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Wall-clock of the most recent fired notification per conversation.
   /// Used for the per-conv 2s debounce that protects against group-chat bursts.
   final Map<String, DateTime> _lastNotifiedAt = {};
-  /// Maximum age (ms) of an incoming message that still triggers a notification.
-  /// Older messages are treated as backlog (startup re-poll, daemon restart,
-  /// store-and-forward catch-up) and only update the badge silently.
-  static const int _notificationStaleThresholdMs = 30000;
+  /// Maximum age (ms) of an incoming message that still triggers a notification
+  /// during the startup catch-up phase. After catch-up ends, no age-based
+  /// suppression applies — Doze-delayed and S&F messages notify normally.
+  static const int _notificationStaleThresholdMs = 60000;
   /// Minimum spacing (ms) between two notifications for the same conversation.
   static const int _notificationDebounceMs = 2000;
+  /// True during the first 30s after init — startup backlog is age-filtered.
+  /// After catch-up, stale suppression is disabled (Doze/S&F messages pass).
+  bool _inStartupCatchUp = true;
 
   /// Extracted moderation sub-service (§9.3 jury, §9.4 reports, channel index gossip).
   late final ChannelModerationService _moderation;
@@ -396,16 +400,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // but at low frequency after the initial burst (~10 attempts in 20min).
   final Map<String, int> _crRetryCountPerContact = {};
   // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
-  // Per-contact last end-to-end-confirmed ACK (any message type).
-  // Proves reachability to the contact — stops CR-Response retry flooding
-  // on CGNAT peers where DELIVERY_RECEIPTs arrive only via relay and thus
-  // never flip dvRouting's direct-only ackConfirmed flag.
-  final Map<String, DateTime> _contactLastAckedAt = {};
   // Contacts for which the sender-side stale warning has already been written
   // into the conversation. Prevents duplicate warnings; cleared on the next
   // ACK (contact is alive) or re-acceptance.
   final Set<String> _staleWarningWrittenFor = {};
-  final Set<String> _autoRepairAttempted = {};
+  // §5.5 receiver-side: per-sender PEER_STORE rate limit (max 10/hour).
+  final Map<String, List<DateTime>> _peerStoreRateLog = {};
   // GM-2 (§9.1.4): track per-group last epoch for which a RESYNC_REQUEST was sent
   // to avoid flooding the owner. Key = groupIdHex, value = epoch that triggered it.
   final Map<String, int> _resyncRequestedAtEpoch = {};
@@ -477,7 +477,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.151';
+  static const String kCurrentAppVersion = '3.1.152';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -559,6 +559,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Future<void> startService() async {
     serviceStartedAt = DateTime.now();
     _log.info('Starting CleonaService "$displayName"...');
+
+    // §12.5 S254: startup catch-up phase — age-based notification suppression
+    // only applies during the first 30s. After that, Doze-delayed and S&F
+    // messages trigger notifications normally.
+    _inStartupCatchUp = true;
+    Future.delayed(const Duration(seconds: 30), () => _inStartupCatchUp = false);
 
     // Ensure profile dir exists
     Directory(profileDir).createSync(recursive: true);
@@ -1055,26 +1061,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       prevAckReceived?.call(msgIdHex, recipientHex, wasDirect);
 
       final now = DateTime.now();
-      _contactLastAckedAt[recipientHex] = now;
       _staleWarningWrittenFor.remove(recipientHex);
       for (final entry in _contacts.entries) {
         if (entry.key == recipientHex ||
             entry.value.deviceNodeIds.contains(recipientHex)) {
-          _contactLastAckedAt[entry.key] = now;
+          entry.value.lastAckedAt = now;
           _staleWarningWrittenFor.remove(entry.key);
-          _autoRepairAttempted.remove(entry.key);
-          // §4.11.10 scanner-side session end: a DELIVERY_RECEIPT from this
-          // contact proves end-to-end reachability — the First-Contact
-          // rendezvous session (if any) is complete. Cheap no-op otherwise.
           _fcRendezvous?.onCrConfirmed(entry.key);
           return;
         }
       }
       _fcRendezvous?.onCrConfirmed(recipientHex);
     };
-
-    // Mutual Peer Selection for S&F (Architecture Section 3.3.7).
-    node.getMutualPeerIds = _computeMutualPeerIds;
 
     // Contact device resolution for onRouteDown userId→device fallback
     // and PEER_LIST_WANT IPv6 refresh.
@@ -1090,31 +1088,34 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (pk != null && pk.isNotEmpty) return pk;
       return prevContactPkLookup?.call(userId);
     };
-    node.identityResolver.onContactKeyMismatch ??= (userId, embeddedPk) {
+    node.identityResolver.onContactKeyMismatch ??= (userId, embeddedPk, manifest) {
       final userHex = bytesToHex(userId);
       final contact = _contacts[userHex];
-      final storedPkHex = contact?.ed25519Pk != null
-          ? bytesToHex(contact!.ed25519Pk!).substring(0, 16)
-          : '<null>';
+      if (contact == null) return;
 
-      // Self-Heal: if the AuthManifest key is provably correct (user-ID
-      // binding SHA-256(secret + pk) == userId), update the stale stored key.
-      final derivedUserId = HdWallet.computeUserId(embeddedPk, NetworkSecret.secret);
-      if (constantTimeEquals(derivedUserId, userId) && contact != null) {
+      // A8 D1 Self-Heal: check Pfad 1 (Founding-Hash) + Pfad 2 (Rotationskette).
+      // contactEd25519Pk: null — Pfad 3 (Contact-Match) is excluded by definition
+      // (this callback fires exactly on contact-mismatch; Fable L1).
+      final status = manifest.verifySelfCertified(
+        deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.secret),
+        contactEd25519Pk: null,
+      );
+
+      if (status == AnchorStatus.verified) {
+        final oldPkHex = contact.ed25519Pk != null
+            ? bytesToHex(contact.ed25519Pk!).substring(0, 16) : '<null>';
         contact.ed25519Pk = Uint8List.fromList(embeddedPk);
         _saveContacts();
         _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
-            '$storedPkHex… replaced with AuthManifest key '
+            '$oldPkHex… replaced with AuthManifest key '
             '${bytesToHex(embeddedPk).substring(0, 16)}… '
-            '(user-ID binding verified)');
+            '(verifySelfCertified: founding-hash or rotation-chain)');
         return;
       }
 
-      _log.warn('D1 trust anchor: AuthManifest fuer Kontakt '
-          '${userHex.substring(0, 16)}… traegt User-Key '
-          '${bytesToHex(embeddedPk).substring(0, 16)}…, '
-          'gespeichert=$storedPkHex… — Record verworfen '
-          '(§4.3 contact continuity, user-ID binding mismatch)');
+      _log.warn('D1 trust anchor: contact ${userHex.substring(0, 8)} key mismatch '
+          '(status=$status) — Record verworfen '
+          '(§4.3 contact continuity)');
     };
 
     // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't
@@ -1425,7 +1426,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final nowDt = DateTime.now();
     _lastNotifiedAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 1);
     _lastCrRetryPerContact.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
-    _contactLastAckedAt.removeWhere((_, ts) => nowDt.difference(ts).inDays > 1);
+    _peerStoreRateLog.removeWhere((_, log) => log.isEmpty ||
+        log.every((ts) => nowDt.difference(ts).inHours > 1));
     _resyncRequestedAtEpoch.removeWhere((_, epoch) => epoch > 0 &&
         nowDt.millisecondsSinceEpoch ~/ 1000 - epoch > 86400);
   }
@@ -3527,15 +3529,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
       for (final dev in devices) {
-        final ok = await node.sendToDevice(packet, dev.deviceNodeId);
-        if (ok) {
+        final res = await node.sendToDeviceTracked(packet, dev.deviceNodeId);
+        if (res.ok) {
           _log.info('L1 retry: direct delivery OK for '
               '${messageIdHex.substring(0, 8)} → re-tracking ACK');
+          // Befund 2: relay sends (hop != destination device) need the 8s
+          // relay floor from computeTimeout(hopCount: 2).
+          final destDevHex = bytesToHex(dev.deviceNodeId);
+          final wasRelay =
+              res.viaHopHex != null && res.viaHopHex != destDevHex;
           unawaited(node.ackTracker.trackSend(
             messageIdHex,
             recipientHex,
             const <PeerAddress>[],
-            AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+            AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
+                hopCount: wasRelay ? 2 : 1),
+            viaNextHopHex: res.viaHopHex,
             serializedPacket: serializedPacket,
             recipientUserId: recipientUserId,
           ));
@@ -3579,15 +3588,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
     for (final devHex in contact.deviceNodeIds) {
       final devId = hexToBytes(devHex);
-      final ok = await node.sendToDevice(packet, devId);
-      if (ok) {
+      final res = await node.sendToDeviceTracked(packet, devId);
+      if (res.ok) {
         _log.info('L1 retry: legacy delivery OK for '
             '${messageIdHex.substring(0, 8)} → re-tracking ACK');
+        // Befund 2: relay sends (hop != destination device) need the 8s
+        // relay floor from computeTimeout(hopCount: 2).
+        final wasRelay = res.viaHopHex != null && res.viaHopHex != devHex;
         unawaited(node.ackTracker.trackSend(
           messageIdHex,
           recipientHex,
           const <PeerAddress>[],
-          AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+          AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
+              hopCount: wasRelay ? 2 : 1),
+          viaNextHopHex: res.viaHopHex,
           serializedPacket: serializedPacket,
           recipientUserId: recipientUserId,
         ));
@@ -3615,28 +3629,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final recipientHex = bytesToHex(recipientUserId);
     final contact = _contacts[recipientHex];
 
-    // §5.4: Erasure-coded backup on DHT
-    final fragmentBundleId =
-        SodiumFFI().sha256(serializedPacket).sublist(0, 16);
-    final erasureOk = await _distributeErasureFragments(
-      packetBytes: serializedPacket,
-      messageId: fragmentBundleId,
-      recipientUserEd25519Pk: contact?.ed25519Pk,
-      recipientUserNodeId: recipientUserId,
-    );
+    // §5.1: size-based L3 branching — only ONE of S&F or Erasure fires
+    final useErasure = serializedPacket.length > _l3SizeThresholdBytes;
+    bool l3Ok;
+    if (useErasure) {
+      final fragmentBundleId =
+          SodiumFFI().sha256(serializedPacket).sublist(0, 16);
+      l3Ok = await _distributeErasureFragments(
+        packetBytes: serializedPacket,
+        messageId: fragmentBundleId,
+        recipientUserEd25519Pk: contact?.ed25519Pk,
+        recipientUserNodeId: recipientUserId,
+      );
+    } else {
+      l3Ok = await _storeSafOnNetworkPeers(
+        recipientUserId: recipientUserId,
+        wrappedEnvelope: serializedPacket,
+      );
+    }
 
-    // §5.5: S&F copy on mutual peers (S121 F1: ACK-verified placement)
-    final safOk = await _storeSafOnContactPeers(
-      recipientUserId: recipientUserId,
-      wrappedEnvelope: serializedPacket,
-    );
-
-    if (erasureOk || safOk) {
+    if (l3Ok) {
       _updateMessageStatusById(
           messageIdHex, recipientHex, MessageStatus.queuedOffline);
+      _log.info('L3 placed via ${useErasure ? "erasure" : "S&F"}: $messageIdHex');
     } else {
-      // Neither erasure nor S&F succeeded — park in outbox for retry on
-      // next network-change edge (the outbox flush runs L1→L2→L3).
       _addToOutbox(
         messageIdHex: messageIdHex,
         recipientUserIdHex: recipientHex,
@@ -3644,21 +3660,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             contact?.ed25519Pk != null ? bytesToHex(contact!.ed25519Pk!) : null,
         canonicalPacket: serializedPacket,
       );
-      _log.warn('Offline cascade failed (erasure=$erasureOk, saf=$safOk) '
+      _log.warn('L3 ${useErasure ? "erasure" : "S&F"} failed '
           '— $messageIdHex parked in outbox');
     }
   }
 
-  /// §5.5 F4(a) (S121): infrastructure-node S&F policy — when true, this
-  /// node stores PEER_STORE messages for ANY recipient (within budgets),
-  /// not only for its own accepted contacts. Set by bootstrap
-  /// runners; GUI daemons and mobile devices keep contact-only storage.
-  bool acceptAnyPeerStore = false;
+  /// §5.1 size threshold: messages <= this use S&F, larger use Erasure.
+  static const int _l3SizeThresholdBytes = 10240;
 
-  /// §5.5 (S121 F1): pending PEER_STORE ACKs keyed by storeIdHex. The
-  /// storage peer answers every store with `PEER_STORE_ACK{accepted}` —
-  /// accepted=false when the recipient is not ITS accepted contact
-  /// (receiver-enforced mutuality, §5.5 criterion 3).
+  /// §5.5: pending PEER_STORE ACKs keyed by storeIdHex. The storage peer
+  /// answers every store with `PEER_STORE_ACK{accepted}` — accepted=false
+  /// only when budget/rate-limit/size limits are exceeded.
   final Map<String, Completer<bool>> _pendingPeerStoreAcks = {};
 
   /// Per-store ACK wait. 8 s covers relay paths (min relay ACK budget §2).
@@ -3671,7 +3683,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// S121 F1 — the sender could never distinguish accepted from rejected
   /// or lost stores).
   void handleIncomingPeerStoreAckInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
+      {bool wasDirect = false}) {
+    // L3 fix (S258): PEER_STORE_ACK is a response to our PEER_STORE —
+    // proves outbound reachability to this infra peer. Befund 15: only
+    // when the ACK arrived DIRECTLY (hopCount==0, real source address) —
+    // a relayed ACK must not confirm a direct route to the storage peer.
+    if (wasDirect) {
+      final senderHex = bytesToHex(senderDeviceId);
+      node.dvRouting.confirmRoute(senderHex);
+    }
     try {
       final ack = proto.PeerStoreAck.fromBuffer(frame.payload);
       final storeIdHex = bytesToHex(Uint8List.fromList(ack.storeId));
@@ -3682,26 +3703,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     } catch (_) {/* malformed ACK — ignore */}
   }
 
-  /// §5.5: Store a complete message copy on mutual peers with ACK-verified
-  /// placement (S121 F1). Spec: "the sender detects [a rejected store] via
-  /// a missing PEER_STORE_ACK and can try the next candidate."
-  ///
-  /// Sends in waves toward [_safTargetCopies] confirmed copies, drawing
-  /// fresh candidates per wave until the pool is dry. Success = at least
-  /// one storage peer ACCEPTED. Pre-F1 this was fire-and-forget and
-  /// returned true for merely attempting — the cascade then reported
-  /// queuedOffline although every store had been rejected or lost
-  /// (field evidence 2026-07-03, Martin→Eierphone).
-  Future<bool> _storeSafOnContactPeers({
+  /// §5.5: Store a complete message copy on network peers with ACK-verified
+  /// placement. Sends in waves toward [_safTargetCopies] confirmed copies,
+  /// drawing fresh candidates per wave until the pool is dry. Success = at
+  /// least one storage peer ACCEPTED.
+  Future<bool> _storeSafOnNetworkPeers({
     required Uint8List recipientUserId,
     required Uint8List wrappedEnvelope,
   }) async {
     // Draw a deep candidate pool (3 waves worth) so rejected stores can
     // fall through to the next candidates per spec.
-    final pool = _findContactPeerDeviceIds(recipientUserId,
+    final pool = _findStoragePeerDeviceIds(recipientUserId,
         limit: _safTargetCopies * 3);
     if (pool.isEmpty) {
-      _log.debug('S&F: no mutual peers for ${_hexShort(recipientUserId)}');
+      _log.debug('S&F: no storage peers for ${_hexShort(recipientUserId)}');
       return false;
     }
 
@@ -3756,11 +3771,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return true;
   }
 
-  /// §5.5: Find contacts that are likely mutual peers (both sender and
-  /// recipient know them). Heuristic: accepted contacts with a known
-  /// deviceNodeId in the routing table (i.e. online and reachable).
-  /// Excludes the recipient itself.
-  List<Uint8List> _findContactPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
+  /// §5.5: Find storage peers for S&F offline delivery. Tier 1: accepted
+  /// contacts (high confidence the recipient knows them). Tier 2: confirmed
+  /// routing-table peers (the recipient polls confirmed peers via
+  /// PEER_RETRIEVE). Excludes the recipient itself.
+  List<Uint8List> _findStoragePeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
     final recipientHex = bytesToHex(recipientUserId);
     final selfDeviceHex = identity.deviceNodeIdHex;
     final recipientContact = _contacts[recipientHex];
@@ -3794,17 +3809,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    // Phase 2: routing table peers (e.g. Bootstrap) as fallback candidates.
-    // Structurally guaranteed slots: Phase-1 contacts may ALL reject the
-    // store (recipient is not THEIR contact), so infra nodes with
-    // acceptAnyPeerStore must survive the pool limit for wave-retry to
-    // reach them. S142 RCA: Bootstrap was excluded because isEmpty guard
-    // blocked Phase 2; S200 RCA: global sort + take(limit) displaced
-    // Phase-2 when Phase-1 had ≥ limit entries (≥9 confirmed contacts).
-    // Fix: cap each phase independently, no global re-sort — waves process
-    // the pool sequentially so Phase-1 (§5.5 mutual-peer preference) is
-    // tried first, Phase-2 (infra fallback) is guaranteed at the tail.
-    final reservedSlots = _safTargetCopies; // 3 slots for infra peers
+    // Phase 2: confirmed routing-table peers as fallback. Reserved slots
+    // ensure Tier-2 diversity even when Tier-1 has enough contacts.
+    // Only confirmed peers qualify — the receiver polls confirmed peers
+    // via PEER_RETRIEVE, and push-on-store requires confirmed status.
+    final reservedSlots = _safTargetCopies;
     final phase1Cap = limit > reservedSlots ? limit - reservedSlots : 0;
     phase1.sort((a, b) => b.$2.compareTo(a.$2));
 
@@ -4451,6 +4460,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // _retryPendingContactRequests regardless of the initial send result.
     // Return true so the UI shows "sent" rather than "failed" — the retry
     // timer handles delivery even when the routing table isn't warm yet.
+    _startCrRetryTimer();
     return true;
   }
 
@@ -4764,7 +4774,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     contact.acceptedAt ??= DateTime.now();
     _crRetryCountPerContact.remove(nodeIdHex);
     _staleWarningWrittenFor.remove(nodeIdHex);
-    _autoRepairAttempted.remove(nodeIdHex);
+    contact.lastAckedAt = DateTime.now();
     _saveContacts();
     // A newly-accepted contact may carry a birthday set locally; refresh.
     _syncCalendarBirthdays();
@@ -4931,7 +4941,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final now = DateTime.now();
     if (now.difference(acceptedAt) < staleThreshold) return;
 
-    final lastAck = _contactLastAckedAt[userIdHex];
+    final lastAck = contact.lastAckedAt;
     if (lastAck != null && now.difference(lastAck) < staleThreshold) return;
 
     final conv = conversations[userIdHex];
@@ -5057,7 +5067,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // proves end-to-end reachability (works for direct AND relay receipts —
       // critical for CGNAT peers where receipts only arrive via relay and
       // dvRouting.confirmRoute is never called).
-      final lastAck = _contactLastAckedAt[entry.key];
+      final lastAck = contact.lastAckedAt;
       if (lastAck != null &&
           contact.acceptedAt != null &&
           lastAck.isAfter(contact.acceptedAt!)) {
@@ -5106,14 +5116,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     for (final entry in _contacts.entries) {
       final contact = entry.value;
       if (contact.status != 'accepted') continue;
-      if (_autoRepairAttempted.contains(entry.key)) continue;
+      if (contact.autoRepairAttempted) continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
       final acceptedAt = contact.acceptedAt;
       if (acceptedAt == null || now.difference(acceptedAt) < staleThreshold) continue;
-      final lastAck = _contactLastAckedAt[entry.key];
+      final lastAck = contact.lastAckedAt;
       if (lastAck != null && now.difference(lastAck) < staleThreshold) continue;
 
-      _autoRepairAttempted.add(entry.key);
+      contact.autoRepairAttempted = true;
+      _saveContacts();
       _log.event('AUTO-REPAIR: sending re-contact CR to stale contact '
           '${contact.displayName} (${entry.key.substring(0, 8)})');
       sendContactRequest(entry.key);
@@ -5129,11 +5140,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         DateTime.now().difference(c.acceptedAt!).inMinutes < 5);
     final hasStaleContacts = _contacts.entries.any((e) =>
         e.value.status == 'accepted' &&
-        !_autoRepairAttempted.contains(e.key) &&
+        !e.value.autoRepairAttempted &&
         e.value.acceptedAt != null &&
         DateTime.now().difference(e.value.acceptedAt!).inDays >= 7 &&
-        (_contactLastAckedAt[e.key] == null ||
-            DateTime.now().difference(_contactLastAckedAt[e.key]!).inDays >= 7));
+        (e.value.lastAckedAt == null ||
+            DateTime.now().difference(e.value.lastAckedAt!).inDays >= 7));
     if (hasPending || hasRecentAccepted || hasStaleContacts) {
       _crRetryTimer = Timer(const Duration(seconds: 30), () {
         _crRetryTimer = null;
@@ -5306,20 +5317,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// Decide whether the in-app notification (sound + vibrate + Android banner)
-  /// for an incoming message should be suppressed. Three independent layers:
+  /// for an incoming message should be suppressed. Five layers (§12.5 / §15.5):
   ///
   ///   L1 — Foreground active conversation: chat is already on screen.
-  ///   L2 — Stale backlog: message timestamp older than [_notificationStaleThresholdMs].
-  ///        Covers startup re-poll, daemon restart, S&F catch-up — the user
-  ///        either already saw these elsewhere or there is no point in beeping
-  ///        about old news.
-  ///   L3 — Per-conversation debounce: at most one notification every
-  ///        [_notificationDebounceMs] ms per conversation, against group-chat
-  ///        spam-bursts.
+  ///   L2 — Per-conversation/type notification setting.
+  ///   L3 — Stale backlog (startup only): during the first 30s after init,
+  ///        messages older than 60s (sender clock) are suppressed. After
+  ///        catch-up, no age-based suppression — Doze-delayed and S&F
+  ///        messages notify normally.
+  ///   L4 — Per-conversation debounce: at most one notification every
+  ///        [_notificationDebounceMs] ms per conversation.
+  ///
+  /// L5 (_isAppResumed gate) lives in [_postAndroidNotification] and only
+  /// affects the Android system notification, not in-app sound/vibrate.
   ///
   /// Badge updates run in a different code path and are NOT gated by this.
   bool _shouldSuppressNotification(String conversationId, int messageTimestampMs) {
+    // L1: active conversation on screen
     if (_isAppResumed && _activeConversationId == conversationId) return true;
+    // L2: per-conversation/type notification setting
     final conv = conversations[conversationId];
     if (conv != null) {
       final enabled = conv.notificationsEnabled ??
@@ -5327,8 +5343,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
               isGroup: conv.isGroup, isChannel: conv.isChannel);
       if (!enabled) return true;
     }
-    final ageMs = DateTime.now().millisecondsSinceEpoch - messageTimestampMs;
-    if (ageMs > _notificationStaleThresholdMs) return true;
+    // L3: stale backlog — only during startup catch-up phase
+    if (_inStartupCatchUp) {
+      final ageMs = DateTime.now().millisecondsSinceEpoch - messageTimestampMs;
+      if (ageMs > _notificationStaleThresholdMs) return true;
+    }
+    // L4: per-conversation debounce
     final last = _lastNotifiedAt[conversationId];
     if (last != null &&
         DateTime.now().difference(last).inMilliseconds < _notificationDebounceMs) {
@@ -5381,32 +5401,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Compute set of nodeIdHex that the recipient is likely to know.
   /// Sources: shared contacts (bidirectional) + shared group members.
-  Set<String> _computeMutualPeerIds(Uint8List recipientUserId) {
-    final recipientHex = bytesToHex(recipientUserId);
-    final mutual = <String>{};
-
-    // Source 1: Our accepted contacts — the recipient likely knows them too
-    // (contacts are bidirectional: if we accepted them, they accepted us).
-    for (final contact in _contacts.values) {
-      if (contact.status == 'accepted' && contact.nodeIdHex != recipientHex) {
-        mutual.add(contact.nodeIdHex);
-      }
-    }
-
-    // Source 2: Shared group members — groups where recipient is a member.
-    for (final group in _groups.values) {
-      if (group.members.containsKey(recipientHex)) {
-        for (final memberHex in group.members.keys) {
-          if (memberHex != recipientHex && memberHex != identity.userIdHex) {
-            mutual.add(memberHex);
-          }
-        }
-      }
-    }
-
-    return mutual;
-  }
-
   // ── ServiceContext implementation ───────────────────────────────
 
   @override
@@ -7170,18 +7164,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// §5.8: Add a message to the one-shot outbox.
+  static const _latestWinsTypes = {
+    'MTV3_CONTACT_REQUEST', 'MTV3_CONTACT_REQUEST_RESPONSE',
+    'MTV3_KEY_ROTATION_BROADCAST',
+  };
+
   void _addToOutbox({
     required String messageIdHex,
     required String recipientUserIdHex,
     String? recipientEd25519PkHex,
     required Uint8List canonicalPacket,
+    String? messageType,
   }) {
+    // A7 Latest-Wins: for semantically idempotent system messages, only the
+    // latest outbox entry per (recipient, type) matters.
+    if (messageType != null && _latestWinsTypes.contains(messageType)) {
+      _outbox.removeWhere((_, e) =>
+          e.recipientUserIdHex == recipientUserIdHex &&
+          e.messageType == messageType);
+    }
     _outbox[messageIdHex] = _OutboxEntry(
       messageIdHex: messageIdHex,
       recipientUserIdHex: recipientUserIdHex,
       recipientEd25519PkHex: recipientEd25519PkHex,
       canonicalPacketB64: base64Encode(canonicalPacket),
       sentAtMs: DateTime.now().millisecondsSinceEpoch,
+      messageType: messageType,
     );
     _saveOutbox();
     _log.info('Outbox: parked $messageIdHex → ${recipientUserIdHex.substring(0, 8)} '
@@ -7245,6 +7253,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
         // ── Layer 1+2: Try direct delivery first ──
         var directOk = false;
+        String? sentViaHopHex;
+        String? sentDestDevHex;
         final devices = await node.identityResolver
             .resolve(recipientUserId);
         if (devices.isNotEmpty) {
@@ -7254,10 +7264,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           // Transport.serializeWithTag on the wire path).
           packet.timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
           for (final dev in devices) {
-            final ok = await node.sendToDevice(
+            final res = await node.sendToDeviceTracked(
               packet, dev.deviceNodeId);
-            if (ok) {
+            if (res.ok) {
               directOk = true;
+              sentViaHopHex = res.viaHopHex;
+              sentDestDevHex = bytesToHex(dev.deviceNodeId);
               break;
             }
           }
@@ -7271,44 +7283,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           _log.info('Outbox flush: re-sent '
               '${entry.messageIdHex.substring(0, 8)} → sent (awaiting receipt)');
           final baseRtt = node.dhtRpc.getRtt(recipientUserId);
-          final timeout = AckTracker.computeTimeout(baseRtt);
+          // Befund 2: relay sends (hop != destination device) need the 8s
+          // relay floor from computeTimeout(hopCount: 2).
+          final wasRelay =
+              sentViaHopHex != null && sentViaHopHex != sentDestDevHex;
+          final timeout =
+              AckTracker.computeTimeout(baseRtt, hopCount: wasRelay ? 2 : 1);
           unawaited(node.ackTracker.trackSend(
             entry.messageIdHex,
             entry.recipientUserIdHex,
             const <PeerAddress>[],
             timeout,
+            viaNextHopHex: sentViaHopHex,
             serializedPacket: canonicalBytes,
             recipientUserId: recipientUserId,
           ));
           continue;
         }
 
-        // ── Layer 3: Erasure + S&F fallback ──
-        final fragmentBundleId =
-            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-        final recipientEd25519Pk = entry.recipientEd25519PkHex != null
-            ? hexToBytes(entry.recipientEd25519PkHex!)
-            : null;
+        // ── Layer 3: size-based S&F or Erasure ──
+        if (!_outbox.containsKey(entry.messageIdHex)) continue;
+        final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
+        bool l3Ok;
+        if (useErasure) {
+          final fragmentBundleId =
+              SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+          final recipientEd25519Pk = entry.recipientEd25519PkHex != null
+              ? hexToBytes(entry.recipientEd25519PkHex!)
+              : null;
+          l3Ok = await _distributeErasureFragments(
+            packetBytes: canonicalBytes,
+            messageId: Uint8List.fromList(fragmentBundleId),
+            recipientUserEd25519Pk: recipientEd25519Pk,
+            recipientUserNodeId: recipientUserId,
+          );
+        } else {
+          l3Ok = await _storeSafOnNetworkPeers(
+            recipientUserId: recipientUserId,
+            wrappedEnvelope: canonicalBytes,
+          );
+        }
 
-        final erasureOk = await _distributeErasureFragments(
-          packetBytes: canonicalBytes,
-          messageId: Uint8List.fromList(fragmentBundleId),
-          recipientUserEd25519Pk: recipientEd25519Pk,
-          recipientUserNodeId: recipientUserId,
-        );
-        final safOk = await _storeSafOnContactPeers(
-          recipientUserId: recipientUserId,
-          wrappedEnvelope: canonicalBytes,
-        );
-
-        if (erasureOk || safOk) {
+        if (l3Ok) {
           toRemove.add(entry.messageIdHex);
           _updateMessageStatusById(
               entry.messageIdHex,
               entry.recipientUserIdHex,
               MessageStatus.queuedOffline);
-          _log.info('Outbox flush: placed ${entry.messageIdHex.substring(0, 8)}'
-              ' (erasure=$erasureOk, saf=$safOk) → queuedOffline');
+          _log.info('Outbox flush: L3 placed via ${useErasure ? "erasure" : "S&F"}: '
+              '${entry.messageIdHex.substring(0, 8)}');
         } else {
           _log.debug('Outbox flush: still no peers for '
               '${entry.messageIdHex.substring(0, 8)} — retaining');
@@ -7631,10 +7654,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// Post an Android system notification for an incoming message.
+  /// L5 gate: suppressed when the Flutter Activity is in foreground.
   void _postAndroidNotification(String senderName, String text, String conversationId) {
     if (onPostNotificationAndroid == null) return;
     if (_isAppResumed) return;
-    onPostNotificationAndroid!(senderName, text, conversationId);
+    try {
+      onPostNotificationAndroid!(senderName, text, conversationId);
+    } catch (e) {
+      _log.warn('postAndroidNotification failed: $e');
+    }
   }
 
   /// Feed `CalendarManager.syncBirthdaysFromContacts()` from the local
@@ -8775,6 +8803,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   int get confirmedPeerCount => node.confirmedPeerIds.length;
   @override
+  int get reachablePeerCount => node.reachablePeerIds.length;
+  @override
   bool get hasPortMapping => node.natTraversal.hasPortMapping;
 
   @override
@@ -8922,6 +8952,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       'localIps': localIps,
       'peerCount': peerCount,
       'confirmedPeerCount': confirmedPeerCount,
+      'reachablePeerCount': reachablePeerCount,
       'hasPortMapping': hasPortMapping,
       'mobileFallbackActive': node.transport.isMobileFallbackActive,
       'fragmentCount': fragmentCount,
@@ -12256,20 +12287,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         precomputedPow: l3Pow,
       );
       final canonicalBytes = node.serializePacketForOfflineDelivery(outer);
-      final fragmentBundleId =
-          SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-      final erasureOk = await _distributeErasureFragments(
-        packetBytes: canonicalBytes,
-        messageId: fragmentBundleId,
-        recipientUserEd25519Pk: contact.ed25519Pk,
-        recipientUserNodeId: recipientUserId,
-      );
-      final safOk = await _storeSafOnContactPeers(
-        recipientUserId: recipientUserId,
-        wrappedEnvelope: canonicalBytes,
-      );
-      // §5.8: report L3 placement outcome to caller via optional output param.
-      final l3Placed = erasureOk || safOk;
+      final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
+      bool l3Placed;
+      if (useErasure) {
+        final fragmentBundleId =
+            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+        l3Placed = await _distributeErasureFragments(
+          packetBytes: canonicalBytes,
+          messageId: fragmentBundleId,
+          recipientUserEd25519Pk: contact.ed25519Pk,
+          recipientUserNodeId: recipientUserId,
+        );
+      } else {
+        l3Placed = await _storeSafOnNetworkPeers(
+          recipientUserId: recipientUserId,
+          wrappedEnvelope: canonicalBytes,
+        );
+      }
       if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = l3Placed;
       if (!l3Placed) {
         // §5.8: 0 connectivity — park canonical bytes in outbox so the next
@@ -12280,6 +12314,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientEd25519PkHex:
               contact.ed25519Pk != null ? bytesToHex(contact.ed25519Pk!) : null,
           canonicalPacket: canonicalBytes,
+          messageType: messageType.name,
         );
         _log.info('sendToUser: 0 peers — message ${bytesToHex(effectiveMessageId).substring(0, 8)} parked in outbox');
       }
@@ -12314,6 +12349,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         ? messageId
         : SodiumFFI().randomBytes(16);
     proto.NetworkPacketV3? canonicalPacket;
+    // Befund 1+2: hop + destination device of the FIRST successful fan-out
+    // leg — the fan-out registers a single AckTracker entry, so that entry
+    // tracks the route of the first leg that actually left the machine.
+    String? firstOkViaHopHex;
+    String? firstOkDestDevHex;
     for (final deviceId in deviceIds) {
       try {
         final inner = proto.ApplicationFrameV3()
@@ -12360,8 +12400,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
         canonicalPacket ??= outer;
 
-        final ok = await node.sendToDevice(outer, deviceId);
-        if (ok) dispatched++;
+        final res = await node.sendToDeviceTracked(outer, deviceId);
+        if (res.ok) {
+          dispatched++;
+          if (firstOkDestDevHex == null) {
+            firstOkViaHopHex = res.viaHopHex;
+            firstOkDestDevHex = bytesToHex(deviceId);
+          }
+        }
       } catch (e) {
         _log.warn('sendToUser: per-device fan-out failed for '
             '${_hexShort(deviceId)}: $e (continuing)');
@@ -12385,7 +12431,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final messageIdHex = bytesToHex(effectiveMessageId);
       final recipientHex = bytesToHex(recipientUserId);
       final baseRtt = node.dhtRpc.getRtt(recipientUserId);
-      final timeout = AckTracker.computeTimeout(baseRtt);
+      // Befund 2: relay sends (hop != destination device) need the 8s
+      // relay floor from computeTimeout(hopCount: 2).
+      final wasRelay =
+          firstOkViaHopHex != null && firstOkViaHopHex != firstOkDestDevHex;
+      final timeout =
+          AckTracker.computeTimeout(baseRtt, hopCount: wasRelay ? 2 : 1);
       final canonicalBytes = canonicalPacket != null
           ? node.serializePacketForOfflineDelivery(canonicalPacket)
           : null;
@@ -12394,6 +12445,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientHex,
         const <PeerAddress>[],
         timeout,
+        viaNextHopHex: firstOkViaHopHex,
         serializedPacket: canonicalBytes,
         recipientUserId: recipientUserId,
       ));
@@ -12409,6 +12461,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientEd25519PkHex:
               contact.ed25519Pk != null ? bytesToHex(contact.ed25519Pk!) : null,
           canonicalPacket: canonicalBytes,
+          messageType: messageType.name,
         );
       }
     }
@@ -12422,19 +12475,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (dispatched == 0 && canonicalPacket != null) {
       final canonicalBytes =
           node.serializePacketForOfflineDelivery(canonicalPacket);
-      final fragmentBundleId =
-          SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-      final erasureOk = await _distributeErasureFragments(
-        packetBytes: canonicalBytes,
-        messageId: Uint8List.fromList(fragmentBundleId),
-        recipientUserEd25519Pk: contact.ed25519Pk,
-        recipientUserNodeId: recipientUserId,
-      );
-      final safOk = await _storeSafOnContactPeers(
-        recipientUserId: recipientUserId,
-        wrappedEnvelope: canonicalBytes,
-      );
-      final l3Placed = erasureOk || safOk;
+      final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
+      bool l3Placed;
+      if (useErasure) {
+        final fragmentBundleId =
+            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+        l3Placed = await _distributeErasureFragments(
+          packetBytes: canonicalBytes,
+          messageId: Uint8List.fromList(fragmentBundleId),
+          recipientUserEd25519Pk: contact.ed25519Pk,
+          recipientUserNodeId: recipientUserId,
+        );
+      } else {
+        l3Placed = await _storeSafOnNetworkPeers(
+          recipientUserId: recipientUserId,
+          wrappedEnvelope: canonicalBytes,
+        );
+      }
       if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = l3Placed;
       if (!l3Placed) {
         final msgIdHex = bytesToHex(effectiveMessageId);
@@ -12444,9 +12501,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientEd25519PkHex:
               contact.ed25519Pk != null ? bytesToHex(contact.ed25519Pk!) : null,
           canonicalPacket: canonicalBytes,
+          messageType: messageType.name,
         );
-        _log.warn('sendToUser: Path 2 L3 failed (erasure=$erasureOk, '
-            'saf=$safOk) — $msgIdHex parked in outbox');
+        _log.warn('sendToUser: Path 2 L3 ${useErasure ? "erasure" : "S&F"} '
+            'failed — $msgIdHex parked in outbox');
       }
     }
 
@@ -12503,13 +12561,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     if (cr.ed25519PublicKey.isEmpty || cr.mlDsaPublicKey.isEmpty) {
       _log.debug('First-CR drop: CR payload missing sender pubkeys');
-      return;
-    }
-
-    // §8.1 per-sender CR rate limit (5/hour) — applies to First-CR path too.
-    final senderHex = bytesToHex(Uint8List.fromList(inner.senderUserId));
-    if (_isCrRateLimited(senderHex)) {
-      _log.debug('First-CR drop: rate limited for ${senderHex.substring(0, 8)}');
       return;
     }
 
@@ -12771,6 +12822,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── §5.5 Store-and-Forward InfraFrame Handlers ──────────────────────
 
+  bool _checkSenderStoreRateLimit(String senderHex) {
+    final now = DateTime.now();
+    final cutoff = now.subtract(const Duration(hours: 1));
+    final log = _peerStoreRateLog.putIfAbsent(senderHex, () => []);
+    log.removeWhere((ts) => ts.isBefore(cutoff));
+    if (log.length >= 10) return false;
+    log.add(now);
+    return true;
+  }
+
   void handleIncomingPeerStoreInfra(
     proto.InfrastructureFrameV3 frame,
     Uint8List senderDeviceId,
@@ -12782,20 +12843,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final store = proto.PeerStore.fromBuffer(frame.payload);
       final recipientUserId = Uint8List.fromList(store.recipientNodeId);
 
-      // §5.5 receiver-side validation: only store for recipients that are
-      // our accepted contacts.  This enforces "contact peer" at the storage
-      // node rather than relying on sender-side heuristics.
-      // S121 F4(a): infrastructure nodes (bootstrap) accept stores
-      // for ANY recipient within the existing budgets (30/recipient,
-      // sender rate limit) — they have no contacts by design, and they are
-      // the peers every device confirms and polls at coming-online. This
-      // makes the §5.5 Phase-2 fallback actually deliverable (pre-F4 a
-      // spec-compliant bootstrap rejected every Phase-2 store) and mirrors
-      // the §5.5b First-CR-Mailbox precedent.
+      // §5.5 receiver-side: accept stores for any recipient within budgets.
+      // The Closed-Network HMAC is the trust boundary — no contact check.
       final recipientHex = bytesToHex(recipientUserId);
-      final isOurContact = _contacts.values.any((c) =>
-          bytesToHex(c.nodeId) == recipientHex && c.status == 'accepted');
-      if (!isOurContact && !acceptAnyPeerStore) {
+      final senderHex = bytesToHex(senderDeviceId);
+      if (!_checkSenderStoreRateLimit(senderHex)) {
         final ack = proto.PeerStoreAck()
           ..storeId = store.storeId
           ..accepted = false;
@@ -12824,23 +12876,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientDeviceId: senderDeviceId,
       );
 
-      // Bug 3 fix: push-on-store — if the recipient is currently confirmed
-      // (reachable), push immediately rather than waiting for retrieve-poll.
+      // Push-on-store: if the recipient is currently confirmed, push
+      // immediately rather than waiting for retrieve-poll.
       if (stored) {
+        final recipientPeer = node.routingTable.getPeerByUserId(recipientUserId);
+        if (recipientPeer != null) {
+          final devHex = recipientPeer.nodeIdHex;
+          if (node.isPeerConfirmed(devHex)) {
+            _pushStoredMessagesTo(devHex);
+          }
+        }
         final contact = _contacts[recipientHex];
         if (contact != null) {
           for (final devHex in contact.deviceNodeIds) {
             if (node.isPeerConfirmed(devHex)) {
               _pushStoredMessagesTo(devHex);
               break;
-            }
-          }
-        } else if (acceptAnyPeerStore) {
-          final recipientPeer = node.routingTable.getPeer(recipientUserId);
-          if (recipientPeer != null) {
-            final devHex = bytesToHex(recipientPeer.nodeId);
-            if (node.isPeerConfirmed(devHex)) {
-              _pushStoredMessagesTo(devHex);
             }
           }
         }
@@ -13091,6 +13142,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       sourcePort: sourcePort,
       snapshot: snapshot.withSenderUserId(
           Uint8List.fromList(frame.senderUserId)),
+      // Befund 14: direct = arrived with hopCount==0 AND a real UDP source
+      // address. Relayed packets (hopCount>0) must NOT count as direct even
+      // though the relay's source address is known — otherwise relayed
+      // DELIVERY_RECEIPTs confirm a non-existent direct route.
+      wasDirect: packet.hopCount == 0 && sourceAddr.address != '0.0.0.0',
     );
     return AppFrameDispatchOutcome.delivered;
   }
@@ -13136,6 +13192,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       sourceAddr: sourceAddr,
       sourcePort: sourcePort,
       snapshot: snapshot.withSenderUserId(senderUserId),
+      // Befund 14: same direct-derivation as the KEM path.
+      wasDirect: packet.hopCount == 0 && sourceAddr.address != '0.0.0.0',
     );
     return AppFrameDispatchOutcome.delivered;
   }
@@ -13153,6 +13211,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     required InternetAddress sourceAddr,
     required int sourcePort,
     required SenderIdentitySnapshot snapshot,
+    // Befund 14: true only when the OUTER packet arrived with hopCount==0
+    // from a real UDP source address (computed at packet level in
+    // handleIncomingApplicationPacket). Callers without packet context
+    // (First-CR infra path, S&F/erasure re-injection) keep the safe
+    // default false — a receipt then never confirms a direct route.
+    bool wasDirect = false,
   }) async {
     // Receive-side dedup (Architecture §5.8 RUDP-Light): drop duplicate
     // frames silently. The same logical message can arrive via Direct +
@@ -13193,6 +13257,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // the one case the sender-side edges (network-change, first-peer,
     // endpoint-confirmed) cannot see.
     _maybeFlushOutboxForSender(senderUserHex);
+
+    // A5: any verified ApplicationFrame proves contact liveness
+    if (senderContact != null && senderContact.status == 'accepted') {
+      senderContact.lastAckedAt = DateTime.now();
+      _staleWarningWrittenFor.remove(senderUserHex);
+      if (senderContact.autoRepairAttempted) {
+        senderContact.autoRepairAttempted = false;
+      }
+    }
 
     switch (frame.messageType) {
       // Messaging — Cluster C2
@@ -13244,7 +13317,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         break;
       case proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT:
         _handleDeliveryReceiptV3(frame, senderDeviceId, snapshot,
-            sourceAddr: sourceAddr);
+            wasDirect: wasDirect);
         break;
 
       // Recovery / Identity / Profile — Cluster C4
@@ -13586,7 +13659,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// receipts are deferred to C4-Groups.
   void _handleDeliveryReceiptV3(
       proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot,
-      {InternetAddress? sourceAddr}) {
+      {bool wasDirect = false}) {
     try {
       final receipt = proto.DeliveryReceipt.fromBuffer(frame.payload);
       if (receipt.messageId.isEmpty) return;
@@ -13597,16 +13670,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Bridge to AckTracker (RUDP-Light §2.4.5): consume the pending entry
       // registered by `sendToUser` so the route-failure / route-down logic
       // (3× consecutive timeout → markRouteDown + Poison Reverse) and the
-      // address-success bookkeeping can fire. `wasDirect` heuristic:
-      // relay-delivered receipts arrive with from=0.0.0.0
-      // (no source address known), direct UDP receipts carry the recipient's
-      // real address. confirmRoute (DV) only fires for direct receipts.
-      final wasDirect =
-          sourceAddr != null && sourceAddr.address != '0.0.0.0';
+      // address-success bookkeeping can fire. Befund 14: `wasDirect` is
+      // derived at packet level (hopCount==0 + real UDP source address) —
+      // the old source-address-only heuristic wrongly classified single-hop
+      // relayed receipts as direct. Relayed receipts now run the
+      // onRelayRouteConfirmed path instead of confirmRoute.
       // §3.1 B-1: pass senderDeviceId (deviceId) so the ACK→DV bridge
       // operates on routing-layer IDs, not identity-layer IDs.
       node.ackTracker.handleAck(
           msgIdHex, bytesToHex(senderDeviceId), wasDirect: wasDirect);
+
+      // A5: DELIVERY_RECEIPT proves end-to-end contact liveness
+      final senderUserHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final senderContact = _contacts[senderUserHex];
+      if (senderContact != null) {
+        senderContact.lastAckedAt = DateTime.now();
+        _staleWarningWrittenFor.remove(senderUserHex);
+        if (senderContact.autoRepairAttempted) {
+          senderContact.autoRepairAttempted = false;
+        }
+        _saveContacts();
+      }
 
       // §5.5b: cancel pending FIRST_CR_STORE timer for First-CRs
       _firstCrAckGates.remove(msgIdHex)?.cancel();
@@ -15008,6 +15092,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             : null;
         existing.status = 'accepted';
         existing.acceptedAt ??= DateTime.now();
+        existing.lastAckedAt = DateTime.now();
         _crRetryCountPerContact.remove(senderHex);
         _staleWarningWrittenFor.remove(senderHex);
         // First-CR ContactSeed bootstrap is over once we have the recipient's
@@ -16463,6 +16548,8 @@ class _OutboxEntry {
   final String canonicalPacketB64;
   /// When the original send was attempted (for TTL / expired-status check).
   final int sentAtMs;
+  /// A7 Latest-Wins: message type name for system-message dedup.
+  final String? messageType;
 
   _OutboxEntry({
     required this.messageIdHex,
@@ -16470,6 +16557,7 @@ class _OutboxEntry {
     this.recipientEd25519PkHex,
     required this.canonicalPacketB64,
     required this.sentAtMs,
+    this.messageType,
   });
 
   Map<String, dynamic> toJson() => {
@@ -16478,6 +16566,7 @@ class _OutboxEntry {
         if (recipientEd25519PkHex != null) 'recipientEd25519PkHex': recipientEd25519PkHex,
         'canonicalPacketB64': canonicalPacketB64,
         'sentAtMs': sentAtMs,
+        if (messageType != null) 'messageType': messageType,
       };
 
   static _OutboxEntry fromJson(Map<String, dynamic> json) => _OutboxEntry(
@@ -16486,6 +16575,7 @@ class _OutboxEntry {
         recipientEd25519PkHex: json['recipientEd25519PkHex'] as String?,
         canonicalPacketB64: json['canonicalPacketB64'] as String,
         sentAtMs: json['sentAtMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+        messageType: json['messageType'] as String?,
       );
 }
 

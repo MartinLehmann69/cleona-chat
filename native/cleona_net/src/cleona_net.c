@@ -32,6 +32,7 @@
   #include <netinet/in.h>
   #include <unistd.h>
   #include <errno.h>
+  #include <net/if.h>
   typedef int cleona_native_socket_t;
   #define CLEONA_INVALID_SOCKET (-1)
   #define CLEONA_SOCKET_ERROR   (-1)
@@ -320,12 +321,24 @@ CLEONA_NET_EXPORT int cleona_udp_send6(
     return -1;
   }
 
-  /* Strip scope-id suffix (%eth0) — inet_pton does not accept it. */
+  /* Strip scope-id suffix (%eth0) — inet_pton does not accept it — but
+   * resolve it to sin6_scope_id, otherwise link-local destinations
+   * (fe80::/10) fail with EINVAL because the kernel cannot pick an
+   * outgoing interface for an ambiguous link-local address. */
   char ip_buf[64];
   strncpy(ip_buf, dest_ip6, sizeof(ip_buf) - 1);
   ip_buf[sizeof(ip_buf) - 1] = '\0';
+  uint32_t scope = 0;
   char* pct = strchr(ip_buf, '%');
-  if (pct) *pct = '\0';
+  if (pct) {
+    *pct = '\0';
+#if defined(_WIN32)
+    scope = (uint32_t)atoi(pct + 1);   /* Windows: scope is numeric */
+#else
+    scope = if_nametoindex(pct + 1);
+    if (scope == 0) scope = (uint32_t)atoi(pct + 1);
+#endif
+  }
 
   struct sockaddr_in6 dst;
   memset(&dst, 0, sizeof(dst));
@@ -334,6 +347,7 @@ CLEONA_NET_EXPORT int cleona_udp_send6(
   if (inet_pton(AF_INET6, ip_buf, &dst.sin6_addr) != 1) {
     return -2;
   }
+  dst.sin6_scope_id = scope;
 
 #if defined(_WIN32)
   WSABUF buf;
@@ -397,6 +411,57 @@ CLEONA_NET_EXPORT int cleona_udp_sendto_fd(
   dst.sin_family = AF_INET;
   dst.sin_port = htons(dest_port);
   if (inet_pton(AF_INET, dest_ip, &dst.sin_addr) != 1) return -2;
+
+#if defined(_WIN32)
+  WSABUF buf;
+  buf.buf = (CHAR*)data;
+  buf.len = (ULONG)len;
+  DWORD bytes_sent = 0;
+  int rc = WSASendTo((SOCKET)(intptr_t)fd, &buf, 1, &bytes_sent, 0,
+                     (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
+  if (rc != SOCKET_ERROR) return (int)bytes_sent;
+  return -WSAGetLastError();
+#else
+  ssize_t n = sendto(fd, data, (size_t)len, 0,
+                     (struct sockaddr*)&dst, sizeof(dst));
+  if (n < 0) return -errno;
+  return (int)n;
+#endif
+}
+
+CLEONA_NET_EXPORT int cleona_udp_sendto_fd6(
+    int fd,
+    const char* dest_ip6,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len) {
+  if (fd < 0 || !dest_ip6 || !data || len <= 0) return -1;
+
+  /* Strip scope-id suffix (%eth0) — inet_pton does not accept it — but
+   * resolve it to sin6_scope_id, otherwise link-local destinations
+   * (fe80::/10) fail with EINVAL because the kernel cannot pick an
+   * outgoing interface for an ambiguous link-local address. */
+  char ip_buf[64];
+  strncpy(ip_buf, dest_ip6, sizeof(ip_buf) - 1);
+  ip_buf[sizeof(ip_buf) - 1] = '\0';
+  uint32_t scope = 0;
+  char* pct = strchr(ip_buf, '%');
+  if (pct) {
+    *pct = '\0';
+#if defined(_WIN32)
+    scope = (uint32_t)atoi(pct + 1);   /* Windows: scope is numeric */
+#else
+    scope = if_nametoindex(pct + 1);
+    if (scope == 0) scope = (uint32_t)atoi(pct + 1);
+#endif
+  }
+
+  struct sockaddr_in6 dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.sin6_family = AF_INET6;
+  dst.sin6_port = htons(dest_port);
+  if (inet_pton(AF_INET6, ip_buf, &dst.sin6_addr) != 1) return -2;
+  dst.sin6_scope_id = scope;
 
 #if defined(_WIN32)
   WSABUF buf;

@@ -261,7 +261,7 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.people),
                 title: Text(locale.get('connected_peers')),
-                subtitle: Text('${service.confirmedPeerCount}'),
+                subtitle: Text('${service.reachablePeerCount}'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showConnectionSheet(context, service),
               ),

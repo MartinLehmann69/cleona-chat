@@ -188,9 +188,15 @@ class CallService {
 
   Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false}) async {
     if (groupCallManager.currentGroupCall != null) return null;
+    // Start ringback BEFORE the crypto pipeline — startCall() includes KEM
+    // encapsulation + ML-DSA signing + PoW which can take 1-3s on mobile.
+    notificationSound.playRingback();
     final session = await callManager.startCall(peerNodeIdHex, video: video);
-    if (session != null) notificationSound.playRingback();
-    return session?.toCallInfo();
+    if (session == null) {
+      notificationSound.stopRingback();
+      return null;
+    }
+    return session.toCallInfo();
   }
 
   Future<void> acceptCall() async {
