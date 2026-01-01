@@ -59,7 +59,7 @@ post_install do |installer|
   # extract the relevant objects from the vendored .a archives.
   ffi_symbols = %w[
     _sodium_init _OQS_version _ZSTD_versionNumber
-    _opus_get_version_string _cleona_audio_create _whisper_print_system_info
+    _opus_get_version_string _whisper_print_system_info
   ]
   undef_flags = ffi_symbols.map { |s| "-u #{s}" }.join(' ')
   Dir.glob(File.join(__dir__, 'Pods', 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig|
