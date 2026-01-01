@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:125ade3a2010, 2026-06-14). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:88d4c4f0cb8c, 2026-06-14). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1664,9 +1664,9 @@ The PEER_LIST_WANT → PEER_LIST_PUSH response path (`_handlePeerListWantInfra`)
 
 ### 4.5 Mesh Discovery
 
-Cleona nodes find each other through several discovery channels running in parallel. No BLE (presence leakage, eclipse attack).
+Cleona nodes find each other through a **cascading discovery sequence**. Each tier fires only if the previous tier failed to produce a confirmed peer with a fresh peer list. This minimises startup traffic to the bare minimum required for mesh entry — in the common case (at least one stored peer is online), discovery completes with 3 packets (1 PING + 1 PEER_LIST_WANT + 1 PEER_LIST_PUSH) instead of thousands. No BLE (presence leakage, eclipse attack).
 
-**Discovery channels**:
+**Discovery channels** (available to the cascade):
 
 | Channel | Mechanism | Use case |
 |---|---|---|
@@ -1677,13 +1677,24 @@ Cleona nodes find each other through several discovery channels running in paral
 | **QR code** | device pubkey + addresses encoded as QR | visual pairing path |
 | **ContactSeed URI** | `cleona://...` link, copy/paste | sharing via email or messenger |
 
-**Discovery burst**: 3× in parallel on all channels, then silence. No periodic repetition — Cleona is not a heartbeat system.
+**Discovery cascade** (startup and Stage-5 Re-Discovery §5.10.5):
 
-**Isolated-node exception.** The "then silence" rule holds for any node that has ≥1 known peer. A node at **`peerCount == 0`** is a pathological case with no neighbours to flood, so it runs a self-terminating **re-discovery retry** with exponential backoff (1 min → 5 min → 30 min, capped at 60 min). Each tick re-fires the LAN burst, unicast-re-probes the persisted WAN peer addresses from the routing-table snapshot, and re-pings the cached bootstrap entry. The retry stops the instant the first peer is confirmed. Traffic cost is O(1) (an isolated node has no peers to storm) and the timer is never armed in a populated mesh — this is the recovery path for a node that boots into a new network, wakes from suspend with dead cached addresses, or otherwise loses all peers without sending anything. See §12.3 for the shared recovery sequence it feeds into.
+| Tier | Mechanism | Fires when | Traffic cost |
+|---|---|---|---|
+| **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by score (lastSeen recency × address priority §4.6). One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
+| **2 — LAN Discovery** | 3× burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76, TTL=4) + IPv6-Multicast, then silence. | Tier 1 exhausted (all stored peers unreachable or routing table empty) | 9 datagrams (3 × 3 channels) |
+| **3 — Bootstrap** | Unicast probe to cached bootstrap addresses. Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–2 PINGs |
+| **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Last resort. | Tier 3 exhausted (bootstrap unreachable) | ~65 000 probes over 130 s |
 
-**Cold-start jitter**: when `_finishStart()` runs (after Kademlia bootstrap or quick-start), the node delays 0–3 s (uniform random) before firing its first peer-exchange and address-broadcast round. This staggers the O(N²) `PEER_LIST_PUSH` cascade that occurs when many nodes boot simultaneously (e.g. a mod-lab cluster or power-cycle event). Without jitter, 20 simultaneous nodes produce ~35,000 UDP packets in <10 s — enough to congest a consumer-grade router and trigger fragment-NACK retransmit spirals.
+**Discovery-complete gate**: the node-level flag `_discoveryComplete` is set when **any** tier produces a confirmed peer that delivers a `PEER_LIST_PUSH` with ≥1 entry. Once set:
+- All pending discovery timers are cancelled (no further tier escalation).
+- Kademlia bootstrap, proactive rendezvous (§4.6), welcome route floods, and address broadcasts are suppressed — they are not needed because the live peer list already provides current addresses and routes.
+- DV route propagation (`_onDvRouteChanged` / `_flushDvUpdates`) and normal peer maintenance proceed normally — these are operational, not discovery.
+- The flag is reset on network-change events (§4.9) so the cascade re-runs with fresh conditions.
 
-**Subnet-scan fallback**: if 0 peers are found after the burst, a unicast probe over the /16 subnet (port 41338) is used as a last resort.
+**Isolated-node exception.** A node at **`peerCount == 0`** (empty persisted routing table — fresh install or long offline) skips Tier 1 and starts at Tier 2. If all tiers exhaust without success, it runs a self-terminating **re-discovery retry** with exponential backoff (1 min → 5 min → 30 min, capped at 60 min). Each tick re-runs the full cascade from Tier 2. The retry stops the instant the first peer is confirmed. Traffic cost is O(1) (an isolated node has no peers to storm) and the timer is never armed in a populated mesh. See §12.3 for the shared recovery sequence it feeds into.
+
+**Cold-start jitter**: after discovery completes, the node delays 0–3 s (uniform random) before the first DV route propagation and address broadcast round. This staggers the O(N²) `PEER_LIST_PUSH` cascade that occurs when many nodes boot simultaneously (e.g. a mod-lab cluster or power-cycle event).
 
 #### 4.5.2 Native UDP Send Path (libcleona_net)
 
@@ -1851,7 +1862,7 @@ Bootstrap nodes are **accelerators for initial mesh discovery**, not central ser
 
 Until then, bootstrap nodes are the initial single-point-of-failure — if they are down, fresh daemon starts cannot enter the mesh.
 
-**Bootstrap resilience**: stored routing-table entries (after pruning at §4.4) are kept across restarts and re-touched at startup so the daemon doesn't have to re-discover its known mesh from scratch. If the persisted routing table is empty (fresh install) or pruned to zero (long offline), Discovery falls back to the architected channels — LAN burst, Subnet-Scan, ContactSeed import.
+**Bootstrap resilience**: stored routing-table entries (after pruning at §4.4) are the primary discovery source (Tier 1 of the §4.5 cascade). The daemon probes them first — only if all stored peers are unreachable does it escalate to LAN discovery (Tier 2), then bootstrap (Tier 3), then subnet scan (Tier 4). A fresh install with an empty routing table starts at Tier 2 directly.
 
 ### 4.9 Network Change Detection
 
@@ -2419,9 +2430,7 @@ A `MTV3_PEER_LIST_PUSH` reply that arrives within 30 s of a `MTV3_PEER_LIST_WANT
 
 **Action** (single-shot per cascade-fail; no recursive Stage 5 → Stage 5):
 
-1. Re-execute the Startup-Discovery procedure (§4.5):
-   - Three-burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76) + IPv6-Multicast, intervals 0/2/2 s
-   - Subnet-Scan on the local /16 (DHCP-priority hosts first, then sweep)
+1. Reset `_discoveryComplete = false` and re-execute the §4.5 discovery cascade from Tier 1 (stored peers). The cascade escalates through Tier 2 (LAN burst), Tier 3 (bootstrap), Tier 4 (subnet scan) only if each prior tier fails — the same cascading logic as startup.
 2. Blanket-mark **all** known peers' `pkStale = true` so a fresh firstParty Self-Broadcast can replace any stale PK on receive.
 3. If even Stage 5 yields no peer, the message proceeds normally to §5.4 (Erasure Coding) and §5.6 (Mailbox) — the message is not lost, it shifts to the offline-delivery layers.
 

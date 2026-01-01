@@ -231,6 +231,15 @@ class CleonaNode {
   /// isolated-node retry tick can re-ping them without requiring the caller
   /// to re-supply them. Cleared on [stop].
   final List<String> _isolatedNodeBootstrapAddrs = [];
+
+  /// §4.5 Discovery Cascade: set to true when a PEER_LIST_PUSH with ≥1
+  /// entry is received. Gates all burst-producing mechanisms (welcome route
+  /// updates, DV flushes, Kademlia bootstrap, address broadcasts) so they
+  /// only fire after the mesh state is known — not during the discovery phase.
+  /// Reset on network-change events (§4.9) so the cascade re-runs.
+  bool _discoveryComplete = false;
+  Timer? _discoveryCascadeTimer;
+
   final Set<String> _dvPendingChanges = {};
   final RelayDedupCache _relayDedup = RelayDedupCache();
 
@@ -893,15 +902,12 @@ class CleonaNode {
     // but are reachable right now. The regular maintenance timer (60s, 4h threshold)
     // handles cleanup AFTER peers have had a chance to respond to PINGs.
 
-    // Bootstrap from known peers — send PING and wait for PONG.
-    // Also cache the addresses for the isolated-node retry (§4.5).
+    // §4.5 Discovery Cascade: store bootstrap addresses for Tier 3.
+    // Pings are deferred to `_startDiscoveryCascade()` — no immediate burst.
     if (bootstrapPeers.isNotEmpty) {
       _isolatedNodeBootstrapAddrs
         ..clear()
         ..addAll(bootstrapPeers);
-      for (final bp in bootstrapPeers) {
-        _addBootstrapPeer(bp);
-      }
     }
 
     // NOTE: no convergence delay here. _startBase() is shared by start() and
@@ -915,30 +921,22 @@ class CleonaNode {
   Future<void> start({List<String> bootstrapPeers = const []}) async {
     await _startBase(bootstrapPeers: bootstrapPeers);
 
-    // Headless mode: give PINGs time to get PONGs back (populate routing table)
-    // before the blocking Kademlia bootstrap. startQuick() callers deliberately
-    // skip this — they converge via the background _kademliaBootstrap() and must
-    // not block the path to IPC-readiness on it.
-    if (bootstrapPeers.isNotEmpty || routingTable.peerCount == 0) {
-      await Future.delayed(const Duration(seconds: 3));
-    }
-
-    // Start Kademlia bootstrap (FIND_NODE for own ID)
-    await _kademliaBootstrap();
+    // §4.5 Discovery Cascade: probe stored peers → LAN → bootstrap → scan.
+    // Blocks until discovery completes or all tiers exhausted.
+    await _startDiscoveryCascade();
 
     _finishStart();
   }
 
   /// Quick start: transport + discovery immediately, bootstrap in background.
   Future<void> startQuick({List<String> bootstrapPeers = const []}) async {
-    // Everything identical up to the bootstrap point
     await _startBase(bootstrapPeers: bootstrapPeers);
 
-    // Bootstrap + Peer Exchange in background
-    _kademliaBootstrap().then((_) => _finishStart());
+    // §4.5 Discovery Cascade in background — does not block IPC readiness.
+    _startDiscoveryCascade().then((_) => _finishStart());
 
     _running = true;
-    _log.info('Node quick-started. Background bootstrap in progress...');
+    _log.info('Node quick-started. Discovery cascade in background...');
   }
 
   void _finishStart() {
@@ -953,55 +951,18 @@ class CleonaNode {
   }
 
   void _finishStartDelayed() {
-    // §4.6 (V3.1.72): DHT/resolution lookups select by age + XOR distance
-    // (findClosestPeers prefers "recent" < 10 min), NOT by direct-confirmed.
-    // The V3.1.71 `defaultPeerFilter = isPeerConfirmed` is removed: it hid
-    // unconfirmed-but-reachable replicators from Kademlia and broke
-    // first-contact identity resolution. Gossip-content traffic reduction
-    // stays governed by `_isPeerAliveForGossip` (a separate, stricter gate).
     routingTable.defaultPeerFilter = null;
-
-    // Immediate peer exchange with all known peers
-    if (routingTable.peerCount > 0) {
-      _doPeerExchange();
-      // Also broadcast our own PeerInfo (including PKs)
-      _broadcastAddressUpdate(force: true);
-    }
-
-    // Cross-subnet discovery (§4.10): scan other /24 subnets in the /16 range
-    // until a confirmed cross-subnet peer is found (e.g. Bootstrap). This
-    // ensures the QR ContactSeed includes a publicly-reachable relay.
-    // Using _hasCrossSubnetPeer as the sole stop condition: finding only
-    // same-subnet peers keeps scanning; finding a cross-subnet peer stops.
-    if (!_hasCrossSubnetPeer()) {
-      _log.info('No cross-subnet peer at startup — starting subnet scan');
-      localDiscovery.startSubnetScan(_localIps, () => _hasCrossSubnetPeer());
-    }
 
     // §5.11 — Maintenance timer (15 min, intern-only). Local prune of peers
     // older than 4 h, stale addresses, default-gateway recompute, persistence.
-    // Generates NO network traffic itself — 60 s was lärmig given the 4 h+
-    // pruning window. 15 min is plenty.
     _maintenanceTimer ??=
         Timer.periodic(const Duration(minutes: 15), (_) => _maintenance());
 
-    // §5.11 — Peer-exchange tick removed. Mesh churn is now event-driven:
-    //   • new neighbor (`isNewNeighbor==true`) → `_pushSelfToNeighbors()`
-    //   • own identity-key rotation → `_broadcastAddressUpdate()` (self-PUSH)
-    //   • DV-safety-net (1 h) carries a piggy-backed firstParty self-PUSH
-    //     as cold-path backstop (see `_dvSafetyNetExchange`).
-    // Stage 2 §5.10.2 still triggers DHT_PING with `pk_recovery_hint=true`
-    // for hot-path heal in 1 RTT (§5.12). The 120 s heartbeat is gone.
-
     // §5.12 cold-path — full DV exchange + firstParty self-broadcast every 1h.
-    // Backstop for any Stage-2 trigger that we missed: ensures every neighbor
-    // sees our current signing keys at least hourly.
     _dvSafetyNetTimer ??= Timer.periodic(const Duration(hours: 1), (_) => _dvSafetyNetExchange());
 
-    // Startup mobile fallback: if after 30s no peer has been confirmed via
-    // inbound hopCount==0 packet, the primary network path is likely broken
-    // (WiFi hairpin NAT, captive portal). Probe alternative interfaces
-    // without waiting for UdpKeepalive (which needs registered peers to fail).
+    // Startup mobile fallback: if after 30s no peer has been confirmed,
+    // probe alternative interfaces (WiFi hairpin NAT, captive portal).
     Future.delayed(const Duration(seconds: 30), () {
       if (!_running) return;
       if (_confirmedPeers.values.any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) return;
@@ -1010,23 +971,109 @@ class CleonaNode {
       _tryMobileFallback();
     });
 
-    // §4.5 Isolated-Node Re-Discovery: arm the backoff timer when there are
-    // no confirmed peers at the end of startup. This covers both the fresh-
-    // install case (no routing_table.json) and the case where every persisted
-    // peer is unreachable in the current session. The timer is self-
-    // terminating — it cancels itself on the first confirmed peer.
-    if (routingTable.peerCount == 0) {
-      _armIsolatedNodeTimer();
-    }
-
     _running = true;
     nodeStartedAt = DateTime.now();
-    _log.info('Node started. Peers: ${routingTable.peerCount}');
+    _log.info('Node started. Peers: ${routingTable.peerCount}, '
+        'discoveryComplete=$_discoveryComplete');
   }
 
   void _registerSelf() {
     // We don't add ourselves to the routing table, but we store our info
     // for PeerExchange to include our PK.
+  }
+
+  // ── §4.5 Discovery Cascade ──────────────────────────────────────────
+
+  /// Sequential 4-tier discovery (Architecture §4.5). Each tier fires only
+  /// if the previous tier failed to produce a confirmed peer with a fresh
+  /// peer list. Returns when discovery completes or all tiers are exhausted.
+  Future<void> _startDiscoveryCascade() async {
+    _discoveryComplete = false;
+
+    // Tier 1 — Stored peers: probe persisted routing table (sorted by
+    // lastSeen recency). 1 PING per peer, 2 s timeout, max 5 peers.
+    final stored = routingTable.allPeers
+        .where((p) => !_isLocalIdentity(p.nodeIdHex))
+        .toList()
+      ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+
+    if (stored.isNotEmpty) {
+      final probeCount = stored.length < 5 ? stored.length : 5;
+      _log.info('§4.5 Cascade Tier 1: probing $probeCount stored peers');
+      for (final peer in stored.take(5)) {
+        if (_discoveryComplete) return;
+        final target = peer.allConnectionTargets().cast<PeerAddress?>().firstWhere(
+            (a) => a!.ip.isNotEmpty && a.port > 0,
+            orElse: () => null);
+        if (target != null) {
+          _sendPing(target.ip, target.port);
+        }
+      }
+      // Wait up to 5 s for PONG + PEER_LIST_PUSH
+      for (var i = 0; i < 10 && !_discoveryComplete; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (_discoveryComplete) return;
+      _log.info('§4.5 Cascade Tier 1 exhausted — no stored peer responded');
+    }
+
+    // Tier 2 — LAN Discovery: broadcast + multicast burst.
+    _log.info('§4.5 Cascade Tier 2: LAN broadcast/multicast');
+    localDiscovery.triggerFastDiscovery();
+    multicastDiscovery.triggerFastDiscovery();
+    for (var i = 0; i < 10 && !_discoveryComplete; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    if (_discoveryComplete) return;
+    _log.info('§4.5 Cascade Tier 2 exhausted — no LAN peer found');
+
+    // Tier 3 — Bootstrap: unicast probe to cached bootstrap addresses.
+    if (_isolatedNodeBootstrapAddrs.isNotEmpty) {
+      _log.info('§4.5 Cascade Tier 3: bootstrap probe '
+          '(${_isolatedNodeBootstrapAddrs.length} address(es))');
+      for (final addr in _isolatedNodeBootstrapAddrs) {
+        _addBootstrapPeer(addr);
+      }
+      for (var i = 0; i < 10 && !_discoveryComplete; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+      if (_discoveryComplete) return;
+      _log.info('§4.5 Cascade Tier 3 exhausted — bootstrap unreachable');
+    }
+
+    // Tier 4 — Subnet Scan (last resort).
+    _log.info('§4.5 Cascade Tier 4: subnet scan');
+    localDiscovery.startSubnetScan(
+        _localIps, () => _discoveryComplete);
+
+    // Arm isolated-node timer if routing table is empty.
+    if (routingTable.peerCount == 0) {
+      _armIsolatedNodeTimer();
+    }
+  }
+
+  /// Called once when the first PEER_LIST_PUSH with ≥1 entry arrives.
+  /// Transitions from discovery to normal operation: fires deferred peer
+  /// exchange, address broadcast, and Kademlia bootstrap.
+  void _onDiscoveryComplete() {
+    if (_discoveryComplete) return;
+    _discoveryComplete = true;
+    _discoveryCascadeTimer?.cancel();
+    _discoveryCascadeTimer = null;
+    _log.info('§4.5 Discovery complete — transitioning to normal operation');
+
+    // Cold-start jitter (0–3 s) before the post-discovery burst (§4.5).
+    final jitterMs = Random().nextInt(3000);
+    Future.delayed(Duration(milliseconds: jitterMs), () {
+      if (!_running) return;
+      // Peer exchange + address broadcast — now safe, we have a live mesh.
+      if (routingTable.peerCount > 0) {
+        _doPeerExchange();
+        _broadcastAddressUpdate(force: true);
+      }
+      // Kademlia bootstrap — populate DHT after we know the mesh.
+      _kademliaBootstrap();
+    });
   }
 
   // ── V3.0 Receive Pipeline (Architecture v3.0 §2.4 receiver steps 3-7) ──
@@ -1181,6 +1228,14 @@ class CleonaNode {
       } else {
         outerStatus = OuterSigStatus.verified;
       }
+      // Self-heal: if Ed25519 passed but ML-DSA device PK is missing (slim
+      // gossip omits PQ keys), request the full key set so future packets
+      // get full hybrid verification.
+      if (senderPeer != null &&
+          senderPeer.deviceMlDsaPublicKey == null &&
+          senderDeviceId.isNotEmpty) {
+        _sendPeerKeyRequest(senderDeviceId);
+      }
     } else {
       // No PK on file → lenient pass (bootstrap, §2.4.0).
       outerStatus = OuterSigStatus.skippedBootstrap;
@@ -1267,15 +1322,18 @@ class CleonaNode {
         _log.info('DV: New neighbor ${senderHex.substring(0, 8)} from '
             '${from.address}:$fromPort (${ct.name}) '
             '— routing table populated via _touchPeer');
-        _lastRouteUpdateSentTo[senderHex] = DateTime.now();
-        Timer(const Duration(milliseconds: 500),
-            () => _sendWelcomeRouteUpdate(senderHex));
-        // §5.11 event-driven mesh push — the periodic 120 s peer-exchange tick
-        // is gone. Tell the existing neighbors about ourselves on each new-
-        // neighbor event so the mesh-state stays fresh without lärmiges
-        // Polling. `isNewNeighbor` fires at most once per peer.
-        _pushSelfToNeighborsExcept(senderDeviceId);
-      } else {
+        // §4.5: welcome route updates and self-broadcasts are deferred until
+        // discovery completes. During discovery, the peer list from the first
+        // responding peer provides routes — no need to flood the mesh.
+        if (_discoveryComplete) {
+          _lastRouteUpdateSentTo[senderHex] = DateTime.now();
+          Timer(const Duration(milliseconds: 500),
+              () => _sendWelcomeRouteUpdate(senderHex));
+          _pushSelfToNeighborsExcept(senderDeviceId);
+        } else {
+          _log.debug('DV: Welcome/push deferred — discovery not complete');
+        }
+      } else if (_discoveryComplete) {
         _maybeSendCatchUpRouteUpdate(senderHex);
       }
 
@@ -1989,6 +2047,7 @@ class CleonaNode {
           final needKeys = existing != null &&
               (existing.mlKemPublicKey == null ||
                existing.mlDsaPublicKey == null ||
+               existing.deviceMlDsaPublicKey == null ||
                (peer.keyFingerprint != null &&
                 existing.computedKeyFingerprint != null &&
                 bytesToHex(peer.keyFingerprint!) !=
@@ -2051,6 +2110,11 @@ class CleonaNode {
       } else {
         _log.debug('PeerListPush: received ${push.peers.length} peers from '
             '${from.address}');
+      }
+      // §4.5 Discovery-complete gate: first PUSH with entries → transition
+      // from discovery to normal operation.
+      if (!_discoveryComplete && push.peers.isNotEmpty) {
+        _onDiscoveryComplete();
       }
       onPeersChanged?.call();
     } catch (e) {
@@ -4024,6 +4088,9 @@ class CleonaNode {
 
     _lastNetworkChangeAt = DateTime.now();
 
+    // §4.5: reset discovery gate — the cascade must re-confirm the mesh.
+    _discoveryComplete = false;
+
     // Notify daemon/headless to re-query public IP
     onNetworkChangeDetected?.call();
 
@@ -4652,6 +4719,12 @@ class CleonaNode {
 
   void _flushDvUpdates() {
     if (_dvPendingChanges.isEmpty) return;
+    // §4.5: defer DV propagation until discovery completes — routes learned
+    // during discovery come from the peer list, not from DV flooding.
+    if (!_discoveryComplete) {
+      _dvPropagationDebounce = Timer(const Duration(seconds: 2), _flushDvUpdates);
+      return;
+    }
     final changes = _dvPendingChanges.length;
     _dvPendingChanges.clear();
 
@@ -5271,6 +5344,9 @@ class CleonaNode {
     _ipv6ProbeTimer?.cancel();
     _isolatedNodeRetryTimer?.cancel();
     _isolatedNodeRetryTimer = null;
+    _discoveryCascadeTimer?.cancel();
+    _discoveryCascadeTimer = null;
+    _discoveryComplete = false;
     _isolatedNodeBootstrapAddrs.clear();
     localDiscovery.stop();
     multicastDiscovery.stop();

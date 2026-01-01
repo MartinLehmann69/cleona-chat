@@ -424,7 +424,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.87';
+  static const String kCurrentAppVersion = '3.1.89';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -3130,8 +3130,22 @@ class CleonaService implements ICleonaService {
             recipientUserId, hexToBytes(seedDeviceIdHex), seedEpB64);
         _log.info('CONTACT_REQUEST First-CR: DHT miss for '
             '${recipientUserIdHex.substring(0, 8)} — sent DEVICE_KEM_REQUEST '
-            '(step 1b); CR deferred until DEVICE_KEM_OFFER resolves the key.');
-        return false;
+            '(step 1b); waiting up to 15s for DEVICE_KEM_OFFER...');
+        final completer = _dkeCompleters.putIfAbsent(
+            recipientUserIdHex, () => Completer<void>());
+        try {
+          await completer.future.timeout(const Duration(seconds: 15));
+          _dkeCompleters.remove(recipientUserIdHex);
+          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER received for '
+              '${recipientUserIdHex.substring(0, 8)} — CR sent by offer handler');
+          return true;
+        } on TimeoutException {
+          _dkeCompleters.remove(recipientUserIdHex);
+          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER timeout for '
+              '${recipientUserIdHex.substring(0, 8)} — CR stays pending_outgoing, '
+              'retry timer will continue');
+          return false;
+        }
       } else {
         _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
             'no DeviceKemRecord in DHT for '
@@ -3199,6 +3213,11 @@ class CleonaService implements ICleonaService {
   /// every backoff tick; without this guard a deferred v2 first-CR would emit a
   /// fresh request on every tick. Throttled to the OFFER round-trip budget (8s).
   final Map<String, DateTime> _lastKemRequestSent = {};
+
+  /// Completers for DKE step 1b synchronous wait. sendContactRequest() awaits
+  /// these (15s timeout) so the UI gets a real success/failure. Completed by
+  /// handleIncomingDeviceKemOffer() when the OFFER arrives.
+  final Map<String, Completer<void>> _dkeCompleters = {};
 
   /// Per-sender anti-flood for inbound DEVICE_KEM_REQUEST (§8.2 Layer-3 rate
   /// limit). senderDeviceHex → recent request timestamps (sliding 60s window).
@@ -3358,6 +3377,12 @@ class CleonaService implements ICleonaService {
 
       _log.info('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} verified '
           'against ep — Device-KEM-PK resolved, re-triggering first-CR');
+
+      // Wake up the synchronous DKE waiter if still active (step 1b path).
+      final dkeCompleter = _dkeCompleters.remove(contactUserHex);
+      if (dkeCompleter != null && !dkeCompleter.isCompleted) {
+        dkeCompleter.complete();
+      }
 
       // Self-healing: send the CR right now via the hasFullSeed fast path.
       unawaited(sendContactRequest(

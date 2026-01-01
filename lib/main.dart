@@ -883,7 +883,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // No daemon process (or just killed) — start a new one
+    // No daemon process (or just killed) — clean up stale IPC artifacts
+    // from a crashed/killed daemon before spawning. The daemon's own guards
+    // handle this too, but cleaning here avoids races where the GUI's
+    // _waitForSocketConnectable sees the stale socket and tries to connect
+    // before the daemon replaces it.
+    try { File('$_baseDir/cleona.sock').deleteSync(); } catch (_) {}
+    try { File('$_baseDir/cleona.port').deleteSync(); } catch (_) {}
+    try { File('$_baseDir/cleona.pid').deleteSync(); } catch (_) {}
+
     final daemonBinary = _findDaemonBinary();
     if (daemonBinary == null) return false;
 
@@ -1133,6 +1141,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _scheduleSkinPrecache(activeIdForPrecache?.skinId);
         return;
       }
+    }
+
+    // Linux/Windows desktop: daemon spawn failed or IPC connect failed.
+    // Don't silently hang — re-arm the retry loop so the GUI recovers
+    // when the daemon comes up (e.g. after slow PQ keygen or a transient
+    // startup crash).
+    if (Platform.isLinux || Platform.isWindows) {
+      debugPrint('[main] Daemon not reachable — scheduling retry connect');
+      _scheduleRetryConnect();
+      return;
     }
 
     // Mobile + macOS-no-daemon: start node in-process (the app IS the node).

@@ -268,11 +268,7 @@ class V3FrameCodec {
     if (!device_sig.verifyEd25519(edSig, signedBytes, senderDeviceEd25519Pk)) {
       return false;
     }
-    if (mlSig.isNotEmpty) {
-      // ML-DSA sig is present → must be valid. A receiver can choose to
-      // accept Ed25519-only frames (e.g. infrastructure flavor); that is a
-      // policy decision in the caller, not a codec concern.
-      if (senderDeviceMlDsaPk == null) return false;
+    if (mlSig.isNotEmpty && senderDeviceMlDsaPk != null) {
       if (!device_sig.verifyMlDsa(mlSig, signedBytes, senderDeviceMlDsaPk)) {
         return false;
       }
