@@ -253,3 +253,97 @@ CLEONA_NET_EXPORT void cleona_udp_close(cleona_udp_socket_t* s) {
   cleona_wsa_cleanup_one();
 #endif
 }
+
+CLEONA_NET_EXPORT int cleona_udp_sendto_fd(
+    int fd,
+    const char* dest_ip,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len) {
+  if (fd < 0 || !dest_ip || !data || len <= 0) return -1;
+
+  struct sockaddr_in dst;
+  memset(&dst, 0, sizeof(dst));
+  dst.sin_family = AF_INET;
+  dst.sin_port = htons(dest_port);
+  if (inet_pton(AF_INET, dest_ip, &dst.sin_addr) != 1) return -2;
+
+#if defined(_WIN32)
+  WSABUF buf;
+  buf.buf = (CHAR*)data;
+  buf.len = (ULONG)len;
+  DWORD bytes_sent = 0;
+  int rc = WSASendTo((SOCKET)(intptr_t)fd, &buf, 1, &bytes_sent, 0,
+                     (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
+  if (rc != SOCKET_ERROR) return (int)bytes_sent;
+  return -WSAGetLastError();
+#else
+  ssize_t n = sendto(fd, data, (size_t)len, 0,
+                     (struct sockaddr*)&dst, sizeof(dst));
+  if (n < 0) return -errno;
+  return (int)n;
+#endif
+}
+
+#if !defined(_WIN32)
+#include <dirent.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+
+static int _find_udp_fd_by_port(uint16_t local_port, int family) {
+  DIR* dir = opendir("/proc/self/fd");
+  if (!dir) return -1;
+
+  struct dirent* entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_name[0] == '.') continue;
+    int fd = atoi(entry->d_name);
+    if (fd < 0) continue;
+
+    /* Check socket type */
+    int sock_type = 0;
+    socklen_t optlen = sizeof(sock_type);
+    if (getsockopt(fd, SOL_SOCKET, SO_TYPE, &sock_type, &optlen) != 0) continue;
+    if (sock_type != SOCK_DGRAM) continue;
+
+    /* Check address family and bound port */
+    struct sockaddr_storage addr;
+    socklen_t addrlen = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr*)&addr, &addrlen) != 0) continue;
+
+    if (family == AF_INET && addr.ss_family == AF_INET) {
+      struct sockaddr_in* a4 = (struct sockaddr_in*)&addr;
+      if (ntohs(a4->sin_port) == local_port) {
+        closedir(dir);
+        return fd;
+      }
+    } else if (family == AF_INET6 && addr.ss_family == AF_INET6) {
+      struct sockaddr_in6* a6 = (struct sockaddr_in6*)&addr;
+      if (ntohs(a6->sin6_port) == local_port) {
+        closedir(dir);
+        return fd;
+      }
+    }
+  }
+  closedir(dir);
+  return -1;
+}
+#endif
+
+CLEONA_NET_EXPORT int cleona_find_udp4_fd(uint16_t local_port) {
+#if defined(_WIN32)
+  (void)local_port;
+  return -1;
+#else
+  return _find_udp_fd_by_port(local_port, AF_INET);
+#endif
+}
+
+CLEONA_NET_EXPORT int cleona_find_udp6_fd(uint16_t local_port) {
+#if defined(_WIN32)
+  (void)local_port;
+  return -1;
+#else
+  return _find_udp_fd_by_port(local_port, AF_INET6);
+#endif
+}

@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:208a2509971a, 2026-07-11). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:9457c3027fd1, 2026-07-12). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7217,6 +7217,7 @@ The update manifest must be signed with the **Ed25519 maintainer private key**. 
 | Integrated release pipeline (`release-build.sh` calls `sign-update-manifest.sh` + `publish-in-network-update.sh`) | Automated within the 5-script release pipeline, but only after human-approved code push (step 4 requires interactive `JA-PUSH` approval) — the manifest is signed and fragments are seeded to the local daemon and the bootstrap node (via SSH + SCP) as step 7/8 of `release-build.sh` |
 | Beta/Live network separation (§19.5.6) | Different network secrets = different DHT tags — beta updates never reach the live network |
 | Monotone sequence number (`minMonotoneSeq`) | Prevents downgrade attacks via replayed old manifests. Each new release increments the sequence; nodes reject manifests with equal or lower sequence than the highest seen |
+| Windows code integrity gate (`release-build.sh`: tag checkout + SHA verification) | Prevents building from stale or modified code on the Windows VM — `git fetch --tags && git checkout --force <TAG>`, verified by `git rev-parse HEAD == TAG_SHA` (from `.push-completed` marker) before build starts; hard fail on mismatch (no warn-and-continue) |
 
 **Erasure coding parameters — adapted to storage budgets:**
 

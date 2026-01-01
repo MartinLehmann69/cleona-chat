@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/multi_interface.dart';
+import 'package:cleona/core/network/android_udp_sender.dart';
 import 'package:cleona/core/network/native_udp_sender.dart';
 import 'package:cleona/core/network/ios_udp_sender.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
@@ -67,6 +68,7 @@ class ZeroSendDeadEdgeDetector {
   ZeroSendDeadEdgeDetector({
     this.threshold = 10,
     this.clamp = 1000000,
+    this.minWindowMs = 3000,
   });
 
   /// Consecutive-0-send count at which the socket is considered dead.
@@ -77,8 +79,15 @@ class ZeroSendDeadEdgeDetector {
   /// prevents repeat firing regardless of how high the count climbs.
   final int clamp;
 
+  /// Minimum elapsed time (ms) from first failure before the detector fires.
+  /// Prevents a single DHT K=10 fanout burst (<100ms) from triggering
+  /// dead-edge — only sustained failure over this window is evidence of
+  /// actual socket death.
+  final int minWindowMs;
+
   int _consecutiveZeroSends = 0;
   bool _edgeFired = false;
+  int _firstFailureMs = 0;
 
   /// Current consecutive-0-send count (for logging).
   int get consecutiveZeroSends => _consecutiveZeroSends;
@@ -92,6 +101,7 @@ class ZeroSendDeadEdgeDetector {
   void noteSendSuccess() {
     _consecutiveZeroSends = 0;
     _edgeFired = false;
+    _firstFailureMs = 0;
   }
 
   /// Record a completed `reconnectUdpSockets()`. Same effect as
@@ -100,17 +110,21 @@ class ZeroSendDeadEdgeDetector {
   void noteReconnectCompleted() {
     _consecutiveZeroSends = 0;
     _edgeFired = false;
+    _firstFailureMs = 0;
   }
 
   /// Record [count] consecutive 0-byte sends. Returns `true` exactly once
   /// per dead period — the call where the running count crosses
-  /// [threshold] — and `false` on every other call (below threshold, or
-  /// already-fired-and-not-yet-re-armed).
+  /// [threshold] AND the temporal hysteresis window has elapsed — and
+  /// `false` on every other call.
   bool noteZeroSends(int count) {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (_consecutiveZeroSends == 0) _firstFailureMs = nowMs;
     _consecutiveZeroSends += count;
     if (_consecutiveZeroSends > clamp) _consecutiveZeroSends = clamp;
     if (_edgeFired) return false;
-    if (_consecutiveZeroSends >= threshold) {
+    if (_consecutiveZeroSends >= threshold &&
+        (nowMs - _firstFailureMs) >= minWindowMs) {
       _edgeFired = true;
       return true;
     }
@@ -273,6 +287,12 @@ class Transport {
   /// socket, no §4.5.2 dual-socket risk.
   IosUdpSender? _iosUdpSender;
 
+  /// Android native sendto() via libcleona_net.so. Same fd as Dart socket
+  /// (found via /proc/self/fd scan). Returns actual errno on failure —
+  /// allows distinguishing ENETUNREACH (socket dead) from EHOSTUNREACH
+  /// (peer-specific, normal).
+  AndroidUdpSender? _androidUdpSender;
+
   // ── Multi-Interface Send (Architecture §23.2) ─────────────────────
   /// Per-interface socket manager for multi-path sending over WiFi +
   /// cellular in parallel. Null when mode is [MultiInterfaceMode.off]
@@ -353,6 +373,24 @@ class Transport {
         _log.warn('iOS native sendto() init failed: $e');
       }
       _startIosDiagnostics();
+    }
+
+    // Android: native sendto() on Dart's existing fd for errno visibility.
+    // Allows the dead-edge detector to distinguish ENETUNREACH (socket/route
+    // dead) from EHOSTUNREACH (peer offline — normal, don't count).
+    if (Platform.isAndroid) {
+      try {
+        _androidUdpSender = AndroidUdpSender.open(port);
+        if (_androidUdpSender != null) {
+          _log.info('Android native sendto() activated '
+              '(${AndroidUdpSender.libraryVersion() ?? "unknown"})');
+        } else {
+          _log.info('Android native sendto(): fd not found for port $port '
+              '— using Dart socket (no errno visibility)');
+        }
+      } catch (e) {
+        _log.warn('Android native sendto() init failed: $e');
+      }
     }
 
     // Native UDP sender for Transport.sendUdp — bypasses Dart's
@@ -841,7 +879,8 @@ class Transport {
   }
 
   /// Low-level UDP send: uses native sender (libcleona_net) when available,
-  /// falls back to Dart RawDatagramSocket. Returns bytes sent (>0 on success).
+  /// falls back to Dart RawDatagramSocket. Returns bytes sent (>0 on success),
+  /// 0 on Dart-send failure, or negative errno from native sendto.
   int _udpSendRaw(Uint8List data, InternetAddress address, int remotePort,
       RawDatagramSocket socket) {
     // iOS native sendto() — same fd as Dart socket, bypasses broken send()
@@ -850,9 +889,18 @@ class Transport {
         if (_iosUdpSender!.hasIpv6) {
           return _iosUdpSender!.send6(address.address, remotePort, data);
         }
-        // No IPv6 fd — fall through to Dart socket (best effort)
       } else {
         return _iosUdpSender!.send(address.address, remotePort, data);
+      }
+    }
+    // Android native sendto() — same fd as Dart socket, errno visibility
+    if (_androidUdpSender != null) {
+      if (address.type == InternetAddressType.IPv6) {
+        if (_androidUdpSender!.hasIpv6) {
+          return _androidUdpSender!.send6(address.address, remotePort, data);
+        }
+      } else {
+        return _androidUdpSender!.send(address.address, remotePort, data);
       }
     }
     if (_nativeSender != null && address.type == InternetAddressType.IPv4) {
@@ -862,6 +910,19 @@ class Transport {
       // only if the native sender returned a transient error.
     }
     return socket.send(data, address, remotePort);
+  }
+
+  /// Whether a send failure (return value <= 0 from _udpSendRaw) should count
+  /// toward the dead-edge detector. On Android with native errno, only
+  /// socket/route-level errors (ENETUNREACH, ENETDOWN, EBADF) count. Peer-
+  /// specific errors (EHOSTUNREACH, ECONNREFUSED) indicate the peer is
+  /// offline, not the local socket — those are normal and must NOT trigger
+  /// dead-edge escalation.
+  bool _shouldCountAsSocketDead(int sendResult) {
+    if (_androidUdpSender == null) return true; // no errno info → legacy path
+    if (sendResult == 0) return true; // Dart socket 0-return (no native sender used)
+    if (sendResult > 0) return false; // success (should never be called with this)
+    return AndroidUdpSender.isSocketDeadErrno(sendResult);
   }
 
   /// Send a NetworkPacketV3 via UDP to a specific address.
@@ -930,6 +991,7 @@ class Transport {
             : interFragmentDelay;
         var frag0Failed = false;
         var fragOkCount = 0;
+        var lastFragErrno = 0;
         for (var i = 0; i < n; i++) {
           final sent = _udpSendRaw(wrappedFragments[i], address, remotePort, socket);
           if (sent > 0) {
@@ -939,6 +1001,7 @@ class Transport {
                 'to ${address.address}:$remotePort');
           } else {
             if (i == 0) frag0Failed = true;
+            if (sent < 0) lastFragErrno = sent;
             _log.debug('sendUdp: fragment $i/$n returned $sent '
                 'for ${address.address}:$remotePort');
           }
@@ -982,8 +1045,9 @@ class Transport {
             _resetFragmentCacheTimer(cacheKey);
           }
         } else {
-          _log.info('sendUdp: all ${wrappedFragments.length} fragments returned 0 for ${address.address}:$remotePort');
-          if (_deadEdge.noteZeroSends(wrappedFragments.length) && !_reconnecting) {
+          _log.info('sendUdp: all ${wrappedFragments.length} fragments returned $lastFragErrno for ${address.address}:$remotePort');
+          if (_shouldCountAsSocketDead(lastFragErrno) &&
+              _deadEdge.noteZeroSends(wrappedFragments.length) && !_reconnecting) {
             _log.warn('UDP socket appears dead (${_deadEdge.consecutiveZeroSends} consecutive 0-sends)');
             onUdpSocketDead?.call();
           }
@@ -1000,7 +1064,8 @@ class Transport {
       }
       final v6Hint = address.type == InternetAddressType.IPv6 ? ' [IPv6]' : '';
       _log.info('sendUdp: socket.send returned $sent for ${address.address}:$remotePort (${data.length}B)$v6Hint');
-      if (_deadEdge.noteZeroSends(1) && !_reconnecting) {
+      if (_shouldCountAsSocketDead(sent) &&
+          _deadEdge.noteZeroSends(1) && !_reconnecting) {
         _log.warn('UDP socket appears dead (${_deadEdge.consecutiveZeroSends} consecutive 0-sends)');
         onUdpSocketDead?.call();
       }
@@ -1845,6 +1910,18 @@ class Transport {
           _log.warn('iOS native sendto() reattach failed: $e');
         }
       }
+      // Android: old fds are stale after socket close+reopen — rescan.
+      if (Platform.isAndroid) {
+        _androidUdpSender = null;
+        try {
+          _androidUdpSender = AndroidUdpSender.open(port);
+          if (_androidUdpSender != null) {
+            _log.info('Android native sendto() reattached');
+          }
+        } catch (e) {
+          _log.warn('Android native sendto() reattach failed: $e');
+        }
+      }
       // Multi-interface: refresh per-interface sockets after reconnect
       unawaited(refreshMultiInterface());
       _log.info('UDP sockets reconnected on port $port');
@@ -1968,6 +2045,7 @@ class Transport {
     _nativeSender?.close();
     _nativeSender = null;
     _iosUdpSender = null;
+    _androidUdpSender = null;
     _udpSocket?.close();
     _udpSocket = null;
     _udpSocket6?.close();

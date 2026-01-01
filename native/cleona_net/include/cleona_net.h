@@ -92,6 +92,35 @@ CLEONA_NET_EXPORT int cleona_udp_send(
 CLEONA_NET_EXPORT void cleona_udp_close(cleona_udp_socket_t* s);
 
 /*
+ * Send on an EXISTING file descriptor (not managed by this library).
+ * Used on Android/iOS where Dart's RawDatagramSocket owns the fd and we
+ * just need native sendto() for errno visibility.
+ *
+ * Returns: bytes sent on success, or negative errno on failure.
+ * Does NOT close or modify the fd in any way.
+ */
+CLEONA_NET_EXPORT int cleona_udp_sendto_fd(
+    int fd,
+    const char* dest_ip,
+    uint16_t dest_port,
+    const uint8_t* data,
+    int len);
+
+/*
+ * Find an open UDP4 socket fd bound to [local_port] in this process.
+ * Scans /proc/self/fd + getsockname(). POSIX-only (Linux/Android).
+ *
+ * Returns: the fd (>= 0) on success, -1 if not found.
+ */
+CLEONA_NET_EXPORT int cleona_find_udp4_fd(uint16_t local_port);
+
+/*
+ * Find an open UDP6 socket fd bound to [local_port] in this process.
+ * Returns: the fd (>= 0) on success, -1 if not found.
+ */
+CLEONA_NET_EXPORT int cleona_find_udp6_fd(uint16_t local_port);
+
+/*
  * Version string for diagnostics.
  */
 CLEONA_NET_EXPORT const char* cleona_net_version(void);

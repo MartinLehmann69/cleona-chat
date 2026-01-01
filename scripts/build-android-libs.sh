@@ -405,6 +405,30 @@ build_libcleona_pow() {
     echo "  → $JNILIBS/libcleona_pow.so ($(du -h "$JNILIBS/libcleona_pow.so" | cut -f1))"
 }
 
+build_libcleona_net() {
+    echo "=== libcleona_net bauen ==="
+    local SRC="$PROJECT_DIR/native/cleona_net"
+    local BUILD="$BUILD_DIR/cleona_net"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    cmake -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
+        -DANDROID_ABI="$CMAKE_ABI" \
+        -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
+        "$SRC"
+
+    ninja -j"$(nproc)"
+
+    cp libcleona_net.so "$JNILIBS/libcleona_net.so"
+    "$STRIP" "$JNILIBS/libcleona_net.so"
+    verify_alignment "$JNILIBS/libcleona_net.so"
+    echo "  → $JNILIBS/libcleona_net.so ($(du -h "$JNILIBS/libcleona_net.so" | cut -f1))"
+}
+
 # --- Main ---
 TARGET="${1:-all}"
 
@@ -417,6 +441,7 @@ build_target() {
         cleona_audio)  build_libcleona_audio ;;
         vpx)           build_libcleona_vpx ;;
         pow)           build_libcleona_pow ;;
+        net)           build_libcleona_net ;;
         all)
             build_libsodium
             echo ""
@@ -430,10 +455,12 @@ build_target() {
             echo ""
             build_libcleona_pow
             echo ""
+            build_libcleona_net
+            echo ""
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|vpx|pow|all]"
+            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|vpx|pow|net|all]"
             exit 1
             ;;
     esac
