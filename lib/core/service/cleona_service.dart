@@ -477,7 +477,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.149';
+  static const String kCurrentAppVersion = '3.1.150';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -539,6 +539,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // cleaned up during flush.
   // Structure: entityIdHex (group or channel) → Set<recipientUserIdHex>
   final Map<String, Set<String>> _pendingMembershipResends = {};
+
+  // §5.5b First-CR ACK gate: after sendToDevice, wait 15s for a
+  // DELIVERY_RECEIPT before firing FIRST_CR_STORE to seed peers.
+  // Key = messageIdHex of the First-CR ApplicationFrameV3.
+  final Map<String, Timer> _firstCrAckGates = {};
 
   CleonaService({
     required this.identity,
@@ -1377,7 +1382,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void _handleAckTimeout(String messageIdHex, String recipientUserIdHex) {
     for (final conv in conversations.values) {
       for (final msg in conv.messages) {
-        if (msg.id == messageIdHex && msg.isOutgoing && msg.status == MessageStatus.sent) {
+        if (msg.id == messageIdHex && msg.isOutgoing &&
+            msg.status.canTransitionTo(MessageStatus.queued)) {
           msg.status = MessageStatus.queued;
           _log.info('ACK timeout for ${messageIdHex.substring(0, 8)} to '
               '${recipientUserIdHex.substring(0, 8)} — status downgraded to queued');
@@ -4400,15 +4406,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         '${recipientUserIdHex.substring(0, 8)} (device='
         '${bytesToHex(recipientDeviceId).substring(0, 8)}) ok=$ok');
 
-    // §5.5b FIRST_CR_STORE: also deposit the CR on seed peers so the
-    // target can retrieve it even if currently offline (async CR via
-    // email/copy-paste). The blob is the serialized KEM-encrypted packet
-    // — opaque to the seed peer. Direct send bypasses DV cascade.
-    unawaited(_sendFirstCrStoreToSeedPeers(
-      recipientUserId: recipientUserId,
-      recipientDeviceId: recipientDeviceId,
-      encryptedCrBlob: Uint8List.fromList(packet.writeToBuffer()),
-    ));
+    // §5.5b First-CR ACK gate: wait 15s for DELIVERY_RECEIPT before
+    // falling back to FIRST_CR_STORE on seed peers. If the recipient is
+    // online and reachable, the receipt cancels the timer (see
+    // _handleDeliveryReceiptV3). If not, the timer fires and deposits
+    // the CR on seed peers for offline retrieval.
+    final firstCrMsgIdHex = bytesToHex(Uint8List.fromList(innerFrame.messageId));
+    final crBlob = Uint8List.fromList(packet.writeToBuffer());
+    _firstCrAckGates[firstCrMsgIdHex]?.cancel();
+    _firstCrAckGates[firstCrMsgIdHex] = Timer(const Duration(seconds: 15), () {
+      if (_firstCrAckGates.remove(firstCrMsgIdHex) != null) {
+        _log.info('§5.5b First-CR ACK timeout (15s) for '
+            '${firstCrMsgIdHex.substring(0, 8)} — firing FIRST_CR_STORE');
+        _sendFirstCrStoreToSeedPeers(
+          recipientUserId: recipientUserId,
+          recipientDeviceId: recipientDeviceId,
+          encryptedCrBlob: crBlob,
+        );
+      }
+    });
 
     // First-contact CRs are persisted as pending_outgoing and retried by
     // _retryPendingContactRequests regardless of the initial send result.
@@ -5164,7 +5180,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (msg.thumbnailBase64 != null && existing.thumbnailBase64 == null) {
           existing.thumbnailBase64 = msg.thumbnailBase64;
         }
-        if (msg.status.index > existing.status.index) {
+        if (existing.status.canTransitionTo(msg.status)) {
           existing.status = msg.status;
         }
         if (msg.readAt != null && existing.readAt == null) {
@@ -7400,7 +7416,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     for (final conv in conversations.values) {
       for (final msg in conv.messages) {
         if (msg.id == messageIdHex && msg.isOutgoing) {
-          if (msg.status == newStatus) return; // already correct
+          if (!msg.status.canTransitionTo(newStatus)) return;
           msg.status = newStatus;
           _log.debug('Status update: $messageIdHex → $newStatus');
           onStateChanged?.call();
@@ -13539,6 +13555,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       node.ackTracker.handleAck(
           msgIdHex, bytesToHex(senderDeviceId), wasDirect: wasDirect);
 
+      // §5.5b: cancel pending FIRST_CR_STORE timer for First-CRs
+      _firstCrAckGates.remove(msgIdHex)?.cancel();
+
       // §5.8 Crash-safety: remove outbox entry for delivered message.
       if (_outbox.containsKey(msgIdHex)) {
         _outbox.remove(msgIdHex);
@@ -13550,7 +13569,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       for (final msg in conv.messages) {
         if (msg.id == msgIdHex &&
             msg.isOutgoing &&
-            (msg.status == MessageStatus.sent || msg.status == MessageStatus.queuedOffline)) {
+            msg.status.canTransitionTo(MessageStatus.delivered)) {
           msg.status = MessageStatus.delivered;
           _saveConversations();
           onStateChanged?.call();
@@ -13582,7 +13601,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final conv = conversations[conversationId];
       if (conv == null) return;
       for (final msg in conv.messages) {
-        if (msg.id == msgIdHex && msg.isOutgoing) {
+        if (msg.id == msgIdHex && msg.isOutgoing &&
+            msg.status.canTransitionTo(MessageStatus.read)) {
           msg.status = MessageStatus.read;
           msg.readAt ??= readAt;
           _saveConversations();

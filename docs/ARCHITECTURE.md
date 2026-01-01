@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:abf0283de231, 2026-07-19). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:60a96568174f, 2026-07-20). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7258,13 +7258,13 @@ The update manifest must be signed with the **Ed25519 maintainer private key**. 
 
 **Erasure coding parameters — adapted to storage budgets:**
 
-Fragment sizes must fit within the tightest storage budget (mobile: 5 MB). The N/K ratio is chosen so that individual fragments stay below the mobile limit while maintaining the same 1.43x redundancy ratio as message erasure coding (§5.7).
+Fragment sizes should fit within the tightest storage budget where possible (mobile: 5 MB). The N/K ratio maintains the same 1.43x redundancy ratio as message erasure coding (§5.7). Android fragments (~10.7 MB) exceed the mobile storage budget — mobile nodes hold at most 1-2 fragments and rely on the `expectedSize` parameter in `BinaryFetchClient.fetch()` to raise the per-fetch cap above the 50 MB hard limit (V3.1.149+).
 
 | Platform | Binary size | N | K | Overhead | Fragment size | Fits mobile (5 MB) |
 |---|---|---|---|---|---|---|
-| Android | ~50 MB | 30 | 21 | ~72 MB | ~2.4 MB | Yes |
-| Linux | ~100 MB | 50 | 35 | ~143 MB | ~2.9 MB | Yes |
-| Windows | ~90 MB | 50 | 35 | ~129 MB | ~2.6 MB | Yes |
+| Android | ~224 MB | 30 | 21 | ~320 MB | ~10.7 MB | No |
+| Linux | ~27 MB | 50 | 35 | ~39 MB | ~0.8 MB | Yes |
+| Windows | ~31 MB | 50 | 35 | ~44 MB | ~0.9 MB | Yes |
 
 macOS and iOS are excluded from in-network binary distribution: macOS uses DMG downloads (GitHub Release), iOS uses TestFlight. `shouldUseInNetworkUpdate()` returns `false` on both platforms.
 
@@ -7425,8 +7425,8 @@ No additional port required. UDP (SOCK_DGRAM) and TCP (SOCK_STREAM) share the po
 | Path | Content | Size |
 |---|---|---|
 | `/cleona` | Bootstrap web app (static HTML + JS) | ~200-400 KB |
-| `/cleona/binary/<platform>` | Complete binary (bootstrap nodes in early phase) | 50-110 MB |
-| `/cleona/fragment/<platform>/<index>` | Single erasure fragment | 2-3 MB |
+| `/cleona/binary/<platform>` | Complete binary (bootstrap nodes in early phase) | 27-224 MB |
+| `/cleona/fragment/<platform>/<index>` | Single erasure fragment | 0.8-10.7 MB |
 
 **What the HTTP server does NOT do:** No dynamic processing, no CGI, no API, no upload, no directory listing. Only GET on fixed paths. Minimal attack surface. Returns 404 for any unknown path — no server identification headers, no version disclosure.
 
@@ -7517,7 +7517,7 @@ For environments where network-based distribution is compromised or unavailable.
 | Update Manager (§19.6.2) | `BinaryUpdateManager` (`lib/core/update/binary_update_manager.dart`) | `checkForUpdate()`, `startDownload()`, `assemble()`, `verify()`, `gc()` |
 | Delta Updates (§19.6.3) | `DeltaUpdateManager` (`lib/core/update/delta_update_manager.dart`) | `findDeltaPath()`, `tryDeltaUpdate()` — bsdiff/bspatch glue, falls back to full binary when no path exists |
 | HTTP Fragment Server (§19.6.6) | `BinaryHttpServer` (`lib/core/update/binary_http_server.dart`) | `handleConnection()` behind the existing First-Byte-Sniffing multiplexer; serves `/cleona`, `/cleona/binary/<platform>`, `/cleona/fragment/<platform>/<index>` |
-| HTTP Fragment Client | `BinaryFetchClient` (`lib/core/update/binary_fetch_client.dart`) | `fetch()` |
+| HTTP Fragment Client | `BinaryFetchClient` (`lib/core/update/binary_fetch_client.dart`) | `fetch()` — hard caps: 500 MB full binary, 50 MB fragment; `expectedSize` from manifest overrides when available (V3.1.149+) |
 | Bootstrap Web App (§19.6.6) | `BootstrapWebApp` (`lib/core/update/bootstrap_web_app.dart`) | `html()` — self-contained HTML+JS assembler (Reed-Solomon + Ed25519 verification client-side) |
 | Install Source (§19.6.4) | `InstallSourceDetector` (`lib/core/update/install_source.dart`) | `detect()`, `cached` — Play Store vs. sideload update routing |
 | Invite Links (§19.6.4) | `InviteLink` (`lib/core/update/invite_link.dart`), `InviteLinkService` (`lib/core/update/invite_link_service.dart`) | `InviteLink()`/`InviteLink.fromUrl()`/`verifySignatureForPlatform()`, `createInviteLink()`, `publishInviteScopedRecord()` |
@@ -7527,7 +7527,7 @@ For environments where network-based distribution is compromised or unavailable.
 | Manifest Extensions (§19.6.2) | `UpdateManifest` (`lib/core/update/update_manifest.dart`) | Fields `dhtBinaryTag`, `deltaBinaryTag`, `minMonotoneSeq`, `binaryHashes`, `binarySignatures`, `binarySizes` |
 | Orchestration | `CleonaService` (`lib/core/service/cleona_service.dart`) | `startInNetworkUpdate()`, `_selfSeedCurrentBinary()`, `_buildBinaryAvailabilityRecord()` |
 
-**Erasure parameters as implemented** (`BinarySeeder.platformParams`, matches §19.6.2 table): Android N=30/K=21, Linux/Windows N=50/K=35. macOS/iOS are excluded from in-network distribution (V3.1.149). **Storage budgets as implemented** (`BinaryFragmentStore.kMobileBudgetBytes`/`kDesktopBudgetBytes`, enforced via `enforceBudget()`): mobile 5 MB, desktop 20 MB — matches the §19.6.2 storage budget table.
+**Erasure parameters as implemented** (`BinarySeeder.platformParams`, matches §19.6.2 table): Android N=30/K=21, Linux/Windows N=50/K=35. macOS/iOS are excluded from in-network distribution (V3.1.149). **Storage budgets as implemented** (`BinaryFragmentStore.kMobileBudgetBytes`/`kDesktopBudgetBytes`, enforced via `enforceBudget()`): mobile 5 MB, desktop 20 MB. Android fragments (~10.7 MB) exceed the mobile budget — mobile nodes store fewer fragments and compensate with full-binary fetch from peers that hold the complete binary. **Fetch hard caps** (`BinaryFetchClient`): 500 MB full binary, 50 MB fragment (V3.1.150+; previously 200 MB / 10 MB, which blocked Android APK downloads when `expectedSize` was not passed — fixed V3.1.149 via `fetchWithSize` callback, V3.1.150 raised the hard caps as defence-in-depth).
 
 ---
 

@@ -76,6 +76,23 @@ enum MessageStatus {
   expired,
 }
 
+extension MessageStatusGuard on MessageStatus {
+  bool get _isTerminal =>
+      this == MessageStatus.delivered || this == MessageStatus.read;
+
+  /// Forward-only state-machine guard: returns true only if [next] is a valid
+  /// forward transition.  Terminal states (delivered, read) block all
+  /// non-terminal writes; delivered may advance to read.
+  bool canTransitionTo(MessageStatus next) {
+    if (this == next) return false;
+    if (this == MessageStatus.read) return false;
+    if (this == MessageStatus.delivered) return next == MessageStatus.read;
+    if (this == MessageStatus.expired) return false;
+    if (next._isTerminal) return true;
+    return !_isTerminal;
+  }
+}
+
 /// Media download state for two-stage media delivery.
 enum MediaDownloadState { none, announced, downloading, completed, failed }
 

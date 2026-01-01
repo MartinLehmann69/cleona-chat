@@ -984,6 +984,9 @@ class Transport {
     final socket = _socketFor(address);
     if (socket == null) {
       _log.info('sendUdp: no ${address.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} socket for ${address.address}');
+      if (_deadEdge.noteZeroSends(1) && !_reconnecting) {
+        onUdpSocketDead?.call();
+      }
       return false;
     }
 
@@ -1637,22 +1640,26 @@ class Transport {
   /// Sorted: private IPv4 first (LAN), then public IPv4, then global IPv6.
   /// This ensures WiFi/LAN interfaces are preferred over mobile data.
   static Future<List<String>> getAllLocalIps() async {
-    final interfaces4 = await NetworkInterface.list(
-      type: InternetAddressType.IPv4,
-    );
     final privateIps = <String>[];
     final publicIps = <String>[];
 
-    for (final iface in interfaces4) {
-      for (final addr in iface.addresses) {
-        if (addr.isLoopback || addr.address == '0.0.0.0') continue;
-        final ip = addr.address;
-        if (_isPrivateIpAddr(ip)) {
-          privateIps.add(ip);
-        } else {
-          publicIps.add(ip);
+    try {
+      final interfaces4 = await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      );
+      for (final iface in interfaces4) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback || addr.address == '0.0.0.0') continue;
+          final ip = addr.address;
+          if (_isPrivateIpAddr(ip)) {
+            privateIps.add(ip);
+          } else {
+            publicIps.add(ip);
+          }
         }
       }
+    } catch (_) {
+      // IPv4 enumeration can fail during iOS interface transitions
     }
 
     // IPv6: only global addresses (skip loopback ::1 and link-local fe80::)
@@ -1939,30 +1946,26 @@ class Transport {
         }
       }
 
-      if (_udpSocket == null) {
-        _log.warn('UDP reconnect: IPv4 bind failed after 3 attempts — '
-            'scheduling deferred recovery');
-        Future.delayed(const Duration(seconds: 5), () {
-          if (_udpSocket == null && !_reconnecting) {
-            onUdpSocketDead?.call();
-          }
-        });
-        return;
+      if (_udpSocket != null) {
+        _udpSocket!.broadcastEnabled = true;
+        _udpSocket!.readEventsEnabled = true;
+        _setRecvBuffer(_udpSocket!);
+        _udpSocket!.listen(
+          _onUdpEvent,
+          onError: (e) {
+            _log.warn('UDP socket error: $e');
+            if ('$e'.contains('errno = 9') && !_reconnecting) {
+              onUdpSocketDead?.call();
+            }
+          },
+        );
+      } else {
+        _log.warn('UDP reconnect: IPv4 bind failed after 3 attempts');
       }
 
-      _udpSocket!.broadcastEnabled = true;
-      _udpSocket!.readEventsEnabled = true;
-      _setRecvBuffer(_udpSocket!);
-      _udpSocket!.listen(
-        _onUdpEvent,
-        onError: (e) {
-          _log.warn('UDP socket error: $e');
-          if ('$e'.contains('errno = 9') && !_reconnecting) {
-            onUdpSocketDead?.call();
-          }
-        },
-      );
-
+      // IPv6 bind — independent of IPv4 success. On iOS cellular (DS-Lite,
+      // CGNAT) IPv4 may be unavailable while IPv6 works fine. The old code
+      // returned early on IPv4 failure, leaving BOTH sockets null.
       try {
         _udpSocket6 = await RawDatagramSocket.bind(InternetAddress.anyIPv6, port);
         _udpSocket6!.readEventsEnabled = true;
@@ -1974,11 +1977,34 @@ class Transport {
       } catch (e) {
         _udpSocket6 = null;
       }
+
+      if (_udpSocket == null && _udpSocket6 == null) {
+        _log.warn('UDP reconnect: both IPv4 and IPv6 bind failed — '
+            'scheduling deferred recovery');
+        // iOS: cancel stale polling on closed fds to prevent fd-recycling bugs
+        if (Platform.isIOS) {
+          _iosRecvTimer?.cancel();
+          _iosRecvTimer = null;
+          _iosUdpSender = null;
+        }
+        // Re-arm dead-edge detector so it can fire again on subsequent failures
+        _deadEdge.noteReconnectCompleted();
+        Future.delayed(const Duration(seconds: 5), () {
+          if (_udpSocket == null && _udpSocket6 == null && !_reconnecting) {
+            onUdpSocketDead?.call();
+          }
+        });
+        return;
+      }
+
       _deadEdge.noteReconnectCompleted();
       _lastUdpReceiveMs = 0;
       _selfProbeAcked = false;
       _staleProbeInFlight = false;
       _startedAtMs = DateTime.now().millisecondsSinceEpoch;
+      if (_udpSocket != null || _udpSocket6 != null) {
+        _log.info('UDP reconnect: IPv4=${_udpSocket != null} IPv6=${_udpSocket6 != null}');
+      }
       if (Platform.isWindows) _sendSelfProbe();
       // iOS: old fd is stale after socket close+reopen — must rescan.
       // Restart native receive polling with the new fd.
@@ -2030,11 +2056,9 @@ class Transport {
       _log.info('UDP sockets reconnected on port $port');
     } catch (e) {
       _log.warn('UDP socket reconnect failed: $e');
-      // Deferred recovery: if an unexpected error left sockets null, ensure
-      // the system doesn't stay permanently dead.
-      if (_udpSocket == null) {
+      if (_udpSocket == null && _udpSocket6 == null) {
         Future.delayed(const Duration(seconds: 5), () {
-          if (_udpSocket == null && !_reconnecting) {
+          if (_udpSocket == null && _udpSocket6 == null && !_reconnecting) {
             onUdpSocketDead?.call();
           }
         });

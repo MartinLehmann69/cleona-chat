@@ -18,8 +18,8 @@ class BinaryFetchClient {
   static const Duration kFullBinaryTimeout = Duration(minutes: 10);
   static const Duration kConnectTimeout = Duration(seconds: 3);
 
-  static const int kMaxFullBinaryBytes = 200 * 1024 * 1024; // 200 MB
-  static const int kMaxFragmentBytes = 10 * 1024 * 1024; // 10 MB
+  static const int kMaxFullBinaryBytes = 500 * 1024 * 1024; // 500 MB
+  static const int kMaxFragmentBytes = 50 * 1024 * 1024; // 50 MB
 
   final CLogger _log;
   final HttpClient _client;

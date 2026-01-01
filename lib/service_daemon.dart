@@ -386,6 +386,7 @@ class _MultiServiceDaemon {
     var identities = mgr.loadIdentities();
     if (identities.isEmpty) {
       log.warn('Keine Identitäten gefunden — warte auf GUI-Setup (cleona.start trigger)');
+      _running = false;
       return;
     }
 
