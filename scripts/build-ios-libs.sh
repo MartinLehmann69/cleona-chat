@@ -322,8 +322,13 @@ build_cleona_audio() {
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
     cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
-    # speexdsp is built as a subdirectory — copy its .a too
-    find . -name 'libspeexdsp.a' -exec cp {} "$INSTALL_DIR/cleona_audio/lib/" \;
+    # speexdsp is built as a CMake subdirectory — separate install dir to
+    # avoid double-inclusion (cleona_audio doesn't embed speexdsp objects)
+    SPEEX_A=$(find . -name 'libspeexdsp.a' -print -quit)
+    if [ -n "$SPEEX_A" ]; then
+        mkdir -p "$INSTALL_DIR/speexdsp/lib"
+        cp "$SPEEX_A" "$INSTALL_DIR/speexdsp/lib/"
+    fi
     cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
     cd "$PROJECT_DIR"
 }
@@ -428,7 +433,7 @@ for platform_tag in device simulator; do
 
     # Collect all .a files from all lib install dirs
     ALL_ARCHIVES=()
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib speexdsp/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] && ALL_ARCHIVES+=("$a")
         done
