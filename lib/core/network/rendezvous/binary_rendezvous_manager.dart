@@ -266,7 +266,7 @@ class BinaryRendezvousManager {
     final currentEpoch = currentEpochString();
     final prevEpoch = previousEpochString();
     final results = <ResolvedBinaryEndpoint>[];
-    final seenDevices = <String>{};
+    final seenDevices = <String, int>{};
 
     for (final epoch in [currentEpoch, prevEpoch]) {
       final tag = computeBinaryTag(secret, epoch, platform);
@@ -290,9 +290,7 @@ class BinaryRendezvousManager {
         final devHex = rec.deviceId
             .map((b) => b.toRadixString(16).padLeft(2, '0'))
             .join();
-        if (seenDevices.contains(devHex)) continue;
-        seenDevices.add(devHex);
-        results.add(ResolvedBinaryEndpoint(
+        final endpoint = ResolvedBinaryEndpoint(
           addresses: rec.addresses,
           deviceIdHex: devHex,
           platform: rec.platform,
@@ -301,7 +299,16 @@ class BinaryRendezvousManager {
           hasFullBinary: rec.hasFullBinary,
           fragmentIndices: rec.fragmentIndices,
           seq: rec.seq,
-        ));
+        );
+        if (seenDevices.containsKey(devHex)) {
+          final existingIdx = seenDevices[devHex]!;
+          if (rec.seq > results[existingIdx].seq) {
+            results[existingIdx] = endpoint;
+          }
+          continue;
+        }
+        seenDevices[devHex] = results.length;
+        results.add(endpoint);
       }
     }
 
