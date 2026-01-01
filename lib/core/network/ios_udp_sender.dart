@@ -25,7 +25,7 @@ typedef _RecvPeekDart = int Function(int fd);
 class IosUdpSender {
   final int _fd;
   final _SendtoDart _sendto;
-  final _RecvPeekDart _recvPeek;
+  final _RecvPeekDart? _recvPeek;
 
   IosUdpSender._(this._fd, this._sendto, this._recvPeek);
 
@@ -38,8 +38,12 @@ class IosUdpSender {
         'cleona_ios_find_udp_fd');
     final sendto =
         lib.lookupFunction<_SendtoC, _SendtoDart>('cleona_ios_sendto');
-    final recvPeek =
-        lib.lookupFunction<_RecvPeekC, _RecvPeekDart>('cleona_ios_recv_peek');
+
+    _RecvPeekDart? recvPeek;
+    try {
+      recvPeek = lib
+          .lookupFunction<_RecvPeekC, _RecvPeekDart>('cleona_ios_recv_peek');
+    } catch (_) {}
 
     final fd = findFd(localPort);
     if (fd < 0) return null;
@@ -61,7 +65,5 @@ class IosUdpSender {
     }
   }
 
-  /// Peek at receive buffer without consuming. Returns 1 if data available,
-  /// -35 (EAGAIN) if empty, or other -errno on error.
-  int recvPeek() => _recvPeek(_fd);
+  int recvPeek() => _recvPeek?.call(_fd) ?? -999;
 }
