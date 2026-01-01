@@ -37,6 +37,7 @@ import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart';
+import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
@@ -136,6 +137,11 @@ class IdentityResolver {
   /// verifizierter Anker wird nie durch hoehere seq allein ersetzt — nur
   /// durch eine gueltige Rotationskette.
   final Map<String, Uint8List> _anchoredPkByUserHex = {};
+
+  /// Einmal-pro-User-Guard fuer das Legacy-Fallback-Log (Transition).
+  final Set<String> _legacyLoggedFor = {};
+
+  final CLogger _log = CLogger.get('resolver');
 
   IdentityResolver({
     required this.routingTable,
@@ -418,8 +424,15 @@ class IdentityResolver {
         );
         switch (status) {
           case AnchorStatus.forged:
-            continue; // silent drop — kryptografisch widerlegt
+            // Volumen gebunden an eigene Lookups (pull-basiert) — warn ok.
+            _log.warn('D1: forged AuthManifest fuer '
+                '${bytesToHex(userId).substring(0, 16)}... verworfen '
+                '(seq=${m.sequenceNumber}, anchor-bind failed)');
+            continue;
           case AnchorStatus.contactMismatch:
+            _log.warn('D1: AuthManifest fuer Kontakt '
+                '${bytesToHex(userId).substring(0, 16)}... widerspricht '
+                'gespeichertem Key — verworfen (seq=${m.sequenceNumber})');
             onContactKeyMismatch?.call(userId, m.userEd25519Pk);
             continue;
           case AnchorStatus.legacy:
@@ -443,13 +456,25 @@ class IdentityResolver {
       }
     }
 
+    final userHex = bytesToHex(userId);
     if (bestVerified != null) {
+      if (!_anchoredPkByUserHex.containsKey(userHex)) {
+        _log.info('D1: AuthManifest fuer ${userHex.substring(0, 16)}... '
+            'verified (anchor gebunden, seq=${bestVerified.sequenceNumber})');
+      }
       return _AuthLookup(bestVerified, bestVerified.userEd25519Pk);
     }
     // Transition (§4.3): legacy-unverified akzeptiert, aber ohne Anker —
     // Liveness/KEM laufen dann im Legacy-Modus weiter. Ein gecachter
     // TOFU-Anker wird dadurch NICHT ersetzt.
-    if (bestLegacy != null) return _AuthLookup(bestLegacy, null);
+    if (bestLegacy != null) {
+      if (_legacyLoggedFor.add(userHex)) {
+        _log.info('D1: AuthManifest fuer ${userHex.substring(0, 16)}... '
+            'legacy-unverified akzeptiert (Transition, '
+            'seq=${bestLegacy.sequenceNumber})');
+      }
+      return _AuthLookup(bestLegacy, null);
+    }
     return null;
   }
 

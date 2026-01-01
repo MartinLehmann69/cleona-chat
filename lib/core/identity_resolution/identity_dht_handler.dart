@@ -18,6 +18,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/identity_resolution/liveness_record.dart';
@@ -52,6 +53,8 @@ class IdentityDhtHandler {
 
   Timer? _maintenanceTimer;
   Timer? _persistDebounce;
+
+  final CLogger _log = CLogger.get('identity-dht');
 
   IdentityDhtHandler({
     required this.ownNodeId,
@@ -120,6 +123,12 @@ class IdentityDhtHandler {
           m.sequenceNumber <= existing.sequenceNumber) {
         return; // Replay-Schutz (verified-beats-legacy ignoriert seq)
       }
+    }
+    if (incomingVerified) {
+      // Volumen: Auth-Republish alle 20h pro User — info ok. Dient als
+      // VM-/Feld-Evidenz, dass der D1-Pfad aktiv ist.
+      _log.info('D1: verankertes AuthManifest fuer '
+          '${hex.substring(0, 16)}... gespeichert (seq=${m.sequenceNumber})');
     }
     _storedAuthManifests[hex] = m;
     _enforceAuthCap();
