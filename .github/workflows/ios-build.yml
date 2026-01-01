@@ -152,32 +152,16 @@ jobs:
           cd ios
           pod install --repo-update
 
-      - name: Inject force_load into Flutter xcconfigs
+      - name: Prepare force_load path
         run: |
-          # flutter build ipa reruns "pod install" internally, which regenerates
-          # Pods-Runner.*.xcconfig — wiping any injection there. But Flutter's
-          # own ios/Flutter/{Debug,Release}.xcconfig are NOT regenerated (only
-          # Generated.xcconfig is). The Runner target's base configuration
-          # chain is: Runner buildSettings < Flutter/Release.xcconfig <
-          # Generated.xcconfig < Pods-Runner.release.xcconfig. Appending
-          # OTHER_LDFLAGS here adds to the inherited chain from Pods.
           DEVICE_A="$(pwd)/ios/CleonaNative/libcleona_all_device.a"
           if [ ! -f "$DEVICE_A" ]; then
             echo "ERROR: $DEVICE_A not found"
             ls -la ios/CleonaNative/
             exit 1
           fi
-          FORCE_FLAG="-force_load $DEVICE_A"
-          for xcconfig in ios/Flutter/Debug.xcconfig ios/Flutter/Release.xcconfig; do
-            if ! grep -q 'force_load' "$xcconfig"; then
-              echo "OTHER_LDFLAGS = \$(inherited) $FORCE_FLAG" >> "$xcconfig"
-              echo "  $(basename $xcconfig): injected"
-            fi
-          done
-          echo "--- Verification ---"
-          cat ios/Flutter/Release.xcconfig
-          echo "---"
-          cat ios/Flutter/Debug.xcconfig
+          echo "FORCE_LOAD_PATH=$DEVICE_A" >> "$GITHUB_ENV"
+          echo "Archive size: $(du -h "$DEVICE_A" | cut -f1)"
 
       - name: Install distribution certificate
         env:
@@ -224,10 +208,42 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          flutter build ipa \
-            --release \
-            --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
-            --export-options-plist=ios/ExportOptions.plist
+          # Two-phase build:
+          # 1) flutter build ios: compiles Dart, runs pod install, produces
+          #    the Xcode project with all generated files.
+          # 2) xcodebuild archive: links the Runner binary with -force_load
+          #    passed as an extra OTHER_LDFLAGS override. xcodebuild's
+          #    command-line build settings have HIGHEST priority — they
+          #    override xcconfigs, project.pbxproj, and everything else.
+          flutter build ios --release --no-codesign \
+            --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
+
+          # Inject -force_load AFTER flutter's internal pod install
+          FORCE_FLAG="-force_load $FORCE_LOAD_PATH"
+          XCCONFIG_DIR="ios/Pods/Target Support Files/Pods-Runner"
+          for xcconfig in "$XCCONFIG_DIR"/Pods-Runner.*.xcconfig; do
+            [ -f "$xcconfig" ] || continue
+            if ! grep -q 'force_load' "$xcconfig"; then
+              sed -i '' "s|^OTHER_LDFLAGS = \(.*\)|OTHER_LDFLAGS = \1 $FORCE_FLAG|" "$xcconfig"
+              echo "  $(basename "$xcconfig"): injected"
+            fi
+          done
+
+          # Archive + export IPA
+          xcodebuild archive \
+            -workspace ios/Runner.xcworkspace \
+            -scheme Runner \
+            -configuration Release \
+            -archivePath build/ios/archive/Runner.xcarchive \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="Apple Development" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            | tail -20
+
+          xcodebuild -exportArchive \
+            -archivePath build/ios/archive/Runner.xcarchive \
+            -exportPath build/ios/ipa \
+            -exportOptionsPlist ios/ExportOptions.plist
 
       - name: List build outputs
         if: always()
