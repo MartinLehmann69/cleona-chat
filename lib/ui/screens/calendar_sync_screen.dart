@@ -185,6 +185,12 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
     return AppBarScaffold(
       title: locale.get('calendar_sync_title'),
       opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
       body: SafeArea(
         top: false,
         child: _loading

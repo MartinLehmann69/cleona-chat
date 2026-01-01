@@ -752,6 +752,12 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     return AppBarScaffold(
       title: locale.get('archive_settings_title'),
       opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
       body: ListView(
         children: [
           const SizedBox(height: 8),
@@ -1100,6 +1106,12 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     return AppBarScaffold(
       title: locale.get('transcription_settings_title'),
       opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
       body: ListView(
         children: [
           const SizedBox(height: 8),
@@ -1253,6 +1265,12 @@ class _MediaSettingsScreenState extends State<MediaSettingsScreen> {
     return AppBarScaffold(
       title: locale.get('media_settings_title'),
       opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
       body: ListView(
         children: [
           const SizedBox(height: 8),
@@ -1476,6 +1494,12 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
     return AppBarScaffold(
       title: locale.get('notification_settings_title'),
       opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
       body: ListView(
         children: [
           const SizedBox(height: 8),
