@@ -364,23 +364,25 @@ build_libvpx() {
     #     via `xcrun --sdk iphoneos` (redundant with, but consistent
     #     with, our own -isysroot).
     #
-    #   - Simulator: arm64-iphonesimulator-gcc (with --force-toolchain)
+    #   - Simulator: --force-target=arm64-iphonesimulator-gcc
     #     NOT in configure's all_platforms whitelist — libvpx only
     #     pre-registers x86/x86_64 iphonesimulator variants (predates
-    #     Apple Silicon simulators). --force-toolchain bypasses the
-    #     whitelist check (`is_in ... || enabled force_toolchain`);
-    #     the toolchain string still matches the `*-iphonesimulator-*`
-    #     case in configure.sh's target-parsing, which correctly
-    #     resolves the iphonesimulator SDK. Using arm64-darwin-gcc for
-    #     the simulator instead would be wrong: it hits the
-    #     `arm*-darwin-*` case, which appends an *iphoneos* -isysroot
-    #     AFTER ours, silently pointing the simulator build at the
-    #     wrong SDK (last -isysroot wins).
-    local vpx_target="arm64-darwin-gcc"
-    local force_flag=""
+    #     Apple Silicon simulators). --force-target sets the toolchain
+    #     AND enables the force_toolchain feature (configure.sh:601-603),
+    #     which bypasses the whitelist check
+    #     (`is_in ... || enabled force_toolchain`, configure.sh:827).
+    #     NB: `--force-toolchain` is only the internal feature name, NOT
+    #     a CLI option — passing it aborts with "Unknown option" (CI run
+    #     28697167082). The toolchain string still matches the
+    #     `*-iphonesimulator-*` case in configure.sh's target-parsing,
+    #     which correctly resolves the iphonesimulator SDK. Using
+    #     arm64-darwin-gcc for the simulator instead would be wrong: it
+    #     hits the `arm*-darwin-*` case, which appends an *iphoneos*
+    #     -isysroot AFTER ours, silently pointing the simulator build at
+    #     the wrong SDK (last -isysroot wins).
+    local target_flag="--target=arm64-darwin-gcc"
     if [ "$platform" = "iphonesimulator" ]; then
-        vpx_target="arm64-iphonesimulator-gcc"
-        force_flag="--force-toolchain"
+        target_flag="--force-target=arm64-iphonesimulator-gcc"
     fi
 
     # VP8-only: vpx_shim.c (native/vpx_shim.c) only calls vpx_codec_vp8_cx/
@@ -388,9 +390,8 @@ build_libvpx() {
     # entry points — no VP9 symbols are used. --disable-vp9 keeps the
     # build lean. --disable-webm-io/--disable-libyuv are already the
     # default (off); listed explicitly for documentation.
-    # shellcheck disable=SC2086
     ./configure \
-        --target="$vpx_target" $force_flag \
+        "$target_flag" \
         --prefix="$INSTALL_DIR/vpx" \
         --disable-examples \
         --disable-tools \
