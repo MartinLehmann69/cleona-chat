@@ -1435,6 +1435,16 @@ class _ChatScreenState extends State<ChatScreen> {
             onPressed: () => Navigator.pop(ctx),
             child: Text(locale.get('cancel')),
           ),
+          TextButton.icon(
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: previewText));
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get('copied_to_clipboard'))),
+              );
+            },
+            icon: const Icon(Icons.copy, size: 16),
+            label: Text(locale.get('copy')),
+          ),
           FilledButton.icon(
             onPressed: () async {
               Navigator.pop(ctx);

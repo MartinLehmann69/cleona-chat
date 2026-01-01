@@ -99,6 +99,7 @@ class CallManager {
 
   CallSession? _currentCall;
   Timer? _ringingTimeout;
+  Timer? _inviteRetryTimer;
 
   /// Ringing timeout in seconds (auto-hangup if not answered).
   static const int ringingTimeoutSec = 60;
@@ -181,13 +182,24 @@ class CallManager {
       invite.callerKemCiphertext = kemCt;
     }
 
+    final inviteBytes = invite.writeToBuffer();
+    final recipientId = hexToBytes(peerNodeIdHex);
+
     final sent = await sendViaUser?.call(
-          hexToBytes(peerNodeIdHex),
+          recipientId,
           proto.MessageTypeV3.MTV3_CALL_INVITE,
-          invite.writeToBuffer(),
+          inviteBytes,
         ) ??
         false;
     _log.info('Call invite sent to ${peerNodeIdHex.substring(0, 8)}: ${sent ? "OK" : "FAILED"}');
+
+    // UDP has no delivery guarantee — retry the CALL_INVITE up to 2 more
+    // times if no CALL_ACCEPT/REJECT arrives within 3s each. This is NOT a
+    // timeout increase; it compensates for UDP packet loss or stale routes
+    // that haven't converged yet after a cold start.
+    if (sent) {
+      _scheduleInviteRetry(recipientId, inviteBytes, peerNodeIdHex, 2);
+    }
 
     // 60s Ringing Timeout — auto-hangup if not answered
     _startRingingTimeout();
@@ -548,6 +560,30 @@ class CallManager {
   void _cancelRingingTimeout() {
     _ringingTimeout?.cancel();
     _ringingTimeout = null;
+    _cancelInviteRetry();
+  }
+
+  // ── CALL_INVITE Retry ──────────────────────────────────────────
+
+  void _scheduleInviteRetry(
+      Uint8List recipientId, Uint8List inviteBytes, String peerHex, int remaining) {
+    _inviteRetryTimer?.cancel();
+    if (remaining <= 0) return;
+    _inviteRetryTimer = Timer(const Duration(seconds: 3), () async {
+      final call = _currentCall;
+      if (call == null || call.state != CallState.ringing ||
+          call.direction != CallDirection.outgoing) {
+        return;
+      }
+      _log.info('CALL_INVITE retry ($remaining left) → ${peerHex.substring(0, 8)}');
+      await sendViaUser?.call(recipientId, proto.MessageTypeV3.MTV3_CALL_INVITE, inviteBytes);
+      _scheduleInviteRetry(recipientId, inviteBytes, peerHex, remaining - 1);
+    });
+  }
+
+  void _cancelInviteRetry() {
+    _inviteRetryTimer?.cancel();
+    _inviteRetryTimer = null;
   }
 
   bool _callIdMatches(Uint8List a, List<int> b) {
