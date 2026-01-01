@@ -1327,8 +1327,13 @@ class CleonaNode {
         // responding peer provides routes — no need to flood the mesh.
         if (_discoveryComplete) {
           _lastRouteUpdateSentTo[senderHex] = DateTime.now();
-          Timer(const Duration(milliseconds: 500),
-              () => _sendWelcomeRouteUpdate(senderHex));
+          Timer(const Duration(milliseconds: 500), () {
+            _sendWelcomeRouteUpdate(senderHex);
+            // §4.5: push top-N known peers to the new neighbor so it
+            // learns PeerInfo (addresses, userId) immediately — not just
+            // DV routes which carry no addresses.
+            _pushTopNPeersToNewNeighbor(senderDeviceId);
+          });
           _pushSelfToNeighborsExcept(senderDeviceId);
         } else {
           _log.debug('DV: Welcome/push deferred — discovery not complete');
@@ -2302,13 +2307,12 @@ class CleonaNode {
         final peerHex = bytesToHex(id);
         Route? route;
         if (!isSelf) {
-          // §4.4 gossip gate: only include peers that pass the full
-          // liveness check (confirmed + alive route + not cascade-exhausted).
-          if (!_isPeerAliveForGossip(peerHex)) {
-            _log.debug('PeerListWant: skip ${peerHex.substring(0, 8)} '
-                '— not alive for gossip');
-            continue;
-          }
+          // WANT is an explicit request — the requester already knows the
+          // peer exists (from a DV ROUTE_UPDATE). Respond with whatever
+          // PeerInfo we have. The gossip gate (isPeerConfirmed) is NOT
+          // applied here — it belongs on proactive gossip (Summary handler)
+          // only. Requiring confirmed would break DV→K-bucket seeding for
+          // peers behind NAT whose mapping expired.
           route = dvRouting
               .routesTo(peerHex)
               .where((r) => r.isAlive)
@@ -4449,6 +4453,36 @@ class CleonaNode {
     }
   }
 
+  /// §4.5: Push PeerInfo for our top-N known peers to a newly connected
+  /// neighbor. The welcome ROUTE_UPDATE only carries (destination, cost) —
+  /// no addresses, no userId. Without this push, the new peer would have to
+  /// send PEER_LIST_WANT for every DV destination individually.
+  void _pushTopNPeersToNewNeighbor(Uint8List recipientDeviceId) {
+    final pushData = proto.PeerListPush();
+    final recipientHex = bytesToHex(recipientDeviceId);
+    var count = 0;
+    for (final peer in routingTable.allPeers) {
+      if (count >= 20) break;
+      if (peer.nodeIdHex == recipientHex) continue;
+      if (routingTable.isLocalNode(peer.nodeId)) continue;
+      final route = dvRouting.bestRouteTo(peer.nodeIdHex);
+      if (route == null || !route.isAlive) continue;
+      pushData.peers.add(peer.toProto(gossipFilter: true));
+      pushData.hopsFromSender.add(route.hopCount);
+      pushData.costFromSender.add(route.cost);
+      count++;
+    }
+    if (count > 0) {
+      _sendInfra(
+        messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
+        innerPayload: pushData.writeToBuffer(),
+        recipientDeviceId: recipientDeviceId,
+      );
+      _log.info('§4.5: Welcome peer-push → $count peers to '
+          '${recipientHex.substring(0, 8)}');
+    }
+  }
+
   /// Initiate a port probe for an external IP (public API for daemon/headless ipify fallback).
   void probePublicPort(String externalIp) => _initiatePortProbe(externalIp);
 
@@ -4838,6 +4872,12 @@ class CleonaNode {
       _log.debug('§4.6 liveness heartbeat: PINGing $hbIdx direct neighbors '
           '(150ms jitter)');
     }
+
+    // §4.4 safety-net: piggy-back a PeerListSummary exchange so peers
+    // detect stale/new entries via hash-check and pull deltas. This is
+    // the periodic backstop for the event-driven _doPeerExchange() that
+    // runs once at discovery-complete.
+    _doPeerExchange();
   }
 
   /// Welcome-Update: send full route table to a newly discovered neighbor.

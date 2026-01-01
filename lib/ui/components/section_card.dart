@@ -108,10 +108,13 @@ class SectionRow {
           else if (trailing != null)
             trailing!
           else if (value != null)
-            Text(
-              value!,
-              style: tokens.typography.mono.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+            Flexible(
+              child: Text(
+                value!,
+                style: tokens.typography.mono.copyWith(
+                  color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                ),
+                textAlign: TextAlign.end,
               ),
             ),
         ],

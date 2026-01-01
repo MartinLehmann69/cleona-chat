@@ -31,6 +31,19 @@ class SettingsScreen extends StatelessWidget {
   final ICleonaService service;
   const SettingsScreen({super.key, required this.service});
 
+  String _buildIpAddressText() {
+    final ips = <String>[];
+    for (final ip in service.localIps) {
+      if (ip == '127.0.0.1' || ip == '::1') continue;
+      ips.add(ip);
+    }
+    final pub = service.publicIp;
+    if (pub != null && pub.isNotEmpty && !ips.contains(pub)) {
+      ips.add('$pub (WAN)');
+    }
+    return ips.isEmpty ? '—' : ips.join('\n');
+  }
+
   void _showPortDialog(BuildContext context) {
     final locale = AppLocale.read(context);
     final controller = TextEditingController(text: '${service.port}');
@@ -351,11 +364,15 @@ class SettingsScreen extends StatelessWidget {
               ),
               SectionRow(
                 label: locale.get('encryption_label'),
-                value: 'X25519 + ML-KEM-768 / Ed25519 + ML-DSA-65',
+                value: 'X25519 + ML-KEM-768\nEd25519 + ML-DSA-65',
               ),
               SectionRow(
                 label: locale.get('network_tag_label'),
                 value: NetworkSecret.channel.name,
+              ),
+              SectionRow(
+                label: locale.get('ip_addresses_label'),
+                value: _buildIpAddressText(),
               ),
             ],
           ),

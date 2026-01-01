@@ -293,7 +293,16 @@ class PeerRescueBundle {
             networkTagValid: false,
             errorMessage: 'Not a rescue bundle URI');
       }
-      final b64 = uri.substring(uriPrefix.length);
+      var b64 = uri.substring(uriPrefix.length);
+      // Sanitize: messengers may URL-encode padding, insert line breaks,
+      // or add invisible Unicode characters during copy/paste.
+      b64 = b64
+          .replaceAll('%3D', '=')
+          .replaceAll('%3d', '=')
+          .replaceAll(RegExp(r'[\s​­﻿]'), '');
+      // Normalize padding to multiple of 4
+      final pad = b64.length % 4;
+      if (pad > 0) b64 = b64.padRight(b64.length + (4 - pad), '=');
       final bytes = base64Url.decode(b64);
       return parseAndValidate(bytes, knownExporterEd25519Pk: knownExporterEd25519Pk);
     } catch (e) {
