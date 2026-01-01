@@ -86,20 +86,29 @@ class CleonaForegroundService : Service() {
         instance = this
         createNotificationChannel()
         watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_GRACE_MS)
-        // Manifest declares foregroundServiceType="dataSync|microphone".
-        // The 2-arg startForeground() implicitly applies ALL manifest types,
-        // which forces the system to verify RECORD_AUDIO at boot — crashing
-        // freshly installed apps that have never granted the permission.
-        // Boot as DATA_SYNC only; _promoteForCall() upgrades to MICROPHONE
-        // on demand once RECORD_AUDIO has been granted.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                createNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification())
+        // Boot as SPECIAL_USE (no time limit, API 34+) or DATA_SYNC (pre-34).
+        // _promoteForCall() upgrades to MICROPHONE on demand.
+        // try/catch: defence-in-depth against ForegroundServiceStartNotAllowedException
+        // crash loops (Android can reject startForeground for exhausted quotas).
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground failed: ${e.message} — falling back to untyped")
+            try { startForeground(NOTIFICATION_ID, createNotification()) } catch (_: Exception) {}
         }
     }
 
@@ -121,24 +130,42 @@ class CleonaForegroundService : Service() {
     // honored — but minSdk in app/build.gradle.kts is high enough that
     // this branch is informational.
     private fun _promoteForCall() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
-                       ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            startForeground(NOTIFICATION_ID, createNotification(), type)
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                           ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                startForeground(NOTIFICATION_ID, createNotification(), type)
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val type = ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                           ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                startForeground(NOTIFICATION_ID, createNotification(), type)
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "promoteForCall failed: ${e.message}")
         }
     }
 
     private fun _demoteAfterCall() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                createNotification(),
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    createNotification(),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, createNotification())
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "demoteAfterCall failed: ${e.message}")
         }
     }
 

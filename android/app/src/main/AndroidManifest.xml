@@ -62,8 +62,12 @@
 
         <service
             android:name=".CleonaForegroundService"
-            android:foregroundServiceType="dataSync|microphone"
-            android:exported="false" />
+            android:foregroundServiceType="specialUse|microphone"
+            android:exported="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="persistent_p2p_messaging_daemon" />
+        </service>
 
         <meta-data
             android:name="flutterEmbedding"

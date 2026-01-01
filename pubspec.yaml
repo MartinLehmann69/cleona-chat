@@ -1,7 +1,7 @@
 name: cleona
 description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
 publish_to: 'none'
-version: 3.1.111+1
+version: 3.1.112+1
 
 environment:
   sdk: ^3.11.0
