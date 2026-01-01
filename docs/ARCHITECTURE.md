@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:9ae47223e414, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:cdbefc3971f2, 2026-06-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1736,9 +1736,9 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 - When sender (IPv4-only) and receiver (IPv6-only) share mutual peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
 - **Invariant:** A dual-stack relay node MUST forward incoming packets on IPv6 to recipients on IPv4 (and vice versa). The relay-forward logic (`_sendV3ViaHop`) selects the best address of the next hop independent of the IP version of the incoming packet — the bridge function follows implicitly from address selection.
 
-<!-- TODO V3.1.x: 2026-06-04 finding: Phone sent CR-relay to Bootstrap IPv6 (2001:db8::...), Bootstrap received nothing. Either IPv6 reception on Bootstrap is broken (firewall, socket binding) or the phone's sendUdp to IPv6 fails silently (mobile-IPv6 → home-network-IPv6 routing). Needs investigation. -->
+**IPv6 Reception Bug (V3.1.x fix):** Investigation of the 2026-06-04 finding (Phone→Bootstrap IPv6 packet lost) revealed two root causes: (1) `MulticastDiscovery` bound a second IPv6 socket to `nodePort` with `SO_REUSEPORT` — on Linux the kernel distributed inbound IPv6 unicast packets between Transport and MulticastDiscovery; packets that landed on MulticastDiscovery were silently dropped (same class as the 2fbc879 IPv4 regression, §4.5.2). Fix: MulticastDiscovery now binds to `discoveryPort` (41338) like LocalDiscovery does for IPv4. The §4.5.2 invariant check was extended to also verify `/proc/net/udp6`. (2) `currentSelfAddresses()` classified all local IPv6 as `IPV6_GLOBAL` — ULA/link-local addresses were advertised as globally routable and tried by remote peers. Fix: uses `PeerAddress.classifyIp()` for correct classification.
 
-**Bootstrap IPv6 reachability**: bootstrap nodes have a statically configured global IPv6 (e.g. via OPNsense VIP). This guarantees bootstrap reachability even in DS-Lite scenarios.
+**Bootstrap IPv6 reachability**: the bootstrap node obtains a global IPv6 via SLAAC from the DMZ prefix (e.g. `2001:db8:a::4ef0:215:5dff:fea8:21c`). OPNsense's WAN firewall passes IPv6 TCP/UDP 8080-8081 to this address; NDP on the DMZ bridge resolves the MAC. The bootstrap publishes its IPv6 via `api6.ipify.org`, so DS-Lite mobile peers can reach it directly.
 
 ### 4.8 Bootstrap Node
 

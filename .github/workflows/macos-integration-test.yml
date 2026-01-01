@@ -4,7 +4,7 @@
 # Phase 1: Startup smoke (always)
 #   FFI dylib loading, app launch, setup flow, UI navigation
 #
-# Phase 2: Network integration (when BOOTSTRAP_CONTACT_SEED secret is set)
+# Phase 2: Network integration (when BOOTSTRAP_CONTACT_SEED variable is set)
 #   ContactSeed import, peer connection to bootstrap via relay cascade
 #
 # No signing needed — runs locally on the runner, not distributed.
@@ -80,7 +80,7 @@ jobs:
 
       - name: Run integration test
         env:
-          BOOTSTRAP_CONTACT_SEED: ${{ secrets.BOOTSTRAP_CONTACT_SEED }}
+          BOOTSTRAP_CONTACT_SEED: ${{ vars.BOOTSTRAP_CONTACT_SEED }}
         run: |
           flutter test integration_test/app_test_ci.dart -d macos --timeout 120s 2>&1 | tee test-output.log
           EXIT_CODE=${PIPESTATUS[0]}

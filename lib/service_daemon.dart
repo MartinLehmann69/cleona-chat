@@ -1194,7 +1194,7 @@ class _MultiServiceDaemon {
           return;
         }
 
-        final oldIp = node.natTraversal.publicIp;
+        final oldIp = node.natTraversal.publicIp ?? node.manualPublicIp;
         if (force && oldIp != null && oldIp == ip) {
           log.info('ipify recheck: public IP unchanged ($ip)');
           return;
@@ -1205,9 +1205,16 @@ class _MultiServiceDaemon {
           node.natTraversal.reset();
         }
 
-        log.info('Public IP via ipify: $ip — starting port probe');
-        node.natTraversal.setExternalIpOnly(ip);
-        node.probePublicPort(ip);
+        if (node.manualPublicIp != null) {
+          // DNAT node (--public-ip): port is the listening port, no probe needed.
+          log.info('Public IP via ipify: $ip — DNAT node, confirming $ip:${node.port}');
+          node.natTraversal.confirmPublicAddress(ip, node.port);
+          node.manualPublicIp = ip;
+        } else {
+          log.info('Public IP via ipify: $ip — starting port probe');
+          node.natTraversal.setExternalIpOnly(ip);
+          node.probePublicPort(ip);
+        }
         node.broadcastAddressUpdate();
       } catch (e) {
         log.warn('ipify${force ? " recheck" : " fallback"} failed: $e');

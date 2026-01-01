@@ -470,12 +470,31 @@ void _queryPublicIpFallback(CleonaNode node, CLogger log, {Duration delay = Dura
         return;
       }
 
-      // Double-check — PortMapper may have succeeded while ipify was in flight
-      if (node.natTraversal.hasPublicIp) return;
+      // IP-change detection (aligned with service_daemon.dart)
+      final oldIp = node.natTraversal.publicIp ?? node.manualPublicIp;
+      if (force && oldIp != null && oldIp == ip) {
+        log.info('ipify recheck: public IP unchanged ($ip)');
+        return;
+      }
+      if (force && oldIp != null && oldIp != ip) {
+        log.info('Public IP CHANGED: $oldIp → $ip — resetting NAT, broadcasting update');
+        node.natTraversal.reset();
+      }
 
-      log.info('Public IP via ipify: $ip — starting port probe');
-      node.natTraversal.setExternalIpOnly(ip);
-      node.probePublicPort(ip);
+      // Double-check — PortMapper may have succeeded while ipify was in flight
+      // (skip this guard on forced recheck — IP may have changed)
+      if (!force && node.natTraversal.hasPublicIp) return;
+
+      if (node.manualPublicIp != null) {
+        // DNAT node (--public-ip): port is the listening port, no probe needed.
+        log.info('Public IP via ipify: $ip — DNAT node, confirming $ip:${node.port}');
+        node.natTraversal.confirmPublicAddress(ip, node.port);
+        node.manualPublicIp = ip;
+      } else {
+        log.info('Public IP via ipify: $ip — starting port probe');
+        node.natTraversal.setExternalIpOnly(ip);
+        node.probePublicPort(ip);
+      }
       node.broadcastAddressUpdate();
     } catch (e) {
       log.warn('ipify fallback failed: $e');
