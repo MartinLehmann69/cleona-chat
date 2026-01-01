@@ -467,7 +467,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.129';
+  static const String kCurrentAppVersion = '3.1.130';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1030,10 +1030,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return prevContactPkLookup?.call(userId);
     };
     node.identityResolver.onContactKeyMismatch ??= (userId, embeddedPk) {
+      final userHex = bytesToHex(userId);
+      final contact = _contacts[userHex];
+      final storedPkHex = contact?.ed25519Pk != null
+          ? bytesToHex(contact!.ed25519Pk!).substring(0, 16)
+          : '<null>';
+
+      // Self-Heal: if the AuthManifest key is provably correct (user-ID
+      // binding SHA-256(secret + pk) == userId), update the stale stored key.
+      final derivedUserId = HdWallet.computeUserId(embeddedPk, NetworkSecret.secret);
+      if (_constantTimeEq(derivedUserId, userId) && contact != null) {
+        contact.ed25519Pk = Uint8List.fromList(embeddedPk);
+        _saveContacts();
+        _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
+            '$storedPkHex… replaced with AuthManifest key '
+            '${bytesToHex(embeddedPk).substring(0, 16)}… '
+            '(user-ID binding verified)');
+        return;
+      }
+
       _log.warn('D1 trust anchor: AuthManifest fuer Kontakt '
-          '${bytesToHex(userId).substring(0, 16)}... traegt einen User-Key, '
-          'der dem gespeicherten Kontakt-Key widerspricht (keine brueckende '
-          'Rotationskette) — Record verworfen (§4.3 contact continuity)');
+          '${userHex.substring(0, 16)}… traegt User-Key '
+          '${bytesToHex(embeddedPk).substring(0, 16)}…, '
+          'gespeichert=$storedPkHex… — Record verworfen '
+          '(§4.3 contact continuity, user-ID binding mismatch)');
     };
 
     // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't
@@ -2363,6 +2383,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     msg.status = sent
         ? MessageStatus.sent
         : (l3Out[0] ? MessageStatus.queuedOffline : MessageStatus.failed);
+    _saveConversations();
     onStateChanged?.call();
 
     // Twin-Sync: notify other devices about sent message (§26)
@@ -4300,14 +4321,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Delete a contact and its conversation.
   @override
-  void deleteContact(String nodeIdHex) {
+  void deleteContact(String nodeIdHex, {required String source}) {
     _contacts.remove(nodeIdHex);
     _deletedContacts.add(nodeIdHex);
     conversations.remove(nodeIdHex);
     _saveContacts();
     _saveConversations();
     onStateChanged?.call();
-    _log.info('Contact deleted: ${nodeIdHex.substring(0, 8)}');
+    _log.info('Contact deleted: ${nodeIdHex.substring(0, 8)} (source=$source)');
 
     // Twin-Sync (§26)
     _sendTwinSync(proto.TwinSyncType.CONTACT_DELETED, Uint8List.fromList(utf8.encode(nodeIdHex)));
@@ -6588,13 +6609,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
 
         if (directOk) {
-          toRemove.add(entry.messageIdHex);
           _updateMessageStatusById(
               entry.messageIdHex,
               entry.recipientUserIdHex,
-              MessageStatus.delivered);
-          _log.info('Outbox flush: direct delivery OK for '
-              '${entry.messageIdHex.substring(0, 8)} → delivered');
+              MessageStatus.sent);
+          _log.info('Outbox flush: re-sent '
+              '${entry.messageIdHex.substring(0, 8)} → sent (awaiting receipt)');
+          final baseRtt = node.dhtRpc.getRtt(recipientUserId);
+          final timeout = AckTracker.computeTimeout(baseRtt);
+          unawaited(node.ackTracker.trackSend(
+            entry.messageIdHex,
+            entry.recipientUserIdHex,
+            const <PeerAddress>[],
+            timeout,
+            serializedPacket: canonicalBytes,
+            recipientUserId: recipientUserId,
+          ));
           continue;
         }
 
@@ -7001,7 +7031,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Save all persistent state (conversations, contacts, groups, channels).
   /// Called by the app lifecycle observer when going to background on Android.
   void saveState() {
-    _saveConversations();
+    _saveConversationsTimer?.cancel();
+    _saveConversationsTimer = null;
+    _saveConversationsPending = false;
+    _saveConversationsNow();
     _saveContacts();
     _saveGroups();
     _saveChannels();
@@ -13561,8 +13594,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
 
       // Previously deleted contact sends new CR: allow re-contact (delete ≠ block).
+      bool wasPreviouslyDeleted = false;
       if (_deletedContacts.contains(senderHex)) {
         _deletedContacts.remove(senderHex);
+        wasPreviouslyDeleted = true;
         _saveContacts();
         _log.info('Previously deleted contact ${senderHex.substring(0, 8)} re-requesting — allowed');
       }
@@ -13582,9 +13617,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final storedEd25519 = existing.ed25519Pk;
         final incomingEd25519 = Uint8List.fromList(cr.ed25519PublicKey);
 
-        // Restlücke A: accepted contact with empty stored key — treat as fresh CR
+        // Restlücke A: accepted contact with empty stored key — fill keys
+        // silently instead of downgrading to pending (never overwrite accepted→pending)
         if (storedEd25519 == null || storedEd25519.isEmpty) {
-          _log.warn('RC-1: accepted contact ${senderHex.substring(0, 8)} has no stored ed25519Pk — routing to Inbox');
+          existing.displayName = cr.displayName;
+          existing.ed25519Pk = incomingEd25519;
+          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
+          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
+          existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
+          if (cr.profilePicture.isNotEmpty) {
+            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
+          }
+          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
+            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
+          }
+          _saveContacts();
+          _log.warn('RC-1: accepted contact ${senderHex.substring(0, 8)} had no stored ed25519Pk — keys filled from CR');
+          acceptContactRequest(senderHex);
+          return;
         }
         // Same-Seed-Reinstall: keys unchanged — silent refresh
         else if (_bytesEqual(storedEd25519, incomingEd25519)) {
@@ -13634,13 +13684,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
       }
       if (existing != null && existing.status == 'accepted' && !allowAutoOverwrite) {
-        // F4-Gate triggered: status==accepted, but outer-sig was not verified.
-        // Do not auto-overwrite. Treat as fresh inbound CR — fall through to
-        // the regular pending-CR creation below, which surfaces it in the
-        // Inbox tab for explicit user confirmation.
-        _log.warn('F4-Gate: skipping auto-overwrite for ${cr.displayName} '
-            '(${senderHex.substring(0, 8)}) — outerSigStatus='
-            '${snapshot.outerSigStatus.name}, requires explicit user accept');
+        // CR from accepted contact with unverified outer-sig: silently drop.
+        // Never downgrade accepted→pending — the contact relationship is
+        // already established. If a legitimate re-install happened, the
+        // next direct-path CR (with verified outer-sig) will handle it.
+        _log.warn('CR from accepted contact ${cr.displayName} '
+            '(${senderHex.substring(0, 8)}) dropped — outerSigStatus='
+            '${snapshot.outerSigStatus.name}, contact already accepted');
+        return;
       }
       if (existing != null && existing.status == 'pending_outgoing') {
         // Bidirectional CR: we sent them a CR AND they sent us one.
@@ -13714,6 +13765,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _saveContacts();
       _saveConversations();
       _log.info('CR from ${cr.displayName} (${senderHex.substring(0, 8)}) → pending');
+
+      if (wasPreviouslyDeleted) {
+        _log.info('Auto-accepting CR from previously deleted contact '
+            '${cr.displayName} (${senderHex.substring(0, 8)})');
+        acceptContactRequest(senderHex);
+        return;
+      }
 
       onContactRequestReceived?.call(senderHex, cr.displayName);
       onStateChanged?.call();

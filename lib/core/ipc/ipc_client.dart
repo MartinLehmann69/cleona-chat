@@ -1769,7 +1769,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  void deleteContact(String nodeIdHex) {
+  void deleteContact(String nodeIdHex, {required String source}) {
     _sendRequest('delete_contact', params: {'nodeIdHex': nodeIdHex});
   }
 

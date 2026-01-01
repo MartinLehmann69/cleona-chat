@@ -204,7 +204,7 @@ abstract class ICleonaService {
   void notifyContactSeedUriShared(String rendezvousNonceB64);
   bool addManualPeer(String ip, int port);
   Future<bool> acceptContactRequest(String nodeIdHex);
-  void deleteContact(String nodeIdHex);
+  void deleteContact(String nodeIdHex, {required String source});
   void renameContact(String nodeIdHex, String? localAlias);
   /// Set/clear a contact's birthday (local metadata only, never broadcast).
   /// Pass null for all three to clear. Triggers calendar birthday re-sync.

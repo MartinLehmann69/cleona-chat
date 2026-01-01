@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:639a1c3cc39a, 2026-07-08). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8a12baa7cae0, 2026-07-09). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1480,7 +1480,7 @@ A manifest is **verified** iff (a) its hybrid signature validates against the **
 2. **Rotation chain** (soft re-key, §7.4b): the chain starts at a founding pubkey whose hash equals the userId; each link carries the old key's Ed25519 signature over the successor pubkeys (reusing the `KeyRotationBroadcast` link shape, Appendix A); the final link's pubkeys equal the embedded ones.
 3. **Contact match:** the embedded pubkeys equal the stored contact pubkeys for this userId (contacts track rotations via KEY_ROTATION_BROADCAST, so their stored key is current).
 
-**Contact continuity (mandatory):** if the userId is a stored contact, path 3 MUST hold (or a valid rotation chain must bridge old→new); a mismatch rejects the record and raises the existing key-change-detection event (§8.3). **Resolver continuity (TOFU):** once a verified manifest is cached, later manifests must verify against the cached anchor or present a valid chain — a higher `seq` alone never replaces a verified anchor.
+**Contact continuity (mandatory):** if the userId is a stored contact, path 3 MUST hold (or a valid rotation chain must bridge old→new); a mismatch triggers a **self-heal check**: if path 1 (founding-key binding `SHA-256(network_secret || embeddedPk) == userId`) verifies for the AuthManifest's embedded pubkey, the stored contact key is updated to the AuthManifest key automatically (local-only, no network traffic). This covers stale contact keys caused by delete+re-add scenarios where the contact was re-added from a fresh CR but the stored key was not yet updated. If neither path 1 nor a valid rotation chain bridges the mismatch, the record is rejected and the existing key-change-detection event (§8.3) is raised. **Resolver continuity (TOFU):** once a verified manifest is cached, later manifests must verify against the cached anchor or present a valid chain — a higher `seq` alone never replaces a verified anchor.
 
 **Selection rule:** verified beats legacy-unverified; highest `seq` within the class.
 
@@ -2420,7 +2420,7 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
 
 **Sender-side retries no longer exist.** Once all Layer-2 routes are exhausted and Layer-3 (S&F + Mailbox) has been triggered, the sender has done its duty. The receiver will pull the message from its mailbox on next coming-online. The outbox (see below) provides **crash-safety** rather than retry semantics: every ACK-worthy message is persisted at send time and removed when the corresponding `DELIVERY_RECEIPT` arrives. If the daemon is killed between Layer-2 dispatch and Layer-3 placement — or between Layer-2 dispatch and receipt of the `DELIVERY_RECEIPT` — the outbox entry survives and the full cascade is re-attempted once on the next `onNetworkChanged` edge. This is distinct from v2.2's `MessageQueue`, which retried against reachable network on a timer.
 
-**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed: each entry re-attempts the **full cascade** (Layer 1+2 first — the recipient may now be online — then Layer 3 on Layer-2 failure). On success (direct delivery OR Layer-3 placement), the entry is cleared; on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
+**Persistent outbox (crash-safe delivery).** Every ACK-worthy message is written to the local **outbox** (`outbox.json.enc`, encrypted, survives daemon crashes) at send time. When the corresponding `DELIVERY_RECEIPT` arrives, the entry is removed. If the `DELIVERY_RECEIPT` never arrives — because the recipient was unreachable, the relay path failed, or the daemon was killed before the ACK timeout could trigger Layer 3 — the outbox entry persists. On daemon restart (or on any `onNetworkChanged` / first-peer-confirmed / contact-endpoint-confirmed / verified-inbound-from-recipient edge — the last one (F3′, V3.1.118) fires user-scoped when a fully verified application frame arrives from a user with parked entries, covering the recipient reappearing while the sender's own connectivity never changed; gated 60 s per sender), the outbox is flushed: each entry re-attempts the **full cascade** (Layer 1+2 first — the recipient may now be online — then Layer 3 on Layer-2 failure). On L1+2 send success, the message status is set to `sent` (single checkmark) and the AckTracker is registered for proper receipt tracking — the outbox entry is retained until the actual `DELIVERY_RECEIPT` confirms delivery (V3.1.130+; prior: L1+2 success falsely set `delivered`). On L3 placement, the entry is cleared (`queuedOffline`); on continued failure (still zero peers), the entry is retained for the next edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete. This covers three previously distinct failure modes in a single mechanism: (a) zero sender connectivity (airplane mode, dead network), (b) daemon crash between Layer-2 dispatch and ACK timeout, and (c) daemon crash between ACK-timeout-triggered Layer-3 and successful placement. The outbox is **not** a retry queue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message.
 
 **Cascade latency budget.** Layer 2 attempts routes sequentially — each route waits for `DELIVERY_RECEIPT` or ACK timeout (`max(2 × RTT × hopCount, 8s)`, capped 30s) before trying the next. With up to 3 alive routes per device, the worst-case Layer-2 latency per device is ~30s (typical: 8–16s). Layer 3 begins only after Layer 2 is exhausted for ALL resolved devices. For latency-sensitive sends (call setup), `sendToUser` accepts `requireOnline=true` — Layer 3 is skipped entirely and the call returns `false` immediately on Layer-2 failure. **Speculative Layer-3 placement is intentionally omitted.** Placing erasure fragments while Layer 2 is still running would waste storage bandwidth for messages that may yet be delivered directly. The sequential model trades worst-case placement latency (~30s) for storage efficiency — fragments are placed only on confirmed send failure. This is acceptable because the delay affects only the *placement* timing, not the *delivery* timing to the receiver.
 
@@ -3202,7 +3202,7 @@ Once Multi-Device is active, application-state changes (new contacts, conversati
 | # | Type | Content |
 |---|---|---|
 | 0 | CONTACT_ADDED | new contact accepted (with pubkeys, display name, verification level) |
-| 1 | CONTACT_DELETED | contact deleted |
+| 1 | CONTACT_DELETED | contact deleted (source-tagged: `inbox_reject`, `conversation_dialog`, `contacts_dialog`, `ipc`) |
 | 2 | MESSAGE_SENT | message sent on one device → mirror so the other devices see it locally |
 | 3 | MESSAGE_EDITED | edit within the per-chat editing window (default 60 min, see §14.6) |
 | 4 | MESSAGE_DELETED | delete is **unbounded** — the author may delete their own message at any time (no time window); the receiver admits the delete as long as the sender is the original author (§14.6). Only `MESSAGE_EDITED` is window-bound. |
@@ -3413,15 +3413,21 @@ A Contact Request (CR) is the only permitted form in which an **unknown** user m
 |------|-----------|----------|
 | Same-Seed-Reinstall | Keys unchanged | Refresh keys/device-ID, re-accept (silently ok) |
 | Key changed | `ed25519Pk` differs from stored | Overwrite + §8.3 Key-Change-Detection (verification reset + warning + `contact_identity_rotated` IPC event) |
-| Contact without stored User-Key | `ed25519Pk` null/empty | Treated as fresh inbound CR (Inbox + explicit accept), never Device-Sig-only-Overwrite |
+| Contact without stored User-Key | `ed25519Pk` null/empty | Keys filled silently from CR (same as Same-Seed-Reinstall), re-accept — never downgrade accepted→pending |
 
 The CR/CRR path is thereby consistent with RESTORE_BROADCAST (§6.3, H-2) and Emergency Key Rotation (§7.4b, SR-1): **a real identity-key change is never silent**, regardless of the transport carrier. The prior state (overwrite solely on `outerSigStatus==verified`, without §8.3) allowed a takeover via the CR path around Key-Change-Detection — RC-1 hardening closes this door.
 
 **Cross-reference §8.3:** Key-Change-Detection (§8.3) is the **only** permitted reaction path to an identity-key change of a known contact and MUST be traversed by **all** overwrite paths (RESTORE, KEY_ROTATION, CONTACT_REQUEST, CONTACT_REQUEST_RESPONSE) whenever `ed25519Pk` changes.
 
+**CR-from-accepted-contact suppression (V3.1.130+):** if a CR arrives for a contact that is already `accepted` but the outer Device-Sig is unverified (`skippedBootstrap`), the CR is silently dropped. An `accepted` contact is **never** downgraded to `pending` — neither by the F4-Gate path nor by the Restlücke-A (missing stored key) path. The `accepted→pending` transition is architecturally forbidden; all four sub-paths within the `accepted`-contact branch now terminate with `return`. A legitimate re-install from the same sender will be handled by the next direct-path CR (verified outer-sig), which triggers Same-Seed-Reinstall or §8.3 Key-Change-Detection as appropriate.
+
 **Mixed-Net:** Receiver-side hardening — an RC-1 receiver protects itself regardless of the sender build. Legacy builds still overwrite silently on receive; enforcement via `minRequiredVersion` (§19.5.7 Phase-2 pattern), as with SR-2.
 
+**Inbox reject UX (V3.1.130+):** the "reject" action on pending contact requests in the Inbox tab requires explicit user confirmation via an AlertDialog before calling `deleteContact()`, consistent with the conversation-dialog and contacts-dialog delete paths. All three delete paths are source-tagged for diagnostics (`inbox_reject`, `conversation_dialog`, `contacts_dialog`).
+
 **Bidirectional CR auto-accept**: if Alice accepts Bob's CR while Bob has already sent Alice a CR (race), both CRs are auto-accepted without further user confirmation.
+
+**Previously-deleted-contact auto-accept (V3.1.130+):** if a CR arrives from a userId that is in the `_deletedContacts` set (the user had previously accepted and then deleted this contact), the CR is auto-accepted without user interaction. This is safe because `userId = SHA-256(network_secret + pubkey)` cryptographically binds the identity — no attacker can forge a CR with the correct userId without the corresponding private key. The `_deletedContacts` entry is cleared on acceptance. This eliminates the manual re-accept step when one side deletes a contact and the other re-initiates via `sendContactRequest` (re-contact path).
 
 ### 8.1.1 ContactSeed Format (rev3 — Compact ContactSeed + Deferred Key Exchange)
 
@@ -6629,6 +6635,10 @@ Flutter UI with ThemeExtensions, 5 token primitives, 6 component classes, 10 Ski
 **Identity switch**: immediate switch in the active daemon state (all identities run in parallel within the daemon; only the UI display changes).
 
 **Conversation sorting**: unread first, then by descending timestamp.
+
+**Conversation-list timestamps**: today shows `HH:MM`, yesterday shows localized "Yesterday" label, 2-6 days shows short weekday abbreviation (Mo/Di/...), same year shows `d.M.`, older shows `d.M.YY`.
+
+**Chat date separators**: a centered date label is inserted between messages from different calendar days. Labels: today = "Heute"/"Today"/..., yesterday = "Gestern"/"Yesterday"/..., 2-6 days = full weekday name, same year = "d. Month", older = "d. Month YYYY". Skipped for vote-sorted channels (Feature Requests). Individual message bubbles continue to show only `HH:MM` — the separator provides the date context. i18n keys: `date_today`, `date_yesterday`, `weekday_1`-`weekday_7` (full), `weekday_short_1`-`weekday_short_7`, `month_1`-`month_12` (all 33 locales).
 
 **Inbox tab** (contact requests and invites): pending CR + GROUP_INVITE + CHANNEL_INVITE listed. Accept/Reject per item.
 

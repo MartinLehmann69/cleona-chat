@@ -1194,7 +1194,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
             break;
           }
-          service.deleteContact(nodeIdHex);
+          service.deleteContact(nodeIdHex, source: 'ipc');
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: true,

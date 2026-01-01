@@ -34,6 +34,7 @@ import 'package:cleona/ui/components/poll_card.dart';
 import 'package:cleona/ui/screens/poll_editor_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:cleona/ui/components/system_channel_post.dart';
+import 'package:cleona/ui/date_format.dart' as df;
 
 /// Defensive base64 decode for image fields persisted in conversations.
 /// Wraps base64Decode's FormatException — invalid input returns null and the
@@ -467,7 +468,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 msg.text.contains('"feature_request"')) {
                               _loadFrTally(msg.id, service);
                             }
-                            return _MessageBubble(
+                            final bubble = _MessageBubble(
                               message: msg,
                               isEditing: _editingMessageId == msg.id,
                               isGroup: widget.isGroup || widget.isChannel,
@@ -487,6 +488,36 @@ class _ChatScreenState extends State<ChatScreen> {
                                           force: true);
                                     },
                             );
+                            final isFr = sys_ch.SystemChannels.isFeatureReqChannel(widget.conversationId);
+                            if (!isFr && df.needsDateSeparator(
+                                index > 0 ? messages[index - 1].timestamp : null,
+                                msg.timestamp)) {
+                              final cs = Theme.of(context).colorScheme;
+                              return Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Center(
+                                    child: Container(
+                                      margin: const EdgeInsets.symmetric(vertical: 8),
+                                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: cs.surfaceContainerHighest.withValues(alpha: 0.7),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Text(
+                                        df.formatDateSeparator(msg.timestamp, locale),
+                                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                          color: cs.onSurfaceVariant,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  bubble,
+                                ],
+                              );
+                            }
+                            return bubble;
                           },
                         ),
                     ),

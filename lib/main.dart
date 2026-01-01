@@ -1022,6 +1022,59 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  void _logDaemonCrash() {
+    try {
+      final ts = DateTime.now().toIso8601String();
+      final buf = StringBuffer()
+        ..writeln('=== Daemon crash detected at $ts ===');
+
+      // Read PID from lock/pid file
+      int? daemonPid;
+      for (final name in ['cleona.lock', 'cleona.pid']) {
+        try {
+          final content = File('$_baseDir/$name').readAsStringSync().trim();
+          daemonPid = int.tryParse(content);
+          if (daemonPid != null) break;
+        } catch (_) {}
+      }
+      buf.writeln('Daemon PID: ${daemonPid ?? "unknown"}');
+
+      // Check dmesg for OOM/segfault for this PID (Linux only)
+      if (Platform.isLinux) {
+        try {
+          final r = Process.runSync('dmesg', ['--time-format', 'iso'],
+              stdoutEncoding: const SystemEncoding());
+          if (r.exitCode == 0) {
+            final lines = (r.stdout as String).split('\n');
+            final relevant = lines.where((l) =>
+                l.contains('oom-kill') ||
+                l.contains('Out of memory') ||
+                l.contains('segfault') ||
+                l.contains('killed process') ||
+                (daemonPid != null && l.contains('$daemonPid')));
+            if (relevant.isNotEmpty) {
+              buf.writeln('dmesg matches:');
+              for (final l in relevant) {
+                buf.writeln('  $l');
+              }
+            } else {
+              buf.writeln('dmesg: no OOM/segfault/kill signals found');
+            }
+          }
+        } catch (e) {
+          buf.writeln('dmesg: $e');
+        }
+      }
+
+      final crashLog = File('/tmp/cleona-daemon-crash.log');
+      crashLog.writeAsStringSync('${buf.toString()}\n',
+          mode: FileMode.append, flush: true);
+      debugPrint('[main] Crash info written to /tmp/cleona-daemon-crash.log');
+    } catch (e) {
+      debugPrint('[main] Failed to log daemon crash: $e');
+    }
+  }
+
   Future<bool> _signalDaemonToStart() async {
     File('$_baseDir/cleona.start').writeAsStringSync('start');
     return _waitForSocketConnectable(maxWaitMs: 15000);
@@ -1288,10 +1341,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onGroupCallEnded = (_) => notifyListeners();
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
         ipcClient.onDaemonDied = () {
-          // GUI and daemon act as one unit — if daemon truly dies (lock file
-          // missing or PID gone), GUI exits. Next GUI launch will start a
-          // fresh daemon via _ensureDaemonRunning().
-          debugPrint('[main] Daemon process gone — exiting GUI');
+          debugPrint('[main] Daemon process gone — logging crash info before exit');
+          _logDaemonCrash();
           exit(0);
         };
         ipcClient.onIpcStalled = () {

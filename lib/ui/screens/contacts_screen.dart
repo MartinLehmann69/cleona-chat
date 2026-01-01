@@ -74,7 +74,7 @@ class ContactsScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Port: ${svc.port} | Peers: ${svc.peerCount}',
+                    'Port: ${svc.port} | Peers: ${svc.confirmedPeerCount}',
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
@@ -294,7 +294,7 @@ class ContactsScreen extends StatelessWidget {
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Theme.of(context).colorScheme.error),
             onPressed: () {
-              svc.deleteContact(nodeIdHex);
+              svc.deleteContact(nodeIdHex, source: 'contacts_dialog');
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('$name geloescht')),

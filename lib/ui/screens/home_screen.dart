@@ -40,6 +40,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
 import 'package:cleona/ui/components/share_cleona_dialog.dart';
+import 'package:cleona/ui/date_format.dart' as df;
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -261,10 +262,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         // Network Stats — combined health indicator + peer count, opens stats page
         IconButton(
           icon: Badge(
-            label: Text('${service.peerCount}'),
-            backgroundColor: service.peerCount >= 10
+            label: Text('${service.confirmedPeerCount}'),
+            backgroundColor: service.confirmedPeerCount >= 10
                 ? Colors.green
-                : service.peerCount >= 3
+                : service.confirmedPeerCount >= 3
                     ? Colors.orange
                     : colorScheme.error,
             textColor: Colors.white,
@@ -1281,8 +1282,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
 
         // Build timestamp string from last message or last activity
         final timestampStr = lastMsg != null
-            ? _formatTime(lastMsg.timestamp)
-            : _formatTime(conv.lastActivity);
+            ? df.formatConversationTime(lastMsg.timestamp, locale)
+            : df.formatConversationTime(conv.lastActivity, locale);
 
         // Favourite star prefix baked into name for ChatListTile
         final displayName = conv.isFavorite
@@ -1458,7 +1459,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
             style: FilledButton.styleFrom(backgroundColor: colorScheme.error),
             onPressed: () {
               Navigator.pop(ctx);
-              widget.service.deleteContact(conv.id);
+              widget.service.deleteContact(conv.id, source: 'conversation_dialog');
             },
             child: Text(locale.get('delete')),
           ),
@@ -1836,13 +1837,6 @@ class _ConversationListViewState extends State<_ConversationListView> {
     return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
   }
 
-  String _formatTime(DateTime dt) {
-    final now = DateTime.now();
-    if (dt.day == now.day && dt.month == now.month && dt.year == now.year) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    }
-    return '${dt.day}.${dt.month}.';
-  }
 }
 
 // ── Inbox View (Pending Requests) ──────────────────────────────────────
@@ -1922,7 +1916,26 @@ class _InboxView extends StatelessWidget {
                   IconButton(
                     icon: Icon(Icons.close, color: colorScheme.error),
                     tooltip: locale.get('reject'),
-                    onPressed: () => service.deleteContact(c.nodeIdHex),
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: Text(locale.get('delete_contact_title')),
+                          content: Text(locale.tr('delete_contact_confirm', {'name': c.displayName})),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
+                            FilledButton(
+                              style: FilledButton.styleFrom(backgroundColor: colorScheme.error),
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                service.deleteContact(c.nodeIdHex, source: 'inbox_reject');
+                              },
+                              child: Text(locale.get('delete')),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
                   ),
                   IconButton(
                     icon: const Icon(Icons.check, color: Colors.green),
