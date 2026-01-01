@@ -1,8 +1,8 @@
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
     show EndpointAddress;
 
 /// HTTP client for fetching binaries/fragments from other Cleona nodes'

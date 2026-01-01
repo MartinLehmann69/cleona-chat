@@ -8,8 +8,8 @@ project(cleona_video C)
 # directory (SPEC §7 / §9). Everything repo-wide — linux/CMakeLists.txt,
 # windows/runner/CMakeLists.txt, scripts/build-*-libs.sh,
 # ios/CleonaNative/cleona_exported_symbols.txt, preflight jniLibs lists — is
-# owned by the build package V0.5. What V0.5 has to add is written down in
-# native/cleona_video/BUILD_REQUEST.md.
+# owned by the build package V0.5. What was requested from V0.5 and what is
+# still open: BUGFIX_CURRENT.md AV-V0.3.
 #
 # Standalone use (this is what the V0.3 acceptance runs):
 #   cmake -S native/cleona_video -B build/cleona_video
@@ -119,8 +119,8 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/CMakeLists.txt")
 endif()
 
 # ---------------------------------------------------------------------------
-# Platform backends, when they land (V1.13-V1.16). Each brings its own
-# CMakeLists.txt and its own BUILD_REQUEST.md. Added after test/ so that
+# Platform backends (V1.13-V1.16). Each brings its own CMakeLists.txt.
+# Added after test/ so that
 # cleona_video_add_conformance_test() is already defined (mirrors
 # native/cleona_voice/CMakeLists.txt's identical loop).
 # ---------------------------------------------------------------------------

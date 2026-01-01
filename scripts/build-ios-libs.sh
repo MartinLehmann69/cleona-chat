@@ -3,7 +3,7 @@
 # build-ios-libs.sh — Build native libraries for iOS
 #
 # Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp,
-# as STATIC libraries (.a) for iOS.
+# the cleona_* shims (pow, link, voice, video) as STATIC libraries (.a) for iOS.
 #
 # iOS does not allow loading custom dynamic libraries — all native code must
 # be statically linked into the app binary. Flutter's dart:ffi then accesses
@@ -337,6 +337,37 @@ build_cleona_pow() {
     cd "$PROJECT_DIR"
 }
 
+build_cleona_link() {
+    local platform="$1"
+    echo "── libcleona_link (Elligator2, V4 §4d) ($platform) ────────────"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/cleona_link"
+    local build="$BUILD_DIR/cleona_link"
+    rm -rf "$build" && mkdir -p "$build" && cd "$build"
+
+    # No SODIUM_LIB as with cleona_pow: Monocypher 4.0.3 is vendored
+    # (native/cleona_link/vendor/, migration plan §4d.5), no external
+    # dependency. CMAKE_SYSTEM_NAME=iOS makes native/cleona_link/
+    # CMakeLists.txt choose STATIC by itself (same switch as
+    # cleona_pow). CLEONA_LINK_BUILD_SMOKE=OFF: the step-0 gate (smoke
+    # executables + the deliberately broken saboteur library) is a
+    # standalone build artefact and would have no business on iOS anyway —
+    # the saboteur exports the same three symbols and must never get
+    # near the static merge.
+    cmake -GNinja \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLEONA_LINK_BUILD_SMOKE=OFF \
+        "$src"
+    ninja -j"$NPROC"
+    mkdir -p "$INSTALL_DIR/cleona_link/lib"
+    cp libcleona_link.a "$INSTALL_DIR/cleona_link/lib/"
+    cd "$PROJECT_DIR"
+}
+
 # Dart FFI bridge to whisper.cpp (S280).
 #
 # native/whisper_wrapper.c provides whisper_full_from_ptr() plus the setters
@@ -421,10 +452,10 @@ build_cleona_video() {
     local build="$BUILD_DIR/cleona_video"
     rm -rf "$build" && mkdir -p "$build" && cd "$build"
 
-    # CLEONA_VIDEO_STATIC=ON ist hier redundant (apple/CMakeLists.txt waehlt
-    # STATIC schon bei CMAKE_SYSTEM_NAME=iOS), aber explizit: iOS hat kein
-    # dlopen, dart:ffi nimmt DynamicLibrary.process(), also MUSS es eine .a
-    # sein, die spaeter in libcleona_all.a landet.
+    # CLEONA_VIDEO_STATIC=ON is redundant here (apple/CMakeLists.txt already chooses
+    # STATIC for CMAKE_SYSTEM_NAME=iOS), but explicit: iOS has no
+    # dlopen, dart:ffi uses DynamicLibrary.process(), so it MUST be a .a
+    # that later lands in libcleona_all.a.
     cmake -GNinja \
         -DCMAKE_SYSTEM_NAME=iOS \
         -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
@@ -447,7 +478,7 @@ PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice cleona_video)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_link cleona_voice cleona_video)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -465,11 +496,12 @@ for platform in "${PLATFORMS[@]}"; do
             zstd)          build_libzstd "$platform" ;;
             erasurecode)   build_liberasurecode "$platform" ;;
             opus)          build_libopus "$platform" ;;
-            # Wrapper haengt an whisper (braucht dessen Header) und wird
-            # deshalb im selben Ziel gebaut — so greift auch
-            # `build-ios-libs.sh whisper`.
+            # The wrapper depends on whisper (needs its headers) and is
+            # therefore built in the same target — that way
+            # `build-ios-libs.sh whisper` also covers it.
             whisper)       build_whisper "$platform"; build_whisper_wrapper "$platform" ;;
             cleona_pow)    build_cleona_pow "$platform" ;;
+            cleona_link)   build_cleona_link "$platform" ;;
             cleona_voice)  build_cleona_voice "$platform" ;;
             cleona_video)  build_cleona_video "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
@@ -521,6 +553,7 @@ for t in "${WANTED[@]}"; do
             done
             ;;
         cleona_pow)    make_xcfw libcleona_pow cleona_pow libcleona_pow.a ;;
+        cleona_link)   make_xcfw libcleona_link cleona_link libcleona_link.a ;;
         cleona_voice)  make_xcfw CleonaVoice cleona_voice libcleona_voice.a include ;;
         cleona_video)  make_xcfw CleonaVideo cleona_video libcleona_video.a include ;;
     esac
@@ -574,7 +607,7 @@ for platform_tag in device simulator; do
     _index="$_symdir/index"
     : > "$_index"
 
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_pow/lib cleona_voice/lib cleona_video/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_pow/lib cleona_link/lib cleona_voice/lib cleona_video/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             _slug="$(echo "$a" | tr -c 'A-Za-z0-9' '_')"

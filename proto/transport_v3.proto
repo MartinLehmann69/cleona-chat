@@ -1,0 +1,1001 @@
+syntax = "proto3";
+
+package cleona;
+
+import "app_payloads.proto";
+
+// ── V3 transport ───────────────────────────────────────────────────────
+// Frames, routing, delivery, DHT, erasure coding — everything that stands and
+// falls with the V3 network layer. This file is replaced by AP-3.
+//
+// AP-1a step 6 (MIGRATION §9.15.6): extracted from `cleona.proto`.
+// Field tags and enum values were NOT changed in the process (MIGRATION §2.3).
+// The original's comments stand unchanged next to the declarations they
+// belonged to; the original's file header follows immediately.
+// ── Core Wire Types ────────────────────────────────────────────────────
+// V2 `MessageEnvelope` removed in V3.0 Wave 4 Phase B (2026-05-05).
+// V2 `MessageType` enum removed in V3.0 Wave 7 (2026-05-05) — final V2-cut.
+// Wire-format is exclusively NetworkPacketV3 + ApplicationFrameV3
+// (§3 Appendix A). All wire-typing happens via `MessageTypeV3` (defined
+// below in §V3 Coexistence section).
+
+// ── Compression ────────────────────────────────────────────────────────
+
+enum CompressionType {
+  NONE = 0;
+  ZSTD = 1;
+}
+message ErasureCodingMetadata {
+  bytes mailbox_id = 1;         // 32 bytes
+  bytes original_message_id = 2;
+  uint32 fragment_index = 3;
+  uint32 total_fragments = 4;   // N = 10
+  uint32 required_fragments = 5; // K = 7
+  uint32 original_size = 6;
+}
+message ProofOfWork {
+  uint64 nonce = 1;
+  uint32 difficulty = 2;
+  bytes hash = 3;
+}
+// ── Peer Information ───────────────────────────────────────────────────
+
+message PeerInfoProto {
+  bytes node_id = 1;
+  string public_ip = 2;
+  uint32 public_port = 3;
+  string local_ip = 4;
+  uint32 local_port = 5;
+  repeated PeerAddressProto addresses = 6;
+  string network_tag = 7;
+  uint64 last_seen = 8;
+  NatType nat_type = 9;
+  uint32 capabilities = 10;
+  bytes ed25519_public_key = 11;        // User-Sig PK (Identity-Signaturen, Mailbox-IDs, CR-Verify)
+  bytes ml_dsa_public_key = 12;         // User-Sig PK (PQ-Komponente)
+  bytes ed25519_signature = 13;
+  bytes ml_dsa_signature = 14;
+  bytes x25519_public_key = 15;
+  bytes ml_kem_public_key = 16;
+  bytes user_id = 17;             // Multi-Device (§26): stable identity (same across all devices)
+  // §17.3 Welle 3 — Device-Sig PK (per-device, persisted in device_keys.json).
+  // Distinct from ed25519_public_key/ml_dsa_public_key (User-Sig, identity-wide):
+  // outer NetworkPacketV3 device_sig is signed with the Device-Sig keypair, so
+  // verifyOuterDeviceSig must use *these* fields, not the User-Sig PKs above.
+  // Empty/absent = receiver falls back to lenient-bootstrap path until learned.
+  bytes device_ed25519_public_key = 18;
+  bytes device_ml_dsa_public_key = 19;
+  bytes key_fingerprint = 20;           // SHA-256(ed25519_pk ‖ ml_dsa_pk ‖ x25519_pk ‖ ml_kem_pk ‖ device_ed25519_pk ‖ device_ml_dsa_pk) — slim PEER_LIST_PUSH omits PQ keys; receiver compares fingerprint to detect key changes and requests full keys via PEER_KEY_REQUEST on mismatch.
+  // D3 Admission-PoW (§13.1.2): 8-byte nonce certifying device_ed25519_public_key
+  // (SHA-256("cleona-id-pow-v1" || pk || nonce) >= 22 leading zero bits).
+  // Travels alongside the key it certifies; part of the slim field set (8 B).
+  // Legacy builds ignore it; legacy gossipers drop it on re-serialization.
+  bytes device_id_pow_nonce = 21;
+}
+enum NatType {
+  NAT_UNKNOWN = 0;
+  NAT_PUBLIC = 1;
+  NAT_FULL_CONE = 2;
+  NAT_SYMMETRIC = 3;
+}
+// ── DHT Messages ───────────────────────────────────────────────────────
+
+message DhtPing {
+  bytes sender_id = 1;
+  uint64 timestamp = 2;
+  // Welle 5.12 Stage-2 hot-path heal hint (§5.10.2 / §5.12). When true, the
+  // ping is a Stale-PK recovery probe — the responder MUST answer with the
+  // normal DHT_PONG *and* an unsolicited firstParty PEER_LIST_PUSH carrying
+  // its own PeerInfo (current signing keys), so the prober heals the cached
+  // PK in 1 RTT instead of waiting for a periodic peer exchange.
+  bool pk_recovery_hint = 3;
+  // §5.10.2 First-contact KEM bootstrap. Set ONLY when our own
+  // DeviceKemRecord lookup for this device just missed — a peer that already
+  // holds the record never asks. The responder then attaches its signed
+  // DeviceKemRecord to the DHT_PONG, which is the only way a peer known by
+  // address alone can ever send a KEM-path message: that record is otherwise
+  // distributed through the 2D-DHT only, and the DHT is precisely what such a
+  // peer cannot reach yet. Opt-in rather than unconditional because the record
+  // is ~1.4 KB and pushes the PONG onto the fragmentation path (§2.6).
+  bool want_kem_record = 4;
+}
+message DhtPong {
+  bytes sender_id = 1;
+  uint64 timestamp = 2;
+  string observed_ip = 3;       // reporter's view of sender's public IP
+  uint32 observed_port = 4;
+  repeated bytes additional_node_ids = 5; // secondary identity node IDs on same port
+  // §5.10.2 — present only when the ping carried want_kem_record.
+  // Self-authenticating (§4.3): verified against the claimed user master
+  // Ed25519 key exactly like a DHT-fetched record, and cached in the same
+  // replica cache. No transport condition is needed: DHT_PING is in the BOOT
+  // allow-list and is therefore always plaintext.
+  DeviceKemRecordV3 kem_record = 6;
+}
+message DhtFindNode {
+  bytes target_id = 1;          // ID to look up
+  bytes sender_id = 2;
+}
+message DhtFindNodeResponse {
+  repeated PeerInfoProto closest_peers = 1;
+}
+message DhtStore {
+  bytes key = 1;
+  bytes value = 2;
+  uint64 ttl_ms = 3;
+}
+message DhtStoreResponse {
+  bool success = 1;
+}
+message DhtFindValue {
+  bytes key = 1;
+}
+message DhtFindValueResponse {
+  bytes value = 1;
+  repeated PeerInfoProto closest_peers = 2;
+  bool found = 3;
+}
+// ── Peer List Exchange (3-step delta) ──────────────────────────────────
+
+message PeerListSummary {
+  repeated PeerSummaryEntry entries = 1;
+}
+message PeerSummaryEntry {
+  bytes node_id = 1;
+  uint64 last_seen = 2;
+}
+message PeerListWant {
+  repeated bytes wanted_node_ids = 1;
+}
+message PeerListPush {
+  repeated PeerInfoProto peers = 1;
+  // S368 RESERVED (2, 3). The two parallel indices carried the
+  // distance-vector view of the pusher. Their field description was the
+  // most literal backward compatibility in the schema: "both lists empty →
+  // receiver falls back to 'cache-only' path (previous behaviour)".
+  // Exactly this design — a missing field means "old peer, do as
+  // before" — is excluded on this line.
+  // MEASURED: `hopsFromSender` and `costFromSender` each have ZERO
+  // occurrences in `lib/`+`bin/`, on this branch as on `v4/knoten-host`.
+  reserved 2, 3;
+  reserved "hops_from_sender", "cost_from_sender";
+}
+message PeerKeyRequest {
+  // Empty — recipient responds with full PeerInfoProto for all hosted identities.
+}
+message PeerKeyResponse {
+  repeated PeerInfoProto peers = 1;  // Full PeerInfoProto with all PQ keys
+}
+// ── Fragment Store/Retrieve ────────────────────────────────────────────
+
+message FragmentStore {
+  bytes mailbox_id = 1;
+  bytes message_id = 2;
+  uint32 fragment_index = 3;
+  uint32 total_fragments = 4;
+  uint32 required_fragments = 5;
+  bytes fragment_data = 6;
+  uint32 original_size = 7;
+  uint64 ttl_ms = 8;
+}
+message FragmentStoreAck {
+  bytes message_id = 1;
+  uint32 fragment_index = 2;
+}
+message FragmentRetrieve {
+  bytes mailbox_id = 1;
+}
+message FragmentRetrieveResponse {
+  bytes mailbox_id = 1;
+  uint32 fragment_count = 2;
+}
+message FragmentDelete {
+  bytes mailbox_id = 1;
+  bytes message_id = 2;
+}
+// Reachability check for anti-Sybil
+message ReachabilityCheck {
+  bytes target_node_id = 1;
+  bytes bloom_filter = 2;         // visited nodes
+  uint32 hops_remaining = 3;
+  bytes request_id = 4;
+}
+message ReachabilityResponse {
+  bytes request_id = 1;
+  bool reached = 2;
+}
+// ── Delivery/Read Receipts ─────────────────────────────────────────────
+
+message DeliveryReceipt {
+  bytes message_id = 1;
+  uint64 delivered_at = 2;
+  // §14.7.4: receiver withholds its delivery status from the sender's UI.
+  // Encoded as "withhold", not "disclose", on purpose: proto3 scalars default
+  // to false when absent, so a receipt from a node that predates this field
+  // (or any future encoder that omits it) means "disclose" — the behaviour
+  // that was in place before the flag existed. The inverse naming would turn
+  // every legacy receipt into a suppressed status.
+  bool withhold_delivery_status = 3;
+}
+// ── Guardian Recovery (Shamir SSS) ────────────────────────────────────
+
+message GuardianShareStore {
+  bytes share_data = 1;               // [1-byte index][share bytes]
+  bytes owner_node_id = 2;            // Whose seed is this?
+  string owner_display_name = 3;
+}
+message GuardianRestoreRequest {
+  bytes owner_node_id = 1;            // Who is being restored?
+  string owner_display_name = 2;
+  bytes triggering_guardian_node_id = 3;
+  string triggering_guardian_name = 4;
+  bytes recovery_mailbox_id = 5;      // DHT mailbox where to send shares
+}
+message GuardianRestoreResponse {
+  bytes share_data = 1;               // Der Share
+  bytes owner_node_id = 2;            // For whom?
+}
+// ── Relay (Multi-Hop Message Forwarding) ──────────────────────────────
+
+message RelayForward {
+  bytes relay_id = 1;                  // 16 Bytes UUID, Dedup
+  bytes final_recipient_id = 2;        // 32 bytes, actual target
+  bytes wrapped_envelope = 3;          // Serialized original envelope (unchanged)
+  uint32 hop_count = 4;               // Current hop (starts at 1)
+  uint32 max_hops = 5;                // Maximum (Default 3)
+  repeated bytes visited_nodes = 6;    // deviceNodeIds that have already forwarded
+  bytes origin_node_id = 7;           // Original sender deviceNodeId for RELAY_ACK routing
+  uint64 created_at_ms = 8;           // Erstellungszeitpunkt (TTL: max 5 Min)
+  uint32 ttl = 9;                     // Hop limit (start value 64, -1 per hop, discard at 0)
+  bytes origin_user_id = 10;          // Original-Sender userId — Multi-Identity-aware
+                                      // Loop-Prevention: Forwarder MUST exclude any
+                                      // candidate whose userId matches origin_user_id,
+                                      // regardless of deviceNodeId. Without this, a
+                                      // sender's secondary identity can be picked as
+                                      // relay-candidate by a third node, creating a
+                                      // loop back to the original device (§3.3.4 + §26).
+}
+message RelayAck {
+  bytes relay_id = 1;                  // Associated relay_id
+  bool delivered = 2;                  // true = target reached
+  bytes relayed_by = 3;               // Node ID of the delivering relay
+}
+// ── Peer Reachability Query (Relay Route Discovery) ───────────────────
+
+message PeerReachabilityQuery {
+  bytes target_node_id = 1;            // Peer we are looking for
+  bytes query_id = 2;                  // 16-Byte UUID (Dedup)
+  // V3.1.33: Port probe — ask responder to send a CPRB probe packet
+  // to this address. Used to verify port forwarding (manual DNAT, UPnP)
+  // without relying on UPnP AddPortMapping success.
+  string probe_ip = 3;                // Public IP to probe (empty = normal query)
+  uint32 probe_port = 4;              // Port to probe
+}
+message PeerReachabilityResponse {
+  bytes target_node_id = 1;
+  bytes query_id = 2;
+  bool can_reach = 3;                  // Peer in routing table and recently seen?
+  uint64 last_seen_ms = 4;            // When last seen (0 = never)
+}
+// ── Store-and-Forward (offline delivery via peers) ────────────────────
+
+message PeerStore {
+  bytes recipient_node_id = 1;         // For whom to store
+  bytes wrapped_envelope = 2;          // Original envelope (encrypted, signed)
+  bytes store_id = 3;                  // 16-Byte UUID (Dedup)
+  uint64 ttl_ms = 4;                  // How long to store (default 7 days)
+}
+message PeerStoreAck {
+  bytes store_id = 1;
+  bool accepted = 2;
+}
+message PeerRetrieve {
+  bytes requester_node_id = 1;         // Who is asking (= own NodeId)
+}
+message PeerRetrieveResponse {
+  repeated bytes stored_envelopes = 1; // Serialisierte Original-Envelopes
+  uint32 remaining = 2;               // More available? (pagination)
+}
+// ── Distance-Vector Routing (V3) ────────────────────────────────────────
+
+enum ConnectionTypeProto {
+  CT_LAN_SAME_SUBNET = 0;
+  CT_LAN_OTHER_SUBNET = 1;
+  CT_WIFI_DIRECT = 2;
+  CT_PUBLIC_UDP = 3;
+  CT_HOLE_PUNCH = 4;
+  CT_RELAY = 5;
+  CT_MOBILE = 6;
+  CT_MOBILE_RELAY = 7;
+}
+message RouteEntryProto {
+  bytes destination = 1;               // 32 Bytes NodeId
+  int32 hop_count = 2;
+  int32 cost = 3;
+  ConnectionTypeProto conn_type = 4;
+  int64 last_confirmed_ms = 5;
+  uint32 capabilities = 6;             // PeerCapabilities bitmask (§27: ipv4=1, ipv6=2)
+}
+message RouteUpdateMsg {
+  repeated RouteEntryProto routes = 1;
+}
+// ── NAT Hole Punch (V3) ───────────────────────────────────────────────
+
+message HolePunchRequest {
+  bytes target_node_id = 1;        // Peer we want to punch
+  string my_public_ip = 2;        // Our public IP
+  int32 my_public_port = 3;       // Unser oeffentlicher Port
+  bytes request_id = 4;           // 16-Byte UUID (Dedup)
+}
+message HolePunchNotify {
+  bytes requester_node_id = 1;     // Wer will punchen
+  string requester_ip = 2;        // Its public IP
+  int32 requester_port = 3;       // Dessen oeffentlicher Port
+  bytes request_id = 4;           // 16-Byte UUID (Dedup)
+}
+message HolePunchPing {
+  bytes request_id = 1;           // Zugehoerige request_id
+  bytes sender_node_id = 2;       // Wer pingt
+  int64 timestamp_ms = 3;         // For RTT measurement
+}
+message HolePunchPong {
+  bytes request_id = 1;           // Zugehoerige request_id
+  bytes sender_node_id = 2;       // Wer pongt
+  int64 ping_timestamp_ms = 3;    // Echo of the ping timestamp
+}
+// ── 2D-DHT Identity Resolution (§2.2.4) ──────────────────────────────
+
+// D1 (§4.3 Trust anchor): one soft-re-key link old→new. Link shape mirrors
+// KeyRotationBroadcast — the OLD key signs the successor pubkeys, proving
+// continuity from the founding key (whose hash is the userId) to the
+// currently embedded manifest keys.
+message RotationChainLinkProto {
+  bytes old_ed25519_pk = 1;        // 32 bytes — predecessor pubkey; link[0]'s
+                                   // old pk MUST hash to the userId (founding
+                                   // anchor); link[i>0]'s old pk MUST equal
+                                   // link[i-1].new_ed25519_pk
+  bytes new_ed25519_pk = 2;        // 32 bytes — successor user pubkey
+  bytes new_ml_dsa_pk = 3;         // ML-DSA-65 successor pubkey
+  bytes old_signature_ed25519 = 4; // OLD key's sig over (new_ed25519_pk || new_ml_dsa_pk)
+}
+message AuthManifestProto {
+  bytes user_id = 1;
+  repeated bytes authorized_device_node_ids = 2;
+  int32 ttl_seconds = 3;
+  int64 sequence_number = 4;
+  int64 published_at_ms = 5;
+  bytes ed25519_sig = 6;
+  bytes ml_dsa_sig = 7;
+  // D1 (§4.3 Trust anchor): self-certifying embedded user pubkeys, covered by
+  // the hybrid signature.
+  // S368: this used to say that a record WITHOUT these keys ("legacy records,
+  // pre-D1 builds") would be treated as "legacy-unverified". This milder
+  // level no longer exists — `AnchorStatus.legacy` is removed, and a
+  // record without embedded keys counts as `forged`. The fields are
+  // therefore mandatory, not optional-with-leniency.
+  bytes user_ed25519_pk = 8;
+  bytes user_ml_dsa_pk = 9;
+  // Founding-key → current-key continuity after soft re-key (§7.4b). Empty
+  // unless the identity has rotated.
+  repeated RotationChainLinkProto rotation_chain = 10;
+  // LD-1 (§7.1 Linked-Device): delegation certificates for linked devices.
+  // Empty on single-device identities and pre-LD builds. A device present in
+  // authorized_device_node_ids but NOT in device_delegations is the Primary
+  // (seed-holder) or a legacy full-authority device. A device present in BOTH
+  // is a Linked Device with bounded capabilities. Old builds silently ignore
+  // this field (unknown proto field).
+  repeated DeviceDelegationCertProto device_delegations = 11;
+  // §7.5: Device-Sig pubkeys for all authorized devices (Primary + Linked).
+  // Enables receiver-enforced co-authorization of emergency key rotations.
+  repeated AuthorizedDeviceSigningKeys device_sig_keys = 12;
+  // §7.5: Proof that device-set shrinks were co-authorized by remaining devices.
+  DeviceSetChangeProof device_set_change_proof = 13;
+}
+message LivenessRecordProto {
+  bytes user_id = 1;
+  bytes device_node_id = 2;
+  repeated PeerAddressProto addresses = 3;
+  int32 ttl_seconds = 4;
+  int64 sequence_number = 5;
+  int64 published_at_ms = 6;
+  bytes ed25519_sig = 7;
+  // P5 (§7.1.4 vs §4.3): a linked device does not hold the user SK and
+  // can no longer sign under the user anchor after a rotation. It
+  // therefore signs with its delegated device key and names the used PK
+  // here. Empty = signed directly under the user key as before
+  // (primary path).
+  //
+  // P6 (working rule #5): the delegation certificate is NOT sent along.
+  // It cost ~5.3 KB per record (ML-DSA-PK 1952 B + ML-DSA-Sig 3309 B) and
+  // fragmented every liveness republish (every 15 min to up to 10
+  // replicators). Instead, the receiver takes the certificate from the
+  // AuthManifest it holds for this user anyway
+  // (`AuthManifest.delegationFor(deviceId)`). This weakens nothing: P5
+  // was already fail-closed without an anchor, because the ML-DSA half of the
+  // certificate cannot be checked otherwise — the manifest dependency already
+  // existed and is only made explicit here. Field 9 stays reserved.
+  bytes signer_ed25519_pk = 8;
+  reserved 9;
+}
+message IdentityAuthRetrieveRequest {
+  bytes user_id = 1;
+  int64 minimum_seq = 2;
+}
+message IdentityLiveRetrieveRequest {
+  bytes user_id = 1;
+  bytes device_node_id = 2;
+}
+// Welle 5 (§4.3): pull DeviceKemRecordV3 from K=10 closest replicators per
+// (userId, deviceId). Storage-Key SHA-256("kem" || user_id || device_id).
+message IdentityKemRetrieveRequest {
+  bytes user_id = 1;
+  bytes device_id = 2;
+  uint64 minimum_seq = 3;
+}
+// ═══════════════════════════════════════════════════════════════════════
+// V3.0 LAYERED-FRAMES — Wave 1 draft (Cleona_Chat_Architecture_v3_0.md)
+// ═══════════════════════════════════════════════════════════════════════
+//
+// STATUS: Draft, NOT protoc-generated. Spec reference: Appendix A (§A.1-A.7).
+//
+// Coexistence rule: these V3 types live IN PARALLEL to MessageEnvelope/MessageType.
+// Build stays green, wire format unchanged. In wave 2 (hard cut, §23.2):
+//   - MessageEnvelope + MessageType (old) are REMOVED
+//   - NetworkPacketV3       → NetworkPacket
+//   - ApplicationFrameV3    → ApplicationFrame
+//   - PerMessageKemV3       → PerMessageKem (old PerMessageKem removed)
+//   - MessageTypeV3         → MessageType
+//   - TextMessageV3         → TextMessage (new, was implicit in payload before)
+// So the V3 suffixes are purely temporary for the draft phase.
+//
+// Reused sub-messages (taken over unchanged): ContentMetadata,
+// EditMetadata, ExpiryMetadata, ErasureCodingMetadata, CompressionType,
+// ProofOfWork, PeerAddressProto, AddressType, ConnectionTypeProto. The
+// payload types shown in Appendix A.5 (ContactRequest, MediaInline, etc.)
+// already exist above under v2 names and are reused 1:1 or renamed in
+// wave 2 — no need to duplicate them here.
+
+// ── Outer Layer (NetworkPacket) — what relays see ───────────────────────
+//
+// Subject of the sigs = device keypair (NOT user keypair). Application frames
+// hybrid (Ed25519+ML-DSA), infrastructure frames (DHT pings, RTT, hole punch)
+// only Ed25519 to save bandwidth — deviceMlDsaSig then empty.
+message NetworkPacketV3 {
+  uint32        version            = 1;   // V3.0 = 1
+  uint32        flags              = 2;   // bit-flags, default 0
+  bytes         next_hop_device_id = 3;   // 32 bytes — routing target of the next hop
+  bytes         sender_device_id   = 4;   // 32 bytes — Origin-Device
+  uint64        timestamp_ms       = 5;
+  uint32        ttl                = 6;   // default 64, pro Hop -1
+  uint32        hop_count          = 7;   // pro Relay +1
+  bytes         network_tag        = 8;   // 16 bytes HMAC-SHA256-128 (Closed-Network)
+  ProofOfWork   pow                = 9;   // PoW-Solution
+
+  // Sigs (Subjekt = Device-Keypair)
+  bytes         device_ed25519_sig = 10;  // 64 bytes, always
+  bytes         device_ml_dsa_sig  = 11;  // ~3300 bytes — empty for infrastructure frames
+
+  // Payload-Discriminator
+  PayloadTypeV3 payload_type       = 12;
+  bytes         payload            = 13;  // serialized ApplicationFrameV3 OR NetworkPacketV3 (onion)
+
+  // S368 RESERVED (14). §5.3 anti-loop for multi-hop relay. The relay
+  // belongs to the V3 network layer, which does not exist on this line; the
+  // field description presented itself as "Backward-compatible: old nodes
+  // ignore the field". MEASURED: `visitedDeviceIds` has ZERO occurrences in
+  // `lib/`+`bin/` on both branches.
+  reserved 14;
+  reserved "visited_device_ids";
+
+  // §2.3.1 (V3.1.159): the port on which the sender ACTUALLY listens.
+  // The receiver may prefer it to the observed UDP source port only
+  // if the source IP is PRIVATE (RFC1918 / ULA / link-local).
+  // Behind NAT/CGNAT the observed port stays authoritative — only for it
+  // does a hole-punch return path exist.
+  //
+  // Reason: the Windows send socket deliberately binds ephemerally
+  // (transport.dart, localPort:0), so the UDP header there never carries the
+  // listening port. Measured: a single peer with 15 learned addresses,
+  // 14 of them dead, and ~900 failed send attempts.
+  //
+  // S368 RESERVED (15). "0 = unknown (peer before V3.1.159)" was age
+  // information about the peer — on this line there are no
+  // older peers. MEASURED: `senderDataPort` has ZERO occurrences
+  // in `lib/`+`bin/` on both branches. The reason it once
+  // came about (Windows binds the send socket ephemerally, the UDP header there
+  // never carries the listening port) belongs to the V3 transport layer.
+  reserved 15;
+  reserved "sender_data_port";
+}
+enum PayloadTypeV3 {
+  PAYLOAD_APPLICATION_FRAME           = 0;   // Inner KEM-encrypted under recipient user PK (E2E identity)
+  PAYLOAD_ONION_LAYER                 = 1;   // Inner = nested NetworkPacketV3, KEM-encrypted under hop device PK (V3.0 not active, §2.5)
+  // S368 RESERVED (2, 3): both denoted an inner layer of type
+  // `InfrastructureFrameV3`, which no longer exists. Value 3 was moreover the
+  // PLAINTEXT path (no KEM, no zstd) for first contact — the
+  // chicken-and-egg workaround when the receiver's device KEM PK is still
+  // unknown. This line solves the same problem without plaintext on the wire.
+  reserved 2, 3;
+  reserved "PAYLOAD_INFRASTRUCTURE_FRAME", "PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME";
+  // 4 reserved for future use (do not assign without spec update).
+}
+// ── Inner Layer (ApplicationFrame) — KEM-encrypted under recipient user PK ─
+//
+// Transported in NetworkPacketV3.payload as KEM ciphertext via PerMessageKemV3.
+// Subject of the sigs = user keypair (for end-to-end identity authentication).
+message ApplicationFrameV3 {
+  // S368 RESERVED (1). The version byte was written by NOBODY
+  // and read by NOBODY: the two construction sites in `lib/`
+  // (`cleona_service.dart`, first contact and `_v41InnerFrame`) do not set
+  // it, so the wire always carried the proto3 default 0 — "V3.0
+  // = 1" and 0 were indistinguishable. A field that claims a version
+  // and carries none is worse than none.
+  reserved 1;
+  reserved "version";
+  bytes           recipient_user_id   = 2;   // 32 bytes
+  bytes           sender_user_id      = 3;   // 32 bytes
+  uint64          timestamp_ms        = 4;
+  bytes           message_id          = 5;   // 16 bytes UUID v4
+  MessageTypeV3   message_type        = 6;
+  bytes           payload             = 7;   // type-specific protobuf (see MessageTypeV3)
+
+  // Sigs (Subjekt = User-Keypair) — End-to-End-Identity-Authenticity
+  bytes           user_ed25519_sig    = 10;  // 64 bytes, always
+  bytes           user_ml_dsa_sig     = 11;  // ~3300 bytes, always for user frames
+
+  // Optional metadata (reuse of existing sub-messages)
+  ContentMetadata        content_metadata    = 12;
+  EditMetadata           edit_metadata       = 13;
+  ExpiryMetadata         expiry_metadata     = 14;
+  ErasureCodingMetadata  erasure_metadata    = 15;
+  CompressionType        compression         = 16;
+
+  // Conversation routing — empty for DM; set for group/channel pairwise fan-out.
+  // Receiver dispatches to the matching group/channel conversation. Calendar/Polls
+  // payload-internal group_ids are semantically distinct (linked-event association).
+  bytes                  group_id            = 17;
+
+  // GM-1 (§9.1.4): sender's local group membership state for split-view detection
+  uint64 group_membership_epoch = 18;
+  bytes  group_membership_hash  = 19; // 32 bytes SHA-256
+}
+// ── KEM header v3 (Sec H-5 v2) ──────────────────────────────────────────
+//
+// Carries the ApplicationFrameV3 ciphertext + KEM material. Sits in
+// NetworkPacketV3.payload (with payload_type = PAYLOAD_APPLICATION_FRAME).
+message PerMessageKemV3 {
+  bytes  x25519_ciphertext = 1;   // 32 bytes — X25519 ephemeral pubkey/ciphertext
+  bytes  ml_kem_ciphertext = 2;   // 1088 bytes ML-KEM-768
+  bytes  aead_ciphertext   = 3;   // ChaCha20-Poly1305(serialized ApplicationFrameV3) + 16-byte tag
+                                 // [S368: the addition -- OR InfrastructureFrameV3 -- is dropped, the type no longer exists]
+  bytes  aead_nonce        = 4;   // 12 bytes
+  uint32 version           = 5;   // V3.0 = 2 (Sec H-5)
+}
+// ── Infrastructure frame V3 — S368 REMOVED ──────────────────────
+//
+// Here stood `message InfrastructureFrameV3` (device-addressed inner layer,
+// §2.3.5) with the fields version(1), recipient_device_id(2),
+// sender_device_id(3), timestamp_ms(4), message_id(5), message_type(6),
+// payload(7), in_reply_to(8).
+//
+// MEASURED before it fell: its FOUR receiving sites
+//   handleChannelIndexExchangeInfra         (channel_moderation_service.dart)
+//   handleIncomingFirstContactRequest       (cleona_service_contact_request.dart)
+//   handleIncomingKeyRotationBroadcastInfra (cleona_service_identity.dart)
+//   handleIncomingRestoreBroadcastInfra     (cleona_service_restore.dart)
+// each had ZERO callers in `lib/`+`bin/`, on `s368/kompat-inventur` as
+// on `v4/knoten-host`, and the frame was constructed NOWHERE in `lib/`
+// — the only constructions were in a smoke suite.
+//
+// TWO OF ITS FIELDS WERE ALREADY THE FINDING ON THEIR OWN:
+//   version(1)      -- V3.0 = 1 -- never set, always 0 on the wire.
+//   in_reply_to(8)  The associated paragraph was the only literally
+//                   spelled-out rolling stage in the whole schema:
+//                   -- The fallback is the rolling-upgrade path for peers
+//                   before V3.1.159 and remains until all nodes set the field.
+//                   A path for older peers — on this line
+//                   there are none.
+//
+// The FACTUAL reason `in_reply_to` once came about still holds and
+// therefore stands here, so that it is not lost with the frame: without a
+// correlator, two simultaneous requests of the same type to
+// the same peer swap their answers. In S280 exactly that overwrote a
+// contact trust anchor. Whoever builds a request/response pair on this
+// line again needs a correlator — but one that is
+// MANDATORY, not one with a fallback to the (peer, type) tuple.
+// ── MessageType V3 (numbering from Appendix A.4) ────────────────────────
+//
+// CAUTION: numbers DIFFER FROM MessageType (old). Examples:
+//   old: RESTORE_BROADCAST=13   → V3: MTV3_RESTORE_BROADCAST=30
+//   old: TWIN_SYNC=131          → V3: MTV3_TWIN_SYNC=180
+// Hard cut in wave 2 (profile reset, §23.2). Until then both
+// enums coexist without problems because they have different names.
+//
+// Prefix MTV3_ to avoid symbol collision with MessageType (old).
+// In wave 2 the prefix is removed + enum renamed to MessageType.
+enum MessageTypeV3 {
+  // ── Core Messaging ──────────────────────────────────────────
+  MTV3_TEXT                       = 0;
+  MTV3_MEDIA_INLINE               = 1;   // ≤256KB, inline in payload
+  MTV3_MEDIA_ANNOUNCE             = 2;   // Two-Stage Stage 1
+  MTV3_MEDIA_REQUEST              = 3;   // Two-Stage Stage 2 trigger
+  MTV3_MEDIA_CHUNK                = 4;   // Two-Stage Stage 2 data
+  MTV3_MEDIA_COMPLETE             = 5;
+  MTV3_MEDIA_REJECT               = 6;
+  MTV3_REACTION                   = 7;
+  MTV3_REPLY                      = 8;   // metadata in ContentMetadata
+  MTV3_EDIT                       = 9;   // EditMetadata
+  MTV3_DELETE                     = 10;  // soft-delete (15min window)
+  MTV3_TYPING_INDICATOR           = 15;  // ephemeral
+  MTV3_READ_RECEIPT               = 16;  // ephemeral
+  MTV3_DELIVERY_RECEIPT           = 17;  // ACK for non-ephemeral types
+  MTV3_VOICE_MESSAGE              = 22;  // AAC, optional transcription
+
+  // ── Recovery & Identity ─────────────────────────────────────
+  MTV3_RESTORE_BROADCAST          = 30;
+  MTV3_RESTORE_RESPONSE           = 31;
+  MTV3_IDENTITY_DELETED           = 32;
+  MTV3_PROFILE_UPDATE             = 33;
+  MTV3_KEY_ROTATION_BROADCAST     = 34;
+  // §26.6.2 Multi-Device Emergency Key Rotation: receiver of a successfully
+  // applied KEY_ROTATION_BROADCAST sends a pure-ACK back to the rotator's
+  // new identity so the broadcaster can mark the contact as acknowledged
+  // and stop retrying. Body is empty — auth is the §23.3 inner User-Sig
+  // (the V2 outer-Ed25519 forge-defence per package C F2 is subsumed by the
+  // V3 pipeline's User-Sig + Device-Sig + KEM-decap chain).
+  MTV3_KEY_ROTATION_ACK           = 38;
+
+  // ── Guardian / Shamir Social Recovery (§6.2) — S368 RESERVED ──
+  // The three numbers carried guardian-to-guardian messages on the
+  // InfrastructureFrame. Both are gone: the frame (§2.3.5) no longer runs on
+  // this line, and the three names each had ZERO occurrences in `lib/` and
+  // `bin/` — on this branch as on `v4/knoten-host`.
+  // Reserved instead of deleted, so that the number does not come back with a
+  // different meaning.
+  reserved 35, 36, 37;
+  reserved "MTV3_GUARDIAN_SHARE_STORE", "MTV3_GUARDIAN_RESTORE_REQUEST",
+           "MTV3_GUARDIAN_RESTORE_RESPONSE";
+
+  // ── Contact Requests ────────────────────────────────────────
+  MTV3_CONTACT_REQUEST            = 40;
+  MTV3_CONTACT_REQUEST_RESPONSE   = 41;
+
+  // ── Groups (Pairwise Fanout) ────────────────────────────────
+  MTV3_GROUP_CREATE               = 50;
+  MTV3_GROUP_INVITE               = 51;
+  MTV3_GROUP_LEAVE                = 52;
+  MTV3_GROUP_KEY_UPDATE           = 53;
+  MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST = 54; // §9.1.4 GM-2: request current member list from owner
+
+  // ── Channels ────────────────────────────────────────────────
+  MTV3_CHANNEL_CREATE             = 60;
+  MTV3_CHANNEL_POST               = 61;
+  MTV3_CHANNEL_INVITE             = 62;
+  MTV3_CHANNEL_LEAVE              = 63;
+  MTV3_CHANNEL_ROLE_UPDATE        = 64;
+  MTV3_CHANNEL_BAD_BADGE_REPORT   = 65;
+  MTV3_CHANNEL_JURY_VOTE          = 66;
+  MTV3_CHANNEL_MOD_DECISION       = 67;
+  MTV3_CHANNEL_SUBSCRIBE_PROBE    = 68;
+
+  // ── Calls (Signaling) ───────────────────────────────────────
+  MTV3_CALL_INVITE                = 70;
+  MTV3_CALL_ANSWER                = 71;
+  MTV3_CALL_REJECT                = 72;
+  MTV3_CALL_HANGUP                = 73;
+  MTV3_ICE_CANDIDATE              = 74;
+  MTV3_CALL_REJOIN                = 75;
+
+  // ── Calls (Live-Media: skip ML-DSA + zstd; AES-GCM under call_key) ──
+  MTV3_CALL_AUDIO                 = 76;
+  MTV3_CALL_VIDEO                 = 77;
+  MTV3_CALL_GROUP_AUDIO           = 78;
+  MTV3_CALL_GROUP_VIDEO           = 79;
+  MTV3_CALL_GROUP_LEAVE           = 80;
+  // S368: MTV3_CALL_GROUP_KEY_ROTATE = 81 removed (wire-compat no-op).
+  reserved 81;
+  MTV3_CALL_RTT_PING              = 82;
+  MTV3_CALL_RTT_PONG              = 83;
+  MTV3_CALL_TREE_UPDATE           = 84;
+  MTV3_CALL_KEYFRAME_REQUEST      = 85;
+  MTV3_CALL_GROUP_SENDER_KEY      = 86; // Per-sender media key announce (§10.2.1)
+
+  // ── Calls (Own-Media state, §10.6 / V1.12) ──────────────────
+  // Deliberately NOT in the live-media class above. CALL_MEDIA_STATE is a
+  // small signaling frame about the sender's own video, not a media frame:
+  // it has no 20-33 ms deadline, it must arrive, and it keeps ML-DSA + zstd
+  // and the ordinary delivery cascade. The §10.3.1 exemptions (no TLS
+  // escalation, no NACK retry, FEC instead of retransmit) apply to
+  // MTV3_CALL_AUDIO/VIDEO/GROUP_* only and must not be extended to 87.
+  MTV3_CALL_MEDIA_STATE           = 87;
+
+  // ── Calls (multi-device arbitration, §17.2) ─────────────────────
+  // CANCEL_OTHERS ends the ringing on all devices of the called
+  // identity EXCEPT the one whose ANSWER bound the session. §17.2
+  // lists it explicitly as its own signalling kind: "Signaling
+  // messages (`INVITE`, `RING_ACK`, `ANSWER`, `REJECT`, `HANGUP`,
+  // `CANCEL_OTHERS`)".
+  //
+  // Its own type and no longer a rider on MTV3_CALL_REJECT: a
+  // rejection and an arbitration are two events with
+  // different outcomes (the rejection ends the call for the whole
+  // identity, the arbitration spares exactly one device), and the
+  // difference must not hang on a prefix in a free-text field.
+  // Payload: CallCancelOthers (app_payloads.proto).
+  //
+  // Signalling, NOT live media: keeps ML-DSA, zstd and the normal
+  // delivery cascade — like 87, for the same reason.
+  MTV3_CALL_CANCEL_OTHERS         = 88;
+
+  // RING_ACK (§17.2): "Ringtone and the 60-s answer timeout start only once
+  // the callee's `RING_ACK` cell has been harvested (,it really is ringing
+  // on their end')." Until then the caller stays on ,reaching' and hears
+  // NOTHING — §17.2: "This means there is no fake ringing against a device
+  // that was never reached."
+  //
+  // Signalling, NOT live media — like 87 and 88.
+  // Payload: CallRingAck (app_payloads.proto).
+  MTV3_CALL_RING_ACK              = 89;
+
+  // ── Channel Gossip & Moderation Plumbing (§10.2) ────────────
+  // Wave 2B.3: V3 carriers for the V2 CHANNEL_INDEX_EXCHANGE / JOIN_REQUEST /
+  // REPORT triplet. INDEX_EXCHANGE is a peer-to-peer broadcast to random
+  // routing-table peers (NOT necessarily contacts) so its eventual wire path
+  // is InfrastructureFrame; JOIN_REQUEST and REPORT go owner/moderator-bound
+  // and ride ApplicationFrame via sendToUser.
+  MTV3_CHANNEL_INDEX_EXCHANGE     = 90;
+  MTV3_CHANNEL_JOIN_REQUEST       = 91;
+  MTV3_CHANNEL_REPORT             = 92;
+
+  // ── DHT Operations ──────────────────────────────────────────
+  // S368: 100-104 (peer list gossip, peer key query) RESERVED.
+  // The carrier was the V3 network layer (`lib/core/network/`), which does not
+  // exist on the V4.1 line. ZERO occurrences each in `lib/`+`bin/` on both
+  // branches.
+  reserved 100, 101, 102, 103, 104;
+  reserved "MTV3_PEER_LIST_PUSH", "MTV3_PEER_LIST_SUMMARY",
+           "MTV3_PEER_LIST_WANT", "MTV3_PEER_KEY_REQUEST",
+           "MTV3_PEER_KEY_RESPONSE";
+
+  MTV3_DHT_PING                   = 110;
+  MTV3_DHT_PONG                   = 111;
+  MTV3_DHT_FIND_NODE              = 112;
+  MTV3_DHT_FIND_NODE_RESPONSE     = 113;
+  MTV3_DHT_STORE                  = 114;
+  MTV3_DHT_STORE_RESPONSE         = 115;
+  MTV3_DHT_FIND_VALUE             = 116;
+  MTV3_DHT_FIND_VALUE_RESPONSE    = 117;
+
+  // ── Fragment Storage (Erasure-Coded) ────────────────────────
+  MTV3_FRAGMENT_STORE             = 120;
+  MTV3_FRAGMENT_STORE_ACK         = 121;
+  MTV3_FRAGMENT_RETRIEVE          = 122;
+  MTV3_FRAGMENT_RETRIEVE_RESPONSE = 123;
+  MTV3_FRAGMENT_DELETE            = 124;
+
+  // ── Store-and-forward on mutual peers — S368 RESERVED ───────
+  // S&F on network peers was the third layer of the V3 delivery cascade.
+  // V4.1 stores in the secure store, not with peers. ZERO occurrences each.
+  reserved 130, 131, 132, 133;
+  reserved "MTV3_PEER_STORE", "MTV3_PEER_STORE_ACK",
+           "MTV3_PEER_RETRIEVE", "MTV3_PEER_RETRIEVE_RESPONSE";
+
+  // ── Per-Chat Configuration ──────────────────────────────────
+  MTV3_CHAT_CONFIG_UPDATE         = 140;
+  MTV3_CHAT_CONFIG_RESPONSE       = 141;
+
+  // ── Routing & Reachability — S368 RESERVED ──────────────────
+  // Distance-vector routing and multi-hop relay are the V3 network layer.
+  // `DvRouting` has zero occurrences on the V4.1 line; these five
+  // numbers likewise, in `lib/` as in `bin/`, on both branches.
+  reserved 150, 151, 152, 153, 154;
+  reserved "MTV3_ROUTE_UPDATE", "MTV3_REACHABILITY_QUERY",
+           "MTV3_REACHABILITY_RESPONSE", "MTV3_RELAY_FORWARD",
+           "MTV3_RELAY_ACK";
+
+  // ── Hole punch — S368 RESERVED ──────────────────────────────
+  // Coordinated NAT hole punching belonged to the V3 network layer
+  // (`NatTraversal`). ZERO occurrences each in `lib/`+`bin/` on both
+  // branches.
+  reserved 160, 161, 162, 163;
+  reserved "MTV3_HOLE_PUNCH_REQUEST", "MTV3_HOLE_PUNCH_NOTIFY",
+           "MTV3_HOLE_PUNCH_PING", "MTV3_HOLE_PUNCH_PONG";
+
+  // ── 2D-DHT Identity Resolution ──────────────────────────────
+  MTV3_IDENTITY_AUTH_PUBLISH      = 170;
+  MTV3_IDENTITY_AUTH_RETRIEVE     = 171;
+  MTV3_IDENTITY_AUTH_RESPONSE     = 172;
+  MTV3_IDENTITY_LIVE_PUBLISH      = 173;
+  MTV3_IDENTITY_LIVE_RETRIEVE     = 174;
+  MTV3_IDENTITY_LIVE_RESPONSE     = 175;
+  // ── 2D-DHT device KEM record — S368 RESERVED ────────────────
+  // §4.3 (2D-DHT Identity Resolution) is REPLACED on the V4.1 line, not
+  // renumbered: V4.1 has no pollable third-party knowledge, liveness is
+  // pairwise. The three numbers each have ZERO occurrences.
+  reserved 176, 177, 178;
+  reserved "MTV3_IDENTITY_KEM_PUBLISH", "MTV3_IDENTITY_KEM_RETRIEVE",
+           "MTV3_IDENTITY_KEM_RESPONSE";
+
+  // ── Multi-Device (§7) ───────────────────────────────────────
+  MTV3_TWIN_SYNC                  = 180;   // 12 Sub-Types via TwinSyncType
+  MTV3_DEVICE_PAIR_REQUEST        = 181;
+  MTV3_DEVICE_PAIR_APPROVE        = 182;
+  MTV3_DEVICE_REVOCATION          = 183;
+  MTV3_ROTATION_REJECTION_ALERT   = 184;   // §7.5: Linked → Contacts: "I reject this rotation"
+  // §14.5 path 2: pairwise device-set announcement. ADDITIVE — 185 was
+  // free (183/184 above, 190 next). Carries DeviceSetAnnounceV3.
+  MTV3_DEVICE_SET_ANNOUNCE        = 185;   // §14.5: "The device set is announced pairwise"
+
+  // ── Calendar (§11.1) ────────────────────────────────────────
+  MTV3_CALENDAR_INVITE            = 190;
+  MTV3_CALENDAR_RSVP              = 191;
+  MTV3_CALENDAR_UPDATE            = 192;
+  MTV3_CALENDAR_DELETE            = 193;
+  MTV3_FREE_BUSY_REQUEST          = 194;
+  MTV3_FREE_BUSY_RESPONSE         = 195;
+
+  // ── Polls (§11.3) ───────────────────────────────────────────
+  MTV3_POLL_CREATE                = 200;
+  MTV3_POLL_VOTE                  = 201;
+  MTV3_POLL_VOTE_ANONYMOUS        = 202;
+  MTV3_POLL_UPDATE                = 203;
+  MTV3_POLL_SNAPSHOT              = 204;
+  MTV3_POLL_REVOKE                = 205;
+
+  // ── In-Call Collaboration (§10.5, planned) ──────────────────
+  MTV3_WHITEBOARD_STROKE          = 210;
+  MTV3_WHITEBOARD_PAGE            = 211;
+  MTV3_FILE_EXCHANGE              = 212;
+  MTV3_CLIPBOARD_EXCHANGE         = 213;
+  MTV3_SCREEN_SHARE_FRAME         = 214;
+  MTV3_CALL_CHAT                  = 215;
+  MTV3_REMOTE_CONTROL_INPUT       = 216;
+
+  // Deferred Key Exchange + First-CR-Mailbox — S368 RESERVED
+  // The first-CR post box lived on DHT peers; V4.1 has the
+  // secure store for that. ZERO occurrences each in `lib/`+`bin/` on both branches.
+  reserved 220, 221, 222, 223, 224;
+  reserved "MTV3_DEVICE_KEM_REQUEST", "MTV3_DEVICE_KEM_OFFER",
+           "MTV3_FIRST_CR_STORE", "MTV3_FIRST_CR_STORE_ACK",
+           "MTV3_FIRST_CR_DELIVER";
+
+  // Anonymous Vote Re-Broadcaster (§11.4.8) — S368 RESERVED
+  // The re-broadcaster was a V3 infrastructure path. The anonymous vote
+  // itself LIVES (MTV3_POLL_VOTE_ANONYMOUS = 202, above) — reserved is only
+  // the path via a third node. ZERO occurrences each.
+  reserved 225, 226;
+  reserved "MTV3_POLL_ANON_SUBMIT", "MTV3_POLL_ANON_SUBMIT_ACK";
+
+  // §9.5.7 System-Channel record gossip — S368 RESERVED
+  // The gossip ran over the BOOT path of the InfrastructureFrame, which no longer
+  // exists on this line. The system channels themselves remain (§16.7);
+  // reserved is their V3 distribution path. ZERO occurrences each.
+  reserved 230, 231, 232, 233;
+  reserved "MTV3_SYSCHAN_DIGEST", "MTV3_SYSCHAN_SUMMARY",
+           "MTV3_SYSCHAN_WANT", "MTV3_SYSCHAN_PUSH";
+}
+// ── Identity resolution V3 (§4.3) ───────────────────────────────────────
+//
+// AuthManifestV3 extends AuthManifestProto (old) with the user pubkeys,
+// so that the receiver can verify the sig WITHOUT a separate identity lookup.
+// Spec: Appendix A.5 AuthManifest.
+message AuthManifestV3 {
+  bytes           user_id                 = 1;
+  repeated bytes  authorized_device_ids   = 2;
+  uint64          ttl_seconds             = 3;   // 86400 (24h)
+  uint64          sequence_number         = 4;
+  uint64          published_at_ms         = 5;
+  bytes           ed25519_sig             = 6;
+  bytes           ml_dsa_sig              = 7;
+  bytes           user_ed25519_pk         = 8;   // for in-place verify
+  bytes           user_ml_dsa_pk          = 9;
+}
+message LivenessRecordV3 {
+  bytes                      user_id            = 1;
+  bytes                      device_node_id     = 2;
+  repeated PeerAddressProto  addresses          = 3;
+  uint64                     ttl_seconds        = 4;   // 900 (15min) or 3600 (1h)
+  uint64                     sequence_number    = 5;
+  uint64                     published_at_ms    = 6;
+  bytes                      ed25519_sig        = 7;   // signed by USER key (not device)
+  bytes                      device_ed25519_pk  = 8;   // for outer-sig verify at the receiver
+}
+// ── DeviceKemRecord V3 (2D-DHT, wave 5, §4.3) ───────────────────────────
+//
+// Third 2D-DHT record next to AuthManifestV3 and LivenessRecordV3. Carries
+// the device KEM pubkeys (X25519 + ML-KEM-768) that were needed for the KEM encap on
+// InfrastructureFrameV3 (and later ONION_LAYER).
+// S368: `InfrastructureFrameV3` no longer exists (see above). This
+// sentence stays as a statement of origin — it explains WHAT the record
+// was once built for, and is no statement about what runs today.
+//
+// Lifecycle separation: KEM PK changes only on device key reset (multi-
+// year cadence), liveness flips every 15min. Separate records avoid
+// unnecessary DHT traffic from the joint republish.
+//
+// Trust anchor: signed by user master Ed25519 key (same chain as
+// AuthManifestV3 — the user vouches for the device KEM PK of their
+// authorised device).
+//
+// Storage key: SHA-256("kem" || user_id || device_id) — own key space,
+// independent of "auth"+userId and "live"+userId+deviceId.
+message DeviceKemRecordV3 {
+  bytes  user_id              = 1;   // 32 bytes
+  bytes  device_id            = 2;   // 32 bytes
+  bytes  device_x25519_pk     = 3;   // 32 bytes
+  bytes  device_ml_kem_pk     = 4;   // 1184 bytes (ML-KEM-768 public key)
+  uint64 ttl_seconds          = 5;   // 86400 (24h)
+  uint64 sequence_number      = 6;
+  uint64 published_at_ms      = 7;
+  bytes  ed25519_sig          = 8;   // signed by user master Ed25519 key
+  bytes  user_ed25519_pk      = 9;   // for in-place verify
+  // P5: see LivenessRecordProto — delegated signature of a linked
+  // device. Empty = signed directly under the user key.
+  // P6: the certificate is not sent along, the receiver takes it from
+  // the AuthManifest (see LivenessRecordProto). Field 11 stays reserved.
+  bytes  signer_ed25519_pk    = 10;
+  reserved 11;
+}
+// ── PeerListEntry V3 (§5.x PEER_LIST_PUSH) ──────────────────────────────
+//
+// Replaces PeerInfoProto in the V3 PEER_LIST_* frames. Narrower because
+// identity fields (pubkeys, user ID) now come from the 2D-DHT resolver.
+message PeerListEntryV3 {
+  bytes                       device_id        = 1;   // 32 bytes
+  repeated PeerAddressProto   addresses        = 2;
+  uint64                      last_seen_ms     = 3;
+  uint64                      age_hours        = 4;   // routing-table-age hint
+  ConnectionTypeProto         connection_type  = 5;
+}
+// ── RelayForward V3 ─────────────────────────────────────────────────────
+//
+// Close in content to RelayForward (old), but:
+//   - wrappedPacket = NetworkPacketV3 (instead of MessageEnvelope)
+//   - origin_device_id replaces origin_node_id (terminology hygiene)
+//   - no more origin_user_id (user identity sits in the inner frame)
+message RelayForwardV3 {
+  bytes           relay_id            = 1;   // 16 bytes UUID — Anti-Loop
+  bytes           final_recipient_id  = 2;   // = device_id of final destination
+  bytes           wrapped_packet      = 3;   // serialized NetworkPacketV3
+  uint32          hop_count           = 4;
+  uint32          max_hops            = 5;   // = 3
+  uint32          ttl                 = 6;
+  bytes           origin_device_id    = 7;
+  uint64          created_at_ms       = 8;
+  repeated bytes  visited             = 9;   // device_ids that already forwarded
+}
+// ── Deferred Key Exchange (rev3, §8.1.1) ─────────────────────────────────
+
+message DeviceKemRequestV3 {
+  bytes   target_user_id    = 1;   // 32 bytes — userId of the device owner
+  bytes   target_device_id  = 2;   // 32 bytes — specific device being queried
+  bytes   nonce             = 3;   // 16 bytes — replay protection + OFFER binding
+  uint64  timestamp_ms      = 4;
+}
+message DeviceKemOfferV3 {
+  bytes   device_x25519_pk  = 1;   // 32 bytes
+  bytes   device_ml_kem_pk  = 2;   // 1184 bytes (ML-KEM-768)
+  bytes   nonce             = 3;   // echo of REQUEST nonce
+  bytes   user_ed25519_sig  = 4;   // Ed25519 sig over (device_x25519_pk + device_ml_kem_pk + nonce)
+  uint64  timestamp_ms      = 5;
+}
+// ── First-CR-Mailbox (rev3, §5.5b) ──────────────────────────────────────
+
+message FirstCrStoreV3 {
+  bytes   recipient_user_id   = 1;   // 32 bytes — target userId
+  bytes   recipient_device_id = 2;   // 32 bytes — target deviceId
+  bytes   encrypted_cr_blob   = 3;   // KEM-encrypted InfrastructureFrame (opaque to SeedPeer)
+  bytes   sender_device_id    = 4;   // 32 bytes — for dedup
+  uint64  timestamp_ms        = 5;
+  uint64  ttl_ms              = 6;   // max 7 days (604800000)
+}
+message FirstCrStoreAckV3 {
+  bool    accepted            = 1;
+  string  reject_reason       = 2;   // "quota_exceeded" | "ttl_exceeded" | ...
+  bytes   recipient_user_id   = 3;   // echo from FirstCrStoreV3 (V3.2 correlation)
+}
+message FirstCrDeliverV3 {
+  bytes   encrypted_cr_blob   = 1;   // same blob from FIRST_CR_STORE
+  bytes   sender_device_id    = 2;   // original sender
+  uint64  stored_at_ms        = 3;   // when the SeedPeer received the STORE
+}

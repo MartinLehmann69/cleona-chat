@@ -21,7 +21,7 @@
 /// be unit-tested without a native library present.
 library;
 
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 
 /// State of one OS voice effect, as **read back** from the platform.
 ///

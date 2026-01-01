@@ -45,7 +45,7 @@ android {
     productFlavors {
         create("live") {
             dimension = "channel"
-            // Live: chat.cleona.cleona (unverändert)
+            // Live: chat.cleona.cleona (unchanged)
             resValue("string", "app_name", "Cleona Chat")
         }
         create("beta") {

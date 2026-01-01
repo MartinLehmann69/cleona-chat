@@ -18,12 +18,12 @@ library;
 
 import 'dart:typed_data';
 
+import 'package:cleona/core/calls/live_media_frame_budget.dart';
 import 'package:cleona/core/calls/video_pipeline.dart';
 import 'package:cleona/core/calls/video_preset.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/udp_fragmenter.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 
 /// Per-peer decoder state: one decode-only session and its texture.
 class PeerVideoState {
@@ -172,7 +172,7 @@ class GroupVideoReceiver {
       height: first.height > 0 ? first.height : VideoPreset.medium.height,
       fps: VideoPreset.medium.fps,
       targetBitrateKbps: VideoPreset.medium.bitrateKbps,
-      maxFrameBytes: UdpFragmenter.liveMediaMaxFrameBytes,
+      maxFrameBytes: kLiveMediaMaxFrameBytes,
       direction: VideoDirection.decodeOnly,
     );
 

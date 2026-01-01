@@ -7,6 +7,7 @@ library;
 
 import 'dart:ffi';
 import 'dart:io';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -172,12 +173,25 @@ class OqsFFI {
 
   static OqsFFI? _instance;
 
+  /// Bundle paths since S367 — reasoning in `sodium_ffi.dart`
+  /// (`_openLibsodium`): the daemon lies in `<bundleDir>/bin/`, its own
+  /// directory no longer carries the libraries.
   static DynamicLibrary _openLib() {
     if (Platform.isIOS) return DynamicLibrary.process();
-    if (Platform.isAndroid || Platform.isLinux) return DynamicLibrary.open('liboqs.so');
+    if (Platform.isAndroid) return DynamicLibrary.open('liboqs.so');
+    if (Platform.isLinux) {
+      for (final p in [
+        'liboqs.so',
+        '${AppPaths.bundleLibDir}/liboqs.so',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw StateError('liboqs.so not found');
+    }
     if (Platform.isMacOS) {
       for (final p in [
         'liboqs.dylib',
+        '${AppPaths.macFrameworksDir}/liboqs.dylib',
         '@executable_path/../Frameworks/liboqs.dylib',
         '/opt/homebrew/lib/liboqs.dylib',
         '/usr/local/lib/liboqs.dylib',
@@ -186,7 +200,15 @@ class OqsFFI {
       }
       throw StateError('liboqs.dylib not found');
     }
-    if (Platform.isWindows) return DynamicLibrary.open('liboqs.dll');
+    if (Platform.isWindows) {
+      for (final p in [
+        'liboqs.dll',
+        '${AppPaths.bundleDir}\\liboqs.dll',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw StateError('liboqs.dll not found');
+    }
     return DynamicLibrary.open('liboqs.so');
   }
 

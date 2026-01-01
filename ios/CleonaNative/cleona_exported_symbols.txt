@@ -96,6 +96,15 @@ _cleona_ios_create_send_socket
 # libcleona_pow (native PoW)
 _cleona_pow_find_nonce
 
+# libcleona_link — Elligator2 link-handshake shim (V4, Migrationsplan §4d;
+# vendored Monocypher 4.0.3). Explicit entries, no wildcard, on purpose:
+# preflight Check 12 part B then enforces that scripts/build-ios-libs.sh
+# actually compiles native/cleona_link for iOS — exactly the check the
+# voice/video wildcards below opt out of.
+_cleona_link_elligator_map
+_cleona_link_elligator_rev
+_cleona_link_elligator_key_pair
+
 # libcleona_voice — native OS voice session (ABI: native/cleona_voice/cleona_voice.h, §10.4)
 # Wildcard on purpose: preflight Check 12 part B iterates only over explicit
 # entries and would then demand that build-ios-libs.sh compiles whatever

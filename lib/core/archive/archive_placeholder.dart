@@ -1,248 +1,127 @@
-// Placeholder rendering for archived media.
+// Placeholder description for archived media (§21.6).
 //
-// Generates visual representations based on the current ArchiveTier:
-// - thumbnail: Preview image (~20-50 KB) with download tap
-// - mini: Mini-thumbnail (~2-5 KB, 64px) with download tap
-// - metadataOnly: Type icon + filename + size, tappable
+// This type carries DATA ONLY. Until S392/C1 it also carried three ready-made
+// strings — `displayText`, `typeDescription`, `formattedSize` — built right
+// here, in the core layer, in English: 'JPEG Image', '2.3 MB',
+// 'Archived (preview)'. That cannot be retrofitted to working rule 7 (every
+// user-visible string in all 34 locales), because `AppLocale` lives in the
+// UI process and this file runs in the service process (§22.6). Formatting
+// therefore moved to `lib/ui/components/archive_placeholder_labels.dart`,
+// which is handed a translator.
 //
-// Supports progress display for retrieval actions.
-
-import 'dart:convert';
-import 'dart:typed_data';
+// The `original` tier produces NO placeholder: the file is still on the
+// device, and drawing a placeholder over it is the false statement this
+// rework exists to remove.
 
 import 'package:cleona/core/archive/archive_config.dart';
-import 'package:cleona/core/archive/archive_types.dart';
+import 'package:cleona/core/service/service_types.dart' show UiMessage;
 
-/// Description of a placeholder element (UI-independent).
+/// What the UI needs in order to draw an archived medium, as data.
 ///
-/// The UI layer (Flutter) uses this data to render the appropriate widget.
-/// The placeholder itself is platform-independent (no Flutter import).
+/// Every field is a measurement, never a sentence. The one thing that looks
+/// like a decision — [tier] — is the archive index's own value, carried over
+/// IPC by S392/B3 and read back with [archiveTierFromWire].
 class ArchivePlaceholderInfo {
-  /// The current storage tier.
+  /// The storage tier. Never [ArchiveTier.original] — see the file header.
   final ArchiveTier tier;
 
-  /// Display text (e.g. filename or "Image archived").
-  final String displayText;
+  /// When the medium was offloaded. §21.6 names the date explicitly as part
+  /// of what tier 4 still shows ("a metadata reference (date, size, type
+  /// icon)"). `null` means the archive entry carried no date; the UI says so
+  /// rather than inventing one.
+  final DateTime? archivedAt;
 
-  /// Type description (e.g. "JPEG Image", "MP4 Video").
-  final String typeDescription;
+  /// Size of the ORIGINAL in bytes, `null` when unknown.
+  ///
+  /// Nullable on purpose: `0` and "not known" are different facts, and a
+  /// placeholder that prints '0 B' for the second one is the same class of
+  /// lie as the one this rework removes.
+  final int? fileSizeBytes;
 
-  /// File size as formatted string (e.g. "2.3 MB").
-  final String formattedSize;
+  /// MIME type of the original, `null` when unknown.
+  final String? mimeType;
 
-  /// Base64-encoded thumbnail (only when tier == thumbnail).
-  final String? thumbnailBase64;
+  /// The original file name, `null` when unknown.
+  final String? originalFilename;
 
-  /// Mini-thumbnail as Base64 (only when tier == mini).
+  /// Tier-3 mini image (~2–5 KB, 64 px) as base64.
+  ///
+  /// **Empty today and that is not a defect.** The downscaler is S392/B1
+  /// (`archive_thumbnail.dart`); until it lands, `applyArchiveView` never
+  /// fills the wire field. Consumers MUST render the tier without it — a
+  /// missing mini is a missing picture, never a missing placeholder.
   final String? miniBase64;
 
-  /// Whether a tap should start retrieval.
-  final bool isTappable;
-
-  /// Whether a retrieval is in progress.
+  /// Whether a retrieval is currently running (S392/B4).
   final bool isRetrieving;
 
-  /// Retrieval progress (0.0-1.0, null when not active).
+  /// Retrieval progress 0.0–1.0, `null` while no retrieval runs.
   final double? retrievalProgress;
 
-  /// Whether the media item is pinned.
+  /// Whether the medium is pinned.
+  ///
+  /// **Nothing fills this over IPC yet.** S392/B3 deliberately left `pinned`
+  /// off the wire, so the UI process cannot know it; the parameter exists for
+  /// the in-process caller and defaults to false. Reported as an open point
+  /// rather than silently defaulted to something prettier.
   final bool isPinned;
 
-  /// Share URL for reference.
-  final String shareUrl;
+  /// Where the original sits on the share — the retrieval path for B4.
+  /// `null` when the wire field was absent.
+  final String? shareUrl;
 
-  /// Message ID for retrieval.
+  /// The message this placeholder stands for.
   final String messageId;
 
-  ArchivePlaceholderInfo({
+  const ArchivePlaceholderInfo({
     required this.tier,
-    required this.displayText,
-    required this.typeDescription,
-    required this.formattedSize,
-    this.thumbnailBase64,
+    required this.messageId,
+    this.archivedAt,
+    this.fileSizeBytes,
+    this.mimeType,
+    this.originalFilename,
     this.miniBase64,
-    this.isTappable = true,
     this.isRetrieving = false,
     this.retrievalProgress,
     this.isPinned = false,
-    required this.shareUrl,
-    required this.messageId,
+    this.shareUrl,
   });
 }
 
-/// Creates placeholder info based on ArchiveEntry and tier.
+/// Builds [ArchivePlaceholderInfo] from the state the UI process actually has.
 class ArchivePlaceholder {
-  /// Create placeholder for an archived entry.
-  static ArchivePlaceholderInfo build(
-    ArchiveEntry entry, {
-    String? thumbnailBase64,
-    String? miniBase64,
+  /// The placeholder for [m], or `null` when [m] must be drawn normally.
+  ///
+  /// Returns `null` in exactly three cases, and they are different reasons for
+  /// the same answer:
+  ///
+  ///  * `archiveTier == null` — no archive entry for this message. NOT the
+  ///    same as `original` (see `service_types.dart`), and the reason this
+  ///    check cannot be folded into the next one.
+  ///  * an unknown tier name — a newer service process talking to an older
+  ///    UI. Showing nothing beats guessing a tier.
+  ///  * [ArchiveTier.original] — archived, but the file is still here.
+  static ArchivePlaceholderInfo? forMessage(
+    UiMessage m, {
     bool isRetrieving = false,
     double? retrievalProgress,
+    bool isPinned = false,
   }) {
-    final typeDesc = _typeDescription(entry.mimeType);
-    final sizeStr = _formatFileSize(entry.fileSizeBytes);
-    final displayText = entry.originalFilename ?? _tierDisplayText(entry.tier);
+    final tier = archiveTierFromWire(m.archiveTier);
+    if (tier == null || tier == ArchiveTier.original) return null;
 
-    switch (entry.tier) {
-      case ArchiveTier.original:
-        return ArchivePlaceholderInfo(
-          tier: entry.tier,
-          displayText: displayText,
-          typeDescription: typeDesc,
-          formattedSize: sizeStr,
-          thumbnailBase64: thumbnailBase64,
-          isTappable: false, // Original present, no download needed
-          isPinned: entry.pinned,
-          shareUrl: entry.shareUrl,
-          messageId: entry.messageId,
-        );
-
-      case ArchiveTier.thumbnail:
-        return ArchivePlaceholderInfo(
-          tier: entry.tier,
-          displayText: displayText,
-          typeDescription: typeDesc,
-          formattedSize: sizeStr,
-          thumbnailBase64: thumbnailBase64,
-          isTappable: true,
-          isRetrieving: isRetrieving,
-          retrievalProgress: retrievalProgress,
-          isPinned: entry.pinned,
-          shareUrl: entry.shareUrl,
-          messageId: entry.messageId,
-        );
-
-      case ArchiveTier.mini:
-        return ArchivePlaceholderInfo(
-          tier: entry.tier,
-          displayText: displayText,
-          typeDescription: typeDesc,
-          formattedSize: sizeStr,
-          miniBase64: miniBase64,
-          isTappable: true,
-          isRetrieving: isRetrieving,
-          retrievalProgress: retrievalProgress,
-          isPinned: entry.pinned,
-          shareUrl: entry.shareUrl,
-          messageId: entry.messageId,
-        );
-
-      case ArchiveTier.metadataOnly:
-        return ArchivePlaceholderInfo(
-          tier: entry.tier,
-          displayText: displayText,
-          typeDescription: typeDesc,
-          formattedSize: sizeStr,
-          isTappable: true,
-          isRetrieving: isRetrieving,
-          retrievalProgress: retrievalProgress,
-          isPinned: entry.pinned,
-          shareUrl: entry.shareUrl,
-          messageId: entry.messageId,
-        );
-    }
-  }
-
-  /// Generate tier-specific display text.
-  static String getTierDescription(ArchiveTier tier) {
-    switch (tier) {
-      case ArchiveTier.original:
-        return 'Original on device';
-      case ArchiveTier.thumbnail:
-        return 'Preview (original in archive)';
-      case ArchiveTier.mini:
-        return 'Mini preview (original in archive)';
-      case ArchiveTier.metadataOnly:
-        return 'Metadata only (original in archive)';
-    }
-  }
-
-  /// Tier icon name (for Material Icons in Flutter).
-  static String getTierIconName(ArchiveTier tier) {
-    switch (tier) {
-      case ArchiveTier.original:
-        return 'image';
-      case ArchiveTier.thumbnail:
-        return 'photo_size_select_large';
-      case ArchiveTier.mini:
-        return 'photo_size_select_small';
-      case ArchiveTier.metadataOnly:
-        return 'link';
-    }
-  }
-
-  /// Generate thumbnail from original image data (max thumbnailMaxKB).
-  ///
-  /// Returns the first [maxKB] KB of image data as Base64.
-  /// In production, a proper image resize would be performed.
-  static String? generateThumbnailBase64(
-    Uint8List imageData, {
-    int maxKB = 100,
-  }) {
-    if (imageData.isEmpty) return null;
-    final maxBytes = maxKB * 1024;
-    final data = imageData.length <= maxBytes
-        ? imageData
-        : Uint8List.fromList(imageData.sublist(0, maxBytes));
-    return base64Encode(data);
-  }
-
-  /// Generate mini-thumbnail (max miniMaxKB).
-  static String? generateMiniBase64(
-    Uint8List imageData, {
-    int maxKB = 10,
-  }) {
-    if (imageData.isEmpty) return null;
-    final maxBytes = maxKB * 1024;
-    final data = imageData.length <= maxBytes
-        ? imageData
-        : Uint8List.fromList(imageData.sublist(0, maxBytes));
-    return base64Encode(data);
-  }
-
-  // -- Private helper methods -----------------------------------------------
-
-  static String _tierDisplayText(ArchiveTier tier) {
-    switch (tier) {
-      case ArchiveTier.original:
-        return 'Original';
-      case ArchiveTier.thumbnail:
-        return 'Archived (preview)';
-      case ArchiveTier.mini:
-        return 'Archived (mini)';
-      case ArchiveTier.metadataOnly:
-        return 'Archived (link)';
-    }
-  }
-
-  static String _typeDescription(String? mimeType) {
-    if (mimeType == null || mimeType.isEmpty) return 'File';
-    final lower = mimeType.toLowerCase();
-    if (lower.startsWith('image/')) {
-      final sub = lower.substring(6).toUpperCase();
-      return '$sub Image';
-    }
-    if (lower.startsWith('video/')) {
-      final sub = lower.substring(6).toUpperCase();
-      return '$sub Video';
-    }
-    if (lower.startsWith('audio/')) {
-      final sub = lower.substring(6).toUpperCase();
-      return '$sub Audio';
-    }
-    if (lower == 'application/pdf') return 'PDF Document';
-    if (lower == 'application/zip') return 'ZIP Archive';
-    if (lower == 'text/plain') return 'Text File';
-    return 'File';
-  }
-
-  static String _formatFileSize(int bytes) {
-    if (bytes < 1024) return '$bytes B';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
-    if (bytes < 1024 * 1024 * 1024) {
-      return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
-    }
-    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    return ArchivePlaceholderInfo(
+      tier: tier,
+      messageId: m.id,
+      archivedAt: m.archivedAt,
+      fileSizeBytes: m.fileSize,
+      mimeType: m.mimeType,
+      originalFilename: m.filename,
+      miniBase64: m.archiveMiniBase64,
+      isRetrieving: isRetrieving,
+      retrievalProgress: retrievalProgress,
+      isPinned: isPinned,
+      shareUrl: m.archiveShareUrl,
+    );
   }
 }

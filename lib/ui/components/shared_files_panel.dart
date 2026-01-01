@@ -1,3 +1,15 @@
+// NOT CONNECTED (S367, `docs/v4-redesign/S367-unerreichbare-dateien.md`
+// §3.5) — see the detailed note in
+// `lib/ui/components/call_collaboration_panel.dart` (which would be the only
+// `lib/` importer of this widget). Short version: the send path
+// (`GroupCallManager._sendCollaborationToAll` ->
+// `CallTransport.sendSecuredToParticipant`) is a declared no-op
+// (`lib/core/calls/call_transport_v41.dart:451-468`, `noCarrier`,
+// as long as §17.5's group topology is open, C-9/C-10/C-11). A
+// download button here would additionally be a second, separate promise: even
+// with a carrier `CallFileShare` (proto/app_payloads.proto) transports
+// only the announcement (name/size/mime), no data field — the
+// actual byte transfer is built nowhere.
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';

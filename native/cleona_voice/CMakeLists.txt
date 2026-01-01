@@ -5,11 +5,10 @@
 #
 # SCOPE OF THIS FILE
 # ------------------
-# V0.2 owns native/cleona_voice/** and nothing else. This file therefore builds
-# the ABI header target and the mock only. It is deliberately NOT referenced
-# from linux/CMakeLists.txt, windows/runner/CMakeLists.txt, or any script in
-# scripts/ — those files belong to the build owner (V0.5 / V1.8, SPEC §9).
-# What they have to add is written down in BUILD_REQUEST.md next to this file.
+# V0.2 owned native/cleona_voice/** and nothing else; the build owner (V0.5 /
+# V1.8, SPEC §9) wired this tree into linux/CMakeLists.txt,
+# windows/runner/CMakeLists.txt and scripts/build-*-libs.sh. What was
+# requested and what is still open: BUGFIX_CURRENT.md AV-V0.2.
 #
 # Platform backends (V1.1-V1.4) add their own subdirectories under
 # native/cleona_voice/<platform>/ and are picked up by the block at the bottom
@@ -136,8 +135,7 @@ if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/test/CMakeLists.txt")
 endif()
 
 # ---------------------------------------------------------------------------
-# Platform backends, when they land (V1.1-V1.4). Each brings its own
-# CMakeLists.txt and its own BUILD_REQUEST.md.
+# Platform backends (V1.1-V1.4). Each brings its own CMakeLists.txt.
 # ---------------------------------------------------------------------------
 foreach(_plat linux android apple windows)
   if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_plat}/CMakeLists.txt")

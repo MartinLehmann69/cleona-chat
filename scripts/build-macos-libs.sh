@@ -3,7 +3,7 @@
 # build-macos-libs.sh — Build native libraries for macOS
 #
 # Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp
-# as dylibs for macOS
+# and the cleona_* shims (pow, link, voice, video) as dylibs for macOS
 # (arm64, x86_64 or universal via lipo).
 #
 # Run this on a macOS host (it cannot cross-compile from Linux — Apple's SDK
@@ -59,7 +59,7 @@ LIBOQS_VERSION="0.15.0"
 LIBZSTD_VERSION="1.5.6"
 LIBERASURECODE_VERSION="1.6.2"
 LIBOPUS_VERSION="1.5.2"
-WHISPER_VERSION="v1.8.4"  # muss zu jniLibs/XCFrameworks passen — siehe build-android-libs.sh
+WHISPER_VERSION="v1.8.4"  # must match jniLibs/XCFrameworks — see build-android-libs.sh
 
 # ── Architecture setup ───────────────────────────────────────────────────────
 setup_arch() {
@@ -277,6 +277,29 @@ build_cleona_pow() {
     rewrite_install_name "$OUT_DIR/libcleona_pow.dylib"
 }
 
+build_cleona_link() {
+    echo "── libcleona_link (Elligator2, V4 §4d) ──────────────────────"
+    local src="$PROJECT_DIR/native/cleona_link"
+    local build="$BUILD_DIR/cleona_link"
+    rm -rf "$build" && mkdir -p "$build"
+    # No CMAKE_PREFIX_PATH as with cleona_pow: Monocypher 4.0.3 is vendored
+    # (native/cleona_link/vendor/, migration plan §4d.5), no external
+    # dependency. CLEONA_LINK_BUILD_SMOKE=OFF keeps the step-0 smoke
+    # executables and the deliberately broken saboteur library (exports
+    # the same three symbols) out of the production build tree — standalone build
+    # see native/cleona_link/CMakeLists.txt header.
+    cmake -GNinja -S "$src" -B "$build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+        -DCLEONA_LINK_BUILD_SMOKE=OFF
+    ninja -C "$build"
+    # Name WITH lib prefix like cleona_pow/cleona_video (only cleona_voice
+    # deviates — see the comment in build_cleona_video below).
+    cp "$build/libcleona_link.dylib" "$OUT_DIR/libcleona_link.dylib"
+    rewrite_install_name "$OUT_DIR/libcleona_link.dylib"
+}
+
 build_cleona_voice() {
     echo "── libcleona_voice (VoiceProcessingIO) ──────────────────────"
     local src="$PROJECT_DIR/native/cleona_voice"
@@ -299,10 +322,10 @@ build_cleona_video() {
     local src="$PROJECT_DIR/native/cleona_video"
     local build="$BUILD_DIR/cleona_video"
     rm -rf "$build" && mkdir -p "$build"
-    # BUILD_PLATFORM bleibt an -- genau dieses Backend ist das Ziel. Der
-    # Plattform-Loop in native/cleona_video/CMakeLists.txt steigt auf einem
-    # Apple-Host nur nach apple/ ab; linux/, android/ und windows/ haben alle
-    # einen Host-Guard am Dateianfang.
+    # BUILD_PLATFORM stays on -- exactly this backend is the target. The
+    # platform loop in native/cleona_video/CMakeLists.txt descends only into
+    # apple/ on an Apple host; linux/, android/ and windows/ all have
+    # a host guard at the start of the file.
     cmake -GNinja -S "$src" -B "$build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
@@ -310,10 +333,10 @@ build_cleona_video() {
         -DCLEONA_VIDEO_BUILD_MOCK=OFF \
         -DCLEONA_VIDEO_BUILD_SMOKE=OFF
     ninja -C "$build"
-    # Name MIT lib-Praefix, anders als bei cleona_voice oben: video_pipeline.dart
-    # :691-693 sucht "libcleona_video.dylib", voice_session.dart:345/:392 sucht
-    # "cleona_voice.dylib". Die beiden Bindings sind sich uneins; massgeblich ist
-    # je das, was zur Laufzeit tatsaechlich geoeffnet wird.
+    # Name WITH lib prefix, unlike cleona_voice above: video_pipeline.dart
+    # :691-693 looks for "libcleona_video.dylib", voice_session.dart:345/:392 looks for
+    # "cleona_voice.dylib". The two bindings disagree; what counts is
+    # in each case what is actually opened at runtime.
     cp "$build/apple/libcleona_video.dylib" "$OUT_DIR/libcleona_video.dylib"
     rewrite_install_name "$OUT_DIR/libcleona_video.dylib"
 }
@@ -375,7 +398,7 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
-    local all_targets=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice cleona_video)
+    local all_targets=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_link cleona_voice cleona_video)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")
     fi
@@ -392,6 +415,7 @@ run_builds() {
             opus) build_libopus ;;
             whisper) build_whisper ;;
             cleona_pow) build_cleona_pow ;;
+            cleona_link) build_cleona_link ;;
             cleona_voice) build_cleona_voice ;;
             cleona_video) build_cleona_video ;;
             *) echo "Unknown target: $t"; exit 1 ;;

@@ -7,16 +7,12 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.content.res.AssetFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -34,6 +30,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.MethodChannel
+import io.flutter.view.TextureRegistry
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -49,7 +46,22 @@ class MainActivity : FlutterActivity() {
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
     private val UPDATE_CHANNEL = "chat.cleona/update"
-    private val SESSION_BEHAVIOUR_CHANNEL = "chat.cleona/session_behaviour"
+    // S363, point 1 (option D): device credential confirmation via
+    // `KeyguardManager`. Deliberately NOT `androidx.biometric`:
+    //   * the dependency is missing (`android/app/build.gradle.kts` lists
+    //     CameraX, concurrent-futures, Guava, security-crypto — no
+    //     androidx.biometric, and `pubspec.yaml` no local_auth), and
+    //   * `BiometricPrompt` requires a `FragmentActivity`; this class
+    //     is `FlutterActivity`, and switching to
+    //     `FlutterFragmentActivity` would touch `provideFlutterEngine`,
+    //     `configureFlutterEngine` and the engine caching in
+    //     `CleonaApplication` — the only risky move in the package.
+    // The price: device credential only (PIN/pattern/password), no biometrics.
+    private val KEYGUARD_CHANNEL = "chat.cleona/keyguard"
+    // No own SESSION_BEHAVIOUR_CHANNEL constant here anymore: the
+    // channel name is now defined in CleonaForegroundService.SESSION_BEHAVIOUR_CHANNEL
+    // (single source of truth at the place that also makes
+    // OUTGOING invokeMethod calls on this channel — see there).
     private val MSG_CHANNEL_ID = "cleona_messages"
     private val CALL_CHANNEL_ID = "cleona_calls"
     private val CALL_NOTIFICATION_ID = 42001
@@ -60,26 +72,17 @@ class MainActivity : FlutterActivity() {
     // Cleona_Chat_Architecture_v3_0.md §10.4 "Session behaviour" table).
     // ─────────────────────────────────────────────────────────────────────
 
-    // Registered once per configureFlutterEngine call so the focus-change
-    // callback can invokeMethod back into Dart without threading state
-    // through onAudioFocusChange's own signature.
-    private var sessionBehaviourChannel: MethodChannel? = null
-
-    // Non-null exactly while requestAudioFocus() has an outstanding grant —
-    // this IS the "do we currently hold focus" state, read by
-    // onAudioFocusChange to decide whether a LOSS is an interruption of ours
-    // or noise from a focus we never held (or already abandoned).
-    private var audioFocusRequest: AudioFocusRequest? = null
-    @Suppress("DEPRECATION")
-    private var legacyAudioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
-
-    // True from AUDIOFOCUS_LOSS_TRANSIENT(_CAN_DUCK) until the matching
-    // AUDIOFOCUS_GAIN — the round trip this class turns into
-    // onInterruptionBegin/onInterruptionEnd. A plain AUDIOFOCUS_LOSS (another
-    // app took focus for good, not just transiently) begins an interruption
-    // but is not expected to end with a GAIN of our own, so it does not set
-    // this flag — see onAudioFocusChange.
-    private var focusInterrupted = false
+    // AudioFocus state (sessionBehaviourChannel, audioFocusRequest,
+    // legacyAudioFocusListener, focusInterrupted) lived here until 2026-08-15 as
+    // instance fields of this Activity. The same class of error as A-1: the focus
+    // did not survive an Activity recreation during an ongoing call,
+    // a later abandonAudioFocus became a no-op, other apps'
+    // media playback stayed suppressed until the process ended. The fields
+    // together with requestCallAudioFocus/abandonCallAudioFocus/onAudioFocusChange
+    // have moved to CleonaForegroundService's companion object (see
+    // there for the full rationale); the MethodChannel handler in
+    // configureFlutterEngine below only calls the static methods
+    // there.
 
     // PROXIMITY_SCREEN_OFF_WAKE_LOCK — held only while the active call route
     // is the earpiece (architecture §10.4, "Proximity": "screen off if and
@@ -96,6 +99,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val REQUEST_AUDIO_PERMISSION = 1002
         private const val REQUEST_INSTALL_PERMISSION = 1003
+        private const val REQUEST_CONFIRM_CREDENTIAL = 1004
     }
 
     // Samsung Auto-Blocker revokes REQUEST_INSTALL_PACKAGES after ~30 min.
@@ -107,6 +111,7 @@ class MainActivity : FlutterActivity() {
     // not ComponentActivity, so registerForActivityResult is unavailable here
     // (same request-code pattern as REQUEST_AUDIO_PERMISSION above).
     private var pendingInstallPermissionResult: MethodChannel.Result? = null
+    private var pendingKeyguardResult: MethodChannel.Result? = null
 
     // Bug #U16: ACTION_SEND payload, drained by Dart via `chat.cleona/share`.
     // Shape: {"text": String?, "files": List<String>} (content:// → cacheDir copy).
@@ -129,18 +134,84 @@ class MainActivity : FlutterActivity() {
         // Binds libcleona_voice.so through the Java runtime (JNI_OnLoad) and
         // hands the Android voice backend (V1.2) an application context.
         // Without this, cleona_voice_open() always fails with
-        // CLEONA_VOICE_ERR_BACKEND — see BUILD_REQUEST_V1.2.md §2, addressed
+        // CLEONA_VOICE_ERR_BACKEND — see BUGFIX_CURRENT.md AV-V1.2 §2, addressed
         // to this file's owner (V1.10). install() is idempotent and swallows
         // UnsatisfiedLinkError on purpose (the .so and this line land in two
         // different commits by two different owners), so it is safe to call
         // here even before scripts/build-android-libs.sh ships the library.
         VoiceSession.install(applicationContext)
 
+        // A-6 (MIGRATION §5.4, BUGFIX_CURRENT.md AV-V1.14 §4.2): the same
+        // wiring for the video backend. It was MISSING until today —
+        // `VideoSession.install()` was called tree-wide only in the
+        // conformance harness, which is why `cleona_video_open()` in the
+        // real app always returned CLEONA_VIDEO_ERR_BACKEND and every
+        // video call since V1.14 was silently audio-only. The finding had to be found via
+        // the source code, because this path additionally wrote to no
+        // log file (A-5).
+        //
+        // The TextureRegistry adapter is needed because `VideoSession.kt`
+        // deliberately does NOT type against `io.flutter.view.TextureRegistry`:
+        // the on-device conformance harness compiles the file without the
+        // Flutter classpath and would break on a direct import. It
+        // passes `null` and falls back to the headless EGL variant.
+        //
+        // `flutterEngine.renderer` is the engine's TextureRegistry, and the
+        // engine belongs to `CleonaApplication`, not to this Activity (see
+        // `cleanUpFlutterEngine` above). It thus survives an
+        // Activity recreation — the same ownership question that A-1 hinges on.
+        VideoSession.install(
+            applicationContext,
+            FlutterVideoTextureProvider(flutterEngine.renderer),
+        )
+
         // No camera MethodChannel any more (V3.1): the `chat.cleona/camera`
         // contract existed for the superseded Dart-side capture path
         // (video_capture_android.dart -> CameraXHandler.kt). Capture now lives
         // below the video ABI in VideoSession.kt, where the frames never enter
         // Dart at all (invariant I10, §10.6).
+
+        // ── S363: device credential confirmation ──────────────────────────────
+        //
+        // The pattern (`startActivityForResult` + `onActivityResult`) already
+        // exists in this class — REQUEST_INSTALL_PERMISSION below. No
+        // dependency and no new base class is added here.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, KEYGUARD_CHANNEL)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "isDeviceSecure" -> {
+                        val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+                        result.success(km.isDeviceSecure)
+                    }
+                    "confirmDeviceCredential" -> {
+                        val km = getSystemService(Context.KEYGUARD_SERVICE) as android.app.KeyguardManager
+                        if (!km.isDeviceSecure) {
+                            // No screen lock: there is nothing to
+                            // confirm. `false` instead of an error, so that
+                            // the Dart side takes the same branch as for
+                            // a cancellation by the user.
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        val title = call.argument<String>("title")
+                        val description = call.argument<String>("description")
+                        @Suppress("DEPRECATION")
+                        val intent = km.createConfirmDeviceCredentialIntent(title, description)
+                        if (intent == null) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        // A still open call is answered before the
+                        // next one overwrites it — otherwise the
+                        // Dart side hangs forever on a Future that nobody
+                        // resolves anymore.
+                        pendingKeyguardResult?.success(false)
+                        pendingKeyguardResult = result
+                        startActivityForResult(intent, REQUEST_CONFIRM_CREDENTIAL)
+                    }
+                    else -> result.notImplemented()
+                }
+            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -236,12 +307,11 @@ class MainActivity : FlutterActivity() {
                         return@setMethodCallHandler
                     }
                     Thread {
-                        try {
-                            playAssetSound(asset)
-                            runOnUiThread { result.success(null) }
-                        } catch (e: Exception) {
-                            runOnUiThread { result.success(null) } // non-fatal
-                        }
+                        // A-1: ownership lies with the foreground service
+                        // (process-wide), not with this Activity.
+                        CleonaForegroundService.playAssetSound(
+                            applicationContext, asset)
+                        runOnUiThread { result.success(null) }
                     }.start()
                 }
                 "startLoopSound" -> {
@@ -250,11 +320,16 @@ class MainActivity : FlutterActivity() {
                         result.error("INVALID_ARGS", "asset required", null)
                         return@setMethodCallHandler
                     }
-                    startLoopSound(asset)
+                    // A-1: see CleonaForegroundService.startLoopSound —
+                    // the player belongs to the process, not to this Activity.
+                    // Before, it survived every Activity recreation and was
+                    // afterwards only stoppable by ending the process.
+                    CleonaForegroundService.startLoopSound(
+                        applicationContext, asset)
                     result.success(null)
                 }
                 "stopSound" -> {
-                    stopLoopSound()
+                    CleonaForegroundService.stopLoopSound()
                     result.success(null)
                 }
                 "setCallAudioMode" -> {
@@ -340,6 +415,14 @@ class MainActivity : FlutterActivity() {
             when (call.method) {
                 "canInstallPackages" -> {
                     result.success(packageManager.canRequestPackageInstalls())
+                }
+                // S388: no update fetching over a metered connection
+                // (owner decision 15.09.2026). The system's answer —
+                // it covers mobile data AND a Wi-Fi marked as metered.
+                "isActiveNetworkMetered" -> {
+                    val cm = getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+                        as android.net.ConnectivityManager
+                    result.success(cm.isActiveNetworkMetered)
                 }
                 "openInstallPermissionSettings" -> {
                     val intent = android.content.Intent(
@@ -499,20 +582,24 @@ class MainActivity : FlutterActivity() {
         CleonaCallIntegration.register(applicationContext, flutterEngine.dartExecutor.binaryMessenger)
 
         // Session behaviour (V1.10): AudioFocus, interruption, proximity —
-        // architecture §10.4 "Session behaviour" table. See the class-level
-        // fields above and lib/core/calls/session_behaviour.dart for why the
-        // interruption signal is bridged through this channel rather than
-        // through the cleona_voice ABI's own event queue.
+        // architecture §10.4 "Session behaviour" table. requestAudioFocus/
+        // abandonAudioFocus redirect to CleonaForegroundService — state
+        // and return path to Dart live there, not here (see the
+        // field comments above and CleonaForegroundService.kt). This Activity
+        // only holds the incoming channel binding for the three methods.
+        // setProximityMonitoring stays Activity-local — the WakeLock is
+        // defensively released in onDestroy(), see there.
         val behaviourChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
-            SESSION_BEHAVIOUR_CHANNEL
+            CleonaForegroundService.SESSION_BEHAVIOUR_CHANNEL
         )
-        sessionBehaviourChannel = behaviourChannel
         behaviourChannel.setMethodCallHandler { call, result ->
             when (call.method) {
-                "requestAudioFocus" -> result.success(requestCallAudioFocus())
+                "requestAudioFocus" -> result.success(
+                    CleonaForegroundService.requestCallAudioFocus(applicationContext)
+                )
                 "abandonAudioFocus" -> {
-                    abandonCallAudioFocus()
+                    CleonaForegroundService.abandonCallAudioFocus(applicationContext)
                     result.success(null)
                 }
                 "setProximityMonitoring" -> {
@@ -544,9 +631,9 @@ class MainActivity : FlutterActivity() {
         ensureForegroundService()
 
         // Bug #U16: cold-start via Share-Sheet — stash payload for Dart drain.
-        // Activity-Property `intent` ist getIntent(), enthält das ACTION_SEND-
-        // Payload. Vorher hier die lokale Service-Intent-Variable übergeben —
-        // handleShareIntent verwarf sie wegen falscher Action.
+        // The Activity property `intent` is getIntent(), it contains the ACTION_SEND
+        // payload. Before, the local service intent variable was passed here —
+        // handleShareIntent discarded it because of the wrong action.
         handleShareIntent(intent)
         handleDeepLinkIntent(intent)
     }
@@ -566,10 +653,12 @@ class MainActivity : FlutterActivity() {
     // Defensive release only — a leaked PROXIMITY_SCREEN_OFF_WAKE_LOCK would
     // otherwise survive an Activity recreation the system decided to do
     // outside the configChanges list above (e.g. under memory pressure).
-    // Audio focus is deliberately NOT abandoned here: it is scoped to the
-    // call, not to the Activity instance, and a call keeps running via the
-    // foreground service (Arbeitsregel #8) independent of whether this
-    // Activity currently exists.
+    // No AudioFocus cleanup here: since 2026-08-15 this Activity holds
+    // no AudioFocus state at all (see field comment above). The
+    // focus lives in CleonaForegroundService, belongs to the call duration, not
+    // to the Activity lifetime, and a call keeps running in the foreground service
+    // even if this Activity does not exist at the moment (working rule
+    // #8) — abandoning here would be wrong, not merely superfluous.
     override fun onDestroy() {
         proximityWakeLock?.let { if (it.isHeld) it.release() }
         proximityWakeLock = null
@@ -613,6 +702,13 @@ class MainActivity : FlutterActivity() {
                 packageManager.canRequestPackageInstalls()
             )
             pendingInstallPermissionResult = null
+        }
+        // S363: the result of the device credential confirmation. Here the
+        // resultCode really counts (unlike for the permission screen
+        // above): RESULT_OK means "the user has identified themselves".
+        if (requestCode == REQUEST_CONFIRM_CREDENTIAL) {
+            pendingKeyguardResult?.success(resultCode == RESULT_OK)
+            pendingKeyguardResult = null
         }
     }
 
@@ -754,49 +850,12 @@ class MainActivity : FlutterActivity() {
         manager.notify(conversationId.hashCode(), notification)
     }
 
-    @Volatile
-    private var loopingPlayer: MediaPlayer? = null
-
-    private fun playAssetSound(asset: String) {
-        try {
-            val afd: AssetFileDescriptor = assets.openFd("flutter_assets/$asset")
-            val mp = MediaPlayer()
-            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-            afd.close()
-            mp.prepare()
-            mp.start()
-            mp.setOnCompletionListener { it.release() }
-        } catch (e: Exception) {
-            // Sound playback is non-fatal
-        }
-    }
-
-    private fun startLoopSound(asset: String) {
-        stopLoopSound()
-        try {
-            val afd: AssetFileDescriptor = assets.openFd("flutter_assets/$asset")
-            val mp = MediaPlayer()
-            mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
-            afd.close()
-            mp.isLooping = true
-            mp.prepare()
-            mp.start()
-            loopingPlayer = mp
-        } catch (e: Exception) {
-            // Sound playback is non-fatal
-        }
-    }
-
-    private fun stopLoopSound() {
-        val mp = loopingPlayer
-        loopingPlayer = null
-        if (mp != null) {
-            try {
-                if (mp.isPlaying) mp.stop()
-                mp.release()
-            } catch (_: Exception) {}
-        }
-    }
+    // A-1: `loopingPlayer`, `playAssetSound`, `startLoopSound` and
+    // `stopLoopSound` lived here until 2026-08-15 — as instance fields and
+    // methods of the Activity. They have moved to
+    // `CleonaForegroundService`'s companion object, where they are tied to the
+    // process lifetime instead of this Activity (MIGRATION §5.4,
+    // finding A-1). The MethodChannel handler above calls them there.
 
     private fun setCallAudioMode(speaker: Boolean) {
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -813,119 +872,18 @@ class MainActivity : FlutterActivity() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Session behaviour (V1.10): AudioFocus, interruption, proximity.
-    //
-    // Architecture §10.4, "Session behaviour" table:
-    //   "Audio focus: Android AudioFocusRequest with
-    //    AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE, loss handled ... Without it,
-    //    media from other apps keeps playing through the call."
-    //   "Interruption: a cellular call, Siri or another VoIP call takes the
-    //    session; Cleona releases it cleanly and reclaims it afterwards.
-    //    Without this the audio stays gone after the foreign call ends."
-    //   "Proximity: screen off if and only if the active route is the
-    //    earpiece. Android PROXIMITY_SCREEN_OFF_WAKE_LOCK ..."
-    //
-    // Deliberately independent of VoiceSession's own lifecycle (I2/I6, see
-    // session_behaviour.dart's file doc): this class never calls
-    // VoiceSession.start()/stop() here. AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
-    // asks the platform to silence/pause other apps' playback for the
-    // duration — EXCLUSIVE rather than plain GAIN_TRANSIENT because a call is
-    // not "background music that may duck a little", it is the one thing
-    // that should be audible.
+    // Session behaviour (V1.10): AudioFocus. requestCallAudioFocus,
+    // abandonCallAudioFocus and onAudioFocusChange lived here until 2026-08-15
+    // — as private methods of this Activity. They have moved to
+    // CleonaForegroundService's companion object (MIGRATION style
+    // like A-1, full rationale there): the focus belongs to the CALL DURATION,
+    // not to the Activity lifetime, and previously did not survive an
+    // Activity recreation during an ongoing call —
+    // with the consequence that a later abandonAudioFocus was a no-op and
+    // other apps' media playback stayed suppressed until the process ended. The
+    // MethodChannel handler in configureFlutterEngine above calls the
+    // static methods there.
     // ─────────────────────────────────────────────────────────────────────
-
-    private fun requestCallAudioFocus(): Boolean {
-        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        val listener = AudioManager.OnAudioFocusChangeListener { onAudioFocusChange(it) }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val attrs = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-            val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                .setAudioAttributes(attrs)
-                .setOnAudioFocusChangeListener(listener)
-                .build()
-            val rc = am.requestAudioFocus(request)
-            val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-            if (granted) {
-                audioFocusRequest = request
-                focusInterrupted = false
-            } else {
-                Log.w("Cleona", "requestAudioFocus (AudioFocusRequest) rc=$rc")
-            }
-            return granted
-        }
-
-        // API 24-25: no AudioFocusRequest class. Same duration hint via the
-        // deprecated overload.
-        @Suppress("DEPRECATION")
-        val rc = am.requestAudioFocus(
-            listener, AudioManager.STREAM_VOICE_CALL,
-            AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
-        )
-        val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-        if (granted) {
-            legacyAudioFocusListener = listener
-            focusInterrupted = false
-        } else {
-            Log.w("Cleona", "requestAudioFocus (legacy) rc=$rc")
-        }
-        return granted
-    }
-
-    private fun abandonCallAudioFocus() {
-        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
-            audioFocusRequest = null
-        } else {
-            @Suppress("DEPRECATION")
-            legacyAudioFocusListener?.let { am.abandonAudioFocus(it) }
-            legacyAudioFocusListener = null
-        }
-        focusInterrupted = false
-    }
-
-    // Runs on whichever thread the platform delivers focus changes on
-    // (documented as an arbitrary thread; in practice the main thread on all
-    // tested API levels, but not guaranteed) — invokeMethod requires the
-    // platform thread, hence runOnUiThread rather than a bare call.
-    private fun onAudioFocusChange(focusChange: Int) {
-        when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
-                // I2/I6: nothing here touches VoiceSession. This only tells
-                // Dart that a foreign call/app took the session, so the UI
-                // can show it (§10.4, "behaves like a telephony call").
-                focusInterrupted = true
-                runOnUiThread {
-                    sessionBehaviourChannel?.invokeMethod("onInterruptionBegin", null)
-                }
-            }
-            AudioManager.AUDIOFOCUS_GAIN -> {
-                // Only an "interruption ended" if we were actually
-                // interrupted — the very first GAIN after a successful
-                // request also arrives here on some OEMs and must not be
-                // reported as an end-of-interruption with nothing to end.
-                if (focusInterrupted) {
-                    focusInterrupted = false
-                    runOnUiThread {
-                        sessionBehaviourChannel?.invokeMethod(
-                            "onInterruptionEnd",
-                            // Android has no separate "should resume" signal —
-                            // AUDIOFOCUS_GAIN itself IS the resume signal
-                            // (session_behaviour.dart, InterruptionEndInfo).
-                            mapOf("shouldResume" to true)
-                        )
-                    }
-                }
-            }
-            else -> Log.i("Cleona", "onAudioFocusChange: unhandled focusChange=$focusChange")
-        }
-    }
 
     // Held only while the active route is the earpiece — never while the
     // route is the speaker (architecture §10.4, "Proximity"). The decision
@@ -1247,6 +1205,26 @@ class MainActivity : FlutterActivity() {
         file.outputStream().use { out ->
             out.write(header.array())
             out.write(pcm)
+        }
+    }
+}
+
+/**
+ * Thin adapter from Flutter's [TextureRegistry] to the flutter-free
+ * seam type [VideoTextureProvider] from `VideoSession.kt`.
+ *
+ * Wording following the former BUILD_REQUEST_V1.14 §4.2
+ * (BUGFIX_CURRENT.md AV-V1.14).
+ */
+private class FlutterVideoTextureProvider(
+    private val registry: TextureRegistry,
+) : VideoTextureProvider {
+    override fun createSurfaceTexture(): VideoTextureEntry {
+        val entry = registry.createSurfaceTexture()
+        return object : VideoTextureEntry {
+            override fun id() = entry.id()
+            override fun surfaceTexture() = entry.surfaceTexture()
+            override fun release() = entry.release()
         }
     }
 }

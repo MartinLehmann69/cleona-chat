@@ -2121,7 +2121,9 @@ class _AndroidCalendarBridgeCard extends StatefulWidget {
 
 class _AndroidCalendarBridgeCardState
     extends State<_AndroidCalendarBridgeCard> {
-  final _bridge = AndroidCalendarBridge();
+  // `widget` is not yet attached at field-initializer time, so the bridge
+  // (which needs the active identity's profileDir) is built in initState.
+  late final AndroidCalendarBridge _bridge;
   bool _hasPermission = false;
   bool _busy = false;
   String? _status;
@@ -2129,6 +2131,7 @@ class _AndroidCalendarBridgeCardState
   @override
   void initState() {
     super.initState();
+    _bridge = AndroidCalendarBridge(profileDir: widget.service.profileDir);
     _refreshPermission();
   }
 

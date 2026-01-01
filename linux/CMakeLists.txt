@@ -113,30 +113,43 @@ set_target_properties(opus PROPERTIES PUBLIC_HEADER "")
 # production build file (below, nothing names `cleona_voice_mock`), and the
 # mock target still needs to exist for native/cleona_voice/test's conformance
 # harness (built as a subdirectory of the same CMake tree) to have something
-# to link against in link mode (native/cleona_voice/BUILD_REQUEST_V1.1.md §1).
+# to link against in link mode (BUGFIX_CURRENT.md AV-V1.1 §1).
 set(CLEONA_VOICE_BUILD_SMOKE OFF CACHE BOOL "" FORCE)
 add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_voice" "${CMAKE_BINARY_DIR}/cleona_voice_build")
 
-# === cleona_video — NOT wired in yet, deliberately ===
-# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership) +
-# native/cleona_video/BUILD_REQUEST.md.
+# === cleona_link (libcleona_link.so) — V4 Elligator2 shim, migration plan §4d ===
+# Built from native/cleona_link/ (vendored Monocypher 4.0.3, no external deps),
+# installed into bundle/lib/ for FFI loading — same install pattern as
+# cleona_net/cleona_voice: the install(TARGETS) directive lives further down,
+# after the bundle REMOVE_RECURSE block.
+# CLEONA_LINK_BUILD_SMOKE=OFF: the step-0 gate (smoke_link_elligator +
+# the deliberately broken cleona_link_saboteur library it links against) is a
+# standalone-build concern (native/cleona_link/CMakeLists.txt header); neither
+# executable nor saboteur belongs in a production build tree. OFF also keeps
+# the saboteur .so from ever sitting next to the real one in the build dir.
+set(CLEONA_LINK_BUILD_SMOKE OFF CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_link" "${CMAKE_BINARY_DIR}/cleona_link_build")
+
+# === cleona_video — NOT wired in (open: BUGFIX_CURRENT.md AV-V0.3 §2) ===
+# docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 (build ownership).
 #
-# Only a hardware-free mock exists today (native/cleona_video/mock) — there is
-# no real Linux backend to bundle yet. Wiring `add_subdirectory` in here now
-# would have exactly one available target to install: the mock, which answers
-# every call with a synthetic bitstream and must never reach a release build
-# (native/cleona_video/BUILD_REQUEST.md §5). scripts/preflight.sh Check "Mock
-# backend not in production build wiring" enforces that this file stays clean
-# of `cleona_video_mock` until then.
+# The real Linux backend exists (native/cleona_video/linux, V1.13, VA-API +
+# V4L2; conformance 34/34 in 3b71b760, 37/0 in bd9fadc4) but is not bundled.
+# Open before wiring it: cross-implementation H.264 interop is unproven, and
+# scripts/build-linux-packages.sh lists no libva/libdrm runtime dependency
+# (BUGFIX_CURRENT.md AV-V1.13). The mock (native/cleona_video/mock) answers
+# every call with a synthetic bitstream and must never reach a release build;
+# scripts/preflight.sh Check "Mock backend not in production build wiring"
+# enforces that this file never names `cleona_video_mock`.
 #
-# Wire this up when the real backend lands, not before, same shape as
-# cleona_voice above:
-#   video (V1.13, VA-API/V4L2 M2M): add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_video" "${CMAKE_BINARY_DIR}/cleona_video_build")
-#                            install the `cleona_video` target (NOT `cleona_video_mock`)
-#                            into ${INSTALL_BUNDLE_LIB_DIR}, same pattern as cleona_net below.
-# See native/cleona_video/BUILD_REQUEST.md §2 for the exact snippet and the
-# CMake options (CLEONA_VIDEO_BUILD_MOCK / BUILD_SMOKE) a production build
-# must turn OFF.
+# Shape when wiring, same as cleona_voice above:
+#   add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_video" "${CMAKE_BINARY_DIR}/cleona_video_build")
+#   install the `cleona_video` target (NOT `cleona_video_mock`)
+#   into ${INSTALL_BUNDLE_LIB_DIR}, same pattern as cleona_net below.
+# CMake options: V0.3 asked for -DCLEONA_VIDEO_BUILD_MOCK=OFF and
+# -DCLEONA_VIDEO_BUILD_SMOKE=OFF; the cleona_voice block above instead keeps
+# MOCK at its default ON for the conformance harness. Decide consistently
+# when wiring.
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
@@ -186,6 +199,10 @@ install(TARGETS opus LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
 
 # cleona_voice — same install pattern as cleona_net.
 install(TARGETS cleona_voice LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
+  COMPONENT Runtime)
+
+# cleona_link — same install pattern as cleona_net.
+install(TARGETS cleona_link LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

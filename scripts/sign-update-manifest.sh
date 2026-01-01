@@ -1,5 +1,26 @@
 #!/usr/bin/env bash
-# Sign a Cleona update manifest with the maintainer Ed25519 key.
+# Sign a Cleona update manifest with the maintainer key — HYBRID.
+#
+# ── TWO SIGNATURES OVER THE SAME BYTES (v4_2 §4.4.3, §26.5.2) ────────────
+#
+# §4.4.3 "Signature rule (normative)" lists the update manifest as
+# `hybrid`; §4.4.1 requires that the receiver checks both signatures individually
+# and that BOTH must be valid. This script therefore produces:
+#
+#   `sig`   Ed25519   over $PAYLOAD   (openssl, classic key)
+#   `sigPq` ML-DSA-65 over $PAYLOAD   (liboqs via scripts/maintainer_mldsa.dart)
+#
+# If either of the two is missing, this script aborts. A manifest with only
+# one signature would not be a weaker manifest — `UpdateManifest.verify`
+# rejects it, so the pipeline would have published an artefact that its
+# own clients do not accept (the same trap as with --mono-seq, S368).
+#
+# Why ML-DSA-65 is NOT signed via openssl: the verifying side
+# is liboqs (`lib/core/crypto/oqs_ffi.dart`, `OQS_SIG_verify`/`ML-DSA-65`).
+# Another library may implement the same standard in a different variant
+# (pure/prehash, context, framing) — the error then only shows in the
+# field. `scripts/maintainer_mldsa.dart` uses the same library and
+# the same calls as the node.
 #
 # Usage:
 #   ./scripts/sign-update-manifest.sh <version> <download-url> <archive-hash> <changelog> \
@@ -40,7 +61,11 @@
 #                      strictly greater than the highest previously-seen value.
 #
 # Prerequisites:
-#   - Maintainer private key at ~/Schreibtisch/cleona_maintainer_private.pem (or CLEONA_MAINTAINER_KEY env)
+#   - Maintainer Ed25519 private key at ~/CleonaPrivat/keys/cleona_maintainer_private.pem
+#     (or CLEONA_MAINTAINER_KEY env)
+#   - Maintainer ML-DSA-65 private key at ~/CleonaPrivat/keys/cleona_maintainer_mldsa.key
+#     (or CLEONA_MAINTAINER_MLDSA_KEY env). Generated with
+#     `scripts/gen-maintainer-mldsa-key.sh` — by the owner, once.
 #
 # After signing a manifest with --bin-dir, distribute the binaries into the network with:
 #   scripts/publish-in-network-update.sh --manifest <manifest.json> --bin-dir <DIR>
@@ -48,6 +73,9 @@
 set -euo pipefail
 
 PRIVATE_KEY="${CLEONA_MAINTAINER_KEY:-$HOME/CleonaPrivat/keys/cleona_maintainer_private.pem}"
+MLDSA_KEY="${CLEONA_MAINTAINER_MLDSA_KEY:-$HOME/CleonaPrivat/keys/cleona_maintainer_mldsa.key}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Platforms supported by §19.6.2 in-network distribution, in the fixed order
 # used everywhere below (JSON map key order). Must stay stable — the signed
@@ -82,9 +110,21 @@ ed25519_sign_stdin() {
     rm -f "$tmp"
 }
 
+# ML-DSA-65 via liboqs — the same library that the verifying node
+# uses. Prints the signature base64 on stdout.
+mldsa_sign_stdin() {
+    local tmp="$SIGN_TMPDIR/sign-pq-input-$$-$RANDOM"
+    cat > "$tmp"
+    ( cd "$PROJECT_DIR" && dart run scripts/maintainer_mldsa.dart sign "$MLDSA_KEY" "$tmp" )
+    rm -f "$tmp"
+}
+
 # --- Argument parsing: pull out flags, leave positional args in place ---
 BIN_DIR=""
 MONO_SEQ=""
+PREVS=()
+DELTA_OUT=""
+BSDIFF="${BSDIFF:-bsdiff}"
 DHT_TAG_GLOBAL=""
 declare -A DHT_TAGS
 POSITIONAL=()
@@ -109,6 +149,18 @@ while [ $# -gt 0 ]; do
             MONO_SEQ="$2"
             shift 2
             ;;
+        --prev)
+            # S387, D1 (§26.6.2): PLATFORM=VERSION=FILE of the installed
+            # predecessor version; at most two per platform (V-1, V-2).
+            [ $# -ge 2 ] || usage
+            PREVS+=("$2")
+            shift 2
+            ;;
+        --delta-out)
+            [ $# -ge 2 ] || usage
+            DELTA_OUT="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             ;;
@@ -125,8 +177,22 @@ if [ $# -lt 4 ]; then
 fi
 
 if [ ! -f "$PRIVATE_KEY" ]; then
-    echo "Error: Maintainer private key not found at: $PRIVATE_KEY"
-    echo "Set CLEONA_MAINTAINER_KEY env var or place key at ~/Schreibtisch/cleona_maintainer_private.pem"
+    echo "Error: Maintainer Ed25519 private key not found at: $PRIVATE_KEY" >&2
+    echo "Set CLEONA_MAINTAINER_KEY, or place the key at" >&2
+    echo "  ~/CleonaPrivat/keys/cleona_maintainer_private.pem" >&2
+    exit 1
+fi
+
+# The PQ half is not optional. Without it a manifest would arise that every
+# 4.2 client rejects (§4.4.3) — aborting here is cheaper than a
+# published, unusable release.
+if [ ! -f "$MLDSA_KEY" ]; then
+    echo "ERROR: ML-DSA-65 maintainer key not found: $MLDSA_KEY" >&2
+    echo "  The manifest is signed HYBRID (v4_2 4.4.3). Without the" >&2
+    echo "  post-quantum half every client rejects the manifest." >&2
+    echo "  Generate once (owner, own machine):" >&2
+    echo "    scripts/gen-maintainer-mldsa-key.sh" >&2
+    echo "  or set CLEONA_MAINTAINER_MLDSA_KEY to the existing one." >&2
     exit 1
 fi
 
@@ -223,6 +289,92 @@ if assoc_nonempty DHT_TAGS || [ -n "$DHT_TAG_GLOBAL" ]; then
     DHT_BIN_JSON="$DT"
 fi
 
+# --- S387, D1 (§26.6.2): deltas from V-1 and V-2, each with hash and length ---
+#
+# "The manifest names every delta together with its content hash and
+# length, per platform and per source version; without both, a node can
+# neither derive the delta's key nor tell when it is complete." Until S387
+# this script produced no delta, and deltaBin stayed empty in the payload.
+#
+# Generated with bsdiff (environment variable BSDIFF, default `bsdiff`).
+# If the tool is missing, the script aborts — a manifest that promises a delta
+# that does not exist would be worse than none.
+DELTA_BIN_JSON=""
+DELTA_HASH_JSON=""
+DELTA_SIZE_JSON=""
+if [ "${#PREVS[@]}" -gt 0 ]; then
+    if ! assoc_nonempty BIN_HASH; then
+        echo "Error: --prev requires --bin-dir with the new binaries" >&2
+        exit 1
+    fi
+    if ! command -v "$BSDIFF" >/dev/null 2>&1; then
+        echo "Error: --prev needs bsdiff ('$BSDIFF' not found; set BSDIFF=...)" >&2
+        exit 1
+    fi
+    DELTA_OUT="${DELTA_OUT:-$BIN_DIR/deltas}"
+    mkdir -p "$DELTA_OUT"
+    declare -A PREV_COUNT D_BIN D_HASH D_SIZE
+    for SPEC in "${PREVS[@]}"; do
+        P_PLAT="${SPEC%%=*}"
+        REST="${SPEC#*=}"
+        P_VER="${REST%%=*}"
+        P_FILE="${REST#*=}"
+        if [ -z "$P_PLAT" ] || [ -z "$P_VER" ] || [ "$P_FILE" = "$REST" ] || [ ! -f "$P_FILE" ]; then
+            echo "Error: --prev '$SPEC' is not PLATFORM=VERSION=EXISTING_FILE" >&2
+            exit 1
+        fi
+        if [ -z "${BIN_HASH[$P_PLAT]:-}" ]; then
+            echo "Error: --prev for '$P_PLAT', but no new cleona-$P_PLAT in --bin-dir" >&2
+            exit 1
+        fi
+        PREV_COUNT["$P_PLAT"]=$(( ${PREV_COUNT[$P_PLAT]:-0} + 1 ))
+        if [ "${PREV_COUNT[$P_PLAT]}" -gt 2 ]; then
+            echo "Error: more than two --prev for '$P_PLAT' — D1 allows V-1 and V-2 only" >&2
+            exit 1
+        fi
+        D_FILE="$DELTA_OUT/cleona-$P_PLAT-$VERSION-from-$P_VER.bsdiff"
+        "$BSDIFF" "$P_FILE" "$(realpath "$BIN_DIR/cleona-$P_PLAT")" "$D_FILE"
+        D_HEX=$(openssl dgst -sha256 "$D_FILE" | awk '{print $NF}')
+        D_LEN=$(stat -c%s "$D_FILE" 2>/dev/null || stat -f%z "$D_FILE")
+        D_BIN["$P_PLAT"]+="${D_BIN[$P_PLAT]:+,}\"$P_VER\":\"1\""
+        D_HASH["$P_PLAT"]+="${D_HASH[$P_PLAT]:+,}\"$P_VER\":\"$D_HEX\""
+        D_SIZE["$P_PLAT"]+="${D_SIZE[$P_PLAT]:+,}\"$P_VER\":$D_LEN"
+        echo "  [$P_PLAT] delta $P_VER -> $VERSION: $D_FILE hash=$D_HEX size=${D_LEN}B" >&2
+    done
+    DB="{"; DH="{"; DZ="{"
+    FIRST=1
+    for PLATFORM in "${PLATFORMS[@]}"; do
+        [ -n "${D_BIN[$PLATFORM]:-}" ] || continue
+        if [ "$FIRST" -eq 0 ]; then DB+=","; DH+=","; DZ+=","; fi
+        FIRST=0
+        DB+="\"$PLATFORM\":{${D_BIN[$PLATFORM]}}"
+        DH+="\"$PLATFORM\":{${D_HASH[$PLATFORM]}}"
+        DZ+="\"$PLATFORM\":{${D_SIZE[$PLATFORM]}}"
+    done
+    DELTA_BIN_JSON="$DB}"
+    DELTA_HASH_JSON="$DH}"
+    DELTA_SIZE_JSON="$DZ}"
+fi
+
+# --- S368: the sequence number is MANDATORY, not optional ----------------
+#
+# `UpdateManifest.isDowngradeAttempt` fails closed since S368: a
+# manifest WITHOUT `monotoneSeq` counts as a downgrade attempt and is rejected for
+# in-network updates. Before, a missing field was a
+# free pass — an old, validly signed manifest thus bypassed the
+# replay protection completely.
+#
+# This check stands here so that the pipeline does not publish something
+# that its own clients reject. Without it the fix on the read side
+# would be a silent update block.
+if [ -z "$MONO_SEQ" ]; then
+    echo "ERROR: --mono-seq missing." >&2
+    echo "  Since S368 every client rejects a manifest without monotoneSeq" >&2
+    echo "  (replay protection, §19.6). A manifest without the number" >&2
+    echo "  would not merely be weaker — it would be ineffective." >&2
+    exit 1
+fi
+
 # --- Build payload — must match UpdateManifest.signedPayload in
 #     lib/core/update/update_manifest.dart exactly (byte-for-byte). ---
 HAS_BINARY_FIELDS=""
@@ -236,15 +388,32 @@ if [ -z "$MIN_REQ" ] && [ -z "$MIN_REQ_REASON" ] && [ -z "$HAS_BINARY_FIELDS" ];
 else
     PAYLOAD="${VERSION}\n${URL}\n${HASH}\n${CHANGELOG}\n${TIMESTAMP}\n${MIN_REQ}\n${MIN_REQ_REASON}"
     if [ -n "$HAS_BINARY_FIELDS" ]; then
-        # deltaBinaryTag (deltaBin) is not produced by this script — its slot
-        # in the payload is always the empty string, matching a null field
-        # on the Dart side.
-        PAYLOAD="${PAYLOAD}\n${DHT_BIN_JSON}\n\n${MONO_SEQ}\n${BIN_HASH_JSON}\n${BIN_SIG_JSON}\n${BIN_SIZE_JSON}"
+        # S387: deltaBin sits in the second slot; hash and length of the deltas
+        # are appended at the end, ONLY if there are deltas — exactly like
+        # UpdateManifest.signedPayload.
+        PAYLOAD="${PAYLOAD}\n${DHT_BIN_JSON}\n${DELTA_BIN_JSON}\n${MONO_SEQ}\n${BIN_HASH_JSON}\n${BIN_SIG_JSON}\n${BIN_SIZE_JSON}"
+        if [ -n "$DELTA_HASH_JSON" ]; then
+            PAYLOAD="${PAYLOAD}\n${DELTA_HASH_JSON}\n${DELTA_SIZE_JSON}"
+        fi
     fi
 fi
 
-# Sign with Ed25519
+# --- Hybrid signature: BOTH over exactly the same bytes ------------------
+#
+# `printf '%b'` is fed twice with the same $PAYLOAD; the two
+# signatures thus cover the same byte sequence, exactly as
+# `UpdateManifest.verify` rebuilds it from the read manifest.
 SIGNATURE=$(printf '%b' "$PAYLOAD" | ed25519_sign_stdin)
+if [ -z "$SIGNATURE" ]; then
+    echo "ERROR: Ed25519 signature is empty — openssl delivered nothing." >&2
+    exit 1
+fi
+
+SIGNATURE_PQ=$(printf '%b' "$PAYLOAD" | mldsa_sign_stdin)
+if [ -z "$SIGNATURE_PQ" ]; then
+    echo "ERROR: ML-DSA-65 signature is empty." >&2
+    exit 1
+fi
 
 # --- Build JSON output ---
 FIELDS=()
@@ -254,6 +423,7 @@ FIELDS+=("\"hash\": \"$HASH\"")
 FIELDS+=("\"log\": \"$CHANGELOG\"")
 FIELDS+=("\"ts\": $TIMESTAMP")
 FIELDS+=("\"sig\": \"$SIGNATURE\"")
+FIELDS+=("\"sigPq\": \"$SIGNATURE_PQ\"")
 [ -n "$MIN_REQ" ] && FIELDS+=("\"minReq\": \"$MIN_REQ\"")
 [ -n "$MIN_REQ_REASON" ] && FIELDS+=("\"minReqReason\": \"$MIN_REQ_REASON\"")
 [ -n "$DHT_BIN_JSON" ] && FIELDS+=("\"dhtBin\": $DHT_BIN_JSON")
@@ -261,6 +431,9 @@ FIELDS+=("\"sig\": \"$SIGNATURE\"")
 [ -n "$BIN_HASH_JSON" ] && FIELDS+=("\"binHash\": $BIN_HASH_JSON")
 [ -n "$BIN_SIG_JSON" ] && FIELDS+=("\"binSig\": $BIN_SIG_JSON")
 [ -n "$BIN_SIZE_JSON" ] && FIELDS+=("\"binSize\": $BIN_SIZE_JSON")
+[ -n "$DELTA_BIN_JSON" ] && FIELDS+=("\"deltaBin\": $DELTA_BIN_JSON")
+[ -n "$DELTA_HASH_JSON" ] && FIELDS+=("\"deltaHash\": $DELTA_HASH_JSON")
+[ -n "$DELTA_SIZE_JSON" ] && FIELDS+=("\"deltaSize\": $DELTA_SIZE_JSON")
 
 echo "{"
 LAST=$((${#FIELDS[@]} - 1))

@@ -1,0 +1,11 @@
+name: mycelium
+description: Der Draht und was darauf aufsetzt. Gruene Wiese, null Importe aus lib/.
+publish_to: none
+version: 0.0.1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  cleona:
+    path: ..

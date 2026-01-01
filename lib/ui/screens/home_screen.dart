@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show SystemNavigator;
@@ -10,9 +9,9 @@ import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
+import 'package:cleona/ui/screens/contacts_screen.dart';
 import 'package:cleona/ui/screens/settings_screen.dart';
 import 'package:cleona/ui/components/language_selector.dart';
 import 'package:cleona/ui/screens/network_stats_screen.dart';
@@ -22,6 +21,7 @@ import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
+import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/components/reduced_mode_banner.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
@@ -31,14 +31,16 @@ import 'package:cleona/ui/screens/calendar_screen.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_dialog.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_router_select_screen.dart';
 import 'package:cleona/ui/screens/nat_wizard/nat_wizard_instructions_screen.dart';
-import 'package:cleona/core/network/router_db.dart';
-import 'package:cleona/core/network/nfc_platform_bridge.dart' show isNfcAvailable;
-import 'package:cleona/core/network/contact_seed.dart';
+import 'package:cleona/core/platform/router_db.dart';
+import 'package:cleona/core/contact/nfc_platform_bridge.dart' show isNfcAvailable;
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
-import 'package:cleona/core/network/channel_uri.dart';
+import 'package:cleona/ui/components/invitation_messages.dart'
+    show invitationExpiryWarning;
+import 'package:cleona/ui/components/invitation_redeem.dart';
+import 'package:cleona/core/contact/channel_uri.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/ui/components/skin_fab.dart';
 import 'package:cleona/ui/components/share_cleona_dialog.dart';
 import 'package:cleona/ui/date_format.dart' as df;
@@ -155,7 +157,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           Navigator.of(ctx).pop();
           final routerDb = await RouterDb.load();
           if (!mounted) return;
-          final detectedInfo = service.getNetworkStats().upnpRouterInfo;
+          // UPnP DETECTION DOES NOT EXIST IN V4.1 (gap G-12). Here stood
+          // `service.getNetworkStats().upnpRouterInfo`; the field fell on
+          // 01.09.2026 (S360) because it no longer had a filler
+          // and was permanently `null`. The user picks their model from the
+          // list — the preselection has gone, the instructions have not.
+          const UpnpRouterInfo? detectedInfo = null;
           await Navigator.of(context).push(
             MaterialPageRoute<void>(
               builder: (_) => NatWizardRouterSelectScreen(
@@ -261,18 +268,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final channelConvs = sortUnreadFirst(allConvs.where((c) => c.isChannel).toList());
     final favConvs = sortUnreadFirst(allConvs.where((c) => c.isFavorite).toList());
 
-    // Contacts tab: all accepted 1:1 contacts (with or without conversation)
-    final dmIds = dmConvs.map((c) => c.id).toSet();
-    final contactsWithoutConv = service.acceptedContacts
-        .where((c) => !dmIds.contains(c.nodeIdHex))
-        .map((c) => Conversation(
-              id: c.nodeIdHex,
-              displayName: c.effectiveName,
-              profilePictureBase64: c.profilePictureBase64,
-            ))
-        .toList();
-    final kontakteList = [...dmConvs, ...contactsWithoutConv];
-
     final pendingCount = service.pendingContacts.length;
     final totalUnread = allConvs.fold<int>(0, (s, c) => s + c.unreadCount);
     final dmUnread = dmConvs.fold<int>(0, (s, c) => s + c.unreadCount);
@@ -292,17 +287,28 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       actions: [
         // Language selector
         const LanguageSelector(),
-        // Connection status icon (WiFi/Mobile/Offline)
+        // The ONE connection display: the readiness state (§22.9,
+        // owner decision E3 = A). The reachability mark next to it
+        // went away with E5 = a.
         _ConnectionStatusIcon(appState: appState),
         // Network Stats — combined health indicator + peer count, opens stats page
         IconButton(
+          // §25.4: "The badge mirrors the readiness state 1:1 and applies
+          // no threshold logic of its own." Before, two
+          // invented thresholds on a peer COUNT stood here (>= 10 green, >= 3
+          // orange) — §25.4 on this verbatim: "A threshold on an
+          // acquaintance count does not carry weight here … many sync
+          // partners in the same island are not deliverable."
+          //
+          // The number on the badge is now the one on which `ready` depends:
+          // the INDEPENDENT partners (§25.4 "not the gross count").
           icon: Badge(
-            label: Text('${service.reachablePeerCount}'),
-            backgroundColor: service.reachablePeerCount >= 10
-                ? Colors.green
-                : service.reachablePeerCount >= 3
-                    ? Colors.orange
-                    : colorScheme.error,
+            label: Text('${service.independentSyncPartners}'),
+            backgroundColor: switch (service.readinessState) {
+              kReadinessReady => Colors.green,
+              kReadinessConnecting => Colors.orange,
+              _ => colorScheme.error,
+            },
             textColor: Colors.white,
             child: const Icon(Icons.bar_chart),
           ),
@@ -396,8 +402,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 _ConversationListView(conversations: allConvs, service: service, emptyKey: 'no_chats', showDonationBanner: true),
                 // Favorites: conversations marked as favorite
                 _ConversationListView(conversations: favConvs, service: service, emptyKey: 'no_favorites'),
-                // Chats: all accepted 1:1 contacts (with or without conversation)
-                _ConversationListView(conversations: kontakteList, service: service, emptyKey: 'no_direct_chats'),
+                // Contacts (S367 §3.1): ContactsScreen replaces the former
+                // inline build (dmConvs + contactsWithoutConv merged by
+                // hand) — it now carries the merge itself, plus the four
+                // verification levels and the §9.5.2a issue-report path
+                // the inline build never had access to.
+                ContactsScreen(service: service),
                 // Groups: only groups
                 _ConversationListView(conversations: groupConvs, service: service, emptyKey: 'no_groups'),
                 // Channels: sub-tabs (Subscribed | My Channels | Search)
@@ -710,6 +720,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   void _showAddContactDialog(BuildContext context) {
     final controller = TextEditingController();
+    // V4.2 §15.6: the finding on the pasted text stands IN the dialog, so that
+    // the user can paste anew instead of reopening the dialog.
+    final hint = ValueNotifier<({String text, bool error})?>(null);
+    // §15.3: a card that expires soon warns on reading. The first press
+    // shows the warning, the second sends.
+    String? warnedText;
     final locale = AppLocale.read(context);
     final service = context.read<CleonaAppState>().service;
     showDialog(
@@ -776,7 +792,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 );
               },
             ),
-            // ── Cleona teilen ──────────────────────────────────
+            // ── Share Cleona ───────────────────────────────────
             SizedBox(
               width: double.infinity,
               child: OutlinedButton.icon(
@@ -793,16 +809,32 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             ),
             const Divider(),
             const SizedBox(height: 8),
-            Text(locale.get('enter_node_id')),
-            const SizedBox(height: 8),
+            // V4.2 §15.2/§15.6: an invitation as a text line. The bare
+            // node ID and the ContactSeed URI of the V4.1 line are gone —
+            // V4.2 knows no first contact without a card.
             TextField(
               controller: controller,
               decoration: InputDecoration(
-                labelText: locale.get('node_id_hex_label'),
-                hintText: 'cleona://... oder Node-ID (Hex)',
+                labelText: locale.get('card_paste_label'),
+                hintText: 'cleona:1:…',
                 border: const OutlineInputBorder(),
               ),
-              maxLines: 3,
+              minLines: 2,
+              maxLines: 4,
+            ),
+            ValueListenableBuilder<({String text, bool error})?>(
+              valueListenable: hint,
+              builder: (c, h, _) => h == null
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        h.text,
+                        style: h.error
+                            ? TextStyle(color: Theme.of(c).colorScheme.error)
+                            : null,
+                      ),
+                    ),
             ),
           ],
         ),
@@ -813,101 +845,38 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
           FilledButton(
             onPressed: () {
-              final input = controller.text.trim();
-              ContactSeed? seed;
-
-              // Try as ContactSeed URI first
-              if (input.startsWith('cleona://')) {
-                seed = ContactSeed.fromUri(input);
-                // §8.1.1 integrity check (SR-2): manipulated URI → invalid.
-                if (seed != null && seed.verifyIntegrity() == false) {
-                  seed = null;
-                }
+              final input = controller.text;
+              final svc = service;
+              if (svc == null) return;
+              // Reading happens HERE, before any packet (§15.2 channel, §15.3
+              // expiry, §15.6 the five read findings) — the same reader that
+              // the service uses when redeeming.
+              final reading = InvitationRedeem.readText(input);
+              final reason = InvitationRedeem.errorOf(locale, reading);
+              if (reason != null) {
+                hint.value = (text: reason, error: true);
+                return;
               }
-
-              // Fall back to plain 64-char hex Node-ID
-              if (seed == null && input.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(input)) {
-                seed = ContactSeed(nodeIdHex: input, displayName: '');
-              }
-
-              if (seed == null && input.isNotEmpty) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    backgroundColor: Theme.of(context).colorScheme.error,
-                    content: Text(locale.get('qr_invalid')),
-                  ),
+              if (reading.expiresSoon && warnedText != input) {
+                warnedText = input;
+                hint.value = (
+                  text: invitationExpiryWarning(locale, reading.daysLeft!),
+                  error: false,
                 );
                 return;
               }
-
-              if (seed != null && service != null) {
-                // Channel mismatch check
-                final localTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
-                if (!seed.isChannelCompatible(localTag)) {
-                  final localName = NetworkSecret.channel == NetworkChannel.beta ? 'Beta' : 'Live';
-                  Navigator.pop(ctx);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      backgroundColor: Theme.of(context).colorScheme.error,
-                      content: Text(locale.tr('channel_mismatch', {
-                        'contact': seed.channelDisplayName,
-                        'local': localName,
-                      })),
-                    ),
-                  );
-                  return;
-                }
-
-                Navigator.pop(ctx);
-
-                // Register seed peers if available, wait for PONGs, then send CR.
-                // §8.1.1 rev3: v2 seeds carry ep (trust-anchor), v1 carry dxk/dmk.
-                final dxk = seed.deviceX25519Pk;
-                final dmk = seed.deviceMlKemPk;
-                final dxkB64 = dxk != null ? base64.encode(dxk) : null;
-                final dmkB64 = dmk != null ? base64.encode(dmk) : null;
-                final ep = seed.userEd25519Pk;
-                final epB64 = ep != null ? base64Url.encode(ep).replaceAll('=', '') : null;
-                // §4.11.10: pasted URIs carry the `r` rendezvous nonce —
-                // pass it through so the scanner-side session starts.
-                final rn = seed.rendezvousNonce;
-                final rnB64 = rn != null
-                    ? base64Url.encode(rn).replaceAll('=', '')
-                    : null;
-                if (seed.seedPeers.isNotEmpty || seed.ownAddresses.isNotEmpty) {
-                  service.addPeersFromContactSeed(
-                    seed.nodeIdHex,
-                    seed.ownAddresses,
-                    seed.seedPeers.map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses)).toList(),
-                    targetDeviceIdHex: seed.deviceIdHex,
-                    targetDxkB64: dxkB64,
-                    targetDmkB64: dmkB64,
-                    targetEpB64: epB64,
-                    targetRendezvousNonceB64: rnB64,
-                  );
-                  Future.delayed(const Duration(seconds: 3), () {
-                    service.sendContactRequest(
-                      seed!.nodeIdHex,
-                      seedDeviceIdHex: seed.deviceIdHex,
-                      seedDxkB64: dxkB64,
-                      seedDmkB64: dmkB64,
-                      seedEpB64: epB64,
-                    );
-                  });
-                } else {
-                  service.sendContactRequest(
-                    seed.nodeIdHex,
-                    seedDeviceIdHex: seed.deviceIdHex,
-                    seedDxkB64: dxkB64,
-                    seedDmkB64: dmkB64,
-                    seedEpB64: epB64,
-                  );
-                }
-
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(locale.get('contact_request_sent'))),
-                );
-              }
+              // The message follows the RESULT (S368) — `send` shows the
+              // named outcome, never an unexamined "sent".
+              final messenger = ScaffoldMessenger.of(context);
+              final errorColor = Theme.of(context).colorScheme.error;
+              Navigator.pop(ctx);
+              InvitationRedeem.send(
+                service: svc,
+                messenger: messenger,
+                locale: locale,
+                errorColor: errorColor,
+                text: input,
+              );
             },
             child: Text(locale.get('send')),
           ),
@@ -1336,7 +1305,7 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
                                 runSpacing: 4,
                                 children: [
                                   ChoiceChip(
-                                    label: const Text('Alle'),
+                                    label: Text(locale.get('filter_all')),
                                     selected: _filterCategory == null,
                                     onSelected: (_) {
                                       setSheetState(() => _filterCategory = null);
@@ -1363,7 +1332,7 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
                                 spacing: 8,
                                 children: [null, 'de', 'en', 'es', 'hu', 'sv', 'multi'].map((l) {
                                   return ChoiceChip(
-                                    label: Text(l == null ? 'Alle' : l == 'multi' ? locale.get('language_multi') : l.toUpperCase()),
+                                    label: Text(l == null ? locale.get('filter_all') : l == 'multi' ? locale.get('language_multi') : l.toUpperCase()),
                                     selected: _filterLanguage == l,
                                     onSelected: (_) {
                                       setSheetState(() => _filterLanguage = l);
@@ -1663,14 +1632,14 @@ class _ConversationListViewState extends State<_ConversationListView> {
                   const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8),
                   Text(locale.get(_isGroupManager(conv.id) ? 'group_management' : 'group_info')),
                 ])),
-                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_group'), style: const TextStyle(color: Colors.red))])),
+                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
               ],
               if (conv.isChannel) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
                 if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
                   PopupMenuItem(value: 'share_channel', child: Row(children: [const Icon(Icons.share, size: 18), const SizedBox(width: 8), Text(locale.get('share'))])),
                 if (!sys_ch.SystemChannels.isSystemChannel(conv.id))
-                  PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_channel'), style: const TextStyle(color: Colors.red))])),
+                  PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
               ],
               if (!conv.isGroup && !conv.isChannel) ...[
                 PopupMenuItem(value: 'rename_contact', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('rename_contact'))])),
@@ -1690,10 +1659,23 @@ class _ConversationListViewState extends State<_ConversationListView> {
             ? df.formatConversationTime(lastMsg.timestamp, locale)
             : df.formatConversationTime(conv.lastActivity, locale);
 
+        // §15.7: counterpart deleted their identity — the conversation stays
+        // (archived, read-only in ChatScreen), so its list entry keeps
+        // showing name and picture with a "(deleted)" suffix. DMs only —
+        // `conv.id` is a groupId/channelId for those, never a contact's
+        // nodeId, so `getContact` correctly returns null and this is a
+        // no-op there.
+        final isDeletedContact = !conv.isGroup && !conv.isChannel &&
+            (widget.service.getContact(conv.id)?.isDeleted ?? false);
+
         // Favourite star prefix baked into name for ChatListTile
+        final shownName = shownContactName(conv.displayName, locale);
         final displayName = conv.isFavorite
-            ? '★ ${conv.displayName}'
-            : conv.displayName;
+            ? '★ $shownName'
+            : shownName;
+        final tileName = isDeletedContact
+            ? '$displayName${locale.get('contact_deleted_suffix')}'
+            : displayName;
 
         // ChatListTile has no trailing slot — overlay the context-menu button
         // via a Stack so the long-press popup is still reachable.
@@ -1706,20 +1688,20 @@ class _ConversationListViewState extends State<_ConversationListView> {
               // Task 21 (contacts_screen) can add presence once the service
               // interface exposes it.
               isOnline: false,
-              name: displayName,
+              name: tileName,
               preview: previewText,
               timestamp: timestampStr,
               unreadCount: conv.unreadCount,
               avatarOverride: avatarWidget,
               onTap: () {
-                // Bug #U3+#U15: nicht mehr direkt conv.unreadCount=0 setzen.
-                // markConversationRead ist die einzige Quelle-of-Truth und
-                // aktualisiert (a) in-App-Badge, (b) Android-Launcher-Badge
-                // per MethodChannel, (c) Android-Notification-Cancel, (d)
-                // sendet ReadReceipts. Die direkte Zuweisung umging (b-d).
-                // ChatScreen ruft markConversationRead im postFrameCallback
-                // ohnehin nochmal auf — der Doppel-Call ist idempotent
-                // (no-op bei unreadCount==0).
+                // Bug #U3+#U15: no longer set conv.unreadCount=0 directly.
+                // markConversationRead is the only source of truth and
+                // updates (a) in-app badge, (b) Android launcher badge
+                // via MethodChannel, (c) Android notification cancel, (d)
+                // sends ReadReceipts. The direct assignment bypassed (b-d).
+                // ChatScreen calls markConversationRead in the postFrameCallback
+                // again anyway — the double call is idempotent
+                // (no-op at unreadCount==0).
                 final appState = context.read<CleonaAppState>();
                 appState.service?.markConversationRead(conv.id);
                 Navigator.push(
@@ -1773,7 +1755,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
               Navigator.pop(ctx);
               widget.service.leaveGroup(conv.id);
             },
-            child: Text(locale.get('leave_group')),
+            child: Text(locale.get('leave')),
           ),
         ],
       ),
@@ -1795,7 +1777,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
               Navigator.pop(ctx);
               widget.service.leaveChannel(conv.id);
             },
-            child: Text(locale.get('leave_channel')),
+            child: Text(locale.get('leave')),
           ),
         ],
       ),
@@ -2256,7 +2238,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
       if (ch.channelIdHex == channelIdHex) continue;
       final myRole = ch.members[service.nodeIdHex]?.role ?? 'subscriber';
       if (myRole == 'owner' || myRole == 'admin') {
-        targets.add(MapEntry(ch.channelIdHex, '${ch.name} (Channel)'));
+        targets.add(MapEntry(ch.channelIdHex, '${ch.name} (${locale.get('channel')})'));
       }
     }
 
@@ -2280,7 +2262,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
             ),
             Expanded(
               child: targets.isEmpty
-                  ? Center(child: Text(locale.get('no_contacts')))
+                  ? Center(child: Text(locale.get('no_contacts_yet')))
                   : ListView.builder(
                       itemCount: targets.length,
                       itemBuilder: (_, i) {
@@ -2321,7 +2303,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
   String _lastMessagePreview(BuildContext context, UiMessage msg) {
     final locale = AppLocale.read(context);
     if (msg.isDeleted) return locale.get('message_deleted');
-    if (msg.isMedia) return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}📎 ${msg.filename ?? "Datei"}';
+    if (msg.isMedia) return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}📎 ${msg.filename ?? locale.get('file_fallback')}';
     if (msg.senderNodeIdHex.isEmpty) return msg.text; // System message
     return '${msg.isOutgoing ? "${locale.get('you_prefix')} " : ""}${msg.text}';
   }
@@ -2383,7 +2365,7 @@ class _InboxView extends StatelessWidget {
                 fallback: const Icon(Icons.person_add, color: Colors.orange),
               ),
               title: Text(
-                c.displayName,
+                shownContactName(c.displayName, locale),
                 style: TextStyle(
                   fontWeight: FontWeight.w500,
                   color: titleColor,
@@ -2410,7 +2392,7 @@ class _InboxView extends StatelessWidget {
                         context: context,
                         builder: (ctx) => AlertDialog(
                           title: Text(locale.get('delete_contact_title')),
-                          content: Text(locale.tr('delete_contact_confirm', {'name': c.displayName})),
+                          content: Text(locale.tr('delete_contact_confirm', {'name': shownContactName(c.displayName, locale)})),
                           actions: [
                             TextButton(onPressed: () => Navigator.pop(ctx), child: Text(locale.get('cancel'))),
                             FilledButton(
@@ -2764,19 +2746,27 @@ class _IdentityCreatingTab extends StatelessWidget {
   }
 }
 
-// ── Connection Status Icon (P2P-aware) ──────────────────────────────
+// ── Connection display (§22.9, ONE indicator) ───────────────────────
 //
-// Combines OS-level connectivity (connectivity_plus) with actual P2P
-// reachability (reachablePeerCount from CleonaAppState). Four states:
+// S388, owner decision E3 = A / E5 = a (V4.2 §22.9 in the version of the
+// approved proposal A2): "The tray and the GUI show **one**
+// indicator: the readiness state of §22.7 (`searching` / `connecting` /
+// `ready`), with a 30-s pulse freeze … There is no separate connection
+// tier and no reachability mark (§12.3)".
 //
-//   Offline:   No network (OS reports none)
-//   Searching: Network available but 0 confirmed P2P peers
-//   Mobile:    Mobile data + peers reachable (cost warning)
-//   WiFi:      WiFi/Ethernet/VPN + peers reachable
+// Until S388 a five-level display stood here (`_computeTier`:
+// strong/good/medium/weak/offline from connection type, outgoing
+// sync partners and port mapping) and next to it a reachability mark
+// (`_ReachabilityMark`, incoming sync partners). Both have gone:
+// the level was a second calculation that needs no user action,
+// and the mark said at most "seen from outside", not "reachable
+// from outside".
 //
-// WiFi takes priority over Mobile when both are reported (Android
-// dual-connectivity). The "Searching" state uses a pulsing opacity
-// animation to indicate active peer discovery.
+// The mapping state -> image stands in `readinessIconName`
+// (`lib/core/tray/tray_status.dart`) — the same function that both
+// trays use. The state `searching` pulses and freezes after 30 s
+// (a pure UI measure against software GPU load, independent of the
+// network model).
 
 class _ConnectionStatusIcon extends StatefulWidget {
   final CleonaAppState appState;
@@ -2791,12 +2781,11 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
-  // Pulse conveys "searching" visually, but a node without contacts + without
-  // LAN reach cannot self-resolve (architecture: joins via ContactSeed QR,
-  // docs/NETWORK.md §91). After this window, freeze the animation: the icon
-  // stays on the "weak" tier (DHT background bootstrap + Kademlia keep
-  // running), but we stop requesting a repaint every frame. Resumes on the
-  // next weak-tier entry (e.g. after peer loss + network change).
+  // Pulse conveys `searching` visually, but a node without an answering
+  // neighbour may stay there for a long time. After this window, freeze the
+  // animation: the icon stays on `searching`, but we stop requesting a
+  // repaint every frame. Resumes on the next entry into `searching`
+  // (e.g. after a network change).
   static const _pulseFreezeAfter = Duration(seconds: 30);
   Timer? _pulseFreezeTimer;
   bool _pulseFrozen = false;
@@ -2820,72 +2809,18 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
     super.dispose();
   }
 
-  /// 5-tier connection classification (User-Mockup 2026-04-18):
-  ///   strong (Hulk, green)           — WiFi + inbound reachable (Port-Mapping)
-  ///   good (normal man, lime)        — WiFi + peers, no port mapping (NAT-behind but stable)
-  ///   medium (yellow man)            — Mobile data / WiFi-fallback-to-mobile (CGNAT)
-  ///   weak (orange man, starved)     — Network up but 0 confirmed peers (searching)
-  ///   offline (skeleton)             — No network at all
-  ConnectionTier _computeTier() {
-    final results = widget.appState.connectivityResults;
-    final confirmedPeers = widget.appState.reachablePeerCount;
-    final hasNetwork = results.isNotEmpty &&
-        !results.contains(ConnectivityResult.none);
-    final hasWifi = results.contains(ConnectivityResult.wifi) ||
-        results.contains(ConnectivityResult.ethernet) ||
-        results.contains(ConnectivityResult.vpn);
-    final hasMobile = results.contains(ConnectivityResult.mobile);
-    final hasPortMapping = widget.appState.hasPortMapping;
-    final mobileFallback = widget.appState.isMobileFallbackActive;
-
-    if (!hasNetwork) return ConnectionTier.offline;
-    if (confirmedPeers == 0) return ConnectionTier.weak;
-    if (mobileFallback || (!hasWifi && hasMobile)) return ConnectionTier.medium;
-    if (hasWifi) {
-      return hasPortMapping ? ConnectionTier.strong : ConnectionTier.good;
-    }
-    return ConnectionTier.good;
-  }
-
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
-    final tier = _computeTier();
+    // The ONE quantity (§22.9, E3 = A). `readinessState` is the same
+    // getter that the tray in the daemon and the badge in the statistics screen
+    // read — no second calculation path from connection type or partner counts.
+    final readiness = widget.appState.readinessState;
 
-    final String assetPath;
-    final String tooltip;
-    final bool searching;
-
-    switch (tier) {
-      case ConnectionTier.offline:
-        assetPath = 'assets/conn_skeleton.png';
-        tooltip = locale.get('conn_offline');
-        searching = false;
-        break;
-      case ConnectionTier.weak:
-        // Network up but 0 peers — starved man (pulse to indicate "searching")
-        assetPath = 'assets/conn_weak.png';
-        tooltip = locale.get('conn_searching');
-        searching = true;
-        break;
-      case ConnectionTier.medium:
-        assetPath = 'assets/conn_medium.png';
-        tooltip = widget.appState.isMobileFallbackActive
-            ? locale.get('conn_mobile_fallback')
-            : locale.get('conn_mobile');
-        searching = false;
-        break;
-      case ConnectionTier.good:
-        assetPath = 'assets/conn_good.png';
-        tooltip = locale.get('conn_good');
-        searching = false;
-        break;
-      case ConnectionTier.strong:
-        assetPath = 'assets/conn_strong.png';
-        tooltip = locale.get('conn_wifi');
-        searching = false;
-        break;
-    }
+    final assetPath = 'assets/${readinessIconName(readiness)}.png';
+    final tooltip = locale.get(readinessKey(readiness));
+    final searching = readiness != kReadinessReady &&
+        readiness != kReadinessConnecting;
 
     // Start/stop pulse animation for searching state. Auto-freeze after
     // _pulseFreezeAfter so long-running no-peer situations don't burn CPU
@@ -2924,14 +2859,14 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
         message: tooltip,
         child: InkWell(
           borderRadius: BorderRadius.circular(14),
-          onTap: () => _handleTap(tier, locale),
+          onTap: () => _handleTap(readiness, locale),
           child: searching
               ? (_pulseFrozen
                   // Pulse frozen after _pulseFreezeAfter — render at static
-                  // 70% opacity so the frozen weak-tier is visually distinct
-                  // from a healthy medium-tier (which renders at full opacity).
-                  // Without this, both look identical and users misread weak as
-                  // medium ("Mobilfunk"). Observed 2026-05-15.
+                  // 70% opacity so a frozen `searching` stays visually
+                  // distinct from the other states (which render at full
+                  // opacity). Observed 2026-05-15 with the former tiers:
+                  // without it, users misread the frozen icon.
                   ? Opacity(opacity: 0.7, child: image)
                   : AnimatedBuilder(
                       animation: _pulseAnimation,
@@ -2947,45 +2882,22 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
     );
   }
 
-  /// Tap dispatcher: if NAT-Wizard could help (WiFi behind NAT → "good" tier),
-  /// open it; otherwise show an explanatory dialog so the user isn't left
-  /// wondering what the icon means.
-  void _handleTap(ConnectionTier tier, AppLocale locale) {
-    final service = widget.appState.service;
-    if (service == null) return;
-    switch (tier) {
-      case ConnectionTier.strong:
-        // All good — no action needed. Could open NetworkStats in the future.
-        return;
-      case ConnectionTier.good:
-        // WiFi + peers but no inbound port-mapping. Wizard can promote to
-        // "strong" if the user adds a port-forward rule. Flows through the
-        // dedicated [onNatWizardUserRequested] callback so the one-shot
-        // auto-trigger latch in HomeScreen doesn't swallow it.
-        service.requestNatWizard();
-        return;
-      case ConnectionTier.medium:
-        // Mobile data / CGNAT — port-forward on own router can't fix this.
-        _showExplainDialog(
-          title: locale.get('conn_mobile'),
-          body: locale.get('conn_mobile_explain'),
-        );
-        return;
-      case ConnectionTier.weak:
-        // Network up but no peers. Explain that it's normal shortly after
-        // startup / after a network switch.
-        _showExplainDialog(
-          title: locale.get('conn_searching'),
-          body: locale.get('conn_searching_explain'),
-        );
-        return;
-      case ConnectionTier.offline:
-        _showExplainDialog(
-          title: locale.get('conn_offline'),
-          body: locale.get('conn_offline_explain'),
-        );
-        return;
-    }
+  /// A tap answers the question in EVERY state — with the word of the
+  /// state and the same explanatory text that the badge in the
+  /// statistics screen shows (`readiness_*_hint`).
+  ///
+  /// S388: until then the tap branched by level. `strong` stayed
+  /// mute (finding gui-66 66.05), `good` opened the NAT wizard
+  /// via `requestNatWizard()`, the other three showed `conn_*_explain`.
+  /// With the level the condition "fixed connection without port mapping"
+  /// went away, on which the wizard depended; the user path there via
+  /// this icon no longer exists (open point in report S388).
+  void _handleTap(String readiness, AppLocale locale) {
+    if (widget.appState.service == null) return;
+    _showExplainDialog(
+      title: locale.get(readinessKey(readiness)),
+      body: locale.get(readinessHintKey(readiness)),
+    );
   }
 
   void _showExplainDialog({required String title, required String body}) {
@@ -3013,14 +2925,6 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
   }
 }
 
-/// 5-tier classification for the connection-status icon.
-/// Asset mapping (per user mockup 2026-04-18):
-///   strong  → conn_strong.png   (green Hulk)
-///   good    → conn_good.png     (normal man)
-///   medium  → conn_medium.png   (yellow man)
-///   weak    → conn_weak.png     (starved man, pulses)
-///   offline → conn_skeleton.png (skeleton)
-enum ConnectionTier { offline, weak, medium, good, strong }
 
 /// Signal-style donation banner — subtle card at top of conversation list.
 /// Dismissible for 30 days via SharedPreferences.

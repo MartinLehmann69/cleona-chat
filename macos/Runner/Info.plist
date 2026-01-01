@@ -39,7 +39,18 @@
 	     AudioUnitInitialize/AudioQueue access — no prompt, no recoverable
 	     error. Cleona runs unsandboxed (see DebugProfile.entitlements), so
 	     the TCC usage string is the only gate that applies; there is no
-	     sandbox entitlement to add instead (BUILD_REQUEST_V1.3.md §3). -->
+	     sandbox entitlement to add instead (BUGFIX_CURRENT.md AV-V1.3 §3). -->
+	<!-- Since S380 the QR scanner on macOS shows the camera as soon as one
+	     is there (owner decision 10.09.2026: "Scanning follows the camera,
+	     not the platform"). `mobile_scanner` supports macOS and has always
+	     been registered in `macos/Flutter/GeneratedPluginRegistrant.swift:31`
+	     — only this line was missing. Without it TCC ends the process on the
+	     first AVCaptureDevice access, without a prompt and without a
+	     catchable error. Cleona runs unsandboxed (see
+	     Release.entitlements), so the TCC usage string is the only gate;
+	     there is no `com.apple.security.device.camera` to add here. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Cleona braucht die Kamera fuer Videoanrufe und zum Einlesen des QR-Einladungscodes eines Kontakts.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Cleona braucht das Mikrofon fuer Sprach- und Videoanrufe.</string>
 	<key>NSMainNibFile</key>

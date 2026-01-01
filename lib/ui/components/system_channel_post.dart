@@ -96,7 +96,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
   }
 
   /// §9.5.3 (S119 D3): Feature-Request card with the embedded auto-poll —
-  /// Ja/Nein/Egal vote buttons with live counts, own vote highlighted.
+  /// "Ja"/"Nein"/"Egal" vote buttons with live counts, own vote highlighted.
   Widget _buildFeatureRequest(
       BuildContext context, Map<String, dynamic> json, ColorScheme cs) {
     final locale = AppLocale.read(context);
@@ -155,11 +155,11 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
             const SizedBox(height: 8),
             Row(
               children: [
-                voteButton(SysChanVote.ja, 'feature_vote_yes',
+                voteButton(SysChanVote.yes, 'feature_vote_yes',
                     tally['ja'] ?? 0),
-                voteButton(SysChanVote.nein, 'feature_vote_no',
+                voteButton(SysChanVote.no, 'feature_vote_no',
                     tally['nein'] ?? 0),
-                voteButton(SysChanVote.egal, 'feature_vote_neutral',
+                voteButton(SysChanVote.irrelevant, 'feature_vote_neutral',
                     tally['egal'] ?? 0),
               ],
             ),
@@ -337,7 +337,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               children: [
                 _chip(cs, report.platform),
                 _chip(cs, '${report.peerCount} peers'),
-                _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
+                _chip(cs, report.hasPortMapping ? 'UPnP' : AppLocale.read(context).get('upnp_none')),
                 Text(
                   timestamp,
                   style: TextStyle(
@@ -392,10 +392,13 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
             ),
             const SizedBox(height: 6),
             Text(
-              'NAT: ${report.natType} · '
-              '${report.peerCount} Peers · '
-              '${report.routeCount} Routen · '
-              'Uptime: ${ContactIssueReport.formatDuration(report.uptimeSeconds)}',
+              AppLocale.read(context).tr('issue_report_net_summary', {
+                'nat': report.natType,
+                'peers': '${report.peerCount}',
+                'routes': '${report.routeCount}',
+                'uptime':
+                    ContactIssueReport.formatDuration(report.uptimeSeconds),
+              }),
               style: TextStyle(fontSize: 12, color: cs.onSecondaryContainer),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
@@ -423,7 +426,8 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
-                  '... ${logLines.length - 8} weitere Zeilen',
+                  AppLocale.read(context)
+                      .tr('log_more_lines', {'count': '${logLines.length - 8}'}),
                   style: TextStyle(
                     fontSize: 10,
                     fontStyle: FontStyle.italic,
@@ -438,7 +442,7 @@ class _SystemChannelPostState extends State<SystemChannelPost> {
               alignment: WrapAlignment.spaceBetween,
               children: [
                 _chip(cs, report.platform),
-                _chip(cs, report.hasPortMapping ? 'UPnP' : 'kein UPnP'),
+                _chip(cs, report.hasPortMapping ? 'UPnP' : AppLocale.read(context).get('upnp_none')),
                 Text(
                   timestamp,
                   style: TextStyle(

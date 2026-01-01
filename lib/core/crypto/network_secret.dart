@@ -1,72 +1,57 @@
-import 'dart:io';
 import 'dart:typed_data';
-import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/network_secret_material.dart';
-import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/config/network_channel.dart';
 
-/// Network channel identifiers.
-enum NetworkChannel {
-  beta,
-  live;
+// `NetworkChannel` and the channel resolution moved to
+// lib/core/config/network_channel.dart (AP-1a, §9.15.5): the channel is a
+// build-time switch, not key material, and twelve files imported this module
+// for nothing else. Not re-exported — callers import it from its new home.
 
-  /// Default bootstrap port for this channel.
-  /// Live = 8080 (production, established DNAT chain).
-  /// Beta = 8081 (development/testing).
-  int get defaultBootstrapPort => switch (this) {
-        NetworkChannel.live => 8080,
-        NetworkChannel.beta => 8081,
-      };
-
-  /// Resolve from string (e.g. --dart-define=NETWORK_CHANNEL=live).
-  static NetworkChannel fromString(String s) => switch (s.toLowerCase()) {
-        'live' => NetworkChannel.live,
-        _ => NetworkChannel.beta,
-      };
-}
-
-/// Closed Network Model (Architecture 17.5).
+/// The network secret of the V4.1 line — and what it is **not**.
 ///
-/// The network secret is derived offline from the maintainer's Ed25519 private key:
+/// The secret is derived offline from the maintainer's Ed25519 private key:
 ///   network_secret = HMAC-SHA256(maintainer_key, "cleona-network-" + channel + "-v" + version)[:16]
 ///
-/// It is embedded at build time in XOR-masked fragments (Architecture 17.5.6).
-/// Nodes without the correct secret cannot parse, generate, or respond to
-/// Cleona network traffic — they are cryptographically isolated.
+/// It is embedded at build time in XOR-masked fragments; the material lives in
+/// `network_secret_material.dart` and is never inlined here (see there).
 ///
-/// Secret Rotation (Architecture §13.2):
-/// - Each major release rotates the secret version
-/// - During transition, both current and previous secrets are accepted
-/// - Outgoing packets use the PREVIOUS secret (backward-compatible with
-///   un-updated peers); after transition ends, outgoing uses the current
-/// - A one-generation-old "expired hint" secret is kept solely to detect
-///   peers whose secret has fully expired and send them an EPOCH_EXPIRED
-///   update hint (wrapped with their old secret so they can parse it)
+/// **What it does (§26.6, §26.7).** It is the input keying material of the
+/// binary-distribution rendezvous: the lookup tag, the record encryption key
+/// and the per-device publishing key all derive from it
+/// (`rendezvous/rendezvous_secret.dart`). It also tags an exported peer-rescue
+/// bundle (`rendezvous/peer_rescue_bundle.dart`). A build made from the
+/// published source derives an all-zero secret and therefore cannot discover
+/// or decrypt update records — see [hasKeyMaterial].
+///
+/// **What it explicitly is NOT (§22.2, §26.5.1, §26.7).** It is not an
+/// admission barrier. There is **no packet HMAC** and **no network-side
+/// membership filter** on this line: every build can take part in the delivery
+/// layer. Identity at the wire is `L_node` (`link/node_keys.dart`) — derived
+/// from the three static node keys, hence self-certifying and secret-free —
+/// and authenticity is carried by the handshake init MAC and the AEAD of the
+/// cell, not by a network-wide shared secret.
+///
+/// **Removed 06.09.2026 (S370), with owner approval.** `wrapPacket`,
+/// `unwrapPacket`, `verifyPacketHmac`, `computePacketHmac`,
+/// `computeNetworkTag`, `verifyNetworkTag`, `outboundSecret` and the whole
+/// EPOCH_EXPIRED hint family lived here and had **zero callers** in `lib/` on
+/// both branches — measured with bare-symbol sweeps, `git grep` against
+/// `v4/knoten-host`, and a check that neither `dart:mirrors` nor any
+/// method-name string literal could reach them. They belonged to the V3
+/// closed-network wire, which this line does not have. Do not reintroduce them
+/// here: a packet HMAC would contradict §22.2 and would be a membership filter
+/// the architecture rules out.
+///
+/// **Rotation (§26.7).** Two generations are accepted at once so a node that
+/// has not yet updated stays able to find the very binary that updates it
+/// (`binary_rendezvous_manager.dart`, R-2). What does *not* exist is a
+/// rotation **cascade** that could lock anyone out of the network — there is
+/// nothing to be locked out of.
 class NetworkSecret {
-  /// The active channel, determined at compile time via --dart-define.
-  /// On Android: automatically inferred from package name suffix (.beta → beta).
-  static const _channelStr =
-      String.fromEnvironment('NETWORK_CHANNEL', defaultValue: '');
-
-  static NetworkChannel? _cachedChannel;
-
-  static NetworkChannel get channel {
-    if (_cachedChannel != null) return _cachedChannel!;
-    if (_channelStr.isNotEmpty) {
-      _cachedChannel = NetworkChannel.fromString(_channelStr);
-      return _cachedChannel!;
-    }
-    // Auto-detect from Android package name
-    if (Platform.isAndroid) {
-      _cachedChannel = AppPaths.packageName.endsWith('.beta')
-          ? NetworkChannel.beta
-          : NetworkChannel.live;
-    } else {
-      // Desktop default: beta (dev environment)
-      _cachedChannel = NetworkChannel.beta;
-    }
-    return _cachedChannel!;
-  }
+  /// The active channel. Resolution lives in
+  /// lib/core/config/network_channel.dart; kept here as a delegating getter
+  /// for the callers that need both the channel and the secret material.
+  static NetworkChannel get channel => activeNetworkChannel;
 
   /// Current secret version. Increment when rotating secrets.
   static const int currentSecretVersion = 1;
@@ -76,22 +61,15 @@ class NetworkSecret {
   /// Set to 0 to disable dual-secret acceptance.
   static const int previousSecretVersion = 0;
 
-  /// Expired-hint secret version: the most recent secret we no longer ACCEPT
-  /// but still keep to DETECT expired peers and send them an EPOCH_EXPIRED
-  /// update hint. Set to the old previousSecretVersion when closing a
-  /// transition window (e.g. current=2, previous=0, expiredHint=1).
-  /// 0 = no expired hint secret available.
-  static const int expiredHintSecretVersion = 0;
-
-  /// Transition period in days. After this many days since build,
-  /// the previous secret is no longer accepted.
+  /// Transition period in days: how long the previous secret stays acceptable
+  /// for rendezvous lookup after a rotation.
   static const int transitionDays = 90;
 
   // ---------------------------------------------------------------------------
-  // Key material (Architecture 4.10 / 13.2) lives in network_secret_material.dart
-  // and is NEVER inlined here — the publishing pipeline substitutes that file
-  // with an all-zero placeholder and fails closed if any real table byte
-  // survives into the public staging tree (sync-to-git.sh [3b] + [4h]).
+  // Key material lives in network_secret_material.dart and is NEVER inlined
+  // here — the publishing pipeline substitutes that file with an all-zero
+  // placeholder and fails closed if any real table byte survives into the
+  // public staging tree (sync-to-git.sh [3b] + [4h], dry-run check [6b]).
   //
   // When rotating to V2:
   // 1. Generate new secret: HMAC-SHA256(maintainer_key, "cleona-network-beta-v2")[:16]
@@ -99,20 +77,21 @@ class NetworkSecret {
   //    network_secret_material.dart as kNetworkSecretBetaTableV2 / ...LiveTableV2
   // 3. Add a `case 2:` to _secretForVersion below
   // 4. Set currentSecretVersion = 2, previousSecretVersion = 1
-  // 5. After 90 days: set previousSecretVersion = 0, expiredHintSecretVersion = 1
+  // 5. After 90 days: set previousSecretVersion = 0
   // ---------------------------------------------------------------------------
 
-  /// Whether this build carries real closed-network key material.
+  /// Whether this build carries real key material.
   ///
-  /// `false` for builds made from the published source (Architecture 4.10) —
-  /// such a build derives an all-zero secret and cannot join the official
-  /// network. Exposed so higher layers can surface that state instead of
-  /// presenting it as an ordinary connectivity failure.
+  /// `false` for builds made from the published source — such a build derives
+  /// an all-zero secret. It can still take part in the delivery layer (there is
+  /// no membership filter, §26.5.1), but it publishes and resolves binary
+  /// update records under a different tag and cannot decrypt them. Exposed so
+  /// higher layers can surface that state instead of presenting it as an
+  /// ordinary connectivity failure.
   static bool get hasKeyMaterial => kNetworkSecretMaterialPresent;
 
   static Uint8List? _cached;
   static Uint8List? _cachedPrevious;
-  static Uint8List? _cachedExpiredHint;
 
   /// Returns the 16-byte network secret for the current version.
   /// Reassembled from XOR-masked fragments at runtime.
@@ -129,58 +108,16 @@ class NetworkSecret {
     return _cachedPrevious;
   }
 
-  /// Returns the expired-hint secret, or null if not configured.
-  static Uint8List? get expiredHintSecret {
-    if (expiredHintSecretVersion == 0) return null;
-    _cachedExpiredHint ??= _secretForVersion(expiredHintSecretVersion);
-    return _cachedExpiredHint;
-  }
-
   /// Whether dual-secret acceptance is active.
   static bool get isInTransition => previousSecretVersion > 0;
 
-  /// Secret version used for **identity derivation** (`userId`, `deviceNodeId`).
-  ///
-  /// Deliberately decoupled from [currentSecretVersion] and pinned to the
-  /// founding epoch. Rotating the wire filter (Architecture 13.2) must not
-  /// re-mint every identity in the network.
-  ///
-  /// Why this cannot follow the rotation: `userId = SHA-256(secret || pk)` is
-  /// recomputed on every identity load and never persisted
-  /// (`identity_context.dart`). A version bump here would change every `userId`
-  /// and `deviceNodeId` at once — contacts would no longer recognise each
-  /// other, group membership keyed by `userId` would break, Auth-Manifest and
-  /// Liveness records would sit under stale DHT keys, and the System-Channel
-  /// author binding `computeUserId(inlinePk) == authorUserId` (9.5.7) would
-  /// fail for every pre-rotation record. That break would land on the FIRST V2
-  /// build, not at the end of the transition window — the dual-secret window
-  /// covers packet acceptance only, never identity.
-  ///
-  /// Channel separation is unaffected: V1 already differs between beta and
-  /// live, so identities stay in disjoint address spaces per channel.
-  ///
-  /// Security cost of pinning: none. Anyone able to mint IDs under V2 can mint
-  /// them under V1 just as well — ID minting is insider-defeated either way
-  /// (13.1.8); the real cost barrier is admission PoW.
-  ///
-  /// **Never change this constant.** Guarded by
-  /// `test/smoke/smoke_identity_secret_pin.dart`.
-  static const int identitySecretVersion = 1;
-
-  static Uint8List? _cachedIdentity;
-
-  /// The secret used for identity derivation — see [identitySecretVersion].
-  ///
-  /// Use this for `HdWallet.computeUserId` / `HdWallet.computeDeviceNodeId`.
-  /// Never use [secret] for those: it follows the rotation.
-  static Uint8List get identitySecret =>
-      _cachedIdentity ??= _secretForVersion(identitySecretVersion);
-
-  /// The secret to use for all outbound packets.
-  /// During transition: the PREVIOUS (old) secret — ensures backward
-  /// compatibility with un-updated peers who only know the old secret.
-  /// After transition: the CURRENT secret.
-  static Uint8List get outboundSecret => previousSecret ?? secret;
+  // S388: here stood `identitySecret`, a forwarder to
+  // `kIdentityDomainBytes` for two callers that still passed `computeUserId`
+  // a second argument "domain". Since "identifier = A" (v4.2 §4.1) the
+  // second argument is the ML-DSA-65 key; both callers pass it,
+  // and the forwarder no longer had a caller. The identity derives from
+  // the public `kIdentityDomain`, never from this module —
+  // `smoke_identity_secret_pin.dart` records that.
 
   /// Returns the secret for the given version.
   static Uint8List _secretForVersion(int version) {
@@ -206,179 +143,9 @@ class NetworkSecret {
     return result;
   }
 
-  /// Length of the HMAC prefix on all non-Proto UDP packets (Discovery, CPRB,
-  /// fragments). NetworkPacketV3 carries its tag in the `network_tag` field
-  /// instead — see [networkTagLength].
-  static const hmacPrefixLength = 8;
-
-  /// Length of the in-frame HMAC tag for NetworkPacketV3 (V3 wire-format).
-  /// HMAC-SHA256 truncated to 128 bits per Architecture v3.0 §2.4 [11].
-  static const networkTagLength = 16;
-
-  /// Compute 8-byte truncated HMAC-SHA256 for packet authentication.
-  /// Prepended to every outgoing UDP packet (Architecture 17.5.4).
-  /// Uses [outboundSecret] (old secret during transition for compat).
-  static Uint8List computePacketHmac(Uint8List payload) {
-    return _truncate(_computeHmacFull(outboundSecret, payload), hmacPrefixLength);
-  }
-
-  /// Compute the 16-byte in-frame network_tag for a NetworkPacketV3.
-  /// Input must be the protobuf serialization of the packet WITHOUT the
-  /// network_tag field set (Architecture v3.0 §2.4 [11]).
-  /// Uses [outboundSecret] (old secret during transition for compat).
-  static Uint8List computeNetworkTag(Uint8List frameBytesWithoutTag) {
-    return _truncate(
-        _computeHmacFull(outboundSecret, frameBytesWithoutTag), networkTagLength);
-  }
-
-  /// Verify the 16-byte network_tag of a received NetworkPacketV3.
-  /// `frameBytesWithoutTag` must be the re-serialization of the parsed packet
-  /// with the network_tag field cleared. Tries the current secret first, then
-  /// the previous secret (if in transition).
-  static bool verifyNetworkTag(
-      Uint8List tag, Uint8List frameBytesWithoutTag) {
-    if (tag.length != networkTagLength) return false;
-    if (_verifyTagWith(secret, tag, frameBytesWithoutTag)) return true;
-    final prev = previousSecret;
-    if (prev != null && _verifyTagWith(prev, tag, frameBytesWithoutTag)) {
-      return true;
-    }
-    return false;
-  }
-
-  static bool _verifyTagWith(
-      Uint8List secretBytes, Uint8List tag, Uint8List payload) {
-    final expected =
-        _truncate(_computeHmacFull(secretBytes, payload), networkTagLength);
-    return constantTimeEquals(tag, expected);
-  }
-
-  /// Compute full 32-byte HMAC-SHA256 with a specific secret. Internal — most
-  /// callers want the 8-byte (prefix) or 16-byte (network_tag) truncation.
-  static Uint8List _computeHmacFull(Uint8List secretBytes, Uint8List payload) {
-    final sodium = SodiumFFI();
-    // HMAC-SHA256 expects 32-byte key — pad 16-byte secret to 32
-    final key = Uint8List(32);
-    key.setRange(0, 16, secretBytes);
-    return Uint8List.fromList(sodium.hmacSha256(key, payload));
-  }
-
-  static Uint8List _truncate(Uint8List bytes, int length) =>
-      Uint8List.fromList(bytes.sublist(0, length));
-
-  /// Verify the 8-byte HMAC prefix of a received packet.
-  /// Returns true if valid against the current secret.
-  static bool verifyPacketHmac(Uint8List hmacBytes, Uint8List payload) {
-    return _verifyHmacWith(secret, hmacBytes, payload);
-  }
-
-  /// Verify HMAC with a specific secret.
-  static bool _verifyHmacWith(
-      Uint8List secretBytes, Uint8List hmacBytes, Uint8List payload) {
-    final expected =
-        _truncate(_computeHmacFull(secretBytes, payload), hmacPrefixLength);
-    if (hmacBytes.length < hmacPrefixLength) return false;
-    return constantTimeEquals(
-        Uint8List.fromList(hmacBytes.sublist(0, hmacPrefixLength)), expected);
-  }
-
-  /// Prepend 8-byte HMAC to a packet payload.
-  /// Always uses the CURRENT secret.
-  static Uint8List wrapPacket(Uint8List payload) {
-    final hmac = computePacketHmac(payload);
-    final wrapped = Uint8List(hmacPrefixLength + payload.length);
-    wrapped.setRange(0, hmacPrefixLength, hmac);
-    wrapped.setRange(hmacPrefixLength, wrapped.length, payload);
-    return wrapped;
-  }
-
-  /// Verify and unwrap a received packet.
-  /// Tries the current secret first, then the previous secret (if in transition).
-  /// Returns payload if valid, null if invalid against all accepted secrets.
-  static Uint8List? unwrapPacket(Uint8List packet) {
-    if (packet.length <= hmacPrefixLength) return null;
-    final hmac = Uint8List.fromList(packet.sublist(0, hmacPrefixLength));
-    final payload = Uint8List.fromList(packet.sublist(hmacPrefixLength));
-
-    // Try current secret first (fast path, most common case)
-    if (_verifyHmacWith(secret, hmac, payload)) return payload;
-
-    // Try previous secret if in transition period (Architecture 17.5.5)
-    final prev = previousSecret;
-    if (prev != null && _verifyHmacWith(prev, hmac, payload)) return payload;
-
-    return null;
-  }
-
-  // ── EPOCH_EXPIRED hint (§13.2) ──────────────────────────────────────
-  // Format: [8B HMAC(old_secret, payload)][payload]
-  // Payload: [4B magic "CEEP"][2B minVersionLE][2B currentEpochLE]
-  // Total: 16 bytes on wire (8 HMAC + 8 payload).
-
-  /// Magic for EPOCH_EXPIRED hint packets: "CEEP" (Cleona Epoch Expired)
-  static const epochExpiredMagic = [0x43, 0x45, 0x45, 0x50];
-
-  /// Build an EPOCH_EXPIRED hint packet wrapped with [hintSecret].
-  /// Returns null if no hint secret is available.
-  static Uint8List? buildEpochExpiredPacket() {
-    final hint = expiredHintSecret;
-    if (hint == null) return null;
-    final payload = Uint8List(8);
-    payload[0] = epochExpiredMagic[0];
-    payload[1] = epochExpiredMagic[1];
-    payload[2] = epochExpiredMagic[2];
-    payload[3] = epochExpiredMagic[3];
-    payload[4] = currentSecretVersion & 0xFF;
-    payload[5] = (currentSecretVersion >> 8) & 0xFF;
-    payload[6] = currentSecretVersion & 0xFF; // epoch = version for now
-    payload[7] = (currentSecretVersion >> 8) & 0xFF;
-    final hmac = _truncate(_computeHmacFull(hint, payload), hmacPrefixLength);
-    final packet = Uint8List(hmacPrefixLength + payload.length);
-    packet.setRange(0, hmacPrefixLength, hmac);
-    packet.setRange(hmacPrefixLength, packet.length, payload);
-    return packet;
-  }
-
-  /// Try to parse an EPOCH_EXPIRED hint from an already-unwrapped payload.
-  /// Returns the minimum required version, or null if not an EPOCH_EXPIRED.
-  static int? parseEpochExpiredPayload(Uint8List payload) {
-    if (payload.length < 8) return null;
-    if (payload[0] != epochExpiredMagic[0] ||
-        payload[1] != epochExpiredMagic[1] ||
-        payload[2] != epochExpiredMagic[2] ||
-        payload[3] != epochExpiredMagic[3]) {
-      return null;
-    }
-    return payload[4] | (payload[5] << 8);
-  }
-
-  /// Check raw prefix-wrapped packet bytes against the expired-hint secret.
-  /// Used when both current and previous HMAC verification failed — if this
-  /// succeeds, the sender is running an expired build and we should respond
-  /// with a hint. Returns true on match.
-  static bool verifyPrefixHmacWithExpiredHint(Uint8List packet) {
-    final hint = expiredHintSecret;
-    if (hint == null) return false;
-    if (packet.length <= hmacPrefixLength) return false;
-    final hmac = Uint8List.fromList(packet.sublist(0, hmacPrefixLength));
-    final payload = Uint8List.fromList(packet.sublist(hmacPrefixLength));
-    return _verifyHmacWith(hint, hmac, payload);
-  }
-
-  /// Check a V3 in-frame network_tag against the expired-hint secret.
-  static bool verifyNetworkTagWithExpiredHint(
-      Uint8List tag, Uint8List frameBytesWithoutTag) {
-    final hint = expiredHintSecret;
-    if (hint == null) return false;
-    if (tag.length != networkTagLength) return false;
-    return _verifyTagWith(hint, tag, frameBytesWithoutTag);
-  }
-
   /// Clear cached secrets (for testing).
   static void clearCache() {
     _cached = null;
     _cachedPrevious = null;
-    _cachedExpiredHint = null;
-    _cachedIdentity = null;
   }
 }

@@ -152,8 +152,8 @@ class LinkableRingSignature {
       summed = sodium.ed25519ScalarAdd(summed, cs[i]);
     }
     final cJ = sodium.ed25519ScalarSub(cSum, summed);
-    final cJa = sodium.ed25519ScalarMul(cJ, a);
-    final rJ = sodium.ed25519ScalarSub(alpha, cJa);
+    final cYes = sodium.ed25519ScalarMul(cJ, a);
+    final rJ = sodium.ed25519ScalarSub(alpha, cYes);
     cs[signerIndex] = cJ;
     rs[signerIndex] = rJ;
 

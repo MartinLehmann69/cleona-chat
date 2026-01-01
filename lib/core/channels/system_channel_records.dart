@@ -15,12 +15,14 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/identity/identity_context.dart'
+    show StoredRotationLink;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
 
 /// Protobuf `bytes` getters are `List<int>` — wrap for [bytesToHex].
@@ -33,11 +35,11 @@ class SysChanKind {
   static const int retract = 2;
 }
 
-/// FR vote options (§9.5.3): 0 = Ja, 1 = Nein, 2 = Egal.
+/// FR vote options (§9.5.3): 0 = "Ja" (yes), 1 = "Nein" (no), 2 = "Egal" (don't care).
 class SysChanVote {
-  static const int ja = 0;
-  static const int nein = 1;
-  static const int egal = 2;
+  static const int yes = 0;
+  static const int no = 1;
+  static const int irrelevant = 2;
 }
 
 /// Admission outcome for [SystemChannelRecordStore.tryAdmit].
@@ -72,22 +74,30 @@ class StoredSysChanRecord {
 
 /// FR tally for one target record (latest vote per author, LWW).
 class FrTally {
-  final int ja;
-  final int nein;
-  final int egal;
-  const FrTally(this.ja, this.nein, this.egal);
-  int get net => ja - nein;
+  final int yes;
+  final int no;
+  final int irrelevant;
+  const FrTally(this.yes, this.no, this.irrelevant);
+  int get net => yes - no;
 }
 
 class SystemChannelRecordStore {
   final CLogger _log;
 
-  /// Optional fallback for rotated authors: returns true when the inline
-  /// Ed25519 pubkey is authorized for [authorUserId] via the cached
-  /// AuthManifest rotation chain (§4.3). Without it, only the founding
-  /// binding (computeUserId(inlinePk) == authorUserId) admits.
-  bool Function(Uint8List authorUserId, Uint8List inlineEd25519Pk)?
-      chainVerifier;
+  /// Upper limit for the length of the rotation chain travelling along (S392).
+  ///
+  /// It is a **DoS gate, not the spec** — v4_2 names no number.
+  /// Without it, a self-signed record with N invented links costs the
+  /// recipient N ML-DSA checks, while the attacker signs only once.
+  /// At 32 that is in the worst case ~32 checks and a record of about
+  /// 235 KB.
+  ///
+  /// The number is deliberately chosen far above any plausible number of
+  /// emergency rotations of an identity, because a reached limit would
+  /// lock the author out — exactly what §14.5 ("a rotation is never
+  /// blocked, only shown") forbids. Whoever lowers it lowers it against
+  /// this sentence.
+  static const int maxRotationChainLinks = 32;
 
   /// channelIdHex → fingerprintHex → record
   final Map<String, Map<String, StoredSysChanRecord>> _records = {};
@@ -101,8 +111,65 @@ class SystemChannelRecordStore {
   /// signed the retract (must match the target's author).
   final Map<String, Map<String, String>> _retractedTargets = {};
 
-  SystemChannelRecordStore({String? profileDir})
+  /// Encrypted storage (S366). `null` = no write-back — that is the path
+  /// for pure computation checks and for every caller that needs the
+  /// holdings only in memory.
+  final MessageStore? _store;
+
+  /// Area for the records themselves: key `<channel>:<fingerprint>`,
+  /// value `{'b': base64(bytes)}`.
+  static const String kAreaRecords = 'syschan_records';
+
+  /// Area for the tombstones (`_knownGone`): the same key cut, empty
+  /// value. A SEPARATE area and not a special key in the record area
+  /// — the tombstones grow WITHOUT A CAP, while the records are capped
+  /// at 25 MB per channel (§9.5.5). Two laws of growth do not belong in
+  /// one area, and `countArea` thus quantifies both separately.
+  static const String kAreaGone = 'syschan_gone';
+
+  SystemChannelRecordStore({String? profileDir, this._store})
       : _log = CLogger.get('syschan', profileDir: profileDir);
+
+  static String _key(String channelIdHex, String fpHex) =>
+      '$channelIdHex:$fpHex';
+
+  /// Writes ONE record. Formerly every change rewrote the whole
+  /// collection — in the field profile 1 838 533 B, the second-largest
+  /// file of all. Exactly for that reason a 2-second batching hung on it;
+  /// with this granularity it is moot and has been dropped.
+  void _persistRecord(String channelIdHex, StoredSysChanRecord stored) {
+    final s = _store;
+    if (s == null) return;
+    try {
+      s.putEntry(kAreaRecords, _key(channelIdHex, stored.fingerprintHex),
+          {'b': base64Encode(stored.bytes)});
+    } catch (e) {
+      _log.warn('syschan: persist record failed: $e');
+    }
+  }
+
+  void _forgetRecord(String channelIdHex, String fpHex) {
+    final s = _store;
+    if (s == null) return;
+    try {
+      s.removeEntry(kAreaRecords, _key(channelIdHex, fpHex));
+    } catch (e) {
+      _log.warn('syschan: remove record failed: $e');
+    }
+  }
+
+  /// A tombstone. It carries the anti-resurrection (§9.5.7) and must
+  /// therefore NEVER disappear together with the record.
+  void _persistGone(String channelIdHex, String fpHex) {
+    final s = _store;
+    if (s == null) return;
+    try {
+      s.putEntry(
+          kAreaGone, _key(channelIdHex, fpHex), const <String, dynamic>{});
+    } catch (e) {
+      _log.warn('syschan: persist tombstone failed: $e');
+    }
+  }
 
   // ── Fingerprint / set hash ─────────────────────────────────────────
 
@@ -205,6 +272,8 @@ class SystemChannelRecordStore {
     int voteOption = 0,
     Uint8List? recordId,
     int? timestampMs,
+    List<proto.SysChanRotationLink> rotationChain =
+        const <proto.SysChanRotationLink>[],
   }) {
     final record = proto.SystemChannelRecord()
       ..channelId = channelId
@@ -218,6 +287,9 @@ class SystemChannelRecordStore {
       ..text = text
       ..voteOption = voteOption;
     if (targetRecordId != null) record.targetRecordId = targetRecordId;
+    // The chain belongs in the canonical bytes BEFORE signing —
+    // otherwise it could be swapped in transit (S392).
+    if (rotationChain.isNotEmpty) record.rotationChain.addAll(rotationChain);
 
     final canonical = canonicalBytes(record);
     record.sigEd25519 = SodiumFFI().signEd25519(canonical, ed25519Sk);
@@ -246,23 +318,107 @@ class SystemChannelRecordStore {
         return false;
       }
       // UserID-Founding-Binding (§9.5.7): the trust anchor for unknown-
-      // author admission. Rotated authors verify via the AuthManifest
-      // rotation chain when a chainVerifier is wired.
-      final derived = HdWallet.computeUserId(
-          Uint8List.fromList(record.authorEd25519Pk), NetworkSecret.identitySecret);
-      if (_hex(derived) != _hex(record.authorUserId)) {
-        final chain = chainVerifier;
-        if (chain == null ||
-            !chain(Uint8List.fromList(record.authorUserId),
-                Uint8List.fromList(record.authorEd25519Pk))) {
-          return false;
-        }
+      // author admission.
+      // S388 ("identifier = A", v4.2 §4.1): the UserID derives from BOTH
+      // signing keys, and the record carries both inline. An ML-DSA key
+      // of wrong length throws in `computeUserId` and ends below in the
+      // `catch` as a rejection.
+      if (record.rotationChain.isEmpty) {
+        final derived = HdWallet.computeUserId(
+            Uint8List.fromList(record.authorEd25519Pk),
+            Uint8List.fromList(record.authorMlDsaPk));
+        return _hex(derived) == _hex(record.authorUserId);
       }
-      return true;
+      // Rotated author: the chain IS the proof (§4.1, §4.5.4, §14.5).
+      return _verifyRotationChain(record);
     } catch (_) {
       return false;
     }
   }
+
+  /// Checks the chain travelling along, founding → current keys (S392).
+  ///
+  /// It replaces the direct binding as soon as it is present: a
+  /// non-empty chain MUST hold, it is never an additional offer.
+  /// Otherwise a never-rotated record could append a junk chain and
+  /// still get through — and nobody would check anything any more.
+  ///
+  /// The order is intentional: first the four cheap structure and
+  /// binding checks (byte comparisons, one SHA-256), only then the
+  /// expensive signature checks. An attacker must not be able to
+  /// trigger N ML-DSA checks with a forged record.
+  bool _verifyRotationChain(proto.SystemChannelRecord record) {
+    final chain = record.rotationChain;
+    if (chain.length > maxRotationChainLinks) return false;
+
+    // (1) Founding anchor: the first link holds the keys from which the
+    //     UserID derives. If it does not match them, the chain belongs to
+    //     another identity.
+    final founding = HdWallet.computeUserId(
+        Uint8List.fromList(chain.first.oldEd25519Pk),
+        Uint8List.fromList(chain.first.oldMlDsaPk));
+    if (_hex(founding) != _hex(record.authorUserId)) return false;
+
+    // (2) The chain must be a chain: the old pair of every link is the
+    //     new pair of its predecessor.
+    for (var i = 1; i < chain.length; i++) {
+      if (_hex(chain[i].oldEd25519Pk) != _hex(chain[i - 1].newEd25519Pk)) {
+        return false;
+      }
+      if (_hex(chain[i].oldMlDsaPk) != _hex(chain[i - 1].newMlDsaPk)) {
+        return false;
+      }
+    }
+
+    // (3) The last link must arrive at the keys with which the record is
+    //     signed — otherwise the chain proves a foreign path.
+    if (_hex(chain.last.newEd25519Pk) != _hex(record.authorEd25519Pk)) {
+      return false;
+    }
+    if (_hex(chain.last.newMlDsaPk) != _hex(record.authorMlDsaPk)) {
+      return false;
+    }
+
+    // (4) Every link is hybrid-signed by the OLD pair (§4.5.4). First
+    //     Ed25519 (cheap), then ML-DSA — and both are mandatory: a link
+    //     with an empty signature (LD-8 with outdated user sig SK,
+    //     `identity_context.dart rotateDelegation`) fails here.
+    for (final link in chain) {
+      if (link.oldEd25519Pk.length != 32) return false;
+      final content = StoredRotationLink.linkContentOf(
+          Uint8List.fromList(link.newEd25519Pk),
+          Uint8List.fromList(link.newMlDsaPk));
+      if (!SodiumFFI().verifyEd25519(
+          content,
+          Uint8List.fromList(link.sigEd25519),
+          Uint8List.fromList(link.oldEd25519Pk))) {
+        return false;
+      }
+      if (!OqsFFI().mlDsaVerify(
+          content,
+          Uint8List.fromList(link.sigMlDsa),
+          Uint8List.fromList(link.oldMlDsaPk))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// Maps the persisted chain of an identity onto the wire form.
+  /// ONE place, so that producer (`_publishSystemChannelRecord`) and
+  /// checker see the same shape.
+  static List<proto.SysChanRotationLink> wireChainOf(
+          Iterable<StoredRotationLink> chain) =>
+      <proto.SysChanRotationLink>[
+        for (final l in chain)
+          proto.SysChanRotationLink()
+            ..oldEd25519Pk = l.oldEd25519Pk
+            ..oldMlDsaPk = l.oldMlDsaPk
+            ..newEd25519Pk = l.newEd25519Pk
+            ..newMlDsaPk = l.newMlDsaPk
+            ..sigEd25519 = l.oldSignatureEd25519
+            ..sigMlDsa = l.oldSignatureMlDsa
+      ];
 
   /// Receiver-side daily rate limit per author (§9.5.3/§9.5.5): counts
   /// POSTs from this author stored in the last 24 h.
@@ -333,6 +489,7 @@ class SystemChannelRecordStore {
         if (retractedBy != null) {
           if (retractedBy == authorHex) {
             (_knownGone[channelIdHex] ??= {}).add(fpHex);
+            _persistGone(channelIdHex, fpHex);
             return SysChanAdmission.duplicate;
           }
           // Tombstone author does not match the real post author — the
@@ -340,6 +497,7 @@ class SystemChannelRecordStore {
           _retractedTargets[channelIdHex]!.remove(recordIdHex);
         }
         (_records[channelIdHex] ??= {})[fpHex] = stored;
+        _persistRecord(channelIdHex, stored);
         return SysChanAdmission.postAdmitted;
 
       case SysChanKind.vote:
@@ -348,6 +506,7 @@ class SystemChannelRecordStore {
         }
         if (record.targetRecordId.isEmpty) return SysChanAdmission.rejected;
         (_records[channelIdHex] ??= {})[fpHex] = stored;
+        _persistRecord(channelIdHex, stored);
         return SysChanAdmission.voteAdmitted;
 
       case SysChanKind.retract:
@@ -360,6 +519,7 @@ class SystemChannelRecordStore {
           return SysChanAdmission.rejected;
         }
         (_records[channelIdHex] ??= {})[fpHex] = stored;
+        _persistRecord(channelIdHex, stored);
         (_retractedTargets[channelIdHex] ??= {})[targetIdHex] = authorHex;
         // GC rule: drop the target's content but keep its fingerprint so
         // anti-entropy never re-fetches it and the +1 dedup metadata
@@ -367,6 +527,8 @@ class SystemChannelRecordStore {
         if (target != null) {
           _records[channelIdHex]!.remove(target.fingerprintHex);
           (_knownGone[channelIdHex] ??= {}).add(target.fingerprintHex);
+          _forgetRecord(channelIdHex, target.fingerprintHex);
+          _persistGone(channelIdHex, target.fingerprintHex);
         }
         return SysChanAdmission.retractAdmitted;
 
@@ -406,18 +568,18 @@ class SystemChannelRecordStore {
         latest[authorHex] = r.record;
       }
     }
-    var ja = 0, nein = 0, egal = 0;
+    var yes = 0, no = 0, irrelevant = 0;
     for (final v in latest.values) {
       switch (v.voteOption) {
-        case SysChanVote.ja:
-          ja++;
-        case SysChanVote.nein:
-          nein++;
-        case SysChanVote.egal:
-          egal++;
+        case SysChanVote.yes:
+          yes++;
+        case SysChanVote.no:
+          no++;
+        case SysChanVote.irrelevant:
+          irrelevant++;
       }
     }
-    return FrTally(ja, nein, egal);
+    return FrTally(yes, no, irrelevant);
   }
 
   /// The caller's current vote on a target, or null.
@@ -475,6 +637,8 @@ class SystemChannelRecordStore {
       final postIdHex = _hex(post.record.recordId);
       records.remove(post.fingerprintHex);
       (_knownGone[channelIdHex] ??= {}).add(post.fingerprintHex);
+      _forgetRecord(channelIdHex, post.fingerprintHex);
+      _persistGone(channelIdHex, post.fingerprintHex);
       evicted++;
       // Evict this post's votes with it.
       final voteFps = records.values
@@ -486,6 +650,8 @@ class SystemChannelRecordStore {
       for (final fp in voteFps) {
         records.remove(fp);
         _knownGone[channelIdHex]!.add(fp);
+        _forgetRecord(channelIdHex, fp);
+        _persistGone(channelIdHex, fp);
       }
     }
     if (evicted > 0) {
@@ -495,42 +661,64 @@ class SystemChannelRecordStore {
     return evicted;
   }
 
-  // ── Persistence ────────────────────────────────────────────────────
+  // ── Persistence (S366: encrypted storage instead of file) ─────────
+  //
+  // WHAT HAS CHANGED AND WHY. Until S366 the whole holdings lay in
+  // `syschan_records.json` and were rewritten completely on EVERY
+  // change — in the field profile 1 838 533 B. Against that stood a
+  // 2-second batching in the service, which damped the write storm and
+  // opened a window in doing so: whoever stopped within these two
+  // seconds lost the record just published (`stop()` cancelled the
+  // timer). Both are gone. Every change now writes EXACTLY THE ROW that
+  // changed, immediately.
+  //
+  // NO DATA-LOSS LATCH NEEDED, and that is a statement, not an
+  // omission: there is no full-write path here any more that a failed
+  // load could overwrite with empty holdings. `putEntry`/`removeEntry`
+  // touch only what the caller is holding in hand right now, and
+  // `evictToLimit` returns immediately on empty holdings.
 
-  Map<String, dynamic> toJson() => {
-        'channels': _records.map((ch, records) => MapEntry(ch, {
-              'records': records.values.map((r) => base64Encode(r.bytes)).toList(),
-              'gone': (_knownGone[ch] ?? const <String>{}).toList(),
-            })),
-      };
-
-  void loadFromJson(Map<String, dynamic> json) {
+  /// Loads records and tombstones from the storage.
+  void loadFromStore() {
+    final s = _store;
+    if (s == null) return;
     try {
-      final channels = json['channels'] as Map<String, dynamic>? ?? {};
-      for (final entry in channels.entries) {
-        final ch = entry.key;
+      for (final key in s.loadArea(kAreaGone).keys) {
+        final sep = key.indexOf(':');
+        if (sep <= 0) continue;
+        final ch = key.substring(0, sep);
         if (!SystemChannels.isSystemChannel(ch)) continue;
-        final data = entry.value as Map<String, dynamic>;
-        _knownGone[ch] = ((data['gone'] as List<dynamic>?) ?? const [])
-            .map((e) => e as String)
-            .toSet();
-        for (final b64 in (data['records'] as List<dynamic>?) ?? const []) {
-          try {
-            final bytes = base64Decode(b64 as String);
-            final record = proto.SystemChannelRecord.fromBuffer(bytes);
-            final fpHex = fingerprintHexOf(bytes);
-            (_records[ch] ??= {})[fpHex] = StoredSysChanRecord(
-                record: record, bytes: bytes, fingerprintHex: fpHex);
-            if (record.kind == SysChanKind.retract &&
-                record.targetRecordId.isNotEmpty) {
-              (_retractedTargets[ch] ??= {})[_hex(record.targetRecordId)] =
-                  _hex(record.authorUserId);
-            }
-          } catch (_) {/* skip corrupt entry */}
-        }
+        (_knownGone[ch] ??= <String>{}).add(key.substring(sep + 1));
+      }
+      for (final entry in s.loadArea(kAreaRecords).entries) {
+        final sep = entry.key.indexOf(':');
+        if (sep <= 0) continue;
+        final ch = entry.key.substring(0, sep);
+        if (!SystemChannels.isSystemChannel(ch)) continue;
+        try {
+          final bytes = base64Decode(entry.value['b'] as String);
+          final record = proto.SystemChannelRecord.fromBuffer(bytes);
+          // The fingerprint is RECOMPUTED and not taken over from the
+          // key: it is the record's ID card, and a key that does not match
+          // its content must not bring it back under a false name.
+          final fpHex = fingerprintHexOf(bytes);
+          (_records[ch] ??= {})[fpHex] = StoredSysChanRecord(
+              record: record, bytes: bytes, fingerprintHex: fpHex);
+          if (record.kind == SysChanKind.retract &&
+              record.targetRecordId.isNotEmpty) {
+            (_retractedTargets[ch] ??= {})[_hex(record.targetRecordId)] =
+                _hex(record.authorUserId);
+          }
+        } catch (_) {/* skip corrupt entry */}
       }
     } catch (e) {
       _log.warn('syschan: load failed: $e');
     }
   }
+
+  /// Number of stored records or tombstones — for guards and for
+  /// callers that must know before a write path whether the storage
+  /// holds anything.
+  int storedRecordCount() => _store?.countArea(kAreaRecords) ?? 0;
+  int storedGoneCount() => _store?.countArea(kAreaGone) ?? 0;
 }

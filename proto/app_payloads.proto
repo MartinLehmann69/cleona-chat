@@ -1,0 +1,1674 @@
+syntax = "proto3";
+
+package cleona;
+
+// ── App payloads ───────────────────────────────────────────────────────
+// Application messages: chat, groups, calls, calendar, polls, channels,
+// moderation, multi-device. Transport-free — this file imports nothing and
+// is only ever read by the network layer.
+//
+// AP-1a step 6 (MIGRATION §9.15.6): split out of `cleona.proto` so that
+// the V4 network rebuild (AP-3) can replace `transport_v3.proto` without touching the
+// app payloads. Field tags and enum values are wire numbers and were
+// NOT changed during the split (MIGRATION §2.3). The comments of the
+// original stand unchanged at the declarations to which they belonged.
+// ── Sub-messages ───────────────────────────────────────────────────────
+
+message ContentMetadata {
+  string mime_type = 1;
+  uint64 file_size = 2;
+  string filename = 3;
+  uint32 duration_ms = 4;       // audio/video duration
+  bytes thumbnail = 5;          // compressed thumbnail, max 100KB
+  bytes content_hash = 6;       // SHA-256 of the full content
+  // Source-side transcript (§14.9). Inline voice additionally carries it in the
+  // VoicePayload; in the two-stage path (>256KB) the metadata is the ONLY
+  // carrier, because MEDIA_ANNOUNCE has no payload and the stage-2 chunks
+  // are raw file bytes.
+  string transcript_text = 7;       // empty = no transcript present
+  string transcript_language = 8;   // detected language ("de", "en", ...)
+  float transcript_confidence = 9;  // 0.0-1.0
+}
+// ── Link Preview (Sender-Side) ────────────────────────────────────────
+// Sender fetches og: metadata + thumbnail before encryption.
+// Recipient NEVER contacts the target server — zero network requests.
+
+message LinkPreview {
+  string url = 1;                  // The detected URL
+  string title = 2;                // og:title or <title>
+  string description = 3;          // og:description (max 300 chars)
+  string site_name = 4;            // og:site_name
+  bytes thumbnail = 5;             // og:image as JPEG thumbnail (max 64KB)
+  uint64 fetched_at_ms = 6;        // When the sender fetched the preview
+}
+message ExpiryMetadata {
+  uint64 expiry_duration_ms = 1;  // 0 = no expiry
+  uint64 edit_window_ms = 2;     // 0 = no editing allowed
+}
+message EditMetadata {
+  bytes original_message_id = 1;
+  uint64 edit_timestamp = 2;
+}
+message PeerAddressProto {
+  string ip = 1;
+  uint32 port = 2;
+  AddressType address_type = 3;
+  double score = 4;
+  uint64 last_success = 5;
+  uint64 last_attempt = 6;
+  uint32 success_count = 7;
+  uint32 fail_count = 8;
+}
+enum AddressType {
+  IPV4_PUBLIC = 0;
+  IPV4_PRIVATE = 1;
+  IPV6_GLOBAL = 2;
+  IPV6_ULA = 3;          // RFC 4193 fc00::/7 (fc.. or fd..)
+  IPV6_LINK_LOCAL = 4;   // RFC 4291 fe80::/10
+  IPV6_SITE_LOCAL = 5;   // RFC 3879 fec0::/10 (deprecated)
+}
+// ── Contact Request ────────────────────────────────────────────────────
+
+message ContactRequestMsg {
+  string display_name = 1;
+  bytes ed25519_public_key = 2;
+  bytes ml_dsa_public_key = 3;
+  bytes x25519_public_key = 4;
+  bytes ml_kem_public_key = 5;
+  string message = 6;
+  bytes profile_picture = 7;     // JPEG, max 64KB
+  string description = 8;
+}
+message ContactRequestResponse {
+  bool accepted = 1;
+  string rejection_reason = 2;
+  bytes ed25519_public_key = 3;
+  bytes ml_dsa_public_key = 4;
+  bytes x25519_public_key = 5;
+  bytes ml_kem_public_key = 6;
+  string display_name = 7;
+  bytes profile_picture = 8;
+  string description = 9;
+}
+// ── Profile ────────────────────────────────────────────────────────────
+
+message ProfileData {
+  bytes profile_picture = 1;     // JPEG, max 64KB
+  string description = 2;
+  uint64 updated_at_ms = 3;
+  string display_name = 4;       // Updated display name (empty = unchanged)
+}
+// ── Groups ─────────────────────────────────────────────────────────────
+
+message GroupCreate {
+  bytes group_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated bytes member_ids = 4;
+  bytes picture = 5;
+}
+message GroupInviteV3 {
+  bytes group_id = 1;
+  string group_name = 2;
+  bytes inviter_id = 3;
+  repeated GroupMemberV3 members = 4;
+  bytes group_picture = 5;
+  string group_description = 6;
+  // GM-1 (§9.1.4): monotonic epoch + canonical membership hash + hybrid sig
+  uint64 membership_epoch = 7;
+  bytes membership_hash = 8;          // SHA-256(epoch || groupId || sorted members)
+  bytes membership_sig_ed25519 = 9;   // 64 bytes, over membership_hash
+  bytes membership_sig_ml_dsa = 10;   // ~3300 bytes, over membership_hash
+}
+message GroupMemberV3 {
+  bytes node_id = 1;
+  string display_name = 2;
+  string role = 3;              // "owner", "admin", "member"
+  bytes ed25519_public_key = 4;
+  bytes x25519_public_key = 5;
+  bytes ml_kem_public_key = 6;
+}
+// GM-2 (§9.1.4): requester sends local epoch so owner knows whether a resync is needed
+message GroupMembershipResyncRequest {
+  bytes group_id = 1;
+  uint64 local_epoch = 2;
+}
+message GroupKeyUpdate {
+  bytes group_id = 1;
+  bytes new_group_key = 2;      // encrypted per-member
+}
+message GroupLeave {
+  bytes group_id = 1;
+}
+// ── Channels ───────────────────────────────────────────────────────────
+
+message ChannelCreate {
+  bytes channel_id = 1;
+  string name = 2;
+  string description = 3;
+  bool announcement_only = 4;
+  ExpiryMetadata default_expiry = 5;
+  bytes picture = 6;
+  bool is_public = 7;
+  bool is_adult = 8;
+  string language = 9;
+}
+message ChannelPost {
+  bytes channel_id = 1;
+  bytes post_id = 2;
+  string text = 3;
+  ContentMetadata media = 4;
+  bytes content_data = 5;
+}
+message ChannelInvite {
+  bytes channel_id = 1;
+  string channel_name = 2;
+  bytes inviter_id = 3;
+  string role = 4;
+  bytes welcome_message = 5;
+  bytes channel_picture = 6;
+  string channel_description = 7;
+  repeated GroupMemberV3 members = 8;   // reuse GroupMemberV3 for full member list
+  bool is_public = 9;
+  bool is_adult = 10;
+  string language = 11;
+  // GM-4 (§9.1.4): monotonic epoch + canonical membership hash + hybrid sig
+  uint64 membership_epoch = 12;
+  bytes membership_hash = 13;          // SHA-256(epoch || channelId || sorted members)
+  bytes membership_sig_ed25519 = 14;   // 64 bytes, over membership_hash
+  bytes membership_sig_ml_dsa = 15;    // ~3300 bytes, over membership_hash
+}
+message ChannelRoleUpdate {
+  bytes channel_id = 1;
+  bytes target_id = 2;
+  string new_role = 3;
+}
+message ChannelLeave {
+  bytes channel_id = 1;
+}
+// ── Chat Config ────────────────────────────────────────────────────────
+
+message ChatConfigUpdate {
+  string conversation_id = 1;
+  bool allow_downloads = 2;
+  bool allow_forwarding = 3;
+  bool is_request = 4;
+  bool accepted = 5;
+  sint64 expiry_duration_ms = 6;
+  sint64 edit_window_ms = 7;
+  bool read_receipts = 8;
+  bool typing_indicators = 9;
+}
+// ── Identity Deleted ───────────────────────────────────────────────────
+
+message IdentityDeletedNotification {
+  bytes identity_ed25519_pk = 1;
+  uint64 deleted_at_ms = 2;
+  string display_name = 3;
+}
+// ── Restore ────────────────────────────────────────────────────────────
+
+message RestoreBroadcast {
+  bytes old_node_id = 1;
+  bytes new_node_id = 2;
+  bytes new_ed25519_pk = 3;
+  bytes new_x25519_pk = 4;
+  bytes new_ml_kem_pk = 5;
+  bytes new_ml_dsa_pk = 6;
+  string display_name = 7;
+  uint64 timestamp = 8;
+  bytes signature = 9;           // signed with old Ed25519 key (proves ownership)
+  bytes signature_ml_dsa = 10;   // H-2: hybrid — signed with old ML-DSA-65 key (PQ proof; absent on pre-H-2 senders)
+}
+message RestoreResponse {
+  uint32 phase = 1;              // 1=contacts, 2=recent messages, 3=full history
+  repeated ContactEntry contacts = 2;
+  repeated StoredMessage messages = 3;
+  repeated RestoreGroupInfo groups = 4;
+  repeated RestoreChannelInfo channels = 5;
+}
+message RestoreGroupInfo {
+  bytes group_id = 1;
+  string name = 2;
+  string description = 3;
+  string owner_node_id_hex = 4;
+  repeated RestoreGroupMember members = 5;
+}
+message RestoreGroupMember {
+  string node_id_hex = 1;
+  string display_name = 2;
+  string role = 3;               // "owner", "admin", "member"
+  bytes ed25519_pk = 4;
+  bytes x25519_pk = 5;
+  bytes ml_kem_pk = 6;
+}
+message RestoreChannelInfo {
+  bytes channel_id = 1;
+  string name = 2;
+  string description = 3;
+  string owner_node_id_hex = 4;
+  repeated RestoreChannelMember members = 5;
+  // NSFW rating. Without this field the restore path could not carry the flag
+  // at all, so a recovered channel always fell back to the ChannelInfo
+  // constructor default. Per architecture §9.2.2 a channel marked not safe for
+  // minors is invisible to identities without the isAdult flag, so losing the
+  // flag on recovery would expose an adult channel to exactly those users.
+  // Field 6 is additive: old senders leave it unset and new readers see the
+  // protobuf default false, which is the pre-existing behaviour.
+  bool is_adult = 6;
+}
+message RestoreChannelMember {
+  string node_id_hex = 1;
+  string display_name = 2;
+  string role = 3;               // "owner", "admin", "subscriber"
+  bytes ed25519_pk = 4;
+  bytes x25519_pk = 5;
+  bytes ml_kem_pk = 6;
+}
+message ContactEntry {
+  bytes node_id = 1;
+  string display_name = 2;
+  bytes ed25519_pk = 3;
+  bytes x25519_pk = 4;
+  bytes ml_kem_pk = 5;
+  bytes ml_dsa_pk = 6;
+  bytes profile_picture = 7;
+  string description = 8;
+}
+message StoredMessage {
+  bytes message_id = 1;
+  bytes sender_id = 2;
+  bytes recipient_id = 3;
+  string conversation_id = 4;
+  uint64 timestamp = 5;
+  // V3 (2026-05-05 Wave 7): UI-tag carrying `UiMessageType.wireValue` (sequential
+  // 0..N, see lib/core/service/service_types.dart). Detached from the V2
+  // `MessageType` wire enum so RESTORE_RESPONSE no longer drags V2-numbering
+  // into the inner-frame payload.
+  int32 ui_message_type = 6;
+  bytes payload = 7;             // encrypted
+}
+// ── Calls ──────────────────────────────────────────────────────────────
+
+message CallInvite {
+  bytes call_id = 1;
+  bytes caller_eph_x25519_pk = 2;
+  bytes caller_kem_ciphertext = 3;
+  bool is_video = 4;
+  bool is_group_call = 5;
+  bytes group_id = 6;
+  // S368: `bytes group_call_key = 7;` has been removed. It was kept as "Retained for
+  // wire-compat" and was thus a field that only existed so that an
+  // older counterpart could read it — exactly what does not exist on this line
+  // (owner: "V4.1 is not backwards compatible", "Neither data -
+  // nor in the network"). Group media have been keyed per sender via
+  // GroupCallSenderKey since §10.2.1. Besides, the value was NEVER READ: the recipient
+  // put it into `GroupCallSession.callKey`, and this field had not a single
+  // read access in `lib/`.
+  reserved 7;
+
+  // ── Version gate (§10.4, spec erratum E5) ────────────────────────────
+  //
+  // The app version of the caller, encoded as `major * 1000 + minor`.
+  // 3.1.x -> 3001, 3.2.0 -> 3002, 4.0.0 -> 4000. Monotonic across every
+  // version jump, also across a major change.
+  //
+  // WHAT FOR. §10.4 specifies that sample rate, codec and frame format all three
+  // change with 3.2.0 and that a 3.1.x client therefore cannot hold a call with a 3.2.x client.
+  // For that the recipient needs a
+  // statement about which voice stack the caller speaks.
+  //
+  // A MISSING FIELD IS A STATEMENT, NOT A GAP. proto3 delivers 0, and
+  // a recipient must NOT derive from the absence "unknown, so probably
+  // fine".
+  //
+  // S368: here it said that 0 meant "defines 'sender older than 3.2.0,
+  // superseded voice stack'". This interpretation is gone, and with it
+  // the 0 no longer needs a special case: since S368 the evaluation asks for
+  // EQUALITY with the own version (`call_service.dart`,
+  // `isCompatibleCallerVersion`), and 0 is never equal to the own version.
+  // A statement about WHICH older line the sender speaks thus
+  // no longer has an addressee — on this line there are no older
+  // counterparts (owner, 05.09.2026: "V4.1 is not backwards compatible",
+  // "Neither data - nor in the network!").
+  //
+  // WHY major+minor AND NOT ONLY THE MINOR. §10.4 formulates the gate as
+  // `minor >= 2`. The minor alone does not survive a major jump: 4.0.0 has
+  // minor 0, and a check `minor >= 2` would reject every 4.0 client,
+  // although it has the newer stack. The field therefore carries both. Thus
+  // both the literal rule from §10.4 can be formed (`(v % 1000) >= 2`) and
+  // a rollover-proof one (`v >= 3002`) — the choice between them is a
+  // decision about the evaluation, not about the wire format, and is therefore
+  // not made here. See the finding on §10.4 in package report V1.12.
+  //
+  // S368, so that the next reader does not build the wrong one: the evaluation
+  // of this line takes NEITHER of the two. It asks for EQUALITY
+  // (`v == own version`), because a lower bound accepts every FUTURE
+  // version unchecked — the same defect, only one generation
+  // later. The wire format still carries both readings; the
+  // reasoning stands in `call_service.dart` at
+  // `isCompatibleCallerVersion`.
+  //
+  // WHY WITHOUT PATCH. A patch release does not change the voice stack (semver),
+  // and the patch counter of this project runs to well over 99 (v3.1.160).
+  // Every encoding that packs it into a fixed position would have
+  // overflowed there and would have made 3.1.160 look larger than 3.2.0.
+  // Capping: minor < 1000.
+  //
+  // THE CHECK ITSELF DOES NOT LIE HERE. It belongs to V2.1
+  // (`call_service.dart`, `handleCallInviteV3`), together with the rejection reason visible to the
+  // user and its translation. §10.4: a
+  // call between incompatible versions is explicitly rejected,
+  // "never allowed to fail silently".
+  uint32 caller_app_major_minor = 8;
+
+  // ── Media format negotiation (§10.3.1/§10.4/§10.6, V1.18) ────────────
+  //
+  // The range of media formats that the caller can speak. Separated
+  // for audio and video, because both have separate ABIs (`cleona_voice.h`,
+  // `cleona_video.h`), separate codecs and separate step plans —
+  // §10.4 step 5 exchanges the audio codec (Opus), §10.6 step 4/5 the
+  // video codec, independently of each other. A shared counter would
+  // force a video change to downgrade audio along with it, although nothing has changed
+  // in the audio format.
+  //
+  // WHAT A COUNTER COVERS. For its media kind: the wire framing of the
+  // media message, the codec including parameters, the frame layout and the
+  // AEAD construction on this payload. These four change together in this
+  // project, not individually: §10.4 changes with 3.2.0 sample rate,
+  // codec AND frame format and calls that ONE incompatibility. Four
+  // separate counters would make combinations describable that no
+  // build ever produces and that nobody can test.
+  //
+  // WHAT FOR — AND EXPLICITLY NOT WHAT FOR. There is no backwards compatibility
+  // with 3.1, and that stays so (§10.4 "Compatibility: none,
+  // by decision"). These fields do not establish it. They exist for
+  // the reverse case: so that a FUTURE version (3.3, 4.0, ...) can still speak with
+  // 3.2, instead of forcing a second hard cut.
+  //
+  // RELATION TO FIELD 8. Field 8 is a one-sided floor ("is the peer
+  // at least 3.2.0") and is not negotiated. It cannot
+  // express what the other side speaks, and a 3.2 client shipped today
+  // carries `>= 3002` set in concrete: it accepts every future
+  // version unconditionally and can never learn that 3.4 media are
+  // undecodable for it. Exactly this gap is closed by these fields. The
+  // two do not overlap — field 8 answers "can we talk
+  // at all", these fields "in which dialect", and they act
+  // exclusively above the floor of field 8.
+  //
+  // A MISSING FIELD IS A STATEMENT, NOT A GAP. proto3 delivers 0.
+  // These fields can only be omitted by a build from 3.2.0 on that
+  // was made before V1.18 — and that one speaks exactly base format 1. 0 here
+  // therefore means by definition "range [1,1], only the 3.2.0 base format", not
+  // "unknown, so probably fine". That is deliberately the OTHER conclusion
+  // than with field 8, where 0 leads to rejection: there the 0 stems from a
+  // 3.1.x client that cannot hold a call at all, here from a
+  // 3.2.0 client that can. Same rule, different facts — the
+  // conclusion is derived, not chosen.
+  //
+  // WHY A RANGE AND NOT ONLY A MAXIMUM. Old formats are dropped,
+  // not dragged along forever: `PerMessageKem.acceptKemVersions`
+  // has changed from {1} to {2} (v1 removed in V3.1.72). Without the
+  // minimum the callee could choose a format that the caller
+  // has long stopped speaking; the abort would only take place one round later
+  // at the caller, with a worse reason. A contiguous
+  // range suffices — the acceptance set of this project was always
+  // contiguous.
+  //
+  // WHY NOT PER FRAME. A field in every audio frame costs at 50
+  // frames/s permanently roughly 100 B/s per direction, against the Opus target of
+  // 24-32 kbps (§10.4) thus ~2.7 % — for a property that
+  // never changes during the session. Work rule 5 and the hard
+  // size bounds from §10.3.1/I9 forbid recurring costs without
+  // benefit. What does change in the middle of the call is resolution
+  // and bitrate (V1.17); those already stand in `VideoFrame.width/height`
+  // and are a preset, not a format. A change of the format itself
+  // requires a rebuild (`MTV3_CALL_REJOIN`), which renegotiates.
+  // The negotiation is reliable: `CALL_INVITE`/`CALL_ANSWER` are
+  // setup frames with ML-DSA, zstd and the normal delivery cascade, not
+  // live media — they cannot get lost silently.
+  //
+  // THE EVALUATION DOES NOT LIE HERE. The negotiation rule stands in
+  // `lib/core/calls/media_format_version.dart`; the wiring in
+  // `call_service.dart` including visible rejection reason belongs to V2.1
+  // (BUGFIX_CURRENT.md AV-V1.18).
+  uint32 caller_audio_format_min = 9;
+  uint32 caller_audio_format_max = 10;
+  uint32 caller_video_format_min = 11;
+  uint32 caller_video_format_max = 12;
+
+  // ── Address candidates and session cookie of level D (§17.3/§17.4) ───
+  //
+  // §17.3 verbatim: "Candidates in signaling: INVITE and ANSWER carry the
+  // address candidates of both sides (local addresses + observed
+  // addresses, both families kept separate - a narrow ICE without TURN)."
+  //
+  // ONE PACKED FIELD AND NOT `repeated bytes`, and the reason is the
+  // cell limit. A `repeated bytes` costs 2 B of framing per candidate
+  // (field header + length); eight candidates are 16 B of framing alone. The
+  // INVITE already carries the 1088 B large ML-KEM ciphertext and thus lies
+  // close to the piece limit of the delivery (1026 B payload per
+  // cell, `frame_split.dart`) - every additional byte can cost a
+  // further cell, and one cell on the signal line is
+  // m x R_signal = 15 placements = 120 s egress (§17.2), i.e. a
+  // full TTL. The packed form is therefore not a micro-optimisation.
+  //
+  // FORMAT, self-delimiting, see `lib/core/calls/address_candidates.dart`:
+  //
+  //     per candidate:  fam(1) = 4 | 6  ||  addr(4 | 16)  ||  port(2, big endian)
+  //
+  // i.e. 7 B for IPv4 and 19 B for IPv6. The family stands in front, because
+  // only it says how many bytes follow. An unknown family value
+  // ends the reading - a reader that keeps guessing assembles candidates from
+  // foreign leftovers.
+  //
+  // ORDER IS A STATEMENT: the observations stand in the order
+  // of the address book, the youngest last. The port prediction from §17.3
+  // ("within a window of +/-10 ports around the most recently observed
+  // port") reads exactly this promise.
+  //
+  // A MISSING FIELD IS A STATEMENT: empty means "no candidates
+  // named", and the recipient then starts no punch window instead of
+  // sending to `0.0.0.0`.
+  bytes caller_candidates = 13;
+
+  // The session cookie that the CALLER hands out (§17.4: "a valid AEAD
+  // under `call_key` plus a session cookie"). 8 B. Frames that arrive AT THE
+  // CALLER carry it; the callee stamps it on everything
+  // he sends. §17.6: "the volunteer hands out two session cookies" -
+  // two, not one, so that the two directions cannot be linked via a
+  // single observed value.
+  //
+  // Empty means: this caller sets up no level-D window. The
+  // callee then admits no session instead of opening one with a
+  // null cookie - eight zero bytes would be a cookie that anyone can
+  // guess.
+  bytes caller_d_cookie = 14;
+}
+message CallAnswer {
+  bytes call_id = 1;
+  bytes callee_eph_x25519_pk = 2;
+  bytes callee_kem_ciphertext = 3;
+
+  // ── Media format negotiation, result (§10.4, V1.18) ────────────────
+  //
+  // The format CHOSEN by the callee per media kind — the highest
+  // that both sides speak. Before V1.18 `CallAnswer` carried no
+  // version information at all (fields 1-3), so the capabilities of the callee
+  // never reached the caller. Without this back channel the caller cannot
+  // switch down, and "future backwards compatibility" stays
+  // unreachable — regardless of how the format is encoded.
+  //
+  // The caller checks the value against its own range and against what
+  // it itself offered, and aborts on deviation with a visible reason.
+  // A broken or malicious peer can thus not force a format
+  // that the caller never offered.
+  //
+  // If the field is missing (0), the same rule applies as with `CallInvite`: the
+  // callee is a 3.2.0 build before V1.18 and has thus chosen base format 1.
+  // A statement, not a gap.
+  uint32 selected_audio_format = 4;
+  uint32 selected_video_format = 5;
+
+  // ── Address candidates and session cookie of the CALLEE (§17.3/§17.4)
+  //
+  // Same form and same reasoning as `CallInvite.caller_candidates`
+  // / `caller_d_cookie`; the ANSWER is the second half of the exchange.
+  // Only with it do BOTH sides have `call_key` (which falls out of the
+  // ephemeral DH plus KEM), both cookies and both candidate lists -
+  // that is the point in time from which the punch window from §17.3 can run,
+  // and on both sides at the same time.
+  bytes callee_candidates = 6;
+  bytes callee_d_cookie = 7;
+}
+message CallReject {
+  bytes call_id = 1;
+  string reason = 2;
+}
+
+// CANCEL_OTHERS (§17.2) — the arbitration of the CALLER with several
+// devices of one identity.
+//
+// §17.2: „an INVITE is **one** cell — all of the callee's devices harvest
+// the same tag line and ring … the first `ANSWER` binds the session to one
+// device, `CANCEL_OTHERS` (TTL 120 s) ends the ringing of the others."
+//
+// Why the CALLER and not the answering device sends, and why the
+// ephemeral key is the recognition value: the file header of
+// `lib/core/calls/call_arbitration.dart`.
+message CallCancelOthers {
+  bytes call_id = 1;
+
+  // The ephemeral X25519 key of the callee from that ANSWER
+  // which bound the session — 32 bytes.
+  //
+  // It is the value by which the WINNING device recognises itself:
+  // the cell goes to the identity and therefore also reaches the winner
+  // (§14.2 — „One delivery serves all devices"). Without this value the
+  // winner would hang up its own call.
+  //
+  // NO device identifier. §14.1: the DeviceID is „not an addressing means";
+  // keeping it here would mean writing it into a message to a CONTACT.
+  // The ephemeral key says the same and reveals nothing that
+  // the contact does not already know from the ANSWER — it is drawn fresh per call AND
+  // per device and worthless after the call.
+  //
+  // Empty is not a valid value: a CANCEL_OTHERS without binding key
+  // would also take the call away from the winner. The recipient discards it.
+  bytes bound_answer_key = 2;
+}
+// RING_ACK (§17.2) — „it is really ringing at their end".
+//
+// §17.2, paragraph „Caller state `reaching`": „After placing the INVITE, the
+// caller shows ,reaching …' — **no** ringtone. Ringtone and the 60-s answer
+// timeout start only once the callee's `RING_ACK` cell has been harvested."
+//
+// Every ringing device of the callee sends one — the INVITE is ONE
+// cell to the identity and makes all devices ring (§14.2), so the
+// feedback comes N-fold. The caller needs only the first to switch from
+// state `reaching` to ringback tone; he counts the others.
+message CallRingAck {
+  bytes call_id = 1;
+
+  // Which device of the callee is ringing — 32 bytes, drawn fresh per call AND per
+  // device.
+  //
+  // §17.2 says verbatim at this place „`RING_ACK` carries the
+  // `deviceId`". Here stands **no** DeviceID, and that is a deliberate,
+  // justified deviation, not carelessness:
+  //
+  //   * §14.1 lists the DeviceID as „not an addressing means"; writing it into a
+  //     message to a CONTACT would contradict that.
+  //   * On the V4.1 delivery route there is none at all: §14.2 — „The delivery
+  //     path has **no device level**", and `HarvestEvent.senderDeviceId` is
+  //     `null` there (B-32, S349). A field that cannot be filled would be
+  //     a lie in the schema.
+  //   * What the clause is supposed to ACHIEVE, this value achieves completely: letting the
+  //     caller count how many different devices are ringing,
+  //     without him learning WHICH.
+  //
+  // It is the same value that the later `CallAnswer` carries as
+  // `callee_eph_x25519_pk` and that `CallCancelOthers` names — the
+  // ephemeral X25519 key of this device for this call. One mark
+  // across the whole call, not three.
+  bytes device_marker = 2;
+}
+message CallHangup {
+  bytes call_id = 1;
+}
+message IceCandidate {
+  bytes call_id = 1;
+  string candidate = 2;
+  string sdp_mid = 3;
+  uint32 sdp_m_line_index = 4;
+}
+message CallRejoin {
+  bytes call_id = 1;
+}
+// ── Key Rotation ───────────────────────────────────────────────────────
+
+message KeyRotation {
+  bytes new_x25519_pk = 1;
+  bytes new_ml_kem_pk = 2;
+  uint64 rotation_timestamp = 3;
+  bytes signature = 4;           // signed with identity key
+}
+// ── Channel Join Request ──────────────────────────────────────────────
+
+message ChannelJoinRequest {
+  bytes channel_id = 1;
+  string display_name = 2;         // requester's display name
+  bytes ed25519_pk = 3;            // requester's public keys for encryption
+  bytes x25519_pk = 4;
+  bytes ml_kem_pk = 5;
+}
+// ── Channel Index Exchange (Gossip) ──────────────────────────────────
+
+message ChannelIndexExchange {
+  repeated ChannelIndexEntryProto entries = 1;
+}
+// ── Channel Moderation ────────────────────────────────────────────────
+
+message ChannelReportMsg {
+  bytes report_id = 1;
+  bytes channel_id = 2;
+  uint32 category = 3;            // ReportCategory enum index
+  repeated bytes evidence_post_ids = 4;
+  string description = 5;
+  uint64 created_at_ms = 6;
+  bool is_post_report = 7;        // true = single-post, false = channel report
+  bytes post_id = 8;              // only for single-post reports
+}
+message ChannelReportResponse {
+  bytes report_id = 1;
+  bool accepted = 2;
+  string rejection_reason = 3;
+}
+message JuryRequestMsg {
+  bytes jury_id = 1;
+  bytes channel_id = 2;
+  bytes report_id = 3;
+  uint32 category = 4;
+  repeated bytes evidence_post_ids = 5;
+  string report_description = 6;
+  string channel_name = 7;
+  string channel_language = 8;
+  uint32 epoch_day = 9;
+  uint32 jury_round = 10;
+  bytes eligibility_snapshot_hash = 11;
+}
+message JuryVoteMsg {
+  bytes jury_id = 1;
+  bytes report_id = 2;
+  uint32 vote = 3;                // 0=approve, 1=reject, 2=abstain
+  string reason = 4;
+  bytes sig_ed25519 = 5;          // hybrid sig over canonical verdict core
+  bytes sig_ml_dsa = 6;
+  uint32 jury_round = 7;
+  uint32 epoch_day = 8;           // UTC day the jury was initiated
+}
+message JuryResultMsg {
+  bytes jury_id = 1;
+  bytes report_id = 2;
+  bytes channel_id = 3;
+  uint32 consequence = 4;         // JuryConsequence enum index
+  uint32 votes_approve = 5;
+  uint32 votes_reject = 6;
+  uint32 votes_abstain = 7;
+  uint32 new_bad_badge_level = 8;
+  repeated JurorVerdictSig juror_sigs = 9;
+  bytes eligibility_snapshot_hash = 10;
+  uint32 epoch_day = 11;
+  uint32 jury_round = 12;
+}
+message JurorVerdictSig {
+  bytes juror_user_id = 1;
+  bytes sig_ed25519 = 2;
+  bytes sig_ml_dsa = 3;
+  uint32 vote = 4;                // mirrored from the juror's JuryVoteMsg
+}
+// ── Juror Availability Registry (DHT) ─────────────────────────────────
+
+message JurorAvailabilityRecord {
+  bytes user_pub_key_ed25519 = 1;
+  bytes user_pub_key_ml_dsa = 2;
+  uint64 creation_epoch_ms = 3;   // identity creation timestamp
+  bytes self_sig_ed25519 = 4;     // hybrid self-sig over fields 1-3
+  bytes self_sig_ml_dsa = 5;
+  uint64 published_at_ms = 6;    // record publish timestamp
+}
+// ── Moderation Proof (DHT, on-demand) ─────────────────────────────────
+
+message ModerationProofRecord {
+  bytes channel_id = 1;
+  bytes jury_id = 2;
+  bytes report_id = 3;
+  uint32 consequence = 4;
+  uint32 epoch_day = 5;
+  uint32 jury_round = 6;
+  repeated JurorVerdictSig juror_sigs = 7;
+  bytes eligibility_snapshot_hash = 8;
+}
+message CsamReporterQuorumProof {
+  bytes channel_id = 1;
+  repeated CsamReportSig reporter_sigs = 2;
+}
+message CsamReportSig {
+  bytes reporter_user_id = 1;
+  bytes sig_ed25519 = 2;
+  bytes sig_ml_dsa = 3;
+  bytes report_id = 4;
+  uint64 reported_at_ms = 5;
+}
+// ── DHT Channel Index ─────────────────────────────────────────────────
+
+message ChannelIndexEntryProto {
+  bytes channel_id = 1;
+  string name = 2;
+  string language = 3;
+  bool is_adult = 4;
+  string description = 5;
+  uint32 subscriber_count = 6;
+  uint32 bad_badge_level = 7;
+  uint64 bad_badge_since_ms = 8;
+  bool correction_submitted = 9;
+  bytes owner_node_id = 10;
+  uint64 created_at_ms = 11;
+  bytes owner_signature = 12;     // proves ownership
+  bytes moderation_proof_hash = 13; // SHA-256 of ModerationProofRecord (on-demand DHT fetch)
+}
+message ReadReceipt {
+  bytes message_id = 1;
+  uint64 read_at = 2;
+}
+// ── Typing Indicator ───────────────────────────────────────────────────
+
+message TypingIndicator {
+  string conversation_id = 1;
+  bool is_typing = 2;
+}
+// ── Message Edit/Delete ────────────────────────────────────────────────
+
+message MessageEdit {
+  bytes original_message_id = 1;
+  string new_text = 2;
+  uint64 edit_timestamp = 3;
+}
+message MessageDelete {
+  bytes message_id = 1;
+  uint64 deleted_at = 2;
+}
+// ── Emoji Reaction ─────────────────────────────────────────────────────
+
+message EmojiReaction {
+  bytes message_id = 1;
+  string emoji = 2;
+  bool remove = 3;
+}
+// ── App-Level Chunking for Relay/S&F (V3.1.9) ───────────────────────
+
+message MediaChunk {
+  bytes transfer_id = 1;          // 16-Byte UUID, identifies the chunked transfer
+  uint32 chunk_index = 2;         // 0-based chunk index
+  uint32 total_chunks = 3;        // Total number of chunks
+  bytes chunk_data = 4;           // Chunk payload (piece of the original serialized envelope)
+  bytes original_recipient_id = 5; // Final recipient (32 bytes) for routing
+}
+// ── Two-Stage Media Stage-2 (V3) ────────────────────────────────────
+//
+// MEDIA_ANNOUNCE (Stage 1) carries metadata + thumbnail. The receiver
+// then asks for the actual content via MTV3_MEDIA_REQUEST (payload =
+// original messageId bytes). The sender splits the file into
+// MediaChunkV3 frames, each shipped as its own ApplicationFrameV3
+// (per-chunk KEM-encrypted via sendToUser), and finalises with a
+// MediaCompleteV3 carrying the SHA-256 of the assembled bytes for
+// receiver-side integrity-check. Architecture §5.7 + §1797.
+message MediaChunkV3 {
+  bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
+  uint32 chunk_index = 2;         // 0-based chunk index
+  uint32 total_chunks = 3;        // Total number of chunks
+  bytes data         = 4;         // Chunk payload (≤32 KB after compression)
+}
+message MediaCompleteV3 {
+  bytes media_id     = 1;         // 16-byte messageId of the original MEDIA_ANNOUNCE
+  bytes content_hash = 2;         // SHA-256 of the fully reassembled file
+  uint64 total_size  = 3;         // Total file size in bytes (sanity-check)
+}
+// ── Overlay Multicast Tree (Phase 3d) ─────────────────────────────────
+
+message CallRttPing {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  int64 timestamp_us = 2;        // Sender's microsecond timestamp
+}
+message CallRttPong {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  int64 echo_timestamp_us = 2;   // Echoed from ping (for RTT calculation)
+  int64 responder_timestamp_us = 3; // Responder's own timestamp
+}
+message OverlayTreeNode {
+  bytes node_id = 1;              // Participant Node-ID (32 bytes)
+  bytes parent_node_id = 2;       // Parent Node-ID (empty = root)
+  repeated bytes child_node_ids = 3; // Children Node-IDs
+  bool is_lan_cluster_head = 4;   // Represents a LAN multicast cluster
+  repeated bytes lan_member_ids = 5; // Other LAN cluster members (receive via multicast)
+}
+message CallTreeUpdate {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  repeated OverlayTreeNode nodes = 2; // Full tree topology
+  bytes initiator_node_id = 3;    // Tree root (call initiator)
+  uint32 version = 4;             // Monotonic version (for conflict resolution)
+}
+// ── Video Calls (Phase 3b) ────────────────────────────────────────────
+
+// Video frame flags (bitmask in flags field):
+//   0x01 = keyframe
+//   0x02 = last fragment of this frame
+//   0x04 = frame is a fragment (not complete)
+message VideoFrame {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  uint32 sequence_number = 2;     // Monotonic per-stream sequence
+  uint32 flags = 3;               // Bitmask: keyframe(0x01), last_fragment(0x02), is_fragment(0x04)
+  uint32 fragment_index = 4;      // Fragment index within a frame (0 if not fragmented)
+  uint32 fragment_total = 5;      // Total fragments for this frame (1 if not fragmented)
+  uint32 width = 6;               // Frame width in pixels
+  uint32 height = 7;              // Frame height in pixels
+  bytes nonce = 8;                // 12-Byte AES-256-GCM nonce
+  bytes encrypted_data = 9;       // VP8 encoded + AES-256-GCM encrypted frame data + 16B tag
+  uint32 timestamp_ms = 10;       // Capture timestamp (for sync + jitter)
+}
+message KeyframeRequest {
+  bytes call_id = 1;              // 16-Byte Call-ID
+}
+// ── Own-video state (§10.6, Spec-Erratum E2) ──────────────────────────
+//
+// Why a sender is currently not sending video. Meaningful ONLY while
+// CallMediaState.sending_video == false.
+//
+// Invariante I12 — this is a statement about the SENDER'S OWN transmission.
+// It is not an instruction to the peer and grants no control over the peer's
+// camera. No value here may ever mean "switch your video off"; a message with
+// that meaning does not exist in this protocol and must not be added.
+//
+// OPEN enumeration. The extension rule is binding for every future change:
+//   * a new reason gets a NEW number. Existing numbers are never reused,
+//     never renumbered, never redefined.
+//   * a receiver that does not recognise a value MUST fall back to
+//     VIDEO_OFF_REASON_UNSPECIFIED — "no picture, and this build does not
+//     know why" — and MUST NOT map it onto a reason it does know. Folding an
+//     unknown reason into USER_DISABLED would state the peer's intent as a
+//     fact without evidence, which is the exact confusion E2 exists to
+//     remove.
+// proto3 open-enum decoding already yields that fallback: an unrecognised
+// value is kept in the unknown fields and the getter returns 0.
+enum VideoOffReason {
+  // No reason given, or a reason this build does not know (see rule above).
+  VIDEO_OFF_REASON_UNSPECIFIED            = 0;
+  // The sender switched their own video off. A deliberate act, not a fault.
+  VIDEO_OFF_REASON_USER_DISABLED          = 1;
+  // The sender cannot send: no supported encoder step produces frames that
+  // fit under the current per-frame ceiling. This is the wire form of
+  // CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE (cleona_video.h, Spec-Erratum E1),
+  // surfaced by the rate control of V1.17. The receiver shows an explanatory
+  // text — never the same state as USER_DISABLED, and never a black picture
+  // with no explanation.
+  VIDEO_OFF_REASON_BANDWIDTH_INSUFFICIENT = 2;
+}
+// The sender's own media state inside a call (§10.6). Sent whenever the
+// sender's own video starts or stops, and never on the peer's behalf (I12).
+message CallMediaState {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  // "I am sending video." False means the peer should render the state in
+  // video_off_reason instead of the last received frame — the frozen picture
+  // is what this message exists to prevent.
+  bool sending_video = 2;
+  // Only meaningful while sending_video == false. Senders set
+  // VIDEO_OFF_REASON_UNSPECIFIED while sending_video == true, and receivers
+  // ignore the field in that case.
+  VideoOffReason video_off_reason = 3;
+  // Monotonic per (call_id, sender), starting at 1. The state travels over an
+  // unordered datagram network, so a reordered older frame would otherwise
+  // reinstate a stale "video off" while frames are arriving — precisely the
+  // wrong picture. Receivers accept strictly greater values only. Same role
+  // as GroupCallKeyRotate.key_version and CallTreeUpdate.version.
+  uint64 state_seq = 4;
+}
+// ── Group Calls (Phase 3c) ───────────────────────────────────────────
+
+message GroupCallAudio {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — original audio source
+  uint32 sequence_number = 3;     // Per-sender monotonic sequence
+  bytes encrypted_audio = 4;      // AES-256-GCM encrypted PCM (keyed by group_call_key)
+}
+message GroupCallLeave {
+  bytes call_id = 1;              // 16-Byte Call-ID
+}
+// S368: `message GroupCallKeyRotate` has been removed. It carried the rotating
+// SHARED group key that §10.2.1 replaced with per-sender keys;
+// its receive handler has since been a no-op that only
+// existed so that an older counterpart may send the type.
+message GroupCallVideo {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — original video source
+  bytes video_frame_data = 3;     // Serialized VideoFrame proto (encrypted VP8)
+}
+// Per-sender media key announcement (Architecture §10.2.1). Each participant
+// generates a secret 256-bit send_key known only to itself and announces it,
+// dual-signed + KEM-encrypted (setup-class ApplicationFrame), to every other
+// participant. Receivers map sender_node_id -> send_key and decrypt that
+// sender's media frames with it. Because send_key is secret to its owner, a
+// relaying co-participant cannot forge frames as another sender. Replaces the
+// shared group_call_key media role (CallInvite.group_call_key, deprecated for
+// group media). key_version bumps on rotation (membership change / rejoin).
+message GroupCallSenderKey {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — owner of this send_key
+  bytes send_key = 3;             // 32-Byte AES-256 secret, sender-owned
+  uint32 key_version = 4;         // Monotonic per-sender version for rotation
+
+  // == LEVEL-D MATERIAL PER PAIR (17.3/17.4, owner decision E-1 = B) ==
+  //
+  // WHY ON THIS MESSAGE AND NOT ON ONE OF ITS OWN. 10.2.1 forces
+  // EVERY pair of a group call to an exchange anyway: every
+  // participant must know the `send_key` of every other, otherwise he cannot
+  // decrypt their frames. This message thus already flies
+  // over exactly the set of pairs for which decision E-1 = B requires a pairwise
+  // level-D key. Attaching four fields costs NO
+  // additional cell; a message of its own would have doubled the number of
+  // setup cells of a group call (work rule 5) -- with
+  // six participants that is 15 pairs.
+  //
+  // WHY PAIRWISE AT ALL AND NOT A SHARED KEY.
+  // 17.7: "every relay in the crystal **is** a participant". A
+  // shared hop key would thus let every participant on every hop
+  // forge as every other. 17.5 already says it for the content: "a
+  // shared group key cannot provide sender authenticity (any holder could
+  // forge as any other)". The same applies to the HOP, and 17.4 hangs the
+  // entire admission of the D socket on exactly this key: "the D
+  // socket responds **exclusively** to packets with a valid AEAD under
+  // `call_key` plus a session cookie".
+  //
+  // TWO SEPARATE AEADs, AND THEY STAY SEPARATE. The CONTENT of a
+  // media frame lies under the `send_key` (field 3, 10.2.1) -- per
+  // SENDER, and it survives every forwarding step. The D FRAME
+  // around it lies under the pairwise key from these fields -- per
+  // HOP, and it ends at every relay. Whoever merges the two takes
+  // either the sender authenticity away from the content or the
+  // admission check away from the hop. The counterpart of this comment stands at
+  // `_openParticipantMediaPath` in the group call management.
+
+  // The ephemeral X25519 share of the sender for THIS call. One per
+  // call and device, not one per pair: every pair nevertheless gets its own
+  // DH result, because the counter-share differs per pair.
+  // The same value as `CallAnswer.callee_eph_x25519_pk` (17.2) -- it is
+  // at the same time the binding mark of the multi-device arbitration.
+  bytes d_eph_x25519_pk = 5;
+
+  // ML-KEM-768 ciphertext, encapsulated to the STATIC ML-KEM key of the
+  // recipient (`ContactInfo.mlKemPk`), exactly as in the 1:1 path
+  // (`CallInvite.caller_kem_ciphertext`). The static share is the
+  // reason why a third party cannot form the pair key -- not even
+  // the initiator, through whose hands the round below runs:
+  // only the recipient can decapsulate.
+  bytes d_kem_ciphertext = 6;
+
+  // The session cookie (17.4, 8 B) that the SENDER expects for this pair.
+  // ONE OF ITS OWN PER PAIR: the D socket keeps its
+  // session table by the local cookie and throws on reuse
+  // ("is already admitted"). A call with one cookie for all would have
+  // exactly one session, and the demux would assign the frames of all participants
+  // to the same counterpart.
+  bytes d_cookie = 7;
+
+  // The packed address candidates of the sender (17.3), the same format
+  // as `CallInvite.caller_candidates`.
+  bytes d_candidates = 8;
+
+  // == THE ROUND THAT THE SENDER KNOWS AS JOINED ==============
+  //
+  // Only the INITIATOR fills the field; for all others it is empty.
+  //
+  // WHAT FOR. Measured on 06.09.2026 at state 11c1756b: a participant who is
+  // not the initiator NEVER learns that another non-initiator
+  // has joined. The INVITE reception sets all members except the
+  // sender to `invited`; the ANSWER reaches exclusively the
+  // initiator; and the forwarding tree does carry the round, but arrives
+  // nowhere, because its carrier hard-returns `noCarrier`.
+  // Thus the set of those joined stayed at every non-initiator
+  // forever {me, initiator} -- and 10.2.1 itself breaks on that: in a
+  // probe with three participants the second did not have the `send_key` of the third
+  // and could not decrypt their frames at all. Without the
+  // round there is neither the sender key meshing nor the
+  // pair keys of this decision.
+  //
+  // WHY HERE AND NOT IN THE TREE UPDATE. Because this message arrives and
+  // that one does not. The forwarding tree is moreover a statement about
+  // the MEDIA FORM (17.7) and changes with every speaker or
+  // presentation change; the round is a statement about the
+  // MEMBERSHIP and changes only on joining and leaving.
+  //
+  // TRUST. The list is a third-party statement of the initiator -- he is
+  // the arbiter anyway per 17.2 and the root per 17.7. It
+  // carries no authorisation: a wrongly named participant
+  // merely gets an address that ends in no pair key,
+  // because he cannot deliver the counter-material. The OPPOSITE direction
+  // -- "I have joined" -- does not stand here at all: it is the
+  // self-statement that EVERY authenticated cell of this kind makes anyway,
+  // and the receive path already checks it against the outer identifier.
+  repeated bytes joined_participants = 9;
+}
+// ── In-Call Collaboration (§10.5) ───────────────────────────────────
+
+// Whiteboard stroke data — real-time streaming via Overlay Multicast Tree.
+// MTV3_WHITEBOARD_STROKE = 210
+message WhiteboardStroke {
+  bytes stroke_id = 1;              // 16-Byte unique stroke identifier
+  bytes author_id = 2;              // 32 bytes — stroke author's user-id
+  string author_name = 3;           // Display name of author
+  int32 tool = 4;                   // WhiteboardTool enum: 0=PEN,1=HIGHLIGHTER,2=ERASER,3=TEXT,4=SHAPE,5=LASER
+  int32 color = 5;                  // ARGB color value
+  float stroke_width = 6;           // Stroke width in logical pixels
+  repeated float points = 7;        // x,y pairs flattened [x0,y0,x1,y1,...]
+  string text = 8;                  // TEXT tool only: text content
+  int32 shape_type = 9;             // SHAPE tool only: 0=RECTANGLE,1=CIRCLE,2=LINE,3=ARROW
+  int64 timestamp = 10;             // Unix millis
+  int32 action_type = 11;           // 0=STROKE_DATA,1=BEGIN,2=POINTS,3=END,4=CLEAR_ALL,5=UNDO,6=REDO
+  int32 page_index = 12;            // Target page index
+}
+// Whiteboard page management — add/switch pages, snapshot for late joiners.
+// MTV3_WHITEBOARD_PAGE = 211
+message WhiteboardPage {
+  int32 action = 1;                 // 0=ADD_PAGE,1=SWITCH_PAGE,2=SNAPSHOT_REQUEST,3=SNAPSHOT_RESPONSE
+  int32 page_index = 2;             // Target page index
+  int32 total_pages = 3;            // Total number of pages
+  repeated WhiteboardStroke strokes = 4;  // Full snapshot of strokes (SNAPSHOT_RESPONSE only)
+  bytes requester_id = 5;           // Who requested the snapshot (SNAPSHOT_REQUEST only)
+}
+// File sharing within a call — metadata announcement via Overlay Multicast Tree.
+// MTV3_FILE_EXCHANGE = 212
+message CallFileShare {
+  bytes file_id = 1;                // 16-Byte unique file identifier
+  string file_name = 2;             // Original filename
+  int64 file_size = 3;              // File size in bytes (max 50 MB)
+  string mime_type = 4;             // MIME type
+  bytes thumbnail_data = 5;         // Optional JPEG thumbnail (<64 KB)
+  bytes shared_by = 6;              // 32 bytes — sharer's user-id
+  string shared_by_name = 7;        // Sharer's display name
+  int32 action = 8;                 // 0=ANNOUNCE,1=REQUEST_DOWNLOAD,2=DOWNLOAD_READY
+}
+// Clipboard exchange within a call.
+// MTV3_CLIPBOARD_EXCHANGE = 213
+message CallClipboardExchange {
+  bytes sender_id = 1;              // 32 bytes — sender's user-id
+  string sender_name = 2;           // Sender's display name
+  string text_content = 3;          // Text clipboard content (if text)
+  bytes image_data = 4;             // Image clipboard content (if image, JPEG/PNG)
+  string content_type = 5;          // "text" or "image"
+  int64 timestamp = 6;              // Unix millis
+}
+// Screen share control — start/stop/quality negotiation.
+// MTV3_SCREEN_SHARE_FRAME = 214
+message ScreenShareControl {
+  bool is_sharing = 1;              // true=start, false=stop
+  int32 width = 2;                  // Capture width
+  int32 height = 3;                 // Capture height
+  int32 fps = 4;                    // Target FPS
+  bool optimize_for_text = 5;       // Crisp text mode (2 FPS)
+  bytes sharer_id = 6;              // 32 bytes — who is sharing
+}
+// Ephemeral in-call chat message — NOT persisted after call ends.
+// MTV3_CALL_CHAT = 215
+message CallChatMessage {
+  bytes message_id = 1;             // 16-Byte unique message identifier
+  bytes sender_id = 2;              // 32 bytes — sender's user-id
+  string sender_name = 3;           // Sender's display name
+  string text = 4;                  // Message text
+  int64 timestamp = 5;              // Unix millis
+  bytes reply_to_id = 6;            // Optional: message_id of replied-to message
+}
+// ── Voice Transcription (Source-Side) ────────────────────────────────
+
+message VoicePayload {
+  bytes audio_data = 1;             // Audio-Bytes (Opus/OGG/AAC)
+  string transcript_text = 2;      // transcript (empty = no transcript present)
+  string transcript_language = 3;  // Detected language ("de", "en", ...)
+  float transcript_confidence = 4; // Confidence 0.0-1.0
+}
+// ── Multi-Device (§26) ──────────────────────────────────────────────
+
+enum TwinSyncType {
+  CONTACT_ADDED = 0;
+  CONTACT_DELETED = 1;
+  MESSAGE_SENT = 2;
+  MESSAGE_EDITED = 3;
+  MESSAGE_DELETED = 4;
+  TWIN_READ_RECEIPT = 5;
+  GROUP_CREATED = 6;
+  PROFILE_CHANGED = 7;
+  SETTINGS_CHANGED = 8;
+  DEVICE_ANNOUNCE = 9;
+  DEVICE_RENAMED = 10;
+  TWIN_DEVICE_REVOKED = 11;
+  ROTATION_APPROVAL_REQUEST = 12;   // §7.5: Primary → Linked: countersign this rotation
+  ROTATION_APPROVAL_RESPONSE = 13;  // §7.5: Linked → Primary: Device-Sig countersig token
+  // 14/15/16 are RESERVED and are deliberately NOT used here: v4_1
+  // §14.7 lists the 17 twin types canonically and assigns exactly these
+  // three numbers to INVITE_LIST (14), PREKEY_CONSUMED (15) and
+  // DEVICE_SET_CHANGED (16). They are not built in `lib/` yet. Whoever
+  // uses them here for something else makes the numbering of the
+  // architecture document and that of the wire permanently different.
+  reserved 14, 15, 16;
+
+  // §21.5.2 / package E-9: the identity was deleted — the message to
+  // the OWN devices. `broadcastIdentityDeleted` reached until here
+  // only `_contacts`, never `_devices`; a second device kept contacts,
+  // keys and history indefinitely. The payload is
+  // `IdentityDeletedNotification` — the same message that the contacts
+  // get, so that there is only ONE.
+  //
+  // WIRE EXTENSION, not a changed value: 17 was never assigned. A
+  // device with an older state does not know it — what it then does is
+  // measured and documented in `_handleTwinSyncV3`.
+  TWIN_IDENTITY_DELETED = 17;
+}
+enum DevicePlatform {
+  PLATFORM_UNKNOWN = 0;
+  PLATFORM_ANDROID = 1;
+  PLATFORM_IOS = 2;
+  PLATFORM_LINUX = 3;
+  PLATFORM_WINDOWS = 4;
+  PLATFORM_MACOS = 5;
+}
+message TwinSyncEnvelope {
+  bytes sync_id = 1;               // UUID (16 bytes), for deduplication
+  bytes device_id = 2;             // UUID (16 bytes), originating device
+  uint64 timestamp = 3;            // Unix milliseconds
+  TwinSyncType sync_type = 4;
+  bytes payload = 5;               // Type-specific protobuf
+}
+message DeviceRecord {
+  bytes device_id = 1;             // UUID (16 bytes), generated once on first launch
+  string device_name = 2;          // OS hostname by default, user-editable
+  DevicePlatform platform = 3;
+  uint64 first_seen = 4;           // Unix milliseconds
+  uint64 last_seen = 5;            // Unix milliseconds, updated on each TWIN_SYNC
+  repeated PeerAddressProto addresses = 6; // Current network addresses of this device
+  bool is_this_device = 7;         // True if this is the local device
+  bytes device_node_id = 8;        // §26 Phase 4: routing-level ID for this device (for DEVICE_REVOKED)
+}
+message KeyRotationBroadcast {
+  bytes new_ed25519_pk = 1;        // 32 bytes — new public key
+  bytes new_ml_dsa_pk = 2;         // ML-DSA-65 public key
+  bytes new_x25519_pk = 3;         // 32 bytes — new X25519 public key
+  bytes new_ml_kem_pk = 4;         // ML-KEM-768 public key
+  bytes old_signature_ed25519 = 5; // Signature with OLD key (proves ownership)
+  bytes new_signature_ed25519 = 6; // Signature with NEW key (proves new identity)
+  // §7.5 Device Co-Authorization: Device-Sig countersigs from authorized devices
+  repeated RotationApprovalToken approval_tokens = 7;
+  uint32 pre_rotation_device_count = 8;
+}
+// ── Calendar (§23) ─────────────────────────────────────────────────────
+
+enum EventCategory {
+  APPOINTMENT = 0;
+  TASK = 1;
+  BIRTHDAY = 2;
+  REMINDER = 3;
+  MEETING = 4;
+}
+enum FreeBusyLevel {
+  FB_FULL = 0;          // Title, description, location, time visible
+  FB_TIME_ONLY = 1;     // Only "busy from X to Y" visible (no content)
+  FB_HIDDEN = 2;        // Not visible in Free/Busy queries at all
+}
+enum RsvpStatus {
+  RSVP_ACCEPTED = 0;
+  RSVP_DECLINED = 1;
+  RSVP_TENTATIVE = 2;
+  RSVP_PROPOSE_NEW_TIME = 3;
+}
+message CalendarReminderOffset {
+  int32 minutes_before = 1;       // 5, 15, 60, 1440 (=1 day), etc.
+}
+message CalendarInviteMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  string title = 2;
+  string description = 3;
+  string location = 4;
+  int64 start_time = 5;            // Unix milliseconds
+  int64 end_time = 6;              // Unix milliseconds
+  bool all_day = 7;
+  string time_zone = 8;            // IANA timezone, e.g. "Europe/Berlin"
+  string recurrence_rule = 9;      // RFC 5545 RRULE (optional)
+  bool has_call = 10;
+  bytes group_id = 11;             // Linked group (for group events)
+  bytes created_by = 12;           // Inviter's node ID
+  string created_by_name = 13;     // Inviter's display name
+  int64 rsvp_deadline = 14;        // Optional deadline (Unix ms, 0 = no deadline)
+  EventCategory category = 15;
+  repeated CalendarReminderOffset reminders = 16;
+  repeated bytes attendee_node_ids = 17;  // Individual invitees (node IDs, 32 bytes each)
+}
+message CalendarRsvpMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  RsvpStatus response = 2;
+  int64 proposed_start = 3;        // Only for PROPOSE_NEW_TIME
+  int64 proposed_end = 4;          // Only for PROPOSE_NEW_TIME
+  string comment = 5;              // Optional comment
+}
+message CalendarUpdateMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  string title = 2;
+  string description = 3;
+  string location = 4;
+  int64 start_time = 5;
+  int64 end_time = 6;
+  bool all_day = 7;
+  string time_zone = 8;
+  string recurrence_rule = 9;
+  bool has_call = 10;
+  bool cancelled = 11;             // true = event cancelled
+  int64 updated_at = 12;           // Unix milliseconds
+  repeated CalendarReminderOffset reminders = 13;
+}
+message CalendarDeleteMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  int64 deleted_at = 2;            // Unix milliseconds
+}
+message FreeBusyRequestMsg {
+  int64 query_start = 1;           // Unix ms, start of the query window
+  int64 query_end = 2;             // Unix ms, end of the query window
+  bytes request_id = 3;            // UUID (16 bytes) for response correlation
+}
+message FreeBusyResponseMsg {
+  bytes request_id = 1;            // UUID (16 bytes), correlates to request
+  repeated FreeBusyBlock blocks = 2;
+}
+message FreeBusyBlock {
+  int64 start = 1;                 // Unix ms
+  int64 end = 2;                   // Unix ms
+  FreeBusyLevel level = 3;         // FULL or TIME_ONLY (HIDDEN events omitted entirely)
+  string title = 4;                // Only present if level == FULL
+  string location = 5;             // Only present if level == FULL
+}
+// ── Polls & Voting (§24) ───────────────────────────────────────────────
+
+enum PollType {
+  POLL_SINGLE_CHOICE = 0;    // Exactly one option
+  POLL_MULTIPLE_CHOICE = 1;  // Several options
+  POLL_DATE = 2;             // Doodle-style Yes/No/Maybe per slot
+  POLL_SCALE = 3;            // Rating 1..N
+  POLL_FREE_TEXT = 4;        // Open text response
+}
+enum PollAction {
+  POLL_ACTION_CLOSE = 0;
+  POLL_ACTION_REOPEN = 1;
+  POLL_ACTION_ADD_OPTIONS = 2;
+  POLL_ACTION_REMOVE_OPTIONS = 3;
+  POLL_ACTION_EXTEND_DEADLINE = 4;
+  POLL_ACTION_DELETE = 5;
+}
+enum DateAvailability {
+  DATE_AVAIL_YES = 0;
+  DATE_AVAIL_NO = 1;
+  DATE_AVAIL_MAYBE = 2;
+}
+message PollOptionMsg {
+  int32 option_id = 1;             // Sequential (0, 1, 2, ...)
+  string label = 2;
+  int64 date_start = 3;            // For POLL_DATE: slot start (Unix ms, 0 = unused)
+  int64 date_end = 4;              // For POLL_DATE: slot end (Unix ms, 0 = unused)
+}
+message PollSettingsMsg {
+  bool anonymous = 1;              // Ring-signed anonymous voting (§24.4)
+  int64 deadline = 2;              // Auto-close time (Unix ms, 0 = none)
+  bool allow_vote_change = 3;      // Default: true
+  bool show_results_before_close = 4; // Default: true
+  int32 max_choices = 5;           // For MULTIPLE_CHOICE (0 = unlimited)
+  int32 scale_min = 6;             // For SCALE (default 1)
+  int32 scale_max = 7;             // For SCALE (default 5)
+  bool only_members_can_vote = 8;  // Channels: members only, not subscribers
+}
+message PollCreateMsg {
+  bytes poll_id = 1;               // UUID (16 bytes)
+  string question = 2;
+  string description = 3;
+  PollType poll_type = 4;
+  repeated PollOptionMsg options = 5;
+  PollSettingsMsg settings = 6;
+  bytes group_id = 7;              // Group or channel this poll belongs to
+  bytes created_by = 8;            // Creator's node ID
+  string created_by_name = 9;
+  int64 created_at = 10;           // Unix ms
+}
+message DateResponseMsg {
+  int32 option_id = 1;
+  DateAvailability availability = 2;
+}
+message PollVoteMsg {
+  bytes poll_id = 1;
+  bytes voter_id = 2;              // Voter's node ID (non-anonymous)
+  string voter_name = 3;
+  repeated int32 selected_options = 4; // SINGLE/MULTIPLE_CHOICE option IDs
+  repeated DateResponseMsg date_responses = 5; // DATE poll
+  int32 scale_value = 6;           // SCALE poll
+  string free_text = 7;            // FREE_TEXT poll
+  int64 voted_at = 8;
+}
+message PollUpdateMsg {
+  bytes poll_id = 1;
+  PollAction action = 2;
+  bytes updated_by = 3;            // Must be creator or admin
+  repeated PollOptionMsg added_options = 4;    // POLL_ACTION_ADD_OPTIONS
+  repeated int32 removed_options = 5;          // POLL_ACTION_REMOVE_OPTIONS
+  int64 new_deadline = 6;          // POLL_ACTION_EXTEND_DEADLINE
+  int64 updated_at = 7;
+}
+message OptionCountMsg {
+  int32 option_id = 1;
+  int32 count = 2;                 // SINGLE/MULTIPLE/DATE: vote count per option
+  int32 yes_count = 3;             // DATE poll only
+  int32 maybe_count = 4;           // DATE poll only
+  int32 no_count = 5;              // DATE poll only
+}
+message PollSnapshotMsg {
+  bytes poll_id = 1;
+  int32 total_votes = 2;
+  repeated OptionCountMsg option_counts = 3;
+  double scale_average = 4;        // SCALE poll only
+  int32 scale_count = 5;           // SCALE poll: number of voters
+  bool closed = 6;
+  int64 snapshot_at = 7;
+}
+// Anonymous vote (§24.4): ring signature over all group member keys.
+// Contains no voter_id/voter_name — identity is hidden by the ring, while
+// key_image prevents double-voting.
+message PollVoteAnonymousMsg {
+  bytes poll_id = 1;
+  bytes encrypted_choice = 2;      // Serialised PollVoteMsg with voter_id cleared
+  bytes key_image = 3;             // 32 bytes — linkability tag
+  bytes ring_signature = 4;        // Concatenated (c_i || r_i) pairs, 64B each
+  repeated bytes ring_members = 5; // The N public keys used (Ed25519, 32B each)
+  int64 voted_at = 6;
+}
+// Anonymous vote-revocation: owner proves ownership of a key image by
+// re-signing a fixed "revoke" marker with the same ring.
+message PollVoteRevokeMsg {
+  bytes poll_id = 1;
+  bytes key_image = 2;
+  bytes ring_signature = 3;
+  repeated bytes ring_members = 4;
+  int64 revoked_at = 5;
+}
+// ── Anonymous Vote Re-Broadcaster (§11.4.8) ──────────────────────────
+//
+// Voter bundles pre-encrypted per-recipient KEM blobs and sends them to
+// a random DHT peer R via InfrastructureFrame. R re-originates each entry
+// as a fresh APPLICATION_FRAME under its own device identity.
+message PollAnonSubmitEntry {
+  bytes  recipient_user_id    = 1;  // 32 bytes — who to deliver to
+  bytes  kem_blob             = 2;  // pre-encrypted PerMessageKemV3 (inner = de-attributed ApplicationFrame)
+  repeated bytes device_ids   = 3;  // cached recipient device IDs for routing
+}
+message PollAnonSubmitMsg {
+  bytes                        poll_id  = 1;
+  repeated PollAnonSubmitEntry entries  = 2;
+  uint64                       pow_nonce = 3;  // PoW over serialized bundle
+}
+message PollAnonSubmitAckMsg {
+  bytes  poll_id       = 1;
+  bool   accepted      = 2;
+  string reject_reason = 3;
+}
+// ── Linked-Device Delegation (§7.1 LD-1) ───────────────────────────────
+//
+// A DeviceDelegationCert authorizes a Linked Device to act for the user
+// identity with bounded capabilities. The cert is signed by the User-Key
+// (hybrid Ed25519 + ML-DSA) and carried inside the AuthManifest so
+// receivers can verify delegated Inner-Frame signatures.
+//
+// Security model: the Linked Device holds a per-device delegated Sig-Key
+// (derived via HKDF from the master seed, deterministic per device_id) +
+// the User-KEM-SK for message decryption. It does NOT hold the master
+// seed, the User-Sig-SK, or the ability to rotate/revoke.
+message DeviceDelegationCertProto {
+  bytes  device_id              = 1;  // 32 bytes — the delegated device
+  bytes  delegated_ed25519_pk   = 2;  // 32 bytes — per-device sig subkey
+  bytes  delegated_ml_dsa_pk    = 3;  // 1952 bytes — per-device PQ sig subkey
+  uint32 capabilities           = 4;  // bitmask (DeviceDelegationCapability)
+  uint64 issued_at_ms           = 5;  // when Primary issued this cert
+  uint64 max_valid_until_ms     = 6;  // dead-man-switch expiry (0 = no expiry)
+  bytes  user_ed25519_sig       = 7;  // User-Key sig over fields 1-6
+  bytes  user_ml_dsa_sig        = 8;  // User-Key PQ sig over fields 1-6
+}
+// Capabilities bitmask for DeviceDelegationCert. Primary-only ops (rotate,
+// revoke, pair, sign-manifest) are NOT representable — they require the
+// master seed which linked devices never hold.
+enum DeviceDelegationCapability {
+  DDC_UNSPECIFIED       = 0;
+  DDC_SEND_MESSAGES     = 1;  // sign ApplicationFrames with delegated key
+  DDC_MANAGE_CONTACTS   = 2;  // accept/reject contact requests
+  DDC_MANAGE_GROUPS     = 4;  // create groups, admin ops
+  DDC_MANAGE_CHANNELS   = 8;  // channel admin ops
+  DDC_ALL_STANDARD      = 15; // all non-primary capabilities
+}
+// ── Payload type TEXT (new): explicit TextMessage instead of raw bytes ──────
+//
+// V2 packed text as raw UTF-8 into encrypted_payload. V3 wraps every
+// payload type into a proto message of its own — gives us version fields per
+// type and a clear schema for future extensions (formatHint etc.).
+message TextMessageV3 {
+  string text         = 1;
+  string format_hint  = 2;   // "plain" | "markdown" — V3.0 only "plain"
+
+  // Reply / Quote (V3 reply schema). Empty when this is not a reply.
+  // - reply_to_message_id: 16-byte messageId of the quoted bubble. Receivers
+  //   can resolve it locally (it lives in the same conversation) to render
+  //   the inline-quote header. UI falls back to reply_to_snippet if the
+  //   referenced message is not retained locally.
+  // - reply_to_snippet:    short text excerpt sender renders at compose-time.
+  //   Bounded to ~120 chars by sender-side trimming.
+  bytes  reply_to_message_id = 3;
+  string reply_to_snippet    = 4;
+
+  // Sender-side link preview (Architecture §2.3.4). Sender fetches the
+  // preview (HTTPS-only, SSRF-guarded) and embeds the result so the
+  // receiver renders it WITHOUT performing any network request — the
+  // receiver-MUST-NOT-fetch invariant is what makes link previews
+  // privacy-safe. Empty when the message has no URL or fetch failed.
+  LinkPreview link_preview   = 5;
+}
+// ── Linked-Device Pairing (§7.1 LD-2) ──────────────────────────────────
+//
+// New pairing flow: the Primary does NOT transfer the master seed. Instead
+// it issues a DeviceDelegationCert + per-device sig keys + User-KEM-SK.
+// The entire payload is KEM-encrypted under the new device's ephemeral
+// X25519+ML-KEM PK from the signedPairToken.
+
+// New device → Primary: "I want to pair, here are my device keys"
+message DevicePairRequestV3 {
+  bytes   device_ed25519_pk     = 1;  // 32B — new device's Device-Sig PK
+  bytes   device_ml_dsa_pk      = 2;  // 1952B — new device's Device-Sig PQ PK
+  bytes   pair_token_signature  = 3;  // proves possession of the pairToken
+  uint64  timestamp_ms          = 4;
+}
+// Primary → New device: delegation material (KEM-encrypted end-to-end)
+message DevicePairApproveV3 {
+  // Delegated Sig keys (per-device, derived from seed via HKDF)
+  bytes  delegated_ed25519_pk   = 1;  // 32B
+  bytes  delegated_ed25519_sk   = 2;  // 64B (Ed25519 expanded secret)
+  bytes  delegated_ml_dsa_pk    = 3;  // 1952B
+  bytes  delegated_ml_dsa_sk    = 4;  // 4032B
+
+  // User-KEM secret keys (for decrypting incoming Per-Message-KEM)
+  bytes  user_x25519_sk         = 5;  // 32B
+  bytes  user_ml_kem_sk         = 6;  // 2400B
+
+  // The signed delegation certificate (to be embedded in AuthManifest)
+  DeviceDelegationCertProto delegation_cert = 7;
+
+  // Identity metadata for the linked device to display
+  bytes  user_id                = 8;  // 32B
+  string display_name           = 9;
+  bytes  profile_picture        = 10; // optional
+}
+// ── §7.5 Device Co-Authorization (Rotation Quorum) ────────────────────
+
+// Device-Sig pubkeys embedded in AuthManifest for all authorized devices.
+// Enables contacts to verify Device-Sig countersigs on rotation broadcasts.
+// Device-Sig keys are locally generated (NOT seed-derived) — a seed thief
+// cannot forge them.
+message AuthorizedDeviceSigningKeys {
+  bytes device_node_id    = 1;  // SHA-256(network_secret || ed25519_device_pk)
+  bytes device_ed25519_pk = 2;  // 32B — Device-Sig Ed25519 pubkey
+  bytes device_ml_dsa_pk  = 3;  // 1952B — Device-Sig ML-DSA-65 pubkey
+  bool  is_primary        = 4;  // true = seed-holder device
+}
+// A single device's countersig on an emergency key rotation.
+message RotationApprovalToken {
+  bytes  device_node_id     = 1;  // countersigning device
+  bytes  rotation_hash      = 2;  // SHA-256(new_ed25519_pk || new_ml_dsa_pk || new_x25519_pk || new_ml_kem_pk || userId)
+  bytes  device_ed25519_sig = 3;  // Device-Sig Ed25519 over rotation_hash
+  bytes  device_ml_dsa_sig  = 4;  // Device-Sig ML-DSA-65 over rotation_hash
+}
+// TwinSync payload for ROTATION_APPROVAL_REQUEST (Primary → Linked).
+// Occasion of an approval request. Without the discriminator the
+// linked device reports every request as "Emergency Key Rotation genehmigen?" —
+// a device set change would thus be confirmed under a false description
+// (§7.5). Field 6 default 0 = rotation, so that old senders
+// are interpreted unchanged.
+enum ApprovalKindV3 {
+  APPROVAL_KIND_KEY_ROTATION     = 0;
+  APPROVAL_KIND_DEVICE_SET_CHANGE = 1;
+}
+message RotationApprovalRequestPayload {
+  bytes rotation_hash    = 1;  // the hash to countersign
+  bytes new_ed25519_pk   = 2;  // new User-PKs (for display in approval dialog)
+  bytes new_ml_dsa_pk    = 3;
+  bytes new_x25519_pk    = 4;
+  bytes new_ml_kem_pk    = 5;
+  ApprovalKindV3 approval_kind = 6;  // P4: occasion, see above
+  // Only set with APPROVAL_KIND_DEVICE_SET_CHANGE — the device list after
+  // the change, so that the dialog can name what is being removed.
+  repeated bytes new_device_node_ids = 7;
+}
+// TwinSync payload for ROTATION_APPROVAL_RESPONSE (Linked → Primary).
+message RotationApprovalResponsePayload {
+  RotationApprovalToken token = 1;
+  bool rejected = 2;  // true = active rejection (not just timeout)
+}
+// Linked device → all contacts: "I am actively rejecting a rotation"
+message RotationRejectionAlertPayload {
+  bytes user_id           = 1;  // the identity being rotated
+  bytes device_node_id    = 2;  // this device (the rejector)
+  bytes rotation_hash     = 3;  // the rotation being rejected
+  bytes device_ed25519_sig = 4; // Device-Sig Ed25519 over rotation_hash
+  bytes device_ml_dsa_sig  = 5; // Device-Sig ML-DSA-65 over rotation_hash
+}
+// Proof that a device-set shrink was co-authorized by remaining devices.
+// Embedded in AuthManifest (field 13) when devices are removed.
+message DeviceSetChangeProof {
+  uint32 previous_device_count = 1;
+  bytes  change_hash = 2;  // SHA-256(userId || sorted(new_device_node_ids) || new_seq)
+  repeated RotationApprovalToken approvals = 3;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// §14.5 path 2 — THE PAIRWISE DEVICE-SET ANNOUNCEMENT
+// ═══════════════════════════════════════════════════════════════════════
+//
+// v4_1 §14.5, verbatim: "**The device set is announced pairwise.** Changes
+// go out to contacts as an ordinary delivery; the contact holds the state.
+// The announcement carries the previous device count and the
+// countersignatures of the remaining devices, so that a **shrinking of the
+// device set** requires proof. These very countersignatures are the quorum
+// from §14.4."
+//
+// WHY THIS TYPE HAD TO EXIST. Before it, `verifyRotationCoAuth` was fed a
+// `const cachedDeviceSigKeys = <DeviceSigInfo>[]` — a compile-time empty
+// list — so every emergency rotation resolved to `RotationCoAuthResult
+// .legacy` and was applied unchecked. §14.5 DOES prescribe the legacy
+// branch, but as the exception for a brand-new or long-absent contact; with
+// no carrier for the device set it was the rule, for every contact, always.
+// The §7.5 protection against a seed thief was therefore universally
+// absent.
+//
+// WHY NOT A PUBLIC OBJECT. §14.5: "A public durable object was explicitly
+// rejected. It would be formally permissible … but would make the device
+// set of every identity enumerable network-wide and turn the identity
+// itself into a discoverable object — a breach of the no-directory
+// property at the person level."
+//
+// PRIVACY (§5.1, §23.6 row 1 / RL-1). This rides the ordinary delivery
+// path, so at the egress it is cells of the fixed size at the constant
+// rate to slot-drawn partners — indistinguishable from cover, and the
+// observable graph stays the sync graph, decoupled from the social graph.
+// The only party that learns anything is the contact, who already holds
+// the contact relation; the announcement adds the device COUNT and the
+// device-sig pubkeys of a person they already correspond with. It does not
+// widen the social graph by one edge.
+message DeviceSetAnnounceV3 {
+  // Monotonic per announcing identity. Replay defence: a receiver keeps the
+  // highest seq it has accepted per contact and refuses anything <=.
+  // Without it a captured older announcement — with a LARGER device set —
+  // could be replayed to restore a locked-out device's key as a valid
+  // countersigner.
+  uint32 seq = 1;
+  uint64 issued_at_ms = 2;
+
+  // §14.5 "carries the previous device count". The receiver does NOT trust
+  // this for the quorum denominator (it is the suspect's own claim); it
+  // counts over its own CACHED set. The field is kept because §14.8 makes
+  // it visible: "contacts see the device count in the announcement, and a
+  // jump stands out".
+  uint32 previous_device_count = 3;
+
+  // The device set as it stands AFTER the change.
+  repeated AuthorizedDeviceSigningKeys device_sig_keys = 4;
+
+  // SHA-256(userId || sorted(device_node_ids) || seq) — what the approvals
+  // below sign. Recomputed by the receiver; never taken from the wire.
+  bytes change_hash = 5;
+
+  // §14.5: "the countersignatures of the remaining devices, so that a
+  // shrinking of the device set requires proof. These very
+  // countersignatures are the quorum from §14.4."
+  repeated RotationApprovalToken approvals = 6;
+
+  // The identity (User-Sig) signature over fields 1-6, under the CURRENT
+  // identity key. Proves the announcement came from the contact and not
+  // from a relay; the contact's stored trust anchor verifies it.
+  bytes user_signature_ed25519 = 7;
+}
+// ═══════════════════════════════════════════════════════════════════════
+// §9.5.7 System-Channel Records & Gossip (V3.1.117, S119 D1/D2/D3)
+// ═══════════════════════════════════════════════════════════════════════
+
+// Self-contained, self-signed system-channel record. Distinct wire type
+// from CHANNEL_POST (D1-S1): system channels are ownerless and carry no
+// subscriber registry, so every record must be verifiable stand-alone via
+// the inline pubkeys (KEX-Gate context-proof, §8.2/§9.5.6).
+// One link of the founding->current rotation chain (v4.2 §4.5.4). The OLD
+// key pair signs `new_ed25519_pk || new_ml_dsa_pk`; the signature is hybrid
+// because the chain is "a long-lived verifiable artifact" (§4.5.4) — an
+// Ed25519-only link would leave the founding binding of every rotated
+// author on classical security alone.
+// Persisted counterpart: `StoredRotationLink` (`identity/identity_context.dart`).
+message SysChanRotationLink {
+  bytes old_ed25519_pk = 1;   // 32B  — pubkey BEFORE this rotation
+  bytes old_ml_dsa_pk  = 2;   // 1952B
+  bytes new_ed25519_pk = 3;   // 32B  — pubkey AFTER this rotation
+  bytes new_ml_dsa_pk  = 4;   // 1952B
+  bytes sig_ed25519    = 5;   // 64B   over new_ed25519_pk || new_ml_dsa_pk
+  bytes sig_ml_dsa     = 6;   // 3309B over the same bytes
+}
+message SystemChannelRecord {
+  bytes  channel_id        = 1;   // 32B — compile-time system-channel constant (§9.5.1)
+  bytes  record_id         = 2;   // 16B UUID v4
+  uint32 kind              = 3;   // 0 = POST, 1 = VOTE, 2 = RETRACT (D2)
+  bytes  author_user_id    = 4;   // 32B UserID (founding binding, §9.5.7)
+  // The author's CURRENT signing keys, inline for stand-alone verify. They
+  // equal the founding keys only as long as the author never rotated; after
+  // a rotation `rotation_chain` (13) carries founding -> these.
+  bytes  author_ed25519_pk = 5;
+  bytes  author_ml_dsa_pk  = 6;
+  uint64 timestamp_ms      = 7;
+  string text              = 8;   // POST: content (JSON for structured reports)
+  // VOTE (§9.5.3 embedded FR poll — open records, tallied locally) and
+  // RETRACT (D2 tombstone) reference their target here:
+  bytes  target_record_id  = 9;
+  uint32 vote_option       = 10;  // VOTE: 0 = yes, 1 = no, 2 = don't care
+  // Hybrid self-signature (H-2 pattern) over the canonical content
+  // (this message serialized with both sig fields empty):
+  bytes  sig_ed25519       = 11;
+  bytes  sig_ml_dsa        = 12;
+  // Continuity proof for a rotated author (v4.2 §4.1/§4.5.4/§14.5): empty
+  // for a never-rotated identity, otherwise founding -> current, oldest
+  // link first. It rides ALONG WITH the record — "proofs accompany the
+  // action" (§14.5 path 1) — because a system channel is ownerless and its
+  // authors are mostly not contacts (§16.7), so there is no pairwise cache
+  // to look the chain up in, and §14.5 rejected a public directory.
+  // It is part of the canonical bytes, so the self-signature covers it.
+  repeated SysChanRotationLink rotation_chain = 13;
+}
+// Hourly anti-entropy Digest → Summary → Want → Push (§9.5.7 D1-S2),
+// piggy-backed on the channel-index gossip slot. BOOT-path
+// InfrastructureFrames (§2.3.5): HMAC + inner record self-signature.
+message SysChanDigest {
+  bytes  channel_id   = 1;
+  uint32 record_count = 2;
+  bytes  set_hash     = 3;  // XOR over all record fingerprints (16B) — order-independent
+}
+message SysChanSummary {
+  bytes channel_id            = 1;
+  repeated bytes fingerprints = 2;  // sender's full fingerprint set (16B each)
+}
+message SysChanWant {
+  bytes channel_id            = 1;
+  repeated bytes fingerprints = 2;  // records the sender wants pushed
+}
+message SysChanPush {
+  bytes channel_id       = 1;
+  repeated bytes records = 2;  // serialized SystemChannelRecord blobs
+  uint32 ttl             = 3;  // eager new-record flood: forward with ttl-1, dedup by fingerprint
+}

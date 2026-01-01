@@ -3,8 +3,8 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex;
 
 /// Manages binary update fragments/complete binaries on disk (Architektur
 /// §19.6.2 — Censorship-Resistant Distribution / In-Network Binary Updates).
@@ -23,7 +23,7 @@ class BinaryFragmentStore {
 
   // Storage budgets (§19.6.2).
   static const int kBootstrapBudgetBytes = -1; // unlimited (all platforms, early phase)
-  static const int kDesktopBudgetBytes = 20 * 1024 * 1024; // 20 MB
+  static const int kDesktopBudgetBytes = 32 * 1024 * 1024; // 32 MiB
   static const int kMobileBudgetBytes = 5 * 1024 * 1024; // 5 MB
 
   BinaryFragmentStore(this.profileDir)
@@ -268,17 +268,9 @@ class BinaryFragmentStore {
     return total;
   }
 
-  static int budgetForNodeType(String nodeType) {
-    switch (nodeType) {
-      case 'bootstrap':
-        return kBootstrapBudgetBytes;
-      case 'mobile':
-        return kMobileBudgetBytes;
-      case 'desktop':
-      default:
-        return kDesktopBudgetBytes;
-    }
-  }
+  // DROPPED ON 09.09.2026 (S378): no caller in lib/ or test/.
+  // The budgets are today kept by `update/cover_fill_blocks.dart`
+  // (`kCoverFillBudgetBytes`, `kCoverFillMobileBudgetBytes`).
 
   Future<List<String>> storedVersions(String platform) async {
     final versions = <String>[];
@@ -340,17 +332,31 @@ class BinaryFragmentStore {
   }
 
   /// Enforce a storage budget by deleting fragments (highest index first)
-  /// belonging to the oldest stored versions, until under [budgetBytes].
-  /// A negative budget means unlimited (no-op). `complete.bin` files are
-  /// left untouched — they represent fully reconstructed binaries and are
-  /// more valuable than individual fragments.
-  Future<void> enforceBudget(int budgetBytes) async {
+  /// belonging to the oldest stored versions, then `complete.bin` files
+  /// (oldest version first), until under [budgetBytes]. A negative budget
+  /// means unlimited (no-op).
+  ///
+  /// [protectPlatform]/[protectVersion] name the (platform, version) pair
+  /// [BinaryUpdateManager] currently targets for local installation — its
+  /// `complete.bin` is the file `applyUpdate()` hands to the OS installer
+  /// (Android: `main.dart` reads it via [completePath] directly; desktop:
+  /// [BinaryUpdateManager.getVerifiedBinaryPath] copies it out before
+  /// install). It is exempt from deletion for as long as the manager holds
+  /// that target, so a budget sweep can never remove the exact binary the
+  /// user is about to install or has just handed to the installer.
+  /// `complete.bin` files for any other (platform, version) — superseded
+  /// local versions, or on-demand binaries fetched to serve other
+  /// platforms' peers (§19.6.4) — remain fully subject to the budget.
+  Future<void> enforceBudget(int budgetBytes,
+      {String? protectPlatform, String? protectVersion}) async {
     if (budgetBytes < 0) return;
     try {
       var total = await totalStorageUsed();
       if (total <= budgetBytes) return;
 
-      final candidates = <({String platform, String version, int index,
+      final fragmentCandidates = <({String platform, String version,
+          int index, File file, int size, DateTime storedAt})>[];
+      final completeCandidates = <({String platform, String version,
           File file, int size, DateTime storedAt})>[];
       final root = Directory(_storageDir);
       if (!await root.exists()) return;
@@ -362,7 +368,7 @@ class BinaryFragmentStore {
           for (final index in await availableFragments(platform, version)) {
             final file = File(_fragmentPath(platform, version, index));
             try {
-              candidates.add((
+              fragmentCandidates.add((
                 platform: platform,
                 version: version,
                 index: index,
@@ -372,16 +378,48 @@ class BinaryFragmentStore {
               ));
             } catch (_) {}
           }
+
+          final isProtected =
+              platform == protectPlatform && version == protectVersion;
+          if (isProtected) continue;
+          final completeFile = File(completePath(platform, version));
+          try {
+            if (await completeFile.exists()) {
+              completeCandidates.add((
+                platform: platform,
+                version: version,
+                file: completeFile,
+                size: await completeFile.length(),
+                storedAt: storedAt,
+              ));
+            }
+          } catch (_) {}
         }
       }
 
       // Oldest version first; within a version, highest fragment index first.
-      candidates.sort((a, b) {
+      fragmentCandidates.sort((a, b) {
         final byAge = a.storedAt.compareTo(b.storedAt);
         return byAge != 0 ? byAge : b.index.compareTo(a.index);
       });
+      // complete.bin files: oldest version first.
+      completeCandidates.sort((a, b) => a.storedAt.compareTo(b.storedAt));
 
-      for (final c in candidates) {
+      for (final c in fragmentCandidates) {
+        if (total <= budgetBytes) break;
+        try {
+          await c.file.delete();
+          total -= c.size;
+        } catch (e) {
+          _log.error('enforceBudget: failed to delete ${c.file.path}: $e');
+        }
+      }
+
+      // Fragments alone may not suffice (a single complete.bin can dwarf the
+      // whole budget, §S362 measured: 189.6 MB APK against a 5 MB mobile
+      // budget) — fall back to complete.bin files, oldest first, never
+      // touching the protected install target.
+      for (final c in completeCandidates) {
         if (total <= budgetBytes) break;
         try {
           await c.file.delete();

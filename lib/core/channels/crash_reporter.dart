@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import '../network/clogger.dart';
+import '../log/clogger.dart';
 import '../service/cleona_service.dart';
 import 'system_channels.dart';
 
@@ -12,15 +12,35 @@ import 'system_channels.dart';
 /// returns the result so the UI layer can show the appropriate popup.
 class CrashReporter {
   final CleonaService _service;
-  final CLogger _log = CLogger.get('CrashReporter');
-  static const _rateLimitFile = 'crash_rate_limit.json';
+  final CLogger _log;
+
+  /// Area of the encrypted storage (§21.4.1, S366).
+  ///
+  /// Formerly `crash_rate_limit.json` per profile. The content is a
+  /// list of at most ten timestamps, which drop out on the next write
+  /// when older than 24 hours — capped in NUMBER and in TIME. That is
+  /// why `replaceArea` with ONE entry stands here and not `putEntry` per
+  /// timestamp: this is not a growing collection but a state.
+  ///
+  /// NO DATA-LOSS LATCH, and for a reason: if the state is lost, the
+  /// consequence is a burst of at most
+  /// [SystemChannels.maxReportsPerDay] reports — exactly what
+  /// F5-R2 introduced the persistence against, but an annoyance and not
+  /// a loss. A latch that blocked reporting entirely on an unreadable
+  /// state would be the worse side: then after a crash no report at all
+  /// would come any more.
+  static const String area = 'crash_rate_limit';
+  static const String _key = '_';
 
   /// Tracks reports-per-hour and reports-per-day for rate limiting.
   /// Persisted across restarts to prevent burst-on-restart (F5-R2).
   final List<DateTime> _reportTimestamps = [];
   bool _loaded = false;
 
-  CrashReporter(this._service);
+  // _service.profileDir is already the source that _ensureLoaded() uses
+  // for the rate_limit file (line above) -> the same value for the logger.
+  CrashReporter(this._service)
+      : _log = CLogger.get('CrashReporter', profileDir: _service.profileDir);
 
   // ── Rate limiting ─────────────────────────────────────────────────
 
@@ -28,8 +48,7 @@ class CrashReporter {
     if (_loaded) return;
     _loaded = true;
     try {
-      final json = _service.fileEnc.readJsonFile(
-          '${_service.profileDir}/$_rateLimitFile');
+      final json = _service.store.loadArea(area)[_key];
       if (json == null) return;
       final list = json['ts'] as List<dynamic>?;
       if (list == null) return;
@@ -69,8 +88,9 @@ class CrashReporter {
       final ms = _reportTimestamps
           .map((t) => t.millisecondsSinceEpoch)
           .toList();
-      _service.fileEnc.writeJsonFile(
-          '${_service.profileDir}/$_rateLimitFile', {'ts': ms});
+      _service.store.replaceArea(area, {
+        _key: {'ts': ms}
+      });
     } catch (e) {
       _log.debug('Failed to persist rate-limit timestamps: $e');
     }
@@ -102,7 +122,7 @@ class CrashReporter {
 
     int peerCount = 0;
     try {
-      peerCount = _service.node.routingTable.allPeers.length;
+      peerCount = _service.peerCount;
     } catch (_) {}
 
     int memBytes = 0;
@@ -222,14 +242,33 @@ class CrashReporter {
     final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
 
     int peerCount = 0;
-    int routeCount = 0;
-    String natType = 'unknown';
     bool hasPortMapping = false;
+    // ── TWO DIAGNOSTIC VALUES STAY UNFILLED ON 2026-08-31 (CUT) ──────
+    //
+    // `routeCount` came from `node.dvRouting.routeCount`, `natType` from
+    // `node.natTraversal.natType.name` — both via the pass-throughs in
+    // `cleona_service_v3_retire.dart:73,76`, which were deleted with the
+    // V3 cut. The quantities themselves are V3: the number of entries
+    // in the distance-vector table and the STUN classification of the
+    // own NAT. V4.1 has neither a DV table nor a NAT type detection —
+    // there is nothing that could answer these two questions.
+    //
+    // THEY ARE THEREFORE NOT ESTIMATED BUT LEFT EMPTY:
+    // `routeCount = 0` and `natType = 'unknown'` are exactly the values
+    // the presetting already provided for when access failed. An error
+    // report carrying an invented route count is worse than one that
+    // leaves the question open — it sends it to everyone who reads the
+    // report.
+    //
+    // `LogReport` requires both fields (`system_channels.dart:319,321`);
+    // whether the cut of the report is switched to V4.1 quantities
+    // (readiness, independent sync partners) is a question for
+    // `system_channels.dart` and is reported, not decided here.
+    const int routeCount = 0;
+    const String natType = 'unknown';
     try {
-      peerCount = _service.node.routingTable.allPeers.length;
-      routeCount = _service.node.dvRouting.routeCount;
-      natType = _service.node.natTraversal.natType.name;
-      hasPortMapping = _service.node.natTraversal.hasPortMapping;
+      peerCount = _service.peerCount;
+      hasPortMapping = _service.hasPortMapping;
     } catch (_) {}
 
     int memBytes = 0;

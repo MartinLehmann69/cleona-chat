@@ -1,9 +1,9 @@
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/erasure/reed_solomon.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
+import 'package:cleona/core/codec/reed_solomon.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex;
 import 'package:cleona/core/update/binary_fragment_store.dart';
 
 /// Encodes complete binaries into Reed-Solomon erasure fragments and stores
@@ -13,9 +13,8 @@ class BinarySeeder {
   final BinaryFragmentStore _store;
   final CLogger _log;
 
-  BinarySeeder({required BinaryFragmentStore store, String? profileDir})
-      : _store = store,
-        _log = CLogger.get('bin-seeder', profileDir: profileDir);
+  BinarySeeder({required this._store, String? profileDir})
+      : _log = CLogger.get('bin-seeder', profileDir: profileDir);
 
   /// Per-platform Reed-Solomon parameters (§19.6.2).
   static const Map<String, ({int n, int k})> platformParams = {

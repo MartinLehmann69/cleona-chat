@@ -4,8 +4,9 @@ import 'dart:io';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/util/hex.dart';
 
 /// Bridges the local calendar to a plain `.ics` file on disk.
 ///
@@ -31,7 +32,9 @@ class LocalIcsPublisher {
   LocalIcsPublisher({
     required this.identityId,
     required this.calendar,
-  }) : _log = CLogger.get('icspub[$identityId]');
+  }) // no own profileDir field -> that of the passed CalendarManager-
+      // Use the instance that knows the same per-identity directory.
+      : _log = CLogger.get('icspub[${shortHex(identityId)}]', profileDir: calendar.profileDir);
 
   static const int _maxImportBytes = 10 * 1024 * 1024;
 

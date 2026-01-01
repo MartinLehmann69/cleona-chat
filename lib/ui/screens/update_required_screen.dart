@@ -17,9 +17,10 @@ class UpdateRequiredScreen extends StatelessWidget {
   /// fires with the result of [BinaryUpdateManager.checkForUpdate].
   final bool inNetworkAvailable;
 
-  /// Called when the user picks the in-network update path instead of the
-  /// external download link. Only invoked when [inNetworkAvailable] is true.
-  final VoidCallback? onStartInNetworkUpdate;
+  // `onStartInNetworkUpdate` stood here — the download click. Since S387
+  // the app collects without user action (owner decision 14.09.2026, v4_2
+  // §26.5.4: "While a hard-blocked node is still assembling,
+  // `UpdateRequiredScreen` shows the assembly state instead of a button").
 
   /// Called when the update is ready and the user taps "Install" (Android)
   /// or "Restart" (desktop).
@@ -34,7 +35,6 @@ class UpdateRequiredScreen extends StatelessWidget {
     required this.reasonI18nKey,
     required this.onSkipLimited,
     this.inNetworkAvailable = false,
-    this.onStartInNetworkUpdate,
     this.onApplyUpdate,
     this.updateState = BinaryUpdateState.idle,
     this.updateProgress = 0.0,
@@ -93,16 +93,10 @@ class UpdateRequiredScreen extends StatelessWidget {
                   _buildFailedSection(locale, cs),
                   const SizedBox(height: 24),
                 ] else ...[
-                  // Idle: show download buttons
-                  if (inNetworkAvailable && onStartInNetworkUpdate != null) ...[
-                    FilledButton.icon(
-                      icon: const Icon(Icons.cloud_download),
-                      label: Text(locale.get('updateInNetworkButton')),
-                      onPressed: onStartInNetworkUpdate,
-                    ),
-                    const SizedBox(height: 12),
-                  ],
-                  if (inNetworkAvailable && onStartInNetworkUpdate != null)
+                  // Idle: the in-network update collects without a click (S387);
+                  // only the external path remains (store/GitHub, §26.6.7
+                  // steps 1-2) — a link, not a download of the update.
+                  if (inNetworkAvailable)
                     OutlinedButton.icon(
                       icon: const Icon(Icons.download),
                       label: Text(locale.get('update_required_download')),
@@ -168,13 +162,9 @@ class UpdateRequiredScreen extends StatelessWidget {
       const SizedBox(height: 12),
       Text(locale.get('update_failed'),
           style: TextStyle(color: cs.error)),
-      const SizedBox(height: 12),
-      if (onStartInNetworkUpdate != null)
-        OutlinedButton.icon(
-          icon: const Icon(Icons.refresh),
-          label: Text(locale.get('update_retry')),
-          onPressed: onStartInNetworkUpdate,
-        ),
+      // No [Retry] any more: the next occasion (start,
+      // network change, app opened, new neighbour) collects again by itself
+      // (§26.6.1 "asks again at the next such moment").
     ]);
   }
 }

@@ -16,8 +16,16 @@ library;
 import 'package:cleona/core/calls/video_preset.dart';
 
 /// Video quality level (ordered from lowest to highest).
+///
+/// **Since S368 [tile] is the lowest picture level** and sits between
+/// [audioOnly] and [low]. The order carries meaning: `index` IS the
+/// ordering, [VideoRateController] computes ladder rungs as `index - 1`,
+/// and the up/down logic below compares indices exclusively.
+/// A new level therefore belongs at its place in the ordering, not at the
+/// end of the enumeration.
 enum VideoQuality {
   audioOnly, // video paused
+  tile,      // 144p 15fps — group tile (S368)
   low,       // 240p 15fps
   medium,    // 480p 30fps
   high,      // 720p 30fps
@@ -51,6 +59,17 @@ class BandwidthEstimator {
   static const double bitrateReduceThreshold = 0.10; // 10%
   static const double fpsReduceThreshold = 0.15;     // 15%
   static const double resolutionReduceThreshold = 0.20; // 20%
+
+  /// From here on the picture falls to the tile rung (S368).
+  ///
+  /// Sits between [resolutionReduceThreshold] (20 % -> 240p) and
+  /// [videoPauseThreshold] (30 % -> audio alone), i.e. exactly in the gap
+  /// in which until S368 there was only "240p or nothing at all". 150 instead of 300
+  /// kbit/s is the last step before switching off — and for
+  /// group calls the only one that makes a weak connection a
+  /// forwarder at all (S368 proposal §3.4).
+  static const double tileReduceThreshold = 0.25;    // 25%
+
   static const double videoPauseThreshold = 0.30;    // 30%
 
   /// RTT thresholds (ms).
@@ -134,6 +153,8 @@ class BandwidthEstimator {
     if (_smoothedLossRate >= videoPauseThreshold ||
         _smoothedRttMs >= criticalRttThreshold) {
       targetQuality = VideoQuality.audioOnly;
+    } else if (_smoothedLossRate >= tileReduceThreshold) {
+      targetQuality = VideoQuality.tile;
     } else if (_smoothedLossRate >= resolutionReduceThreshold) {
       targetQuality = VideoQuality.low;
     } else if (_smoothedLossRate >= fpsReduceThreshold ||
@@ -186,7 +207,12 @@ class BandwidthEstimator {
   /// Map quality level to video preset.
   static VideoPreset _qualityToPreset(VideoQuality q) {
     switch (q) {
+      // [VideoQuality.audioOnly] gets the LOWEST rung, not the
+      // second lowest: with `videoPaused == true` the caller reads
+      // no preset anyway, and if it does after all, it should be the cheapest.
       case VideoQuality.audioOnly:
+      case VideoQuality.tile:
+        return VideoPreset.tile;
       case VideoQuality.low:
         return VideoPreset.low;
       case VideoQuality.medium:

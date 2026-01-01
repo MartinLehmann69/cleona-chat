@@ -1,34 +1,40 @@
 // ignore_for_file: deprecated_member_use, depend_on_referenced_packages
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/recovery/legacy_guardian_state.dart';
 import 'package:printing/printing.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
-import 'package:cleona/core/crypto/network_secret.dart';
-import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
+import 'package:cleona/core/config/network_channel.dart';
+import 'package:cleona/core/link/data_port.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_service.dart';
+import 'package:cleona/core/service/app_version.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/archive/archive_config.dart';
+import 'package:cleona/core/archive/archive_network.dart';
+import 'package:cleona/core/storage/message_store.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
-import 'package:cleona/core/network/multi_interface.dart';
+import 'package:cleona/core/archive/share_identity.dart';
+import 'package:cleona/core/service/multi_interface_mode.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/screens/performance_screen.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/form_group.dart';
 import 'package:cleona/ui/components/section_card.dart';
 import 'package:cleona/ui/components/connection_sheet.dart';
-import 'dart:convert';
-import 'dart:io';
 
 class SettingsScreen extends StatelessWidget {
   final ICleonaService service;
@@ -49,7 +55,16 @@ class SettingsScreen extends StatelessWidget {
     }
     return SectionRow(
       label: locale.get('version_label'),
-      value: '${CleonaService.kCurrentAppVersion} (Architecture v3.0)',
+      // S368: here stood `(Architecture v3.0)` — as a LITERAL. The only
+      // "About" line of the application thus told the user it follows an
+      // architecture that this line has no longer followed since S345. The
+      // version to the left of it always came correctly from the one source;
+      // the parenthetical addition was a literal beside it.
+      //
+      // It is therefore NOT rewritten to today's correct number,
+      // but DERIVED (`kAppLine`). A new literal would be the same
+      // error once more, only with a number that happens to be right today.
+      value: '${CleonaService.kCurrentAppVersion} (Architecture v$kAppLine)',
     );
   }
 
@@ -98,13 +113,34 @@ class SettingsScreen extends StatelessWidget {
                   setDialogState(() => error = '1024–65535');
                   return;
                 }
-                // §4.5.2 invariant: the data port must never equal the fixed
-                // LAN-discovery port. The daemon rejects it too, but the IPC
+                // §4.5.2 invariant: the data port must never equal one of
+                // the fixed LAN ports. The daemon rejects it too, but the IPC
                 // error text never reaches the user (setPort returns a plain
                 // bool), so the reason has to be given here.
-                if (newPort == LocalDiscovery.discoveryPort) {
-                  setDialogState(
-                      () => error = locale.get('port_reserved_discovery'));
+                //
+                // S376: both values, via the one place of definition. The
+                // text now carries the port as a placeholder — it stood in
+                // all 34 languages as the literal "41338" and would have
+                // named the wrong number for 41340.
+                if (DataPort.isReservedLanPort(newPort)) {
+                  setDialogState(() => error = locale
+                      .tr('port_reserved_discovery', {'port': '$newPort'}));
+                  return;
+                }
+                // A browser-blocked port does not break the node — it breaks
+                // its INVITATION LINKS, and only at the recipient. The link
+                // is an http:// URL the recipient opens in a browser (they do
+                // not have Cleona yet); a blocked port makes the browser
+                // refuse locally, so no request ever reaches this node and no
+                // error is ever logged here. `generateInviteLinkUrl` already
+                // withholds such a link, but silently — without this message
+                // the user would simply find the invitation block gone and
+                // have no way to connect it to the port they just typed.
+                // That is the whole reason the check is repeated here: the
+                // other two paths reject correctly but cannot explain.
+                if (IdentityManager.isBrowserBlockedPort(newPort)) {
+                  setDialogState(() => error = locale
+                      .tr('port_browser_blocked', {'port': '$newPort'}));
                   return;
                 }
                 if (newPort == service.port) {
@@ -167,14 +203,57 @@ class SettingsScreen extends StatelessWidget {
     );
   }
 
-  void _showSeedPhrase(BuildContext context) {
+  /// S363, point 1 (option D): the 24 words behind the
+  /// device-code lock.
+  ///
+  /// Why it waits asynchronously here although `loadSeedPhrase()` is synchronous:
+  /// the lock asks the user, and questions are asynchronous. The
+  /// system dialog comes from `KeyguardManager` (Android); on all other
+  /// platforms [IdentityManager.loadSeedPhraseGated] returns the same
+  /// value as before, only in a `Future`.
+  ///
+  /// The second reason for this version is the DISPLAY: there are three
+  /// outcomes that a user cannot place without explanation —
+  /// cancel, removed screen lock, and "nothing lies on this
+  /// device" (the normal case after a reinstallation, because the
+  /// keyring is app-bound). Before, each of them showed the same
+  /// meaningless line.
+  Future<void> _showSeedPhrase(BuildContext context) async {
     final locale = AppLocale.read(context);
     final identityMgr = IdentityManager();
-    final words = identityMgr.loadSeedPhrase();
+    final access = await identityMgr.loadSeedPhraseGated(
+      title: locale.get('seed_phrase_gate_title'),
+      description: locale.get('seed_phrase_gate_description'),
+    );
+    if (!context.mounted) return;
 
+    final words = access.words;
     if (words == null) {
+      final String message;
+      switch (access.outcome) {
+        case GateOutcome.cancelled:
+          message = locale.get('seed_phrase_gate_cancelled');
+          break;
+        case GateOutcome.invalidated:
+          message = locale.get('seed_phrase_gate_invalidated');
+          break;
+        case GateOutcome.absent:
+          // On a device with an app-bound keyring,
+          // "nothing there" is almost always the reinstallation; otherwise it is the
+          // old, terse sentence.
+          // NOT `hasDeviceGate`: the statement of this sentence is "the
+          // keyring falls with the app installation", and that
+          // applies on BOTH mobile platforms — the device-code lock
+          // exists only on Android. Two statements, two queries.
+          message = access.gated || identityMgr.hasAppBoundKeyring
+              ? locale.get('seed_phrase_absent_device')
+              : locale.get('no_recovery_phrase');
+          break;
+        default:
+          message = locale.get('no_recovery_phrase');
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(locale.get('no_recovery_phrase'))),
+        SnackBar(content: Text(message), duration: const Duration(seconds: 8)),
       );
       return;
     }
@@ -246,7 +325,13 @@ class SettingsScreen extends StatelessWidget {
               onPressed: () => Navigator.pop(context),
             )
           : null,
-      body: ListView(
+      // Working rule #6 / Android edge-to-edge: `AppBarScaffold` sets
+      // `SafeArea(bottom: false)` — the header is thus safe at the top, the
+      // body at the bottom is NOT. Without this wrapper the gesture/
+      // navigation bar eats the last row of the list.
+      body: SafeArea(
+        top: false,
+        child: ListView(
         children: [
           const SizedBox(height: 8),
 
@@ -272,7 +357,16 @@ class SettingsScreen extends StatelessWidget {
               ListTile(
                 leading: const Icon(Icons.people),
                 title: Text(locale.get('connected_peers')),
-                subtitle: Text('${service.reachablePeerCount}'),
+                // §22.7.3/§24.4.1: the partner counts carry a separate label
+                // PER DIRECTION. A single number left open
+                // whether it means one's own delivery or the contribution for
+                // others — two different statements (§25.4).
+                subtitle: Text(
+                  '${locale.get('stats_sync_partners_outbound')}: '
+                  '${service.syncPartnersOutbound} · '
+                  '${locale.get('stats_sync_partners_inbound')}: '
+                  '${service.syncPartnersInbound}',
+                ),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showConnectionSheet(context, service),
               ),
@@ -281,6 +375,45 @@ class SettingsScreen extends StatelessWidget {
                 title: Text(locale.get('stored_fragments')),
                 subtitle: Text('${service.fragmentCount}'),
               ),
+              // §24.4.2 — data-saving mode. It stands in the FIRST group
+              // of the screen, not in a submenu: "a visible
+              // state, not a setting buried in a submenu".
+              _DataSaverTile(
+                service: service,
+                // §31.3 tier 4: "Wi-Fi, Ethernet, or VPN take precedence
+                // over cellular, for all traffic." So metered means
+                // cellular ONLY, not "also cellular".
+                //
+                // The connection type comes from `CleonaAppState`, which keeps it
+                // anyway (main.dart:609, fed from
+                // `Connectivity().onConnectivityChanged`). A second
+                // subscription would be a second platform channel for
+                // the same information — working rule #5.
+                //
+                // NOT via `ICleonaService`: the Linux/Windows daemon
+                // is a pure `dart compile exe` binary without a
+                // Flutter plugin registrant and cannot call `connectivity_plus`.
+                // The suggestion is a matter of the UI
+                // anyway — §24.4.2 only places the condition on ACTIVATING,
+                // and that runs via the service.
+                metered: appState.connectivityResults
+                        .contains(ConnectivityResult.mobile) &&
+                    !appState.connectivityResults
+                        .contains(ConnectivityResult.wifi) &&
+                    !appState.connectivityResults
+                        .contains(ConnectivityResult.ethernet) &&
+                    !appState.connectivityResults
+                        .contains(ConnectivityResult.vpn),
+              ),
+              // S373 — the cover in the own network. Directly below the
+              // saving mode, because both spend the same good and the
+              // user should see them side by side: the one thins the
+              // cover stream, the other suspends it in the consented
+              // segment.
+              _LanShapingTile(service: service),
+              // S388 — source 4 (§11.9): the only traffic to foreign
+              // relays, therefore switchable and with its consequence below.
+              _ExternalRecordsTile(service: service),
             ],
           ),
 
@@ -313,16 +446,14 @@ class SettingsScreen extends StatelessWidget {
                 title: _titleWithHelp(context, 'show_recovery_phrase', 'show_recovery_phrase_help'),
                 subtitle: Text(locale.get('recovery_phrase_subtitle')),
                 trailing: const Icon(Icons.chevron_right),
-                onTap: () => _showSeedPhrase(context),
+                onTap: () => unawaited(_showSeedPhrase(context)),
               ),
-            ],
-          ),
-
-          FormGroup(
-            title: locale.get('guardian_social_recovery'),
-            dividers: false,
-            children: [
-              _GuardianSetupTile(service: service),
+              // §13.8 requires that the limit of recovery is communicated
+              // "actively and unambiguously". It therefore stands
+              // NEXT TO the phrase, not in a separate group:
+              // until S361 the group was called "Social Recovery" and offered a
+              // set-up path that no longer exists (gap G-8).
+              _SocialRecoveryLimitTile(service: service),
             ],
           ),
 
@@ -489,7 +620,7 @@ class SettingsScreen extends StatelessWidget {
               ),
               SectionRow(
                 label: locale.get('network_tag_label'),
-                value: NetworkSecret.channel.name,
+                value: activeNetworkChannel.name,
               ),
               SectionRow(
                 label: locale.get('ip_addresses_label'),
@@ -500,103 +631,85 @@ class SettingsScreen extends StatelessWidget {
           const SizedBox(height: 8),
         ],
       ),
+      ),
     );
   }
 
 }
 
-class _GuardianSetupTile extends StatelessWidget {
+/// The limit of recovery — instead of a path that does not carry.
+///
+/// WHAT STOOD HERE BEFORE. `_GuardianSetupTile` offered "Set up social
+/// recovery", let the user choose five contacts and called
+/// `service.setupGuardians(...)`. Since the CUT the call could only
+/// return `false` (`cleona_service.dart` `setupGuardians`) — the user
+/// got "Guardian setup failed" after five selection clicks and
+/// no explanation. And whoever had set up guardians BEFORE the CUT saw
+/// the same set-up tile, because `isGuardianSetUp` hard-returned `false`:
+/// the UI claimed "no backup" about a backup whose
+/// state it did not know (gap G-8).
+///
+/// WHAT IT SAYS NOW. v4_1 §13.8 "Limits of recovery" is unambiguous:
+/// "V4.1 has no social-recovery procedure. […] No set of other people can
+/// restore an identity — in no number, in no combination, under no
+/// threshold. […] there is no third route, and none is planned." The same
+/// paragraph obliges to the notice: "this limit must be communicated to
+/// the user actively and unambiguously during onboarding and at the seed
+/// display." The tile is this notice; it is deliberately not
+/// tappable, because there is nothing to do.
+///
+/// THREE STATES, NOT TWO. Additionally it is measured whether legacy stores
+/// still lie on THIS device
+/// (`lib/core/recovery/legacy_guardian_state.dart:36-48`). `present`
+/// warns, `unknown` says "cannot be determined", `none` stays silent. The
+/// expensive direction — presenting the user a "you have nothing" where the
+/// state is open — thus no longer occurs.
+class _SocialRecoveryLimitTile extends StatelessWidget {
   final ICleonaService service;
-  const _GuardianSetupTile({required this.service});
+  const _SocialRecoveryLimitTile({required this.service});
 
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
+    final scheme = Theme.of(context).colorScheme;
+    // `profileDir` is available in both process kinds: in `CleonaService`
+    // from the `ServiceContext`, in the `IpcClient` from the daemon's
+    // snapshot (`service_interface.dart:106-114`). Daemon and GUI run
+    // on the same machine (Unix socket or 127.0.0.1), so the directory
+    // is readable. Where not, the measurement reports `unknown` — and exactly
+    // that is then shown.
+    final deposit = LegacyGuardianDeposit.probe(service.profileDir);
 
-    if (service.isGuardianSetUp) {
-      return ListTile(
-        leading: const Icon(Icons.shield, color: Colors.green),
-        title: Text(locale.tr('guardian_active', {'count': '5'})),
-        subtitle: Text(locale.get('guardian_setup_subtitle')),
-      );
+    final notes = <String>[];
+    if (deposit.ownGuardians == LegacyGuardianTrace.present) {
+      notes.add(locale.get('social_recovery_legacy_found'));
+    } else if (deposit.ownGuardians == LegacyGuardianTrace.unknown) {
+      notes.add(locale.get('social_recovery_legacy_unknown'));
+    }
+    if (deposit.heldShares == LegacyGuardianTrace.present) {
+      notes.add(locale.get('social_recovery_legacy_shares'));
     }
 
     return ListTile(
-      leading: const Icon(Icons.group_add),
-      title: _titleWithHelp(context, 'guardian_setup', 'guardian_setup_help'),
-      subtitle: Text(locale.get('guardian_setup_subtitle')),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: () => _showGuardianSetupDialog(context),
-    );
-  }
-
-  void _showGuardianSetupDialog(BuildContext context) {
-    final locale = AppLocale.read(context);
-    final accepted = service.acceptedContacts;
-
-    if (accepted.length < 5) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(locale.tr('guardian_need_5_contacts', {'count': '${accepted.length}'}))),
-      );
-      return;
-    }
-
-    final selected = <String>{};
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: Text(locale.get('guardian_setup')),
-          content: SizedBox(
-            width: 400,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(locale.get('guardian_select_5')),
-                const SizedBox(height: 12),
-                ...accepted.map((c) => CheckboxListTile(
-                  value: selected.contains(c.nodeIdHex),
-                  title: Text(c.displayName),
-                  subtitle: Text(c.nodeIdHex.substring(0, 16),
-                      style: const TextStyle(fontFamily: 'monospace', fontSize: 10)),
-                  onChanged: (v) {
-                    setDialogState(() {
-                      if (v == true) {
-                        if (selected.length < 5) selected.add(c.nodeIdHex);
-                      } else {
-                        selected.remove(c.nodeIdHex);
-                      }
-                    });
-                  },
-                )),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: Text(locale.get('cancel')),
-            ),
-            FilledButton(
-              onPressed: selected.length == 5
-                  ? () async {
-                      final result = await service.setupGuardians(selected.toList());
-                      if (ctx.mounted) Navigator.of(ctx).pop();
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text(result
-                              ? locale.get('guardian_setup_complete')
-                              : locale.get('guardian_setup_failed'))),
-                        );
-                      }
-                    }
-                  : null,
-              child: Text('${locale.get('guardian_setup')} (${selected.length}/5)'),
+      leading: Icon(Icons.info_outline, color: scheme.onSurfaceVariant),
+      title: Text(locale.get('social_recovery_gone_title')),
+      isThreeLine: true,
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(locale.get('social_recovery_gone_body')),
+          for (final note in notes) ...[
+            const SizedBox(height: 6),
+            Text(
+              note,
+              style: TextStyle(
+                color: scheme.error,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -629,9 +742,42 @@ class _SeedPhraseDialog extends StatelessWidget {
                   Icon(Icons.warning_amber, color: Theme.of(context).colorScheme.error),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(
-                      locale.get('seed_phrase_warning'),
-                      style: const TextStyle(fontSize: 13),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          locale.get('seed_phrase_warning'),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 8),
+                        // Second of the two places required by v4_1 §13.8
+                        // ("during onboarding and at the seed
+                        // display"). The first is the initial display in
+                        // `setup_screen.dart`.
+                        Text(
+                          locale.get('social_recovery_gone_body'),
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600),
+                        ),
+                        // S363, measurement question 2: THE AVAILABILITY PRICE
+                        // BELONGS BEFORE THE DECISION. The lock from
+                        // point 1 makes the copy in the device fragile:
+                        // a removed or changed screen lock
+                        // destroys the auth-bound key and with
+                        // it the 24 words. Until now this was only said
+                        // afterwards (`seed_phrase_gate_invalidated`) — i.e.
+                        // exactly when the user can no longer
+                        // decide anything. Only on a build WITH the lock;
+                        // on the desktop the sentence would be wrong.
+                        if (IdentityManager().hasDeviceGate) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            locale.get('seed_phrase_device_copy_note'),
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 ],
@@ -727,11 +873,55 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   String? _tierError;
   String? _connectionTestResult;
 
-  String get _profileDir {
-    if (widget.service is CleonaService) {
-      return (widget.service as CleonaService).profileDir;
+  /// Share identity and "only in this network" as the SERVICE sees them
+  /// (§21.6, S394) — via `archive_status` on the desktop, in-process on
+  /// Android/iOS. `null` until the first answer.
+  Map<String, dynamic>? _shareStatus;
+  String? _networkError;
+
+  /// Loading has failed (the storage THREW), and
+  /// [_config] therefore carries default values instead of the real setting.
+  /// Carries the data-loss bolt in [_save].
+  bool _loadFailed = false;
+
+  /// The encrypted storage of the identity — or `null`.
+  ///
+  /// ── WHY THIS CAN BE `null` HERE, AND WHAT THAT MEANS ──────────
+  ///
+  /// Under Linux and Windows the UI is a SEPARATE process: it
+  /// talks to the daemon via IPC, and `widget.service` there is an
+  /// `IpcClient`, not a [CleonaService] (`main.dart:1908` `_service =
+  /// ipcClient`). So it has neither profile directory nor
+  /// storage key — the daemon holds both. Under macOS the
+  /// same applies as soon as a daemon program exists.
+  ///
+  /// **The write path of this screen was therefore already dead before S366**
+  /// (finding B-2 of the S363 inventory, re-measured here): `_profileDir` returned
+  /// `''` there, `_save()` returned in the first line, and
+  /// `archive_config.json` arose on none of the three desktop
+  /// platforms. It carried only on Android and iOS, where the app
+  /// ITSELF is the node and `widget.service` is a real
+  /// [CleonaService].
+  ///
+  /// The conversion deliberately changes NOTHING about that: it leads the path
+  /// where it carries into the encrypted storage — where
+  /// it is dead, it stays dead. Reviving it would mean building an
+  /// IPC write command, and that would carry the archive password across
+  /// the IPC boundary. Exactly that is not supposed to happen (see
+  /// `ipc_server.dart`, `archive_test_connection`). That is a
+  /// decision for the owner, not a side effect of a rebuild.
+  MessageStore? get _store {
+    final s = widget.service;
+    if (s is! CleonaService) return null;
+    try {
+      return s.store;
+    } catch (_) {
+      // `CleonaService.store` THROWS if the identity has no
+      // master seed — explicitly and without a substitute key
+      // (§21.4.1). A settings screen must not
+      // break on that: it then shows default values and writes nothing.
+      return null;
     }
-    return '';
   }
 
   @override
@@ -748,6 +938,36 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     _tier1Controller.text = '${_config.tier1Boundary.inDays}';
     _tier2Controller.text = '${_config.tier2Boundary.inDays}';
     _tier3Controller.text = '${_config.tier3Boundary.inDays}';
+    unawaited(_refreshShareStatus());
+  }
+
+  Future<void> _refreshShareStatus() async {
+    Map<String, dynamic>? st;
+    try {
+      st = await widget.service.getArchiveShareStatus();
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() => _shareStatus = st);
+  }
+
+  Future<void> _rebindShare() async {
+    await widget.service.rebindArchiveShare();
+    await _refreshShareStatus();
+  }
+
+  Future<void> _captureNetwork() async {
+    final n = await widget.service.captureArchiveNetwork();
+    if (!mounted) return;
+    setState(() => _networkError =
+        n == null ? AppLocale.read(context).get('archive_network_capture_failed') : null);
+    await _refreshShareStatus();
+  }
+
+  Future<void> _clearNetworks() async {
+    await widget.service.clearArchiveNetworks();
+    if (!mounted) return;
+    setState(() => _networkError = null);
+    await _refreshShareStatus();
   }
 
   @override
@@ -766,14 +986,15 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   }
 
   ArchiveConfig _load() {
-    final dir = _profileDir;
-    if (dir.isEmpty) return ArchiveConfig.production();
-    final file = File('$dir/archive_config.json');
-    if (!file.existsSync()) return ArchiveConfig.production();
+    final s = _store;
+    if (s == null) return ArchiveConfig.production();
     try {
-      return ArchiveConfig.fromJson(
-          json.decode(file.readAsStringSync()) as Map<String, dynamic>);
+      return ArchiveConfig.readFrom(s) ?? ArchiveConfig.production();
     } catch (_) {
+      // The storage threw — the data is there, but not readable.
+      // That is NOT the same as "never configured", and the bolt in
+      // [_save] must know the difference.
+      _loadFailed = true;
       return ArchiveConfig.production();
     }
   }
@@ -783,11 +1004,11 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     final t2 = int.tryParse(_tier2Controller.text);
     final t3 = int.tryParse(_tier3Controller.text);
     if (t1 == null || t2 == null || t3 == null || t1 < 1 || t2 < 1 || t3 < 1) {
-      setState(() => _tierError = 'Alle Werte müssen ≥ 1 sein');
+      setState(() => _tierError = AppLocale.read(context).get('archive_tier_error_min'));
       return;
     }
     if (t1 >= t2 || t2 >= t3) {
-      setState(() => _tierError = 'Original→Vorschau < Vorschau→Mini < Mini→Nur Metadaten');
+      setState(() => _tierError = AppLocale.read(context).get('archive_tier_error_order'));
       return;
     }
     setState(() => _tierError = null);
@@ -798,11 +1019,48 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
     ));
   }
 
+  /// S366: into the `archive_config` area of the storage instead of bare into
+  /// `archive_config.json`. The file carried [ArchiveConfig.archivePassword]
+  /// in plain text.
+  ///
+  /// ── THE DATA-LOSS BOLT ─────────────────────────────────────────
+  ///
+  /// There was none here, and the gap was sharp: [_load] silently returned
+  /// `ArchiveConfig.production()` on every read error, and
+  /// the next field change immediately called this method via `_updateConfig`
+  /// — so the default values laid themselves over the real
+  /// setting, including host name, user name and password. The
+  /// user would only have flipped a switch.
+  ///
+  /// Now: if loading THREW and the area still holds
+  /// a row, NOTHING is written. If the storage is not readable at
+  /// all, the bolt fails CLOSED.
   void _save() {
-    final dir = _profileDir;
-    if (dir.isEmpty) return;
-    final file = File('$dir/archive_config.json');
-    file.writeAsStringSync(json.encode(_config.toJson()));
+    final s = _store;
+    if (s == null) return;
+    if (_loadFailed) {
+      int present;
+      try {
+        present = s.countArea(kArchiveConfigArea);
+      } catch (_) {
+        return;
+      }
+      if (present > 0) return;
+    }
+    try {
+      // S394: pin and "only in this network" belong to the service (the
+      // archive run pins, the capture buttons go through the service). This
+      // screen's copy of them may be older — take them fresh from the store,
+      // or an ordinary field edit would silently undo a pin and the next
+      // run would pin whatever answers then.
+      final stored = ArchiveConfig.readFrom(s);
+      _config.withShareIdentity(stored?.shareIdentity)
+          .withAllowedNetworks(stored?.allowedNetworks ?? const [])
+          .writeTo(s);
+    } catch (_) {
+      // A failed write must not knock over the UI;
+      // the existing data stays unchanged.
+    }
   }
 
   void _updateConfig(ArchiveConfig Function(ArchiveConfig) updater) {
@@ -837,6 +1095,8 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
       tier3Boundary: tier3Boundary ?? _config.tier3Boundary,
       storageBudgetMB: storageBudgetMB ?? _config.storageBudgetMB,
       allowedSSIDs: allowedSSIDs ?? _config.allowedSSIDs,
+      allowedNetworks: _config.allowedNetworks,
+      shareIdentity: _config.shareIdentity,
       defaultProtocol: defaultProtocol ?? _config.defaultProtocol,
       enabledByDefault: enabledByDefault ?? _config.enabledByDefault,
       archiveHost: archiveHost ?? _config.archiveHost,
@@ -850,20 +1110,118 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   Future<void> _testConnection() async {
     setState(() => _connectionTestResult = null);
     try {
-      final transport = ArchiveTransport.forProtocol(_config.defaultProtocol);
-      await transport.connect(
-        host: _config.archiveHost,
-        path: _config.archivePath,
-        username: _config.archiveUsername,
-        password: _config.archivePassword,
-        port: _config.archivePort,
-      );
-      final ok = await transport.testConnectivity(timeout: const Duration(seconds: 5));
-      await transport.disconnect();
-      setState(() => _connectionTestResult = ok ? 'OK' : 'FAIL');
+      final r = await testArchiveConnection(_config,
+          profileDir: widget.service.profileDir);
+      if (!mounted) return;
+      setState(() => _connectionTestResult = r.reachable
+          ? 'OK'
+          : r.identity == ShareIdentityState.mismatch
+              ? AppLocale.read(context).get('archive_identity_mismatch')
+              : 'FAIL');
     } catch (e) {
       setState(() => _connectionTestResult = 'ERROR: $e');
     }
+  }
+
+  /// Share identity (§21.6 security rules). Shown once the service answered.
+  List<Widget> _shareIdentityGroup(AppLocale locale) {
+    final st = _shareStatus;
+    if (st == null) return const [];
+    final state = st['identityState'] as String?;
+    final pin = st['identityPin'] as String?;
+    final mismatch = state == ShareIdentityState.mismatch.name;
+    final error = Theme.of(context).colorScheme.error;
+    final String text;
+    if (mismatch) {
+      text = locale.get('archive_identity_mismatch');
+    } else if (pin != null) {
+      text = locale.get('archive_identity_pinned').replaceAll('{pin}', pin);
+    } else if (state == ShareIdentityState.unavailable.name) {
+      text = locale.get('archive_identity_unavailable');
+    } else {
+      text = locale.get('archive_identity_unpinned');
+    }
+    return [
+      FormGroup(
+        title: locale.get('archive_identity_title'),
+        children: [
+          ListTile(
+            leading: Icon(mismatch ? Icons.gpp_bad : Icons.verified_user,
+                color: mismatch ? error : null),
+            title: Text(text,
+                style: mismatch ? TextStyle(color: error) : null),
+            subtitle: mismatch && pin != null
+                ? Text(locale.get('archive_identity_pinned').replaceAll('{pin}', pin))
+                : null,
+          ),
+          if (mismatch || pin != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: OutlinedButton.icon(
+                  onPressed: _rebindShare,
+                  icon: const Icon(Icons.link_off),
+                  label: Text(locale.get('archive_identity_rebind')),
+                ),
+              ),
+            ),
+        ],
+      ),
+    ];
+  }
+
+  /// "Only in this network" (§21.6, optional narrowing).
+  Widget _networkGroup(AppLocale locale) {
+    final nets = [
+      for (final j in (_shareStatus?['networks'] as List<dynamic>? ?? const []))
+        ?ArchiveNetwork.fromJson(j),
+    ];
+    return FormGroup(
+      title: locale.get('archive_network_title'),
+      children: [
+        if (nets.isEmpty)
+          ListTile(
+            leading: const Icon(Icons.public),
+            title: Text(locale.get('archive_network_none')),
+          ),
+        for (final n in nets)
+          ListTile(
+            leading: const Icon(Icons.router),
+            title: Text(n.subnet),
+            subtitle: n.gateway == null
+                ? null
+                : Text('${locale.get('archive_network_gateway')}: ${n.gateway}'),
+          ),
+        if (_networkError != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Text(_networkError!,
+                style: TextStyle(
+                    color: Theme.of(context).colorScheme.error, fontSize: 12)),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton.icon(
+                onPressed: _shareStatus == null ? null : _captureNetwork,
+                icon: const Icon(Icons.add_location_alt_outlined),
+                label: Text(locale.get('archive_network_capture')),
+              ),
+              if (nets.isNotEmpty)
+                OutlinedButton.icon(
+                  onPressed: _clearNetworks,
+                  icon: const Icon(Icons.clear),
+                  label: Text(locale.get('archive_network_clear')),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
   @override
@@ -1014,7 +1372,11 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
               const SizedBox(height: 8),
             ],
           ),
-          FormGroup(
+          ..._shareIdentityGroup(locale),
+          _networkGroup(locale),
+          // §21.6: the SSID list is offered only where the platform hands
+          // the name over without a location permission (Linux, Windows).
+          if (ssidReadableHere) FormGroup(
             title: locale.get('archive_ssid'),
             padRows: true,
             dividers: false,
@@ -1141,11 +1503,22 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     return null;
   }
 
-  String get _profileDir {
-    if (widget.service is CleonaService) {
-      return (widget.service as CleonaService).profileDir;
+  /// The encrypted storage of the identity — or `null`. The same
+  /// situation as in `_ArchiveSettingsState._store`, including the same dead
+  /// write path on the desktop platforms; the reasoning is there
+  /// in detail.
+  MessageStore? get _store {
+    final s = widget.service;
+    if (s is! CleonaService) return null;
+    try {
+      return s.store;
+    } catch (_) {
+      // `CleonaService.store` THROWS if the identity has no
+      // master seed — explicitly and without a substitute key
+      // (§21.4.1). A settings screen must not
+      // break on that: it then shows default values and writes nothing.
+      return null;
     }
-    return '';
   }
 
   @override
@@ -1159,29 +1532,38 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
   }
 
   void _loadTranscriptionConfig() {
-    final dir = _profileDir;
-    if (dir.isEmpty) return;
-    final file = File('$dir/transcription_config.json');
-    if (!file.existsSync()) return;
+    final s = _store;
+    if (s == null) return;
     try {
-      final j = json.decode(file.readAsStringSync()) as Map<String, dynamic>;
+      final vts = VoiceTranscriptionSettings.readFrom(s);
+      if (vts == null) return;
       setState(() {
-        _selectedLanguage = j['defaultLanguage'] as String? ?? 'auto';
-        _retentionDays = j['audioRetentionDays'] as int? ?? 30;
-        _selectedModel = j['modelSize'] as String? ?? 'base';
+        _selectedLanguage = vts.defaultLanguage;
+        _retentionDays = vts.audioRetentionDays;
+        _selectedModel = vts.modelSize;
       });
     } catch (_) {}
   }
 
+  /// S366: into the `transcription_config` area of the storage instead of bare
+  /// into `transcription_config.json`.
+  ///
+  /// NO DATA-LOSS BOLT, and that is weighed: if the three
+  /// values are lost, transcription runs again with `auto`, 30 days
+  /// and `base`. Nothing is gone that the user does not re-choose in five seconds
+  /// — unlike the archive, where a password hangs at the same
+  /// place.
   void _saveTranscriptionConfig() {
-    final dir = _profileDir;
-    if (dir.isEmpty) return;
-    final file = File('$dir/transcription_config.json');
-    file.writeAsStringSync(json.encode({
-      'defaultLanguage': _selectedLanguage,
-      'audioRetentionDays': _retentionDays,
-      'modelSize': _selectedModel,
-    }));
+    final s = _store;
+    if (s != null) {
+      try {
+        VoiceTranscriptionSettings(
+          defaultLanguage: _selectedLanguage,
+          audioRetentionDays: _retentionDays,
+          modelSize: _selectedModel,
+        ).writeTo(s);
+      } catch (_) {}
+    }
     // Update running service immediately (no restart needed).
     _transcriptionService?.defaultLanguage = _selectedLanguage;
   }
@@ -1358,7 +1740,7 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
   }
 }
 
-/// Media-Einstellungen Screen (Auto-Download Thresholds + Download-Verzeichnis).
+/// Media settings screen (auto-download thresholds + download directory).
 class MediaSettingsScreen extends StatefulWidget {
   final ICleonaService service;
   const MediaSettingsScreen({super.key, required this.service});
@@ -1742,5 +2124,325 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
         ],
       ),
     );
+  }
+}
+
+
+/// §24.4.2 — the data-saving mode as a visible state.
+///
+/// ── WHAT THIS ROW MUST FULFIL ─────────────────────────────────
+///
+/// 1. "a visible state, not a setting buried in a submenu" — it stands
+///    in the first group of the settings, and the state stands as a
+///    word next to it (`datasaver_state_on`/`_off`), not only as a
+///    switch position. §25.4 additionally lists the metric for it in the
+///    network dashboard.
+/// 2. The consequence ALWAYS stands below (`datasaver_consequence`), not
+///    only after reaching for a question mark.
+/// 3. "the app may suggest but must never activate it itself" — the
+///    suggestion is a banner with a button. There is in
+///    this file no path that calls [ICleonaService.setDataSaver] without
+///    a press.
+/// 4. If a chat is on high-secure, the switch is DEAD
+///    (`onChanged: null`) and names the reason. The greying out is
+///    only the courtesy — the effective bolt sits in the service
+///    (`CoverSaver.request`) and holds even if this row lies.
+class _DataSaverTile extends StatefulWidget {
+  final ICleonaService service;
+
+  /// Whether the active connection is metered (cellular only).
+  final bool metered;
+
+  const _DataSaverTile({required this.service, required this.metered});
+
+  @override
+  State<_DataSaverTile> createState() => _DataSaverTileState();
+}
+
+class _DataSaverTileState extends State<_DataSaverTile> {
+  /// Whether the user has dismissed the suggestion for this session.
+  ///
+  /// Deliberately NOT persistent: the suggestion depends on the current
+  /// connection, and a permanently stored "no" would be a
+  /// decision about future connections that nobody has
+  /// made.
+  bool _dismissed = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final scheme = Theme.of(context).colorScheme;
+    final service = widget.service;
+    final locked = service.dataSaverLockedBySecure;
+    final active = service.dataSaverActive;
+
+    final line = SwitchListTile(
+      secondary: Icon(
+        locked ? Icons.lock_outline : Icons.data_saver_on,
+        color: locked ? scheme.outline : null,
+      ),
+      title: Text(
+        '${locale.get('datasaver_title')} — '
+        '${locale.get(active ? 'datasaver_state_on' : 'datasaver_state_off')}',
+      ),
+      subtitle: Text(
+        locked
+            ? locale.get('datasaver_locked_secure')
+            : locale.get('datasaver_consequence'),
+        style: TextStyle(color: locked ? scheme.error : null),
+      ),
+      value: active,
+      // DEAD as long as secure is running. The reason stands in the subtitle.
+      onChanged: locked ? null : (v) => _set(v),
+    );
+
+    if (!widget.metered || active || locked || _dismissed) return line;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // THE SUGGESTION — and only a suggestion. No preselection, no
+        // pre-flipping, no "will be activated in 5 s".
+        Container(
+          width: double.infinity,
+          margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: scheme.secondaryContainer,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.signal_cellular_alt,
+                      size: 18, color: scheme.onSecondaryContainer),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      locale.get('datasaver_suggest'),
+                      style: TextStyle(
+                          fontSize: 13, color: scheme.onSecondaryContainer),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => setState(() => _dismissed = true),
+                    child: Text(locale.get('cancel')),
+                  ),
+                  TextButton(
+                    onPressed: () => _set(true),
+                    child: Text(locale.get('datasaver_suggest_action')),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        line,
+      ],
+    );
+  }
+
+  /// The ONLY way to set the mode from this file — and it
+  /// depends on a user action (switch or button).
+  void _set(bool to) {
+    final reason = widget.service.setDataSaver(to);
+    if (!mounted) return;
+    setState(() => _dismissed = true);
+    if (reason == kDataSaverLockedBySecure) {
+      // The service has refused. The reason is SHOWN, not
+      // swallowed — §24.4.2: "locked with its reason named".
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(AppLocale.read(context).get('datasaver_locked_secure')),
+      ));
+    }
+  }
+}
+
+/// S388, V4.2 §11.9 — the fourth neighbour source switchable: external
+/// address entries on public relays. "The source can be switched
+/// off by the user. A node with it switched off neither reads nor
+/// publishes; it finds neighbours by sources 1–3 alone."
+///
+/// As with the saving mode: the row names the state as a word, and the consequence
+/// ALWAYS stands below (`external_records_consequence`) — when reading and
+/// entering happens, and that off means no traffic to foreign relays.
+/// A device value: the switch applies to the node, not per identity.
+class _ExternalRecordsTile extends StatefulWidget {
+  final ICleonaService service;
+
+  const _ExternalRecordsTile({required this.service});
+
+  @override
+  State<_ExternalRecordsTile> createState() => _ExternalRecordsTileState();
+}
+
+class _ExternalRecordsTileState extends State<_ExternalRecordsTile> {
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final to = widget.service.externalRecordsEnabled;
+    return SwitchListTile(
+      secondary: const Icon(Icons.travel_explore),
+      title: Text(
+        '${locale.get('external_records_title')} — '
+        '${locale.get(to ? 'datasaver_state_on' : 'datasaver_state_off')}',
+      ),
+      subtitle: Text(locale.get('external_records_consequence')),
+      value: to,
+      // The ONLY way to set the switch — a user action.
+      onChanged: (v) {
+        widget.service.setExternalRecordsEnabled(v);
+        if (mounted) setState(() {});
+      },
+    );
+  }
+}
+
+/// S373 — the cover in the own network, as visible consent per
+/// segment.
+///
+/// ── THE REQUIREMENTS, AND WHERE THEY STAND HERE ───────────────────────────
+///
+/// They are the same as for the saving mode (§24.4.2) and are needed
+/// MORE STRICTLY here: there the cover stream is thinned, here it is
+/// suspended.
+///
+/// 1. **Visible state.** The row names the effect as a word
+///    (`datasaver_state_on`/`_off`, reused — it is the same
+///    statement "on/off"), not only a switch position. And it shows
+///    the EFFECT, not the consent: a secure chat overrides
+///    it without revoking it.
+/// 2. **The consequence ALWAYS stands below** (`lan_shaping_consequence`),
+///    not behind a question mark. It names three things: what
+///    is lost, WHERE it is lost (only in this network), and that
+///    secure brings it back.
+/// 3. **The app never activates by itself.** In this file there is no
+///    path that calls [ICleonaService.grantLanShaping] without a press —
+///    no suggestion banner, no preselection. Unlike the
+///    saving mode there is deliberately not even a SUGGESTION here: an
+///    app that on its own prompts switching off the cover would be
+///    exactly the voice that must not exist at this place.
+/// 4. **Secure locks.** The button is then dead and names the reason. The
+///    greying out is only the courtesy — the effective bolt sits in
+///    `CoverSaver.lanShapingActive` and holds even if this row
+///    lies.
+///
+/// ── AND A SEGMENT WITHOUT WITNESSES GETS NO BUTTON ───────────────
+///
+/// But the reasoning (`lan_shaping_no_witness`). A consent
+/// binds itself to a neighbour; without one there would be nothing for it to
+/// hang on, and it would apply in every identically named network in the world. That
+/// is shown to the user BEFORE the press, not as an error message
+/// afterwards.
+class _LanShapingTile extends StatefulWidget {
+  final ICleonaService service;
+
+  const _LanShapingTile({required this.service});
+
+  @override
+  State<_LanShapingTile> createState() => _LanShapingTileState();
+}
+
+class _LanShapingTileState extends State<_LanShapingTile> {
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final scheme = Theme.of(context).colorScheme;
+    final service = widget.service;
+    final locked = service.dataSaverLockedBySecure;
+    final active = service.lanShapingActive;
+    final segments = service.lanSegmentIds;
+    final grantable = service.lanSegmentsGrantable;
+
+    final kinder = <Widget>[
+      ListTile(
+        leading: Icon(
+          locked ? Icons.lock_outline : Icons.wifi_tethering,
+          color: locked ? scheme.outline : null,
+        ),
+        title: Text(
+          '${locale.get('lan_shaping_title')} — '
+          '${locale.get(active ? 'datasaver_state_on' : 'datasaver_state_off')}',
+        ),
+        subtitle: Text(
+          locked
+              ? locale.get('datasaver_locked_secure')
+              : locale.get('lan_shaping_consequence'),
+          style: TextStyle(color: locked ? scheme.error : null),
+        ),
+      ),
+    ];
+
+    if (segments.isEmpty) {
+      kinder.add(Padding(
+        padding: const EdgeInsets.fromLTRB(72, 0, 16, 8),
+        child: Text(locale.get('lan_shaping_no_segment'),
+            style: TextStyle(fontSize: 13, color: scheme.outline)),
+      ));
+    }
+
+    for (final id in segments) {
+      final consented = service.lanSegmentConsented(id);
+      final possible = grantable.contains(id);
+      kinder.add(Padding(
+        padding: const EdgeInsets.fromLTRB(72, 0, 16, 8),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(id, style: const TextStyle(fontSize: 13)),
+                  if (!consented && !possible)
+                    Text(locale.get('lan_shaping_no_witness'),
+                        style:
+                            TextStyle(fontSize: 12, color: scheme.outline)),
+                ],
+              ),
+            ),
+            // THE ONLY WAY IN, and it depends on a press.
+            if (consented)
+              TextButton(
+                onPressed: () => _set(id, false),
+                child: Text(locale.get('lan_shaping_revoke')),
+              )
+            else
+              TextButton(
+                // DEAD with secure and without witnesses. The reason stands
+                // above or in the subtitle of the row.
+                onPressed:
+                    locked || !possible ? null : () => _set(id, true),
+                child: Text(locale.get('lan_shaping_grant')),
+              ),
+          ],
+        ),
+      ));
+    }
+
+    return Column(mainAxisSize: MainAxisSize.min, children: kinder);
+  }
+
+  void _set(String segmentId, bool to) {
+    final ok = to
+        ? widget.service.grantLanShaping(segmentId)
+        : widget.service.revokeLanShaping(segmentId);
+    if (!mounted) return;
+    setState(() {});
+    if (to && !ok) {
+      // REFUSED, AND THE REASON IS SHOWN instead of swallowed: a
+      // setter that silently does nothing cannot be distinguished from a
+      // broken one.
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(AppLocale.read(context).get('lan_shaping_no_witness')),
+      ));
+    }
   }
 }

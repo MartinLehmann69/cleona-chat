@@ -5,10 +5,10 @@ import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/erasure/reed_solomon.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart';
+import 'package:cleona/core/codec/reed_solomon.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/install_source.dart';
@@ -20,7 +20,7 @@ Future<Uint8List> _sha256InIsolateAsync(Uint8List binary) =>
     Isolate.run(() => _sha256InIsolate(binary));
 
 /// §19.6 — orchestrates in-network binary updates: checks a verified
-/// [UpdateManifest] against the DHT binary tag, fetches erasure-coded
+/// [UpdateManifest] against the per-platform binary marker, fetches erasure-coded
 /// fragments from peers, assembles + verifies the binary, and hands a
 /// ready-to-install path back to the caller. Pure state machine — no
 /// network transport of its own (fetches happen via injected callback).
@@ -68,12 +68,10 @@ class BinaryUpdateManager {
   void Function(String version, String binaryPath)? onUpdateReady;
 
   BinaryUpdateManager({
-    required BinaryFragmentStore store,
-    required UpdateChecker checker,
+    required this._store,
+    required this._checker,
     String? profileDir,
-  })  : _store = store,
-        _checker = checker,
-        _log = CLogger.get('bin-update', profileDir: profileDir) {
+  })  : _log = CLogger.get('bin-update', profileDir: profileDir) {
     _highestSeenMonotoneSeq = _loadMonotoneSeq();
   }
 
@@ -91,14 +89,27 @@ class BinaryUpdateManager {
     String currentVersion,
     String platform,
   ) async {
-    if (_state == BinaryUpdateState.downloading ||
+    // ── ONE CHECK, NO STATE (S387) ────────────────────────────
+    //
+    // Here ran `_setState(checking)` and afterwards `_setState(idle)`. Since
+    // the banner only appears on `ready` (owner decision
+    // 14.09.2026), that was an error with consequences: every FURTHER identity
+    // of a daemon checks the same manifest, its `idle` went via IPC to
+    // the same GUI and deleted the banner of the service that had finished
+    // collecting. This method only decides "is there a target";
+    // the state is set by whoever collects.
+    //
+    // And a NEWER manifest during a run is no "already
+    // in transit": it is checked like any other and becomes the new
+    // target (Z1, §26.6.1). The superseded download aborts at
+    // [_superseded].
+    final runs = _state == BinaryUpdateState.downloading ||
         _state == BinaryUpdateState.assembling ||
         _state == BinaryUpdateState.verifying ||
-        _state == BinaryUpdateState.ready) {
-      return _targetVersion != null &&
-          _checker.isNewer(manifest.version, currentVersion);
+        _state == BinaryUpdateState.ready;
+    if (runs && manifest.version == _targetVersion) {
+      return _checker.isNewer(manifest.version, currentVersion);
     }
-    _setState(BinaryUpdateState.checking, 0.0);
     try {
       if (!shouldUseInNetworkUpdate()) {
         // Name the ACTUAL reason. This used to say "(Play Store install)"
@@ -115,18 +126,18 @@ class BinaryUpdateManager {
             : 'install source = ${InstallSourceDetector.cached?.name ?? "not yet detected"} '
                 '(note: detection failures report playStore by design)';
         _log.warn('In-network updates disabled — $why');
-        _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
 
       if (_checker.isDowngradeAttempt(manifest, _highestSeenMonotoneSeq)) {
         _log.warn('Rejecting manifest: monotoneSeq=${manifest.minMonotoneSeq} '
             '<= highestSeen=$_highestSeenMonotoneSeq');
-        _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
 
-      final tag = manifest.dhtBinaryTag?[platform];
+      // Presence marker, not a lookup key — the value is
+      // deliberately not read (reasoning at `UpdateManifest.binaryTag`).
+      final tag = manifest.binaryTag?[platform];
       final hash = manifest.binaryHashes?[platform];
       if (tag == null && hash == null) {
         // INFO, not DEBUG: a manifest that carries no artefact for this
@@ -134,14 +145,12 @@ class BinaryUpdateManager {
         // outcome — unlike the "not newer" case below, which is the normal
         // steady state and stays at DEBUG so the 6h check does not spam.
         _log.info('In-network update unavailable: manifest v${manifest.version} '
-            'has neither dhtBinaryTag nor binaryHash for platform=$platform');
-        _setState(BinaryUpdateState.idle, 0.0);
+            'has neither binaryTag nor binaryHash for platform=$platform');
         return false;
       }
 
       if (!_checker.isNewer(manifest.version, currentVersion)) {
         _log.debug('Manifest v${manifest.version} not newer than $currentVersion');
-        _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
 
@@ -154,13 +163,23 @@ class BinaryUpdateManager {
       _targetVersion = manifest.version;
       _targetPlatform = platform;
       _log.info('In-network update available: v${manifest.version} for $platform');
-      _setState(BinaryUpdateState.idle, 0.0);
       return true;
     } catch (e) {
-      _fail('checkForUpdate failed: $e');
+      // No `_fail`: a `failed` from here would go as a state to the GUI
+      // (see header of the method), although nothing was collected.
+      _errorMessage = 'checkForUpdate failed: $e';
+      _log.error(_errorMessage!);
       return false;
     }
   }
+
+  /// A run for [version] is superseded: aborted, or a newer
+  /// manifest has moved the target (Z1, §26.6.1 "switches to the newest
+  /// target at once"). Until S387 the download only knew [_cancelled], and
+  /// every new run resets that — an old one then kept running and
+  /// fetched pieces for a version that nobody wants any more.
+  bool _superseded(String version) =>
+      _cancelled || _targetVersion != version;
 
   /// Fetch fragments from [sources] until K are available, then hand off to
   /// [assemble]. [fetchFragment] performs the actual network I/O.
@@ -189,19 +208,79 @@ class BinaryUpdateManager {
       // Prefer a node that has the full binary — one shot, no reconstruction.
       // Try ALL full-binary sources (different addresses of the same or
       // different endpoints) before falling back to fragment assembly.
+      //
+      // ── THE CONTENT IS CHECKED HERE, NOT ONLY AT THE CALLER (S372)
+      //
+      // Until S372 this loop was asymmetric: a wrong LENGTH
+      // led to `continue`, a wrong CONTENT with the right length
+      // to `return`. The content was in fact not looked at at all — that
+      // only happened one level higher in `_startInNetworkUpdate`
+      // step 8, and there the source list no longer exists. Whoever
+      // authenticated could not page on; whoever could page on
+      // did not know whether what was procured was any good.
+      //
+      // Consequence: ONE source that delivered something wrong of exactly matching length
+      // ended the whole click path — `verify` failed,
+      // `deleteVersion` cleaned up, and the remaining sources never got their turn.
+      // That is a defect in a flow that is kept as MANDATORY
+      // ("user clicks download -> auto-install", reminder
+      // `project_android_update_flow_v145.md`).
+      //
+      // Ae-1 of the same session enlarged the source set by up to twelve
+      // addresses from the entry cascade (§26.6.4). Whoever
+      // raises the number of providers must repair the loop that gives up at the
+      // first bad provider — otherwise the improvement is
+      // a deterioration.
+      //
+      // ── NO CHECK IS DROPPED, IT ONLY TAKES EFFECT EARLIER ────────────
+      //
+      // The chain stays complete and three-stage: [expectedSize] against
+      // `binarySizes`, SHA-256 against `binaryHashes`, and the
+      // maintainer signature over exactly this hash. The third stage
+      // stays with the caller ([verify]), because installation is
+      // decided there; the second stands from now on ADDITIONALLY here. The
+      // caller checks it a second time afterwards — that is intended
+      // (defence in depth) and costs one hash run over a
+      // file that already came through checked.
+      //
+      // ── THE ABORT STILL COMES ─────────────────────────────────
+      //
+      // The loop runs over a FINITE list. After it,
+      // it is over, and the message says what the cause was — no endless
+      // trying through, no silent exit.
       final fullSources = sources.where((s) => s.hasFullBinary).toList();
+      var hashRejections = 0;
       for (final src in fullSources) {
         _log.info('Fetching full binary from ${src.address.ip}:${src.address.port}');
         final data = fetchWithSize != null
             ? await fetchWithSize(src.address, platform, -1,
                 expectedSize: expectedSize)
             : await fetchFragment(src.address, platform, -1);
-        if (_cancelled) return;
+        if (_superseded(version)) return;
         if (data != null) {
           if (expectedSize != null && data.length != expectedSize) {
             _log.warn('Full-binary from ${src.address.ip} truncated: '
                 'got ${data.length}B, expected ${expectedSize}B — trying next');
             continue;
+          }
+          // The hash run lies in an isolate — the same design as in
+          // [verify]. A synchronous SHA-256 over ~90 MB would otherwise block
+          // the event loop in the middle of the click path.
+          if (expectedHash.isNotEmpty) {
+            final isHex = bytesToHex(await _sha256InIsolateAsync(data));
+            if (_superseded(version)) return;
+            if (isHex.toLowerCase() != expectedHash.toLowerCase()) {
+              hashRejections++;
+              _log.warn('Full-binary from ${src.address.ip}: SHA-256 $isHex '
+                  '!= expected $expectedHash — discarded, next source');
+              continue;
+            }
+          } else {
+            // No anchor in the manifest: then nothing can be checked here,
+            // and the caller rejects it. Make it visible,
+            // do not silently let it through.
+            _log.warn('Full-binary from ${src.address.ip}: no expected '
+                'hash passed — content unchecked here');
           }
           await _store.storeComplete(platform, version, data);
           _setState(BinaryUpdateState.downloading, 1.0);
@@ -210,7 +289,9 @@ class BinaryUpdateManager {
         _log.warn('Full-binary fetch from ${src.address.ip} failed, trying next');
       }
       if (fullSources.isNotEmpty) {
-        _log.warn('All full-binary sources exhausted, falling back to fragments');
+        _log.warn('All ${fullSources.length} full-binary sources exhausted '
+            '($hashRejections of them with wrong content at matching '
+            'length) — fallback to fragments');
       }
 
       final have = (await _store.availableFragments(platform, version)).toSet();
@@ -241,10 +322,10 @@ class BinaryUpdateManager {
       final total = plan.length;
       final entries = plan.entries.toList();
       for (var i = 0; i < entries.length; i += _maxConcurrentFetches) {
-        if (_cancelled) return;
+        if (_superseded(version)) return;
         final batch = entries.skip(i).take(_maxConcurrentFetches);
         await Future.wait(batch.map((entry) async {
-          if (_cancelled) return;
+          if (_superseded(version)) return;
           try {
             final data = await fetchFragment(entry.value, platform, entry.key);
             if (data != null) {
@@ -260,10 +341,12 @@ class BinaryUpdateManager {
             _log.warn('Fragment ${entry.key} fetch failed: $e');
           }
           completed++;
+          if (_superseded(version)) return;
           _setState(BinaryUpdateState.downloading,
               total == 0 ? 1.0 : completed / total);
         }));
       }
+      if (_superseded(version)) return;
 
       final gotCount = (await _store.availableFragments(platform, version)).length;
       if (gotCount < k) {
@@ -413,10 +496,19 @@ class BinaryUpdateManager {
   }
 
   /// Run housekeeping on the fragment store (called periodically by owner).
+  ///
+  /// Passes this manager's own [_targetPlatform]/[_targetVersion] through to
+  /// [BinaryFragmentStore.enforceBudget] as the protected install target —
+  /// this manager is the only object that knows which (platform, version) is
+  /// currently being downloaded/assembled/verified for local installation
+  /// (`main.dart:applyUpdate()` reads `_targetVersion` for exactly that
+  /// decision on Android and desktop alike), so the exemption is set here,
+  /// not guessed at inside the store.
   Future<void> gc(String currentVersion, int budgetBytes) async {
     try {
       await _store.garbageCollect(currentVersion);
-      await _store.enforceBudget(budgetBytes);
+      await _store.enforceBudget(budgetBytes,
+          protectPlatform: _targetPlatform, protectVersion: _targetVersion);
     } catch (e) {
       _log.warn('gc failed: $e');
     }
@@ -456,6 +548,21 @@ class BinaryUpdateManager {
   /// with the verified update. Writes an `update-pending.json` marker so that
   /// the next startup can detect a fresh update and run [markUpdateHealthy]
   /// after a grace period, or [rollback] if the app crashes immediately.
+  /// Root of the bundle that [applyDesktopUpdate] and [rollback]
+  /// replace — derived from the passed program path.
+  ///
+  /// CRITICAL SINCE S367, and the reason is a data loss that was almost
+  /// built in: both procedures below mirror a whole
+  /// bundle with `rsync --delete` or `robocopy` into this directory.
+  /// Until here `File(currentBinaryPath).parent.path` stood there. The
+  /// daemon lies in `<bundleDir>/bin/` since S367 — with the old
+  /// calculation the entire bundle would have been mirrored into `bin/`
+  /// and `--delete` would have removed the rest of the installation. Computed via
+  /// [AppPaths.bundleDirOf] it hits the same, right root for GUI (root) and
+  /// daemon (`bin/`).
+  static String _bundleRootOf(String currentBinaryPath) =>
+      AppPaths.bundleDirOf(currentBinaryPath);
+
   Future<bool> applyDesktopUpdate(String currentBinaryPath) async {
     final verifiedPath = _verifiedBinaryPathSync();
     if (verifiedPath == null) {
@@ -483,7 +590,8 @@ class BinaryUpdateManager {
         // Windows: can't overwrite running .exe files. Write a .bat script
         // that waits for daemon+GUI to exit, then extracts the ZIP, then
         // restarts the daemon. The caller spawns this script and exits.
-        final appDir = currentFile.parent.path.replaceAll('/', '\\');
+        final appDir =
+            _bundleRootOf(currentBinaryPath).replaceAll('/', '\\');
         final bakDir = '$appDir.update-bak'.replaceAll('/', '\\');
         final zipSrc = verifiedPath.replaceAll('/', '\\');
         final tmpZip = '$zipSrc.zip';
@@ -530,7 +638,16 @@ class BinaryUpdateManager {
           'if exist "$tmpZip" del /Q "$tmpZip"\r\n'
           ':start_app\r\n'
           'echo [%date% %time%] Starting daemon... >> "$batLog"\r\n'
-          'start "" "$appDir\\cleona-daemon.exe"\r\n'
+          // `bin\\` first (S367): there `dart build cli` puts the
+          // binary, and only from there does its embedded
+          // path `..\\lib\\sqlite3.dll` resolve. The root stays as
+          // fallback, so that a bundle in the old layout
+          // keeps starting.
+          'if exist "$appDir\\bin\\cleona-daemon.exe" (\r\n'
+          '  start "" "$appDir\\bin\\cleona-daemon.exe"\r\n'
+          ') else (\r\n'
+          '  start "" "$appDir\\cleona-daemon.exe"\r\n'
+          ')\r\n'
           'echo [%date% %time%] Waiting for daemon... >> "$batLog"\r\n'
           'ping -n 5 127.0.0.1 >nul\r\n'
           'echo [%date% %time%] Starting GUI... >> "$batLog"\r\n'
@@ -541,7 +658,7 @@ class BinaryUpdateManager {
         _log.info('Wrote update-apply.bat: $batPath');
       } else if (isGzip && Platform.isLinux) {
         // Linux tar.gz: full bundle replacement (daemon + GUI + libs + data).
-        final appDir = currentFile.parent.path;
+        final appDir = _bundleRootOf(currentBinaryPath);
         final bakDir = '$appDir.update-bak';
 
         try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
@@ -584,9 +701,13 @@ class BinaryUpdateManager {
             return false;
           }
 
-          // Ensure binaries are executable
-          for (final name in ['cleona-daemon', 'cleona']) {
-            final bin = File('$appDir/$name');
+          // Ensure binaries are executable.
+          // `bin/cleona-daemon` is the canonical place of the daemon since S367;
+          // the root entries stay for bundles in the
+          // old layout. A `chmod` on a non-existent
+          // file is no error, but skipped.
+          for (final rel in ['bin/cleona-daemon', 'cleona-daemon', 'cleona']) {
+            final bin = File('$appDir/$rel');
             if (bin.existsSync()) {
               Process.runSync('chmod', ['+x', bin.path]);
             }
@@ -677,7 +798,9 @@ class BinaryUpdateManager {
     final markerFile = File('$updateDir/update-pending.json');
 
     if (Platform.isWindows) {
-      final appDir = File(currentBinaryPath).parent.path;
+      // The same root as when applying (S367) — otherwise
+      // `robocopy` would mirror the backup bundle into `bin\`.
+      final appDir = _bundleRootOf(currentBinaryPath);
       final bakDir = '$appDir.update-bak';
       if (Directory(bakDir).existsSync()) {
         try {

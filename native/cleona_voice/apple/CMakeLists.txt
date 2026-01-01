@@ -25,7 +25,7 @@
 #   iOS:    the same configure with -DCMAKE_SYSTEM_NAME=iOS -DCLEONA_IOS_STATIC=ON
 #           produces libcleona_voice.a plus an iOS conformance executable. The
 #           executable LINKS on the build machine but has to be run on a device;
-#           see BUILD_REQUEST_V1.3.md §5 for what that costs and who can do it.
+#           see BUGFIX_CURRENT.md AV-V1.3 §5 for what that costs and who can do it.
 #
 # ===========================================================================
 # WHY TWO SOURCE FILES AND NOT ONE
@@ -71,7 +71,7 @@ set(CVA_SOURCES cleona_voice_apple.c ${CVA_PLATFORM_SRC})
 if(CLEONA_IOS_STATIC)
   # dart:ffi on iOS is DynamicLibrary.process() — everything is linked into the
   # Runner binary, so the backend has to be a static archive that
-  # scripts/build-ios-libs.sh can merge (BUILD_REQUEST_V1.3.md §1).
+  # scripts/build-ios-libs.sh can merge (BUGFIX_CURRENT.md AV-V1.3 §1).
   add_library(cleona_voice_apple STATIC ${CVA_SOURCES})
 else()
   add_library(cleona_voice_apple SHARED ${CVA_SOURCES})

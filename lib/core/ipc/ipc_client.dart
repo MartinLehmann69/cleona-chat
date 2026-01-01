@@ -4,18 +4,20 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
-import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder, ContactSeedDataSource;
+import 'package:cleona/core/util/hex.dart' show bytesToHex;
+import 'package:cleona/core/crypto/hd_wallet.dart' show HdWallet;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/contact/contact_seed.dart'
+    show ContactSeedBuilder, ContactSeedDataSource, EntrySeedCandidate;
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/core/network/network_stats.dart';
+import 'package:cleona/core/stats/network_stats.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
-import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceMode, MultiInterfaceManager;
-import 'package:cleona/core/services/contact_manager.dart' show Contact;
+import 'package:cleona/core/service/multi_interface_mode.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
-import 'package:cleona/core/node/identity_context.dart';
+import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_update_manager.dart' show BinaryUpdateState;
 
@@ -52,6 +54,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // Cached state from daemon
   String _nodeIdHex = '';
+  // C1: the active identity's profileDir, filled from `get_state`. Needed
+  // so GUI-side bridges (AndroidCalendarBridge) can log to the SAME file
+  // the daemon writes to instead of falling back to the process-log.
+  String _profileDir = '';
   // Welle 5/6: device identity bits (= deviceNodeIdHex + Device-KEM-PKs).
   // Filled from `get_state` snapshot; required by ContactSeed-URI generation
   // (identity_detail_screen.dart) so the receiver can run First-CR without
@@ -63,6 +69,63 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Uint8List _foundingEd25519Pk = Uint8List(0);
   String _displayName = '';
   int _port = 0;
+  /// §22.7 — initial value `searching`, NOT `ready`. Before the first
+  /// answer of the daemon this client knows nothing; the cautious
+  /// direction is the only one that silently opens no gate.
+  String _readinessState = 'searching';
+
+  // §25.4: the partner numbers by direction. Initial value 0 and not a
+  // substitute computed from `peerCount` — as long as the daemon has
+  // reported nothing, "zero known" is the truth, and a surrogate would be
+  // exactly the defect that `smoke_ipc_interface_completeness.dart` looks for.
+  int _syncPartnersOutbound = 0;
+  int _syncPartnersInbound = 0;
+  int _independentSyncPartners = 0;
+  int _reachableResponsibleRelays = 0;
+
+  /// §24.4.2 — data saver mode, transmitted by the daemon.
+  ///
+  /// Initial values `false`/`false` and NO local recomputation: the state
+  /// arises in the daemon's cover stream, this process cannot know it
+  /// before it has heard it. A substitute value computed here would be
+  /// exactly the constant that
+  /// `smoke_ipc_interface_completeness.dart` looks for.
+  bool _dataSaverActive = false;
+  bool _dataSaverLockedBySecure = false;
+
+  /// V4.2 §11.9 — source 4 on/off, transmitted by the daemon (S388). Initial
+  /// value as in the host (on); the first state packet overwrites it.
+  bool _externalRecordsEnabled = true;
+
+  // ── S373: COVER IN THE OWN NETWORK, ACROSS THE IPC BOUNDARY ────────────
+  //
+  // Four quantities, because the UI must show four different things and
+  // cannot derive them from one another:
+  //   * is it currently IN EFFECT (`_lanShapingActive`) — that is the state
+  //     that §24.4.2 requires to be visible;
+  //   * WHICH segments exist (`_lanSegmentIds`) — empty means "no own
+  //     network", and that is a statement of its own;
+  //   * for which is there a CONSENT (`_lanSegmentsConsented`)
+  //     — not the same as "in effect", a Secure chat overrules it;
+  //   * for which COULD one be granted (`_lanSegmentsGrantable`)
+  //     — without witnesses there is no button, but the reasoning.
+  bool _lanShapingActive = false;
+  List<String> _lanSegmentIds = const <String>[];
+  List<String> _lanSegmentsConsented = const <String>[];
+  List<String> _lanSegmentsGrantable = const <String>[];
+
+  /// Reads the four quantities from a state packet. A missing entry leaves
+  /// the previous value standing — the same pattern as with the
+  /// neighbouring lines, so that a partial packet deletes nothing.
+  void _readLanShaping(Map<String, dynamic> d) {
+    _lanShapingActive = d['lanShapingActive'] as bool? ?? _lanShapingActive;
+    final ids = d['lanSegmentIds'];
+    if (ids is List) _lanSegmentIds = ids.whereType<String>().toList();
+    final con = d['lanSegmentsConsented'];
+    if (con is List) _lanSegmentsConsented = con.whereType<String>().toList();
+    final gr = d['lanSegmentsGrantable'];
+    if (gr is List) _lanSegmentsGrantable = gr.whereType<String>().toList();
+  }
   int _peerCount = 0;
   int _confirmedPeerCount = 0;
   int _reachablePeerCount = 0;
@@ -179,6 +242,11 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   void _attachSocketListener() {
+    // New connection, new recipient: a daemon restarted in the meantime
+    // no longer knows the reported language. Without this reset its tray
+    // would stay on the system language, because the client would
+    // consider the language "already reported".
+    _reportedLocale = null;
     _socket!.cast<List<int>>().transform(utf8.decoder).listen(
       _onData,
       onError: (e) => _handleDisconnect('error: $e'),
@@ -369,10 +437,34 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     switch (event.event) {
       case 'state_changed':
         // Lightweight notification — update basic fields, schedule coalesced refresh
+        _readinessState =
+            event.data['readiness'] as String? ?? _readinessState;
+        _syncPartnersOutbound =
+            event.data['syncPartnersOutbound'] as int? ?? _syncPartnersOutbound;
+        _syncPartnersInbound =
+            event.data['syncPartnersInbound'] as int? ?? _syncPartnersInbound;
+        _independentSyncPartners = event.data['independentSyncPartners']
+                as int? ??
+            _independentSyncPartners;
+        _reachableResponsibleRelays =
+            event.data['reachableResponsibleRelays'] as int? ??
+                _reachableResponsibleRelays;
+        _dataSaverActive =
+            event.data['dataSaverActive'] as bool? ?? _dataSaverActive;
+        _dataSaverLockedBySecure = event.data['dataSaverLockedBySecure']
+                as bool? ??
+            _dataSaverLockedBySecure;
+        _externalRecordsEnabled =
+            event.data['externalRecordsEnabled'] as bool? ??
+                _externalRecordsEnabled;
+        _readLanShaping(event.data);
         _peerCount = event.data['peerCount'] as int? ?? _peerCount;
         _confirmedPeerCount = event.data['confirmedPeerCount'] as int? ?? _confirmedPeerCount;
         _reachablePeerCount = event.data['reachablePeerCount'] as int? ?? _reachablePeerCount;
         _hasPortMapping = event.data['hasPortMapping'] as bool? ?? _hasPortMapping;
+        _hasSessionConfirmedPeers = event.data['hasSessionConfirmedPeers']
+                as bool? ??
+            _hasSessionConfirmedPeers;
         _mobileFallbackActive = event.data['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
         _isRunning = event.data['isRunning'] as bool? ?? _isRunning;
         onStateChanged?.call();
@@ -410,7 +502,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         if (rrConv != null) {
           for (final m in rrConv.messages) {
             if (m.id == rrMsgId && m.isOutgoing) {
-              m.status = MessageStatus.read;
+              // S390: read marker, not a delivery state (§9.1 lists four).
+              m.readByRecipient = true;
               m.readAt ??= DateTime.now();
               break;
             }
@@ -440,6 +533,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final chname = event.data['channelName'] as String;
         onChannelInviteReceived?.call(chid, chname);
         refreshState();
+        break;
+      case 'jury_request':
+        // AP-5a: the list itself also rides getStateSnapshot(); this case only
+        // makes it IMMEDIATE and finally fires the declared callback. Merging
+        // by juryId (not append) keeps a repeated event idempotent and keeps
+        // the entry consistent with what the next snapshot will bring.
+        final jr = JuryRequest.fromJson(Map<String, dynamic>.from(event.data));
+        final merged = List<JuryRequest>.from(_pendingJuryRequests);
+        final at = merged.indexWhere((r) => r.juryId == jr.juryId);
+        if (at >= 0) {
+          merged[at] = jr;
+        } else {
+          merged.add(jr);
+        }
+        _pendingJuryRequests = List<JuryRequest>.unmodifiable(merged);
+        onJuryRequestReceived?.call(jr);
+        onStateChanged?.call();
         break;
       case 'restore_progress':
         final phase = event.data['phase'] as int;
@@ -659,6 +769,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   void _applyStateSnapshot(Map<String, dynamic> state) {
     _nodeIdHex = state['nodeIdHex'] as String? ?? _nodeIdHex;
+    _profileDir = state['profileDir'] as String? ?? _profileDir;
     _deviceNodeIdHex = state['deviceNodeIdHex'] as String? ?? _deviceNodeIdHex;
     final dxkB64 = state['deviceX25519PkB64'] as String? ?? state['dxkB64'] as String?;
     if (dxkB64 != null && dxkB64.isNotEmpty) {
@@ -681,9 +792,29 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     }
     _displayName = state['displayName'] as String? ?? _displayName;
     _port = state['port'] as int? ?? _port;
+    _readinessState = state['readiness'] as String? ?? _readinessState;
+    _syncPartnersOutbound =
+        state['syncPartnersOutbound'] as int? ?? _syncPartnersOutbound;
+    _syncPartnersInbound =
+        state['syncPartnersInbound'] as int? ?? _syncPartnersInbound;
+    _independentSyncPartners =
+        state['independentSyncPartners'] as int? ?? _independentSyncPartners;
+    _dataSaverActive = state['dataSaverActive'] as bool? ?? _dataSaverActive;
+    _dataSaverLockedBySecure =
+        state['dataSaverLockedBySecure'] as bool? ?? _dataSaverLockedBySecure;
+    _externalRecordsEnabled =
+        state['externalRecordsEnabled'] as bool? ?? _externalRecordsEnabled;
+    _readLanShaping(state);
     _peerCount = state['peerCount'] as int? ?? _peerCount;
     _confirmedPeerCount = state['confirmedPeerCount'] as int? ?? _confirmedPeerCount;
     _reachablePeerCount = state['reachablePeerCount'] as int? ?? _reachablePeerCount;
+    // AP-5a: sticky — a daemon without the field must not clear the latch.
+    _hasSessionConfirmedPeers =
+        state['hasSessionConfirmedPeers'] as bool? ?? _hasSessionConfirmedPeers;
+    final startedMs = state['nodeStartedAtMs'] as int?;
+    if (startedMs != null) {
+      _nodeStartedAt = DateTime.fromMillisecondsSinceEpoch(startedMs);
+    }
     _mobileFallbackActive = state['mobileFallbackActive'] as bool? ?? _mobileFallbackActive;
     _fragmentCount = state['fragmentCount'] as int? ?? _fragmentCount;
     _isRunning = state['isRunning'] as bool? ?? _isRunning;
@@ -693,12 +824,21 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _profilePictureBase64 = state['profilePicture'] as String?;
     _profileDescription = state['profileDescription'] as String?;
     _isGuardianSetUp = state['isGuardianSetUp'] as bool? ?? false;
+    // AP-5a: absent on a pre-AP-5a daemon -> keep the previous list rather
+    // than clearing it, so an older daemon degrades to today's empty list
+    // instead of dropping entries the event path may have delivered.
+    final juryList = state['pendingJuryRequests'] as List<dynamic>?;
+    if (juryList != null) {
+      _pendingJuryRequests = juryList
+          .map((e) => JuryRequest.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(growable: false);
+    }
     final ms = state['mediaSettings'] as Map<String, dynamic>?;
     if (ms != null) _mediaSettings = MediaSettings.fromJson(ms);
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
     final mim = state['multiInterfaceMode'] as String?;
-    if (mim != null) _multiInterfaceMode = MultiInterfaceManager.modeFromString(mim);
+    if (mim != null) _multiInterfaceMode = MultiInterfaceMode.modeFromString(mim);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
     if (ns != null) _notificationSoundService.updateSettings(NotificationSettings.fromJson(ns));
 
@@ -706,6 +846,26 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final ips = state['localIps'] as List<dynamic>?;
     if (ips != null) _localIps = ips.cast<String>();
     _publicIp = state['publicIp'] as String?;
+
+    // Identity-derivation skew (see HdWallet.identityDerivationFingerprint).
+    // A daemon that predates the field leaves this `unknown` — absence is not
+    // disagreement, and reporting it as one would cry wolf on every rollout
+    // where the daemon lags by one build.
+    final daemonFp = state['identityDerivationFp'] as String?;
+    _identityDerivationSkew = IdentityDerivationSkew.classify(daemonFp);
+    if (_identityDerivationSkew == IdentityDerivationSkew.mismatch) {
+      // Once, not per snapshot: state_changed arrives continuously and this
+      // condition does not clear by itself — it needs a redeploy.
+      if (!_skewLoggedOnce) {
+        _skewLoggedOnce = true;
+        CLogger.get('ipc-client', profileDir: profileDir).error(
+            'Identity derivation skew: daemon mints UserIDs as $daemonFp, this '
+            'GUI as ${HdWallet.identityDerivationFingerprint}. The two halves '
+            'of the app are from different builds; every UserID the daemon '
+            'reports is one this GUI cannot reproduce. No ContactSeed can be '
+            'vouched for until both halves are redeployed together.');
+      }
+    }
     _publicPort = state['publicPort'] as int?;
 
     // Multi-Device (§26)
@@ -716,6 +876,17 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
           .toList();
     }
     _localDeviceId = state['localDeviceId'] as String? ?? _localDeviceId;
+    // §24.4.3: the transition state of the device lockouts. If the field
+    // is missing, the daemon is older than this change — then KEEP the
+    // previous list instead of emptying it: in the display an empty list
+    // means "no transition is running", and that would be a statement an
+    // old daemon never made.
+    final lockJson = state['deviceLockouts'] as List<dynamic>?;
+    if (lockJson != null) {
+      _deviceLockouts = lockJson
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList(growable: false);
+    }
 
     // Update active identity
     if (state['activeIdentityId'] != null) {
@@ -827,6 +998,24 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
           .toList();
     }
 
+    // §11/G-11: the start peer candidates of the NODE. If the key is
+    // missing, the last state stays instead of jumping to empty — a
+    // partial snapshot must not rob the QR code of its `s=`.
+    final candidates = state['entrySeedCandidates'] as List<dynamic>?;
+    if (candidates != null) {
+      _entrySeedCandidates = <EntrySeedCandidate>[
+        for (final k in candidates)
+          if (k is Map<String, dynamic>)
+            EntrySeedCandidate(
+              nodeIdHex: k['n'] as String? ?? '',
+              addresses: (k['a'] as List<dynamic>? ?? const [])
+                  .whereType<String>()
+                  .toList(growable: false),
+              expiryMs: k['x'] as int? ?? 0,
+            ),
+      ];
+    }
+
     // Update typing contacts
     final typing = state['typingContacts'] as List<dynamic>?;
     if (typing != null) {
@@ -838,6 +1027,37 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   /// Check if a contact is currently typing.
   bool isContactTyping(String nodeIdHex) => _typingContacts.contains(nodeIdHex);
 
+  /// The language chosen in the GUI, as `main.dart` reports it.
+  ///
+  /// Owner decision V-10-a = b (09.09.2026): the daemon is to show the
+  /// tray state text in THIS language, not in that of the operating
+  /// system.
+  String? _uiLocale;
+
+  /// What of it has already arrived at the daemon.
+  ///
+  /// The comparison is the whole reason why no additional traffic arises
+  /// here: the field hangs on the next request that the client makes
+  /// anyway, and after that on none any more. On a new connection it is
+  /// reset ([_attachSocketListener]) — a newly started daemon does not
+  /// have the old state.
+  String? _reportedLocale;
+
+  String? get uiLocale => _uiLocale;
+
+  /// Reports the GUI language. Costs NOTHING in itself — it travels with
+  /// the next request that is due anyway.
+  ///
+  /// MEASURED LIMIT, explicitly named (price of variant b): until the next
+  /// request the tray stays on the old state, and until the first GUI
+  /// start on the system language — permanently on a server without a
+  /// GUI. That is the accepted price for no round trip of its own and no
+  /// timer being added (work rule 5).
+  set uiLocale(String? code) {
+    if (code == _uiLocale) return;
+    _uiLocale = code;
+  }
+
   Future<IpcResponse> _sendRequest(String command, {
     Map<String, dynamic> params = const {},
     String? identityId,
@@ -847,17 +1067,24 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     }
 
     final id = _nextRequestId++;
+    // Only as long as the daemon does not yet have the state — after that
+    // the field is `null` and the request as long as before.
+    final locale = _uiLocale != _reportedLocale ? _uiLocale : null;
     final request = IpcRequest(
       id: id,
       command: command,
       params: params,
       identityId: identityId,
+      uiLocale: locale,
     );
     final completer = Completer<IpcResponse>();
     _pendingRequests[id] = completer;
 
     try {
       _socket!.write(request.toJsonLine());
+      // ONLY after the successful write — otherwise a language would count
+      // as reported that never left the socket.
+      if (locale != null) _reportedLocale = locale;
     } catch (e) {
       _pendingRequests.remove(id);
       return IpcResponse(id: id, success: false, error: '$e');
@@ -983,6 +1210,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   String get nodeIdHex => _nodeIdHex;
   @override
+  String get profileDir => _profileDir;
+  @override
   String get deviceNodeIdHex => _deviceNodeIdHex;
   @override
   Uint8List get deviceX25519Pk => _deviceX25519Pk;
@@ -997,6 +1226,48 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   String get displayName => _displayName;
   @override
   int get port => _port;
+  /// §22.7.2, normative: the same value as in the daemon, fed from the
+  /// state — no constant, no `null`, no local recomputation from
+  /// `peerCount`. The guard
+  /// `smoke_ipc_interface_completeness.dart` checks exactly that.
+  @override
+  String get readinessState => _readinessState;
+  @override
+  int get syncPartnersOutbound => _syncPartnersOutbound;
+  @override
+  int get syncPartnersInbound => _syncPartnersInbound;
+  @override
+  int get independentSyncPartners => _independentSyncPartners;
+
+  /// §9.2 — the measured responsibility set, from the daemon's
+  /// `state_changed`. Before the first event `0`: "nothing measured yet"
+  /// and "no relays known" are the same state for the display.
+  @override
+  int get reachableResponsibleRelays => _reachableResponsibleRelays;
+
+  /// §24.4.2, transmitted — no constant, no local recomputation.
+  @override
+  bool get dataSaverActive => _dataSaverActive;
+  @override
+  bool get dataSaverLockedBySecure => _dataSaverLockedBySecure;
+
+  /// §11.9, transmitted — no constant.
+  @override
+  bool get externalRecordsEnabled => _externalRecordsEnabled;
+
+  @override
+  bool get lanShapingActive => _lanShapingActive;
+
+  @override
+  List<String> get lanSegmentIds => _lanSegmentIds;
+
+  @override
+  List<String> get lanSegmentsGrantable => _lanSegmentsGrantable;
+
+  @override
+  bool lanSegmentConsented(String segmentId) =>
+      _lanSegmentsConsented.contains(segmentId);
+
   @override
   int get peerCount => _peerCount;
   @override
@@ -1005,10 +1276,33 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   int get reachablePeerCount => _reachablePeerCount;
   @override
   bool get hasPortMapping => _hasPortMapping;
+  // AP-5a: the daemon holds a monotonic latch (cleona_node.dart:577, only
+  // ever set to true). `_confirmedPeerCount > 0` was a live comparison and a
+  // different predicate: when the counter fell back to 0, PEER-GATE G-3
+  // flipped back on daemon platforms while it stayed latched in-process. The
+  // `||` keeps a pre-AP-5a daemon (which does not send the field) at exactly
+  // today's behaviour instead of regressing it to a constant false.
+  //
+  // NUMBER RANGE, added in S361. This "G-3" is NOT the gap G-3
+  // (§13 recovery) from the gap bookkeeping. It is the peer gate G-3 from
+  // the gate inventory in `docs/MIGRATION_V3_TO_V4_0_MYZEL.md`
+  // (line 8639: `contact_seed.dart isReady`) — a different number range
+  // that uses the same digits. Distinguishing mark: the gap bookkeeping
+  // always writes the word "Luecke" (gap) in front. This peer gate has
+  // meanwhile been done: `contact_seed.dart:970` today reads
+  // `isReady => _source.readinessState == kReadinessReady`, without an
+  // address condition — exactly the target state required in the table.
+  IdentityDerivationSkew _identityDerivationSkew = IdentityDerivationSkew.unknown;
+  bool _skewLoggedOnce = false;
   @override
-  bool get hasSessionConfirmedPeers => _confirmedPeerCount > 0;
+  IdentityDerivationSkew get identityDerivationSkew => _identityDerivationSkew;
+  bool _hasSessionConfirmedPeers = false;
   @override
-  DateTime? get nodeStartedAt => null;
+  bool get hasSessionConfirmedPeers =>
+      _hasSessionConfirmedPeers || _confirmedPeerCount > 0;
+  DateTime? _nodeStartedAt;
+  @override
+  DateTime? get nodeStartedAt => _nodeStartedAt;
   bool get mobileFallbackActive => _mobileFallbackActive;
   @override
   int get fragmentCount => _fragmentCount;
@@ -1030,7 +1324,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final resp = await _sendRequest('send_device_pair_request');
     return resp.success;
   }
-  // sec-h5 §8.2 / T11 + Folge-Task 2026-04-26: reducedMode is a per-session
+  // sec-h5 §8.2 / T11 + follow-up task 2026-04-26: reducedMode is a per-session
   // flag toggled by the GUI splash. On Desktop the splash runs in this GUI
   // process while CleonaService lives in the daemon — we mirror the bool
   // locally (so the [ReducedModeBanner] in home_screen renders) AND push it
@@ -1101,7 +1395,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         text: text,
         timestamp: DateTime.now(),
         type: UiMessageType.text,
-        status: MessageStatus.sent,
+        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
+        // from the success of an IPC round trip, i.e. from an observation
+        // about the own socket connection to the daemon and not about the
+        // network. `sent` has been dropped; the switch does not end at the
+        // IPC boundary. The authoritative value comes anyway with the next
+        // `refreshState()`/`new_message` from the daemon.
+        status: MessageStatus.resting,
         isOutgoing: true,
       );
       return msg;
@@ -1110,7 +1410,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<UiMessage?> sendMediaMessage(String conversationId, String filePath) async {
+  Future<UiMessage?> sendMediaMessage(
+      String conversationId, String filePath) async {
     final resp = await _sendRequest('send_media', params: {
       'conversationId': conversationId,
       'filePath': filePath,
@@ -1124,7 +1425,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         text: filePath.split('/').last,
         timestamp: DateTime.now(),
         type: UiMessageType.file,
-        status: MessageStatus.sent,
+        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
+        // from the success of an IPC round trip, i.e. from an observation
+        // about the own socket connection to the daemon and not about the
+        // network. `sent` has been dropped; the switch does not end at the
+        // IPC boundary. The authoritative value comes anyway with the next
+        // `refreshState()`/`new_message` from the daemon.
+        status: MessageStatus.resting,
         isOutgoing: true,
         filePath: filePath,
         mediaState: MediaDownloadState.completed,
@@ -1151,6 +1458,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     });
     if (resp.success) {
       // Apply locally
+      ensureLoaded(conversationId);
       final conv = conversations[conversationId];
       if (conv != null) {
         final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
@@ -1174,6 +1482,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       // Apply locally
       final conv = conversations[conversationId];
       if (conv != null) {
+        ensureLoaded(conversationId);
         final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
         if (msg != null) {
           msg.text = '';
@@ -1185,39 +1494,31 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
-  @override
-  void checkExpiredMessages(String conversationId) {
-    // Local operation: check timestamps on queuedOffline messages in the
-    // in-memory conversation snapshot and mark them expired.
-    final conv = conversations[conversationId];
-    if (conv == null) return;
-    const ttlMs = 7 * 24 * 60 * 60 * 1000;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    var changed = false;
-    for (final msg in conv.messages) {
-      if (msg.status == MessageStatus.queuedOffline && msg.isOutgoing) {
-        final age = now - msg.timestamp.millisecondsSinceEpoch;
-        if (age > ttlMs) {
-          msg.status = MessageStatus.expired;
-          changed = true;
-        }
-      }
-    }
-    if (changed) onStateChanged?.call();
-  }
+  // ── THE SECOND CLOCK HAS FALLEN (S390, finding B-4) ─────────────────
+  //
+  // Here stood `checkExpiredMessages`, word for word the same check as in
+  // `cleona_service_msgstate.dart::_checkAndMarkExpired` — built twice,
+  // once in the daemon and once in the UI, and the comment next to it
+  // itself warned that both halves had to carry the same deadline and
+  // the same set of states. Both are gone: §9.3 allows no clock that
+  // gives up a message, and `expired` as a fifth state next to the four
+  // of §9.1 has been dropped without replacement.
 
   @override
-  Future<UiMessage?> resendExpiredMessage(
+  Future<UiMessage?> resendFailedMessage(
       String conversationId, String messageId) async {
     // Find the original text, then re-send via sendTextMessage.
     final conv = conversations[conversationId];
     if (conv == null) return null;
+    ensureLoaded(conversationId);
     final original =
         conv.messages.where((m) => m.id == messageId).firstOrNull;
-    if (original == null || original.status != MessageStatus.expired) {
+    if (original == null || original.status != MessageStatus.failed) {
       return null;
     }
-    // Remove expired bubble locally so sendTextMessage creates a fresh one.
+    // §9.3: the old entry goes out, the new attempt gets a new identifier
+    // via sendTextMessage.
+    ensureLoaded(conversationId);
     conv.messages.removeWhere((m) => m.id == messageId);
     onStateChanged?.call();
     return sendTextMessage(
@@ -1309,6 +1610,60 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     if (conv != null) conv.unreadCount = 0;
   }
 
+  /// Fetches the history of a conversation from the service (S366, stage B).
+  ///
+  /// The state that the service sends of its own accord carries only the
+  /// most recent message per conversation — that is the preview for the
+  /// list. Whoever opens the chat calls this once; afterwards the history
+  /// stands in `conversations[id].messages` as before.
+  ///
+  /// The second call is cheap, but not free (one round over the socket):
+  /// `messagesLoaded` records that it has already happened.
+  // NO @override: `ensureLoadedAsync` stands in NO interface —
+  // `ICleonaService` only declares `ensureLoaded`/`ensureAllLoaded`. The
+  // method is the client's own promise to wait for the socket.
+  Future<void> ensureLoadedAsync(String conversationId) async {
+    final conv = conversations[conversationId];
+    if (conv == null || conv.messagesLoaded) return;
+    final answer = await _sendRequest('load_history',
+        params: {'conversationId': conversationId});
+    if (!answer.success) {
+      CLogger.get('ipc-client', profileDir: profileDir)
+          .warn('load_history($conversationId): ${answer.error}');
+      return; // Do NOT mark as loaded — otherwise empty counts as history.
+    }
+    final list = (answer.data['messages'] as List<dynamic>?) ?? const [];
+    conv.messages
+      ..clear()
+      ..addAll(list
+          .map((m) => UiMessage.fromJson(m as Map<String, dynamic>)));
+    conv.messagesLoaded = true;
+    onStateChanged?.call();
+  }
+
+  /// The synchronous version of the interface. On the client side the
+  /// history cannot come synchronously — it lies at the other end of a
+  /// socket. The call triggers the reloading and returns immediately; the
+  /// UI redraws as soon as it is there (`onStateChanged`). Whoever NEEDS
+  /// the history for certain takes [ensureLoadedAsync].
+  @override
+  void ensureLoaded(String conversationId) {
+    unawaited(ensureLoadedAsync(conversationId));
+  }
+
+  @override
+  void ensureAllLoaded() {
+    // On the client that is N rounds over the socket. Today there is no
+    // caller for it — the two operations that need the whole inventory
+    // (archive run, recovery answer) run in the SERVICE. The body
+    // nevertheless stands here and does the right thing instead of
+    // throwing: an interface whose fulfilment depends on the side would
+    // be harder to use than one that costs N rounds.
+    for (final id in conversations.keys.toList()) {
+      ensureLoaded(id);
+    }
+  }
+
   @override
   void setActiveConversationId(String? conversationId) {
     // Daemon-side notifications (sound/vibrate/Android-banner) are emitted in
@@ -1318,8 +1673,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  void setAppResumed(bool isResumed) {
-    // No-op (see setActiveConversationId).
+  void setAppResumed(bool isResumed, {bool triggerNodeHarvest = true}) {
+    // No-op (see setActiveConversationId). `triggerNodeHarvest` has no
+    // subject here: the node stands in the DAEMON, not in this process —
+    // the UI has none on which it could harvest.
   }
 
   @override
@@ -1377,7 +1734,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         text: text,
         timestamp: DateTime.now(),
         type: UiMessageType.text,
-        status: MessageStatus.sent,
+        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
+        // from the success of an IPC round trip, i.e. from an observation
+        // about the own socket connection to the daemon and not about the
+        // network. `sent` has been dropped; the switch does not end at the
+        // IPC boundary. The authoritative value comes anyway with the next
+        // `refreshState()`/`new_message` from the daemon.
+        status: MessageStatus.resting,
         isOutgoing: true,
       );
     }
@@ -1466,7 +1829,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         text: text,
         timestamp: DateTime.now(),
         type: UiMessageType.channelPost,
-        status: MessageStatus.sent,
+        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
+        // from the success of an IPC round trip, i.e. from an observation
+        // about the own socket connection to the daemon and not about the
+        // network. `sent` has been dropped; the switch does not end at the
+        // IPC boundary. The authoritative value comes anyway with the next
+        // `refreshState()`/`new_message` from the daemon.
+        status: MessageStatus.resting,
         isOutgoing: true,
       );
     }
@@ -1487,7 +1856,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         text: resp.data['text'] as String? ?? '',
         timestamp: DateTime.now(),
         type: UiMessageType.channelPost,
-        status: MessageStatus.sent,
+        // AP-4 (§5.1c, finding 1): here stood `MessageStatus.sent` — derived
+        // from the success of an IPC round trip, i.e. from an observation
+        // about the own socket connection to the daemon and not about the
+        // network. `sent` has been dropped; the switch does not end at the
+        // IPC boundary. The authoritative value comes anyway with the next
+        // `refreshState()`/`new_message` from the daemon.
+        status: MessageStatus.resting,
         isOutgoing: true,
       );
     }
@@ -1625,11 +2000,19 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   void Function(JuryRequest request)? onJuryRequestReceived;
 
+  List<JuryRequest> _pendingJuryRequests = const [];
   @override
-  List<JuryRequest> get pendingJuryRequests => [];
+  List<JuryRequest> get pendingJuryRequests =>
+      List.unmodifiable(_pendingJuryRequests);
 
   @override
-  Map<String, dynamic> getChannelModerationInfo(String channelIdHex) => {};
+  Future<Map<String, dynamic>> getChannelModerationInfo(
+      String channelIdHex) async {
+    final resp = await _sendRequest('get_channel_moderation_info',
+        params: {'channelIdHex': channelIdHex});
+    if (!resp.success) return {};
+    return Map<String, dynamic>.from(resp.data);
+  }
 
   @override
   Future<bool> dismissPostReport(String channelIdHex, String reportId) async {
@@ -1715,7 +2098,158 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   bool get serveBinaryUpdates => true;
 
   @override
-  String? generateInviteLinkUrl() => null;
+  Future<String?> generateInviteLinkUrl() async {
+    // A pre-AP-5a daemon does not know the verb and answers
+    // `Unknown command` -> success=false -> null, i.e. exactly the previous
+    // behaviour (invite block hidden) instead of an exception.
+    final resp = await _sendRequest('generate_invite_link_url');
+    if (!resp.success) return null;
+    return resp.data['url'] as String?;
+  }
+
+  /// §15.3/§15.5 — issuing happens IN THE DAEMON, not here.
+  ///
+  /// The daemon holds the master seed, keeps the invitation ledger and
+  /// harvests the invitation line (§15.3.2). This side only passes the
+  /// user's choice there and the key back; it creates nothing.
+  @override
+  Future<InviteIssueResult> issueInviteForSharing({
+    required String inviteClassCode,
+    Duration? validity,
+    bool singleUse = false,
+    String label = 'qr-card',
+  }) async {
+    final resp = await _sendRequest('issue_invitation', params: {
+      'class': inviteClassCode,
+      'validityMs': validity?.inMilliseconds,
+      'singleUse': singleUse,
+      'label': label,
+    });
+    // ── REBUILD THE REASON, DO NOT GUESS (S381) ──────────────────
+    //
+    // If this version does not know the reason named — older or newer
+    // other side —, then `fromWire` says so too
+    // ([InviteIssueRefusal.unknownReason]) and does NOT fall back to the
+    // most frequent neighbour. Exactly this fallback was the defect: the
+    // card showed "cap reached" where in truth the master seed was
+    // missing.
+    if (!resp.success) {
+      return InviteIssueResult.refused(
+          refusalFromWire(resp.data[kInviteRefusalField] as String?));
+    }
+    final kiB64 = resp.data['kiB64'] as String?;
+    if (kiB64 == null || kiB64.isEmpty) {
+      // Success reported, but without a carrier — that is no success (§15.5).
+      return const InviteIssueResult.refused(InviteIssueRefusal.noMasterSeed);
+    }
+    return InviteIssueResult.issued(IssuedInvite(
+      inviteClassCode: resp.data['class'] as String? ?? inviteClassCode,
+      index: resp.data['index'] as int? ?? 0,
+      inviteKey: Uint8List.fromList(base64.decode(kiB64)),
+      expiresAtMs: resp.data['expiresAtMs'] as int?,
+    ));
+  }
+
+  /// §15.3.2 — the daemon fetches the open invitations from its ledger.
+  @override
+  Future<List<OpenInvitation>> listOpenInvitations({DateTime? now}) async {
+    final resp = await _sendRequest('list_open_invitations');
+    if (!resp.success) {
+      // §21.4: unreadable is not empty. An empty list here would be the
+      // false statement "you have no open invitations" — and the user
+      // would keep searching for the invitation that fills the cap.
+      throw StateError(
+          'list_open_invitations failed: ${resp.error ?? "no reason given"}');
+    }
+    final raw = (resp.data['invitations'] as List?) ?? const [];
+    return raw
+        .whereType<Map<String, dynamic>>()
+        .map(OpenInvitation.fromJson)
+        .toList(growable: false);
+  }
+
+  /// §15.3.3 — revocation happens IN THE DAEMON, the ledger lies there.
+  @override
+  Future<bool> revokeInvitation(int index, {DateTime? now}) async {
+    final resp =
+        await _sendRequest('revoke_invitation', params: {'index': index});
+    return resp.success && resp.data['revoked'] == true;
+  }
+
+  // ── V4.2 invitation card (S387, `mycelium/berichte/S387-API-KARTE.md`) ──
+  //
+  // A `success: false` here means: no service in the daemon or a missing
+  // parameter. It is mapped to `notConnected` or `failed` respectively —
+  // never to an empty list or a silent zero.
+
+  @override
+  Future<InvitationIssueResult> issueInvitationCard({
+    InvitationKind kind = InvitationKind.single,
+    InvitationValidity? validity,
+    String label = '',
+    bool faceToFace = false,
+  }) async {
+    final resp = await _sendRequest('invitation_card_issue', params: {
+      'kind': kind.name,
+      if (validity != null) 'validity': validity.name,
+      'label': label,
+      if (faceToFace) 'faceToFace': true,
+    });
+    if (!resp.success) {
+      return InvitationIssueResult.refused(
+          InvitationIssueRefusal.notConnected, resp.error);
+    }
+    return InvitationIssueResult.fromJson(resp.data);
+  }
+
+  @override
+  Future<InvitationRedeemResult> redeemInvitationText(String text) async {
+    final resp = await _sendRequest('invitation_card_redeem_text',
+        params: {'text': text});
+    if (!resp.success) {
+      return InvitationRedeemResult(InvitationRedeemOutcome.notConnected,
+          detail: resp.error);
+    }
+    return InvitationRedeemResult.fromJson(resp.data);
+  }
+
+  @override
+  Future<InvitationRedeemResult> redeemInvitationCardBytes(
+      Uint8List packed) async {
+    final resp = await _sendRequest('invitation_card_redeem_bytes',
+        params: {'packedB64': base64.encode(packed)});
+    if (!resp.success) {
+      return InvitationRedeemResult(InvitationRedeemOutcome.notConnected,
+          detail: resp.error);
+    }
+    return InvitationRedeemResult.fromJson(resp.data);
+  }
+
+  @override
+  Future<StandingInvitationsResult> standingInvitations() async {
+    final resp = await _sendRequest('invitation_card_standing');
+    if (!resp.success) {
+      return const StandingInvitationsResult.unavailable(notConnected: true);
+    }
+    return StandingInvitationsResult.fromJson(resp.data);
+  }
+
+  @override
+  Future<InvitationRevokeOutcome> revokeInvitationCard(
+      String invitationId) async {
+    final resp = await _sendRequest('invitation_card_revoke',
+        params: {'id': invitationId});
+    if (!resp.success) return InvitationRevokeOutcome.notConnected;
+    return InvitationRevokeOutcome.byName(resp.data['outcome'] as String?) ??
+        InvitationRevokeOutcome.unknown;
+  }
+
+  @override
+  Future<InvitationRevokeAllResult> revokeAllInvitationCards() async {
+    final resp = await _sendRequest('invitation_card_revoke_all');
+    if (!resp.success) return const InvitationRevokeAllResult.notConnected();
+    return InvitationRevokeAllResult.fromJson(resp.data);
+  }
 
   @override
   Future<bool> setPort(int newPort) async {
@@ -1752,7 +2286,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   Future<void> setMultiInterfaceMode(MultiInterfaceMode mode) async {
     _multiInterfaceMode = mode;
-    _sendRequest('set_multi_interface_mode', params: {'mode': MultiInterfaceManager.modeToString(mode)});
+    _sendRequest('set_multi_interface_mode', params: {'mode': MultiInterfaceMode.modeToString(mode)});
     onStateChanged?.call();
   }
 
@@ -1772,11 +2306,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Uint8List signEd25519(Uint8List message) => throw UnsupportedError('NFC signing not available via IPC');
   @override
   bool verifyEd25519(Uint8List message, Uint8List signature, Uint8List publicKey) => false;
-  @override
-  void addNfcContact(Contact contact) {
-    // NFC contacts are added via the daemon's in-process service, not IPC
-    throw UnsupportedError('NFC contact add not available via IPC');
-  }
 
   // ── Notification Sound Service ──────────────────────────────────
 
@@ -1825,23 +2354,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
-  @override
-  Future<bool> sendContactRequest(String recipientUserIdHex,
-      {String message = '',
-      String? seedDeviceIdHex,
-      String? seedDxkB64,
-      String? seedDmkB64,
-      String? seedEpB64}) async {
-    final resp = await _sendRequest('send_contact_request', params: {
-      'recipientId': recipientUserIdHex,
-      if (message.isNotEmpty) 'message': message,
-      'seedDeviceIdHex': ?seedDeviceIdHex,
-      'seedDxkB64': ?seedDxkB64,
-      'seedDmkB64': ?seedDmkB64,
-      'seedEpB64': ?seedEpB64,
-    });
-    return resp.success;
-  }
+  // `sendContactRequest` has been dropped (S388-BAU-KONTAKT) — see
+  // `ICleonaService`.
 
   List<String> _localIps = [];
   String? _publicIp;
@@ -1877,13 +2391,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       'targetDmkB64': ?targetDmkB64,
       'targetEpB64': ?targetEpB64,
       'targetRendezvousNonceB64': ?targetRendezvousNonceB64,
-    });
-  }
-
-  @override
-  void notifyContactSeedUriShared(String rendezvousNonceB64) {
-    _sendRequest('rendezvous_uri_shared', params: {
-      'nonceB64': rendezvousNonceB64,
     });
   }
 
@@ -1929,6 +2436,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return contact != null;
   }
 
+  @override
+  bool setContactNeverFixedNeighbour(String nodeIdHex, bool never) {
+    // Cached copy first so the switch follows at once; the daemon holds the
+    // authoritative record and hands the mark to the delivery layer.
+    final contact = getContact(nodeIdHex);
+    if (contact != null) {
+      contact.neverFixedNeighbour = never;
+      onStateChanged?.call();
+    }
+    _sendRequest('contact_set_never_fixed_neighbour', params: {
+      'nodeIdHex': nodeIdHex,
+      'never': never,
+    });
+    return contact != null;
+  }
+
   /// §14.7.4: withhold this node's delivery status from a contact or group.
   /// Mirrors the daemon-side setting into the local cache so the toggle
   /// reflects immediately; the daemon remains authoritative.
@@ -1947,6 +2470,88 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return true;
   }
 
+  /// §12 V4.1: Secure/Speed choice for a chat.
+  ///
+  /// THIS METHOD IS THE ACTUAL FIX. Until 30.08. `chat_screen.dart`
+  /// mutated the fields directly on the object from [getContact] — and in
+  /// here that is an entry from the GUI process's state snapshot, not the
+  /// daemon's contact. The choice fizzled out and was gone again at the
+  /// next `state_changed`. The snapshot is still pulled along, but now
+  /// only as optimism for the display; the daemon is authoritative.
+  // NO `setSecureMode` ANY MORE (S389). The path over the socket
+  // (`set_secure_mode`) has been dropped with the switch: §12.1 allows no
+  // per-chat setting of the send path, so there is also no IPC verb with
+  // which the UI passes it to the daemon.
+
+  /// §24.4.2 — the setter across the IPC boundary.
+  ///
+  /// THE LATCH IS NOT REINVENTED HERE, but PULLED A SECOND TIME. The
+  /// daemon is authoritative (`CoverSaver.instance.request`); this side
+  /// knows only the transmitted [dataSaverLockedBySecure]. It nevertheless
+  /// aborts itself if that is set — otherwise the switch in the UI would
+  /// only snap back at the next `state_changed`, and the user would for a
+  /// moment see an active saver mode that does not exist.
+  ///
+  /// The optimistic anticipation applies ONLY to switching on without a
+  /// latch and is overwritten by the next snapshot — the same pattern as
+  /// [setSecureMode].
+  @override
+  String setDataSaver(bool on) {
+    if (on && _dataSaverLockedBySecure) return kDataSaverLockedBySecure;
+    _dataSaverActive = on;
+    onStateChanged?.call();
+    _sendRequest('set_data_saver', params: {'on': on});
+    return kDataSaverOk;
+  }
+
+  /// §11.9 — optimistic like [setDataSaver]: the switch has no latch, and
+  /// the daemon's next state packet overwrites the anticipation. What is
+  /// reported is that the request went out.
+  @override
+  bool setExternalRecordsEnabled(bool on) {
+    _externalRecordsEnabled = on;
+    onStateChanged?.call();
+    _sendRequest('set_external_records', params: {'on': on});
+    return true;
+  }
+
+  /// S373 — the consent across the IPC boundary.
+  ///
+  /// THE SAME CONSTRUCTION AS [setDataSaver], and for the same reason: the
+  /// rule is not reinvented here but PULLED A SECOND TIME. The daemon is
+  /// authoritative — only it knows its partners and their endpoints. This
+  /// side knows the transmitted list [lanSegmentsGrantable] and aborts
+  /// itself if the segment is not in it; otherwise the UI would report a
+  /// success and silently take it back at the next state packet.
+  ///
+  /// **No optimistic anticipation when GRANTING.** Unlike the saver mode,
+  /// where a wrongly displayed "on" is only ugly: here it would mean
+  /// making the UI believe for a moment that the cover is off, although it
+  /// is running — and that is exactly the kind of statement a user must
+  /// not get wrong. Only what the daemon has confirmed is displayed.
+  ///
+  /// On REVOCATION the anticipation is harmless and therefore allowed: it
+  /// leads to MORE cover, never to less.
+  @override
+  bool grantLanShaping(String segmentId) {
+    if (!_lanSegmentsGrantable.contains(segmentId)) return false;
+    _sendRequest('set_lan_shaping',
+        params: {'segment': segmentId, 'grant': true});
+    return true;
+  }
+
+  @override
+  bool revokeLanShaping(String segmentId) {
+    if (!_lanSegmentsConsented.contains(segmentId)) return false;
+    _lanSegmentsConsented =
+        _lanSegmentsConsented.where((e) => e != segmentId).toList();
+    _lanShapingActive = false;
+    onStateChanged?.call();
+    _sendRequest('set_lan_shaping',
+        params: {'segment': segmentId, 'grant': false});
+    return true;
+  }
+
   @override
   void acceptContactNameChange(String nodeIdHex, bool accept) {
     _sendRequest('accept_name_change', params: {
@@ -1957,6 +2562,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   List<PeerSummary> get peerSummaries => _peerSummaries;
+
+  List<EntrySeedCandidate> _entrySeedCandidates = const [];
+
+  /// §11/G-11 — passed through from the daemon's snapshot. The builder
+  /// makes the selection, not this client.
+  @override
+  List<EntrySeedCandidate> get entrySeedCandidates => _entrySeedCandidates;
 
   @override
   CallInfo? get currentCall => _currentCall;
@@ -2114,20 +2726,31 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
+  /// S368 — AN EMPTY REPORT STOOD HERE.
+  ///
+  /// The implementation returned `appVersion: ''`, `platform: ''`,
+  /// `logTail: ''`, `peerCount: 0` — a completely empty `LogReport`,
+  /// because the interface was synchronous and nothing can be fetched
+  /// synchronously over the IPC socket. The preview dialog (§9.5.2b,
+  /// "Preview + Consent") thus showed an EMPTY report on desktop, and
+  /// `publishLogReport()` then sent the REAL one from the daemon. The user
+  /// did not see what he was consenting to.
+  ///
+  /// `fetchLogReport()` — the right path — stood directly below the whole
+  /// time and had ZERO callers.
+  ///
+  /// Now: the real report, or an error. No third outcome. An empty preview
+  /// would be worse than none at all, because it looks like a result.
   @override
-  LogReport buildLogReport() {
-    return LogReport(
-      appVersion: '',
-      platform: '',
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      logTail: '',
-      peerCount: 0,
-      uptimeSeconds: 0,
-      memoryBytes: 0,
-      natType: 'unknown',
-      hasPortMapping: false,
-      routeCount: 0,
-    );
+  Future<LogReport> buildLogReport() async {
+    final report = await fetchLogReport();
+    if (report == null) {
+      throw StateError(
+          'Log report not retrievable: the daemon did not answer '
+          'build_log_report. No empty substitute report — the preview must '
+          'show what is sent.');
+    }
+    return report;
   }
 
   Future<LogReport?> fetchLogReport() async {
@@ -2214,8 +2837,19 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   List<DeviceRecord> get devices => _devices;
 
+  /// §24.4.3 — transition state last transmitted by the daemon.
+  ///
+  /// Initial value empty, because nothing is known before the first
+  /// answer. The value is set in `_applyStateSnapshot` and NOT computed
+  /// here: the numbers stand in the daemon's `_lockouts`, the client does
+  /// not have them.
+  List<Map<String, dynamic>> _deviceLockouts = const [];
+
   @override
   String get localDeviceId => _localDeviceId;
+
+  @override
+  List<Map<String, dynamic>> get deviceLockouts => _deviceLockouts;
 
   void Function()? onDevicesUpdated;
   @override
@@ -2954,6 +3588,28 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     };
   }
 
+  // ── Media archive: share identity and narrowing (§21.6, S394) ──────────
+
+  @override
+  Future<Map<String, dynamic>?> getArchiveShareStatus() async {
+    final resp = await _sendRequest('archive_status');
+    return resp.success ? Map<String, dynamic>.from(resp.data) : null;
+  }
+
+  @override
+  Future<bool> rebindArchiveShare() async =>
+      (await _sendRequest('archive_rebind_share')).success;
+
+  @override
+  Future<Map<String, dynamic>?> captureArchiveNetwork() async {
+    final resp = await _sendRequest('archive_capture_network');
+    return resp.success ? Map<String, dynamic>.from(resp.data) : null;
+  }
+
+  @override
+  Future<bool> clearArchiveNetworks() async =>
+      (await _sendRequest('archive_clear_networks')).success;
+
   // ── Feature ③: Peer Rescue Bundle (§8.1.2) ──────────────────────────────
 
   /// Export a Peer Rescue Bundle for the active identity.
@@ -3014,6 +3670,25 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // ── Binary Seeding (§19.6.2) ─────────────────────────────────────────────
 
+  /// WITHOUT CALLER, RE-MEASURED (S361) — but its counterpart answers
+  /// again (02.09.2026).
+  ///
+  /// Here stood that `seed_binary` had been dropped server-side with the
+  /// CUT (2026-08-31) and fell into the `default` branch ("Unknown
+  /// command"). That applied until 02.09.2026 and no longer applies: the
+  /// case is back in `ipc_server.dart`, the body lies as
+  /// `CleonaService.seedBinaryFromFile` in `cleona_service_pure.dart`.
+  /// The reasoning there in short: the deleted body only touches the local
+  /// fragment store, and `_selfSeedCurrentBinary` takes the same path at
+  /// start anyway.
+  ///
+  /// STILL APPLIES UNCHANGED: this method has no caller in `lib/` or
+  /// `test/`. The callers of the WIRE COMMAND
+  /// (`test/e2e/tests/binary-update.spec.ts`,
+  /// `scripts/publish-in-network-update.sh:191`) bypass the client here
+  /// and go directly via the raw IPC string. It stays nevertheless — it is
+  /// the typed connection for GUI code, and since 02.09.2026 [maxFragments]
+  /// is also evaluated server-side instead of thrown away.
   Future<Map<String, dynamic>> seedBinary({
     required String platform,
     required String version,

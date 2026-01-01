@@ -5,7 +5,7 @@ import 'package:collection/collection.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/identity_resolution/device_delegation.dart';
+import 'package:cleona/core/identity/device_delegation.dart';
 import 'package:cleona/main.dart' show CleonaAppState;
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
@@ -263,7 +263,7 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
-  /// §7.1 LD-10: Bestaetigungsdialog fuer die Kopplungsanfrage
+  /// §7.1 LD-10: confirmation dialog for the pairing request
   void _showPairingDialog() {
     final locale = AppLocale.read(context);
     showDialog(
@@ -446,15 +446,15 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
             ],
           ],
 
-          // §7.1: Kopplung anfordern. Der Normalweg fuer jedes Zweitgeraet —
-          // es wird per Seed-Phrase eingerichtet und meldet sich hier beim
-          // Primary an, das ihm Delegationsschluessel ausstellt (§7.1.1).
+          // §7.1: request pairing. The normal path for every secondary device —
+          // it is set up via seed phrase and registers here with the
+          // primary, which issues delegation keys to it (§7.1.1).
           //
-          // KEIN `_devices.length > 1`-Guard: ein Geraet, das noch nicht
-          // gekoppelt ist, kennt per Definition nur sich selbst. Die alte
-          // Bedingung blendete den Button also ausgerechnet auf den Geraeten
-          // aus, fuer die er gebaut wurde — Kopplung war ueber diesen Screen
-          // nie ausloesbar.
+          // NO `_devices.length > 1` guard: a device that is not yet
+          // paired by definition knows only itself. The old
+          // condition thus hid the button precisely on the devices
+          // for which it was built — pairing could never be triggered
+          // via this screen.
           if (!status.isLinkedDevice) ...[
             const SizedBox(height: 12),
             OutlinedButton.icon(
@@ -664,6 +664,115 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     );
   }
 
+  /// §24.4.3 — transitional state of running and just-finished lockouts.
+  ///
+  /// The cards stand BEFORE the device list and not in it: the locked-out
+  /// device has already disappeared from `devices` — exactly why
+  /// `LockoutTransition` records its name itself
+  /// (cleona_service_lockout.dart:80-82). A row in the list would have
+  /// no anchor any more.
+  ///
+  /// It is read on every `build` directly from the service, not
+  /// cached in [_refresh]: [_ticker] (1 s) and `onStateChanged`
+  /// trigger the rebuild anyway, and a second copy in the state could
+  /// diverge from [_devices].
+  Widget _buildLockoutSection(BuildContext context) {
+    final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
+    final lockouts = widget.service.deviceLockouts;
+    if (lockouts.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ...lockouts.map((l) {
+          final name = (l['deviceName'] as String?) ?? '';
+          final total = (l['total'] as int?) ?? 0;
+          final open = (l['stillOpen'] as int?) ?? 0;
+          final notSent = (l['notSent'] as int?) ?? 0;
+          final closed = (l['closed'] as bool?) ?? false;
+          final startedAtMs = (l['startedAtMs'] as int?) ?? 0;
+          final deadlineMs = (l['deadlineMs'] as int?) ?? 0;
+          // §14.4: the deadline stands as a point in time in the record, not as a number
+          // of days. Computing it back here keeps the display on the
+          // SAME quantity with which the daemon closes; a hard-coded
+          // 14 would silently diverge as soon as
+          // `_lockoutDeadlineDays` changes.
+          final days = deadlineMs > startedAtMs
+              ? ((deadlineMs - startedAtMs) / 86400000).round()
+              : 0;
+          final String status;
+          if (!closed) {
+            status = locale.tr('device_lockout_transition',
+                {'open': '$open', 'total': '$total'});
+          } else if (l['closeReason'] == 'allInformed') {
+            status = locale
+                .tr('device_lockout_closed_informed', {'total': '$total'});
+          } else {
+            status = locale.tr('device_lockout_closed_deadline',
+                {'days': '$days', 'open': '$open'});
+          }
+          return Card(
+            margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(closed ? Icons.lock : Icons.lock_clock,
+                          size: 24, color: theme.colorScheme.error),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Text(name,
+                            style: theme.textTheme.titleMedium,
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(status, style: theme.textTheme.bodyMedium),
+                  if (!closed && total > 0) ...[
+                    const SizedBox(height: 8),
+                    LinearProgressIndicator(
+                      value: (total - open) / total,
+                    ),
+                  ],
+                  // Shown separately, because "open" and "not sent"
+                  // are not the same — the data side keeps them
+                  // explicitly separate, so that "3 of 47 open" is not read as
+                  // "3 of 47 failed"
+                  // (cleona_service_lockout.dart:94-98).
+                  if (!closed && notSent > 0) ...[
+                    const SizedBox(height: 6),
+                    Text(
+                      locale
+                          .tr('device_lockout_not_sent', {'count': '$notSent'}),
+                      style: theme.textTheme.bodySmall,
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  // §24.4.3: without this sentence the case reads like silent
+                  // loss — whoever then writes to the old address waits
+                  // for a receipt that never comes.
+                  Text(
+                    locale.get('device_lockout_old_address_hint'),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.textTheme.bodySmall?.color?.withValues(
+                          alpha: 0.75),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }),
+        const Divider(height: 24),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -672,13 +781,18 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
 
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('device_management_title'))),
+      // Working rule #6 (Android edge-to-edge): `top: false`, because the
+      // AppBar at the top is already safe; at the bottom the gesture/nav bar
+      // otherwise eats the last list entry.
       body: SafeArea(
+        top: false,
         child: ListView(
           children: [
             const SizedBox(height: 8),
 
             _buildPendingPairingSection(context, appState),
             _buildPendingRotationSection(context, appState),
+            _buildLockoutSection(context),
             if (appState.pendingPairRequests.isNotEmpty ||
                 appState.pendingRotationApprovals.isNotEmpty)
               const Divider(height: 24),

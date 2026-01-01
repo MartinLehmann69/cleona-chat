@@ -73,7 +73,7 @@ class ConformanceActivity : Activity() {
                 // libcleona_video.so THROUGH the runtime, which is what makes
                 // ART call JNI_OnLoad and hand the backend its JavaVM, and
                 // supplies the Context CameraManager needs. Exactly the call
-                // the app has to make at start-up (BUILD_REQUEST_V1.14.md §2).
+                // the app has to make at start-up (BUGFIX_CURRENT.md AV-V1.14 §2).
                 VideoSession.install(applicationContext, null)
                 System.loadLibrary("cleona_video_conformance")
                 code = ConformanceRunner.runNative(
@@ -87,7 +87,7 @@ class ConformanceActivity : Activity() {
                 runCatching { done.writeText(code.toString()) }
 
                 // Drop the task BEFORE killing the process -- see
-                // BUILD_REQUEST_V1.2.md's identical finding for the voice
+                // BUGFIX_CURRENT.md AV-V1.2's identical finding for the voice
                 // runner: without this, ActivityManager restarts the activity
                 // when its process dies, and the restart deletes
                 // conformance.txt/json in onCreate in exactly the window the

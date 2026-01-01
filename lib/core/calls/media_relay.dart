@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 import 'package:cleona/core/calls/overlay_tree.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 /// Per-call relay budget to prevent abuse.
 class RelayBudget {

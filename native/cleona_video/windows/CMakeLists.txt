@@ -5,13 +5,11 @@
 # / Android / Apple / Windows". Architecture: Cleona_Chat_Architecture_v3_0.md
 # §10.6 (platform matrix, Windows row: IMFSourceReader / MFT).
 #
-# Picked up automatically once native/cleona_video/CMakeLists.txt grows the
-# same platform-subdirectory loop the voice tree already has (foreach(_plat
-# linux android apple windows) ... add_subdirectory) -- that file is not this
-# package's to edit (native/cleona_video/test/BUILD_REQUEST.md §1 already asks
-# the build owner for exactly that loop). Until it lands, this directory is
-# still fully buildable and testable standalone; see BUILD_REQUEST_V1.16.md
-# for the exact commands used for this package's own acceptance run.
+# Picked up by native/cleona_video/CMakeLists.txt's platform-subdirectory
+# loop (foreach(_plat linux android apple windows) ... add_subdirectory). This
+# directory is also fully buildable and testable standalone; this package's
+# own acceptance run on the Windows VM is recorded in
+# BUGFIX_CURRENT.md AV-V1.16 §3.
 #
 # Output name is deliberately "cleona_video" (PREFIX ""), matching the naming
 # table in ../CMakeLists.txt's sibling doc for the voice tree ("real ->
@@ -49,7 +47,7 @@ target_link_libraries(cleona_video_windows PRIVATE
   ole32
   strmiids  # IID_ICodecAPI (icodecapi.h declares it EXTERN_C, unconditional
             # extern regardless of INITGUID -- the DirectShow/Media-Foundation-
-            # shared base IID library, not mfuuid.lib. See BUILD_REQUEST_V1.16.md
+            # shared base IID library, not mfuuid.lib. See BUGFIX_CURRENT.md AV-V1.16
             # for the link failure this fixed.
 )
 
@@ -59,7 +57,7 @@ set_target_properties(cleona_video_windows PROPERTIES
 
 # ---------------------------------------------------------------------------
 # Conformance test, link mode (SPEC §10 gate 4: "green on the target
-# platform" -- see BUILD_REQUEST_V1.16.md for what "green" actually means on
+# platform" -- see BUGFIX_CURRENT.md AV-V1.16 for what "green" actually means on
 # a camera-less, GPU-less VM). Registered with ctest by
 # native/cleona_video/test/CMakeLists.txt via the function it defines, exactly
 # like the voice tree's cleona_voice_conformance_windows target.

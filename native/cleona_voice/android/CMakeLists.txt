@@ -19,7 +19,7 @@ endif()
 # Output name is libcleona_voice.so, which is what the Dart binding asks the
 # Android linker for (`lib/core/calls/voice_session.dart:368`) and what the
 # jniLibs layout expects. Installing it there is the build owner's job — see
-# BUILD_REQUEST_V1.2.md §1.
+# BUGFIX_CURRENT.md AV-V1.2 §1.
 # ---------------------------------------------------------------------------
 add_library(cleona_voice SHARED cleona_voice_android.c)
 target_link_libraries(cleona_voice PUBLIC cleona_voice_abi)

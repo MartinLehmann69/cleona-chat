@@ -33,7 +33,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.arrow_back));
     await tester.pumpAndSettle();
 
-    // ── 2. QR BUTTONS IM KONTAKT-DIALOG ─────────────────────────────
+    // ── 2. QR BUTTONS IN THE CONTACT DIALOG ─────────────────────────
     await tester.tap(find.text('Aktuell'));
     await tester.pumpAndSettle();
 
@@ -47,7 +47,7 @@ void main() {
       expect(qrCode.evaluate().isNotEmpty, true, reason: '2.01 QR-Code Button');
       expect(qrScan.evaluate().isNotEmpty, true, reason: '2.02 QR-Scanner Button');
 
-      // Abbrechen
+      // Cancel
       final cancelBtns = find.byType(TextButton);
       if (cancelBtns.evaluate().isNotEmpty) {
         await tester.tap(cancelBtns.first);
@@ -59,11 +59,11 @@ void main() {
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle(const Duration(seconds: 3));
 
-    // 3a. Profil-Beschreibung TextField
+    // 3a. Profile description TextField
     final textFields = find.byType(TextField, skipOffstage: false);
     expect(textFields.evaluate().isNotEmpty, true, reason: '3.01 Description TextField');
 
-    // 3b. Scroll zum Skin-Chooser
+    // 3b. Scroll to the skin chooser
     final scrollables = find.byType(Scrollable);
     if (scrollables.evaluate().isNotEmpty) {
       await tester.drag(scrollables.last, const Offset(0, -200));
@@ -72,10 +72,10 @@ void main() {
 
     final palette = find.byIcon(Icons.palette, skipOffstage: false);
     if (palette.evaluate().isNotEmpty) {
-      expect(palette, findsWidgets, reason: '3.02 Skin-Chooser vorhanden');
+      expect(palette, findsWidgets, reason: '3.02 skin chooser present');
     }
 
-    // 3c. Scroll weiter zum Social Recovery
+    // 3c. Scroll further to Social Recovery
     if (scrollables.evaluate().isNotEmpty) {
       await tester.drag(scrollables.last, const Offset(0, -300));
       await tester.pumpAndSettle();
@@ -83,7 +83,7 @@ void main() {
 
     final security = find.byIcon(Icons.security, skipOffstage: false);
     if (security.evaluate().isNotEmpty) {
-      expect(security, findsWidgets, reason: '3.03 Social Recovery vorhanden');
+      expect(security, findsWidgets, reason: '3.03 Social Recovery present');
     }
 
     // 3d. Seed-Phrase Button
@@ -92,12 +92,12 @@ void main() {
       expect(keyIcon, findsWidgets, reason: '3.04 Recovery-Phrase Button');
     }
 
-    // Zurueck
+    // Back
     await tester.tap(find.byIcon(Icons.arrow_back));
     await tester.pumpAndSettle();
 
     // ── 4. IDENTITY TAB CONTEXT MENU ────────────────────────────────
-    // Lang auf Tab druecken
+    // Long press on tab
     final identityTabs = find.byType(InkWell);
     if (identityTabs.evaluate().length >= 2) {
       await tester.longPress(identityTabs.first);
@@ -122,6 +122,6 @@ void main() {
 
     // ── 5. LANGUAGE SELECTOR ────────────────────────────────────────
     final popupBtns = find.byType(PopupMenuButton<String>);
-    expect(popupBtns.evaluate().isNotEmpty, true, reason: '5.01 Language Selector vorhanden');
+    expect(popupBtns.evaluate().isNotEmpty, true, reason: '5.01 language selector present');
   });
 }

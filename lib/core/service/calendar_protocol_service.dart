@@ -2,13 +2,17 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart';
-import 'package:cleona/core/network/sender_identity_snapshot.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
+// The seam parameter is called `harvest` in THIS file, not `event`:
+// `event` is the domain term here (CalendarEvent, calendarManager.events)
+// with over a hundred occurrences. The foreign body gives way, not the domain.
+import 'package:cleona/core/service/harvest_event.dart';
 
 class CalendarProtocolService {
   CalendarProtocolService(this._ctx, this.calendarManager);
@@ -279,10 +283,10 @@ class CalendarProtocolService {
 
   // ── V3 Application Frame Handlers ────────────────────────────────
 
-  void handleCalendarInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleCalendarInviteV3(HarvestEvent harvest) {
     try {
-      final invite = proto.CalendarInviteMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final invite = proto.CalendarInviteMsg.fromBuffer(harvest.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
       final eventIdHex = bytesToHex(Uint8List.fromList(invite.eventId));
 
       final event = CalendarEvent(
@@ -313,11 +317,12 @@ class CalendarProtocolService {
           id: bytesToHex(SodiumFFI().randomBytes(16)),
           conversationId: event.groupId!,
           senderNodeIdHex: '',
-          text: '$senderName hat einen Termin erstellt: ${event.title}',
+          text: '$senderName created an event: ${event.title}',
           timestamp: DateTime.now(),
           type: UiMessageType.calendarInvite,
           status: MessageStatus.delivered,
           isOutgoing: false,
+          calendarEventId: event.eventId,
         ), isGroup: true);
       }
 
@@ -325,14 +330,14 @@ class CalendarProtocolService {
       onCalendarInviteReceived?.call(senderHex, eventIdHex, event.title);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handleCalendarInviteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleCalendarInviteV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
-  void handleCalendarRsvpV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleCalendarRsvpV3(HarvestEvent harvest) {
     try {
-      final rsvp = proto.CalendarRsvpMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final rsvp = proto.CalendarRsvpMsg.fromBuffer(harvest.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
       final eventIdHex = bytesToHex(Uint8List.fromList(rsvp.eventId));
 
       final status = RsvpStatus.values[rsvp.response.value.clamp(0, RsvpStatus.values.length - 1)];
@@ -343,9 +348,9 @@ class CalendarProtocolService {
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         final statusText = switch (status) {
           RsvpStatus.accepted => 'hat zugesagt',
-          RsvpStatus.declined => 'hat abgesagt',
-          RsvpStatus.tentative => 'hat vorläufig zugesagt',
-          RsvpStatus.proposeNewTime => 'schlägt eine andere Zeit vor',
+          RsvpStatus.declined => 'declined',
+          RsvpStatus.tentative => 'tentatively accepted',
+          RsvpStatus.proposeNewTime => 'proposes a different time',
         };
         _ctx.addMessageToConversation(event.groupId!, UiMessage(
           id: bytesToHex(SodiumFFI().randomBytes(16)),
@@ -363,13 +368,13 @@ class CalendarProtocolService {
       onCalendarRsvpReceived?.call(eventIdHex, senderHex, status);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handleCalendarRsvpV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleCalendarRsvpV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
-  void handleCalendarUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleCalendarUpdateV3(HarvestEvent harvest) {
     try {
-      final update = proto.CalendarUpdateMsg.fromBuffer(frame.payload);
+      final update = proto.CalendarUpdateMsg.fromBuffer(harvest.payload);
       final eventIdHex = bytesToHex(Uint8List.fromList(update.eventId));
 
       final event = calendarManager.events[eventIdHex];
@@ -393,8 +398,8 @@ class CalendarProtocolService {
       );
 
       if (event.groupId != null && _ctx.conversations.containsKey(event.groupId)) {
-        final action = update.cancelled ? 'hat den Termin abgesagt' : 'hat den Termin geändert';
-        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+        final action = update.cancelled ? 'cancelled the event' : 'changed the event';
+        final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         _ctx.addMessageToConversation(event.groupId!, UiMessage(
           id: bytesToHex(SodiumFFI().randomBytes(16)),
@@ -405,6 +410,7 @@ class CalendarProtocolService {
           type: UiMessageType.calendarUpdate,
           status: MessageStatus.delivered,
           isOutgoing: false,
+          calendarEventId: eventIdHex,
         ), isGroup: true);
       }
 
@@ -412,24 +418,24 @@ class CalendarProtocolService {
       onCalendarEventUpdated?.call(eventIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handleCalendarUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleCalendarUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
-  void handleCalendarDeleteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleCalendarDeleteV3(HarvestEvent harvest) {
     try {
-      final del = proto.CalendarDeleteMsg.fromBuffer(frame.payload);
+      final del = proto.CalendarDeleteMsg.fromBuffer(harvest.payload);
       final eventIdHex = bytesToHex(Uint8List.fromList(del.eventId));
 
       final event = calendarManager.events[eventIdHex];
       if (event != null && event.groupId != null) {
-        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+        final senderHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
         final senderName = _ctx.contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         _ctx.addMessageToConversation(event.groupId!, UiMessage(
           id: bytesToHex(SodiumFFI().randomBytes(16)),
           conversationId: event.groupId!,
           senderNodeIdHex: '',
-          text: '$senderName hat den Termin gelöscht: ${event.title}',
+          text: '$senderName deleted the event: ${event.title}',
           timestamp: DateTime.now(),
           type: UiMessageType.calendarDelete,
           status: MessageStatus.delivered,
@@ -442,14 +448,14 @@ class CalendarProtocolService {
       onCalendarEventUpdated?.call(eventIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handleCalendarDeleteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleCalendarDeleteV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
-  Future<void> handleFreeBusyRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) async {
+  Future<void> handleFreeBusyRequestV3(HarvestEvent harvest) async {
     try {
-      final req = proto.FreeBusyRequestMsg.fromBuffer(frame.payload);
-      final querierHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final req = proto.FreeBusyRequestMsg.fromBuffer(harvest.payload);
+      final querierHex = bytesToHex(Uint8List.fromList(harvest.senderUserId));
       final requestIdBytes = Uint8List.fromList(req.requestId);
 
       if (_ctx.contacts[querierHex]?.status != 'accepted') {
@@ -475,7 +481,7 @@ class CalendarProtocolService {
       }
 
       await _ctx.sendEncryptedPayload(
-        Uint8List.fromList(frame.senderUserId),
+        Uint8List.fromList(harvest.senderUserId),
         proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE,
         response.writeToBuffer(),
       );
@@ -483,13 +489,13 @@ class CalendarProtocolService {
       _log.info('Sent FREE_BUSY_RESPONSE to ${querierHex.substring(0, 8)} '
           '(${blocks.length} blocks)');
     } catch (e) {
-      _log.warn('handleFreeBusyRequestV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleFreeBusyRequestV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
-  void handleFreeBusyResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleFreeBusyResponseV3(HarvestEvent harvest) {
     try {
-      final resp = proto.FreeBusyResponseMsg.fromBuffer(frame.payload);
+      final resp = proto.FreeBusyResponseMsg.fromBuffer(harvest.payload);
       final requestIdHex = bytesToHex(Uint8List.fromList(resp.requestId));
 
       final blocks = <FreeBusyBlockResult>[];
@@ -513,13 +519,17 @@ class CalendarProtocolService {
       _log.info('Received FREE_BUSY_RESPONSE for $requestIdHex '
           '(${blocks.length} blocks)');
     } catch (e) {
-      _log.warn('handleFreeBusyResponseV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handleFreeBusyResponseV3: $e (sender=${_hexShort(Uint8List.fromList(harvest.senderUserId))} device=${_hexShort(harvest.senderDeviceId)})');
     }
   }
 
   // ── Private helpers ───────────────────────────────────────────────
 
-  static String _hexShort(Uint8List bytes) {
+  /// Short form for log lines. Tolerates `null`, since the device identifier
+  /// is optional (§14.1: the V4.1 path knows no device) — a
+  /// log line is no reason to insert an untruth.
+  static String _hexShort(Uint8List? bytes) {
+    if (bytes == null) return 'kein-Geraet';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

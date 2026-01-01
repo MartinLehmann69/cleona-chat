@@ -5,22 +5,22 @@
 #
 # Picked up automatically by native/cleona_voice/CMakeLists.txt's platform
 # loop (`foreach(_plat linux android apple windows) ... add_subdirectory`) --
-# that file is V0.5/Build-Eigentümer property and was not edited to add this;
+# that file is V0.5/build owner property and was not edited to add this;
 # the loop already existed and finds this file by convention.
 #
 # This directory owns exactly this file and the two backend sources
 # (cleona_voice_linux.c, voice_apm_shim.{h,cpp}); it does not own
 # linux/CMakeLists.txt (the Flutter Linux runner's build) -- wiring the
-# resulting library into an actual `flutter build linux` bundle is requested
-# from the Build-Eigentümer in BUILD_REQUEST_V1.1.md next to this file.
+# resulting library into an actual `flutter build linux` bundle was done by
+# the build owner in linux/CMakeLists.txt (BUGFIX_CURRENT.md AV-V1.1).
 #
 # The library TARGET is named exactly `cleona_voice` (not `cleona_voice_linux`)
 # on purpose: linux/CMakeLists.txt:86-88 already carries a placeholder comment
-# from the Build-Eigentümer naming that exact target for
+# from the build owner naming that exact target for
 # `install(TARGETS cleona_voice ...)`, the same pattern used for `cleona_audio`
 # and `cleona_net` a few lines below it. Matching the name they already wrote
-# down means BUILD_REQUEST_V1.1.md only has to ask for the two lines to be
-# uncommented, not for a name to be reconciled.
+# down meant the build owner only had to uncomment two lines, not reconcile
+# a name.
 #
 # DEPENDENCIES
 # -------------
@@ -31,8 +31,8 @@
 # webrtc-audio-processing is required too, even though the PREFERRED chain
 # (the PipeWire echo-cancel filter) does not link it directly: the backend
 # falls back to linking it itself when the filter's AEC3 plugin cannot be
-# loaded (architecture §10.4's Linux row; SPEC §12 risk table: "WebRTC APM
-# linken; C++-Abhängigkeit auf einer Plattform bewusst akzeptiert"). A build
+# loaded (architecture §10.4's Linux row; SPEC §12 risk table: "link WebRTC APM;
+# C++ dependency on one platform deliberately accepted"). A build
 # without it therefore cannot deliver the fallback the architecture commits
 # to, so this is REQUIRED, not optional.
 #
@@ -54,7 +54,7 @@ cmake_minimum_required(VERSION 3.13)
 # native/cleona_voice/CMakeLists.txt's platform loop
 # (`foreach(_plat linux android apple windows) ... add_subdirectory(${_plat})`)
 # descends into every platform directory that exists, UNCONDITIONALLY -- that
-# parent file is Build-Eigentümer property and is not this package's to add a
+# parent file is build owner property and is not this package's to add a
 # condition to (SPEC §9). The condition has to live here instead.
 #
 # Without it, an Android NDK cross-build (scripts/build-android-libs.sh, which

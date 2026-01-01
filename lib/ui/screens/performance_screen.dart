@@ -109,7 +109,10 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
   int get _totalMessages {
     var count = 0;
     for (final conv in widget.service.conversations.values) {
-      count += conv.messages.length;
+      // `totalMessages` instead of `messages.length`: the number comes from the
+      // storage and also applies to histories not loaded (S366). With
+      // `messages.length` a 1 would stand here per conversation after the start.
+      count += conv.totalMessages;
     }
     return count;
   }
@@ -120,8 +123,8 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
     String name = '-';
     int maxCount = 0;
     for (final conv in widget.service.conversations.values) {
-      if (conv.messages.length > maxCount) {
-        maxCount = conv.messages.length;
+      if (conv.totalMessages > maxCount) {
+        maxCount = conv.totalMessages;
         name = conv.displayName;
       }
     }

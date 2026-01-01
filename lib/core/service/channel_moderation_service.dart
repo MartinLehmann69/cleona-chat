@@ -1,18 +1,18 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/moderation/jury_selection.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart';
-import 'package:cleona/core/network/sender_identity_snapshot.dart';
+import 'package:cleona/core/moderation/verdict_verifier.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
+import 'package:cleona/core/service/harvest_event.dart';
 
 // ── Helper types (were private in cleona_service.dart) ──────────────
 
@@ -73,8 +73,17 @@ class ChannelModerationService {
   final Map<String, DateTime> _csamCooldowns = {};
   final Map<String, int> _csamStrikes = {};
   final Map<String, Uint8List> moderationProofs = {};
-  Timer? _channelIndexGossipTimer;
   Timer? _moderationTimer;
+
+  /// Count of jury verdicts that failed cryptographic verification
+  /// (§9.3.1a, `verdict_verifier.dart`) — signatures present but
+  /// insufficient valid ones inside the tolerance set. Counted at BOTH
+  /// checkpoints: the initiator's own resolution (`_resolveJury`, before
+  /// `_applyJuryConsequence`) and the receiving juror's copy of the
+  /// broadcast result (`handleIncomingJuryResult`). Never silently
+  /// dropped — every increment has a matching `_log.warn`. Exposed
+  /// (not private) so tests and diagnostics can observe it.
+  int verdictVerificationFailures = 0;
 
   // Callbacks
   void Function(JuryRequest request)? onJuryRequestReceived;
@@ -199,10 +208,11 @@ class ChannelModerationService {
 
     channelReports[reportId] = report;
     _dailyReportCounts[_ctx.identity.userIdHex] = dailyCount + 1;
+    persistChannelReport(reportId);
     if (cat == ReportCategory.illegalCSAM) {
       _csamCooldowns[_ctx.identity.userIdHex] = DateTime.now();
+      persistCsam(_ctx.identity.userIdHex);
     }
-    saveModeration();
 
     _log.info('Channel report $reportId filed for $channelIdHex (category: ${cat.name})');
 
@@ -242,25 +252,164 @@ class ChannelModerationService {
 
     postReports[reportId] = report;
     _dailyReportCounts[_ctx.identity.userIdHex] = dailyCount + 1;
+    persistPostReport(reportId);
     if (cat == ReportCategory.illegalCSAM) {
       _csamCooldowns[_ctx.identity.userIdHex] = DateTime.now();
+      persistCsam(_ctx.identity.userIdHex);
     }
-    saveModeration();
 
     _log.info('Post report $reportId filed for $postId in $channelIdHex (category: ${cat.name})');
     return true;
   }
 
-  void saveModeration() {
+  // ── Storage (S366, §21.4.1) ────────────────────────────────────────
+  //
+  // S362 took the moderation state out of plaintext; it then lay
+  // as `moderation.json.enc` in the profile. That solved
+  // confidentiality and not granularity: the file was rewritten completely on EVERY
+  // report, every vote and every verdict —
+  // eleven triggers, and neither `channelReports` nor `postReports` have
+  // a cap or a deadline. Now every report lies as ONE
+  // row in the encrypted storage.
+  //
+  // The content is unchanged what S362 described: every
+  // channel in which this device reported or judged, including
+  // category — with `illegalCSAM` including the cooldowns and
+  // strikes on the own user ID.
+  //
+  // FOUR AREAS INSTEAD OF ONE MAP WITH PREFIX. The state table
+  // has (area, key) as key; a namespace trick
+  // within one area ("r:", "p:", "j:") would be the same detour
+  // that the contact tombstones no longer need. Separate
+  // areas moreover mean: `loadArea` delivers exactly one kind,
+  // without prefix check, and two report identifiers from different
+  // pots cannot get in each other's way.
+  static const String areaChannelReports = 'moderation';
+  static const String areaPostReports = 'moderation_posts';
+  static const String areaJury = 'moderation_jury';
+  static const String areaCsam = 'moderation_csam';
+
+  /// Whether [loadModeration] has read the storage once. Carries the
+  /// data-loss latch in [saveModeration].
+  bool _moderationLoaded = false;
+
+  /// Writes ONE channel report — or deletes it if it is gone.
+  void persistChannelReport(String reportId) {
     try {
-      final file = File('${_ctx.profileDir}/moderation.json');
-      file.writeAsStringSync(jsonEncode({
-        'channelReports': channelReports.map((k, v) => MapEntry(k, v.toJson())),
-        'postReports': postReports.map((k, v) => MapEntry(k, v.toJson())),
-        'juryRequests': pendingJuryRequests.map((k, v) => MapEntry(k, v.toJson())),
-        'csamCooldowns': _csamCooldowns.map((k, v) => MapEntry(k, v.millisecondsSinceEpoch)),
-        'csamStrikes': _csamStrikes,
-      }));
+      final r = channelReports[reportId];
+      if (r == null) {
+        _ctx.store.removeEntry(areaChannelReports, reportId);
+        return;
+      }
+      _ctx.store.putEntry(areaChannelReports, reportId, r.toJson());
+    } catch (e) {
+      _log.warn('Failed to persist channel report $reportId: $e');
+    }
+  }
+
+  /// Writes ONE post report — or deletes it.
+  void persistPostReport(String reportId) {
+    try {
+      final r = postReports[reportId];
+      if (r == null) {
+        _ctx.store.removeEntry(areaPostReports, reportId);
+        return;
+      }
+      _ctx.store.putEntry(areaPostReports, reportId, r.toJson());
+    } catch (e) {
+      _log.warn('Failed to persist post report $reportId: $e');
+    }
+  }
+
+  /// Writes ONE open jury request — or deletes it.
+  void persistJuryRequest(String juryId) {
+    try {
+      final r = pendingJuryRequests[juryId];
+      if (r == null) {
+        _ctx.store.removeEntry(areaJury, juryId);
+        return;
+      }
+      _ctx.store.putEntry(areaJury, juryId, r.toJson());
+    } catch (e) {
+      _log.warn('Failed to persist jury request $juryId: $e');
+    }
+  }
+
+  /// Writes cooldown and strikes of ONE user ID.
+  ///
+  /// `_csamStrikes` has, re-measured, NO writer — only a
+  /// reader (`_checkReporterQualification`) and this way back. That is
+  /// a separate finding and is not changed here in passing: the
+  /// row carries both quantities along, so that a later writer
+  /// does not have to rebuild anything.
+  void persistCsam(String userIdHex) {
+    try {
+      final cooldown = _csamCooldowns[userIdHex];
+      final strikes = _csamStrikes[userIdHex];
+      if (cooldown == null && strikes == null) {
+        _ctx.store.removeEntry(areaCsam, userIdHex);
+        return;
+      }
+      _ctx.store.putEntry(areaCsam, userIdHex, {
+        if (cooldown != null) 'cooldown': cooldown.millisecondsSinceEpoch,
+        'strikes': ?strikes,
+      });
+    } catch (e) {
+      _log.warn('Failed to persist CSAM state for $userIdHex: $e');
+    }
+  }
+
+  /// Writes the WHOLE moderation state.
+  ///
+  /// Only for the callers that really change many entries at once
+  /// (the moderation timer). Whoever touches exactly one report
+  /// calls the `persist…` methods above — otherwise he brings back
+  /// the full write, only in the storage instead of in a file.
+  void saveModeration() {
+    // DATA-LOSS LATCH. `replaceArea` deletes the area before it
+    // writes: an empty state after a failed load
+    // would destroy the stock. It asks the STORAGE, not the
+    // file — set on `moderation.json.enc` it would never have kicked in again after this
+    // switch and would have silently disappeared.
+    if (!_moderationLoaded &&
+        channelReports.isEmpty &&
+        postReports.isEmpty &&
+        pendingJuryRequests.isEmpty &&
+        _csamCooldowns.isEmpty &&
+        _csamStrikes.isEmpty) {
+      var present = false;
+      try {
+        present = _ctx.store.countArea(areaChannelReports) > 0 ||
+            _ctx.store.countArea(areaPostReports) > 0 ||
+            _ctx.store.countArea(areaJury) > 0 ||
+            _ctx.store.countArea(areaCsam) > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save moderation state — store unreadable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save empty moderation state — load failed but '
+            'the store still holds entries. Would cause data loss!');
+        return;
+      }
+    }
+    try {
+      final store = _ctx.store;
+      store.replaceArea(areaChannelReports,
+          {for (final e in channelReports.entries) e.key: e.value.toJson()});
+      store.replaceArea(areaPostReports,
+          {for (final e in postReports.entries) e.key: e.value.toJson()});
+      store.replaceArea(areaJury,
+          {for (final e in pendingJuryRequests.entries) e.key: e.value.toJson()});
+      final csamKeys = <String>{..._csamCooldowns.keys, ..._csamStrikes.keys};
+      store.replaceArea(areaCsam, {
+        for (final k in csamKeys)
+          k: {
+            if (_csamCooldowns[k] != null)
+              'cooldown': _csamCooldowns[k]!.millisecondsSinceEpoch,
+            if (_csamStrikes[k] != null) 'strikes': _csamStrikes[k],
+          },
+      });
     } catch (e) {
       _log.warn('Failed to save moderation state: $e');
     }
@@ -268,33 +417,40 @@ class ChannelModerationService {
 
   void loadModeration() {
     try {
-      final file = File('${_ctx.profileDir}/moderation.json');
-      if (!file.existsSync()) return;
-      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-
-      final reports = json['channelReports'] as Map<String, dynamic>? ?? {};
-      for (final e in reports.entries) {
-        channelReports[e.key] = ChannelReport.fromJson(e.value as Map<String, dynamic>);
+      final store = _ctx.store;
+      for (final e in store.loadArea(areaChannelReports).entries) {
+        try {
+          channelReports[e.key] = ChannelReport.fromJson(e.value);
+        } catch (err) {
+          _log.warn('Skipping corrupt channel report ${e.key}: $err');
+        }
       }
-
-      final postReportsJson = json['postReports'] as Map<String, dynamic>? ?? {};
-      for (final e in postReportsJson.entries) {
-        postReports[e.key] = PostReport.fromJson(e.value as Map<String, dynamic>);
+      for (final e in store.loadArea(areaPostReports).entries) {
+        try {
+          postReports[e.key] = PostReport.fromJson(e.value);
+        } catch (err) {
+          _log.warn('Skipping corrupt post report ${e.key}: $err');
+        }
       }
-
-      final jury = json['juryRequests'] as Map<String, dynamic>? ?? {};
-      for (final e in jury.entries) {
-        pendingJuryRequests[e.key] = JuryRequest.fromJson(e.value as Map<String, dynamic>);
+      for (final e in store.loadArea(areaJury).entries) {
+        try {
+          pendingJuryRequests[e.key] = JuryRequest.fromJson(e.value);
+        } catch (err) {
+          _log.warn('Skipping corrupt jury request ${e.key}: $err');
+        }
       }
-
-      final cooldowns = json['csamCooldowns'] as Map<String, dynamic>? ?? {};
-      for (final e in cooldowns.entries) {
-        _csamCooldowns[e.key] = DateTime.fromMillisecondsSinceEpoch(e.value as int);
+      for (final e in store.loadArea(areaCsam).entries) {
+        final cooldown = e.value['cooldown'];
+        if (cooldown is int) {
+          _csamCooldowns[e.key] = DateTime.fromMillisecondsSinceEpoch(cooldown);
+        }
+        final strikes = e.value['strikes'];
+        if (strikes is int) _csamStrikes[e.key] = strikes;
       }
-      final strikes = json['csamStrikes'] as Map<String, dynamic>? ?? {};
-      for (final e in strikes.entries) {
-        _csamStrikes[e.key] = e.value as int;
-      }
+      _moderationLoaded = true;
+      _log.info('Loaded ${channelReports.length} channel reports, '
+          '${postReports.length} post reports, '
+          '${pendingJuryRequests.length} jury requests');
     } catch (e) {
       _log.warn('Failed to load moderation state: $e');
     }
@@ -355,7 +511,7 @@ class ChannelModerationService {
     if (channel == null || !_ctx.hasChannelPermission(channel, 'config')) return false;
 
     postReports.remove(reportId);
-    saveModeration();
+    persistPostReport(reportId);
     _log.info('Post report $reportId dismissed');
     return true;
   }
@@ -387,7 +543,7 @@ class ChannelModerationService {
         ownerNodeIdHex: channel.ownerNodeIdHex,
         createdAt: channel.createdAt,
       ));
-      _ctx.channelIndex.save();
+      // S366: `upsert` writes its ONE row itself.
     }
 
     _log.info('Badge correction submitted for channel "${channel.name}"');
@@ -423,76 +579,41 @@ class ChannelModerationService {
     return true;
   }
 
-  // ── Channel Index Gossip ──────────────────────────────────────
-
-  /// Start periodic channel index gossip timer.
-  void startChannelIndexGossip(Duration interval) {
-    _channelIndexGossipTimer?.cancel();
-    _channelIndexGossipTimer = Timer.periodic(interval, (_) => doChannelIndexGossip());
-  }
-
-  /// §9.5.7 (S119 D1): piggyback hook — cleona_service sends the system-
-  /// channel record digests to the same gossip targets, on the same slot
-  /// (no new timer, no new periodicity).
-  void Function(List<PeerInfo> targets)? onGossipTargets;
-
-  /// Send channel index to up to 3 random recently-seen peers.
-  void doChannelIndexGossip() {
-    final allPeers = _ctx.node.routingTable.allPeers;
-    if (allPeers.isEmpty) return;
-
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
-    final recent = allPeers.where((p) => p.lastSeen.isAfter(cutoff)).toList()
-      ..shuffle();
-    final List<PeerInfo> targets;
-    if (recent.length >= 3) {
-      targets = recent.take(3).toList();
-    } else {
-      final stale = allPeers.where((p) => !p.lastSeen.isAfter(cutoff)).toList()
-        ..shuffle();
-      targets = [...recent, ...stale.take(3 - recent.length)];
-    }
-
-    // §9.5.7 anti-entropy piggyback — runs even when the channel index
-    // itself is empty (system-channel records exist independently).
-    onGossipTargets?.call(targets);
-
-    final entries = _ctx.channelIndex.allEntries;
-    if (entries.isEmpty) return;
-
-    final exchangeMsg = proto.ChannelIndexExchange();
-    for (final entry in entries) {
-      exchangeMsg.entries.add(proto.ChannelIndexEntryProto()
-        ..channelId = hexToBytes(entry.channelIdHex)
-        ..name = entry.name
-        ..language = entry.language
-        ..isAdult = entry.isAdult
-        ..description = entry.description ?? ''
-        ..subscriberCount = entry.subscriberCount
-        ..badBadgeLevel = entry.badBadgeLevel
-        ..correctionSubmitted = entry.correctionSubmitted
-        ..ownerNodeId = hexToBytes(entry.ownerNodeIdHex)
-        ..createdAtMs = Int64(entry.createdAt.millisecondsSinceEpoch));
-      if (entry.badBadgeSince != null) {
-        exchangeMsg.entries.last.badBadgeSinceMs = Int64(entry.badBadgeSince!.millisecondsSinceEpoch);
-      }
-    }
-
-    // V3 channel-index gossip rides InfrastructureFrame: recipients are
-    // arbitrary routing-table peers (NOT necessarily contacts), and there
-    // is no inner User-Sig requirement — receivers treat the entries as
-    // gossip and trust nothing. Device-KEM-Decap at the recipient gates
-    // delivery to addressed devices; HMAC + Outer-Device-Sig per §3.5
-    // protect the wire. Architecture §10.2 + §2.3.5.
-    final payload = Uint8List.fromList(exchangeMsg.writeToBuffer());
-    for (final peer in targets) {
-      unawaited(_ctx.node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE,
-        innerPayload: payload,
-        recipientDeviceId: peer.nodeId,
-      ));
-    }
-  }
+  // ── THE CHANNEL INDEX GOSSIP IS GONE (2026-08-31, CUT) ─────────────
+  //
+  // WHAT STOOD HERE. `startChannelIndexGossip` set up a timer every 5 minutes
+  // (`cleona_service.dart:1072`), `doChannelIndexGossip` then drew
+  // from `_ctx.node.routingTable.allPeers` up to THREE arbitrary, most recently
+  // seen nodes and sent them the complete channel index as an
+  // InfrastructureFrame. On that hung via `onGossipTargets`
+  // (`cleona_service.dart:1071`) the §9.5.7 piggyback delivery of the
+  // system channel summaries.
+  //
+  // WHY IT FALLS. The construction presupposes a set of ARBITRARY
+  // network nodes to which one may send unasked — the
+  // Kademlia routing table. That no longer exists in V4.1, and indeed
+  // not as a missing component, but as an abandoned model: the
+  // peer is either a pair (`K_AB`) or a responsible
+  // relay of a tag family. A "random peer" is in both
+  // cases not addressable.
+  //
+  // WHAT V4.1 PROVIDES INSTEAD — AND WHAT OF IT IS MISSING.
+  // `Cleona_Chat_Architecture_v4_1.md` §16.0 introduces for exactly this
+  // purpose the PERMANENT OBJECT CLASS: public, verifiable
+  // objects (directory, moderation cases, system channels) lie with
+  // the responsible relays and reconcile via anti-entropy between
+  // RELAY PAIRS — not via broadcast to strangers. This class is
+  // NOT built; there is no producer for it in the tree. That is the
+  // open gap, and it is NOT covered up here with a substitute broadcast.
+  //
+  // FIELD FINDING ON THIS (S357, 2026-08-31): this path was the carrier of the
+  // measured 3.17 GB/day of system channel traffic with useful share ZERO. It
+  // thus does not only fall away because its carrier is missing — it was also
+  // defective in the shipped form.
+  //
+  // THE RECEIVE SIDE STAYS: `handleChannelIndexExchange` below is
+  // pure protobuf work without network relation and will get a producer
+  // again as soon as §16.0 is built.
 
   /// Handle incoming channel index exchange from a peer.
   ///
@@ -539,7 +660,10 @@ class ChannelModerationService {
         }
       }
       if (added > 0) {
-        _ctx.channelIndex.save();
+        // S366: every `upsert` above has already written its row.
+        // A full write stood here precisely for the case that is the
+        // most expensive — a reconciliation with a neighbour that changes two of
+        // hundreds of entries.
         _log.info('Channel index gossip: merged $added entries from peer');
       }
     } catch (e) {
@@ -547,7 +671,7 @@ class ChannelModerationService {
     }
   }
 
-  // ── Channel Join Request (Owner-Seite) ────────────────────────
+  // ── Channel Join Request (owner side) ─────────────────────────
 
   /// Handle incoming join request for a public channel we own.
   ///
@@ -595,7 +719,9 @@ class ChannelModerationService {
         _ctx.publishChannelToIndex(channelIdHex);
       }
 
-      _log.info('Auto-accepted join request from ${joinReq.displayName} for channel "${channel.name}"');
+      _log.debug('Auto-accepted join request — '
+          'displayName="${joinReq.displayName}"');
+      _log.info('Auto-accepted join request for channel "${channel.name}"');
       _ctx.notifyStateChanged();
     } catch (e) {
       _log.debug('Channel join request error: $e');
@@ -831,12 +957,18 @@ class ChannelModerationService {
 
     if (changed) {
       _ctx.saveChannels();
+      // HERE the full state stays right: the pass changes at five
+      // places states across ALL reports and channels
+      // (CSAM levels, badge probation, jury deadlines, escalation), and it
+      // runs by the clock, not by a user action. Individual
+      // `persist…` calls at five nested places would here be
+      // the more error-prone variant, not the cheaper one.
       saveModeration();
       _ctx.notifyStateChanged();
     }
   }
 
-  // ── Jury-Auswahl + Verteilung ─────────────────────────────────
+  // ── Jury selection + distribution ─────────────────────────────
 
   /// Check if reports for a channel have reached the jury threshold.
   void _checkJuryThreshold(String channelIdHex) {
@@ -984,8 +1116,8 @@ class ChannelModerationService {
     channel.tombstoned = true;
     channel.badBadgeLevel = 3;
     channel.badBadgeSince = DateTime.now();
+    // S366: `remove` deletes its ONE row itself.
     _ctx.channelIndex.remove(channel.channelIdHex);
-    _ctx.channelIndex.save();
 
     // Store proof locally (served on-demand via DHT/gossip)
     final proofBytes = Uint8List.fromList(proof.writeToBuffer());
@@ -1022,9 +1154,11 @@ class ChannelModerationService {
     for (final r in channelReports.values) {
       if (r.channelIdHex == channelIdHex && r.category == category && r.state == ReportState.pending) {
         r.state = ReportState.juryActive;
+        // Only the reports actually switched — those are the ones
+        // of one channel in one category, not the whole stock.
+        persistChannelReport(r.reportId);
       }
     }
-    saveModeration();
     _log.info('Jury $juryId initiated for $channelIdHex (${category.name}) — ${session.jurorNodeIds.length} jurors');
   }
 
@@ -1111,6 +1245,49 @@ class ChannelModerationService {
     return session;
   }
 
+  /// Rebuilds the local candidate pool for [channelIdHex] — same filter as
+  /// jury creation/replacement (`_createJurySession`/`_handleJuryTimeout`)
+  /// — as [JurorRecord]s for [verifyJuryVerdict]'s tolerance-set lookup
+  /// (§9.3.1a).
+  ///
+  /// This is inherently the VERIFIER's OWN local view: own contacts, own
+  /// channel/report state, evaluated at verification time rather than at
+  /// original jury-selection time. That is exactly what
+  /// `config.jurorSetToleranceFactor` (top `factor × jurySize` records,
+  /// not just the exact jurySize) exists to absorb — see
+  /// `jury_selection.dart:isWithinToleranceSet`. Used both by the
+  /// initiator (verifying its own resolution before applying a
+  /// consequence) and by a receiving juror (verifying the initiator's
+  /// broadcast claim); both call sites necessarily see a candidate pool
+  /// that can have drifted slightly from the one at jury creation, which
+  /// is the whole reason the tolerance set is wider than the jury itself.
+  List<JurorRecord> _eligibleJurorRecordsForVerification(
+      String channelIdHex, SodiumFFI sodium) {
+    final channel = _ctx.channels[channelIdHex];
+    final eligible = <ContactInfo>[];
+    for (final c in _ctx.contacts.values) {
+      if (c.status != 'accepted') continue;
+      if (c.nodeIdHex == _ctx.identity.userIdHex) continue;
+      if (c.ed25519Pk == null) continue;
+      if (channel != null && channel.members.containsKey(c.nodeIdHex)) continue;
+      if (channelReports.values.any((r) =>
+          r.channelIdHex == channelIdHex && r.reporterNodeIdHex == c.nodeIdHex)) {
+        continue;
+      }
+      eligible.add(c);
+    }
+    return eligible
+        .map((c) => JurorRecord(
+              recordId: computeJurorRecordId(c.ed25519Pk!, sodium),
+              userPubKeyEd25519: c.ed25519Pk!,
+              userPubKeyMlDsa: c.mlDsaPk ?? Uint8List(0),
+              creationEpochMs: 0,
+              selfSigEd25519: Uint8List(0),
+              selfSigMlDsa: Uint8List(0),
+            ))
+        .toList();
+  }
+
   /// Send an encrypted JuryRequest to a juror.
   void _sendJuryRequest(JurySession session, ContactInfo juror) {
     final channel = _ctx.channels[session.channelIdHex];
@@ -1172,10 +1349,15 @@ class ChannelModerationService {
       );
 
       pendingJuryRequests[juryId] = request;
-      saveModeration();
+      persistJuryRequest(juryId);
       onJuryRequestReceived?.call(request);
       _ctx.notifyStateChanged();
-      _log.info('Received jury request $juryId for channel "${msg.channelName}"');
+      // Identifier instead of name: `msg.channelName` comes FROM THE NETWORK and
+      // thus belongs to no local `ChannelInfo` whose constructor
+      // would register it with `LogRedaction` — it would stand here as the
+      // only channel name in plaintext, while every local one is
+      // redacted. The jury speaks about the identifier anyway.
+      _log.info('Received jury request $juryId for channel $channelIdHex');
     } catch (e) {
       _log.debug('Jury request error: $e');
     }
@@ -1188,7 +1370,7 @@ class ChannelModerationService {
 
     request.vote = JuryVoteResult.values[vote];
     request.votedAt = DateTime.now();
-    saveModeration();
+    persistJuryRequest(juryId);
 
     // Send vote back to the jury initiator
     if (request.requesterNodeIdHex != null) {
@@ -1401,7 +1583,13 @@ class ChannelModerationService {
     _log.info('Jury ${session.juryId}: replaced ${replacements.length} '
         'non-responders in round $nextRound '
         '(jurors: ${newSession.jurorNodeIds.length})');
-    saveModeration();
+    // HERE STOOD `saveModeration()` AND WROTE NOTHING NEW. This
+    // body changes exclusively `_activeSessions` — a map that lies
+    // in NONE of the four areas and was never persisted (it
+    // is discarded in the timer after an hour anyway). The call was
+    // a full write of unchanged data. It is dropped; whoever wants to make the
+    // running sessions of a day survivable needs
+    // an own area for that, not this call.
   }
 
   /// Resolve a jury — compute result and apply consequences.
@@ -1431,7 +1619,74 @@ class ChannelModerationService {
     _log.info('Jury ${session.juryId} resolved: approve=$approve reject=$reject abstain=$abstain quorum=${config.juryHardQuorum(nominalJurySize)}/$nominalJurySize → ${approved ? "APPROVED" : "REJECTED"}');
 
     if (approved) {
-      _applyJuryConsequence(session);
+      // §9.3.1a: verify BEFORE applying — the collected juror signatures
+      // must actually check out against the tolerance set, not just the
+      // initiator's own local vote tally. Deliberately runs for
+      // SELF-INITIATED juries too, not only for verdicts received from
+      // elsewhere: `_applyJuryConsequence` is the one place that mutates
+      // `badBadgeLevel`/`tombstoned`, and the initiator's local
+      // `session.votes`/`jurorNodeIds` are exactly the state a bug (the
+      // replacement-round mutation in `_handleJuryTimeout` rewrites
+      // `jurorNodeIds` in place) or a compromised initiator could corrupt
+      // without any external check ever catching it — "the network
+      // validates, not the app" (`sybil_transport_validator.dart`) is
+      // read here as "not even the app that happens to be the initiator
+      // is exempt". Running the same check on both sides also guarantees
+      // the initiator can never apply a consequence locally that it could
+      // not also prove to a juror that received the broadcast result.
+      final sodium = SodiumFFI();
+      final oqs = OqsFFI();
+      final resultForVerification = proto.JuryResultMsg()
+        ..juryId = hexToBytes(session.juryId)
+        ..reportId = hexToBytes(session.reportId)
+        ..channelId = hexToBytes(session.channelIdHex)
+        ..consequence = consequenceForCategory(session.category).index
+        ..votesApprove = approve
+        ..votesReject = reject
+        ..votesAbstain = abstain
+        ..eligibilitySnapshotHash = session.eligibilitySnapshotHash
+        ..epochDay = session.epochDay
+        ..juryRound = session.juryRound;
+      for (final entry in session.verdictSigs.entries) {
+        resultForVerification.jurorSigs.add(proto.JurorVerdictSig()
+          ..jurorUserId = hexToBytes(entry.key)
+          ..sigEd25519 = entry.value.sigEd25519
+          ..sigMlDsa = entry.value.sigMlDsa
+          ..vote = entry.value.vote);
+      }
+
+      final verification = verifyJuryVerdict(
+        result: resultForVerification,
+        registeredJurors:
+            _eligibleJurorRecordsForVerification(session.channelIdHex, sodium),
+        category: session.category,
+        config: config,
+        sodium: sodium,
+        oqs: oqs,
+      );
+
+      switch (verification) {
+        case VerdictVerification.failed:
+          // Signatures were present but did not check out (forged, too
+          // few, or outside the tolerance set) — never silently dropped:
+          // counted AND logged, matching the "dropped: reason" pattern
+          // used elsewhere in this file (e.g. `handleIncomingChannelReport`).
+          verdictVerificationFailures++;
+          _log.warn('Jury ${session.juryId}: verdict verification FAILED '
+              '(${session.verdictSigs.length} sig(s) collected, need '
+              '${config.juryHardQuorum(nominalJurySize)}/$nominalJurySize valid '
+              'within tolerance set) — consequence NOT applied');
+        case VerdictVerification.legacyUnproven:
+          // No juror attached a hybrid signature at all — Phase 1
+          // observe-only, same posture as the channel-index gossip's own
+          // missing-`moderationProofHash` case
+          // (`handleChannelIndexExchange`): accepted, but flagged.
+          _log.warn('Jury ${session.juryId}: verdict has NO juror '
+              'signatures — applying unproven (Phase 1 observe-only, §9.3.1a)');
+          _applyJuryConsequence(session);
+        case VerdictVerification.verified:
+          _applyJuryConsequence(session);
+      }
     } else if (session.isPlausibilityJury) {
       // Plausibility jury rejected = CSAM hide was unjustified → lift hide
       final channel = _ctx.channels[session.channelIdHex];
@@ -1457,9 +1712,9 @@ class ChannelModerationService {
     for (final r in channelReports.values) {
       if (r.channelIdHex == session.channelIdHex && r.state == ReportState.juryActive) {
         r.state = ReportState.resolved;
+        persistChannelReport(r.reportId);
       }
     }
-    saveModeration();
 
     // Send result to all jurors
     _broadcastJuryResult(session, approve, reject, abstain);
@@ -1488,8 +1743,8 @@ class ChannelModerationService {
         channel.badBadgeLevel = 3;
         channel.badBadgeSince = DateTime.now();
         channel.tombstoned = true;
+        // S366: `remove` deletes its ONE row itself.
         _ctx.channelIndex.remove(session.channelIdHex);
-        _ctx.channelIndex.save();
         _log.info('Channel "${channel.name}" tombstoned (permanent badge)');
         break;
       case JuryConsequence.noAction:
@@ -1557,9 +1812,61 @@ class ChannelModerationService {
       final msg = proto.JuryResultMsg.fromBuffer(payload);
       final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
 
+      // §9.3.1a: cross-check the initiator's claimed verdict against the
+      // hybrid signatures it attached — closes the gap where WE, having
+      // actually cast a vote in this jury, had no way to detect an
+      // initiator that is lying (or just buggy) about the tally or
+      // consequence it claims the jury reached. `verifyJuryVerdict` needs
+      // the original ReportCategory to recompute the same selection point
+      // used at jury creation (`JuryResultMsg` itself carries only the
+      // post-mapped `consequence`, a lossy many-to-one map — see
+      // `verdict_verifier.dart`); read from our own still-pending
+      // `JuryRequest` for this juryId, BEFORE it is cleared below.
+      final pending = pendingJuryRequests[juryId];
+      if (pending == null) {
+        // Every recipient of MTV3_CHANNEL_MOD_DECISION is a juror the
+        // initiator addressed directly (`_broadcastJuryResult` sends only
+        // to `session.jurorNodeIds`) — so an honest, first delivery
+        // always finds a pending entry here. A missing one is far more
+        // likely a harmless duplicate/retransmit of a result we already
+        // processed (and already removed from `pendingJuryRequests`) than
+        // an attack — this handler applies no local consequence either
+        // way, so there is nothing at risk from skipping. Logged (not
+        // silently ignored) and kept in its own bucket, not counted as a
+        // verification FAILURE: that count is reserved for a verdict we
+        // could actually check and that did not check out.
+        _log.info('Jury result for $juryId: no matching local JuryRequest '
+            '(already processed, or never a participant) — skipping '
+            'verification');
+      } else {
+        final sodium = SodiumFFI();
+        final oqs = OqsFFI();
+        final verification = verifyJuryVerdict(
+          result: msg,
+          registeredJurors: _eligibleJurorRecordsForVerification(
+              pending.channelIdHex, sodium),
+          category: pending.category,
+          config: moderationConfig,
+          sodium: sodium,
+          oqs: oqs,
+        );
+        switch (verification) {
+          case VerdictVerification.failed:
+            verdictVerificationFailures++;
+            _log.warn('Jury result for $juryId: verdict verification '
+                'FAILED — initiator\'s claimed tally/consequence does not '
+                'check out against the attached juror signatures');
+          case VerdictVerification.legacyUnproven:
+            _log.warn('Jury result for $juryId: no juror signatures '
+                'attached — unproven (Phase 1 observe-only, §9.3.1a)');
+          case VerdictVerification.verified:
+            _log.info('Jury result for $juryId: verdict verification OK');
+        }
+      }
+
       // Remove from pending requests
       pendingJuryRequests.remove(juryId);
-      saveModeration();
+      persistJuryRequest(juryId);
       _ctx.notifyStateChanged();
 
       _log.info('Jury result for $juryId: approve=${msg.votesApprove} reject=${msg.votesReject} abstain=${msg.votesAbstain}');
@@ -1602,14 +1909,30 @@ class ChannelModerationService {
         return;
       }
 
-      // Anti-Sybil local reachability (§9.4.1): reporter must be known
-      // to us — either as a contact or visible in the routing table.
-      // A node with zero network presence is likely a Sybil identity.
+      // ── THE SECOND HALF OF THIS CHECK IS GONE (2026-08-31, CUT) ─
+      //
+      // Until now it said (v3_0 §9.4.1): "reporter must be known to us —
+      // either as contact OR visible in the routing table", the
+      // second member as `_ctx.node.routingTable.getPeerByUserId(...)`.
+      // The routing table has been deleted with `lib/core/dht/`; in V4.1
+      // there is no set of strangers "somehow seen in the network" from
+      // which this question could be answered.
+      //
+      // NOT REPLACED, BUT NARROWER: the branch falls without replacement, thus
+      // the contact condition alone remains. That is STRICTER than
+      // before (reports of unknown parties now always fall), not
+      // looser — a silent weakening would be the worse thing here.
+      //
+      // WHAT V4.1 PROVIDES AT THIS PLACE IS SOMETHING ELSE and is missing:
+      // §16.4 qualifies the reporter via "registration >= 7 days" and
+      // a role pseudonym from the juror list (§16.5), not
+      // via reachability. Both are unbuilt. Until then
+      // report reception is restricted to contacts, and that stands here.
       final knownContact = _ctx.contacts.containsKey(reporterHex);
-      final knownPeer = _ctx.node.routingTable.getPeerByUserId(senderUserId) != null;
-      if (!knownContact && !knownPeer) {
+      if (!knownContact) {
         _log.warn('Channel report $reportId from $reporterHex dropped: '
-            'reporter not reachable (not in contacts or routing table)');
+            'reporter is not a contact (V4.1 §16.4 reporter qualification '
+            'via registration age is not built yet)');
         return;
       }
 
@@ -1635,7 +1958,7 @@ class ChannelModerationService {
         description: msg.description.isNotEmpty ? msg.description : null,
       );
       channelReports[reportId] = report;
-      saveModeration();
+      persistChannelReport(reportId);
 
       // Check if jury threshold is now reached
       _checkJuryThreshold(channelIdHex);
@@ -1649,15 +1972,15 @@ class ChannelModerationService {
   // ── V3 Dispatch Handlers ──────────────────────────────────────
 
   /// §9.3.1 Bad Badge Reporting (moderation Phase 2, not yet implemented).
-  void handleChannelBadBadgeReportV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void handleChannelBadBadgeReportV3(HarvestEvent event) {}
 
   /// V3-direct handler for MTV3_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
   /// Owner-bound AppFrame; payload is the `ChannelJoinRequest` proto
   /// already decrypted+authenticated by the V3 receive pipeline.
-  void handleChannelJoinRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleChannelJoinRequestV3(HarvestEvent event) {
     handleChannelJoinRequest(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
+      Uint8List.fromList(event.payload),
+      Uint8List.fromList(event.senderUserId),
     );
   }
 
@@ -1666,28 +1989,19 @@ class ChannelModerationService {
   /// handler in place so future moderator-fanout can land without a
   /// silent drop. Payload is the `ChannelReportMsg` proto already
   /// decrypted+authenticated by the V3 receive pipeline.
-  void handleChannelReportV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleChannelReportV3(HarvestEvent event) {
     handleIncomingChannelReport(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
+      Uint8List.fromList(event.payload),
+      Uint8List.fromList(event.senderUserId),
     );
   }
 
-  /// V3-direct InfraFrame handler for MTV3_CHANNEL_INDEX_EXCHANGE (Wave
-  /// 2B.3, §10.2). Gossip-style channel-index distribution to non-contact
-  /// peers; payload is untrusted by design — handler just merges entries
-  /// into `_channelIndex`. No KEM-decap and no inner User-Sig (public
-  /// gossip on the InfraFrame path); the outer Device-Sig is the only
-  /// authenticator and is verified upstream by the V3 receive pipeline.
-  void handleChannelIndexExchangeInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    handleChannelIndexExchange(Uint8List.fromList(frame.payload));
-  }
+  // S368: here stood `handleChannelIndexExchangeInfra` — the V3 entrance for
+  // MTV3_CHANNEL_INDEX_EXCHANGE on the InfrastructureFrame. It had
+  // ZERO callers in `lib/`+`bin/`, on this branch as on `v4/knoten-host`,
+  // and only passed `frame.payload` through to `handleChannelIndexExchange`.
+  // The frame type itself falls with it. `handleChannelIndexExchange` (without
+  // `Infra`) STAYS — it is the live entrance.
 
   /// V3-direct dispatcher for MTV3_CHANNEL_JURY_VOTE. The wire-type is
   /// overloaded by the V3 sender (cleona_service Z.~5023) — it carries
@@ -1697,10 +2011,10 @@ class ChannelModerationService {
   /// `JuryVoteMsg` and discriminate by initiator-side state: if we hold an
   /// `_activeSessions[juryId]` entry, this incoming frame is a vote-back
   /// for that session; otherwise it's a fresh request to participate.
-  void handleChannelJuryVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleChannelJuryVoteV3(HarvestEvent event) {
     try {
-      final payload = Uint8List.fromList(frame.payload);
-      final senderUserId = Uint8List.fromList(frame.senderUserId);
+      final payload = Uint8List.fromList(event.payload);
+      final senderUserId = Uint8List.fromList(event.senderUserId);
       // Try parsing as JuryVoteMsg first (vote-back from juror to initiator).
       // If we hold an active session for this juryId, it's a vote; otherwise
       // parse as JuryRequestMsg (initiator → juror selection).
@@ -1717,7 +2031,7 @@ class ChannelModerationService {
       handleIncomingJuryRequest(payload, senderUserId);
     } catch (e) {
       _log.warn('handleChannelJuryVoteV3: dispatch fail: $e '
-          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+          '(sender=${_hexShort(Uint8List.fromList(event.senderUserId))})');
     }
   }
 
@@ -1726,25 +2040,27 @@ class ChannelModerationService {
   /// decrypted+authenticated by the V3 receive pipeline. The handler is
   /// sender-agnostic (only updates local state from the result tally), so
   /// no senderUserId is forwarded.
-  void handleChannelModDecisionV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    handleIncomingJuryResult(Uint8List.fromList(frame.payload));
+  void handleChannelModDecisionV3(HarvestEvent event) {
+    handleIncomingJuryResult(Uint8List.fromList(event.payload));
   }
 
   /// §9.3.1a Subscribe Probe (moderation reachability check, not yet implemented).
-  void handleChannelSubscribeProbeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void handleChannelSubscribeProbeV3(HarvestEvent event) {}
 
   // ── Dispose ───────────────────────────────────────────────────
 
   void dispose() {
-    _channelIndexGossipTimer?.cancel();
-    _channelIndexGossipTimer = null;
     _moderationTimer?.cancel();
     _moderationTimer = null;
   }
 
   // ── Private helpers ───────────────────────────────────────────
 
-  static String _hexShort(Uint8List bytes) {
+  /// Short form for log lines. Tolerates `null`, since the device identifier
+  /// is optional (§14.1: the V4.1 path knows no device) — a
+  /// log line is no reason to insert an untruth.
+  static String _hexShort(Uint8List? bytes) {
+    if (bytes == null) return 'kein-Geraet';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

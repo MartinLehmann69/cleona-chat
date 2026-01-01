@@ -1,65 +1,65 @@
-// Medienformat-Versionierung fuer den Audio/Video-Kanal (V1.18).
+// Media format versioning for the audio/video channel (V1.18).
 //
-// Architektur §10.3.1 (Live-Media-Transport), §10.4 (Voice-Stack), §10.6
-// (Video). Wire-Felder: `CallInvite.caller_{audio,video}_format_{min,max}`
-// und `CallAnswer.selected_{audio,video}_format` in `proto/cleona.proto`.
+// Architecture §10.3.1 (live media transport), §10.4 (voice stack), §10.6
+// (video). Wire fields: `CallInvite.caller_{audio,video}_format_{min,max}`
+// and `CallAnswer.selected_{audio,video}_format` in `proto/app_payloads.proto`.
 //
-// WOZU. Zu 3.1 gibt es keine Rueckwaertskompatibilitaet, das bleibt so
-// (§10.4 "Compatibility: none, by decision"). Dieses Modul stellt sie nicht
-// her. Es existiert fuer den umgekehrten Fall: damit eine KUENFTIGE Version
-// (3.3, 4.0, ...) mit 3.2 noch sprechen kann, statt einen zweiten harten
-// Schnitt zu erzwingen.
+// WHAT FOR. There is no backward compatibility with 3.1, and that stays so
+// (§10.4 "Compatibility: none, by decision"). This module does not
+// establish it. It exists for the reverse case: so that a FUTURE version
+// (3.3, 4.0, ...) can still talk with 3.2, instead of forcing a second hard
+// cut.
 //
-// ABGRENZUNG ZUM VERSIONSGATE AUF CALL_INVITE (Feld 8, V1.12/V2.1). Die
-// beiden ueberschneiden sich nicht und keines ist ueberfluessig:
+// DISTINCTION FROM THE VERSION GATE ON CALL_INVITE (field 8, V1.12/V2.1). The
+// two do not overlap and neither is superfluous:
 //
-//   * `caller_app_major_minor` ist ein einseitiger BODEN auf der APP-Version.
-//     Er wird nicht ausgehandelt, und er kann nicht ausdruecken, was die
-//     Gegenseite spricht. Ein heute ausgelieferter 3.2-Client traegt
-//     `>= 3002` einbetoniert und nimmt damit jede kuenftige Version
-//     bedingungslos an — er kann nie lernen, dass 3.4-Medien fuer ihn
-//     undekodierbar sind.
-//   * Das Medienformat hier wird AUSGEHANDELT und ist BEIDSEITIG. Es
-//     beschreibt das Format, nicht die App.
+//   * `caller_app_major_minor` is a one-sided FLOOR on the APP version.
+//     It is not negotiated, and it cannot express what the
+//     other side speaks. A 3.2 client shipped today carries
+//     `>= 3002` set in concrete and thus accepts every future version
+//     unconditionally — it can never learn that 3.4 media are
+//     undecodable for it.
+//   * The media format here is NEGOTIATED and is TWO-SIDED. It
+//     describes the format, not the app.
 //
-// Feld 8 beantwortet "koennen wir ueberhaupt reden" und weist 3.1.x ab, das
-// weder das eine noch das andere Feld traegt. Dieses Modul beantwortet "in
-// welchem Dialekt" und wirkt ausschliesslich oberhalb jenes Bodens.
+// Field 8 answers "can we talk at all" and rejects 3.1.x, which
+// carries neither the one nor the other field. This module answers "in
+// which dialect" and acts exclusively above that floor.
 //
-// VORBILD IM HAUS. `PerMessageKem.acceptKemVersions` (per_message_kem.dart:65)
-// fuehrt denselben protokolleigenen Zaehler, unabhaengig von der App-Version,
-// und weist unbekannte Versionen ab statt sie durchzuwinken. Dass die
-// Akzeptanzmenge dort von {1} auf {2} gewechselt ist (v1 entfernt in V3.1.72),
-// ist zugleich der Beleg, dass alte Formate fallen gelassen werden — deshalb
-// traegt die Aushandlung hier ein Minimum und nicht nur ein Maximum.
+// MODEL IN THE HOUSE. `PerMessageKem.acceptKemVersions` (per_message_kem.dart:65)
+// keeps the same protocol-specific counter, independent of the app version,
+// and rejects unknown versions instead of waving them through. That the
+// acceptance set there changed from {1} to {2} (v1 removed in V3.1.72)
+// is at the same time the evidence that old formats are dropped — that is why
+// the negotiation here carries a minimum and not just a maximum.
 //
-// Reine Logik: keine Sockets, keine Proto-Abhaengigkeit, kein Zustand. Die
-// Verdrahtung in `call_service.dart` samt fuer den Nutzer sichtbarem
-// Ablehnungsgrund gehoert V2.1 (BUILD_REQUEST_V1.18.md).
+// Pure logic: no sockets, no proto dependency, no state. The
+// wiring in `call_service.dart` together with a rejection reason visible to the user
+// belongs to V2.1 (BUGFIX_CURRENT.md AV-V1.18).
 
-/// Ausgang einer Formataushandlung.
+/// Outcome of a format negotiation.
 enum MediaFormatOutcome {
-  /// Beide Seiten haben ein gemeinsames Format. [MediaFormatDecision.selected]
-  /// traegt es.
+  /// Both sides have a common format. [MediaFormatDecision.selected]
+  /// carries it.
   agreed,
 
-  /// Die Spannen ueberschneiden sich nicht. Der Call wird abgelehnt — mit
-  /// einem fuer den Nutzer sichtbaren Grund. §10.4: "never allowed to fail
+  /// The ranges do not overlap. The call is rejected — with
+  /// a reason visible to the user. §10.4: "never allowed to fail
   /// silently, which would reproduce exactly the field symptoms this rewrite
   /// removes".
   incompatible,
 }
 
-/// Ergebnis einer Aushandlung oder einer Pruefung der Gegenwahl.
+/// Result of a negotiation or of a check of the counter-choice.
 class MediaFormatDecision {
   final MediaFormatOutcome outcome;
 
-  /// Das gewaehlte Format. Nur bei [MediaFormatOutcome.agreed] aussagekraeftig.
+  /// The chosen format. Only meaningful for [MediaFormatOutcome.agreed].
   final int selected;
 
-  /// Klartext-Begruendung fuer Log und Fehlerreport. NICHT der uebersetzte
-  /// Text fuer den Nutzer — die i18n-Keys in allen 34 Locales legt V2.1 an
-  /// (Arbeitsregel 7), zusammen mit der Anzeige.
+  /// Plain-text rationale for log and error report. NOT the translated
+  /// text for the user — the i18n keys in all 34 locales are created by V2.1
+  /// (working rule 7), together with the display.
   final String detail;
 
   const MediaFormatDecision._(this.outcome, this.selected, this.detail);
@@ -71,11 +71,11 @@ class MediaFormatDecision {
       'MediaFormatDecision(${outcome.name}, selected=$selected, $detail)';
 }
 
-/// Eine zusammenhaengende Spanne unterstuetzter Formatversionen.
+/// A contiguous range of supported format versions.
 ///
-/// Zusammenhaengend und nicht als Menge, weil die Akzeptanzmenge dieses
-/// Projekts immer zusammenhaengend war (siehe `acceptKemVersions`) und eine
-/// Menge auf dem Draht teurer waere als der Gegenwert.
+/// Contiguous and not as a set, because the acceptance set of this
+/// project has always been contiguous (see `acceptKemVersions`) and a
+/// set on the wire would be more expensive than its benefit.
 class MediaFormatRange {
   final int min;
   final int max;
@@ -88,63 +88,63 @@ class MediaFormatRange {
   String toString() => '[$min,$max]';
 }
 
-/// Politik und Konstanten der Medienformat-Versionierung.
+/// Policy and constants of media format versioning.
 class MediaFormatVersion {
   MediaFormatVersion._();
 
-  /// Das Basisformat: der Medienstapel, wie ihn 3.2.0 ausliefert.
+  /// The base format: the media stack as shipped by 3.2.0.
   ///
-  /// Zaehlt unabhaengig von der App-Version hoch, genau wie
-  /// `PerMessageKem.currentKemVersion`. Ein Patch-Release aendert das Format
-  /// nicht; ein Format-Wechsel kann in jeder kuenftigen Version liegen.
+  /// Counts up independently of the app version, just like
+  /// `PerMessageKem.currentKemVersion`. A patch release does not change the format;
+  /// a format change can lie in any future version.
   static const int kBaselineFormat = 1;
 
-  /// Was dieser Build an Audio spricht. Heute nur das Basisformat.
-  /// Steigt, sobald §10.4 Stufe 5 (Opus) das Frame-Format aendert.
+  /// What this build speaks in audio. Today only the base format.
+  /// Rises as soon as §10.4 step 5 (Opus) changes the frame format.
   static const MediaFormatRange audio =
       MediaFormatRange(kBaselineFormat, kBaselineFormat);
 
-  /// Was dieser Build an Video spricht. Heute nur das Basisformat.
-  /// Steigt, sobald §10.6 Stufe 4/5 (Plattform-Hardware-Codec) das
-  /// Frame-Format aendert.
+  /// What this build speaks in video. Today only the base format.
+  /// Rises as soon as §10.6 step 4/5 (platform hardware codec) changes the
+  /// frame format.
   static const MediaFormatRange video =
       MediaFormatRange(kBaselineFormat, kBaselineFormat);
 
-  /// Deutet einen vom Draht gelesenen Formatwert.
+  /// Interprets a format value read from the wire.
   ///
-  /// EIN FEHLENDES FELD IST EINE AUSSAGE, KEINE LUECKE. proto3 liefert 0.
-  /// Weglassen kann das Feld nur ein Build ab 3.2.0, der vor V1.18 entstanden
-  /// ist — und der spricht genau das Basisformat. 0 heisst hier deshalb
-  /// definiert [kBaselineFormat], nicht "unbekannt, also wohl in Ordnung".
+  /// A MISSING FIELD IS A STATEMENT, NOT A GAP. proto3 delivers 0.
+  /// Only a build from 3.2.0 on that was created before V1.18 can omit the field
+  /// — and that one speaks exactly the base format. 0 here therefore
+  /// by definition means [kBaselineFormat], not "unknown, so probably fine".
   ///
-  /// Das ist bewusst die andere Folgerung als bei `caller_app_major_minor`,
-  /// wo 0 zur Ablehnung fuehrt: dort stammt die 0 von einem 3.1.x-Client, der
-  /// ueberhaupt keinen Call halten kann, hier von einem 3.2.0-Client, der es
-  /// kann. Gleiche Regel, verschiedene Sachlage.
+  /// That is deliberately the opposite conclusion from `caller_app_major_minor`,
+  /// where 0 leads to rejection: there the 0 comes from a 3.1.x client that
+  /// cannot hold a call at all, here from a 3.2.0 client that
+  /// can. Same rule, different facts.
   static int normalize(int wireValue) =>
       wireValue == 0 ? kBaselineFormat : wireValue;
 
-  /// Liest eine Spanne vom Draht. Beide Felder werden einzeln normalisiert.
+  /// Reads a range from the wire. Both fields are normalised individually.
   ///
-  /// Eine vom Peer verdrehte Spanne (min > max) wird nicht stillschweigend
-  /// geradegebogen — sie bleibt verdreht und fuehrt in [negotiate] zur
-  /// Ablehnung. Ein Peer, der Unsinn sendet, bekommt keinen Call, keine
-  /// Reparatur.
+  /// A range twisted by the peer (min > max) is not silently
+  /// straightened out — it stays twisted and leads to rejection in [negotiate].
+  /// A peer that sends nonsense gets no call, no
+  /// repair.
   static MediaFormatRange rangeFromWire(int wireMin, int wireMax) =>
       MediaFormatRange(normalize(wireMin), normalize(wireMax));
 
-  /// Angerufenen-Seite: waehlt das hoechste Format, das BEIDE sprechen.
+  /// Callee side: chooses the highest format that BOTH speak.
   ///
-  /// Das hoechste gemeinsame und nicht das eigene hoechste — genau hier
-  /// entsteht die kuenftige Abwaertskompatibilitaet. Spricht der Peer mehr
-  /// als wir, schalten wir herunter, statt ihn abzuweisen.
+  /// The highest common one and not the own highest — exactly here
+  /// future backward compatibility arises. If the peer speaks more
+  /// than we do, we downshift instead of rejecting it.
   ///
-  /// Beide Richtungen sind abgedeckt:
-  ///  * Peer-Maximum HOEHER als das eigene -> das eigene Maximum wird gewaehlt
-  ///    (Herunterschalten). Der eigentliche Zweck dieses Moduls.
-  ///  * Peer-Maximum NIEDRIGER als das eigene -> das Peer-Maximum wird
-  ///    gewaehlt, sofern es nicht unter das eigene Minimum faellt. Faellt es
-  ///    darunter, haben wir dieses Format fallen gelassen -> Ablehnung.
+  /// Both directions are covered:
+  ///  * peer maximum HIGHER than the own -> the own maximum is chosen
+  ///    (downshifting). The actual purpose of this module.
+  ///  * peer maximum LOWER than the own -> the peer maximum is
+  ///    chosen, provided it does not fall below the own minimum. If it falls
+  ///    below, we have dropped this format -> rejection.
   static MediaFormatDecision negotiate({
     required MediaFormatRange peer,
     required MediaFormatRange own,
@@ -154,7 +154,7 @@ class MediaFormatVersion {
       return MediaFormatDecision._(
         MediaFormatOutcome.incompatible,
         0,
-        '$kind: Peer-Spanne ist verdreht ($peer) — kein gueltiges Angebot',
+        '$kind: peer range is inverted ($peer) — not a valid offer',
       );
     }
     final lo = peer.min > own.min ? peer.min : own.min;
@@ -163,22 +163,22 @@ class MediaFormatVersion {
       return MediaFormatDecision._(
         MediaFormatOutcome.incompatible,
         0,
-        '$kind: keine Ueberschneidung — Peer $peer, eigen $own',
+        '$kind: no overlap — peer $peer, own $own',
       );
     }
     return MediaFormatDecision._(
       MediaFormatOutcome.agreed,
       hi,
-      '$kind: $hi gewaehlt aus Peer $peer und eigen $own',
+      '$kind: $hi chosen from peer $peer and own $own',
     );
   }
 
-  /// Anrufer-Seite: prueft die Wahl des Angerufenen aus `CallAnswer`.
+  /// Caller side: checks the callee's choice from `CallAnswer`.
   ///
-  /// Geprueft wird gegen die eigene Spanne UND gegen das tatsaechlich
-  /// angebotene [offered]. Ein defekter oder boeswilliger Peer kann so kein
-  /// Format erzwingen, das wir nie angeboten haben — auch dann nicht, wenn
-  /// wir es grundsaetzlich sprechen koennten.
+  /// It is checked against the own range AND against what was actually
+  /// offered, [offered]. A defective or malicious peer can thus not force a
+  /// format that we never offered — not even if
+  /// we could speak it in principle.
   static MediaFormatDecision verifySelection({
     required int wireSelected,
     required MediaFormatRange own,
@@ -190,22 +190,22 @@ class MediaFormatVersion {
       return MediaFormatDecision._(
         MediaFormatOutcome.incompatible,
         0,
-        '$kind: Peer waehlte $selected, das dieser Build nicht spricht '
-        '(eigen $own)',
+        '$kind: peer chose $selected, which this build does not speak '
+        '(own $own)',
       );
     }
     if (!offered.contains(selected)) {
       return MediaFormatDecision._(
         MediaFormatOutcome.incompatible,
         0,
-        '$kind: Peer waehlte $selected, das nicht angeboten war '
-        '(angeboten $offered)',
+        '$kind: peer chose $selected, which was not offered '
+        '(offered $offered)',
       );
     }
     return MediaFormatDecision._(
       MediaFormatOutcome.agreed,
       selected,
-      '$kind: Wahl $selected bestaetigt',
+      '$kind: choice $selected confirmed',
     );
   }
 }

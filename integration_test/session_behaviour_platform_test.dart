@@ -1,65 +1,72 @@
 // integration_test/session_behaviour_platform_test.dart
 //
 // Device test: SessionBehaviourChannel (V1.10, docs/SPEC_VOICE_VIDEO_REWORK.md
-// §7 "V1.10", Architektur §10.4 "Session behaviour" table).
+// §7 "V1.10", architecture §10.4 "Session behaviour" table).
 //
-// Testet ausschliesslich die native Bruecke (MainActivity.kt /
-// SessionBehaviourHandler.swift), NICHT die volle CleonaApp — CallService
-// (V2.1) und CallScreen (V1.6) laufen parallel und sind noch nicht mit
-// VoiceSession verdrahtet, es gibt also noch keinen echten Call, in den man
-// haengen koennte. Dieser Test bootet nur den minimalen MaterialApp/Binding,
-// den ein MethodChannel-Aufruf braucht, und ruft SessionBehaviourChannel
-// direkt auf. Die eigentliche Behauptung — hat requestAudioFocus() wirklich
-// AudioFocus beim System angemeldet, haelt setProximityMonitoring(true)
-// wirklich den PROXIMITY_SCREEN_OFF_WAKE_LOCK — wird NICHT hier im Dart-Code
-// geprueft (das kann von hier aus nicht beobachtet werden), sondern separat
-// per `adb shell dumpsys audio` / `adb shell dumpsys power` waehrend dieser
-// Test laeuft (siehe Sitzungsbericht V1.10 fuer den exakten dumpsys-Output).
+// Tests exclusively the native bridge (MainActivity.kt /
+// SessionBehaviourHandler.swift), NOT the full CleonaApp — CallService
+// (V2.1) and CallScreen (V1.6) run in parallel and are not yet wired to
+// VoiceSession, so there is no real call yet that one could
+// hook into. This test only boots the minimal MaterialApp/binding
+// that a MethodChannel call needs, and calls SessionBehaviourChannel
+// directly. The actual claim — did requestAudioFocus() really
+// register AudioFocus with the system, does setProximityMonitoring(true)
+// really hold the PROXIMITY_SCREEN_OFF_WAKE_LOCK — is NOT checked here in the Dart code
+// (that cannot be observed from here), but separately
+// via `adb shell dumpsys audio` / `adb shell dumpsys power` while this
+// test runs (see session report V1.10 for the exact dumpsys output).
 //
-// Lauf (Handy, ADB lokal):
+// Run (phone, ADB local):
 //   flutter test integration_test/session_behaviour_platform_test.dart \
 //       -d 3A140DLJG003ZG
 //
-// BEKANNTE INFRA-LUECKE (2026-07-30, V1.10-Sitzung, beobachtet, nicht
-// hergeleitet): auf dem echten Geraet (3A140DLJG003ZG) baut und installiert
-// dieser Lauf die Beta-Debug-APK erfolgreich, die App startet, der Dart-VM-
-// Service kommt hoch ("The Dart VM service is listening on ..." in
-// logcat) — dann bleibt der Host-Prozess `flutter test` laenger als 5
-// Minuten haengen, ohne dass am Geraet danach irgendeine weitere Zeile in
-// logcat auftaucht (weder ein Cleona-Log noch ein Testergebnis). Root
-// Cause, durch grep bestaetigt statt vermutet:
+// KNOWN INFRA GAP (2026-07-30, V1.10 session, observed, not
+// derived): on the real device (3A140DLJG003ZG) this run builds and installs
+// the beta debug APK successfully, the app starts, the Dart VM
+// service comes up ("The Dart VM service is listening on ..." in
+// logcat) — then the host process `flutter test` hangs for more than 5
+// minutes, without any further line appearing in logcat on the device afterwards
+// (neither a Cleona log nor a test result). Root
+// cause, confirmed by grep instead of assumed:
 //   grep -n "testInstrumentationRunner" android/app/build.gradle.kts
-// liefert NICHTS. Flutters `integration_test`-Paket verlangt fuer den
-// Geraete-Treib-Pfad (`flutter test ... -d <android-device>`)
+// returns NOTHING. Flutter's `integration_test` package requires for the
+// device driving path (`flutter test ... -d <android-device>`)
 // `testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"` in
-// `defaultConfig` plus die zugehoerige androidTest-Abhaengigkeit — beides
-// fehlt in diesem Projekt komplett (`find android/app/src/androidTest` ist
-// leer). Ohne das kann der Host-Treiber nicht mit der laufenden App
-// sprechen; die App selbst laeuft nachweislich fehlerfrei (siehe Bericht
-// V1.10 fuer das vollstaendige logcat).
+// `defaultConfig` plus the corresponding androidTest dependency — both
+// are completely missing in this project (`find android/app/src/androidTest` is
+// empty). Without that, the host driver cannot talk to the running app;
+// the app itself demonstrably runs without errors (see report
+// V1.10 for the complete logcat).
 //
-// Das ist eine Projekt-Infrastruktur-Luecke, keine dieses Pakets: sie liegt
-// in `android/app/build.gradle.kts` (Build-Eigentuemer, SPEC §9) und in
-// einem neuen `android/app/src/androidTest/**`-Verzeichnis, beides ausserhalb
-// der V1.10-Eigentumsliste. Diese Datei bleibt als dokumentierter,
-// funktionsfaehiger Testfall stehen — sie wird nirgends automatisiert
-// aufgerufen (kein Treffer in scripts/run-e2e.sh, scripts/preflight.sh),
-// haengt also kein CI/Gate auf. Sobald die Instrumentation nachgeruestet
-// ist, sollte sie ohne Aenderung laufen.
+// This is a project infrastructure gap, not one of this package: it lies
+// in `android/app/build.gradle.kts` (build owner, SPEC §9) and in
+// a new `android/app/src/androidTest/**` directory, both outside
+// the V1.10 ownership list. This file stays as a documented,
+// functional test case — it is not invoked automatically anywhere
+// (no hit in scripts/run-e2e.sh, scripts/preflight.sh),
+// so it blocks no CI/gate. As soon as the instrumentation has been retrofitted,
+// it should run without changes.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
-import 'package:cleona/core/calls/session_behaviour.dart';
+// S367: `SessionBehaviourChannel` moved to `session_behaviour_channel.dart`
+// when the §10.4 mechanisms were connected —
+// `CallService` lives on the daemon path and must not pull in `package:flutter`,
+// so the Flutter-free core had to be separated from the channel part.
+// This device test calls the channel directly and
+// therefore only needs that — the Flutter-free core no longer
+// appears here.
+import 'package:cleona/core/calls/session_behaviour_channel.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('SessionBehaviourChannel: AudioFocus + Proximity Roundtrip',
       (tester) async {
-    // Minimaler Baum, nur damit ein Flutter-Engine-Kontext existiert — kein
-    // Abhaengigkeit auf CleonaApp/CleonaService.
+    // Minimal tree, only so that a Flutter engine context exists — no
+    // dependency on CleonaApp/CleonaService.
     await tester.pumpWidget(const MaterialApp(home: SizedBox()));
     await tester.pumpAndSettle();
 
@@ -68,10 +75,10 @@ void main() {
     debugPrint('V1.10-DEVICE-TEST requestAudioFocus() granted=$granted');
     expect(granted, isTrue,
         reason: 'AudioFocusRequest(AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE) '
-            'wurde vom System abgelehnt');
+            'was rejected by the system');
 
-    // Zeitfenster, in dem `adb shell dumpsys audio` von aussen den
-    // Fokus-Stack beobachten kann.
+    // Time window in which `adb shell dumpsys audio` can observe the
+    // focus stack from outside.
     debugPrint('V1.10-DEVICE-TEST holding audio focus for 5s window');
     await Future<void>.delayed(const Duration(seconds: 5));
 

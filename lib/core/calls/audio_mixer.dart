@@ -5,7 +5,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
 import 'package:cleona/core/calls/voice_codec.dart';
 import 'package:cleona/core/calls/voice_session.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 
 /// Mixes audio from multiple group call participants for playback.
 ///
@@ -42,12 +42,10 @@ class AudioMixer {
   void Function(bool speaker)? onSpeakerToggle;
 
   AudioMixer({
-    required Uint8List ownSendKey,
+    required this._ownSendKey,
     required String profileDir,
-    int ownSendKeyVersion = 1,
-  })  : _ownSendKey = ownSendKey,
-        _ownSendKeyVersion = ownSendKeyVersion,
-        _log = CLogger.get('group-audio', profileDir: profileDir);
+    this._ownSendKeyVersion = 1,
+  }) : _log = CLogger.get('group-audio', profileDir: profileDir);
 
   void setPeerSendKey(String senderUserHex, Uint8List key) {
     _peerSendKeys[senderUserHex] = key;

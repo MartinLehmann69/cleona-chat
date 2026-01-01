@@ -1,10 +1,12 @@
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show PeerAddress, bytesToHex, hexToBytes;
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart' show EndpointAddress;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/ip_address_class.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart' show EndpointAddress;
 import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
@@ -19,10 +21,9 @@ class PhysicalTransferHelper {
   final CLogger _log;
 
   PhysicalTransferHelper({
-    required BinaryFragmentStore store,
+    required this._store,
     String? profileDir,
-  })  : _store = store,
-        _log = CLogger.get('phys-transfer', profileDir: profileDir);
+  })  : _log = CLogger.get('phys-transfer', profileDir: profileDir);
 
   /// Export the current binary for a given platform to a file at [outputPath].
   /// Returns the SHA-256 hash of the exported file, or null on failure.
@@ -112,14 +113,42 @@ class PhysicalTransferHelper {
         _log.warn('importAndVerifyBinary: file not found: $filePath');
         return false;
       }
-      final data = await file.readAsBytes();
-      final actualHash = bytesToHex(SodiumFFI().sha256(data));
+      return await importAndVerifyBytes(
+        data: await file.readAsBytes(),
+        platform: platform,
+        version: version,
+        expectedHash: expectedHash,
+        maintainerSignature: maintainerSignature,
+      );
+    } catch (e) {
+      _log.error('importAndVerifyBinary $filePath failed: $e');
+      return false;
+    }
+  }
+
+  /// The same check for bytes that already lie in memory — the
+  /// fetch path of the delivery layer (S388, `_startInNetworkUpdate` source 0).
+  /// SHA-256 against [expectedHash] AND Ed25519 signature of the maintainer
+  /// over this hash; only then `complete.bin`. `false` = nothing stored.
+  ///
+  /// The hash runs in an isolate as in `BinaryUpdateManager.verify`:
+  /// a binary of 100-190 MB would otherwise block the UI (Android
+  /// carries the GUI in the same process).
+  Future<bool> importAndVerifyBytes({
+    required Uint8List data,
+    required String platform,
+    required String version,
+    required String expectedHash,
+    required Uint8List maintainerSignature,
+  }) async {
+    try {
+      final hash = await Isolate.run(() => SodiumFFI().sha256(data));
+      final actualHash = bytesToHex(hash);
       if (actualHash.toLowerCase() != expectedHash.toLowerCase()) {
         _log.warn('importAndVerifyBinary: hash mismatch for $platform/$version '
             '(expected $expectedHash, got $actualHash)');
         return false;
       }
-      final hash = SodiumFFI().sha256(data);
       final maintainerPubKey = hexToBytes(UpdateChecker.maintainerPublicKeyHex);
       final sigOk = SodiumFFI().verifyEd25519(hash, maintainerSignature, maintainerPubKey);
       if (!sigOk) {
@@ -132,7 +161,7 @@ class PhysicalTransferHelper {
           '(${data.length} bytes)');
       return true;
     } catch (e) {
-      _log.error('importAndVerifyBinary $filePath failed: $e');
+      _log.error('importAndVerifyBytes $platform/$version failed: $e');
       return false;
     }
   }
@@ -169,29 +198,14 @@ class PhysicalTransferHelper {
     required String platform,
   }) {
     for (final addr in localAddresses) {
-      if (!PeerAddress.isPrivateIp(addr.ip)) continue;
+      if (!IpAddressClass.isPrivate(addr.ip)) continue;
       final host = addr.ip.contains(':') ? '[${addr.ip}]' : addr.ip;
       return 'http://$host:$port/cleona/binary/$platform';
     }
     return null;
   }
 
-  /// Generate a human-readable verification string for verbal/visual
-  /// comparison after physical transfer.
-  ///
-  /// Format: first 8 hex chars of SHA-256 hash, grouped in pairs,
-  /// separated by spaces (e.g., "A3 F7 2B 91").
-  /// Short enough to read aloud or compare on screen.
-  static String shortVerificationCode(String sha256Hex) {
-    final hex = sha256Hex.toUpperCase();
-    final prefix = hex.length >= 8 ? hex.substring(0, 8) : hex;
-    final groups = <String>[];
-    for (var i = 0; i < prefix.length; i += 2) {
-      final end = (i + 2 <= prefix.length) ? i + 2 : prefix.length;
-      groups.add(prefix.substring(i, end));
-    }
-    return groups.join(' ');
-  }
+  // DROPPED ON 09.09.2026 (S378): no caller in lib/ or test/.
 
   /// Compute the SHA-256 hash of a file (streaming, handles large files).
   Future<String?> hashFile(String filePath) async {

@@ -74,6 +74,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'package:cleona/core/platform/app_paths.dart';
+
 // ── ABI constants — keep in lockstep with cleona_video.h ─────────────
 
 /// Codec ids. H.264 Constrained Baseline is the mandatory interop level; the
@@ -681,30 +683,39 @@ class VideoNativeLibrary {
     final fromEnv = Platform.environment['CLEONA_VIDEO_LIB'];
     if (fromEnv != null && fromEnv.isNotEmpty) return <String>[fromEnv];
 
-    final sep = Platform.isWindows ? '\\' : '/';
-    final exe = Platform.resolvedExecutable;
-    final lastSep = exe.lastIndexOf(sep);
-    final exeDir = lastSep > 0 ? exe.substring(0, lastSep) : '.';
+    // `AppPaths.bundleDir` instead of the own directory (S367): the
+    // daemon lies in `<bundleDir>/bin/`, because `dart build cli` embeds
+    // the path of its storage library as `../lib/…` relative to the
+    // binary. For the GUI, `bundleDir` delivers its own directory
+    // unchanged.
+    final bundleDir = AppPaths.bundleDir;
 
     if (Platform.isMacOS) {
       return <String>[
         'libcleona_video.dylib',
-        '$exeDir/libcleona_video.dylib',
-        '$exeDir/../Frameworks/libcleona_video.dylib',
+        '$bundleDir/libcleona_video.dylib',
+        '${AppPaths.macFrameworksDir}/libcleona_video.dylib',
       ];
     }
     if (Platform.isWindows) {
       return <String>[
         'cleona_video.dll',
-        '$exeDir\\cleona_video.dll',
-        '$exeDir\\native\\cleona_video.dll',
+        '$bundleDir\\cleona_video.dll',
+        '$bundleDir\\native\\cleona_video.dll',
       ];
     }
     // Linux + Android.
     return <String>[
       'libcleona_video.so',
-      '$exeDir/libcleona_video.so',
-      '$exeDir/lib/libcleona_video.so',
+      '$bundleDir/libcleona_video.so',
+      '$bundleDir/lib/libcleona_video.so',
+      // Locally built backend — the same place the voice loader already
+      // knows (`voice_session.dart`). Without it a built mock was in
+      // principle unfindable for the test, while the same step worked
+      // for the sister subsystem. Shipped builds keep loading via
+      // `$exeDir`.
+      '${Directory.current.path}/native/cleona_video/build/libcleona_video.so',
+      '${Directory.current.path}/native/cleona_video/build/libcleona_video_mock.so',
     ];
   }
 }

@@ -9,7 +9,6 @@
 library;
 
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -17,7 +16,10 @@ import 'dart:typed_data';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_types.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/media/media_store.dart';
+import 'package:cleona/core/media/media_vault.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/storage/message_store.dart';
 
 /// Callback when a transcription is completed.
 typedef TranscriptionCompleteCallback = void Function(
@@ -35,7 +37,7 @@ typedef AudioDecoderCallback = Future<Uint8List?> Function(
 
 /// Service for on-device speech recognition via whisper.cpp.
 class VoiceTranscriptionService {
-  static final _log = CLogger.get('voice-transcription');
+  final CLogger _log;
 
   final VoiceTranscriptionConfig config;
   final String profileDir;
@@ -79,10 +81,43 @@ class VoiceTranscriptionService {
   /// Whether the whisper library is available (independent of model).
   bool get isWhisperAvailable => _whisper != null;
 
+  // `final FileEncryption fileEnc` stood here — the S362 path that placed the
+  // wording of spoken messages encrypted in
+  // `voice_transcriptions.json.enc`. This file no longer
+  // exists (S366); the wording lies in the area `voice_transcriptions`
+  // of the store and thus under its key. A field that only
+  // carries a rationale for a removed write path does not
+  // stay — otherwise the next reader reads it as "a
+  // file is written here".
+
+  /// Encrypted store (S366). As with [PollManager] optional: the
+  /// UI process builds the same service as a proxy without
+  /// its own store, and then NOTHING is written and NOTHING read.
+  final MessageStore? _store;
+
+  /// Area for transcripts. One entry per message, the key is
+  /// the `messageId`, value `{'t': <transkript>, 'l': <lebenslauf-index>}`.
+  ///
+  /// WHY ONE ENTRY PER MESSAGE and not the whole stock in one
+  /// row: the file header says "transcript retention: permanent (never
+  /// delete)" — the collection explicitly grows without a cap. Whoever writes it
+  /// as a whole brings back exactly the full rewrite
+  /// that the state table is built against.
+  static const String kArea = 'voice_transcriptions';
+
+  /// Whether [_loadTranscriptions] ran through. Carries the
+  /// data-loss latch: as long as nothing was loaded, nothing is
+  /// written that could overwrite an existing stock.
+  bool _loaded = false;
+
+  // Was `static final` -> one logger for all identities, constructed
+  // before any profileDir was known. Now an instance field: profileDir
+  // is a constructor parameter (per identity) -> directly usable.
   VoiceTranscriptionService({
     required this.config,
     required this.profileDir,
-  });
+    this._store,
+  })  : _log = CLogger.get('voice-transcription', profileDir: profileDir);
 
   /// Effective default language (override > config).
   String get defaultLanguage => _languageOverride ?? config.defaultLanguage;
@@ -143,7 +178,12 @@ class VoiceTranscriptionService {
     _whisper?.dispose();
     _whisper = null;
     _modelLoaded = false;
-    await _saveTranscriptions();
+    // S366: here stood `await _saveTranscriptions()` — the full writer
+    // of the whole collection. Every change is already stored individually
+    // (`_persistMessage`), there is nothing to catch up on. The call was
+    // moreover the most dangerous in the service: after a
+    // failed load it laid the empty stock over the
+    // full one.
   }
 
   /// Whether the Whisper model file is available for transcription
@@ -233,6 +273,10 @@ class VoiceTranscriptionService {
         final result = await _transcribeFile(job);
         if (result != null) {
           _transcriptions[job.messageId] = result;
+          // S366: first store, then set the lifecycle — both
+          // write the same row, and in this order the wording
+          // is already in it after the first write.
+          _persistMessage(job.messageId);
           _setLifecycle(job.messageId, VoiceLifecycle.complete);
           onTranscriptionComplete?.call(job.messageId, result);
         } else {
@@ -244,17 +288,18 @@ class VoiceTranscriptionService {
     }
 
     _processing = false;
-    await _saveTranscriptions();
+    // S366: no full writer at the end of the loop anymore — every message
+    // was stored individually above.
   }
 
   /// Transcribe audio file in a separate Isolate to avoid blocking the
   /// main event loop (FFI whisper_full() is synchronous and can take seconds).
   Future<VoiceTranscription?> _transcribeFile(_TranscriptionJob job) async {
-    final file = File(job.audioFilePath);
-    if (!file.existsSync()) return null;
+    // S362: the voice message lies encrypted in the store.
+    if (!MediaStore.instance.existsEitherWay(job.audioFilePath)) return null;
 
-    final audioBytes = await file.readAsBytes();
-    if (audioBytes.isEmpty) return null;
+    final audioBytes = MediaStore.instance.readAll(job.audioFilePath);
+    if (audioBytes == null || audioBytes.isEmpty) return null;
 
     Float32List samples;
     if (job.audioFilePath.endsWith('.wav')) {
@@ -329,9 +374,16 @@ class VoiceTranscriptionService {
   }
 
   /// Linux: convert via ffmpeg CLI.
+  ///
+  /// **S362: `ffmpeg` gets an `http://127.0.0.1` source, not a path.**
+  /// The attachment lies framed and encrypted on disk; `ffmpeg` never
+  /// learns to read a `.cmenc`, but takes any HTTP source. If the
+  /// reader is not running (or the attachment still lies as not yet transferred
+  /// plaintext), the path stays — then it is also readable.
   Future<Uint8List?> _convertToWavFfmpeg(String inputPath, String outputPath) async {
+    final source = MediaVault.instance.urlFor(inputPath) ?? inputPath;
     final result = await Process.run('ffmpeg', [
-      '-y', '-i', inputPath,
+      '-y', '-i', source,
       '-ar', '16000', '-ac', '1', '-f', 'wav',
       '-acodec', 'pcm_s16le', outputPath,
     ]);
@@ -344,9 +396,15 @@ class VoiceTranscriptionService {
   }
 
   /// Android: decode via platform-specific audio decoder callback.
+  ///
+  /// **S362:** as in the ffmpeg branch, an `http://127.0.0.1` source goes
+  /// in. On the other side is `MediaExtractor.setDataSource(String)`
+  /// (`MainActivity.kt:928`), and according to the Android contract it takes "a file
+  /// path or an http URL" — the Kotlin side stays unchanged.
   Future<Uint8List?> _convertToWavPlatform(String inputPath, String outputPath) async {
     if (platformAudioDecoder == null) return null;
-    return await platformAudioDecoder!(inputPath, outputPath);
+    final source = MediaVault.instance.urlFor(inputPath) ?? inputPath;
+    return await platformAudioDecoder!(source, outputPath);
   }
 
   /// Parse WAV header and extract PCM samples as Float32.
@@ -492,7 +550,10 @@ class VoiceTranscriptionService {
       }
     }
 
-    if (cleaned > 0) await _saveTranscriptions();
+    // S366: `_setLifecycle` stores every changed message itself.
+    // The collective writer that used to be here rewrote, for ONE
+    // expired audio track piece, the whole — permanently growing —
+    // stock.
     return cleaned;
   }
 
@@ -504,45 +565,88 @@ class VoiceTranscriptionService {
       return; // Invalid transition
     }
     _lifecycles[messageId] = newState;
+    _persistMessage(messageId);
     onLifecycleChanged?.call(messageId, newState);
   }
 
   // -- Persistence ---------------------------------------------------------
 
-  String get _transcriptionFilePath => '$profileDir/voice_transcriptions.json';
-
+  /// S366: from the store (area `voice_transcriptions`) instead of from
+  /// `voice_transcriptions.json`. S362 had at least encrypted the wording;
+  /// but the WHOLE collection kept being written,
+  /// and according to the file header it grows permanently ("never delete").
   Future<void> _loadTranscriptions() async {
-    final file = File(_transcriptionFilePath);
-    if (!file.existsSync()) return;
-
+    final s = _store;
+    if (s == null) {
+      // Proxy mode: nothing to load, nothing to write.
+      _loaded = true;
+      return;
+    }
     try {
-      final jsonStr = await file.readAsString();
-      final data = jsonDecode(jsonStr) as Map<String, dynamic>;
-
-      final items = data['transcriptions'] as Map<String, dynamic>? ?? {};
-      for (final e in items.entries) {
-        _transcriptions[e.key] =
-            VoiceTranscription.fromJson(e.value as Map<String, dynamic>);
+      for (final e in s.loadArea(kArea).entries) {
+        final t = e.value['t'];
+        if (t is Map<String, dynamic>) {
+          try {
+            _transcriptions[e.key] = VoiceTranscription.fromJson(t);
+          } catch (_) {/* damaged entry — only this one is lost */}
+        }
+        final l = e.value['l'];
+        if (l is int && l >= 0 && l < VoiceLifecycle.values.length) {
+          _lifecycles[e.key] = VoiceLifecycle.values[l];
+        }
       }
-
-      final lifecycles = data['lifecycles'] as Map<String, dynamic>? ?? {};
-      for (final e in lifecycles.entries) {
-        _lifecycles[e.key] = VoiceLifecycle.values[e.value as int];
-      }
-    } catch (_) {
-      // Corrupt file — start fresh.
+      _loaded = true;
+      _log.info('Loaded ${_transcriptions.length} transcriptions, '
+          '${_lifecycles.length} lifecycles');
+    } catch (e) {
+      // NOT `_loaded = true`. Whoever falls through here has NOT seen a
+      // possibly full stock — and therefore must not
+      // touch it either (latch below).
+      _log.warn('Failed to load transcriptions: $e');
     }
   }
 
-  Future<void> _saveTranscriptions() async {
-    final data = {
-      'transcriptions':
-          _transcriptions.map((k, v) => MapEntry(k, v.toJson())),
-      'lifecycles':
-          _lifecycles.map((k, v) => MapEntry(k, v.index)),
-    };
-    final file = File(_transcriptionFilePath);
-    await file.writeAsString(jsonEncode(data));
+  /// Writes EXACTLY ONE message. That is the only write path.
+  ///
+  /// THE DATA-LOSS LATCH. Until S366 a failed load
+  /// (`catch` -> "start fresh") ended with the full writer laying the empty stock
+  /// over the full one on shutdown. The latch
+  /// now asks the STORE and not the file — never
+  /// written again after the switchover: as long as nothing was loaded and the
+  /// store holds something, nothing is written. If the store is not
+  /// readable, it fails CLOSED.
+  void _persistMessage(String messageId) {
+    final s = _store;
+    if (s == null) return;
+    if (!_loaded) {
+      int present;
+      try {
+        present = s.countArea(kArea);
+      } catch (e) {
+        _log.warn('REFUSED to persist transcription — store unreadable: $e');
+        return;
+      }
+      if (present > 0) {
+        _log.warn('REFUSED to persist transcription $messageId — load '
+            'failed but the store still holds $present entries. '
+            'Data loss risk!');
+        return;
+      }
+    }
+    final transcription = _transcriptions[messageId];
+    final lifecycle = _lifecycles[messageId];
+    try {
+      if (transcription == null && lifecycle == null) {
+        s.removeEntry(kArea, messageId);
+        return;
+      }
+      s.putEntry(kArea, messageId, {
+        if (transcription != null) 't': transcription.toJson(),
+        if (lifecycle != null) 'l': lifecycle.index,
+      });
+    } catch (e) {
+      _log.warn('Failed to persist transcription $messageId: $e');
+    }
   }
 }
 

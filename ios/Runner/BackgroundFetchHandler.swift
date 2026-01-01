@@ -88,11 +88,11 @@ class BackgroundFetchHandler {
         }
     }
 
-    func cancelPendingTasks() {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundFetchHandler.refreshIdentifier)
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundFetchHandler.processingIdentifier)
-        NSLog("[BackgroundFetch] Cancelled all pending tasks")
-    }
+    // `cancelPendingTasks()` was removed with S370 -- its only
+    // way of being reached was `AppDelegate case "cancelBackgroundFetch"`, and
+    // its Dart counterpart had zero callers. Caller and
+    // callee fell together; the rationale is in
+    // `lib/core/platform/ios_background_fetch.dart`.
 
     // MARK: - Task Execution
 
@@ -100,6 +100,38 @@ class BackgroundFetchHandler {
     /// Both execute the same 9-step wakeup chain from S12.5, but the
     /// processing task passes taskType="processing" to Dart so it can
     /// extend the peer-contact budget from 3 to 10.
+    // -- ONE COMPLETION PER TASK (F-8, S370) -----------------------------
+    //
+    // FINDING: `setTaskCompleted` could run TWICE on the same `BGTask`.
+    // The `expirationHandler` below completed with `false`, but did NOT
+    // abort the running Dart call; the Dart body waits a fixed
+    // 20 s (refresh) or 120 s (processing)
+    // (`lib/core/platform/ios_background_fetch.dart`, `Future.delayed`) and
+    // then completed a second time.
+    //
+    // CAN THIS HAPPEN IN OPERATION? From code reading yes, and for the
+    // refresh run even regularly: the window of a `BGAppRefreshTask`
+    // is ~30 s, the Dart body uses 20 s of it just
+    // waiting, plus loading identities, starting the node (up to three
+    // bind attempts with 2 s pause each), starting one service per identity
+    // and saving at the end. For the `processing` run it hits the case that
+    // the operating system aborts early (battery, temperature, user switches
+    // app).
+    //
+    // The second effect was just as silent: the `defer` block called
+    // `scheduleBothTasks()` a second time, so there were duplicate
+    // requests in the queue.
+    //
+    // NOT MEASURED: what exactly iOS does on the second completion (Apple
+    // describes exactly one call; depending on the version a log entry
+    // or an assertion violation). Because the outcome is not known,
+    // it is not risked -- exactly one completes.
+    //
+    // NOT FIXED, and explicitly open: the Dart body keeps running after
+    // expiry and holds the UDP port for up to 120 s. Aborting it
+    // needs a path Swift -> Dart in the middle of the run; this
+    // branch does not have it. The guard, however, is the only completion
+    // here: nothing is reported twice and nothing is scheduled twice.
     private func handleBackgroundFetch(task: BGTask, taskType: String) {
         NSLog("[BackgroundFetch] Task started (type: \(taskType))")
 
@@ -111,38 +143,53 @@ class BackgroundFetchHandler {
         }
         isFetching = true
 
-        task.expirationHandler = { [weak self] in
-            NSLog("[BackgroundFetch] Task expired by OS (type: \(taskType))")
+        // One-shot completion. The expiration handler runs on an arbitrary
+        // queue, the Dart answer on the main queue --
+        // hence a lock and not a mere Bool.
+        let completionLock = NSLock()
+        var alreadyCompleted = false
+        let complete: (Bool, String) -> Void = { [weak self] success, reason in
+            completionLock.lock()
+            if alreadyCompleted {
+                completionLock.unlock()
+                NSLog("[BackgroundFetch] Zweite Quittung verworfen (\(taskType), \(reason))")
+                return
+            }
+            alreadyCompleted = true
+            completionLock.unlock()
+            NSLog("[BackgroundFetch] Quittung (\(taskType), \(reason)): success=\(success)")
+            task.setTaskCompleted(success: success)
             self?.isFetching = false
-            task.setTaskCompleted(success: false)
             self?.scheduleBothTasks()
+        }
+
+        task.expirationHandler = {
+            NSLog("[BackgroundFetch] Task expired by OS (type: \(taskType))")
+            complete(false, "vom Betriebssystem abgelaufen")
         }
 
         guard let channel = methodChannel else {
             NSLog("[BackgroundFetch] No MethodChannel available -- engine not running?")
-            isFetching = false
-            task.setTaskCompleted(success: false)
-            scheduleBothTasks()
+            complete(false, "kein MethodChannel")
             return
         }
 
         DispatchQueue.main.async {
             channel.invokeMethod("performBackgroundFetch", arguments: ["taskType": taskType]) { [weak self] result in
-                guard let self = self else { return }
-                defer {
-                    self.isFetching = false
-                    self.scheduleBothTasks()
+                guard let self = self else {
+                    complete(false, "AppDelegate weg")
+                    return
                 }
 
                 if let error = result as? FlutterError {
                     NSLog("[BackgroundFetch] Dart error: \(error.code) - \(error.message ?? "")")
-                    task.setTaskCompleted(success: false)
+                    complete(false, "Dart-Fehler")
                     return
                 }
 
                 guard let response = result as? [String: Any] else {
                     NSLog("[BackgroundFetch] Unexpected response type")
-                    task.setTaskCompleted(success: false)
+                    complete(false, "unerwarteter Antworttyp")
                     return
                 }
 
@@ -160,7 +207,7 @@ class BackgroundFetchHandler {
                     )
                 }
 
-                task.setTaskCompleted(success: true)
+                complete(true, "Dart fertig")
             }
         }
     }

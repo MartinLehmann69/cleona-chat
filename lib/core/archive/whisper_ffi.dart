@@ -12,7 +12,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'package:cleona/core/archive/voice_transcription_config.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
 // ── whisper.cpp Native Function Types ────────────────────────────────────
@@ -98,7 +98,9 @@ const int whisperSamplingBeamSearch = 1;
 /// whisper.dispose();
 /// ```
 class WhisperFFI {
-  static final _log = CLogger.get('whisper-ffi');
+  // Pure FFI binding without identity reference (parameterless constructor,
+  // see class docs) -> like the model path further below, AppPaths.dataDir.
+  static final _log = CLogger.get('whisper-ffi', profileDir: AppPaths.dataDir);
 
   DynamicLibrary? _lib;
   Pointer<Void>? _ctx;
@@ -157,10 +159,26 @@ class WhisperFFI {
     }
 
     final (libName, wrapperName, ggmlLibs) = _libNamesForPlatform();
-    final home = Platform.environment['HOME'];
+    // The bundle comes BEFORE the system paths (S367). Until now
+    // this list did not know the bundle root at all — it searched the
+    // bare name, `/usr/lib`, `$HOME/lib` and `build/`. On a
+    // shipped installation `libwhisper` lies in `<bundleDir>/lib`,
+    // and none of these paths pointed there. Computed via `AppPaths.bundleDir`
+    // it is right for GUI and daemon alike — the daemon
+    // lies in `<bundleDir>/bin/` since S367.
+    // AppPaths.home instead of Platform.environment['HOME'] (S370): on Windows
+    // `HOME` is set neither in the user nor in the machine environment
+    // (measured 06.09.2026 on the build VM), it only exists there
+    // inside an sshd session. The home search path was thus dropped on
+    // every regular start. Under Linux/macOS AppPaths.home is
+    // unchanged `$HOME`. See the same finding in
+    // `service_daemon.dart`'s `trayIconCandidatePaths`.
+    final home = AppPaths.home;
     final searchPaths = <String>[
       libName,
+      '${AppPaths.bundleLibDir}${Platform.pathSeparator}$libName',
       if (Platform.isMacOS) ...[
+        '${AppPaths.macFrameworksDir}/$libName',
         '@executable_path/../Frameworks/$libName',
         '/opt/homebrew/lib/$libName',
         '/usr/local/lib/$libName',
@@ -168,7 +186,7 @@ class WhisperFFI {
         '/usr/lib/$libName',
         '/usr/local/lib/$libName',
       ],
-      if (home != null) '$home/lib/$libName',
+      '$home/lib/$libName',
       'build/$libName',
     ];
 
@@ -213,7 +231,9 @@ class WhisperFFI {
     DynamicLibrary? wrapperLib;
     final wrapperSearchPaths = <String>[
       wrapperName,
+      '${AppPaths.bundleLibDir}${Platform.pathSeparator}$wrapperName',
       if (Platform.isMacOS) ...[
+        '${AppPaths.macFrameworksDir}/$wrapperName',
         '@executable_path/../Frameworks/$wrapperName',
         '/opt/homebrew/lib/$wrapperName',
         '/usr/local/lib/$wrapperName',
@@ -221,7 +241,7 @@ class WhisperFFI {
         '/usr/lib/$wrapperName',
         '/usr/local/lib/$wrapperName',
       ],
-      if (home != null) '$home/lib/$wrapperName',
+      '$home/lib/$wrapperName',
     ];
     for (final path in wrapperSearchPaths) {
       try {
@@ -296,7 +316,7 @@ class WhisperFFI {
   /// on Windows `.dll`.
   static (String, String, List<String>) _libNamesForPlatform() {
     if (Platform.isMacOS || Platform.isIOS) {
-      // iOS reuses .dylib-Naming auch bei Static-Link via Embedded Framework
+      // iOS reuses .dylib naming also for static link via embedded framework
       // (DynamicLibrary.process() / executable-path lookup).
       return (
         'libwhisper.dylib',
@@ -532,14 +552,7 @@ class WhisperFFI {
     return 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$modelName';
   }
 
-  /// Expected model file size in bytes (approximate).
-  static int modelSizeBytes(WhisperModelSize size) {
-    return switch (size) {
-      WhisperModelSize.tiny => 39000000,   // ~39 MB
-      WhisperModelSize.base => 77700000,   // ~78 MB
-      WhisperModelSize.small => 250000000, // ~250 MB
-    };
-  }
+  // REMOVED ON 09.09.2026 (S378): no caller in lib/ or test/.
 
   /// Whether the model is downloaded.
   static bool isModelDownloaded(WhisperModelSize size) {

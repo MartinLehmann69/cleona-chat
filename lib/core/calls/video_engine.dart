@@ -43,13 +43,13 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:cleona/core/calls/bandwidth_estimator.dart';
+import 'package:cleona/core/calls/live_media_frame_budget.dart';
 import 'package:cleona/core/calls/video_pipeline.dart';
 import 'package:cleona/core/calls/video_preset.dart';
 import 'package:cleona/core/calls/video_rate_control.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/udp_fragmenter.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 
 export 'package:cleona/core/calls/video_preset.dart';
 export 'package:cleona/core/calls/video_pipeline.dart'
@@ -68,11 +68,21 @@ export 'package:cleona/core/calls/video_rate_control.dart'
         videoOpenShutdownFor;
 
 class VideoEngine {
+  /// A-5: [profileDir] is the reason why this module ends up in a
+  /// log file at all. `CLogger` only writes to a file if it has been given
+  /// a `profileDir` (`clogger.dart::_write`) — without it a line reaches
+  /// console and crash ring, but **no** log file. The fallback
+  /// `CLogger('VideoEngine')` that used to stand here had none, which is
+  /// why every line of this module was invisible in the field and finding
+  /// A-6 (Android video path never wired) could only be found via the
+  /// source code. `VoiceReportLogger` already describes the same error
+  /// in the past tense ("the old VideoEngine") — it was never repaired.
   VideoEngine({
     required Uint8List sharedSecret,
+    String? profileDir,
     CLogger? log,
   })  : _sharedSecret = Uint8List.fromList(sharedSecret),
-        _log = log ?? CLogger('VideoEngine');
+        _log = log ?? CLogger.get('video', profileDir: profileDir);
 
   Uint8List _sharedSecret;
   final CLogger _log;
@@ -140,7 +150,7 @@ class VideoEngine {
       return false;
     }
 
-    final ceiling = UdpFragmenter.liveMediaMaxFrameBytes;
+    const ceiling = kLiveMediaMaxFrameBytes;
     final config = VideoConfig(
       width: VideoPreset.medium.width,
       height: VideoPreset.medium.height,

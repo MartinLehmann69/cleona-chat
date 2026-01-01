@@ -58,15 +58,54 @@ if errorlevel 1 (
 )
 echo [OK] flutter build >> %LOG%
 
-REM --- Dart compile daemon ---
-echo [STEP 4] Dart compile daemon...
-call %DART% compile exe lib\service_daemon.dart -o %RELEASE%\cleona-daemon.exe >> %LOG% 2>&1
+REM --- Dart build daemon ---
+REM ── S372 (07.09.2026): this step contradicted the layout ──────────────────
+REM Until today it stood as `dart compile exe ... -o %RELEASE%\cleona-daemon.exe`
+REM and so had TWO errors that `compile-daemon.bat` no longer has since S367:
+REM   1. `dart compile exe` runs NO build hooks. It silently produces an
+REM      exe WITHOUT sqlite3.dll; the daemon starts, fails when opening the
+REM      store (v4_1 §21.4.1) and ends with EXIT 0.
+REM   2. The target was the release ROOT. The exe looks for its DLL as
+REM      ..\lib\sqlite3.dll RELATIVE TO ITSELF and finds it only from
+REM      Release\bin\. Exactly this layout is what release-build.sh puts into
+REM      the ZIP, and exactly there the E2E suite starts the daemon
+REM      (windows-vm-helper.ts, BUILD_DIR\bin\cleona-daemon.exe).
+REM Both build routes therefore now put the daemon in the same place. The step
+REM is NOT abolished: the scheduled task `CleonaBuild` is listed in
+REM docs/WINDOWS_BUILD_SCRIPTS.md as "full build: GUI + daemon"; a script
+REM that leaves out the daemon would be a third contradiction instead of a
+REM resolution.
+echo [STEP 4] Dart build daemon (dart build cli)...
+call %DART% build cli --target bin/cleona_daemon.dart --output build\.daemon-cli >> %LOG% 2>&1
 if errorlevel 1 (
-    echo [FAIL] daemon compile failed >> %LOG%
+    echo [FAIL] daemon build failed >> %LOG%
     echo FAIL_DAEMON > %MARK%
     exit /b 1
 )
-echo [OK] daemon compile >> %LOG%
+if not exist %RELEASE%\bin mkdir %RELEASE%\bin
+if not exist %RELEASE%\lib mkdir %RELEASE%\lib
+copy /Y build\.daemon-cli\bundle\bin\cleona_daemon.exe %RELEASE%\bin\cleona-daemon.exe >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] daemon copy to bin\ failed >> %LOG%
+    echo FAIL_DAEMON > %MARK%
+    exit /b 1
+)
+copy /Y build\.daemon-cli\bundle\lib\*.dll %RELEASE%\lib\ >> %LOG% 2>&1
+if errorlevel 1 (
+    echo [FAIL] daemon runtime DLL copy to lib\ failed >> %LOG%
+    echo FAIL_DAEMON > %MARK%
+    exit /b 1
+)
+REM A leftover in the root would be worse than none: the GUI would find it
+REM and start a daemon that cannot open its store.
+if exist %RELEASE%\cleona-daemon.exe del /Q %RELEASE%\cleona-daemon.exe
+REM Resolvability probe: exactly the path the exe uses (<exe>\..\lib\).
+if not exist %RELEASE%\bin\..\lib\*.dll (
+    echo [FAIL] There is no DLL under %RELEASE%\bin\..\lib\ — exactly this path is where the exe looks. >> %LOG%
+    echo FAIL_DAEMON > %MARK%
+    exit /b 1
+)
+echo [OK] daemon build >> %LOG%
 
 REM --- DLL Check ---
 REM Fallback copies from windows\runner\. For libsodium.dll this branch should
@@ -86,7 +125,7 @@ echo [OK] All DLLs present >> %LOG%
 
 REM --- Summary ---
 echo [STEP 6] Build complete! >> %LOG%
-dir %RELEASE%\cleona.exe %RELEASE%\cleona-daemon.exe %RELEASE%\libsodium.dll %RELEASE%\liboqs.dll %RELEASE%\libzstd.dll >> %LOG% 2>&1
+dir %RELEASE%\cleona.exe %RELEASE%\bin\cleona-daemon.exe %RELEASE%\libsodium.dll %RELEASE%\liboqs.dll %RELEASE%\libzstd.dll >> %LOG% 2>&1
 echo ALL_DONE > %MARK%
 echo [%date% %time%] Build finished successfully >> %LOG%
 exit /b 0

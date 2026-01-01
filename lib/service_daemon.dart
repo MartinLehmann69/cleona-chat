@@ -1,32 +1,38 @@
+import 'package:cleona/core/service/mycelium_seam.dart';
+import 'package:cleona/core/update/data_port_http.dart';
+import 'package:cleona/core/util/host_interfaces.dart';
+import 'package:mycelium/host.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/keyring_service.dart';
+import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
-import 'package:cleona/core/node/cleona_node.dart';
-import 'package:cleona/core/node/identity_context.dart';
+import 'package:cleona/core/identity/identity_remote_deletion.dart';
+import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
+import 'package:cleona/core/ipc/ipc_probe.dart';
 import 'package:cleona/core/ipc/ipc_server.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart'
-    show RendezvousAddress;
-import 'package:cleona/core/network/transport.dart' show Transport;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/log/log_redaction.dart';
+import 'package:cleona/core/util/local_addresses.dart'
+    show dialableLocalAddresses, isRealNetworkChange;
 import 'package:cleona/core/tray/native_tray.dart';
+import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/service/notification_sound_service.dart' show VibrationType;
 import 'package:cleona/core/update/binary_update_manager.dart';
-import 'package:cleona/core/network/contact_seed.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/update/update_offer.dart';
+import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
+import 'package:cleona/core/contact/contact_seed.dart';
 
 /// Holds the machine-global single-instance flock (§15.1) for the entire
 /// process lifetime. Top-level so it is NEVER garbage-collected — a block- or
@@ -34,6 +40,20 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 /// the fd and silently releasing the lock (observed 2026-05-30: a second daemon
 /// then slipped past Guard 2 to the IPC-socket check).
 RandomAccessFile? _machineGlobalLockRaf;
+
+/// The marker with the UDP port that THIS run actually bound.
+///
+/// Purely for process coordination, like `cleona.pid` / `cleona.lock` /
+/// `cleona.ready` / `cleona.sock` — it carries a port number and nothing
+/// else. Written as soon as the V4.1 node is up; deleted on an orderly
+/// stop and also by Guard 3 as soon as the recorded port is demonstrably
+/// free (then the marker was the corpse of a run that no longer
+/// exists).
+///
+/// It replaces reading `identities.json` in Guard 3 — see the
+/// reasoning there (the port probed until S368 was bound by no
+/// daemon).
+const String _udpPortFilename = 'cleona.udp';
 
 /// Process name behind [targetPid], or `null` when the process does not exist
 /// or cannot be queried.
@@ -244,27 +264,60 @@ void main(List<String> args) {
     // Write PID file early so Guard 0 can detect us before we finish init.
     File(pidPath).writeAsStringSync('$pid\n');
 
-    // Guard 2: IPC endpoint is connectable (another daemon owns it)
+    // Guard 2: the IPC endpoint belongs to another CLEONA daemon.
+    //
+    // ── "IS SOMETHING LISTENING" WAS A PROXY (finding 3, S370) ────
+    //
+    // Until S370 a bare `Socket.connect` stood here: if it succeeds, the
+    // endpoint counts as taken. On Windows the port number is EPHEMERAL
+    // (49152-65535) and sits in a file that survives a hard abort —
+    // some other program gets it. Reproduced on 06.09.2026 on the build
+    // VM with a plain PowerShell TcpListener: the daemon no longer
+    // started, reported "Another daemon is listening on TCP port 49999"
+    // (there was none) and did NOT DELETE the port file, because the
+    // deletion lay in the `catch` branch. Permanent lock-out.
+    //
+    // Now the endpoint is QUERIED: authenticated `ping` with the token
+    // from the same port file, the answer must be `{'pong': true}`
+    // (`cleonaIpcEndpointAnswers`). A foreign listener does not answer.
+    // Why no PID check: Guard 0 above already leaves the process when a
+    // live PID with the same process name exists, the conjunction would
+    // be dead code — and the job of Guard 2 is precisely the daemon that
+    // Guard 0 and 1 have lost (`cleona.lock` AND `cleona.pid` deleted
+    // from outside). There the endpoint is the only witness.
+    //
+    // An unconfirmed endpoint now ALWAYS clears away the port file
+    // — even if something is listening there. That is the direction in
+    // which this third bolt may fall: Guard 0 and Guard 1 carry the
+    // single-instance promise (both proven in a run on Windows on 06.09.),
+    // and a false "taken" locks the user out permanently.
     if (Platform.isWindows) {
       // Windows: TCP loopback — check port file (format: port:token)
       final portFile = File('${config.baseDir}/cleona.port');
       if (portFile.existsSync()) {
+        String? content;
         try {
-          final contents = portFile.readAsStringSync().trim();
-          final port = int.parse(contents.split(':')[0]);
-          final testSock = await Socket.connect(
-            InternetAddress.loopbackIPv4, port,
-          ).timeout(const Duration(seconds: 2));
-          testSock.destroy();
-          stderr.writeln(
-            'ERROR: Another daemon is listening on TCP port $port. '
-            'Stop the running process first.');
-          log.info('Another daemon is listening on TCP port $port, exiting.');
-          exit(1);
+          content = portFile.readAsStringSync();
         } catch (_) {
-          // Port file exists but not connectable — stale, remove it
-          try { portFile.deleteSync(); } catch (_) {}
+          content = null;
         }
+        final endpoint = parseCleonaPortFile(content);
+        final proven = endpoint == null
+            ? false
+            : await cleonaIpcEndpointAnswers(
+                port: endpoint.port, token: endpoint.token);
+        if (proven) {
+          stderr.writeln(
+            'ERROR: Another Cleona daemon owns the IPC endpoint on TCP port '
+            '${endpoint.port}. Stop the running process first.');
+          log.info('Cleona daemon answered ping on TCP port '
+              '${endpoint.port}, exiting.');
+          await CLogger.flushAll();
+          exit(1);
+        }
+        log.info('Stale cleona.port (${endpoint == null ? 'unreadable' : 'Port '
+            '${endpoint.port}'}) — no Cleona daemon answered; removing it.');
+        try { portFile.deleteSync(); } catch (_) {}
       }
     } else {
       // Linux/macOS: Unix Domain Socket
@@ -288,26 +341,57 @@ void main(List<String> args) {
       }
     }
     // Check 3: UDP port already bound (catches orphaned daemons whose
-    // lock file was deleted but are still holding the port). If no --port
-    // arg was passed, read the effective port from identities.json so the
-    // guard catches zombies even when the parent command line is minimal —
-    // Dart sets the process name to "dart:cleona-dae" (truncated to 15
-    // chars), which makes pkill -x matching unreliable and leaves killed-by-
-    // checksum but not actually-killed processes around across redeploys.
-    int? probePort = config.port;
-    if (probePort == null) {
-      try {
-        final idFile = File('${config.baseDir}/identities.json');
-        if (idFile.existsSync()) {
-          final json = jsonDecode(idFile.readAsStringSync()) as Map<String, dynamic>;
-          final list = json['identities'] as List?;
-          if (list != null && list.isNotEmpty) {
-            final first = list.first as Map<String, dynamic>;
-            probePort = first['port'] as int?;
-          }
-        }
-      } catch (_) { /* identities.json malformed — skip port check */ }
-    }
+    // lock file was deleted but are still holding the port). Dart sets the
+    // process name to "dart:cleona-dae" (truncated to 15 chars), which makes
+    // pkill -x matching unreliable and leaves killed-by-checksum but not
+    // actually-killed processes around across redeploys.
+    //
+    // ── UNTIL S368 THIS CHECK MEASURED A PORT THAT NOBODY HOLDS ────
+    //
+    // It read the port from `identities.json` (`identities.first.port`) —
+    // and exactly this port was **not** bound by the daemon between the CUT
+    // and S374. `_startAllInner` computed `v41Port = nodePort + 1` back then
+    // and passed ONLY that one to `startV41Node`; `nodePort` itself stayed
+    // free. Re-measured on 05.09.2026 on a running daemon (profile
+    // with `port: 34260`):
+    //
+    //     "[daemon] V4.1-Knoten gestartet auf Port 34261, 1 Identitäten"
+    //     $ ss -lunap | grep pid=174331
+    //     UNCONN 0 0  0.0.0.0:34261 ... fd=22
+    //     UNCONN 0 0  0.0.0.0:41340 ... fd=26   (LAN entry)
+    //     UNCONN 0 0  0.0.0.0:57123 ... fd=27
+    //
+    // 34260 appears on no line. So the check could not find a zombie
+    // — and conversely would have fired on the next start if some
+    // FOREIGN process happened to sit on 34260. A proxy that is wrong in
+    // both directions.
+    //
+    // ── WHAT IT MEASURES NOW ──────────────────────────────────────────
+    //
+    // The port that a running daemon ACTUALLY bound. The daemon
+    // writes it to `cleona.udp` on start-up (see
+    // `_startAllInner`, next to `cleona.ready`) and clears it away on an
+    // orderly stop. That is the same rank as `cleona.pid`,
+    // `cleona.lock`, `cleona.ready`, `cleona.sock` — pure
+    // process coordination, no identity knowledge.
+    //
+    // ── AND WHY NO LONGER FROM `identities.json` ──────────────────────
+    //
+    // In addition to the measurement error: since S368 the file is stored
+    // encrypted (`identities.json.enc`, device-wide key from the
+    // master seed). Here — before `IdentityContext.initCrypto` — there is
+    // no keyring yet, hence no seed, hence no key. Pulling the keyring
+    // forward is NOT an option: `initCrypto` explicitly requires that
+    // `FirstStartWipe` is its first line, and `KeyringService.init` creates
+    // `.keyring_salt`. The port therefore belongs where it originates —
+    // to the run, not to the identity.
+    int? probePort;
+    try {
+      final portFile = File('${config.baseDir}/$_udpPortFilename');
+      if (portFile.existsSync()) {
+        probePort = int.tryParse(portFile.readAsStringSync().trim());
+      }
+    } catch (_) { /* unreadable — then no port check */ }
     if (probePort != null) {
       try {
         final probe = await RawDatagramSocket.bind(InternetAddress.anyIPv4, probePort);
@@ -327,6 +411,16 @@ void main(List<String> args) {
     try {
       final readyFile = File('${config.baseDir}/cleona.ready');
       if (readyFile.existsSync()) readyFile.deleteSync();
+    } catch (_) { /* non-fatal */ }
+
+    // The same for the port marker: if we got this far, the port recorded
+    // there was free — so the marker stems from a run that no longer
+    // exists. Deleting it here keeps it self-healing; otherwise a value
+    // would remain that at some point belongs to a foreign process and
+    // rejects the next start for no reason.
+    try {
+      final portFile = File('${config.baseDir}/$_udpPortFilename');
+      if (portFile.existsSync()) portFile.deleteSync();
     } catch (_) { /* non-fatal */ }
 
     // Init crypto
@@ -408,8 +502,13 @@ void main(List<String> args) {
     // the thing that broke: append directly next to the regular logs.
     try {
       if (zoneLogBaseDir != null) {
+        // This sink bypasses CLogger's BUFFERING, not its
+        // REDACTION. `LogRedaction.apply` is a pure function without
+        // state in CLogger — it holds even when exactly the
+        // flush path is what is broken. Measured on 06.09.2026, otherwise
+        // a home path lay here in plain text.
         File('$zoneLogBaseDir/daemon-crash.log').writeAsStringSync(
-            '${DateTime.now().toIso8601String()} $msg\n',
+            '${DateTime.now().toIso8601String()} ${LogRedaction.apply(msg)}\n',
             mode: FileMode.append, flush: true);
       }
     } catch (_) {}
@@ -421,14 +520,46 @@ void main(List<String> args) {
   });
 }
 
-/// Manages ONE CleonaNode with MULTIPLE CleonaServices (one per identity).
+/// Runs ONE V4.1 node with SEVERAL CleonaServices (one per identity).
 class _MultiServiceDaemon {
   final _DaemonConfig config;
   final CLogger log;
   final NativeTray tray;
 
-  CleonaNode? _node;
+  /// Carries readiness and connection level to the tray (§22.9).
+  ///
+  /// EVENT-DRIVEN, no timer: [_bindIdentityToTray] hooks itself
+  /// onto `service.onStateChanged` — the same edge the IPC server
+  /// already uses. No network traffic arises (working rule 5), and
+  /// the binder only passes on what has changed.
+  late final TrayStatusBinder _trayStatus =
+      TrayStatusBinder(sink: tray.updateStatus);
+
+  /// The ONE mycelium host of this process (S387, V4.2 §4.5.1): one node,
+  /// one port, one mailbox per identity. Replaces `V41Runtime` +
+  /// `V41Host` per identity.
+  ///
+  /// It holds the wire and the state checker — `shutdownAll()` MUST
+  /// stop it, otherwise a timer keeps the Dart VM alive.
+  Host? _host;
+
+  /// The same key as `_host`'s (`hostKey`, set on
+  /// start) — held for the port mapping (task D): its edge
+  /// network change lies in `_startNetworkMonitor`, a separate method
+  /// without the start method's local `masterSeedForHost`.
+  Uint8List? _masterSeedForHost;
+
+  /// The HTTP delivery at the host port (§26.6.5, S386 part A).
+  DataPortHttp? _delivery;
   final Map<String, CleonaService> _services = {}; // nodeIdHex → service
+
+  /// The one update offer of this daemon (§26.5.4: one node, one
+  /// offer across all identities). It originates in [_startAllInner] and
+  /// is bound there to the services' callbacks; it is held here
+  /// because [_updateManifestAsk] must reach it at the edges (E-9,
+  /// package 10 = A). Before the first start it is `null` — then there is
+  /// also nothing to repeat.
+  UpdateOffer<CleonaService>? _updateOffer;
   final Map<String, IdentityContext> _contexts = {}; // nodeIdHex → context
   IpcServer? _ipcServer;
   ReminderService? _reminderService;
@@ -468,7 +599,7 @@ class _MultiServiceDaemon {
     if (triggerFile.existsSync()) {
       triggerFile.deleteSync();
       if (!_running) {
-        log.info('Start-Trigger von GUI erkannt');
+        log.info('Start trigger from GUI detected');
         startAll();
       }
     }
@@ -477,7 +608,7 @@ class _MultiServiceDaemon {
   Future<void> startAll() async {
     if (_running) return;
     _running = true;
-    log.info('Dienst wird gestartet...');
+    log.info('Service is starting...');
 
     // §3.7: Initialize crypto subsystem (shared sequence — S106 fix)
     await IdentityContext.initCrypto(config.baseDir);
@@ -486,7 +617,7 @@ class _MultiServiceDaemon {
     final mgr = IdentityManager(baseDir: config.baseDir);
     var identities = mgr.loadIdentities();
     if (identities.isEmpty) {
-      log.warn('Keine Identitäten gefunden — warte auf GUI-Setup (cleona.start trigger)');
+      log.warn('No identities found — waiting for GUI setup (cleona.start trigger)');
       _running = false;
       return;
     }
@@ -494,7 +625,7 @@ class _MultiServiceDaemon {
     try {
       await _startAllInner(identities, mgr);
     } catch (e, stack) {
-      log.error('Dienst-Start fehlgeschlagen: $e');
+      log.error('Service start failed: $e');
       log.error('Stack: $stack');
       // Critical: exit on startup failure (e.g. port already in use).
       // Without this, the daemon stays alive as a zombie — holding the lock
@@ -506,7 +637,13 @@ class _MultiServiceDaemon {
   Future<void> _startAllInner(List<Identity> identities, IdentityManager mgr) async {
 
     // Use configured port, or first identity's port
-    final nodePort = config.port ?? identities.first.port;
+    // THE DEVICE'S PORT, not that of the first identity (S374, §11).
+    // `identities.first.port` stood here until S374 and made a
+    // LIST POSITION the decisive quantity: deleting the first
+    // identity silently changed the bound port of the whole device,
+    // along with firewall exception, port mapping and every published
+    // entry hint.
+    final nodePort = config.port ?? mgr.deviceDataPort;
 
     // Routing table stored in base dir (shared across identities)
     final routingDir = config.baseDir;
@@ -522,15 +659,10 @@ class _MultiServiceDaemon {
       masterSeed: masterSeed,
     );
 
-    // Create ONE shared node
-    final node = CleonaNode(
-      profileDir: routingDir,
-      port: nodePort,
-      networkChannel: NetworkSecret.channel.name,
-    );
-    node.manualPublicIp = config.publicIp;
-    node.primaryIdentity = primaryCtx;
-    _node = node;
+    // The directory is now only needed for the entry pool and the
+    // node keys; the V3 routing table for which it was originally
+    // created no longer exists.
+    if (routingDir.isEmpty) throw StateError('routingDir leer');
 
     // Register primary identity
     _contexts[primaryCtx.userIdHex] = primaryCtx;
@@ -551,296 +683,317 @@ class _MultiServiceDaemon {
       _contexts[ctx.userIdHex] = ctx;
     }
 
-    // Register all identities with the node (before start, so routing table rejects them)
-    for (final ctx in _contexts.values) {
-      node.registerIdentity(ctx);
+    // ── THE ASSERTION FROM `NodeHost.adoptIdentities` (carried over, CUT) ─
+    //
+    // `NodeHost.adoptIdentities` threw if the passed view was empty
+    // or did not contain the primary identity. The reason was a
+    // field finding: `_contexts.values` is a LIVE view on a map
+    // that the caller has yet to fill. If the call stood one line too
+    // early, the node registered NOTHING, but started up completely —
+    // and afterwards discarded every service-routed frame. Between
+    // 8b387931 and S348 exactly that was in the field: no contact came
+    // about. A quiet nothing was the most expensive outcome.
+    //
+    // The registration itself went away with `CleonaNode` — V4.1
+    // hangs on the service per identity via `attachV41`, there is no
+    // identity table at the node any more. THE CHECK STAYS, because the
+    // error class stays: the loop further below that calls
+    // `attachV41` runs over the same live view, and if it runs zero times,
+    // the delivery layer hangs on nothing. The outcome would be the same:
+    // daemon up, everything silent.
+    if (_contexts.isEmpty) {
+      throw StateError('Identity collection is empty — the V4.1 delivery '
+          'would hang on nothing, and the daemon would start up mute. Called too '
+          'early?');
+    }
+    if (!_contexts.values.any((ctx) => identical(ctx, primaryCtx))) {
+      throw StateError('The primary identity is missing from the collection '
+          '(primary=${primaryCtx.displayName}, all=${_contexts.length}).');
     }
 
-    // §2.4 receiver step [9] (Edit 2 — multi-identity KEM-Try-Loop): V3
-    // ApplicationFrame dispatcher. Per §3.1 the deviceID is daemon-global,
-    // so `nextHopDeviceId` cannot identify the owning identity any longer
-    // (it identifies the daemon). The receive pipeline therefore tries each
-    // hosted identity's User-KEM-SK in turn until one decapsulates
-    // successfully (recently-active-first heuristic), or all fail.
-    node.onApplicationFramePayload = (packet, from, port, snapshot) async {
-      if (_services.isEmpty) {
-        if (!_servicesReady) {
-          log.debug('V3 APP drop during boot: services not ready');
-          return;
-        }
-        log.warn('V3 APP drop: no services registered');
-        return;
-      }
-
-      // Try-order: most-recently-delivered identity first (heuristic — the
-      // active conversation partner is statistically the most likely
-      // recipient for the next inbound frame). Fall back to insertion order
-      // for ties / cold daemon start.
-      final ordered = _orderedServicesByRecency();
-      for (final service in ordered) {
-        final outcome = await service.handleIncomingApplicationPacket(
-            packet, from, port, snapshot);
-        if (outcome == AppFrameDispatchOutcome.delivered) {
-          _markServiceActive(service);
-          return;
-        }
-        if (outcome == AppFrameDispatchOutcome.droppedAfterDecap) {
-          // Decap succeeded under this identity's User-KEM-SK but a later
-          // step failed (sig/parse/recipient-mismatch). Final drop — no
-          // other identity could decap the same KEM-ciphertext.
-          return;
-        }
-        // outcome == notForThisIdentity: continue to next service.
-      }
-      log.debug('V3 APP drop: KEM-decap failed under all '
-          '${ordered.length} hosted identit${ordered.length == 1 ? "y" : "ies"} '
-          '(frame not addressed to any UserID on this daemon)');
-    };
-
-    // Welle 5 §8.1.1: First-CR-Bootstrap arrives as InfrastructureFrame
-    // with messageType=MTV3_CONTACT_REQUEST (selector exception). Route by
-    // frame.recipientDeviceId — same lookup pattern as the application
-    // path. Other infrastructure types that fall through to this hook
-    // (post-Wave-1 cluster — e.g. routing/DHT chatter that the node hasn't
-    // node-locally dispatched yet) get logged and dropped because their
-    // service-side handlers don't exist yet.
-    node.onInfrastructureFramePayload =
-        (frame, senderDeviceId, from, port, snapshot, wasDirect) {
-      // Service-routed Identity-Layer messageTypes (Welle 5 + 6): CR-Bootstrap,
-      // RESTORE_BROADCAST, Emergency KEY_ROTATION_BROADCAST. Everything else
-      // either lives in the node-local infra dispatch or has no handler yet.
-      final mt = frame.messageType;
-      final isServiceRouted =
-          mt == proto.MessageTypeV3.MTV3_CONTACT_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_RESTORE_BROADCAST ||
-          mt == proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST ||
-          mt == proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE ||
-          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE ||
-          // Wave 2B.3 (§6 Reed-Solomon erasure + S&F mailbox):
-          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
-          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
-          mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE ||
-          mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
-          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK ||
-          // §5.5 Store-and-Forward on mutual peers:
-          mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
-          mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
-          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
-          mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
-          // Wave 2B.3 (§10.2): channel-index gossip
-          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
-          // §8.1.1 rev3: Deferred Key Exchange (step 1b)
-          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
-          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER ||
-          // §11.4.8: Anonymous Vote Re-Broadcaster
-          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT ||
-          mt == proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK ||
-          // §9.5.7 (S119 D1): system-channel record gossip
-          mt == proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST ||
-          mt == proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY ||
-          mt == proto.MessageTypeV3.MTV3_SYSCHAN_WANT ||
-          mt == proto.MessageTypeV3.MTV3_SYSCHAN_PUSH;
-      if (!isServiceRouted) {
-        log.debug('V3 INFRA hook drop: messageType=${mt.name} '
-            'has no service-side handler');
-        return;
-      }
-      // §3.1 C-1: all hosted identities share one daemon-global deviceNodeId.
-      // Fan out to every identity on this device — each handler drops
-      // internally if the frame is not relevant to that identity.
-      final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
-      final identities = node.identitiesForDevice(deviceIdBytes).toList();
-      if (identities.isEmpty) {
-        log.debug('V3 INFRA drop: recipientDeviceId '
-            '${bytesToHex(deviceIdBytes).substring(0, 8)} '
-            'is not local (mt=${mt.name})');
-        return;
-      }
-      for (final id in identities) {
-        final service = _services[id.userIdHex];
-        if (service == null) continue;
-        switch (mt) {
-          case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
-            service.handleIncomingFirstContactRequest(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
-            service.handleIncomingRestoreBroadcastInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
-            service.handleIncomingKeyRotationBroadcastInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_GUARDIAN_SHARE_STORE:
-            service.handleIncomingGuardianShareStoreInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_REQUEST:
-            service.handleIncomingGuardianRestoreRequestInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_GUARDIAN_RESTORE_RESPONSE:
-            service.handleIncomingGuardianRestoreResponseInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
-            service.handleIncomingFragmentStoreInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
-            service.handleIncomingFragmentRetrieveInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
-            service.handleIncomingFragmentRetrieveResponseInfra(
-                frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
-            service.handleIncomingFragmentDeleteInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
-            // S123 Erasure-F1: resolve the sender-side per-fragment-index
-            // ACK wait (see CleonaService._distributeErasureFragments) and
-            // drive the proactive-push retry-cancel path.
-            service.handleIncomingFragmentStoreAckInfra(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
-            service.handleIncomingChannelIndexExchangeInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_PEER_STORE:
-            service.handleIncomingPeerStoreInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
-            // §5.5 (S121 F1): resolve the sender-side ACK wait — the ACK
-            // carries accepted=false when the storage peer rejected the
-            // store (recipient not its contact, budget, rate limit).
-            // Befund 15: wasDirect gates confirmRoute in the handler.
-            service.handleIncomingPeerStoreAckInfra(frame, senderDeviceId,
-                wasDirect: wasDirect);
-            break;
-          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
-            service.handleIncomingPeerRetrieveInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
-            service.handleIncomingPeerRetrieveResponseInfra(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
-            service.handleIncomingDeviceKemRequest(
-                frame, senderDeviceId, from, port);
-            break;
-          case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
-            service.handleIncomingDeviceKemOffer(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST:
-            service.handleIncomingSysChanDigestInfra(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY:
-            service.handleIncomingSysChanSummaryInfra(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_SYSCHAN_WANT:
-            service.handleIncomingSysChanWantInfra(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_SYSCHAN_PUSH:
-            service.handleIncomingSysChanPushInfra(frame, senderDeviceId);
-            break;
-          case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT:
-            service.handleIncomingPollAnonSubmit(
-                frame, senderDeviceId, from, port, snapshot);
-            break;
-          case proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK:
-            service.handleIncomingPollAnonSubmitAck(frame, senderDeviceId);
-            break;
-          default:
-            break;
-        }
-      }
-    };
-
-    // Notify GUI when peer addresses change (e.g. bootstrap discovers public IP)
-    node.onPeersChanged = () {
-      for (final service in _services.values) {
-        service.onStateChanged?.call();
-      }
-    };
+    // ── THE V3 RECEIVE SIDE IS GONE (CUT, 31.08.) ────────────────────
+    //
+    // 216 lines stood here: `host.wireReceive(...)` with the
+    // ApplicationFrame dispatcher (KEM try loop over all hosted
+    // identities) and the infrastructure switch with 24 `MessageTypeV3`
+    // selectors (CONTACT_REQUEST, FRAGMENT_*, PEER_*, SYSCHAN_*,
+    // DEVICE_KEM_*, POLL_ANON_*, GUARDIAN_*), plus
+    // `host.wireEvents(onPeersChanged:)`.
+    //
+    // IT IS A PURE SELECTOR LIST OVER A WIRE THAT NO LONGER
+    // EXISTS. `InfrastructureFrameV3`/`NetworkPacketV3` originated in
+    // `CleonaNode`; without the node nobody calls the hooks, and no
+    // frame of this kind reaches this process. The handlers on the
+    // service side fell with the ten `cleona_service_v3_*.dart`.
+    //
+    // V4.1 receives at a different place: `attachV41` (further below)
+    // hooks in the read side per identity — `V41Host.accept`,
+    // `MessageSealer.open`, `Aggregate.unpack`. There is nothing here to
+    // carry over, only to take away.
+    //
+    // OPEN AND REPORTED: `onPeersChanged` was the signal with which the
+    // UI learned about address changes via `service.onStateChanged`.
+    // V4.1 today has no producer for it.
 
     // Windows: ensure firewall allows inbound UDP for the daemon process.
     if (Platform.isWindows) {
-      await _ensureWindowsFirewallRule(nodePort);
+      await _ensureWindowsFirewallRule();
     }
 
-    // Start the shared node
-    await node.startQuick();
-    log.info('Node gestartet auf Port $nodePort, ${_contexts.length} Identitäten');
+    // ── THE V4.1 NODE IS NOW THE START PATH (CUT, 31.08.) ─────────
+    //
+    // Up to here stood `await host.start()` — the V3 node —, and the
+    // V4.1 delivery was hung alongside 90 lines further below.
+    // The other way round does not work: `CleonaService` gets its `port` from
+    // this node, so it must stand BEFORE the service loop.
+    //
+    // §4.11.9 Infrastructure Rendezvous went away with it and is
+    // NOT replaced: its only consumer in `lib/` was
+    // `CleonaNode.infraRendezvousManager` (re-measured over `lib/` and
+    // `bin/` — otherwise only comments and `smoke_rendezvous_secret_
+    // rotation.dart`). V4.1's external rendezvous is a different
+    // thing and already lies IN `startV41Node`: step 3 of the
+    // entry cascade via `ExternalEntrySource` + `NostrRendezvous`
+    // (`v41_attach.dart:384-397`). Running two rendezvous systems
+    // side by side would be the duplication that this cut
+    // removes.
+    // ── THE ENVELOPE FOR `node_keys.enc` AND THE POOL (S362) ───────
+    //
+    // Until S362 `FileEncryption(baseDir: …)` stood here WITHOUT a key —
+    // the legacy path from `file_encryption.dart:23`, which loads
+    // OR CREATES `db.key`: 32 random bytes in the SAME directory as the
+    // ciphertext. Against a second local user that holds (`0600`), against
+    // a stolen device, a disk image or a backup it does not.
+    //
+    // The right key is the DEVICE-WIDE, seed-derived one:
+    // `node_keys.enc` and the entry pool are per NODE, not per
+    // identity (§2.6 "per-node", §3.5.2 "node-level, identity-free"),
+    // and lie at the profile root directory — the same class as
+    // `device_keys.bin`, which already lies under `deriveSharedFileEncKey`
+    // (`identity_context.dart:407-409`). `deriveFileEncKey(seed, hdIndex)`
+    // would be wrong here: it would give one envelope PER IDENTITY for a
+    // file of which there is exactly one.
+    //
+    // The existing files migrate in `KeyMigration.migrateDeviceScopedFiles`
+    // (called in `IdentityContext.initCrypto`) from the old key to this
+    // one — BEFORE this call, because `NodeKeys.loadOrCreate` is
+    // fail-loud and would turn a container that did not migrate along into
+    // a start error instead of silently regenerating it.
+    //
+    // `null` means "no master seed" (linked device, §7.6.2) and
+    // deliberately falls back to the legacy path: there is nothing to derive
+    // there, and a node without `node_keys.enc` would not be reachable.
+    //
+    // S387: `node_keys.enc` no longer has a reader with the V4.1 node. The
+    // key stays — it now protects `mycelium/host.enc` and
+    // `mycelium/post_box.enc` (`hostKey`), the same class.
+    final masterSeedForHost = masterSeed;
+    // Held for the network-change edge of the port mapping (task D),
+    // which lies in a separate method (`_startNetworkMonitor`).
+    _masterSeedForHost = masterSeedForHost;
 
-    // §4.11.9 Infrastructure Rendezvous: publish this node's public addresses.
-    final infraRv = InfraRendezvousManager(profileDir: config.baseDir);
-    infraRv.init(
-      networkSecret: NetworkSecret.secret,
-      previousNetworkSecret: NetworkSecret.previousSecret,
-      deviceId: _contexts.values.first.nodeId,
-      addressProvider: () => node.currentSelfAddresses()
-          .map((a) => RendezvousAddress(a.ip, a.port))
-          .toList(),
+    // ── THE PORT IS THE ONE PASSED IN. THE `+1` OFFSET IS GONE (S374) ─
+    //
+    // `nodePort + 1` stood here. The `+1` was the COEXISTENCE OFFSET from
+    // the time when V3 and V4.1 ran on the same host: introduced
+    // with the CUT commit `62151c46` (31.08.2026), whose prior state
+    // started both nodes side by side —
+    //
+    //     port: nodePort,        // V3
+    //     port: nodePort + 1,    // V4.1 alongside
+    //
+    // With the cut V3 fell. The offset stayed and thereby went from
+    // fallback port to the ONLY port: nobody has bound `nodePort`
+    // since.
+    //
+    // For a node with a randomly drawn port that is invisible. For
+    // the bootstrap it is deadly, because its port is not a free
+    // choice but nailed down externally — the firewall opens 8081 for
+    // beta (live 8080). Measured on 07.09.2026 on the bootstrap:
+    // started with `--port=8081`, logged `Port: 8081`, but bound
+    // and announced 8082; `ss -ulnp` showed 8081 on no line.
+    // So the port forwarding pointed to a port without a listener,
+    // and the announced address to a port without forwarding.
+    //
+    // The reasoning for keeping it that formerly stood here
+    // (neighbours would have `nodePort + 1` in still valid
+    // entry records) does not hold: V4.1 knows no
+    // legacy-data compatibility, and a special case only for the
+    // bootstrap would be exactly what the owner decision from S372
+    // rules out — "only the bootstrap may have a fixed port,
+    // announced in the ContactSeed, WITHOUT a special case in code".
+    //
+    // Side effect that is healed along with it: `DataPort.drawDataPort()`
+    // excludes `lanDiscoveryPort` (41338) and `browserUnsafePort`
+    // (10080). With the offset this exclusion protected the
+    // wrong value — a draw of 41337 bound 41338, one of 10079
+    // bound 10080, and 41339 bound `kLanEntryPort` (41340), which is not
+    // on the list at all. Without the offset the exclusion again applies
+    // to the port that is also bound.
+    //
+    // The same cut at the two other start paths:
+    // `lib/main.dart` (GUI in-process) and
+    // `lib/core/platform/ios_background_fetch.dart`.
+    //
+    // S387: the port is now bound by the mycelium host — and it starts
+    // AFTER the service loop (see there, `hostStart`). The services
+    // get the device port in advance; `serviceRegister` sets it on
+    // attachment to the one actually bound.
+
+    // ── THE UPDATE IS OFFERED, NOT INSTALLED (S387) ─────────────
+    //
+    // Owner decision 14.09.2026 (v4_2 §26.5.4, §26.6.1 steps 4-6):
+    // collect automatically, only offer what is finished, install ONLY
+    // after the click. Here stood "Auto-download + auto-install for daemon
+    // (no GUI to click)" — the daemon installed immediately on `ready`. That
+    // was right as long as `ready` only came after the download click; since
+    // collecting runs automatically, it would be an installation without
+    // consent. The click comes as IPC `apply_update` from the GUI
+    // (`ipcServer.onApplyUpdate` below).
+    //
+    // Collecting happens at ONE identity — the first one that reports an
+    // in-network distributed manifest; all read the same (`UpdateOffer`).
+    final updateOffer = _updateOffer = UpdateOffer<CleonaService>(
+      assemble: (svc, manifest) => svc.startInNetworkUpdate(manifest),
+      install: (svc) async {
+        final mgr = svc.binaryUpdateManager;
+        if (mgr == null) {
+          log.warn('apply_update: no binaryUpdateManager');
+          return false;
+        }
+        log.info('apply_update: user agreed — installing '
+            'v${mgr.targetVersion}');
+        return _applyAndRestart(mgr, log, shutdownAll);
+      },
+      isNew: (a, b) => UpdateChecker(log: log).isNewer(a, b),
+      report: log.info,
     );
-    node.infraRendezvousManager = infraRv;
-    infraRv.startPeriodicRefresh();
-
-    // §19.6 Auto-download + auto-install for daemon (no GUI to click).
-    // Only the first service to detect the update triggers the download —
-    // all services share the same binary, so one download suffices.
-    bool updateApplyInProgress = false;
 
     // Create and start a CleonaService for each identity
     for (final ctx in _contexts.values) {
       final service = CleonaService(
         identity: ctx,
-        node: node,
         displayName: ctx.displayName,
+        // The device port in advance; the host binds it after this loop,
+        // and `serviceRegister` sets the one actually bound (S387).
+        port: nodePort,
       );
-      if (config.bootstrapMode) {
-        service.onContactRequestReceived = (nodeId, name) {
-          log.info('Bootstrap auto-accept contact: $name ($nodeId)');
-          service.acceptContactRequest(nodeId);
-        };
-      }
+      // S388: here a `--bootstrap` mode accepted every contact request
+      // AUTOMATICALLY. V4.2 §12.5: "A contact exists only after an explicit
+      // acceptance" — and §11.7: no node has a special role. Removed.
       // Wire badge count to tray icon
       service.onBadgeCountChanged = (count) => _updateTrayBadge();
-      // §19.6: wire update callbacks BEFORE startService() so they are
-      // already set when startService() fires onUpdateAvailable for a cached
-      // manifest.  Flow: banner visible → user clicks "Download" → auto-install.
+      // §22.9: readiness and connection level to the tray. MUST stand
+      // here and not later — `IpcServer` chains the existing
+      // `onStateChanged` at construction (ipc_server.dart:203). Whoever
+      // registers afterwards displaces the IPC broadcast; whoever registers
+      // before is called along by it.
+      _bindIdentityToTray(ctx.userIdHex, service);
+      _bindRemoteDeletion(ctx.userIdHex, service);
+      // Update callbacks BEFORE startService(): the start reports a
+      // cached manifest itself. Sequence (S387): manifest →
+      // collect automatically → `ready` → banner in the GUI → click →
+      // `apply_update` → installation. A state never installs.
       service.onUpdateAvailable = (manifest, inNetworkAvailable) {
         log.info('Update available: v${manifest.version} (inNetwork=$inNetworkAvailable)');
+        updateOffer.onManifest(service, manifest, inNetworkAvailable);
       };
       service.onUpdateStateChanged = (state, progress) {
+        updateOffer.onState(service, state);
         if (state == BinaryUpdateState.failed) {
-          log.warn('Download failed — clearing lock so next check retries');
-          updateApplyInProgress = false;
+          log.warn('Update: collecting without result — the next occasion '
+              'tries again');
         }
-        if (state == BinaryUpdateState.ready) {
-          final mgr = service.binaryUpdateManager;
-          if (mgr != null && !updateApplyInProgress) {
-            updateApplyInProgress = true;
-            log.info('Update v${mgr.targetVersion} downloaded and verified — auto-installing');
-            _applyAndRestart(mgr, log, shutdownAll).then((ok) {
-              if (!ok) updateApplyInProgress = false;
-            });
-          }
+        if (state == BinaryUpdateState.ready &&
+            identical(updateOffer.source, service)) {
+          log.info('Update v${service.binaryUpdateManager?.targetVersion} '
+              'checked and ready — waiting for the click');
         }
       };
       await service.startService();
       _services[ctx.userIdHex] = service;
-      log.info('Service gestartet: ${ctx.displayName} (${ctx.userIdHex.substring(0, 16)}...)');
+      // ── S369: THE NAME MOVED FROM `info` TO `debug` ───────
+      //
+      // Owner decision of 02.09.2026 ("display names only on
+      // debug", recorded in `smoke_log_kein_nutzerinhalt_guard.dart`).
+      // This line did not keep it — and the guard still reported
+      // green, because it only read `_log.` and the daemon calls its logger
+      // `log` (`:481`, `final CLogger log;`). Measured 06.09.2026: the
+      // narrow rule saw 1237 calls, a rule without underscore sees
+      // 1342 — 105 calls via `debug` were never checked, and among them
+      // lay exactly these three.
+      //
+      // The damage is the same as the one closed by S368, only under
+      // a different file name: the line wrote the display name
+      // NEXT TO the user ID into `identities/<id>/logs/cleona_*.log` — in
+      // plain text, retained 3 days (live) or 7 days (beta), and sendable
+      // to third parties via the bug log channel (§9.5).
+      //
+      // The IDENTIFIER stays on `info`: it is the routing quantity that
+      // is on the wire anyway, and `cleona_service.dart:1631`
+      // has always logged it likewise.
+      log.info('Service started: ${ctx.userIdHex.substring(0, 16)}...');
+      log.debug('Service started — displayName="${ctx.displayName}"');
     }
 
-    // Services ready — V3 ApplicationFrame/InfrastructureFrame hooks gate on this flag.
-    _servicesReady = true;
+    // ── THE ONE HOST, ONE MAILBOX PER IDENTITY (S387) ─────────────
+    //
+    // Replaces `startV41Node` (before the loop) and `attachV41` per
+    // identity. AFTER the service loop, because the host collects and
+    // delivers immediately on start — an incoming message to a service that
+    // has not yet loaded its conversations would be receipted and lost.
+    // What `startService` sends beforehand lies in the outbox and goes
+    // to the mailbox on attachment (`serviceRegister`).
+    //
+    // `attachV41` also set `binaerQuellenAusEintritt` and the
+    // cover filling (`naechsterTarnfuellungsBlock`/`nimmTarnfuellungsBlock`)
+    // here. Neither has a carrier at the mycelium host; since S388 the update
+    // goes via `attachUpdateToService` (manifest slot + fetch path, §26.5.4/§26.6.1).
+    final host = await hostStart(
+      services: _services.values.toList(),
+      baseDir: config.baseDir,
+      key: hostKey(config.baseDir, masterSeedForHost),
+      port: nodePort,
+      report: log.info,
+    );
+    _host = host;
+    // The moment "start" (S388): ONE service per process carries the update.
+    attachUpdateToService(host, _services.values.first, report: log.info);
+    log.info('mycelium host started on port ${host.port}, '
+        '${host.mailboxes.length} mailbox(es)');
+
+    // The port mapping (task D, §7.3): asked at this edge, NOT
+    // awaited — the RFC 6886 backoff takes eight and a half minutes in the
+    // worst case, and the node start must not wait for it.
+    unawaited(() async {
+      try {
+        await portMappingToEdge(
+          host,
+          baseDir: config.baseDir,
+          key: hostKey(config.baseDir, masterSeedForHost),
+          report: log.info,
+        );
+      } catch (e) {
+        log.warn('Port mapping: $e');
+      }
+    }());
+
+    // The port marker for Guard 3 of the NEXT start — here, because the
+    // port is demonstrably bound from here on (`hostStart` has
+    // returned); `cleona.ready` only falls after the IPC server.
+    try {
+      File('${config.baseDir}/$_udpPortFilename')
+          .writeAsStringSync('${host.port}');
+    } catch (_) { /* non-fatal — then Guard 3 is skipped on the next start */ }
+
+    // The HTTP delivery at the host port (§26.6.5, S386 part A): LAN link
+    // and invitation link depend on it, delivery does not.
+    _delivery = await deliveryForServices(host, _services.values,
+        report: log.info);
+
+    // (The boot-window gate `_servicesReady` stood here. It held back the
+    // V3 receive hooks during start-up and afterwards had
+    // no reader any more — gone together with the hooks.)
 
     // Save updated nodeIdHex values
     mgr.saveIdentities(identities);
@@ -860,32 +1013,29 @@ class _MultiServiceDaemon {
     ipcServer.onCalDAVServerSetEnabled = setCalDAVServerEnabled;
     ipcServer.onCalDAVServerRegenerateToken = regenerateCalDAVServerToken;
     ipcServer.onCalDAVServerSetPort = setCalDAVServerPort;
+    // The click on [Install] — the ONLY way to installation.
+    // Formerly this place asked the manager of the PRIMARY service; since
+    // S387 whoever reports first collects, and exactly that one installs.
     ipcServer.onApplyUpdate = () async {
-      final primarySvc = _services[primaryCtx.userIdHex];
-      if (primarySvc == null) {
-        log.warn('apply_update: no primary service');
-        return;
+      final ok = await updateOffer.consent();
+      if (!ok) {
+        log.warn('apply_update: not installed '
+            '(state ${updateOffer.state.name}, '
+            'running=${updateOffer.installedCurrently})');
       }
-      final mgr = primarySvc.binaryUpdateManager;
-      if (mgr == null) {
-        log.warn('apply_update: no binaryUpdateManager');
-        return;
-      }
-      if (mgr.state != BinaryUpdateState.ready) {
-        log.warn('apply_update: state is ${mgr.state}, not ready');
-        return;
-      }
-      if (updateApplyInProgress) {
-        log.info('apply_update: already in progress');
-        return;
-      }
-      updateApplyInProgress = true;
-      log.info('apply_update: user confirmed — applying v${mgr.targetVersion}');
-      final ok = await _applyAndRestart(mgr, log, shutdownAll);
-      if (!ok) updateApplyInProgress = false;
     };
     ipcServer.onCommandDispatched = (cmd) {
       log.info('IPC cmd: $cmd');
+    };
+    // ── THE TRAY'S LANGUAGE COMES FROM THE GUI (V-10-a = b) ───────────
+    //
+    // Without this edge the tray status text showed the language of the
+    // OPERATING SYSTEM, not the one chosen in the GUI. The code travels as a
+    // field on an IPC request that is made anyway — no round trip of its own,
+    // no timer, no network traffic.
+    ipcServer.onUiLocale = (code) {
+      log.info('Tray language from the GUI: $code');
+      tray.setLocale(code);
     };
     await ipcServer.start();
     _ipcServer = ipcServer;
@@ -922,7 +1072,18 @@ class _MultiServiceDaemon {
     _statusTimer = Timer.periodic(const Duration(seconds: 60), (_) {
       if (!_running) return;
       final svcNames = _services.values.map((s) => s.displayName).join(', ');
-      log.info('Status: peers=${node.routingTable.peerCount}, identities=${_services.length} [$svcNames]');
+      // `host.peerCount` were Kademlia peers of the V3 routing table.
+      // The V4.1 replacement is NOT the same quantity and is therefore also
+      // not named so: `V41Node.status` names slots, sessions by
+      // direction and the readiness — evidence instead of acquaintance
+      // (§22.7).
+      final w = _host;
+      log.info('Status: ${w == null ? "no mycelium host" : "mycelium port=${w.port} "
+          // S394 V4: a neighbour is a NODE; the addresses are counted apart.
+          "neighbours=${w.node.neighbourhood.count} "
+          "(addresses ${w.node.neighbourhood.all.fold<int>(0, (s, n) => s + n.addresses.length)}) "
+          "mailboxes=${w.mailboxes.length}"}, '
+          'identities=${_services.length} [$svcNames]');
     });
 
     // Heartbeat (5s) for main-event-loop liveness diagnostics. The 60s
@@ -958,38 +1119,44 @@ class _MultiServiceDaemon {
       } else {
         log.debug('heartbeat tick=$_heartbeatTick dt=${dtMs}ms');
       }
-      _node?.transport.checkReceiveHealth();
-
-      // Firewall blockade detection: after 60s of uptime, if zero external
-      // packets were received, the local firewall is likely blocking inbound
-      // UDP. Warn once per session so the user (or their log) can diagnose.
-      final transport = _node?.transport;
-      if (_heartbeatTick == 12 && transport != null &&
-          !transport.firewallWarningEmitted &&
-          transport.externalPacketsReceived == 0) {
-        transport.firewallWarningEmitted = true;
-        log.warn('FIREWALL? 60s uptime, 0 inbound external UDP packets. '
-            'If connectivity fails, check that the OS firewall allows '
-            'inbound UDP for this process.');
-      }
+      // GONE WITH V3 (CUT, 31.08.): `_nodeHost.checkReceiveHealth()`
+      // and the firewall blockage warning. Both read state from
+      // `CleonaNode.transport` (`externalPacketsReceived`,
+      // `firewallWarningEmitted`) — the socket no longer exists.
+      //
+      // REPORTED GAP, not silently replaced: the
+      // firewall detection was the only place where a user
+      // learned that their operating system blocks incoming UDP. The
+      // equivalent quantity in V4.1 would be "zero incoming datagrams
+      // after 60 s" at the `UdpSocketSet`; there it is today only counted, not
+      // evaluated.
     });
 
     _startNetworkMonitor();
 
-    // Public IP discovery: PortMapper runs at node startup via NAT-PMP/UPnP.
-    // If it fails (common — no IGD on many routers), fall back to ipify after 10s.
-    // This is critical for Bootstrap nodes behind DNAT — without a known public IP,
-    // mobile peers can't reach them from carrier networks.
-    _queryPublicIpFallback(delay: const Duration(seconds: 10));
-
-    // Re-query public IP on any network change (mass route-down, ip monitor, etc.).
-    node.onNetworkChangeDetected = () {
-      _queryPublicIpFallback(delay: const Duration(seconds: 3), force: true);
-    };
+    // ── THE V3 ADDRESS MODEL IS GONE (CUT, 31.08.) ─────────────────────
+    //
+    // Here stood the ipify fallback and its repetition on
+    // network change. Both lived in `service_daemon_v3_address.dart`, and
+    // its header said so itself: "V4 ch. 4 knows neither hole punching
+    // nor port prediction nor a public address that one would have to
+    // ask for. Caller AND callee disappear
+    // together." The file is deleted.
+    //
+    // V4.1 determines its announceable addresses itself and without a
+    // foreign service: `dialableLocalAddresses()` in `startV41Node`, filtered
+    // against DS-Lite/464XLAT, CGNAT and link-local (B-26). What no longer
+    // arises in the process is the public address CONFIRMED by NAT probe
+    // of a node behind symmetric NAT — that is a
+    // reported gap, not a finished task.
+    //
+    // With them `--public-ip` also goes away: the switch set
+    // `CleonaNode.manualPublicIp`. It is still parsed, but has no effect
+    // anywhere any more.
 
     _running = true;
-    tray.updateMenu(serviceRunning: true);
-    log.info('Dienst gestartet. Socket: $socketPath');
+    _trayStatus.setServiceRunning(true);
+    log.info('Service started. Socket: $socketPath');
 
     // Startup-readiness flag for external orchestrators (E2E tests, systemd,
     // restart scripts). Consumers poll for this file instead of guessing with
@@ -1022,57 +1189,47 @@ class _MultiServiceDaemon {
     });
   }
 
-  // Boot-window gate read by V3 ApplicationFrame / InfrastructureFrame hooks
-  // to drop frames that arrive before per-identity services are constructed.
-  // The sender retries via S&F (§3.3.7) + erasure (§6), so dropping is safe.
-  bool _servicesReady = false;
-
-  // Recently-active identity tracking for the §2.4 step [9] try-loop. The
-  // most-recently-delivered identity is tried first on the next inbound
-  // ApplicationFrame — the active conversation partner is statistically
-  // the most likely recipient, which keeps the per-frame KEM-decap cost
-  // at one attempt for the common case.
-  final List<String> _serviceRecency = <String>[];
-
-  /// Order [_services.values] most-recently-active first. Identities not
-  /// yet in the recency list (cold start, fresh identity) are appended
-  /// after the recency-sorted prefix in insertion order.
-  Iterable<CleonaService> _orderedServicesByRecency() {
-    final seen = <String>{};
-    final out = <CleonaService>[];
-    for (final id in _serviceRecency) {
-      final s = _services[id];
-      if (s != null && seen.add(id)) out.add(s);
-    }
-    for (final entry in _services.entries) {
-      if (seen.add(entry.key)) out.add(entry.value);
-    }
-    return out;
-  }
-
-  /// Mark [service]'s identity as most-recently-active. Called after a
-  /// successful ApplicationFrame delivery to that service.
-  void _markServiceActive(CleonaService service) {
-    final id = service.nodeIdHex;
-    _serviceRecency.remove(id);
-    _serviceRecency.insert(0, id);
-  }
+  // ── GONE WITH THE V3 RECEIVE SIDE (CUT, 31.08.) ──────────────
+  //
+  // Here stood `_servicesReady` (boot-window gate of the V3 hooks),
+  // `_serviceRecency`, `_orderedServicesByRecency()` and
+  // `_markServiceActive()` — together the KEM try-loop heuristic apparatus
+  // from §2.4 step [9]: try the most recently supplied identity
+  // first, so that an incoming `ApplicationFrameV3` is normally
+  // assigned with ONE decap probe.
+  //
+  // V4.1 does not need it, and for a structural reason: the
+  // assignment no longer happens by trying. The pair key
+  // `K_AB` is pairwise, `V41Host.accept` knows from the session who
+  // is speaking, and `attachV41` hangs exactly one identity on exactly one
+  // host. There is no list that one could sort.
 
   /// Add a new identity at runtime.
   Future<CleonaService?> addIdentity(IdentityContext ctx) async {
-    if (_node == null || !_running) return null;
+    final host = _host;
+    if (host == null || !_running) return null;
     if (_services.containsKey(ctx.userIdHex)) return _services[ctx.userIdHex];
 
     _contexts[ctx.userIdHex] = ctx;
-    _node!.registerIdentity(ctx);
 
     final service = CleonaService(
       identity: ctx,
-      node: _node!,
       displayName: ctx.displayName,
+      port: host.port,
     );
     await service.startService();
     _services[ctx.userIdHex] = service;
+
+    // CATCH UP THE MAILBOX (S387) — the same host, the same port. First
+    // the service, then the attachment: the attachment collects immediately.
+    // Without it an identity created at runtime would be mute, without
+    // an error appearing anywhere.
+    serviceRegister(host, service);
+
+    // §22.9: BEFORE `addService`, otherwise the IPC server does not chain our
+    // edge — see the reasoning in `_bindIdentityToTray`.
+    _bindIdentityToTray(ctx.userIdHex, service);
+    _bindRemoteDeletion(ctx.userIdHex, service);
 
     // Update IPC server
     _ipcServer?.addService(ctx.userIdHex, service);
@@ -1085,7 +1242,10 @@ class _MultiServiceDaemon {
       calendar: service.calendarManager,
     ));
 
-    log.info('Identität hinzugefügt: ${ctx.displayName}');
+    // S369: name on `debug`, identifier on `info` — reasoning at
+    // "Service started" in `_startAllInner`.
+    log.info('Identity added: ${ctx.userIdHex.substring(0, 16)}...');
+    log.debug('Identity added — displayName="${ctx.displayName}"');
     return service;
   }
 
@@ -1096,15 +1256,26 @@ class _MultiServiceDaemon {
       await service.stop();
     }
     _contexts.remove(nodeIdHex);
-    _node?.unregisterIdentity(nodeIdHex);
+    // DEREGISTER THIS IDENTITY'S MAILBOX (S387). Without this line
+    // the host kept delivering to a stopped service. The last
+    // mailbox stays at the node until `stopAll` (`serviceDeregister`).
+    final host = _host;
+    if (host != null && service != null) {
+      serviceDeregister(host, service, report: log.info);
+    }
+    // And the display (S376, P8): the tray aggregates across all identities
+    // — readiness as minimum, partners as maximum. If the removed
+    // identity stayed in the aggregate, its last state would pull the
+    // display down permanently.
+    _trayStatus.unregisterIdentity(nodeIdHex);
     _ipcServer?.removeService(nodeIdHex);
     _caldavServer?.unregisterIdentity(nodeIdHex);
-    log.info('Identität entfernt: $nodeIdHex');
+    log.info('Identity removed: $nodeIdHex');
   }
 
   /// IPC callback: create a new identity at runtime.
   Future<String?> _createIdentityAtRuntime(String displayName) async {
-    if (_node == null || !_running) return null;
+    if (_host == null || !_running) return null;
 
     final mgr = IdentityManager(baseDir: config.baseDir);
     final identity = await mgr.createIdentity(displayName);
@@ -1125,7 +1296,6 @@ class _MultiServiceDaemon {
     mgr.saveIdentities(identities);
 
     await addIdentity(ctx);
-    _publishIdentityRegistry();
     return ctx.userIdHex;
   }
 
@@ -1133,7 +1303,7 @@ class _MultiServiceDaemon {
   /// The Identity record already exists on disk (created by
   /// recoverIdentitiesFromRegistry), just needs an IdentityContext + service.
   Future<void> _startRecoveredIdentity(Identity identity) async {
-    if (_node == null || !_running) return;
+    if (_host == null || !_running) return;
     final mgr = IdentityManager(baseDir: config.baseDir);
     final ctx = await IdentityContext.createFromIdentity(
       identity: identity,
@@ -1149,11 +1319,107 @@ class _MultiServiceDaemon {
     }
     mgr.saveIdentities(identities);
     await addIdentity(ctx);
-    log.info('Recovered identity started: ${identity.displayName} (hdIndex=${identity.hdIndex})');
+    // S369: name on `debug` — reasoning at "Service started".
+    log.info('Recovered identity started: '
+        '${ctx.userIdHex.substring(0, 16)}... (hdIndex=${identity.hdIndex})');
+    log.debug('Recovered identity started — '
+        'displayName="${identity.displayName}"');
+  }
+
+  // ── P-12: REMOTE DELETION NEEDS A LISTENER ──────────────────
+  //
+  // `CleonaService.onIdentityDeletedRemotely` had NO assigner in `lib/`
+  // until today — declaration `cleona_service.dart:611`, call
+  // `cleona_service_identity_deletion.dart:85`, only assignment in
+  // a smoke test. In operation the callback was always `null`. The
+  // service cleared away its data on the message TWIN_IDENTITY_DELETED
+  // and reported upwards, where nobody stood: the identity stayed
+  // registered in the running daemon and stayed in `identities.json`
+  // — an empty shell. (Gap book P-12, open since S361.)
+  //
+  // HERE the host hooks in.
+  void _bindRemoteDeletion(String nodeIdHex, CleonaService service) {
+    service.onIdentityDeletedRemotely = (id) {
+      // NOT in the stack of the frame that brought the message.
+      // `onIdentityDeletedRemotely` is called synchronously from within
+      // `_handleTwinIdentityDeleted`; `removeIdentity` stops exactly the
+      // service whose receive path is still on the stack. `Future(…)`
+      // puts the work at the END of the event queue (not
+      // `Future.microtask`, which would still run into the ongoing
+      // continuation), so that the frame is processed to the end first.
+      unawaited(Future(() => _identityFernDeleted(id)));
+    };
+  }
+
+  /// The host part of remote deletion. Body and reasoning are in
+  /// `identity_remote_deletion.dart`; here stands only what belongs to THIS
+  /// host: the running service and the state of the process.
+  Future<void> _identityFernDeleted(String nodeIdHex) async {
+    try {
+      // Remember the directory BEFORE `removeIdentity` — afterwards the
+      // context is removed and the fallback path via `profileDir`
+      // (for an entry without `nodeIdHex`) would have no source any more.
+      final profileDir = _contexts[nodeIdHex]?.profileDir;
+
+      // First deregister and stop, then delete. The other way round the
+      // still running service would have re-created `messages.db` (and
+      // `-wal`/`-shm`) in the just deleted directory.
+      await removeIdentity(nodeIdHex);
+
+      final remaining = remoteDeletionRemoveEntry(
+        nodeIdHex: nodeIdHex,
+        mgr: IdentityManager(baseDir: config.baseDir),
+        profileDir: profileDir,
+        log: log.info,
+      );
+
+      // ── THE TRANSITION INTO "ZERO IDENTITIES" (owner decision (b)) ──
+      //
+      // This state already exists, and it is used daily on first
+      // start: `startAll()` finds no identities, reports
+      // "Keine Identitaeten gefunden — warte auf GUI-Setup (cleona.start
+      // trigger)" and sets `_running = false`. The daemon lives on,
+      // the tray stays, `_triggerTimer` listens for `cleona.start`.
+      //
+      // `stopAll()` leads exactly there: services, IPC server, V4.1 node
+      // and all clocks are cleanly torn down, `_running` falls, the
+      // tray state goes to "stopped", and `_triggerTimer` keeps
+      // running (it is only cancelled in `shutdownAll()`). If the
+      // UI then creates a new identity, it writes
+      // `cleona.start` (`main.dart::_signalDaemonToStart`) and the daemon
+      // starts up again by itself.
+      //
+      // NO process end. `_exportContactSeed` (same file) exits
+      // with `exit(1)` on zero identities — that is the CLI path
+      // `--export-contact-seed` and is never entered from here.
+      if (remaining == 0) {
+        log.warn('The last identity of this device was deleted on '
+            'another own device — services are being stopped, '
+            'the daemon waits for GUI setup (cleona.start trigger)');
+        await stopAll();
+      }
+    } catch (e, stack) {
+      // The error MUST be visible: this is a deletion path, and a
+      // deletion that silently does not delete is the error.
+      log.error('Remote deletion of the host failed for '
+          '${nodeIdHex.length >= 16 ? nodeIdHex.substring(0, 16) : nodeIdHex}'
+          '...: $e');
+      log.error('Stack: $stack');
+    }
   }
 
   /// IPC callback: delete an identity at runtime.
   Future<bool> _deleteIdentityAtRuntime(String nodeIdHex) async {
+    // THIS GATE STAYS — and it applies ONLY to this path (the
+    // user deletes themselves, via the UI). Here it is
+    // right: it prevents someone from locking themselves out of
+    // their own device with a slip. It does not apply to the TWIN MESSAGE
+    // — there the user deliberately triggered the deletion on another
+    // own device, and the promise reads "on
+    // all my devices" (owner decision (b) of 09.09.2026, P-12).
+    // The twin path therefore runs via `_identityFernDeleted`
+    // and not through this function. The same applies to the
+    // identically worded gate in `ipc_server.dart` (`delete_identity`).
     if (_services.length <= 1) return false;
 
     // Send IDENTITY_DELETED to all contacts + hang up active calls BEFORE removing.
@@ -1185,42 +1451,59 @@ class _MultiServiceDaemon {
       mgr.deleteIdentity(id.id);
     }
 
-    _publishIdentityRegistry();
     return true;
   }
 
-  /// Publish the current identity list to DHT (fire-and-forget).
-  /// Uses the first available service — the registry is keyed by masterSeed,
-  /// not per-identity.
-  void _publishIdentityRegistry() {
-    final service = _services.values.firstOrNull;
-    if (service == null) return;
-    final mgr = IdentityManager(baseDir: config.baseDir);
-    final masterSeed = mgr.loadMasterSeed();
-    if (masterSeed == null) return;
-    final identities = mgr.loadIdentities();
-    final entries = identities
-        .map((i) => (hdIndex: i.hdIndex, name: i.displayName))
-        .toList();
-    final nextIndex = mgr.nextHdIndex();
-    service.storeRegistryInDht(masterSeed, entries, nextIndex).then((ok) {
-      log.info('Identity registry DHT publish: ${ok ? 'success' : 'failed'}');
-    }).catchError((e) {
-      log.debug('Identity registry DHT publish error: $e');
-    });
-  }
+  // ── GAP G-5: THE IDENTITY REGISTRY HAS NO STORAGE PLACE ────────
+  //
+  // Here stood `_publishIdentityRegistry()` — two callers
+  // (`_createIdentityAtRuntime`, `_deleteIdentityAtRuntime`), one
+  // callee: `CleonaService.storeRegistryInDht`. That lay in
+  // `cleona_service_v3_delivery.dart:525` and stored the multi-identity
+  // registry reed-solomon-encoded in the Kademlia DHT
+  // (`node.routingTable.findClosestPeers` + `MTV3_FRAGMENT_STORE` at ten
+  // replicators). Both are deleted.
+  //
+  // WHAT IS MISSING, AND SINCE WHEN ALSO THE CONSTRUCTION: until 08.09.2026
+  // it said here that `identity/identity_dht_registry.dart` and the
+  // Reed-Solomon codec lived on — construction, encryption and fragmentation
+  // of the registry were unchanged in place. THE FILE HAS BEEN DELETED SINCE
+  // S376 (owner decision V-11 = A, 08.09.2026). It had
+  // zero callers in `lib/` and built fragments for a storage place that
+  // does not exist: V4.1 has no pollable third-party storage (§4.3 is
+  // replaced in V4.1, not renumbered — liveness is pairwise). The
+  // secure storage on the tagline is addressed to a RECIPIENT; the
+  // registry has none.
+  //
+  // THE GAP STAYS OPEN, it has not become smaller with the deletion
+  // — only more honestly booked: there is now also no half
+  // component lying around that looks like a solution. The REPLACEMENT is
+  // outstanding and normatively sketched: v4_1 §13.7 demands derivation
+  // instead of directory ("derivation instead of a directory"). As long as
+  // nobody builds it, the consequence below applies unchanged.
+  //
+  // CONSEQUENCE, explicitly logged: multi-identity recovery via the
+  // registry is dead until §14 gets a V4.1 carrier. Whoever loses their
+  // device does NOT get their secondary identities back via the seed phrase
+  // — only the primary identity. NOTHING is
+  // faked here: there is no dummy that logs "successful".
 
   void _checkProfileIntegrity(IdentityManager mgr, List<Identity> identities) {
-    final idFile = File('${config.baseDir}/identities.json');
+    // S368: the name on disk is `identities.json.enc` — the same
+    // file, one suffix more. If the plain-text name still stood here,
+    // the guard would fire every 30 s, see "deleted" and rewrite
+    // the file every time. Not harmful, but a check that
+    // is never right is no check.
+    final idFile = File('${config.baseDir}/identities.json.enc');
     if (!idFile.existsSync()) {
-      log.warn('PROFILE WATCHDOG: identities.json deleted externally — '
+      log.warn('PROFILE WATCHDOG: identities.json.enc deleted externally — '
           're-persisting ${identities.length} identities from RAM');
       try {
         Directory(config.baseDir).createSync(recursive: true);
         mgr.saveIdentities(identities);
-        log.info('PROFILE WATCHDOG: identities.json restored');
+        log.info('PROFILE WATCHDOG: identities.json.enc restored');
       } catch (e) {
-        log.error('PROFILE WATCHDOG: failed to restore identities.json: $e');
+        log.error('PROFILE WATCHDOG: failed to restore identities.json.enc: $e');
       }
     }
 
@@ -1244,7 +1527,7 @@ class _MultiServiceDaemon {
 
   Future<void> stopAll() async {
     if (!_running) return;
-    log.info('Dienst wird gestoppt...');
+    log.info('Service is stopping...');
 
     _running = false;
 
@@ -1263,24 +1546,44 @@ class _MultiServiceDaemon {
     await _ipcServer?.stop();
     _ipcServer = null;
 
+    // THE HOST FIRST (S387), then the services. The other way round the still
+    // running host delivered to an already stopped service — a receipted
+    // message that nobody stores any more. `stop` saves the neighbours
+    // and closes wire and state checker; an open timer would keep the
+    // Dart VM alive, and the daemon would not exit after `stopAll()`.
+    await _delivery?.close();
+    _delivery = null;
+    // The port mapping laid down FIRST (task D): its own
+    // renewal timer otherwise keeps the Dart VM alive, independently of the
+    // wire that `stop()` closes right after.
+    if (_host != null) await portMappingLayDown(_host!);
+    _host?.stop();
+    _host = null;
+
     for (final service in _services.values) {
       await service.stop();
     }
     _services.clear();
     _contexts.clear();
 
-    await _node?.stop();
-    _node = null;
-
     final pidFile = File('${config.baseDir}/cleona.pid');
     if (pidFile.existsSync()) pidFile.deleteSync();
 
-    tray.updateMenu(serviceRunning: false);
-    log.info('Dienst gestoppt (Tray bleibt aktiv)');
+    // The port marker falls with the node that held the port.
+    // If it is left lying (crash, SIGKILL, power failure), that is no
+    // damage: Guard 3 of the next start probes the port, finds it
+    // free and clears the marker away itself.
+    try {
+      final portFile = File('${config.baseDir}/$_udpPortFilename');
+      if (portFile.existsSync()) portFile.deleteSync();
+    } catch (_) { /* non-fatal */ }
+
+    _trayStatus.setServiceRunning(false);
+    log.info('Service stopped (tray stays active)');
   }
 
   Future<void> shutdownAll() async {
-    log.info('Daemon wird beendet...');
+    log.info('Daemon is shutting down...');
     _triggerTimer?.cancel();
     _socketWatchdog?.cancel();
     if (_running) await stopAll();
@@ -1291,13 +1594,25 @@ class _MultiServiceDaemon {
     // lock = two daemons with valid exclusive locks on different inodes).
     // The stale PID in the file is detected by the GUI via kill -0.
     tray.dispose();
+    // THE LAST FLUSH, and it was MISSING until 01.09.2026. Seven other
+    // exit points of this file (`:113 :139 :172 :184 :222 :236 :403`)
+    // call it, of all things the orderly shutdown did not — `exit`
+    // asks no timer, so on EVERY clean exit up to 2 s of
+    // log were lost, exactly at the forensically most interesting edge (C-3, B-4).
+    await CLogger.flushAll();
     exit(0);
   }
 
   /// Windows: ensure inbound firewall rules (UDP + TCP) for the daemon exe.
   /// Program-based rules — port-independent, set once per installation.
   /// Non-admin: netsh fails gracefully (rules should be set by installer).
-  Future<void> _ensureWindowsFirewallRule(int port) async {
+  /// The parameter `port` went away (CUT, 31.08.) — it was already
+  /// unused before: the rule is PROGRAM-BOUND (`program=$exe`,
+  /// no `localport=`), so it allows every port of this process. Without
+  /// this note the port change from `nodePort` to
+  /// `nodePort + 1` would have looked like an error on the next reading. It is
+  /// none, and demonstrably so: `port` does not occur in the body.
+  Future<void> _ensureWindowsFirewallRule() async {
     final marker = File('${config.baseDir}/firewall_rule_added');
     if (marker.existsSync()) return;
 
@@ -1551,25 +1866,153 @@ class _MultiServiceDaemon {
   }
 
   /// Linux: `ip monitor address` — fires on every IPv4/IPv6 address add/delete.
-  /// Windows: polling fallback (no equivalent of ip monitor).
+  /// Windows **and macOS**: 30-s poll (no `ip monitor` available).
+  ///
+  /// ── macOS HAD NO EDGE AT ALL UNTIL S376 (P5 finding 4) ────────────
+  ///
+  /// This method knew two cases: `Platform.isWindows` and "otherwise".
+  /// "Otherwise" meant `Process.start('ip', ['monitor', 'address'])` — that
+  /// is Linux `iproute2`. On macOS there is no `ip`; the start throws,
+  /// the `catch` writes a warning line and ends **without replacement**.
+  /// `Platform.isMacOS` had zero occurrences in this file.
+  ///
+  /// The macOS daemon thus learned nothing of a network change: no
+  /// new announce addresses, no dropped sessions, no
+  /// `announceOwnEntry(vorrangig: true)`, no catch-up harvest. On every
+  /// Wi-Fi change of a notebook — office, home, waking from
+  /// sleep — an entry record stood in the network that points to the
+  /// old address, until the daemon restarts. §22.6.
+  ///
+  /// THE DEVICE WAS NOT MEASURED. There is no running macOS daemon from
+  /// the V4.1 tree in this project (S370: iOS/macOS have never been
+  /// built from this line). What is proven is the CODE path — which
+  /// branch macOS takes and that it ends without replacement. What is NOT
+  /// proven: the exact error message of `Process.start` on macOS.
+  /// It is irrelevant to the correctness of the fix: the poll is
+  /// now chosen BEFORE the `ip monitor` attempt, so macOS no longer reaches
+  /// the throwing call at all.
+  ///
+  /// WHY THE POLL AND NOT `SCNetworkReachability`. The poll is
+  /// built, measured (Windows has run with it since S370) and needs no
+  /// second native bridge. An event path would be more economical; it is a
+  /// separate task and not a prerequisite for macOS getting an edge
+  /// at all.
   void _startNetworkMonitor() async {
-    if (Platform.isWindows) {
-      // Windows: poll for network changes every 30s (no ip monitor equivalent).
+    // ONE condition for both platforms, no second branch with
+    // the same body: the Windows version is the version, and macOS
+    // falls into it.
+    //
+    // VIA [networkChangeDetectionFor] and not via a `Platform.is…`
+    // at this place: a guard cannot set `Platform.isMacOS`, but
+    // can query this function for every platform. The
+    // detailed reasoning is there.
+    final detection = networkChangeDetectionFor(
+      isWindows: Platform.isWindows,
+      isMacOS: Platform.isMacOS,
+    );
+    if (detection == NetworkChangeDetection.poll) {
+      // Poll for network changes every 30s (no ip monitor equivalent).
       // The node-reset runs once for the whole daemon; per-service we only
       // trigger the service-side cleanup (mailbox poll, identity-publisher).
       _networkPollTimer = Timer.periodic(const Duration(seconds: 30), (_) async {
         if (!_running) return;
-        final currentIps = await Transport.getAllLocalIps();
+        final currentIps = await dialableLocalAddresses();
         final ipsKey = currentIps.join(',');
         final lastKey = _lastPollIps.join(',');
-        if (ipsKey == lastKey && _lastPollIps.isNotEmpty) return;
+        // SINCE S380 THE PROBE STANDS ONCE, in `isRealNetworkChange` —
+        // the `ip monitor` branch below needs the same, and two copies
+        // would be two places where "change" diverges. That
+        // was exactly the state before S380: a comparison here, none there.
+        if (!isRealNetworkChange(before: _lastPollIps, after: currentIps)) {
+          return;
+        }
         _lastPollIps = currentIps;
         log.info('Network change detected (poll) — IPs: $lastKey → $ipsKey');
-        await _node?.onNetworkChanged();
+        // ── WHAT THESE THREE LINES TRIGGER ──────────────────────────
+        //
+        // `service.onNetworkChanged` is not a mere cleanup call. It calls
+        // the seam `v41OnNetworkChanged` (`cleona_service.dart`, "final
+        // knotenNaht = v41OnNetworkChanged"), and that does three things in
+        // this order: it determines the dialable addresses anew,
+        // resets the announcement with them (`setAnnounceAddresses` in
+        // `v41_attach.dart` — exactly for that S360 pulled the function out of
+        // the body of `startV41Node`), and only afterwards lets
+        // `V41Node.onNetworkChanged` drop the sessions. The
+        // rendezvous loop sees a different address fingerprint on its next
+        // pass, `AblageMarke.verlangtAblage`
+        // fires, and the own entry record is stored anew with reason
+        // `Adresswechsel`.
+        //
+        // DETECTION: here by 30-s poll via `dialableLocalAddresses`
+        // (neither Windows nor macOS have `ip monitor`); in-process and
+        // under Linux event-driven, see below.
+        //
+        // ── UNTIL S373 THE PRIOR STATE STOOD HERE ───────────────────────
+        //
+        // Verbatim: "`_nodeHost.onNetworkChanged()` and the
+        // ipify fallback went away with V3 and are NOT
+        // replaced in V4.1: the node binds its socket once and announces the
+        // address determined at start. An address change makes the
+        // own entry record silently wrong — reported gap."
+        //
+        // That was wrong since S360 — the gap was closed there,
+        // the comment stayed. On 07.09.2026 it
+        // misled someone. It stands here explicitly once
+        // more so that nobody revives the old reading: whoever
+        // checks the chain finds it complete.
+        //
+        // ── THE ONE EDGE THIS POLL DOES NOT SEE ──────────────
+        //
+        // It compares LOCAL addresses. If only the OUTER one changes —
+        // the provider assigns a new WAN IP, the forced disconnect —,
+        // the local IPs stay the same and the poll stays silent. This
+        // edge is covered by the observed address from §17.3: `onAgreedChanged`
+        // carries the announcement forward (package `s373-beobachtete-adresse`,
+        // `8e3ea26c`). Without it exactly this one case would stay open — and
+        // only this one.
+        // ── THE NODE PART ONCE (S376, P5 finding 5) ───────────────
+        //
+        // There is ONE node in this process: one socket, one
+        // session set, one entry record, one LAN call. The
+        // loop below, by contrast, runs per identity — until S376
+        // the node part thus also ran N times, because `triggerNodeReset`
+        // was ignored. With three identities that was three
+        // session teardowns, three priority announcements and three
+        // LAN calls for ONE event; the second and third pass
+        // tore down sessions that the partner selection had just rebuilt
+        // after the first.
+        // ── THE NODE PART ONCE (S376 P5 finding 5; S387 mycelium) ─────
+        //
+        // `Host.networkChanged` (§11.8, §22.7.1): all evidence expires
+        // immediately, interfaces anew, ONE call series, ONE query of the
+        // remembered neighbours — once per event for the whole process,
+        // the services below only with `triggerNodeReset: false`.
+        final w = _host;
+        if (w != null) {
+          // The manifest slot AFTER the end of the network change (S388, M1+):
+          // before that the old neighbourhood still applies.
+          unawaited(w.networkChanged().catchError((Object e) {
+            log.warn('mycelium network change failed: $e');
+          }).then((_) => _updateManifestAsk()));
+          // The port mapping at the same edge (§7.3) — NOT awaited,
+          // for the same reason as at start (RFC 6886 backoff).
+          unawaited(() async {
+            try {
+              await portMappingToEdge(
+                w,
+                baseDir: config.baseDir,
+                key:
+                    hostKey(config.baseDir, _masterSeedForHost),
+                report: log.info,
+              );
+            } catch (e) {
+              log.warn('Port mapping (network change): $e');
+            }
+          }());
+        }
         for (final service in _services.values) {
           service.onNetworkChanged(triggerNodeReset: false);
         }
-        _queryPublicIpFallback(delay: const Duration(seconds: 10));
       });
       return;
     }
@@ -1585,13 +2028,69 @@ class _MultiServiceDaemon {
         if (!_running) return;
         debounce?.cancel();
         debounce = Timer(const Duration(seconds: 2), () async {
-          log.info('Network change detected (ip monitor)');
-          await _node?.onNetworkChanged();
+          // ── AN EVENT IS NOT YET A CHANGE (S380) ──────────────
+          //
+          // Until S380 only the log line stood here: EVERY netlink event
+          // counted as a network change and dropped all sessions. A
+          // router advertisement refreshes the lifetimes of an existing
+          // address and is such an event — measured on the bootstrap
+          // six in 40 minutes, each with three dropped
+          // sessions, while the address set stayed unchanged.
+          // Reasoning and measurement log at `isRealNetworkChange`.
+          //
+          // And the message now names the addresses. Six messages
+          // without a single "what then" kept exactly this finding invisible
+          // for two sessions.
+          final currentIps = await dialableLocalAddresses();
+          final lastKey = _lastPollIps.join(',');
+          final ipsKey = currentIps.join(',');
+          if (!isRealNetworkChange(
+              before: _lastPollIps, after: currentIps)) {
+            log.debug('Address event without address change — discarded '
+                '(ip monitor, IPs: $ipsKey)');
+            return;
+          }
+          _lastPollIps = currentIps;
+          log.info(
+              'Network change detected (ip monitor) — IPs: $lastKey → $ipsKey');
+          // ── THE PRIOR STATE STILL STOOD HERE (S376) ────────────────
+          //
+          // Verbatim: "As in the Windows branch above: the node part of the
+          // network change went away with V3 and is not replaced in V4.1."
+          // S373 corrected the Windows branch and left THIS sentence
+          // standing — so it referred to a correction and at the same
+          // time claimed its opposite. Re-measured on 08.09.2026: the same
+          // applies here as above: the full node part runs — since
+          // S376 via `v41NodeNetworkChange`, ONCE per event, and
+          // the service loop below only carries the service part
+          // (P5 finding 5).
+          // The node part ONCE per event — as in the poll branch above
+          // (`Host.networkChanged`, S387).
+          final w = _host;
+          if (w != null) {
+            unawaited(w.networkChanged().catchError((Object e) {
+              log.warn('mycelium network change failed: $e');
+            }).then((_) => _updateManifestAsk()));
+            // The port mapping at the same edge (§7.3) — NOT
+            // awaited, for the same reason as at start
+            // (RFC 6886 backoff).
+            unawaited(() async {
+              try {
+                await portMappingToEdge(
+                  w,
+                  baseDir: config.baseDir,
+                  key:
+                      hostKey(config.baseDir, _masterSeedForHost),
+                  report: log.info,
+                );
+              } catch (e) {
+                log.warn('Port mapping (network change): $e');
+              }
+            }());
+          }
           for (final service in _services.values) {
             service.onNetworkChanged(triggerNodeReset: false);
           }
-          // Re-query public IP after network change (DNAT may have changed)
-          _queryPublicIpFallback(delay: const Duration(seconds: 10));
         });
       });
       proc.exitCode.then((code) {
@@ -1599,90 +2098,86 @@ class _MultiServiceDaemon {
         _networkMonitor = null;
       });
     } catch (e) {
-      log.warn('ip monitor not available: $e');
+      // ── AND HERE IT ENDS WITHOUT REPLACEMENT (S376, P5 finding 4) ─────────
+      //
+      // That is intentional and no longer a gap: the two platforms
+      // without `ip monitor` — Windows and macOS — take the poll above and
+      // do not reach this line. Whoever lands here is a
+      // Linux-like system WITHOUT `iproute2`. Building a third
+      // detection for it would be a path without a known user.
+      //
+      // BUT IT REMAINS A FINDING AND NOT OPERATING NOISE: without a
+      // network-change edge the own entry record stands silently wrong in the
+      // network after an address change. `warn` is therefore right,
+      // and the line now says WHAT fails instead of only what is missing.
+      log.warn('ip monitor not available: $e — this daemon has no '
+          'network-change edge any more: an address change stays '
+          'unnoticed until the restart (§22.6)');
     }
   }
 
-  /// ipify fallback — queries public IP from external service.
-  /// [force]: re-query even if a public IP is already known (detects IP change).
-  void _queryPublicIpFallback({Duration delay = Duration.zero, bool force = false}) {
-    Timer(delay, () async {
-      final node = _node;
-      if (node == null || !_running) return;
-      if (!force && node.natTraversal.hasPublicIp) {
-        log.info('ipify fallback: skipped (public IP already known)');
-        return;
-      }
 
-      log.info('ipify${force ? " recheck" : " fallback"}: querying public IP...');
-      try {
-        final client = HttpClient();
-        client.connectionTimeout = const Duration(seconds: 10);
-        final request = await client.getUrl(Uri.parse('https://api.ipify.org'));
-        final response = await request.close().timeout(const Duration(seconds: 10));
-        final ip = (await response.transform(const SystemEncoding().decoder).join()).trim();
-        client.close(force: true);
+  /// Since S376 the unread count is only ONE of the quantities that
+  /// the tray shows — it travels in the same [TrayStatus] as the
+  /// readiness state. The sum arises in
+  /// [TrayStatusBinder.refresh] from the counters reported per
+  /// identity; here only the trigger remains.
+  void _updateTrayBadge() => _trayStatus.refresh();
 
-        if (ip.isEmpty || !ip.contains('.')) {
-          log.warn('ipify: empty or invalid response');
-          return;
-        }
-
-        final oldIp = node.natTraversal.publicIp ?? node.manualPublicIp;
-        if (force && oldIp != null && oldIp == ip) {
-          log.info('ipify recheck: public IP unchanged ($ip)');
-          return;
-        }
-
-        if (force && oldIp != null && oldIp != ip) {
-          log.info('Public IP CHANGED: $oldIp → $ip — resetting NAT, broadcasting update');
-          node.natTraversal.reset();
-        }
-
-        if (node.manualPublicIp != null) {
-          // DNAT node (--public-ip): port is the listening port, no probe needed.
-          log.info('Public IP via ipify: $ip — DNAT node, confirming $ip:${node.port}');
-          node.natTraversal.confirmPublicAddress(ip, node.port);
-          node.manualPublicIp = ip;
-        } else {
-          log.info('Public IP via ipify: $ip — starting port probe');
-          node.natTraversal.setExternalIpOnly(ip);
-          node.probePublicPort(ip);
-        }
-        node.broadcastAddressUpdate();
-      } catch (e) {
-        log.warn('ipify${force ? " recheck" : " fallback"} failed: $e');
-      }
-
-      // IPv6 public IP discovery (§27 — DS-Lite/CGNAT bypass)
-      // Global IPv6 is directly routable — no port probe needed.
-      try {
-        final client6 = HttpClient();
-        client6.connectionTimeout = const Duration(seconds: 10);
-        final req6 = await client6.getUrl(Uri.parse('https://api6.ipify.org'));
-        final resp6 = await req6.close().timeout(const Duration(seconds: 10));
-        final ipv6 = (await resp6.transform(const SystemEncoding().decoder).join()).trim();
-        client6.close(force: true);
-        if (ipv6.isNotEmpty && ipv6.contains(':')) {
-          log.info('Public IPv6 via ipify: $ipv6');
-          node.natTraversal.setPublicIpv6(ipv6);
-          node.broadcastAddressUpdate();
-          // §4.7: one-shot inbound probe per join to detect carrier IPv6 filter.
-          node.probeIpv6InboundIfNeeded();
-        }
-      } catch (e) {
-        log.debug('ipify IPv6 query failed (expected if no IPv6): $e');
-      }
-    });
+  /// A moment after M1+ (S388). Only the service with an update carrier asks
+  /// (`attachUpdateToService`); for the others the call is empty — no packet.
+  Future<void> _updateManifestAsk() async {
+    for (final s in _services.values) {
+      await s.updateManifestAsk();
+    }
+    // E-9 (package 10 = A, S389): the same retry as in `main.dart`,
+    // at the same edges. No timer, no deadline (§1.2, working rule 5);
+    // whether collecting happens is decided by `onManifest`.
+    _updateOffer?.againTry();
   }
 
-  /// Update tray title with total unread count across all services.
-  void _updateTrayBadge() {
-    var total = 0;
-    for (final service in _services.values) {
-      total += service.conversations.values.fold<int>(0, (sum, c) => sum + c.unreadCount);
-    }
-    tray.updateMenu(serviceRunning: _running, unreadCount: total);
+  /// Registers an identity with the tray state (§22.9).
+  ///
+  /// ── WHAT THE DAEMON KNOWS ABOUT THE STATE ─────────────────────────
+  ///
+  /// The daemon reads `readinessState` directly from the service — the same
+  /// getter that `ipc_server.dart` sends across the IPC boundary. The tray
+  /// thus gets NO second calculation, but the same quantity one
+  /// layer earlier.
+  ///
+  /// S388 (owner decision E3 = A, V4.2 §22.9 version A2): here also stood
+  /// `syncPartnersOutbound`, `syncPartnersInbound`,
+  /// `hasPortMapping` and `hasNetwork` — the inputs of the five-level
+  /// connection display and the reachability marker. Both have
+  /// gone; the tray shows ONE indicator, the readiness state.
+  /// This also makes moot the named gap from S376 that the
+  /// daemon does not know the connection type and could never show
+  /// the level `medium`.
+  void _bindIdentityToTray(String identityId, CleonaService service) {
+    _trayStatus.registerIdentity(
+      identityId,
+      () => IdentityStatus(
+        readiness: service.readinessState,
+        // V-10-c = b (09.09.2026): the tray no longer aggregates by the
+        // weakest, but shows "Ready 2/3" and lists the
+        // identities individually in the menu. For that the
+        // aggregate needs the name — it did not have it until S377.
+        displayName: service.displayName,
+        unreadCount: service.conversations.values
+            .fold<int>(0, (sum, c) => sum + c.unreadCount),
+      ),
+      (onChange) {
+        // CHAIN, do not overwrite — `onStateChanged` is a field,
+        // not a stream. Exactly this construction is used by `IpcServer`
+        // (ipc_server.dart:203); whoever breaks it here takes from the GUI
+        // its state report.
+        final before = service.onStateChanged;
+        service.onStateChanged = () {
+          before?.call();
+          onChange();
+        };
+      },
+    );
   }
 
   void _launchGui() {
@@ -1692,10 +2187,14 @@ class _MultiServiceDaemon {
       log.info('Tray: GUI already connected — wrote gui.show trigger');
       return;
     }
-    final exePath = Platform.resolvedExecutable;
+    // `AppPaths.bundleDir` instead of the own directory (S367): since the
+    // rebuild the daemon lies in `<bundleDir>/bin/`, the GUI in the
+    // bundle root. `$dir$sep$guiName` would be from here
+    // `…/bin/cleona` and hit nothing; only the
+    // `..` entry would still have carried, and that is a lucky hit, not a path.
     final sep = Platform.pathSeparator;
-    final dir = exePath.substring(0, exePath.lastIndexOf(sep));
-    final guiName = Platform.isWindows ? 'cleona.exe' : 'cleona';
+    final dir = AppPaths.bundleDir;
+    final guiName = AppPaths.guiBinaryName;
     for (final path in ['$dir$sep$guiName', '$dir$sep..$sep$guiName']) {
       if (File(path).existsSync()) {
         log.info('Launching GUI: $path');
@@ -1707,34 +2206,86 @@ class _MultiServiceDaemon {
   }
 }
 
-String? _findIconPath({bool beta = false}) {
-  final exePath = Platform.resolvedExecutable;
-  final sep = Platform.pathSeparator;
-  final dir = exePath.substring(0, exePath.lastIndexOf(sep));
+/// Candidate paths for the tray icon, in search order.
+///
+/// Extracted from [_findIconPath] so that the order can be checked WITHOUT
+/// a file system — `test/smoke/
+/// smoke_windows_heimatpfad_guard.dart` measures on this function that the
+/// fallback to the shipped `cleona-app` bundle is in the list
+/// and the home part comes from [AppPaths.home].
+///
+/// ── WHY `AppPaths.home` AND NOT `Platform.environment['HOME']` ────
+///
+/// Until S370 `Platform.environment['HOME']` stood here, and the fallback
+/// was thus DEAD on Windows — i.e. exactly where the comment below
+/// promises it ("so the tray icon is still found on deployed VMs"). Measured
+/// on 06.09.2026 on the Windows build VM (`192.168.10.74`):
+///
+///   PS> [Environment]::GetEnvironmentVariable("HOME","User")     -> empty
+///   PS> [Environment]::GetEnvironmentVariable("HOME","Machine")  -> empty
+///   cmd(via sshd)> echo %HOME%                 -> C:\Users\Cleona
+///
+/// `HOME` is not a Windows variable. It exists there ONLY inside an
+/// sshd session, because the OpenSSH service sets it for its session. On
+/// start via Explorer, shortcut, the `Run` registry key or
+/// the task scheduler — i.e. in every end-user case and in every
+/// autostart — `home` was null and the two `cleona-app` candidates
+/// fell out of the list. [AppPaths.home] resolves `USERPROFILE` on Windows
+/// and returns `$HOME` unchanged under Linux/macOS.
+List<String> trayIconCandidatePaths({
+  required String exeDir,
+  required String sep,
+  required bool beta,
+  required bool windowsIcons,
+}) {
   // Beta builds prefer _beta icon variants; fall back to standard if not found.
   final suffixes = beta ? ['_beta', ''] : [''];
   // Windows tray requires .ico format; search .ico first, then .png as fallback.
-  final extensions = Platform.isWindows ? ['ico', 'png'] : ['png'];
+  final extensions = windowsIcons ? ['ico', 'png'] : ['png'];
   // Since c7ea816 moved daemon from ~/cleona-app/cleona-daemon to ~/cleona-daemon,
   // the binary no longer lives next to the Flutter bundle. Also search the sibling
-  // cleona-app bundle under $HOME so the tray icon is still found on deployed VMs.
-  final home = Platform.environment['HOME'];
-  final homeBundleDir = home != null ? '$home${sep}cleona-app' : null;
+  // cleona-app bundle under the user's home so the tray icon is still found on
+  // deployed VMs.
+  final homeBundleDir = '${AppPaths.home}${sep}cleona-app';
+  final out = <String>[];
   for (final suffix in suffixes) {
     for (final ext in extensions) {
-      for (final path in [
-        '$dir${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
-        '$dir${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
-        '$dir$sep..${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
-        '$dir$sep..${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
-        if (homeBundleDir != null)
-          '$homeBundleDir${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
-        if (homeBundleDir != null)
-          '$homeBundleDir${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
-      ]) {
-        if (File(path).existsSync()) return path;
-      }
+      out.addAll([
+        '$exeDir${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
+        '$exeDir${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
+        '$exeDir$sep..${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
+        '$exeDir$sep..${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
+        '$homeBundleDir${sep}data${sep}flutter_assets${sep}assets${sep}tray_icon$suffix.$ext',
+        '$homeBundleDir${sep}data${sep}flutter_assets${sep}assets${sep}app_icon$suffix.$ext',
+      ]);
     }
+  }
+  return out;
+}
+
+String? _findIconPath({bool beta = false}) {
+  // `AppPaths.bundleDir` instead of the own directory (S367) — the
+  // Flutter assets lie under `<bundleDir>/data/`, but the daemon in
+  // `<bundleDir>/bin/`. Without this change, of the six
+  // candidates below only the `$home/cleona-app` fallback would hit, which does
+  // not exist on a normal installation: the tray service would have
+  // lost its icon.
+  final sep = Platform.pathSeparator;
+  // MERGE S370: the candidate list now stands as a separate,
+  // checkable function `trayIconCandidatePaths` (it also fixes
+  // the `HOME` finding under Windows) — and it gets as root the
+  // BUNDLE ROOT, not the directory of the executable. Both
+  // are necessary: with `exePath`'s directory the root for the
+  // daemon would be at `<bundleDir>/bin`, and exactly that is what the
+  // paragraph above warns about. The parameter is called `exeDir` because for
+  // the UI it is both at once; here it is the bundle root.
+  for (final path in trayIconCandidatePaths(
+    exeDir: AppPaths.bundleDir,
+    sep: sep,
+    beta: beta,
+    windowsIcons: Platform.isWindows,
+  )) {
+    if (File(path).existsSync()) return path;
   }
   return null;
 }
@@ -1757,6 +2308,22 @@ Future<bool> _applyAndRestart(BinaryUpdateManager mgr, CLogger log, Future<void>
             .split('\x00')
             .where((s) => s.isNotEmpty)
             .toList();
+        // Swap argv[0] for the canonical place in the NEW bundle
+        // (S367). The update has just replaced the whole bundle; if
+        // the daemon previously lay in the root and now lies in `bin/`,
+        // the own command line points to a file that no longer
+        // exists — the restart would run into nothing, and quietly, because
+        // `Process.start` is detached. The arguments stay
+        // unchanged; only the path is updated, and that also only
+        // if a file really lies there.
+        if (cmdParts.isNotEmpty) {
+          final fresh = AppPaths.daemonPathIn(
+              AppPaths.bundleDirOf(Platform.resolvedExecutable));
+          if (File(fresh).existsSync()) {
+            log.info('Restart via $fresh (was: ${cmdParts.first})');
+            cmdParts[0] = fresh;
+          }
+        }
         final quotedCmd = cmdParts.map((p) => "'${p.replaceAll("'", r"'\''")}'").join(' ');
         await Process.start('/bin/bash', [
           '-c',
@@ -1803,9 +2370,6 @@ class _DaemonConfig {
   /// Beta-only: skip the machine-global single-instance guard (§15.1).
   /// Used by lab tooling (jury-swarm) to run N daemons on one host.
   final bool ignoreSingleInstance;
-  /// Infrastructure mode (§4.8 / §5.5 F4): accept PEER_STORE for any
-  /// recipient within budgets, not just own contacts. Used on bootstrap nodes.
-  final bool bootstrapMode;
   final bool exportContactSeed;
   final String? identitySelector;
   final String? name;
@@ -1816,7 +2380,6 @@ class _DaemonConfig {
     this.iconPath,
     this.publicIp,
     this.ignoreSingleInstance = false,
-    this.bootstrapMode = false,
     this.exportContactSeed = false,
     this.identitySelector,
     this.name,
@@ -1829,13 +2392,18 @@ _DaemonConfig _parseArgs(List<String> args) {
   String? iconPath;
   String? publicIp;
   bool ignoreSingleInstance = false;
-  bool bootstrapMode = false;
   bool exportContactSeed = false;
   String? identitySelector;
   String? name;
 
-  // Legacy: --profile and --name still accepted for compatibility
-  String? legacyProfile;
+  // S368: here additionally stood `String? legacyProfile` for `--profile`.
+  // The branch it controlled was WITHOUT EFFECT: both arms of the
+  // case distinction below set `baseDir` to `$home/.cleona`.
+  //
+  // `--name` does NOT fall with it — the removal plan named both together, but
+  // measured, `--name` has two live consumers (`overrideDisplayName`
+  // and `displayName` further below) and two live callers
+  // (`scripts/install-desktop.sh`, `scripts/update-bootstrap-seed.sh`).
 
   // Normalise `--key=value` forms (POSIX getopt-style) into separate
   // tokens so the per-flag matcher below can stay simple.
@@ -1855,10 +2423,6 @@ _DaemonConfig _parseArgs(List<String> args) {
       case '--base-dir':
         if (i + 1 < flat.length) baseDir = flat[++i];
         break;
-      case '--profile':
-        // Legacy: single-identity profile dir
-        if (i + 1 < flat.length) legacyProfile = flat[++i];
-        break;
       case '--port':
         if (i + 1 < flat.length) port = int.tryParse(flat[++i]);
         break;
@@ -1876,30 +2440,40 @@ _DaemonConfig _parseArgs(List<String> args) {
         // (lab/jury-swarm multi-instance). Honored only in beta builds.
         ignoreSingleInstance = true;
         break;
-      case '--bootstrap':
-        bootstrapMode = true;
-        break;
+      // `--bootstrap` stood here until S388 (V4.2 §11.7: no node has a
+      // special role). It now falls into `default` and ends the start.
       case '--export-contact-seed':
         exportContactSeed = true;
         break;
       case '--identity':
         if (i + 1 < flat.length) identitySelector = flat[++i];
         break;
+      default:
+        // D-2 (S372, owner decision E-2 = A): unknown switches are
+        // NO LONGER silently discarded. `--profile` fell in S368,
+        // but `scripts/cleona.service` still passed it through unchanged
+        // — the daemon accepted it, discarded it without effect, and an
+        // E2E run on 05.09. started with it on a throwaway path, while
+        // the daemon itself worked on the real profile and deleted 9.5 GB.
+        // Fail closed instead of fail silent, BEFORE any resource creation (lock,
+        // log, directory) — `_parseArgs` runs at the very beginning of
+        // `main()`.
+        stderr.writeln(
+            'FATAL: unknown switch "${flat[i]}" — daemon does NOT '
+            'start.\n'
+            'Supported: --base-dir --port --name --icon --public-ip '
+            '--identity --export-contact-seed '
+            '--ignore-single-instance');
+        exit(64);
     }
   }
 
   // Determine base dir
-  if (baseDir == null) {
-    if (legacyProfile != null) {
-      // Legacy: profile was e.g. ~/.cleona/identities/identity-1
-      // Base dir is ~/.cleona
-      final home = AppPaths.home;
-      baseDir = '$home/.cleona';
-    } else {
-      final home = AppPaths.home;
-      baseDir = '$home/.cleona';
-    }
-  }
+  //
+  // S368: here stood a case distinction on `legacyProfile`, whose
+  // BOTH arms set the same value — the branch never did anything other
+  // than the rest.
+  baseDir ??= '${AppPaths.home}/.cleona';
 
   return _DaemonConfig(
     baseDir: baseDir,
@@ -1907,7 +2481,6 @@ _DaemonConfig _parseArgs(List<String> args) {
     iconPath: iconPath,
     publicIp: publicIp,
     ignoreSingleInstance: ignoreSingleInstance,
-    bootstrapMode: bootstrapMode,
     exportContactSeed: exportContactSeed,
     identitySelector: identitySelector,
     name: name,
@@ -1949,6 +2522,14 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
   final interfaces = await NetworkInterface.list();
   final localIps = <String>[];
   for (final iface in interfaces) {
+    // S376 (P2-4): THE SAME CLASS AS B-4, only in the ContactSeed export.
+    // `ownAddrs` below takes the FIRST TWO of these addresses and writes
+    // them into the emitted ContactSeed. On a machine with libvirt
+    // or Docker the virtual bridge often stands first in the operating
+    // system's order — the exported seed then named
+    // `192.168.122.1`, and every reader dialled into nothing. Exactly that
+    // was measured on 07.09.2026 on the wire (four unanswered SYNs).
+    if (!interfaceLeadsAfterOutside(iface.name)) continue;
     for (final addr in iface.addresses) {
       if (addr.isLoopback || addr.isLinkLocal) continue;
       localIps.add(addr.address);
@@ -1980,9 +2561,76 @@ Future<void> _exportContactSeed(_DaemonConfig config) async {
     channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
     deviceIdHex: identity.deviceNodeIdHex,
     userEd25519Pk: identity.ed25519PublicKey,
+    // S368: the FOUNDING key must go along, otherwise the exported
+    // seed of a ROTATED identity cannot be recomputed. The UserID
+    // falls out of `foundingEd25519Pk` (§4.1 / `IdentityContext.userId`),
+    // `ed25519PublicKey` is the CURRENT one — after a rotation these are
+    // two different values, and `verifyIntegrity()` would have computed against the
+    // wrong one. For a never-rotated identity both are
+    // equal, and `toUri()` then omits `fp` itself
+    // (`contact_seed.dart:279-282`, "only for rotated identities") —
+    // so the normal case does not change.
+    foundingEd25519Pk: identity.foundingEd25519Pk,
     createdAtMs: DateTime.now().millisecondsSinceEpoch,
   );
 
   stdout.writeln(seed.toUri());
   exit(0);
 }
+
+// The addresses that the V4.1 entry calls in addition to the broadcast
+// (B-27, S349) came from `node.routingTable.allPeers` here until S351 — the
+// V3 node. That was exactly the grip against which `smoke_seam_node_member_
+// guard` (AP-1 step 7) stands: the V4.1 entry cascade talked past the V3
+// transport instead of replacing it as planned. Since the
+// persistent entry pool (`95b2b104`) the same purpose gives the same
+// information without V3 — moved to `lib/core/tagline/v41_attach.dart`
+// (`vorratUnicastTargets`), source now `v41.entries.dialCandidates()`.
+
+
+// ══════════════════════════════════════════════════════════════════════
+// WHICH NETWORK-CHANGE DETECTION A PLATFORM GETS (S376, P5 fnd. 4)
+// ══════════════════════════════════════════════════════════════════════
+//
+// ── WHY THIS IS A SEPARATE FUNCTION ──────────────────────────────
+//
+// The decision stood as `if (Platform.isWindows)` in the body of
+// `_startNetworkMonitor` and was thus checkable only on the platform
+// one happens to be running on. Exactly so the error arose and
+// stayed for years: `Platform.isMacOS` had zero occurrences in this
+// file, macOS fell into the Linux branch, there
+// `Process.start('ip', …)` throws, and the `catch` ended without replacement — a
+// daemon entirely without a network-change edge (§22.6).
+//
+// A guard cannot set `Platform.isMacOS`. But it can query this
+// function for EVERY platform, and that is the whole
+// purpose: the statement "macOS gets a detection" becomes checkable
+// without owning a macOS device.
+//
+// WHAT IS NOT MEASURED THEREBY: whether the poll also WORKS on macOS. It
+// calls `dialableLocalAddresses()`, and that is `NetworkInterface.list` —
+// present on macOS, but never run on a device in this project
+// (S370: iOS/macOS have never been built from the V4.1 tree).
+// What is proven is the code path, not the device.
+enum NetworkChangeDetection {
+  /// 30-s comparison of the local addresses (`dialableLocalAddresses`).
+  poll,
+
+  /// `ip monitor address` from iproute2 — event-driven, Linux.
+  ipMonitor,
+}
+
+/// Which detection this platform gets.
+///
+/// The condition is "does the system have `ip monitor`", not "is it
+/// Windows". Windows and macOS do not have it, Linux has it. A system
+/// without both does not exist in the supported set; if the
+/// `ip monitor` start fails anyway, the warning line in the `catch` says what
+/// fails.
+NetworkChangeDetection networkChangeDetectionFor({
+  required bool isWindows,
+  required bool isMacOS,
+}) =>
+    (isWindows || isMacOS)
+        ? NetworkChangeDetection.poll
+        : NetworkChangeDetection.ipMonitor;

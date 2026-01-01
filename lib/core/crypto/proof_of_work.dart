@@ -4,8 +4,9 @@ import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:fixnum/fixnum.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 // ---------------------------------------------------------------------------
 // Native PoW FFI (libcleona_pow) — optional, graceful fallback to Dart loop
@@ -29,12 +30,14 @@ _PowFindNonceDart? _loadNativePow() {
   if (_nativePowTried) return _nativePowFindNonce;
   _nativePowTried = true;
 
+  // `AppPaths.bundleDir` instead of `File(exe).parent.path` (S367) — the
+  // daemon lies in `<bundleDir>/bin/`, its own directory is no longer
+  // the bundle root. For the GUI both are the same.
   final candidates = <String>[];
   if (Platform.isLinux) {
     candidates.add('libcleona_pow.so');
     try {
-      final exeDir = File(Platform.resolvedExecutable).parent.path;
-      candidates.add('$exeDir/lib/libcleona_pow.so');
+      candidates.add('${AppPaths.bundleDir}/lib/libcleona_pow.so');
     } catch (_) {}
     final home = Platform.environment['HOME'] ?? '';
     if (home.isNotEmpty) {
@@ -44,16 +47,14 @@ _PowFindNonceDart? _loadNativePow() {
   } else if (Platform.isWindows) {
     candidates.add('cleona_pow.dll');
     try {
-      final exeDir = File(Platform.resolvedExecutable).parent.path;
-      candidates.add('$exeDir\\cleona_pow.dll');
+      candidates.add('${AppPaths.bundleDir}\\cleona_pow.dll');
     } catch (_) {}
   } else if (Platform.isMacOS) {
-    for (final p in [
-      'libcleona_pow.dylib',
-      '@executable_path/../Frameworks/libcleona_pow.dylib',
-    ]) {
-      candidates.add(p);
-    }
+    candidates.add('libcleona_pow.dylib');
+    try {
+      candidates.add('${AppPaths.macFrameworksDir}/libcleona_pow.dylib');
+    } catch (_) {}
+    candidates.add('@executable_path/../Frameworks/libcleona_pow.dylib');
   } else if (Platform.isIOS) {
     try {
       final lib = ffi.DynamicLibrary.process();
@@ -186,36 +187,45 @@ class ProofOfWork {
   }
 
   /// Verify PoW: recompute hash and check leading zero bits.
-  /// Accepts both pre-hashed format (current) and legacy full-data format
-  /// for backward compatibility with cached S&F messages.
+  ///
+  /// **ONLY THE PRE-HASHED FORMAT ANY MORE** — `SHA-256(SHA-256(data) ‖ nonce)`.
+  ///
+  /// ── THE SECOND BRANCH IS GONE (S368) ─────────────────────────────────
+  ///
+  /// Below it stood a fallback to `SHA-256(data ‖ nonce)`, with the
+  /// reasoning "backward compatibility with cached S&F messages".
+  /// Store-and-forward is the V3 layer; on the V4.1 line it does not
+  /// exist — `storeAndForward` has zero occurrences there. So there is
+  /// also no cached message in the old format that the branch could
+  /// still hit. Under the owner invariant ("V4.1 is not backward
+  /// compatible") it is dead.
+  ///
+  /// It was moreover MORE EXPENSIVE than the living branch and was run on
+  /// EVERY failed forward attempt: it hashes the COMPLETE payload, whereas
+  /// the reason for pre-hashing was precisely to no longer do that
+  /// (section 6 of `test/smoke/smoke_pow_prehash.dart` measures exactly
+  /// this difference, 1 KB versus 131 KB). A sender who sent 131 KB with
+  /// an arbitrary wrong proof thereby bought a second, full hashing round
+  /// on the receiving side — a fallback that only made work.
+  ///
+  /// **Measured what hangs on it:** `ProofOfWork.verify` has ZERO callers
+  /// in `lib/` and `bin/` (05.09.2026); the only user is
+  /// `smoke_pow_prehash.dart`. That is explicitly named here and not
+  /// silently taken along: the function stays, because a missing proof
+  /// checker would be a different decision than a removed legacy-format
+  /// branch.
   static bool verify(Uint8List data, proto.ProofOfWork pow) {
     if (pow.difficulty < minAcceptedDifficulty) return false;
     final sodium = SodiumFFI();
     final nonce = pow.nonce.toInt();
 
-    // Try pre-hashed format first (current: SHA-256(SHA-256(data) || nonce))
     final dataDigest = sodium.sha256(data);
     final preHashBuf = Uint8List(32 + 8);
     preHashBuf.setRange(0, 32, dataDigest);
     ByteData.sublistView(preHashBuf, 32).setUint64(0, nonce, Endian.little);
     final preHashResult = sodium.sha256(preHashBuf);
-    if (_hasLeadingZeroBits(preHashResult, pow.difficulty) &&
-        _bytesEqual(preHashResult, pow.hash)) {
-      return true;
-    }
-
-    // Legacy full-data format: SHA-256(data || nonce)
-    final buffer = Uint8List(data.length + 8);
-    buffer.setRange(0, data.length, data);
-    ByteData.sublistView(buffer, data.length)
-        .setUint64(0, nonce, Endian.little);
-    final hash = sodium.sha256(buffer);
-    if (!_hasLeadingZeroBits(hash, pow.difficulty)) return false;
-    if (hash.length != pow.hash.length) return false;
-    for (int i = 0; i < hash.length; i++) {
-      if (hash[i] != pow.hash[i]) return false;
-    }
-    return true;
+    return _hasLeadingZeroBits(preHashResult, pow.difficulty) &&
+        _bytesEqual(preHashResult, pow.hash);
   }
 
   static bool _bytesEqual(Uint8List a, List<int> b) {

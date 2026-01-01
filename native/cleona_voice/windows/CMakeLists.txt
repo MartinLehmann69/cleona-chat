@@ -10,8 +10,8 @@
 #
 # Output name is deliberately "cleona_voice" (PREFIX ""), matching the naming
 # table in ../CMakeLists.txt ("real -> libcleona_voice.so / cleona_voice.dll")
-# and what BUILD_REQUEST_V1.4.md asks windows/runner/CMakeLists.txt (owned by
-# the build owner, not this package) to bundle next to cleona.exe.
+# and what windows/runner/CMakeLists.txt (owned by the build owner, not this
+# package) bundles next to cleona.exe.
 
 cmake_minimum_required(VERSION 3.13)
 
@@ -35,8 +35,8 @@ set_target_properties(cleona_voice_windows PROPERTIES
 # Conformance test, link mode (SPEC §10 gate 4: "green on the target
 # platform"). Registered with ctest by native/cleona_voice/test/CMakeLists.txt
 # via the function it defines -- see that file's own doc comment for why link
-# mode is available even though this package's real acceptance run in
-# BUILD_REQUEST_V1.4.md's absence uses the loader binary against the built DLL.
+# mode is available even though this package's real acceptance run
+# (BUGFIX_CURRENT.md AV-V1.4 §3) used the loader binary against the built DLL.
 # ---------------------------------------------------------------------------
 if(TARGET cleona_voice_conformance_loader)
   cleona_voice_add_conformance_test(cleona_voice_conformance_windows cleona_voice_windows)

@@ -41,12 +41,12 @@ bool constantTimeEquals(Uint8List a, Uint8List b) {
 /// the shorter input is implicitly zero-padded (the length difference is
 /// accumulated into the diff to ensure unequal-length inputs always fail).
 bool constantTimeStringEquals(String a, String b) {
-  final ab = utf8.encode(a);
+  final from = utf8.encode(a);
   final bb = utf8.encode(b);
-  final len = ab.length > bb.length ? ab.length : bb.length;
-  var diff = ab.length ^ bb.length;
+  final len = from.length > bb.length ? from.length : bb.length;
+  var diff = from.length ^ bb.length;
   for (var i = 0; i < len; i++) {
-    final av = i < ab.length ? ab[i] : 0;
+    final av = i < from.length ? from[i] : 0;
     final bv = i < bb.length ? bb[i] : 0;
     diff |= av ^ bv;
   }

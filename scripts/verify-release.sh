@@ -210,13 +210,17 @@ print(' '.join(sorted(m.get('binHash',{}).keys())))")
       && ok "platforms in manifest: $MANIFEST_PLATFORMS" \
       || bad "manifest lists no platforms (binHash empty)"
 
-    # dhtBinaryTag is mandatory: without it clients never learn about the
-    # update and the whole seeding effort is wasted (docs/PUBLISHING.md §6.3).
+    # The presence marker `dhtBin` is mandatory: without it no client
+    # offers the update (docs/PUBLISHING.md §6.3). PRESENCE is checked, not
+    # the value — the pipeline writes the placeholder `1` there, and no reader
+    # evaluates it (rationale at `UpdateManifest.binaryTag`, S372). The
+    # JSON key is still called `dhtBin`; only the Dart identifier was
+    # renamed, the wire key is frozen.
     for p in $MANIFEST_PLATFORMS; do
       TAG=$(python3 -c "
 import json;print(json.load(open('$MANIFEST_FILE')).get('dhtBin',{}).get('$p',''))")
-      [ -n "$TAG" ] && ok "dhtBinaryTag set: $p" \
-                    || bad "dhtBinaryTag missing: $p — update will not be offered"
+      [ -n "$TAG" ] && ok "dhtBin (Anwesenheitsmarke) set: $p" \
+                    || bad "dhtBin missing: $p — update will not be offered"
     done
 
     # binHash must equal the hash of the artifact that actually shipped.

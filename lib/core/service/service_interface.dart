@@ -1,15 +1,25 @@
 import 'dart:typed_data';
 import 'package:cleona/core/channels/system_channels.dart';
-import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceMode;
+import 'package:cleona/core/service/multi_interface_mode.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/core/network/network_stats.dart';
-import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder;
+import 'package:cleona/core/stats/network_stats.dart';
+import 'package:cleona/core/contact/contact_seed.dart' show ContactSeedBuilder;
+import 'package:cleona/core/contact/invite_issue_refusal.dart';
+// Re-export COMPLETELY, not `show InviteIssueRefusal`: the
+// mapping reason → wire identifier → message lives in an EXTENSION, and
+// an extension does not travel via a `show` list of the type. With the
+// narrow version `refusal.messageKey` did not translate in the UI.
+export 'package:cleona/core/contact/invite_issue_refusal.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
-import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
-import 'package:cleona/core/node/identity_context.dart';
+import 'package:cleona/core/identity/identity_context.dart';
+import 'package:cleona/core/crypto/hd_wallet.dart' show HdWallet;
+import 'package:cleona/core/service/readiness_names.dart';
+export 'package:cleona/core/service/readiness_names.dart';
+import 'package:cleona/core/service/invitation_card_types.dart';
+export 'package:cleona/core/service/invitation_card_types.dart';
 
 /// §7.5: what a `ROTATION_APPROVAL_REQUEST` is actually asking the user for.
 ///
@@ -50,6 +60,135 @@ enum RotationApprovalKind {
 
 /// Abstract interface for the Cleona service.
 /// Both CleonaService (direct) and IpcClient (remote) implement this.
+/// Whether the daemon on the other end of the IPC boundary mints identities
+/// the same way this build does.
+///
+/// The two halves of the app are separate binaries deployed separately, so
+/// they can disagree about the one formula that decides who everybody is
+/// (`userId = SHA-256(kIdentityDomain ‖ ed25519_pk ‖ mldsa65_pk)`, v4.2
+/// §4.1). When they do, every
+/// UserID the daemon reports is a value the GUI cannot reproduce: the GUI
+/// then cannot honestly hand out a ContactSeed, because the self-check that
+/// makes a seed self-certifying (`ContactSeed.verifyIntegrity`) must fail.
+/// Measured 2026-08-30 — see [HdWallet.identityDerivationFingerprint].
+enum IdentityDerivationSkew {
+  /// Measured equal — the GUI can vouch for what the daemon reports.
+  ok,
+
+  /// Not measurable: no snapshot yet, or a daemon older than the fingerprint.
+  /// Says nothing about agreement; must not be reported as a defect.
+  unknown,
+
+  /// Measured different. Fail closed and say so.
+  mismatch;
+
+  /// Classify a fingerprint reported by the other half of the app against the
+  /// one this build computes.
+  ///
+  /// A missing or empty value is [unknown], never [mismatch]: a daemon older
+  /// than this field reports nothing, and calling that a defect would raise a
+  /// false alarm on every rollout where one half lags by a build. Only a
+  /// value that is present AND different is a measured disagreement.
+  static IdentityDerivationSkew classify(String? reportedFingerprint) {
+    if (reportedFingerprint == null || reportedFingerprint.isEmpty) {
+      return IdentityDerivationSkew.unknown;
+    }
+    return reportedFingerprint == HdWallet.identityDerivationFingerprint
+        ? IdentityDerivationSkew.ok
+        : IdentityDerivationSkew.mismatch;
+  }
+}
+
+/// What of an issued invitation goes into the ContactSeed
+/// (§15.3, §15.5).
+///
+/// NOT `InviteRecord`: that is the entry in the issuer's book and
+/// carries counter, revocation and label. Only what the seed needs
+/// goes over the interface — class, deadline, key. A book record that
+/// wandered over IPC would be a second truth next to the book.
+///
+/// [inviteClassCode] is the ONE-character code from `InviteClass` (`c`, `p`,
+/// …) and not the enum value: `service_interface.dart` lives below the
+/// UI and is not to pull in `core/contact/`, and over IPC
+/// the value has to go through JSON anyway.
+class IssuedInvite {
+  const IssuedInvite({
+    required this.inviteClassCode,
+    required this.index,
+    required this.inviteKey,
+    this.expiresAtMs,
+  });
+
+  /// `InviteClass.code` — one character.
+  final String inviteClassCode;
+
+  /// Running number in the issuer's book (§15.3.1 `i` in `K_inv(i)`).
+  final int index;
+
+  /// `K_inv(i)` — the CARRIER of the contact request (§15.3.2). Without it
+  /// the request has no tagline on which the issuer would ever harvest it.
+  final Uint8List inviteKey;
+
+  /// Expiry in ms since epoch, `null` for an unlimited invitation.
+  final int? expiresAtMs;
+}
+
+/// The result of [ICleonaService.issueInviteForSharing]: either the
+/// invitation or the REASON why there is none.
+///
+/// Until S381 the call returned `null` and the reason stayed in the
+/// issuer's log — the UI then guessed the most frequent one. Why
+/// that is worse than no reason at all is in the header of
+/// `invite_issue_refusal.dart`.
+typedef InviteIssueResult = InviteIssueOutcome<IssuedInvite>;
+
+/// An open invitation, as the UI has to list it
+/// (§15.3.2 cap, §15.3.3 single revocation).
+///
+/// Deliberately WITHOUT `K_inv(i)`: listing and revoking do not need
+/// the key, and what is not needed does not travel
+/// across the process boundary either.
+class OpenInvitation {
+  const OpenInvitation({
+    required this.index,
+    required this.inviteClassCode,
+    required this.expiresAtMs,
+    required this.label,
+    required this.singleUse,
+  });
+
+  /// `i` from `K_inv(i)` (§15.3.1) — the identifier for revocation.
+  final int index;
+
+  /// `InviteClass.wireChar` — one character.
+  final String inviteClassCode;
+
+  /// Expiry in ms since epoch, `null` for an unlimited invitation.
+  final int? expiresAtMs;
+
+  /// Label under which it was issued (e.g. `qr-card`).
+  final String label;
+
+  /// §15.4: single-use invitation of the self-acceptance class.
+  final bool singleUse;
+
+  Map<String, dynamic> toJson() => {
+        'index': index,
+        'class': inviteClassCode,
+        'expiresAtMs': expiresAtMs,
+        'label': label,
+        'singleUse': singleUse,
+      };
+
+  static OpenInvitation fromJson(Map<String, dynamic> j) => OpenInvitation(
+        index: j['index'] as int? ?? 0,
+        inviteClassCode: j['class'] as String? ?? '',
+        expiresAtMs: j['expiresAtMs'] as int?,
+        label: j['label'] as String? ?? '',
+        singleUse: j['singleUse'] == true,
+      );
+}
+
 abstract class ICleonaService {
   // State
   Map<String, Conversation> get conversations;
@@ -62,6 +201,15 @@ abstract class ICleonaService {
 
   // Getters
   String get nodeIdHex;
+  /// Profile directory of the ACTIVE identity — in `CleonaService` from the
+  /// `ServiceContext` (= `identity.profileDir`), in `IpcClient` from the
+  /// daemon's `get_state` snapshot. **Not** `AppPaths.dataDir`:
+  /// that is the process sink for lines that belong to no identity.
+  ///
+  /// Used by GUI-side bridges (e.g. [AndroidCalendarBridge]) that
+  /// build their own [CLogger] and whose lines belong in the log of the SAME
+  /// identity the daemon also writes to.
+  String get profileDir;
   /// Welle 5/6: Device-Node-ID (≠ User-ID) for direct InfraFrame addressing
   /// before the Auth-Manifest is published. Used by ContactSeed-URI.
   String get deviceNodeIdHex;
@@ -76,22 +224,180 @@ abstract class ICleonaService {
   /// userId. Equals [userEd25519Pk] for never-rotated identities; the
   /// ContactSeed emits the `fp` field only when the two differ.
   Uint8List get foundingEd25519Pk;
+  /// The readiness state (§22.7): `searching` | `connecting` | `ready`.
+  ///
+  /// **The only quantity that speaks about DELIVERABILITY.** The three
+  /// peer counters below count acquaintances; this state counts
+  /// evidence — confirmed outbound relays that have accepted a placement.
+  /// §22.7: "gates hang off the readiness state `ready`, never off a raw
+  /// acquaintance count."
+  ///
+  /// **§22.7.2, normative for the transfer:** both implementations
+  /// of this interface — the in-process service and the IPC client —
+  /// deliver the value identically. A field that the daemon keeps and that the
+  /// IPC client answers with a constant or a hard-wired `null`
+  /// is a defect: the GUI would then show an immovable
+  /// readiness, and the observable transition would be lost exactly in the
+  /// layer meant to make it visible. The guard
+  /// `smoke_ipc_interface_completeness.dart` checks this mechanically.
+  ///
+  /// As a string, not as an enumeration: the value crosses a
+  /// JSON boundary, and `Readiness` lives in `lib/core/tagline/` — the
+  /// service interface should not have to import the delivery layer
+  /// just to name a state.
+  String get readinessState;
+
+  /// §25.4 — confirmed sync partners, separated by direction.
+  ///
+  /// **Outbound** are the partners this node itself reaches;
+  /// they carry the OWN delivery and feed the readiness.
+  /// **Inbound** are those that reach it; they say how much this
+  /// node contributes for others, and are a precondition for inbound
+  /// calls (§17). §28.7 rule 3 demands the separate numbers for displays
+  /// — until AP-5 they did not cross the IPC boundary, and every display
+  /// above it had to take one of the three V3 peer numbers as a substitute.
+  ///
+  /// They are EXPLICITLY no statement of deliverability: that is
+  /// [readinessState] and only it (§22.7.3 "no display element derives
+  /// deliverability from a partner count").
+  int get syncPartnersOutbound;
+  int get syncPartnersInbound;
+
+  /// §25.4 "of which independent" — the number `ready` hangs on (>= 2).
+  ///
+  /// Not the gross number: two partners in the same network block are one
+  /// (§22.7.1, `ReadinessTracker.verifiedRelays`).
+  int get independentSyncPartners;
+
+  /// §9.2 — how many responsible relays a Secure placement reaches TODAY.
+  ///
+  /// The number from which the consent dialog computes its TIME SPAN
+  /// (`media_send_estimate.dart`). It must go over this interface
+  /// and not be estimated from [syncPartnersOutbound] as a substitute:
+  /// those are two different sets (session partners versus
+  /// the responsible ones of a tag), and the full reasoning is at
+  /// `V41Delivery.reachableResponsibleRelays`.
+  ///
+  /// `0` means "none known" — then no estimate is possible, and
+  /// the dialog says so instead of showing a number from an empty
+  /// set.
+  int get reachableResponsibleRelays;
+
+  /// §24.4.2 — DATA SAVER MODE: whether it is IN EFFECT.
+  ///
+  /// Not the same as "the user has chosen it": a Secure chat
+  /// overrides the choice (see [dataSaverLockedBySecure]). The display
+  /// must show the EFFECT, not the wish — §24.4.2 demands "a
+  /// visible state, not a setting buried in a submenu", and a state
+  /// that claims something other than what the stream does is no state.
+  bool get dataSaverActive;
+
+  /// §24.4.2 — whether the switch is locked because on this node a
+  /// chat is set to High-Secure.
+  ///
+  /// "**Secure-Mode is exempt, without exception** (owner, 2026-08-30) …
+  /// The cover stream is a node-wide stream, not per chat — so a node
+  /// holding even one Secure chat keeps it in full, and the switch is
+  /// then locked with its reason named."
+  bool get dataSaverLockedBySecure;
+
+  /// §24.4.2 — the setter. **Only a user action calls it**
+  /// ("the app may suggest but must never activate it itself").
+  ///
+  /// Returns [kDataSaverOk] or [kDataSaverLockedBySecure]. The reason
+  /// is REPORTED BACK and not merely swallowed: a setter that
+  /// silently does nothing cannot be told apart from a broken one.
+  String setDataSaver(bool on);
+
+  /// V4.2 §11.9 — whether the fourth neighbour source (external address entries on
+  /// public relays) is switched on. A DEVICE value: it applies to
+  /// the one node of the device. "The source can be switched off by the
+  /// user. A node with it switched off neither reads nor publishes."
+  bool get externalRecordsEnabled;
+
+  /// V4.2 §11.9 — the setter, ONLY from a user action. `false` if
+  /// no node is attached and therefore nothing was set.
+  bool setExternalRecordsEnabled(bool on);
+
+  // ── S373: COVER IN THE OWN NETWORK ──────────────────────────────────
+  //
+  // The same constraints as for saver mode (§24.4.2), only stricter:
+  // here the cover is not thinned but SUSPENDED. Therefore
+  // there is no "on/off" switch, only a consent PER
+  // SEGMENT — whether it takes effect is decided by the situation (all partners in the
+  // segment, no Secure chat), not by the user and certainly not
+  // by the app.
+
+  /// Whether the switch-off is currently IN EFFECT.
+  ///
+  /// Not the same as "a consent exists": a Secure chat
+  /// or a single outside partner overrides it. The display
+  /// must show the EFFECT — a state that claims something other
+  /// than what the stream does is no state.
+  bool get lanShapingActive;
+
+  /// The segments this node sits in (identifiers as they appear in
+  /// the UI). Empty means "no own network recognised".
+  List<String> get lanSegmentIds;
+
+  /// The segments for which a consent CAN be given — at least one
+  /// known neighbour currently sits there to which it could
+  /// bind. Without that there is no button, but the
+  /// reason.
+  List<String> get lanSegmentsGrantable;
+
+  /// Whether a consent is stored for this segment.
+  bool lanSegmentConsented(String segmentId);
+
+  /// The setter. **Only a user action calls it.** `false` if
+  /// no neighbour is there to which the consent could bind —
+  /// the reason is shown, not swallowed.
+  bool grantLanShaping(String segmentId);
+
+  /// The revocation. Always works.
+  bool revokeLanShaping(String segmentId);
+
+  // ── THREE GETTERS, ONE NUMBER — AND NO RECONCILIATION WITH THE STATS ──
+  //
+  // Until 01.09.2026 (S360) the constraint "Must match
+  // `NetworkStats.activePeerCount` and the Connection Sheet list" stood here.
+  // It had been VIOLATED since the CUT of 31.08., and not a
+  // little: `peerCount` delivered the V4.1 session partners (a real
+  // number different from 0), `NetworkStats.activePeerCount` delivered
+  // constantly 0 because its writer had fallen with the routing table.
+  // The home screen showed N, the network statistics 0 — the same question,
+  // two answers.
+  //
+  // Resolved by making the RECONCILIATION PARTNER disappear:
+  // `activePeerCount` was dropped when the network statistics were cut down to
+  // V4.1 quantities. The network statistics now show the
+  // direction-separated partner numbers (§25.4) and read them via
+  // [syncPartnersOutbound]/[syncPartnersInbound] from THIS
+  // interface — i.e. from the same source as everything here. A
+  // divergence is thereby no longer possible, instead of merely
+  // forbidden.
+  //
+  // ALL THREE GETTERS DELIVER THE SAME NUMBER, and that is no oversight:
+  // V3 distinguished routing table / bidirectionally confirmed / reachable via a
+  // live relay. This distinction presupposes a
+  // routing table, and that no longer exists (reasoning at
+  // `CleonaService._v41SessionPartner`). Inventing three different numbers
+  // would be the worse answer.
+  //
+  // WHAT IT STANDS FOR IN THE UI: home badge, settings,
+  // contacts, connection status, Android foreground notification.
   int get peerCount;
-  /// Peers with confirmed bidirectional UDP contact this session.
-  /// Used internally for directConns stats and bug-report metadata.
   int get confirmedPeerCount;
-  // ┌─────────────────────────────────────────────────────────────────┐
-  // │ UI peer counter — SINGLE SOURCE for Home badge, Settings,     │
-  // │ Contacts, Connection-Status, and Android Foreground-Notif.     │
-  // │ Must match NetworkStats.activePeerCount and the Connection     │
-  // │ Sheet list (peerSummaries). All three use reachablePeerIds.    │
-  // │ Do NOT use confirmedPeerCount in UI — it excludes relay peers  │
-  // │ and WILL drift vs. Network Stats. See S252.                   │
-  // └─────────────────────────────────────────────────────────────────┘
   int get reachablePeerCount;
-  /// True if UPnP/PCP successfully opened an inbound port mapping OR an
-  /// observed public address matches our port. Distinguishes "fully
-  /// reachable (green Hulk)" from "behind-NAT outbound-only (yellow Hulk)".
+  /// Whether an inbound port mapping is open (§25.9).
+  ///
+  /// SINCE S373 (07.09.2026) with a producer again: `CleonaService` reads
+  /// `PortMapper.hasMapping` (UPnP/IGD + NAT-PMP/PCP,
+  /// `lib/core/link_io/`), the IPC path passes the value through
+  /// unchanged. Between the CUT (31.08.) and today it was a constant
+  /// `false` — the four display sites (chip "UPnP", two
+  /// system channel reports, crash and contact report) permanently showed
+  /// "no".
   bool get hasPortMapping;
   /// True once at least one peer has been confirmed by a direct packet in
   /// the current daemon session. Used by the QR convergence gate (§8.1.1).
@@ -138,6 +444,11 @@ abstract class ICleonaService {
   /// instead of assembling ContactSeeds themselves.
   ContactSeedBuilder get contactSeedBuilder;
 
+  /// Whether this build and the service it talks to derive identities alike.
+  /// In-process implementations are the same binary and answer [
+  /// IdentityDerivationSkew.ok]; the IPC client measures it.
+  IdentityDerivationSkew get identityDerivationSkew;
+
   // Groups
   Map<String, GroupInfo> get groups;
   Future<String?> createGroup(String name, List<String> memberNodeIdHexList);
@@ -164,7 +475,7 @@ abstract class ICleonaService {
   /// with embedded auto-poll + implicit "Ja" vote of the submitter.
   Future<UiMessage?> submitFeatureRequest(String title, String body);
 
-  /// §9.5.3 D3: open vote record on an FR post (0=Ja, 1=Nein, 2=Egal).
+  /// §9.5.3 D3: open vote record on an FR post (0="Ja" (yes), 1="Nein" (no), 2="Egal" (don't care)).
   /// LWW per author — voting again changes the vote.
   Future<bool> voteFeatureRequest(String recordIdHex, int option);
 
@@ -186,7 +497,9 @@ abstract class ICleonaService {
   Future<bool> reportPost(String channelIdHex, String postId, int category, {String? description});
   Future<bool> submitJuryVote(String juryId, String reportId, int vote, {String? reason});
   List<JuryRequest> get pendingJuryRequests;
-  Map<String, dynamic> getChannelModerationInfo(String channelIdHex);
+  /// AP-5a: async because on daemon platforms this crosses the IPC boundary.
+  /// A synchronous signature forced `IpcClient` to answer `{}` forever.
+  Future<Map<String, dynamic>> getChannelModerationInfo(String channelIdHex);
   Future<bool> dismissPostReport(String channelIdHex, String reportId);
   Future<bool> submitBadgeCorrection(String channelIdHex, {String? newName, String? newDescription});
   Future<bool> contestCsamHide(String channelIdHex);
@@ -201,19 +514,35 @@ abstract class ICleonaService {
 
   // Actions
   Future<UiMessage?> sendTextMessage(String recipientUserIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
+  /// Submits a file into a chat.
+  ///
+  /// NO `secureChoice` ANYMORE (S389). The parameter carried the answer of the
+  /// consent dialog — "send in Secure mode" or "switch to Speed for this
+  /// file". That is a choice of the send path per transfer,
+  /// and §12.1 allows none: "The interface offers no delivery-mode
+  /// control." Its only producer was moreover the switch that
+  /// fell with the same change.
+  ///
+  /// What §24.4.5 still demands at this place — a consent
+  /// per transfer that does NOT choose between two paths but names the
+  /// consequences of ONE — is recorded as finding B-M2 in
+  /// `mycelium/berichte/S389-BAU-MODUS.md`.
   Future<UiMessage?> sendMediaMessage(String conversationId, String filePath);
   Future<bool> acceptMediaDownload(String conversationId, String messageId);
   Future<bool> editMessage(String conversationId, String messageId, String newText);
   Future<bool> deleteMessage(String conversationId, String messageId);
 
-  /// §5.8: Check if any queuedOffline messages in [conversationId] have
-  /// exceeded the 7-day TTL and mark them as [MessageStatus.expired].
-  /// Pure local operation — no network traffic.
-  void checkExpiredMessages(String conversationId);
+  // `checkExpiredMessages` stood here. Fell with S390: §9.3 —
+  // "There is no timer that expires messages and no background retry
+  // loop." A message stays `inTransit` until a receipt arrives
+  // or the user gives up.
 
-  /// §5.8: Re-send a message that has status [MessageStatus.expired].
-  /// Queues the message through the normal send path, resetting the TTL clock.
-  Future<UiMessage?> resendExpiredMessage(String conversationId, String messageId);
+  /// §9.3: resend a given-up message ([MessageStatus.failed])
+  /// — the one user action §12.2 offers at all.
+  ///
+  /// The retry gets a new identifier; the old entry
+  /// stays `failed` and is removed from the conversation.
+  Future<UiMessage?> resendFailedMessage(String conversationId, String messageId);
   Future<void> sendReaction({required String conversationId, required String messageId, required String emoji, required bool remove});
   Future<bool> updateChatConfig(String conversationId, ChatConfig config);
   void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName});
@@ -221,29 +550,161 @@ abstract class ICleonaService {
   Future<bool> rejectConfigProposal(String conversationId);
   Future<UiMessage?> forwardMessage(String sourceConversationId, String messageId, String targetConversationId);
   void markConversationRead(String conversationId);
+
+  /// Loads the history of a conversation lazily (S366, stage B).
+  ///
+  /// After start a conversation carries only its YOUNGEST message —
+  /// it is the preview in the list. Whoever displays or
+  /// searches the history calls this first; the second call does nothing.
+  ///
+  /// **In the service the call takes effect immediately** (the store is right beside it),
+  /// **in the GUI client it only triggers** — there the history lives at the
+  /// other end of a socket, and the UI redraws as soon as
+  /// it is there. Whoever definitely needs it takes
+  /// `IpcClient.ensureLoadedAsync` on the client.
+  void ensureLoaded(String conversationId);
+
+  /// Loads the history of ALL conversations.
+  ///
+  /// Only for the few operations that really need the whole stock
+  /// — the archive run searches by age, the
+  /// restore answer carries the history. **Not as a convenient
+  /// substitute for [ensureLoaded]:** here the memory peak comes back
+  /// against which stage B was built.
+  void ensureAllLoaded();
   /// Track which conversation the user is currently viewing in the foreground.
   /// Used to suppress in-app notifications for messages in the active chat.
   /// Pass null when no chat is open.
   void setActiveConversationId(String? conversationId);
   /// Track whether the app is in the foreground (AppLifecycleState.resumed).
   /// Combined with setActiveConversationId to gate notification suppression.
-  void setAppResumed(bool isResumed);
+  /// [triggerNodeHarvest] (default `true`): on the edge
+  /// "was in the background, is now in front" additionally triggers the catch-up harvest of the
+  /// NODE (§22.6, variant C). A caller that calls this method in
+  /// a loop over several identities passes `false` and
+  /// runs the node part itself exactly once — otherwise the one
+  /// node harvests N times for a single event (S376, P5 finding 5).
+  /// The same separation as [triggerNodeReset] in [onNetworkChanged].
+  void setAppResumed(bool isResumed, {bool triggerNodeHarvest = true});
   void sendTypingIndicator(String conversationId);
   void toggleFavorite(String conversationId);
   Future<bool> setProfilePicture(String? base64Jpeg);
   String? get profilePictureBase64;
   void updateDisplayName(String newName);
-  Future<bool> sendContactRequest(String recipientUserIdHex,
-      {String message = '',
-      String? seedDeviceIdHex,
-      String? seedDxkB64,
-      String? seedDmkB64,
-      String? seedEpB64});
+  // `sendContactRequest` was dropped (S388-BAU-KONTAKT): on V4.2 the
+  // contact request is packet (2) of the first contact in mycelium and is created when
+  // redeeming a card ([redeemInvitationText],
+  // [redeemInvitationCardBytes], §15.5).
+
+  /// Issues an invitation and returns what a ContactSeed
+  /// needs of it: class, deadline and `K_inv(i)` (§15.3, §15.5).
+  ///
+  /// ── WHY THIS IS ON THE INTERFACE AND NOT ONLY ON THE SERVICE ──
+  ///
+  /// Until S380 `contact_share_card` called `svc.issueInvitation(...)` on
+  /// an `is CleonaService` downcast. That only works **in-process**
+  /// (Android/iOS). On every daemon platform — Linux, Windows, macOS —
+  /// the UI talks via IPC, the downcast yielded `null`, and
+  /// instead of the selection the card showed the sentence "this view is
+  /// connected to a background service and shows the code without
+  /// invitation".
+  ///
+  /// **Consequence, measured in the field on 10.09.2026:** the ContactSeed of these
+  /// platforms never carried `ki`, and the then `sendContactRequest` rejected
+  /// every first request after 9 ms — "the ContactSeed carries no
+  /// invitation key `ki` (§15.5) … ki=false". **On the desktop
+  /// no first contact was thus possible**, on any path. (S389: the path has been
+  /// dropped since S388-BAU-KONTAKT; the first request today comes from
+  /// the invitation card, §15.5.)
+  ///
+  /// ── WHO MAY ISSUE STAYS UNCHANGED (§15.3) ──────────────────────────
+  ///
+  /// "Invitations can only be issued by the device that holds the
+  /// identity." Exactly that still happens: the call is executed IN THE DAEMON.
+  /// It holds the master seed (`service_daemon.dart:671`),
+  /// it keeps the invitation book, and it is the one that harvests the invitation line
+  /// (§15.3.2) — an invitation created in the UI would have
+  /// no harvester. The UI is the front part of the same device;
+  /// the path there is the same 0600 Unix socket (Windows: TCP +
+  /// token) over which seed dialog, messages and contact data already
+  /// run. The trust boundary does not move as a result.
+  ///
+  /// ── THE REASON TRAVELS ALONG (S381, 11.09.2026) ────────────────────
+  ///
+  /// Until S381 this said: "`null` means: not issued — cap
+  /// reached (§15.3.4), book unreadable (§21.4) or no master seed for
+  /// this identity (§15.3.1). **The reason is in the issuer's
+  /// log.**" Exactly this last sentence was the defect: the
+  /// UI cannot read a log, so it GUESSED the most frequent
+  /// reason. But §15.3.1 demands that the UI NAMES the consequence.
+  ///
+  /// The result therefore carries the reason as a value. Reasoning and the
+  /// four branches: `invite_issue_refusal.dart`.
+  Future<InviteIssueResult> issueInviteForSharing({
+    required String inviteClassCode,
+    Duration? validity,
+    bool singleUse = false,
+    String label = 'qr-card',
+  });
+
+  /// The open invitations of this identity (§15.3.2).
+  ///
+  /// Needed because the cap was a dead end: the message
+  /// "Revoke one before you create a new one" pointed to a path
+  /// that did not exist. Throws if the book is there and unreadable
+  /// (§21.4) — an empty list would there be the false statement "you have
+  /// no open invitations".
+  Future<List<OpenInvitation>> listOpenInvitations({DateTime? now});
+
+  /// §15.3.3: revoke an open invitation. `false` if it does
+  /// not exist or was already revoked.
+  Future<bool> revokeInvitation(int index, {DateTime? now});
+
+  // ── V4.2 invitation card (§15.2, §15.3, §15.6) — S387 ────────────────
+  //
+  // Contract with the seam: `mycelium/berichte/S387-API-KARTE.md`. The
+  // UI calls only these six; the V4.1 invitation methods above
+  // stay until the seam replaces them.
+
+  /// Issues a card for the ACTIVE identity (§15.2, §15.3).
+  /// [validity] `null` = default of the kind ([InvitationValidity.defaultFor]).
+  /// The card needs no network (§12.4) — a refusal names its reason.
+  /// [faceToFace]: for personal handover (QR shown, NFC) —
+  /// a request on it is accepted without a second question (§15.5); only for
+  /// [InvitationKind.single], and the card then carries no text line.
+  Future<InvitationIssueResult> issueInvitationCard({
+    InvitationKind kind = InvitationKind.single,
+    InvitationValidity? validity,
+    String label = '',
+    bool faceToFace = false,
+  });
+
+  /// Redeems a pasted or shared invitation text (§15.6)
+  /// and sends the contact request. Read error, foreign channel and
+  /// expiry come back as [InvitationRedeemOutcome.readError] before
+  /// a packet goes out (§15.2, §15.3).
+  Future<InvitationRedeemResult> redeemInvitationText(String text);
+
+  /// Like [redeemInvitationText], for the packed card from a
+  /// QR code (binary form) or NFC record (§15.2).
+  Future<InvitationRedeemResult> redeemInvitationCardBytes(Uint8List packed);
+
+  /// The standing invitations of this identity (§15.3). `items == null`
+  /// means unreadable, not empty.
+  Future<StandingInvitationsResult> standingInvitations();
+
+  /// §15.3: revoke a standing invitation.
+  Future<InvitationRevokeOutcome> revokeInvitationCard(String invitationId);
+
+  /// §15.3 "Bulk revocation": all standing invitations at once.
+  Future<InvitationRevokeAllResult> revokeAllInvitationCards();
+
   /// §8.1.1 rev3: pass [targetDeviceIdHex] + Device-KEM-PKs (v1 legacy) or
   /// [targetEpB64] (v2 trust-anchor) from a ContactSeed so the seeded peer
   /// is keyed by Device-Node-ID and a direct DV-route is registered.
-  /// [targetRendezvousNonceB64] (§4.11.10): the URI's `r` nonce (base64url)
-  /// — starts the scanner-side First-Contact rendezvous session.
+  /// [targetRendezvousNonceB64] (§4.11.10): the URI's `r` nonce — since S388
+  /// without effect (first-contact rendezvous removed); falls with the
+  /// V3 ContactSeed reader.
   void addPeersFromContactSeed(
     String targetNodeIdHex,
     List<String> targetAddresses,
@@ -254,10 +715,6 @@ abstract class ICleonaService {
     String? targetEpB64,
     String? targetRendezvousNonceB64,
   });
-  /// §4.11.10 First-Contact Rendezvous, owner side: a ContactSeed-URI
-  /// carrying the given `r` nonce (base64url, 32 bytes) was copied/shared.
-  /// Starts the owner-side rendezvous session (idempotent per nonce).
-  void notifyContactSeedUriShared(String rendezvousNonceB64);
   bool addManualPeer(String ip, int port);
   Future<bool> acceptContactRequest(String nodeIdHex);
   void deleteContact(String nodeIdHex, {required String source});
@@ -266,9 +723,22 @@ abstract class ICleonaService {
   /// §14.7.4: withhold this node's delivery status from a contact or group.
   /// Returns false when [entityIdHex] is neither (e.g. a channel).
   bool setWithholdDeliveryStatus(String entityIdHex, bool withhold);
+
+  // NO SETTER FOR A SEND MODE. Until S389 this held
+  // `setSecureMode` — the write side of the switch from the
+  // chat settings dialog. §12.1: "The interface offers no
+  // delivery-mode control … No per-chat setting, no explanatory dialog,
+  // no switch." There is ONE way to send (§3.3); a verb with which the
+  // UI chooses a second one therefore cannot exist.
+
   /// Set/clear a contact's birthday (local metadata only, never broadcast).
   /// Pass null for all three to clear. Triggers calendar birthday re-sync.
   bool setContactBirthday(String nodeIdHex, {int? month, int? day, int? year});
+
+  /// §15.10 (D2 = a): mark a contact so that it never takes a fixed
+  /// neighbour seat (§5.2). A property of the contact, not a send mode
+  /// (§3.3); local, never distributed. Returns false for an unknown contact.
+  bool setContactNeverFixedNeighbour(String nodeIdHex, bool never);
   void acceptContactNameChange(String nodeIdHex, bool accept);
 
   // Group Call state
@@ -317,7 +787,16 @@ abstract class ICleonaService {
   Future<bool> publishContactIssueReport(String contactNodeIdHex);
 
   // Manual log report (Bug Log)
-  LogReport buildLogReport();
+  //
+  // S368: WAS SYNCHRONOUS, and exactly that broke the user's
+  // consent. On desktop the implementation of this interface is the
+  // IPC bridge; it cannot fetch anything synchronously over the socket and therefore
+  // delivered an EMPTY report (version '', log excerpt '', 0 peers). The
+  // preview dialog showed this empty report, but what was published was
+  // the REAL one from the daemon. The user consented to something other than
+  // what was sent. A Future forces every implementation to obtain the real
+  // report — or to throw.
+  Future<LogReport> buildLogReport();
   Future<bool> publishLogReport();
 
   // ── NAT-Troubleshooting-Wizard (§27.9) ─────────────────────────────
@@ -335,9 +814,19 @@ abstract class ICleonaService {
   /// any positive value delays re-trigger by that many seconds (typically
   /// 7 days = 604800).
   Future<void> dismissNatWizard({required int durationSeconds});
-  /// Re-run UPnP discovery + hole-punch round + 30s direct-connection
-  /// observation. Returns true when at least one direct connection was
-  /// observed during the window (Step 3 "Jetzt pruefen" button). §27.9.2.
+  /// Searches the port mapping anew (UPnP/IGD + NAT-PMP/PCP) and observes
+  /// for 30 s whether an INBOUND sync partner comes about. §27.9.2
+  /// step 3, the button "Check now".
+  ///
+  /// The return value is the observation, not the mapping: §25.4
+  /// lists inbound sync partners as "a precondition for inbound calls
+  /// (§17)" — i.e. exactly "does someone reach me from outside", and that is
+  /// the question a port forwarding answers. The new search runs
+  /// alongside; it can take longer than the observation window.
+  ///
+  /// UNTIL S373 THIS SAID "Re-run UPnP discovery + hole-punch round". The
+  /// sentence was outdated between the CUT (31.08.2026) and 07.09.: the
+  /// implementation only observed. Both are back now.
   Future<bool> recheckNatWizard();
   /// Test-only (E2E gui-53): fire [onNatWizardTriggered] directly, bypassing
   /// the 10-min uptime gate, network-condition checks, and the dismissed-flag
@@ -423,7 +912,10 @@ abstract class ICleonaService {
   /// Returns the full `http://<public-ip>:<port>/cleona#...` URL with
   /// per-platform hashes and maintainer signatures from the UpdateManifest,
   /// or null if no public IP or no manifest is available yet.
-  String? generateInviteLinkUrl();
+  /// AP-5a: async because on daemon platforms this crosses the IPC boundary.
+  /// A synchronous signature forced `IpcClient` to answer `null` forever,
+  /// which hid the whole invite block in `share_cleona_dialog.dart`.
+  Future<String?> generateInviteLinkUrl();
 
   // NFC Contact Exchange: crypto keys + sign/verify
   Uint8List? get ed25519PublicKey;
@@ -433,7 +925,9 @@ abstract class ICleonaService {
   Uint8List? get profilePicture;
   Uint8List signEd25519(Uint8List message);
   bool verifyEd25519(Uint8List message, Uint8List signature, Uint8List publicKey);
-  void addNfcContact(Contact contact);
+  // `addNfcContact` was dropped (S388-BAU-KONTAKT): the NFC screen exchanges
+  // invitation cards and redeems them (§15.5, §15.10) instead of creating a contact
+  // without a request.
 
   // Notification sounds
   NotificationSoundService get notificationSound;
@@ -441,11 +935,49 @@ abstract class ICleonaService {
   // Multi-Device (§26)
   List<DeviceRecord> get devices;
   String get localDeviceId;
+
+  /// §24.4.3 — the transition state of a device lock, for the display.
+  ///
+  /// A lock does not take effect immediately, but per contact — namely as soon as
+  /// this contact has harvested the announcement (§14.6). §24.4.3 demands
+  /// for this the parameterised sentence "Device locked — fully in effect once all
+  /// contacts are informed (3 of 47 still open)" and adds that the
+  /// transition "belongs in the UI, not in a footnote". Until here there was
+  /// only the data side (`DeviceLockoutOps.deviceLockoutStates()`,
+  /// cleona_service_lockout.dart:464) — tree-wide without a single
+  /// consumer. The numbers were kept, the UI never saw them.
+  ///
+  /// **Abstract, not an extension getter.** [isReady] may be an extension
+  /// on [ICleonaService] because there is nothing to transfer there: the
+  /// value is derived from `readinessState`, and a second derivation
+  /// would be the same calculation twice. Here it is the other way round — there are TWO
+  /// real sources: the daemon computes from `_lockouts`, the GUI only has the
+  /// snapshot. An extension could serve only one of the two
+  /// and would have to guess the other.
+  ///
+  /// **The name is deliberately not `deviceLockoutStates`.** A class member
+  /// of this name would shadow the extension method of the same name on
+  /// `CleonaService` (class members take precedence over
+  /// extension members), and `service.deviceLockoutStates()` in
+  /// `test/smoke/smoke_device_lockout_transition.dart` would then be read as a call
+  /// of the getter's result. The getter is therefore called
+  /// `deviceLockouts` and forwards to the extension.
+  ///
+  /// As `List<Map<String, dynamic>>` and not as a type: the value crosses a
+  /// JSON boundary, and `LockoutTransition` lives in a `part` of
+  /// `cleona_service.dart` — the IPC client would have to import the service
+  /// to name it, and that is the dependency direction the wrong way round.
+  ///
+  /// Keys per entry: `deviceId`, `deviceName`, `startedAtMs`,
+  /// `deadlineMs`, `total`, `stillOpen`, `notSent`, `closed`; plus
+  /// `closedAtMs` and `closeReason` (`allInformed` or `deadline`) as soon as
+  /// the transition is closed.
+  List<Map<String, dynamic>> get deviceLockouts;
   void renameDevice(String deviceId, String newName);
   Future<bool> revokeDevice(String deviceId);
   Future<void> rotateIdentityKeys();
   void injectTestDevice(String deviceId, String name, String platform);
-  /// Test-only (E2E gui-52): snapshot of §26.6.2 Paket C retry-manager state.
+  /// Test-only (E2E gui-52): snapshot of §26.6.2 package C retry-manager state.
   Map<String, dynamic> testGetKeyRotationRetryState();
   /// Test-only (E2E gui-52): bypass the 24h retry-interval and force a retry
   /// of all pending contacts now.
@@ -519,7 +1051,7 @@ abstract class ICleonaService {
   /// Convert the winning slot of a DATE poll to a calendar event (§24.5).
   Future<String?> convertDatePollToEvent(String pollId, int winningOptionId);
 
-  /// §26.6.2 Paket C: fired when an emergency-key-rotation retry gives up on
+  /// §26.6.2 package C: fired when an emergency-key-rotation retry gives up on
   /// a contact (either max attempts reached or the 90d window expired). The
   /// contact is flagged, not removed — the UI should warn the user.
   /// Second argument is the remaining pending count.
@@ -624,6 +1156,21 @@ abstract class ICleonaService {
   /// re-publish). Daemon-style callers that already invoke `node.onNetworkChanged()`
   /// once for all identities should pass `false` to avoid the N+1 multiplication
   /// (one node-reset per identity on top of the direct one).
+  // Media archive — share identity and narrowing (§21.6, S394). The
+  // status map carries no secret: identity state, the pin SHORTENED, the
+  // captured networks, and whether this platform reads the SSID for free.
+  Future<Map<String, dynamic>?> getArchiveShareStatus();
+
+  /// Forgets the share pin; the next run pins anew. Deletes nothing.
+  Future<bool> rebindArchiveShare();
+
+  /// Adds the network this device is in now to "only in this network";
+  /// returns the captured entry or `null`.
+  Future<Map<String, dynamic>?> captureArchiveNetwork();
+
+  /// Removes the network narrowing.
+  Future<bool> clearArchiveNetworks();
+
   // Peer Rescue Bundle (§8.1.2)
   Future<Map<String, dynamic>?> exportPeerBundle();
   Future<Map<String, dynamic>> importPeerBundle({String? uri, String? bundleBase64});
@@ -631,3 +1178,40 @@ abstract class ICleonaService {
   Future<void> onNetworkChanged({bool triggerNodeReset = true});
   Future<void> stop();
 }
+
+/// §22.7.2 — the ONE predicate on which the functional gates hang.
+///
+/// **Why an extension and not a getter on the interface.**
+/// §22.7.2 demands literally: "UI and service layer query the **same**
+/// getter; two independent copies of the same gate are impermissible."
+/// Exactly two copies existed until AP-5 — `contact_issue_reporter.dart:98`
+/// (`_service.peerCount > 0`) and `contact_issue_dialog.dart:23`
+/// (`service.peerCount > 0`): the same question, answered twice, and
+/// both answers from an acquaintance count instead of from a
+/// placement proof.
+///
+/// An abstract getter on [ICleonaService] would have brought the second copy
+/// back, only one level deeper: `CleonaService` and `IpcClient`
+/// implement the interface with `implements`, so they inherit
+/// no body and would each have to write one. An extension
+/// CANNOT be overridden — it is the only definition tree-wide,
+/// and that is not convenience here, but the
+/// assurance itself.
+///
+/// The comparison is deliberately against [kReadinessReady] and not against
+/// a literal; the name equality with `Readiness.ready` is held by
+/// `test/smoke/smoke_delivery_api.dart`.
+extension ReadinessGate on ICleonaService {
+  /// Whether placing with redundancy is possible (§22.7.1).
+  bool get isReady => readinessState == kReadinessReady;
+}
+
+/// §24.4.2 — responses of [ICleonaService.setDataSaver].
+///
+/// As strings because the value crosses the JSON boundary of the IPC: an
+/// enumeration would have to be mapped to a name there anyway,
+/// and two mappings are one more than necessary.
+const String kDataSaverOk = 'ok';
+
+/// The latch has engaged: at least one chat is set to High-Secure.
+const String kDataSaverLockedBySecure = 'locked_secure';

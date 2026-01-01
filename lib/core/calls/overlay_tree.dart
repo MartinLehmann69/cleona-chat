@@ -257,16 +257,16 @@ class OverlayTree {
       for (final neighbor in unvisited) {
         if (_nodes[current]!.childrenHex.length >= maxFanOut) {
           // Fan-out exceeded — find another parent in the tree
-          final altParent = _findAvailableParent(visited, current);
-          if (altParent != null) {
+          final oldParent = _findAvailableParent(neighbor);
+          if (oldParent != null) {
             visited.add(neighbor);
             _nodes[neighbor] = TreeNode(
               nodeIdHex: neighbor,
-              parentHex: altParent,
+              parentHex: oldParent,
               isLanClusterHead: clusterMap.containsKey(neighbor),
               lanMemberHex: clusterMap[neighbor],
             );
-            _nodes[altParent]!.childrenHex.add(neighbor);
+            _nodes[oldParent]!.childrenHex.add(neighbor);
             queue.add(neighbor);
           }
           continue;
@@ -287,15 +287,15 @@ class OverlayTree {
     // Handle any participants not connected by MST (disconnected graph)
     for (final p in effectiveParticipants) {
       if (!_nodes.containsKey(p)) {
-        final altParent = _findAvailableParent(_nodes.keys.toSet(), null);
+        final oldParent = _findAvailableParent(p);
         _nodes[p] = TreeNode(
           nodeIdHex: p,
-          parentHex: altParent,
+          parentHex: oldParent,
           isLanClusterHead: clusterMap.containsKey(p),
           lanMemberHex: clusterMap[p],
         );
-        if (altParent != null) {
-          _nodes[altParent]!.childrenHex.add(p);
+        if (oldParent != null) {
+          _nodes[oldParent]!.childrenHex.add(p);
         }
       }
     }
@@ -309,13 +309,57 @@ class OverlayTree {
     }
   }
 
-  /// Find a tree node with available capacity (degree < maxFanOut).
-  String? _findAvailableParent(Set<String> placed, String? exclude) {
-    for (final hex in placed) {
-      if (hex == exclude) continue;
-      final node = _nodes[hex];
-      if (node != null && node.childrenHex.length < maxFanOut) {
-        return hex;
+  /// A node with free fan-out that [forChild] MAY hang onto.
+  ///
+  /// ── WHY THIS IS A BFS FROM THE ROOT AND NOT A PASS OVER THE
+  ///    NODE TABLE (S376/A-3) ────────────────────────────────────────
+  ///
+  /// Until S376 this search ran over `_nodes.keys` in INSERTION order
+  /// and only checked two things: "is it not the child itself" and "does
+  /// it have room". Both are too little, and the error is measured, not
+  /// derived — at 16, 17, 18, 25, 26 and 27 participants the
+  /// tree fell apart on the failure of ONE intermediate node:
+  ///
+  ///     N=16, victim 0002 with the children [0005, 0006, 0007]
+  ///     0005 -> grandparent 0000 (last free place)
+  ///     0006 -> `_findAvailableParent` finds 0007 in insertion order
+  ///     0007 -> finds 0006, which has only just got a child
+  ///     Result: 0006.parent = 0007, 0007.parent = 0006 — a CYCLE,
+  ///     unreachable from the root. Two participants hear nothing
+  ///     more and send into nothing.
+  ///
+  /// Two errors in one expression: the candidate can (a) itself have just
+  /// been detached from the root — the siblings not yet re-hung
+  /// are exactly that — or (b) lie in the child's subtree,
+  /// whereby the attaching cuts the subtree off from the root.
+  ///
+  /// A breadth-first search FROM THE ROOT rules out both without needing an
+  /// additional check: what it reaches hangs on the
+  /// root (rules out (a)), and by not descending further at [forChild]
+  /// it never enters its subtree (rules out (b)).
+  /// It moreover delivers the SHALLOWEST matching node and thus keeps
+  /// the depth bounded, which §17.7 lists as the price of the crystal
+  /// ("roughly 15-25 ms per hop").
+  ///
+  /// In the measured case N=16 it finds 0008 — a leaf with three free
+  /// places, which the pass over insertion order would only have reached after
+  /// 0006 and 0007.
+  String? _findAvailableParent(String? forChild) {
+    if (rootHex == null) return null;
+    final queue = Queue<String>();
+    final seen = <String>{rootHex!};
+    queue.add(rootHex!);
+    while (queue.isNotEmpty) {
+      final current = queue.removeFirst();
+      // NOT into the own subtree: neither the node itself nor anything
+      // below it is eligible as a parent. The `continue` does not descend
+      // further here and thus settles both in one line.
+      if (current == forChild) continue;
+      final node = _nodes[current];
+      if (node == null) continue;
+      if (node.childrenHex.length < maxFanOut) return current;
+      for (final child in node.childrenHex) {
+        if (seen.add(child)) queue.add(child);
       }
     }
     return null;
@@ -419,11 +463,10 @@ class OverlayTree {
         _nodes[node.parentHex]!.childrenHex.add(childHex);
       } else {
         // Find any node with capacity
-        final altParent = _findAvailableParent(
-            _nodes.keys.toSet(), childHex);
-        child.parentHex = altParent;
-        if (altParent != null) {
-          _nodes[altParent]!.childrenHex.add(childHex);
+        final oldParent = _findAvailableParent(childHex);
+        child.parentHex = oldParent;
+        if (oldParent != null) {
+          _nodes[oldParent]!.childrenHex.add(childHex);
         }
       }
     }
@@ -446,31 +489,12 @@ class OverlayTree {
   }
 
   /// Find the shallowest tree node with available fan-out capacity.
-  String? _findShallowestAvailable() {
-    if (rootHex == null) return null;
-
-    // BFS from root — first node with capacity wins
-    final queue = Queue<String>();
-    queue.add(rootHex!);
-    final visited = <String>{rootHex!};
-
-    while (queue.isNotEmpty) {
-      final current = queue.removeFirst();
-      final node = _nodes[current];
-      if (node == null) continue;
-
-      if (node.childrenHex.length < maxFanOut) return current;
-
-      for (final child in node.childrenHex) {
-        if (!visited.contains(child)) {
-          visited.add(child);
-          queue.add(child);
-        }
-      }
-    }
-
-    return null; // All nodes full — shouldn't happen with reasonable fan-out
-  }
+  ///
+  /// Since S376 FORWARDS to [_findAvailableParent]: the two
+  /// bodies were the same breadth-first search line by line. Two versions
+  /// of one search are two opportunities to correct only one of them —
+  /// and exactly one of the two carried the cycle error.
+  String? _findShallowestAvailable() => _findAvailableParent(null);
 
   /// Rebalance a subtree rooted at [subtreeRootHex].
   /// Collects all descendants, sorts by depth preference, re-attaches.

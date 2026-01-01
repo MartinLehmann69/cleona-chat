@@ -1,8 +1,25 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/storage/message_store.dart';
+
+/// The area of the encrypted store for the notification settings
+/// (§21.4.1).
+///
+/// S366: up to here they lay NAKED in the profile as
+/// `notification_settings.json` — listed in neither of the two plaintext
+/// inventories (S363). The content is measured and not presumed
+/// ([NotificationSettings]): ringtone, volume and three switches for
+/// whether direct, group and channel messages are notified at all. No
+/// message content and no contact identifier — but a behavioural profile,
+/// and §21.4 permits no unencrypted accessories next to the store ("a
+/// 'cache directory' … outside encryption is explicitly impermissible").
+const String kNotificationSettingsArea = 'notification_settings';
+
+/// The key of the ONE record.
+const String kNotificationSettingsKey = '_';
 
 /// Available ringtones for incoming calls.
 enum Ringtone {
@@ -86,11 +103,24 @@ class NotificationSettings {
 /// Uses paplay (PulseAudio) on Linux for audio playback — no Flutter dependency.
 /// On Android, sounds are played via platform channel.
 class NotificationSoundService {
-  CLogger _log = CLogger.get('notification_sound');
+  // Process log as default: until [init] runs with the real per-identity
+  // profileDir, this service belongs to no identity. The daemon path calls
+  // [init] and overwrites `_log` with the correct value (self-heal, see
+  // below); the second construction site (`ipc_client.dart`, which never
+  // calls [init] because it is only a proxy object for GUI-side settings)
+  // stays on the process log and thus writes at least into ONE file
+  // instead of none.
+  CLogger _log = CLogger.get('notification_sound', profileDir: AppPaths.dataDir);
 
   NotificationSettings _settings = NotificationSettings();
-  String? _profileDir;
   String? _soundsDir;
+
+  /// The identity's encrypted store, set by [init].
+  ///
+  /// S366: next to it stood `_profileDir` here, and after the switch-over
+  /// it was only the address of the plaintext file — it has remained in
+  /// `_log` (the log path still hangs on the profile).
+  MessageStore? _store;
 
   /// Looping playback is driven from Dart, not from a shell/PowerShell loop:
   /// each iteration spawns exactly ONE player process whose PID we own, so
@@ -119,8 +149,14 @@ class NotificationSoundService {
   NotificationSettings get settings => _settings;
 
   /// Initialize with profile directory for settings persistence.
-  Future<void> init(String profileDir) async {
-    _profileDir = profileDir;
+  ///
+  /// [store] is the identity's encrypted store. It may be `null` — that is
+  /// the stand-in in `ipc_client.dart`, which never calls [init] anyway,
+  /// and the path for guards that only measure playback. Without a store
+  /// nothing is loaded and nothing written; the setting then applies only
+  /// for this run.
+  Future<void> init(String profileDir, {MessageStore? store}) async {
+    _store = store;
     _log = CLogger.get('notification_sound', profileDir: profileDir);
     await _loadSettings();
     _soundsDir = await _findSoundsDir();
@@ -128,9 +164,16 @@ class NotificationSoundService {
 
   /// Find the sounds directory (Flutter asset bundle or project assets).
   Future<String?> _findSoundsDir() async {
-    // Primary: adjacent to binary (canonical ~/cleona-app/data/...)
-    final execDir = File(Platform.resolvedExecutable).parent.path;
-    final bundleSounds = '$execDir/data/flutter_assets/assets/sounds';
+    // Primary: in the bundle (canonical ~/cleona-app/data/...).
+    //
+    // `AppPaths.bundleDir` instead of `File(exe).parent.path` (S367): the
+    // daemon — and it is precisely the one that plays the sounds — has
+    // lived in `<bundleDir>/bin/` since the rebuild. Its own directory
+    // carries no `data/`, the bundle root does. Up to here that was masked
+    // by the `~/cleona-app` fallback below; on a normal installation,
+    // however, that path does not exist.
+    final bundleSounds =
+        '${AppPaths.bundleDir}/data/flutter_assets/assets/sounds';
     if (Directory(bundleSounds).existsSync()) return bundleSounds;
     // Fallback: binary may run from non-canonical path (e.g. ~/cleona-daemon);
     // look for the bundle in the user's standard cleona-app directory.
@@ -145,21 +188,36 @@ class NotificationSoundService {
     return null;
   }
 
+  /// S366: from the store (area [kNotificationSettingsArea]) instead of
+  /// from `notification_settings.json`.
+  ///
+  /// NO DATA-LOSS LATCH, and that is a decision, not a gap: the record
+  /// carries exactly one setting that the user restores in ten seconds.
+  /// If it is lost, it rings with the default sound again — annoying, but
+  /// nothing is gone that could not be set again. A latch here would not
+  /// be a safeguard, just an additional source of errors (the same
+  /// trade-off as with the NAT wizard in `cleona_service_pure.dart`).
   Future<void> _loadSettings() async {
-    if (_profileDir == null) return;
-    final file = File('$_profileDir/notification_settings.json');
-    if (file.existsSync()) {
-      try {
-        final json = jsonDecode(file.readAsStringSync());
-        _settings = NotificationSettings.fromJson(json as Map<String, dynamic>);
-      } catch (_) {}
+    final s = _store;
+    if (s == null) return;
+    try {
+      final j = s.loadArea(kNotificationSettingsArea)
+          [kNotificationSettingsKey];
+      if (j != null) _settings = NotificationSettings.fromJson(j);
+    } catch (e) {
+      _log.warn('Failed to load notification settings: $e');
     }
   }
 
   Future<void> saveSettings() async {
-    if (_profileDir == null) return;
-    final file = File('$_profileDir/notification_settings.json');
-    file.writeAsStringSync(jsonEncode(_settings.toJson()));
+    final s = _store;
+    if (s == null) return;
+    try {
+      s.replaceArea(kNotificationSettingsArea,
+          {kNotificationSettingsKey: _settings.toJson()});
+    } catch (e) {
+      _log.warn('Failed to save notification settings: $e');
+    }
   }
 
   /// Update settings and persist.

@@ -110,18 +110,42 @@ class ModerationConfig {
   final Duration csamObjectionWindow;
 
   // ── Anti-Sybil ──────────────────────────────────────────────────
+  //
+  // ATTENTION S368 (05.09.2026): THESE TWO FIELDS NO LONGER CONTROL ANYTHING.
+  //
+  // Their only reader was `moderation/reachability_check.dart` or
+  // `moderation/sybil_transport_validator.dart` — the DHT-based
+  // anti-Sybil validation. It chose K validators from the DHT; on
+  // this branch there has been no `lib/core/dht/` since the V3 teardown,
+  // the classes had zero callers in `lib/`, and S368 deleted
+  // them. `reachabilityMaxHops` and `reachabilityValidatorCount`
+  // went with them, because they were read nowhere else.
+  //
+  // THESE TWO HERE HAVE REMAINED, and that is expressly NO
+  // statement that they still do anything: `ipc_server.dart` puts
+  // them into the response to `get_moderation_config`, and
+  // `test/e2e/tests/moderation.spec.ts` reads them from there. A daemon
+  // that reports `reachabilityEnabled: true` thereby claims today a
+  // check that does not exist. Removing them changes the
+  // IPC contract and an E2E test — that is a decision of the
+  // owner and not cleanup work. Proposal:
+  // `docs/v4-redesign/S368-VORLAGE-reachability-im-ipc-vertrag.md`.
+  //
+  // What REALLY limits the reporter qualification today stands in
+  // `service/channel_moderation_service.dart`: report reception is restricted to
+  // known contacts, and the file itself names that the
+  // V4.1 qualification via registration age is unbuilt.
 
   /// Social Graph Reachability Check enabled.
+  ///
+  /// WITHOUT EFFECT since S368 — pure display value in the IPC contract, see
+  /// the block above.
   final bool reachabilityEnabled;
 
   /// Percent of validators that must reach the reporter (0.60 = 60%).
+  ///
+  /// WITHOUT EFFECT since S368 — pure display value in the IPC contract.
   final double reachabilityThreshold;
-
-  /// Max. hops for reachability check.
-  final int reachabilityMaxHops;
-
-  /// Number of validator nodes for reachability check.
-  final int reachabilityValidatorCount;
 
   // ── Independence check ───────────────────────────────────────
 
@@ -185,8 +209,6 @@ class ModerationConfig {
     // Anti-Sybil
     this.reachabilityEnabled = true,
     this.reachabilityThreshold = 0.60,
-    this.reachabilityMaxHops = 5,
-    this.reachabilityValidatorCount = 10,
     // Independence
     this.independenceMinGroupSize = 50,
     this.independenceGroupFactor = 0.05,
@@ -237,8 +259,6 @@ class ModerationConfig {
         csamObjectionWindow: Duration(seconds: 30),
         reachabilityEnabled: true,
         reachabilityThreshold: 0.60,
-        reachabilityMaxHops: 5,
-        reachabilityValidatorCount: 10,
         independenceMinGroupSize: 5,
         independenceGroupFactor: 0.05,
         directContactsAlwaysConnected: true,
@@ -289,8 +309,6 @@ class ModerationConfig {
         // Anti-Sybil — disabled in test
         reachabilityEnabled: false,
         reachabilityThreshold: 0.0,
-        reachabilityMaxHops: 5,
-        reachabilityValidatorCount: 3,
         // Independence — simplified
         independenceMinGroupSize: 2,
         independenceGroupFactor: 0.05,
@@ -428,69 +446,6 @@ enum JuryConsequence {
 
   /// No action.
   noAction,
-}
-
-/// Bad Badge levels.
-enum BadBadgeLevel {
-  /// No badge.
-  none,
-
-  /// "Content questionable" — 30-day probation.
-  questionable,
-
-  /// "Repeatedly misleading" — 90-day probation.
-  repeatedlyMisleading,
-
-  /// Permanent — cannot be removed.
-  permanent,
-}
-
-/// Channel topic categories for discovery.
-enum ChannelCategory {
-  /// General / uncategorized.
-  general,
-
-  /// Technology & Science.
-  technology,
-
-  /// News & Politics.
-  news,
-
-  /// Entertainment & Media.
-  entertainment,
-
-  /// Gaming.
-  gaming,
-
-  /// Music & Arts.
-  music,
-
-  /// Sports & Fitness.
-  sports,
-
-  /// Education & Learning.
-  education,
-
-  /// Business & Finance.
-  finance,
-
-  /// Health & Wellness.
-  health,
-
-  /// Food & Cooking.
-  food,
-
-  /// Travel & Geography.
-  travel,
-
-  /// Humor & Memes.
-  humor,
-
-  /// Crypto & Blockchain.
-  crypto,
-
-  /// Regional / Local.
-  regional,
 }
 
 /// Determines the consequence of a successful jury decision.

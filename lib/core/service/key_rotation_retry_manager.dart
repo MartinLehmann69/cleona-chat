@@ -1,12 +1,22 @@
 import 'dart:convert';
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/util/hex.dart';
 
-/// §26.6.2 Paket C — Retry-Pfad fuer Emergency Key Rotation.
+/// Area of the rotation resubmission state in the store (formerly
+/// `key_rotation_retry.json`), §26.6.2 package C.
+const String kKeyRotationRetryArea = 'key_rotation_retry';
+
+/// There is EXACTLY ONE rotation state — "a new rotation supersedes any
+/// prior state", see class header. It therefore gets a fixed key and not
+/// one formed from the `rotationId`: otherwise two states could lie side
+/// by side, and the invariant would only be a declaration of intent.
+const String kKeyRotationRetryKey = '_';
+
+/// §26.6.2 package C — retry path for emergency key rotation.
 ///
 /// Background: `rotateIdentityKeys()` sends a dual-signed
 /// `KEY_ROTATION_BROADCAST` to every accepted contact and hopes the contacts
@@ -37,7 +47,10 @@ import 'package:cleona/core/network/clogger.dart';
 class KeyRotationRetryManager {
   final String profileDir;
   final String identityId;
-  final FileEncryption? _fileEnc;
+
+  /// The encrypted store. `null` means proxy operation (the GUI via IPC):
+  /// state machine without disk.
+  final MessageStore? _store;
   final CLogger _log;
 
   /// Retry cadence. Caller ticks the timer; this class decides what is due.
@@ -57,22 +70,26 @@ class KeyRotationRetryManager {
   KeyRotationRetryManager({
     required this.profileDir,
     required this.identityId,
-    FileEncryption? fileEnc,
+    this._store,
     this.retryIntervalMs = 24 * 60 * 60 * 1000,
     this.expireTtlMs = 90 * 24 * 60 * 60 * 1000,
     this.maxAttempts = 3,
-  })  : _fileEnc = fileEnc,
-        _log = CLogger.get('key-rotation-retry[$identityId]');
+  })  : // profileDir is a constructor parameter (per identity) -> directly usable.
+        _log = CLogger.get('key-rotation-retry[${shortHex(identityId)}]',
+            profileDir: profileDir);
 
   // ── Persistence ─────────────────────────────────────────────────────────
 
   void load() {
-    if (_fileEnc == null) {
+    final store = _store;
+    if (store == null) {
       _loaded = true;
       return;
     }
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/key_rotation_retry.json');
+      // S366: ONE entry in the area `key_rotation_retry` instead of the
+      // file of the same name.
+      final json = store.loadArea(kKeyRotationRetryArea)[kKeyRotationRetryKey];
       if (json != null) {
         _state = KeyRotationRetryState.fromJson(json);
         _log.info('Loaded rotation state ${_state!.rotationId.substring(0, 8)} '
@@ -80,26 +97,53 @@ class KeyRotationRetryManager {
             'acked=${_state!.acked.length} '
             'expired=${_state!.expired.length}');
       }
+      // ONLY AFTER reading and NOT in the `catch`. Until S366 this
+      // statement stood behind the `try` and thus ran ALSO after a read
+      // error — the marker then said "loaded" although nothing was loaded,
+      // and the latch below let the overwrite through.
+      _loaded = true;
     } catch (e) {
       _log.warn('Failed to load key rotation retry state: $e');
     }
-    _loaded = true;
   }
 
   void _save() {
-    if (_fileEnc == null) return;
-    if (!_loaded) {
-      _log.warn('REFUSED to save key rotation retry — load may have failed');
-      return;
+    final store = _store;
+    if (store == null) return;
+    // DATA-LOSS LATCH: it now asks the STORE, no longer only the load flag.
+    //
+    // The latch itself already stood here ("REFUSED to save key rotation
+    // retry"), but it hung on a stand-in: `_loaded` was also set after a
+    // read error (see [load]), and whether something lay on disk was never
+    // checked. After the switch-over it would additionally have been
+    // silently dead — the file it was about is never written again. It
+    // fails closed if the store is not readable.
+    if (!_loaded && _state == null) {
+      var present = false;
+      try {
+        present = store.countArea(kKeyRotationRetryArea) > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save key rotation retry — store not '
+            'readable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save key rotation retry — loading failed, '
+            'but the storage holds a rotation state. '
+            'Would cause data loss!');
+        return;
+      }
     }
     try {
       if (_state == null) {
-        // Nothing to persist yet; writeJsonFile of empty is fine but avoid
-        // overwriting a prior non-empty file.
+        // Nothing to persist yet. Do NOT delete: [clear] is the path for
+        // that, and it is only called on identity deletion.
         return;
       }
-      _fileEnc.writeJsonFile(
-          '$profileDir/key_rotation_retry.json', _state!.toJson());
+      // One object, one entry — `replaceArea` thus keeps the area at
+      // exactly one row and clears old stock away too.
+      store.replaceArea(
+          kKeyRotationRetryArea, {kKeyRotationRetryKey: _state!.toJson()});
     } catch (e) {
       _log.warn('Failed to save key rotation retry state: $e');
     }
@@ -257,20 +301,16 @@ class KeyRotationRetryManager {
   }
 
   /// Drops the whole state. Only called when the identity itself is deleted.
-  /// The on-disk file is removed so a subsequent `load()` cannot resurrect
+  /// The stored row is removed so a subsequent `load()` cannot resurrect
   /// stale rotation pending/expired sets.
   void clear() {
     _state = null;
-    if (_fileEnc != null) {
-      final plain = File('$profileDir/key_rotation_retry.json');
-      final encrypted = File('$profileDir/key_rotation_retry.json.enc');
-      for (final f in [plain, encrypted]) {
-        try {
-          if (f.existsSync()) f.deleteSync();
-        } catch (e) {
-          _log.warn('Failed to delete ${f.path}: $e');
-        }
-      }
+    final store = _store;
+    if (store == null) return;
+    try {
+      store.replaceArea(kKeyRotationRetryArea, const {});
+    } catch (e) {
+      _log.warn('Failed to clear key rotation retry area: $e');
     }
   }
 

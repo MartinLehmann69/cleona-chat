@@ -75,7 +75,7 @@ class ConformanceActivity : Activity() {
                 // Loads libcleona_voice.so THROUGH the runtime, which is what
                 // makes ART call JNI_OnLoad and hand the backend its JavaVM,
                 // and supplies the Context AudioManager needs. Exactly the call
-                // the app has to make at start-up (BUILD_REQUEST_V1.2.md §2).
+                // the app has to make at start-up (BUGFIX_CURRENT.md AV-V1.2 §2).
                 VoiceSession.install(applicationContext)
                 System.loadLibrary("cleona_voice_conformance")
                 code = ConformanceRunner.runNative(

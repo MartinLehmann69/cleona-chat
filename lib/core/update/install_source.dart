@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
 /// Where the running APK was installed from.
@@ -37,7 +37,12 @@ class InstallSourceDetector {
 
   static InstallSource? _cached;
 
-  static final CLogger _log = CLogger('InstallSourceDetector');
+  // Lazily static (Dart initialises every `static final` field individually on
+  // first access, not at class load): `_log` is reached exclusively
+  // from the Android branch of [detect], at which point
+  // `AppPaths.dataDir` has already been regularly resolved (see `_cacheFile` above).
+  static final CLogger _log =
+      CLogger.get('InstallSourceDetector', profileDir: AppPaths.dataDir);
 
   /// Detect the install source. On non-Android platforms, always returns
   /// [InstallSource.unknown]. The result is determined once (build-time

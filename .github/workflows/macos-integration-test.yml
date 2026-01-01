@@ -19,7 +19,7 @@ on:
       - 'scripts/build-macos-libs.sh'
       - 'macos/**'
       - 'lib/core/crypto/*_ffi.dart'
-      - 'lib/core/network/contact_seed.dart'
+      - 'lib/core/contact/contact_seed.dart'
       - 'lib/core/platform/app_paths.dart'
       - 'integration_test/app_test_ci.dart'
       - '.github/workflows/macos-integration-test.yml'

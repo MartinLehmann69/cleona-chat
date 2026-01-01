@@ -8,22 +8,45 @@ import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/calendar/sync/local_ics_publisher.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
-import 'package:cleona/core/crypto/file_encryption.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/util/hex.dart';
 
 /// Per-identity calendar sync orchestrator.
 ///
 /// Each identity owns at most one of [CalDAVConfig], [GoogleCalendarConfig],
 /// [EWSConfig], and [LocalIcsConfig]. On start(), a periodic timer drives
-/// [syncAll]. Configs and per-event sync refs are persisted encrypted under
-/// the identity's profile directory.
+/// [syncAll].
+///
+/// S366: configuration and sync state lie in the encrypted
+/// store per identity (areas `calendar_sync_config` and
+/// `calendar_sync_state`), no longer in `calendar_sync_config.json` /
+/// `calendar_sync_state.json`. Both are small and are always set in full by their
+/// callers — hence `replaceArea` and not
+/// `putEntry`; deleting a provider thus falls out by itself.
 class CalendarSyncService {
   final String profileDir;
   final String identityId;
   final CalendarManager calendar;
-  final FileEncryption fileEnc;
+
+  /// The encrypted store of this identity. `null` means: no
+  /// writing, no reading (proxy/test mode) — as with [CalendarManager].
+  final MessageStore? _store;
   final CLogger _log;
+
+  /// Area of the provider configuration. One entry per provider.
+  static const String kConfigArea = 'calendar_sync_config';
+
+  /// Area of the sync state. ONE entry — the state is an
+  /// object with mixed fields (references, tags, conflict lists),
+  /// not a collection of rows of the same kind.
+  static const String kStateArea = 'calendar_sync_state';
+  static const String _stateKey = 'state';
+
+  /// Did [load] run through successfully? Carries the data-loss latch
+  /// in [_saveConfig] / [_saveState].
+  bool _loaded = false;
 
   /// Background sync cadence — used when the app is NOT in the foreground.
   /// FCM-style push is not available to a fully P2P client (no central
@@ -74,37 +97,59 @@ class CalendarSyncService {
     required this.profileDir,
     required this.identityId,
     required this.calendar,
-    required this.fileEnc,
+    this._store,
     Duration? interval,
     this.foregroundInterval = const Duration(minutes: 3),
     Duration? backgroundInterval,
   })  : backgroundInterval =
             backgroundInterval ?? interval ?? const Duration(minutes: 15),
-        _log = CLogger.get('calsync[$identityId]') {
+        // profileDir is a constructor parameter (per identity) -> directly usable.
+        _log = CLogger.get('calsync[${shortHex(identityId)}]', profileDir: profileDir) {
     _icsPublisher =
         LocalIcsPublisher(identityId: identityId, calendar: calendar);
   }
 
-  /// Back-compat: legacy callers may read .interval as "the currently-active
-  /// polling interval".
+  /// The currently valid interval — foreground or background.
+  ///
+  /// ── S368, AND HERE IS A MEASUREMENT ERROR OF MINE ─────────────────────
+  ///
+  /// The header read "Back-compat: legacy callers may read .interval as
+  /// 'the currently-active polling interval'", and I therefore wanted to remove
+  /// the getter. My measurement was `grep -rn '\.interval\b'` — a
+  /// SINGLE pattern, and it was the wrong one: it only finds the access
+  /// via a receiver (`egress.interval`), not the BARE name
+  /// inside the same class. But that is exactly how it is used here three times:
+  /// `start()` (l. 269), `setForeground()` (l. 290) and
+  /// `_restartTimer()` (l. 300) — the last one is the timer itself.
+  /// The analyzer caught it, not I.
+  ///
+  /// So the getter stays. Only its RATIONALE was wrong: it is not a
+  /// concession to old callers but the expression "which of the
+  /// two intervals applies right now" — and that is needed.
   Duration get interval =>
       _foreground ? foregroundInterval : backgroundInterval;
 
   /// Load persisted config + refs from disk. Safe to call repeatedly.
   void load() {
+    final store = _store;
+    if (store == null) {
+      _loaded = true;
+      return; // proxy/test mode without a store
+    }
     try {
-      final cfgJson = fileEnc.readJsonFile('$profileDir/calendar_sync_config.json');
-      if (cfgJson != null) {
-        final caldavRaw = cfgJson['caldav'] as Map<String, dynamic>?;
+      // S366: from the store instead of from `calendar_sync_config.json`.
+      final cfgJson = store.loadArea(kConfigArea);
+      if (cfgJson.isNotEmpty) {
+        final caldavRaw = cfgJson['caldav'];
         if (caldavRaw != null) _caldav = CalDAVConfig.fromJson(caldavRaw);
-        final googleRaw = cfgJson['google'] as Map<String, dynamic>?;
+        final googleRaw = cfgJson['google'];
         if (googleRaw != null) _google = GoogleCalendarConfig.fromJson(googleRaw);
-        final ewsRaw = cfgJson['exchange'] as Map<String, dynamic>?;
+        final ewsRaw = cfgJson['exchange'];
         if (ewsRaw != null) _ews = EWSConfig.fromJson(ewsRaw);
-        final icsRaw = cfgJson['localIcs'] as Map<String, dynamic>?;
+        final icsRaw = cfgJson['localIcs'];
         if (icsRaw != null) _localIcs = LocalIcsConfig.fromJson(icsRaw);
       }
-      final stateJson = fileEnc.readJsonFile('$profileDir/calendar_sync_state.json');
+      final stateJson = store.loadArea(kStateArea)[_stateKey];
       if (stateJson != null) {
         final caldavRefs = stateJson['caldavRefs'] as Map<String, dynamic>? ?? {};
         for (final e in caldavRefs.entries) {
@@ -151,21 +196,64 @@ class CalendarSyncService {
           'localIcs=${_localIcs != null} '
           'refs=${_caldavRefs.length}+${_googleRefs.length}+${_ewsRefs.length} '
           'conflicts=${_conflicts.length}+${_pendingConflicts.length}pending');
+      _loaded = true;
     } catch (e) {
+      // Do NOT mark as loaded: otherwise empty counts as the stock, and the
+      // latch below would let a full overwrite through.
       _log.warn('Failed to load sync state: $e');
     }
   }
 
+  /// DATA-LOSS LATCH (S366).
+  ///
+  /// If [load] failed (wrong key, damaged store), nothing is
+  /// in memory — and the next `_saveConfig`/`_saveState`
+  /// would persist exactly this nothing. Lost would then be the
+  /// credentials of the external calendar AND the mapping of local
+  /// events to their counterparts on the server; without it the
+  /// next sync creates every event there a second time.
+  ///
+  /// Return value `true` means: do not write. With an unreadable store
+  /// it fails CLOSED — not saving is always right when
+  /// we do not know what is on the disk.
+  bool _boltGrips(MessageStore store) {
+    if (_loaded) return false;
+    try {
+      if (store.countArea(kConfigArea) > 0 || store.countArea(kStateArea) > 0) {
+        _log.warn('REFUSED to save calendar sync state — load failed but the '
+            'store still holds entries. Would cause data loss!');
+        return true;
+      }
+    } catch (e) {
+      _log.warn('REFUSED to save calendar sync state — store unreadable: $e');
+      return true;
+    }
+    return false;
+  }
+
   void _saveConfig() {
-    final json = <String, dynamic>{};
+    final store = _store;
+    if (store == null) return;
+    if (_boltGrips(store)) return;
+    final json = <String, Map<String, dynamic>>{};
     if (_caldav != null) json['caldav'] = _caldav!.toJson();
     if (_google != null) json['google'] = _google!.toJson();
     if (_ews != null) json['exchange'] = _ews!.toJson();
     if (_localIcs != null) json['localIcs'] = _localIcs!.toJson();
-    fileEnc.writeJsonFile('$profileDir/calendar_sync_config.json', json);
+    try {
+      // One entry per provider. `replaceArea` clears out a removed
+      // provider (removeCalDAV & co.) along the way, without needing
+      // its own deletion path.
+      store.replaceArea(kConfigArea, json);
+    } catch (e) {
+      _log.warn('Failed to save sync config: $e');
+    }
   }
 
   void _saveState() {
+    final store = _store;
+    if (store == null) return;
+    if (_boltGrips(store)) return;
     final json = <String, dynamic>{
       'caldavRefs': _caldavRefs.map((k, v) => MapEntry(k, v.toJson())),
       'googleRefs': _googleRefs.map((k, v) => MapEntry(k, v.toJson())),
@@ -179,7 +267,14 @@ class CalendarSyncService {
       'pendingConflicts':
           _pendingConflicts.map((c) => c.toJson()).toList(),
     };
-    fileEnc.writeJsonFile('$profileDir/calendar_sync_state.json', json);
+    try {
+      // ONE entry: the state is an object with mixed fields,
+      // not a collection. It thus stays exactly what used to be in a
+      // file.
+      store.replaceArea(kStateArea, {_stateKey: json});
+    } catch (e) {
+      _log.warn('Failed to save sync state: $e');
+    }
   }
 
   /// Start the periodic timer. No-op if already running.
@@ -255,7 +350,11 @@ class CalendarSyncService {
           exportAllEvents: config.exportAllEvents,
           askOnConflict: config.askOnConflict,
         );
-        _log.info('Auto-selected calendar: ${cals.first.displayName} (${cals.first.url})');
+        // S362: calendar name and URL only at `debug` — both name
+        // a person or their provider.
+        _log.debug('Auto-selected calendar: ${cals.first.displayName} '
+            '(${cals.first.url})');
+        _log.info('Auto-selected calendar (1 of ${cals.length})');
       }
       _caldav = effective;
     } finally {
@@ -367,7 +466,8 @@ class CalendarSyncService {
     try {
       final losing = CalendarEvent.fromJson(c.losingEvent);
       calendar.events[losing.eventId] = losing;
-      calendar.save();
+      // S366: exactly one event — one row, not the whole stock.
+      calendar.persistEvent(losing.eventId);
       _conflicts[idx] = SyncConflict(
         id: c.id,
         eventId: c.eventId,
@@ -401,7 +501,8 @@ class CalendarSyncService {
       // Bump updatedAt so the decision sticks against stale external copies.
       winner.updatedAt = DateTime.now().millisecondsSinceEpoch;
       calendar.events[winner.eventId] = winner;
-      calendar.save();
+      // S366: exactly one event — one row, not the whole stock.
+      calendar.persistEvent(winner.eventId);
       // Record a resolved-history entry too, for transparency.
       _recordConflict(SyncConflict(
         id: c.id,

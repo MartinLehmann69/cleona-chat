@@ -35,16 +35,21 @@
 ///    a v2 header (the v1-on-disk container that held only the Sig keypair
 ///    is migrated on first load by generating a fresh KEM keypair).
 ///
-/// 2. **CleonaNode wiring** (Subagent D): `CleonaNode._deviceKeyPair` becomes
-///    a sibling field `_deviceKemKeyPair` of type [DeviceKemKeyPair].
-///    Populated from [DeviceKeysStore.loadOrCreate] alongside the Sig pair.
+/// 2. **Node wiring** (Subagent D) — **HISTORICAL, the target no longer
+///    exists.** The point read: "`CleonaNode._deviceKeyPair` becomes a
+///    sibling field `_deviceKemKeyPair` of type [DeviceKemKeyPair],
+///    populated from [DeviceKeysStore.loadOrCreate] alongside the Sig
+///    pair." `CleonaNode` was deleted with the CUT of 2026-08-31
+///    (`lib/core/node/`: zero files, measured 2026-09-03). The point has
+///    thus not been done but has become moot — on the V4.1 line there is
+///    no node with this field.
 ///
 /// 3. **DeviceKemRecord publication** (Subagent B, §4.3): when (re)publishing
 ///    the third 2D-DHT record class (storage-key
 ///    `SHA-256("kem" || userId || deviceId)`), the entry MUST contain
 ///    [DeviceKemKeyPair.x25519PublicKey] (32 B) and
 ///    [DeviceKemKeyPair.mlKemPublicKey] (1184 B). See
-///    `proto/cleona.proto` `DeviceKemRecordV3` fields 3 + 4.
+///    `proto/transport_v3.proto::DeviceKemRecordV3` fields 3 + 4.
 ///
 /// 4. **ContactSeed URI** (Subagent B, §8.1.1): `dxk` (X25519) and `dmk`
 ///    (ML-KEM-768) parameters carry the same two pubkeys for

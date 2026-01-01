@@ -19,6 +19,35 @@ import Network
     // Apple requires registration during didFinishLaunchingWithOptions.
     BackgroundFetchHandler.shared.registerBackgroundTasks()
 
+    // -- SCHEDULE AT STARTUP (F-8, S370) -----------------------------
+    //
+    // Architecture v3_0 §12.5 ("Scheduling chain", l. 6460) explicitly
+    // requires: "Both are also scheduled on first app launch and on
+    // every foreground->background transition." The transition to the
+    // background was wired (Dart: `didChangeAppLifecycleState` ->
+    // `scheduleBackgroundFetch` -> `scheduleBothTasks`, main.dart:989),
+    // the program start was NOT.
+    //
+    // What that cost: after a crash, a device restart or
+    // a reinstall nothing was in the queue until the
+    // user next opened AND left the app again. Exactly
+    // in the window in which background delivery is worth the most,
+    // there was none.
+    //
+    // Must come AFTER `registerBackgroundTasks()`: `BGTaskScheduler.submit`
+    // throws for an unregistered identifier.
+    //
+    // UNVERIFIED: code reading only. There is no Apple machine in this
+    // session, and the CI path is not usable (GitHub only holds
+    // `main` @ v3.2.2-beta, this branch is 2930 commits ahead -- a
+    // run there would measure the wrong tree). A device run must show
+    // that the two `submit` calls here do not end with
+    // `BGTaskSchedulerErrorCodeTooManyPendingTaskRequests` when requests
+    // from the last session are still pending at startup -- the
+    // `catch` branch in `scheduleRefreshTask`/`scheduleProcessingTask`
+    // then logs this without crashing.
+    BackgroundFetchHandler.shared.scheduleBothTasks()
+
     // Request notification permission for background-fetched messages.
     BackgroundFetchHandler.shared.requestNotificationAuthorization()
 
@@ -36,12 +65,6 @@ import Network
     // §3.7 OS Keyring: register Keychain MethodChannel handler.
     if let keyringRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "KeyringHandler") {
       KeyringHandler.register(with: keyringRegistrar)
-    }
-
-    // 1:1 video calls: register AVFoundation camera capture handler
-    // (iOS counterpart to Android's CameraXHandler.kt).
-    if let cameraRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "CameraHandler") {
-      CameraHandler.register(with: cameraRegistrar)
     }
 
     // Session behaviour (V1.10): AudioFocus/interruption/proximity — iOS
@@ -159,9 +182,10 @@ import Network
       BackgroundFetchHandler.shared.scheduleBothTasks()
       result(true)
 
-    case "cancelBackgroundFetch":
-      BackgroundFetchHandler.shared.cancelPendingTasks()
-      result(true)
+    // `cancelBackgroundFetch` was removed with S370 -- the Dart side
+    // had zero callers, and v3_0 §12.5 knows no cancellation, only a
+    // scheduling chain. Full rationale in
+    // `lib/core/platform/ios_background_fetch.dart`.
 
     default:
       result(FlutterMethodNotImplemented)

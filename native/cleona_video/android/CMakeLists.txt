@@ -4,16 +4,15 @@
 # Architecture: Cleona_Chat_Architecture_v3_0.md §10.6 (normative).
 #
 # Picked up automatically by native/cleona_video/CMakeLists.txt's platform
-# loop, per native/cleona_video/test/BUILD_REQUEST.md §1. That loop is
-# unconditional (mirrors the cleona_voice tree, whose android/CMakeLists.txt
+# loop. That loop runs by default (mirrors the cleona_voice tree, whose android/CMakeLists.txt
 # guards itself the same way), so this file must make itself a no-op on every
 # other host -- otherwise a Linux/Windows configure would descend into it and
 # fail on missing <camera/NdkCameraManager.h>/<media/NdkMediaCodec.h> or, once
 # V1.13/V1.16 land, die on a duplicate `cleona_video` target the way
-# BUILD_REQUEST_V1.2.md §5 documents for the voice tree's Linux backend.
+# BUGFIX_CURRENT.md AV-V1.2 §5 documents for the voice tree's Linux backend.
 #
 # `if(NOT UNIX)` would be the wrong guard here for the same reason
-# BUILD_REQUEST_V1.2.md §5 calls out: CMake sets UNIX for an Android NDK
+# BUGFIX_CURRENT.md AV-V1.2 §5 calls out: CMake sets UNIX for an Android NDK
 # toolchain build too. `if(NOT ANDROID)` is what native/cleona_voice/android/
 # already uses and is the only guard that actually distinguishes the two.
 if(NOT ANDROID)
@@ -26,8 +25,8 @@ endif()
 # Output name is libcleona_video.so, matching what the Dart binding's search
 # path expects (lib/core/calls/video_pipeline.dart: "libcleona_video.so" next
 # to the executable / in native/cleona_video/CMakeLists.txt's parent include
-# dir) and what scripts/build-android-libs.sh will install into jniLibs once
-# BUILD_REQUEST_V1.14.md §1 lands.
+# dir) and what scripts/build-android-libs.sh installs into jniLibs
+# (build_libcleona_video(), BUGFIX_CURRENT.md AV-V1.14 §4.1).
 # ---------------------------------------------------------------------------
 add_library(cleona_video SHARED cleona_video_android.c)
 target_include_directories(cleona_video PRIVATE "${CMAKE_CURRENT_LIST_DIR}/..")

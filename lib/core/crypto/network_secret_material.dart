@@ -2,17 +2,21 @@
 // CLOSED-NETWORK KEY MATERIAL — PLACEHOLDER (public source tree)
 // ==========================================================================
 //
-// The real key material is not part of the published source. See Architecture
-// 4.10 (Closed Network Model): only official maintainer builds carry the
-// network secret, and a build made from this source therefore derives an
-// all-zero secret. Such a build cannot join the official Cleona network — its
-// packets carry an HMAC no official node accepts, and its node IDs land in a
-// disjoint DHT address space.
+// The real key material is not part of the published source. Only official
+// maintainer builds carry the network secret; a build made from this source
+// derives an all-zero secret.
+//
+// What that secret does (Architecture §26.6, §26.7): it keys the binary
+// distribution path — the lookup tag, the record encryption and the Nostr
+// publishing key of official updates. It admits no one: there is no packet
+// HMAC and no network-side membership filter (§20, §10), and the delivery
+// layer (mycelium/) does not use it. A build from this source therefore takes
+// part in the network like any other, but cannot find or read the official
+// update path.
 //
 // This is intentional and is the only part of the tree that differs from the
-// official build. Everything relevant to auditing the cryptography — the
-// derivation, the HMAC construction, the rotation logic — is in
-// network_secret.dart and is complete here.
+// official build. The derivation and the rotation logic are in
+// network_secret.dart and are complete here.
 //
 // ==========================================================================
 

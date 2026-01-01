@@ -32,7 +32,7 @@ void main() {
     if (d.library == 'flutter test framework') FlutterError.presentError(d);
   };
 
-  testWidgets('Node2: Chat + Gruppen + Channels + Inbox', (tester) async {
+  testWidgets('Node2: chat + groups + channels + inbox', (tester) async {
     runApp(const CleonaApp());
     // Wait for app startup — poll until tabs appear (up to 30s)
     await pumpUntilFound(tester, find.text('Aktuell'), timeout: const Duration(seconds: 30));
@@ -42,7 +42,7 @@ void main() {
     await pumpFrames(tester);
 
     final tiles = find.byType(ListTile);
-    expect(tiles, findsWidgets, reason: '1.01 Conversations vorhanden');
+    expect(tiles, findsWidgets, reason: '1.01 conversations present');
 
     await tester.tap(tiles.first);
     await pumpUntilFound(tester, find.byType(TextField), timeout: const Duration(seconds: 10));
@@ -59,13 +59,13 @@ void main() {
     await pumpUntilFound(tester, find.textContaining('IntTest-Node2', skipOffstage: false));
 
     expect(find.textContaining('IntTest-Node2', skipOffstage: false), findsWidgets,
-        reason: '1.05 Nachricht sichtbar');
+        reason: '1.05 message visible');
 
     // More-vert icon on own message
     final moreVert = find.byIcon(Icons.more_vert, skipOffstage: false);
     if (moreVert.evaluate().isNotEmpty) {
       // Verify the popup trigger exists (message has 3-dot menu)
-      expect(moreVert, findsWidgets, reason: '1.06 more_vert auf eigener Nachricht');
+      expect(moreVert, findsWidgets, reason: '1.06 more_vert on own message');
     }
 
     // ── MESSAGE-POPUP (Edit/Delete/Forward) ─────────────────────────
@@ -97,10 +97,10 @@ void main() {
       final forwardText = find.text('Weiterleiten');
 
       if (editText.evaluate().isNotEmpty) {
-        expect(editText, findsOneWidget, reason: '1.10 Bearbeiten-Text im Popup');
+        expect(editText, findsOneWidget, reason: '1.10 "Bearbeiten" text in the popup');
       }
       if (deleteText.evaluate().isNotEmpty) {
-        expect(deleteText, findsOneWidget, reason: '1.11 Löschen-Text im Popup');
+        expect(deleteText, findsOneWidget, reason: '1.11 "Löschen" text in popup');
       }
       if (forwardText.evaluate().isNotEmpty) {
         expect(forwardText, findsOneWidget, reason: '1.12 Weiterleiten-Text im Popup');
@@ -111,7 +111,7 @@ void main() {
       await pumpFrames(tester);
     }
 
-    // ── NEGATIV: LEERE NACHRICHT SENDEN ─────────────────────────────
+    // ── NEGATIVE: SEND EMPTY MESSAGE ────────────────────────────────
     // Count current messages
     final msgCountBefore = find.textContaining('IntTest-Node2', skipOffstage: false).evaluate().length;
 
@@ -126,14 +126,14 @@ void main() {
 
       // Message count should not have increased
       final msgCountAfter = find.textContaining('IntTest-Node2', skipOffstage: false).evaluate().length;
-      expect(msgCountAfter, msgCountBefore, reason: '1.13 Leere Nachricht nicht gesendet');
+      expect(msgCountAfter, msgCountBefore, reason: '1.13 Empty message not sent');
     }
 
     // Back
     final backBtn = find.byIcon(Icons.arrow_back); if (backBtn.evaluate().isNotEmpty) { await tester.tap(backBtn); for (var i = 0; i < 5; i++) { await tester.pump(const Duration(milliseconds: 200)); } }
     await pumpFrames(tester);
 
-    // ── GRUPPEN ─────────────────────────────────────────────────────
+    // ── GROUPS ──────────────────────────────────────────────────────
     await tester.tap(find.text('Gruppen'));
     await pumpFrames(tester);
 
@@ -141,7 +141,7 @@ void main() {
     if (groupTiles.evaluate().isNotEmpty) {
       await tester.tap(groupTiles.first);
       await pumpFrames(tester, count: 15);
-      expect(find.byType(TextField), findsWidgets, reason: '2.01 Gruppen-Input');
+      expect(find.byType(TextField), findsWidgets, reason: '2.01 group input');
 
       final backBtn = find.byIcon(Icons.arrow_back); if (backBtn.evaluate().isNotEmpty) { await tester.tap(backBtn); for (var i = 0; i < 5; i++) { await tester.pump(const Duration(milliseconds: 200)); } }
       await pumpFrames(tester);
@@ -159,7 +159,7 @@ void main() {
       await tester.tap(channelTiles.first);
       await pumpFrames(tester, count: 15);
 
-      // ── CHANNEL-INFO DIALOG (via Tooltip-Button im Chat) ──────────
+      // ── CHANNEL INFO DIALOG (via tooltip button in chat) ──────────
       final channelInfoBtn = find.byTooltip('Channelinfo');
       if (channelInfoBtn.evaluate().isNotEmpty) {
         expect(channelInfoBtn, findsOneWidget, reason: '3.02 Channelinfo-Tooltip im Chat');
@@ -172,11 +172,11 @@ void main() {
 
         // Dialog should show subscriber/member count text
         final membersText = find.textContaining('Abonnent', skipOffstage: false);
-        final membersTextAlt = find.textContaining('Mitglied', skipOffstage: false);
+        final membersTextOld = find.textContaining('Mitglied', skipOffstage: false);
         expect(
-          membersText.evaluate().isNotEmpty || membersTextAlt.evaluate().isNotEmpty,
+          membersText.evaluate().isNotEmpty || membersTextOld.evaluate().isNotEmpty,
           true,
-          reason: '3.04 Mitglieder/Abonnenten-Text im Dialog',
+          reason: '3.04 members/subscribers text in the dialog',
         );
 
         // Close dialog
@@ -202,7 +202,7 @@ void main() {
            find.textContaining('Alice', skipOffstage: false).evaluate().isNotEmpty,
         true, reason: '4.01 Kontaktname im Inbox');
 
-    // ── MESSAGE EDIT DURCHFÜHREN ─────────────────────────────────────
+    // ── PERFORM MESSAGE EDIT ─────────────────────────────────────
     // Navigate to first chat
     await tester.tap(find.text('Aktuell'));
     await pumpFrames(tester);
@@ -222,7 +222,7 @@ void main() {
         await pumpUntilFound(tester, find.textContaining('EditMe-Test', skipOffstage: false));
 
         expect(find.textContaining('EditMe-Test', skipOffstage: false), findsWidgets,
-            reason: '6.01 EditMe-Test Nachricht gesendet');
+            reason: '6.01 EditMe test message sent');
 
         // Tap more_vert on the last (our) message to open popup
         final editMoreVert = find.byIcon(Icons.more_vert);
@@ -240,7 +240,7 @@ void main() {
             final editBanner = find.textContaining('bearbeiten', skipOffstage: false);
             if (editBanner.evaluate().isNotEmpty) {
               expect(editBanner, findsWidgets,
-                  reason: '6.02 Edit-Banner sichtbar');
+                  reason: '6.02 edit banner visible');
             }
 
             // Check if the edit icon in the banner area is shown
@@ -257,7 +257,7 @@ void main() {
               final textFieldWidget = tester.widget<TextField>(editInput.last);
               final controllerText = textFieldWidget.controller?.text ?? '';
               expect(controllerText.isNotEmpty, true,
-                  reason: '6.04 TextField ist nicht leer im Edit-Modus');
+                  reason: '6.04 TextField is not empty in edit mode');
             }
 
             // Change text to "EditMe-Edited"
@@ -275,7 +275,7 @@ void main() {
               final editedLabel = find.textContaining('bearbeitet', skipOffstage: false);
               if (editedLabel.evaluate().isNotEmpty) {
                 expect(editedLabel, findsWidgets,
-                    reason: '6.05 bearbeitet-Label nach Edit sichtbar');
+                    reason: '6.05 "bearbeitet" label visible after edit');
               }
             }
           } else {
@@ -286,7 +286,7 @@ void main() {
         }
       }
 
-      // ── MESSAGE DELETE DURCHFÜHREN ──────────────────────────────────
+      // ── PERFORM MESSAGE DELETE ──────────────────────────────────
       // Use an existing message for deletion (avoid another PoW wait)
       {
         // Tap more_vert on the last message (our previously sent/edited message)
@@ -305,14 +305,14 @@ void main() {
             final deleteDialogTitle = find.text('Nachricht löschen');
             if (deleteDialogTitle.evaluate().isNotEmpty) {
               expect(deleteDialogTitle, findsOneWidget,
-                  reason: '6.07 Lösch-Bestätigungsdialog erscheint');
+                  reason: '6.07 Delete confirmation dialog appears');
             }
 
             // Dialog should have content text about deleting for everyone
             final deleteContent = find.textContaining('löschen', skipOffstage: false);
             if (deleteContent.evaluate().isNotEmpty) {
               expect(deleteContent, findsWidgets,
-                  reason: '6.08 Lösch-Dialog hat Bestätigungstext');
+                  reason: '6.08 Delete dialog has confirmation text');
             }
 
             // Tap "Löschen" button in the confirmation dialog
@@ -327,7 +327,7 @@ void main() {
               final deletedLabel = find.textContaining('gelöscht', skipOffstage: false);
               if (deletedLabel.evaluate().isNotEmpty) {
                 expect(deletedLabel, findsWidgets,
-                    reason: '6.09 gelöscht-Text nach Delete sichtbar');
+                    reason: '6.09 "gelöscht" text visible after delete');
               }
             }
           } else {
@@ -338,7 +338,7 @@ void main() {
         }
       }
 
-      // ── NEGATIV: KEIN EDIT AUF FREMDER NACHRICHT ──────────────────
+      // ── NEGATIVE: NO EDIT ON A FOREIGN MESSAGE ──────────────────
       // Foreign messages (from Node1/Alice) should not have "Bearbeiten" in their popup.
       // The first message in the chat is likely from the other node (Alice).
       final foreignMoreVert = find.byIcon(Icons.more_vert);
@@ -352,7 +352,7 @@ void main() {
         if (foreignEditText.evaluate().isEmpty) {
           // Correct: Edit is not available on foreign message
           expect(foreignEditText, findsNothing,
-              reason: '6.10 Kein Bearbeiten auf fremder Nachricht');
+              reason: '6.10 No edit on a message from someone else');
         }
 
         // Close popup
@@ -368,8 +368,8 @@ void main() {
       }
     }
 
-    // ── WEITERLEITEN-DIALOG ──────────────────────────────────────────
-    // Im Chat: more_vert auf eigener Nachricht → "Weiterleiten" tappen
+    // ── FORWARD DIALOG ──────────────────────────────────────────
+    // In chat: more_vert on own message → tap "Weiterleiten"
     await tester.tap(find.text('Aktuell'));
     await pumpFrames(tester);
 
@@ -388,21 +388,21 @@ void main() {
           await tester.tap(fwdText);
           await tester.pump(const Duration(milliseconds: 500));
 
-          // Dialog sollte "Weiterleiten an" Titel zeigen
+          // Dialog should show "Weiterleiten an" title
           final fwdDialogTitle = find.text('Weiterleiten an');
           if (fwdDialogTitle.evaluate().isNotEmpty) {
             expect(fwdDialogTitle, findsOneWidget,
-                reason: '7.01 Weiterleiten-Dialog Titel');
+                reason: '7.01 "Weiterleiten an" dialog title');
           }
 
-          // Dialog sollte Kontakt-Liste zeigen (ListTile-Einträge)
+          // Dialog should show contact list (ListTile entries)
           final fwdTargets = find.byType(ListTile);
           if (fwdTargets.evaluate().isNotEmpty) {
             expect(fwdTargets, findsWidgets,
-                reason: '7.02 Weiterleiten-Dialog zeigt Kontakt-Liste');
+                reason: '7.02 forward dialog shows contact list');
           }
 
-          // "Abbrechen" tappen → Dialog schließt
+          // Tap "Abbrechen" → dialog closes
           final fwdCancel = find.text('Abbrechen');
           if (fwdCancel.evaluate().isNotEmpty) {
             await tester.tap(fwdCancel);
@@ -412,13 +412,13 @@ void main() {
             await pumpFrames(tester);
           }
         } else {
-          // Popup schließen wenn Weiterleiten nicht verfügbar
+          // Close popup if forwarding is not available
           await tester.tapAt(const Offset(10, 10));
           await pumpFrames(tester);
         }
       }
 
-      // Zurück zum Home
+      // Back to home
       final fwdBack = find.byIcon(Icons.arrow_back);
       if (fwdBack.evaluate().isNotEmpty) {
         await tester.tap(fwdBack);
@@ -435,24 +435,24 @@ void main() {
       await tester.tap(chSubTiles.first);
       await pumpFrames(tester, count: 15);
 
-      // Prüfe ob Input deaktiviert ist (Subscriber) ODER TextField vorhanden (Owner/Admin)
+      // Check whether input is disabled (subscriber) OR TextField present (owner/admin)
       final readOnlyText = find.textContaining('Nur Owner und Admins', skipOffstage: false);
       final chatInput = find.byType(TextField);
 
-      // Eines von beiden muss existieren
+      // One of the two must exist
       expect(
         readOnlyText.evaluate().isNotEmpty || chatInput.evaluate().isNotEmpty,
         true,
-        reason: '7.03 Channel zeigt entweder Read-Only-Hinweis oder Input-Feld',
+        reason: '7.03 Channel shows either read-only hint or input field',
       );
 
-      // Wenn Read-Only sichtbar, prüfe Text genauer
+      // If read-only is visible, check the text more closely
       if (readOnlyText.evaluate().isNotEmpty) {
         expect(readOnlyText, findsWidgets,
-            reason: '7.04 Subscriber sieht Read-Only-Hinweis');
+            reason: '7.04 subscriber sees read-only notice');
       }
 
-      // Zurück
+      // Back
       final chBack = find.byIcon(Icons.arrow_back);
       if (chBack.evaluate().isNotEmpty) {
         await tester.tap(chBack);
@@ -460,28 +460,28 @@ void main() {
       }
     }
 
-    // ── UNREAD BADGE PRÜFUNG ──────────────────────────────────────────
-    // Zurück auf Home, prüfe ob Unread-Counter-Widgets existieren
+    // ── UNREAD BADGE CHECK ──────────────────────────────────────────
+    // Back on home, check whether unread counter widgets exist
     await tester.tap(find.text('Aktuell'));
     await pumpFrames(tester);
 
-    // Unread-Badge ist ein Container mit BorderRadius(10) und Text mit Zähler
-    // Prüfe ob Badge-Widget irgendwo im Widget-Tree vorhanden ist
+    // Unread badge is a Container with BorderRadius(10) and Text with counter
+    // Check whether a badge widget exists anywhere in the widget tree
     final badgeWidgets = find.byType(Badge, skipOffstage: false);
 
-    // Mindestens Conversations müssen existieren
+    // At least conversations must exist
     final unreadTiles = find.byType(ListTile);
     if (unreadTiles.evaluate().isNotEmpty) {
-      // Prüfe ob irgendein Conversation einen fettgedruckten Titel hat (unread-Indikator)
-      // oder ob Badge-Widgets im Tab-Bereich existieren
+      // Check whether any conversation has a bold title (unread indicator)
+      // or whether badge widgets exist in the tab area
       expect(
         badgeWidgets.evaluate().isNotEmpty || unreadTiles.evaluate().isNotEmpty,
         true,
-        reason: '7.05 Home-Screen zeigt Conversations (Badge oder ListTile vorhanden)',
+        reason: '7.05 Home screen shows conversations (badge or ListTile present)',
       );
     }
 
-    // ── GRUPPE ERSTELLEN DIALOG ───────────────────────────────────────
+    // ── CREATE GROUP DIALOG ───────────────────────────────────────────
     await tester.tap(find.text('Gruppen'));
     await pumpFrames(tester);
 
@@ -490,26 +490,26 @@ void main() {
       await tester.tap(groupAddFab.first);
       await tester.pump(const Duration(milliseconds: 500));
 
-      // Dialog mit TextField für Gruppenname
+      // Dialog with TextField for group name
       final groupNameField = find.byType(TextField);
       expect(groupNameField.evaluate().isNotEmpty, true,
-          reason: '7.06 Gruppe-erstellen-Dialog hat TextField');
+          reason: '7.06 create group dialog has TextField');
 
-      // Dialog-Titel "Gruppe erstellen"
+      // Dialog title "Gruppe erstellen"
       final groupDialogTitle = find.text('Gruppe erstellen');
       if (groupDialogTitle.evaluate().isNotEmpty) {
         expect(groupDialogTitle, findsOneWidget,
-            reason: '7.07 Gruppe-erstellen-Dialog Titel');
+            reason: '7.07 "Gruppe erstellen" dialog title');
       }
 
-      // Checkboxen für Mitglieder-Auswahl
+      // Checkboxes for member selection
       final checkboxes = find.byType(CheckboxListTile);
       if (checkboxes.evaluate().isNotEmpty) {
         expect(checkboxes, findsWidgets,
-            reason: '7.08 Gruppe-erstellen-Dialog zeigt Checkboxen für Mitglieder');
+            reason: '7.08 Create-group dialog shows checkboxes for members');
       }
 
-      // "Abbrechen" tappen → Dialog schließt
+      // Tap "Abbrechen" → dialog closes
       final groupCancel = find.text('Abbrechen');
       if (groupCancel.evaluate().isNotEmpty) {
         await tester.tap(groupCancel);
@@ -519,16 +519,16 @@ void main() {
         await pumpFrames(tester);
       }
 
-      // Prüfe dass wir noch auf dem Gruppen-Tab sind
+      // Check that we are still on the groups tab
       expect(find.text('Gruppen'), findsWidgets,
-          reason: '7.09 Noch auf Gruppen-Tab nach Dialog-Abbrechen');
+          reason: '7.09 Still on groups tab after dialog cancel');
     }
 
     // ── FAB CHECKS ──────────────────────────────────────────────────
     await tester.tap(find.text('Gruppen'));
     await pumpFrames(tester);
     expect(find.byIcon(Icons.group_add).evaluate().isNotEmpty, true,
-        reason: '2.02 Gruppen-FAB');
+        reason: '2.02 group FAB');
 
     await tester.tap(find.text('Kontakte'));
     await pumpFrames(tester);

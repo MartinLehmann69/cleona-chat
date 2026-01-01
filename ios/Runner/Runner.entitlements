@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- §3.7 / nfc_contact_exchange: contact exchange via NDEF tag-in-tag
+	     writes (see `lib/core/contact/nfc_android.dart`, `Ndef.write`).
+	     No FeliCa/ISO7816/ISO15693/MiFare use anywhere in `lib/` — NDEF is
+	     the only format the app reads or writes, so it is the only one
+	     requested here. Required by the `nfc_manager` plugin's own iOS
+	     setup instructions (pub.dev, "Near Field Communication Tag Reader
+	     Session Formats Entitlement"); without it, `NfcManager.instance
+	     .startSession` fails at the OS level regardless of
+	     NFCReaderUsageDescription (Info.plist:73), which only covers the
+	     usage-description dialog, not the capability itself.
+
+	     Requires the "Near Field Communication Tag Reading" capability to
+	     be enabled for this App ID in the Apple Developer portal, and the
+	     "Cleona Distribution" provisioning profile regenerated afterwards
+	     — otherwise codesign fails ("profile doesn't support this
+	     capability") on the very next Manual-signed build (CODE_SIGN_STYLE
+	     = Manual, project.pbxproj). UNGEPRUEFT: no Apple device or Xcode
+	     available in this session to confirm the profile already carries
+	     it. -->
+	<key>com.apple.developer.nfc.readersession.formats</key>
+	<array>
+		<string>NDEF</string>
+	</array>
+
+	<!-- §11 / `lib/core/tagline/lan_entry_wiring.dart:58`:
+	     `rufSock.joinMulticast(InternetAddress(kLanEntryMulticastV4))` on
+	     239.192.67.76 (`lan_entry.dart:276`), unconditional on every
+	     platform including iOS — cross-subnet LAN peer discovery. Without
+	     this entitlement, iOS refuses the join at the socket level; the
+	     call already fails NAMED rather than silently
+	     (`lan_entry_wiring.dart:58-64`: try/catch, logs "Multicast-Gruppe
+	     nicht beigetreten" and falls back to broadcast-only), so a missing
+	     or rejected grant degrades discovery to same-segment-only instead
+	     of breaking anything — see the session report for detail.
+
+	     RESTRICTED entitlement: requires an explicit request to Apple
+	     (Developer portal, "Multicast Networking" additional capability),
+	     which Apple can decline. Add regardless of outcome, per Beschluss
+	     E-5: it either becomes true after approval, or the Xcode capability
+	     toggle is turned back off and this key removed again — a single,
+	     visible edit either way, not a silent gap. UNGEPRUEFT: no Apple
+	     device or Xcode available in this session; Apple DTS staff has
+	     stated this entitlement is not consulted on macOS (see the session
+	     report), so it is NOT added to macos/Runner/*.entitlements. -->
+	<key>com.apple.developer.networking.multicast</key>
+	<true/>
+</dict>
+</plist>

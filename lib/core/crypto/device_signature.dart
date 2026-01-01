@@ -27,9 +27,13 @@
 /// INTEGRATION POINTS — open hooks for follow-up tasks (NOT done in this file)
 /// ---------------------------------------------------------------------------
 ///
-/// 1. **KeyManager / IdentityContext branch** (Task #6, Welle 2 Service-Layer):
-///    `IdentityContext` (lib/core/node/identity_context.dart) currently only
-///    holds the User-Sig keypair (`ed25519SecretKey`, `mlDsaSecretKey`). It
+/// 1. **KeyManager / IdentityContext branch** (Task #6, wave 2 service layer):
+///    `IdentityContext` (**lib/core/identity/identity_context.dart** — the
+///    file was moved there from `lib/core/node/` with the CUT of
+///    2026-08-31; the old path stood here until 2026-09-03) still holds
+///    only the User-Sig keypair (`ed25519SecretKey`,
+///    `mlDsaSecretKey`) — re-measured 2026-09-03: no `deviceKeyPair`.
+///    The integration point is thus open, not done. It
 ///    must be extended with a `deviceKeyPair` field of type [DeviceKeyPair],
 ///    populated on identity load. The Outer-Frame signer uses
 ///    `identity.deviceKeyPair.signEd25519(packetBytes)` and

@@ -8,6 +8,11 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.content.res.AssetFileDescriptor
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.MediaPlayer
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -15,6 +20,8 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import io.flutter.embedding.engine.FlutterEngineCache
+import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class CleonaForegroundService : Service() {
@@ -33,6 +40,305 @@ class CleonaForegroundService : Service() {
         @Volatile
         var instance: CleonaForegroundService? = null
             private set
+
+        // ─── A-1: the ringtone belongs to the PROCESS, not the Activity ───
+        //
+        // Finding A-1 (MIGRATION §5.4, field RCA of 2026-08-07, Pixel 8 Pro):
+        // the MediaPlayer was an instance field in `MainActivity`. After an
+        // Activity recreation — app swiped from Recents and restarted,
+        // same PID — the field of the NEW instance was `null`,
+        // every `stopSound` thus a no-op, and the old player kept running until
+        // the process ended. Re-measured on the device:
+        // `wm_on_destroy_called` + same PID + new `wm_on_create_called`.
+        //
+        // Why HERE and not in the Activity: §5.4 requires that
+        // platform-side media resources are owned process-wide. The
+        // foreground service is the only lifetime on Android that matches the
+        // Dart side (working rule #8, architecture §7.8/§16.2) — and
+        // the field lives in the `companion object`, so it is still
+        // the same even when the service recreates its instance. It is
+        // thus tied to the process lifetime, not to an object lifetime.
+        //
+        // The context ALWAYS comes in as `applicationContext`, never as
+        // Activity — otherwise ownership would only be moved, not solved.
+        private const val SOUND_TAG = "CleonaSound"
+
+        @Volatile
+        private var loopingPlayer: MediaPlayer? = null
+
+        /// Start ringtone (endless loop). A tone already playing
+        /// is stopped first — multiple calls never create two players.
+        @JvmStatic
+        fun startLoopSound(context: Context, asset: String) {
+            stopLoopSound()
+            try {
+                val afd: AssetFileDescriptor =
+                    context.applicationContext.assets.openFd("flutter_assets/$asset")
+                val mp = MediaPlayer()
+                mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                afd.close()
+                mp.isLooping = true
+                mp.prepare()
+                mp.start()
+                loopingPlayer = mp
+                Log.i(SOUND_TAG, "loop started: $asset")
+            } catch (e: Exception) {
+                // A-5: this used to be a silent `catch (e: Exception) {}`
+                // with the comment "Sound playback is non-fatal". Non-fatal
+                // does not mean invisible: that the sound path logged NOTHING
+                // is the reason why A-1 could only be found by ear and A-6 only via
+                // the source code.
+                Log.w(SOUND_TAG, "loop start failed: $asset", e)
+            }
+        }
+
+        /// Stop ringtone. Idempotent — without a playing tone it has no effect.
+        @JvmStatic
+        fun stopLoopSound() {
+            val mp = loopingPlayer
+            loopingPlayer = null
+            if (mp == null) {
+                Log.d(SOUND_TAG, "loop stop: nothing playing")
+                return
+            }
+            try {
+                if (mp.isPlaying) mp.stop()
+                mp.release()
+                Log.i(SOUND_TAG, "loop stopped")
+            } catch (e: Exception) {
+                Log.w(SOUND_TAG, "loop stop failed", e)
+            }
+        }
+
+        /// Play a one-shot tone (notification). No shared
+        /// state — the player cleans up after itself.
+        @JvmStatic
+        fun playAssetSound(context: Context, asset: String) {
+            try {
+                val afd: AssetFileDescriptor =
+                    context.applicationContext.assets.openFd("flutter_assets/$asset")
+                val mp = MediaPlayer()
+                mp.setDataSource(afd.fileDescriptor, afd.startOffset, afd.length)
+                afd.close()
+                mp.prepare()
+                mp.start()
+                mp.setOnCompletionListener { it.release() }
+            } catch (e: Exception) {
+                Log.w(SOUND_TAG, "one-shot failed: $asset", e)
+            }
+        }
+
+        // ─── AudioFocus belongs to the CALL, not the Activity ───
+        //
+        // The same finding as A-1 above, this time for audio focus instead of
+        // the ringtone: `MainActivity` held `audioFocusRequest` and
+        // `legacyAudioFocusListener` as instance fields. After an
+        // Activity recreation during an ongoing call — app swiped from
+        // Recents — the field of the NEW instance was `null`, a
+        // later `abandonAudioFocus` thus a no-op, and the old
+        // focus grant persisted until the process ended: other apps'
+        // media playback stayed suppressed.
+        //
+        // Why HERE and not via `abandon` in `onDestroy()`: the focus
+        // belongs to the CALL DURATION, not to the Activity lifetime — a
+        // call keeps running in the foreground service even if the Activity
+        // does not exist at the moment (working rule #8). An `abandon` in
+        // `onDestroy()` would even be wrong: one would give up the focus in the
+        // middle of a conversation just because the Activity is briefly gone. Therefore
+        // the state lives in the `companion object`, not in the
+        // service INSTANCE — just like `instance` and `loopingPlayer` above
+        // it is thus tied to the process lifetime, not to an object lifetime.
+        //
+        // `focusInterrupted` moves along: it is part of the same
+        // state machine (set in requestCallAudioFocus, read and
+        // cleared in onAudioFocusChange, cleared in
+        // abandonCallAudioFocus) and suffers from the same failure mode — if it stayed
+        // in the Activity, an Activity recreation would reset it to
+        // `false` although the focus is in fact still
+        // interrupted, and a real AUDIOFOCUS_GAIN would then wrongly
+        // be discarded as "no end of interruption".
+        //
+        // Return path to Dart: `onAudioFocusChange` does NOT call back via an
+        // Activity — that would bind the service to a possibly dead
+        // Activity, a leak in the other direction. Instead
+        // `invokeSessionBehaviour` fetches the FlutterEngine directly from the
+        // `FlutterEngineCache` (key `CleonaApplication.ENGINE_ID`) —
+        // the same engine that `CleonaApplication.onCreate()` creates once
+        // and that survives every Activity recreation (see
+        // `MainActivity.getFlutterEngine()`, which reads the same cache entry).
+        // Therefore no register/unregister callback is needed
+        // between Activity and service: the receiver on the Dart side
+        // is bound to the process, not to an Activity instance.
+        // `SESSION_BEHAVIOUR_CHANNEL` is therefore defined here, no longer
+        // in `MainActivity` — single source of truth at the place that now
+        // sends.
+        const val SESSION_BEHAVIOUR_CHANNEL = "chat.cleona/session_behaviour"
+
+        private const val FOCUS_TAG = "CleonaAudioFocus"
+
+        private val focusMainHandler = Handler(Looper.getMainLooper())
+
+        @Volatile
+        private var audioFocusRequest: AudioFocusRequest? = null
+
+        @Suppress("DEPRECATION")
+        @Volatile
+        private var legacyAudioFocusListener: AudioManager.OnAudioFocusChangeListener? = null
+
+        // True from AUDIOFOCUS_LOSS_TRANSIENT(_CAN_DUCK) until the matching
+        // AUDIOFOCUS_GAIN — the round trip this class turns into
+        // onInterruptionBegin/onInterruptionEnd. A plain AUDIOFOCUS_LOSS
+        // (another app took focus for good, not just transiently) begins an
+        // interruption but is not expected to end with a GAIN of our own, so
+        // it does not set this flag — see onAudioFocusChange.
+        @Volatile
+        private var focusInterrupted = false
+
+        /// Request focus for the call duration (AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE,
+        /// architecture §10.4 "Session behaviour" table). EXCLUSIVE instead of
+        /// plain GAIN_TRANSIENT, because a call is not "background music that
+        /// may become a bit quieter", but what is supposed to be audible.
+        @JvmStatic
+        fun requestCallAudioFocus(context: Context): Boolean {
+            val am = context.applicationContext
+                .getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            val listener = AudioManager.OnAudioFocusChangeListener { onAudioFocusChange(it) }
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val attrs = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
+                val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
+                    .setAudioAttributes(attrs)
+                    .setOnAudioFocusChangeListener(listener)
+                    .build()
+                val rc = am.requestAudioFocus(request)
+                val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+                if (granted) {
+                    audioFocusRequest = request
+                    focusInterrupted = false
+                    Log.i(FOCUS_TAG, "focus acquired (AudioFocusRequest)")
+                } else {
+                    Log.w(FOCUS_TAG, "focus request denied (AudioFocusRequest) rc=$rc")
+                }
+                return granted
+            }
+
+            // API 24-25: no AudioFocusRequest class. Same duration hint via
+            // the deprecated overload — the same legacy path as before in
+            // MainActivity, taken over unchanged.
+            @Suppress("DEPRECATION")
+            val rc = am.requestAudioFocus(
+                listener, AudioManager.STREAM_VOICE_CALL,
+                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE
+            )
+            val granted = rc == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            if (granted) {
+                legacyAudioFocusListener = listener
+                focusInterrupted = false
+                Log.i(FOCUS_TAG, "focus acquired (legacy)")
+            } else {
+                Log.w(FOCUS_TAG, "focus request denied (legacy) rc=$rc")
+            }
+            return granted
+        }
+
+        /// Give the focus back. Idempotent — without held focus it has no effect
+        /// (may e.g. arrive twice from Dart if a call aborts during
+        /// teardown).
+        @JvmStatic
+        fun abandonCallAudioFocus(context: Context) {
+            val am = context.applicationContext
+                .getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val request = audioFocusRequest
+                if (request == null) {
+                    Log.d(FOCUS_TAG, "abandon: nothing held (AudioFocusRequest)")
+                } else {
+                    am.abandonAudioFocusRequest(request)
+                    audioFocusRequest = null
+                    Log.i(FOCUS_TAG, "focus abandoned (AudioFocusRequest)")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val listener = legacyAudioFocusListener
+                if (listener == null) {
+                    Log.d(FOCUS_TAG, "abandon: nothing held (legacy)")
+                } else {
+                    @Suppress("DEPRECATION")
+                    am.abandonAudioFocus(listener)
+                    legacyAudioFocusListener = null
+                    Log.i(FOCUS_TAG, "focus abandoned (legacy)")
+                }
+            }
+            focusInterrupted = false
+        }
+
+        // Runs on whichever thread the platform delivers focus changes on
+        // (documented as an arbitrary thread; in practice the main thread on
+        // all tested API levels, but not guaranteed) — invokeMethod requires
+        // the platform thread, hence invokeSessionBehaviour's
+        // focusMainHandler.post rather than a bare call.
+        private fun onAudioFocusChange(focusChange: Int) {
+            when (focusChange) {
+                AudioManager.AUDIOFOCUS_LOSS,
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                    // I2/I6: nothing here touches VoiceSession. This only
+                    // tells Dart that a foreign call/app took the session, so
+                    // the UI can show it (§10.4, "behaves like a telephony
+                    // call").
+                    focusInterrupted = true
+                    Log.i(FOCUS_TAG, "onAudioFocusChange: LOSS-family ($focusChange) — interruption begin")
+                    invokeSessionBehaviour("onInterruptionBegin", null)
+                }
+                AudioManager.AUDIOFOCUS_GAIN -> {
+                    // Only an "interruption ended" if we were actually
+                    // interrupted — the very first GAIN after a successful
+                    // request also arrives here on some OEMs and must not be
+                    // reported as an end-of-interruption with nothing to end.
+                    if (focusInterrupted) {
+                        focusInterrupted = false
+                        Log.i(FOCUS_TAG, "onAudioFocusChange: GAIN — interruption end")
+                        invokeSessionBehaviour(
+                            "onInterruptionEnd",
+                            // Android has no separate "should resume" signal —
+                            // AUDIOFOCUS_GAIN itself IS the resume signal
+                            // (session_behaviour.dart, InterruptionEndInfo).
+                            mapOf("shouldResume" to true)
+                        )
+                    } else {
+                        Log.d(FOCUS_TAG, "onAudioFocusChange: GAIN — initial grant, no interruption to end")
+                    }
+                }
+                else -> Log.i(FOCUS_TAG, "onAudioFocusChange: unhandled focusChange=$focusChange")
+            }
+        }
+
+        // No Activity return path (see the comment block at the top of this
+        // section): the FlutterEngine lives process-wide in the
+        // FlutterEngineCache, set once in
+        // CleonaApplication.onCreate() and survives every
+        // Activity recreation. A missing cache entry is only possible in the
+        // window between process start and CleonaApplication.onCreate()
+        // — no call can be running there anyway, so no
+        // focus change can occur either.
+        private fun invokeSessionBehaviour(method: String, args: Map<String, Any>?) {
+            val engine = FlutterEngineCache.getInstance().get(CleonaApplication.ENGINE_ID)
+            if (engine == null) {
+                Log.w(FOCUS_TAG, "$method dropped — engine not cached yet")
+                return
+            }
+            val channel = MethodChannel(engine.dartExecutor.binaryMessenger, SESSION_BEHAVIOUR_CHANNEL)
+            focusMainHandler.post {
+                try {
+                    channel.invokeMethod(method, args)
+                } catch (e: Throwable) {
+                    Log.e(FOCUS_TAG, "invokeMethod($method) failed", e)
+                }
+            }
+        }
 
         /// API 30+: re-call startForeground with the bitmask
         /// DATA_SYNC | MICROPHONE so the OS lets the process keep an

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 
 /// Auto-discovery of CalDAV servers on the local network via mDNS/DNS-SD.
 ///
@@ -182,7 +182,7 @@ class CalDAVDiscovery {
     if ((flags & 0x8000) == 0) return;
 
     final qdCount = (data[4] << 8) | data[5];
-    final anCount = (data[6] << 8) | data[7];
+    final toCount = (data[6] << 8) | data[7];
     final nsCount = (data[8] << 8) | data[9];
     final arCount = (data[10] << 8) | data[11];
 
@@ -198,7 +198,7 @@ class CalDAVDiscovery {
 
     // Parse answer + authority + additional sections (all share the same
     // resource-record format).
-    final totalRecords = anCount + nsCount + arCount;
+    final totalRecords = toCount + nsCount + arCount;
     for (var i = 0; i < totalRecords; i++) {
       if (offset >= data.length) break;
 

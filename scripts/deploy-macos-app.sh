@@ -48,10 +48,27 @@ fi
 
 cd "$PROJECT_DIR"
 
-# ── 1. Compile daemon ────────────────────────────────────────────────────────
-echo ">>> Compiling cleona-daemon (dart compile exe)"
+# ── 1. Build daemon ──────────────────────────────────────────────────────────
+#
+# S367 — `dart build cli`, NOT `dart compile exe`.
+#
+# Since the store (§21.4.1) depends on a code asset,
+# `dart compile exe` no longer holds: it runs NO build hooks. The
+# Dart docs say the command should then fail; measured, it does
+# not — it silently produces a binary WITHOUT `libsqlite3`. The daemon
+# starts with it, fails when opening the store and ends with EXIT 0:
+# for the UI indistinguishable from "running, just not opening a
+# socket".
+#
+# `dart build cli` puts the library into `bundle/lib/` and embeds its
+# path as `../lib/libsqlite3.dylib`, RELATIVE TO THE EXECUTABLE.
+# Therefore the daemon below lands in `Contents/MacOS/bin/` and the
+# library in `Contents/MacOS/lib/` — not in `Contents/Frameworks/`,
+# which applies to the other dylibs.
+echo ">>> Building cleona-daemon (dart build cli)"
 mkdir -p build
-dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+rm -rf build/.daemon-cli
+dart build cli --target bin/cleona_daemon.dart --output build/.daemon-cli
 
 # ── 2. Flutter build macOS ───────────────────────────────────────────────────
 echo ">>> Building Flutter macOS ($MODE)"
@@ -79,14 +96,27 @@ for f in "$LIBS_DIR"/*.dylib; do
     echo "  + $(basename "$f")"
 done
 
-# ── 4. Drop daemon binary next to GUI ────────────────────────────────────────
-echo ">>> Installing cleona-daemon"
-cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
-chmod +x "$MACOS_BIN/cleona-daemon"
+# ── 4. Install daemon in its own bin/, store library one level up ────────────
+echo ">>> Installing cleona-daemon (Contents/MacOS/bin + Contents/MacOS/lib)"
+mkdir -p "$MACOS_BIN/bin" "$MACOS_BIN/lib"
+cp build/.daemon-cli/bundle/bin/cleona_daemon "$MACOS_BIN/bin/cleona-daemon"
+chmod +x "$MACOS_BIN/bin/cleona-daemon"
+cp build/.daemon-cli/bundle/lib/*.dylib "$MACOS_BIN/lib/" 2>/dev/null || true
+# A leftover in the root would be worse than none: the GUI would find
+# it (`_findDaemonBinary` knows the root as a fallback) and start
+# a daemon that cannot open its store.
+rm -f "$MACOS_BIN/cleona-daemon"
+
+# Resolvability test: exactly the path that the binary uses.
+"$PROJECT_DIR/scripts/check-daemon-lib-resolvable.sh" "$MACOS_BIN/bin/cleona-daemon" || {
+    echo "!! The daemon does not find its storage library — abort."
+    exit 1
+}
 
 # ── 5. Ad-hoc sign everything ────────────────────────────────────────────────
 echo ">>> Ad-hoc signing dylibs + daemon"
-for f in "$FRAMEWORKS"/*.dylib "$MACOS_BIN/cleona-daemon"; do
+for f in "$FRAMEWORKS"/*.dylib "$MACOS_BIN"/lib/*.dylib "$MACOS_BIN/bin/cleona-daemon"; do
+    [ -e "$f" ] || continue
     codesign --force --sign - "$f" || true
 done
 

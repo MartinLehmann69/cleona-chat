@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/peer_info.dart' show hexToBytes;
+import 'package:cleona/core/util/hex.dart' show hexToBytes;
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
 /// Invite link for initial installation (§19.6.4): bootstraps a fresh device

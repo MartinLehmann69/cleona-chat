@@ -43,12 +43,27 @@ def ipc_call(sock, command, params=None, identity_id=None):
                 return msg
     return None
 
+def _b64url(v):
+    """Standard base64 -> base64url without padding (like `toUri()`)."""
+    return v.replace("+", "-").replace("/", "_").rstrip("=")
+
+
 def build_contact_seed_uri(data, bootstrap_id=None, bootstrap_addr=None):
     node_id = data["nodeIdHex"]
     name = data.get("displayName", "Node")
     device_id = data.get("deviceNodeIdHex", "")
     dxk = data.get("deviceX25519PkB64", "")
     dmk = data.get("deviceMlKemPkB64", "")
+    # S368: `ep` (and `fp`, if the identity has rotated) is the
+    # TRUST ANCHOR of the seed — SHA-256(kIdentityDomain || anchor) must
+    # yield the claimed UserID (§8.1.1). Without it the seed cannot be
+    # recomputed by the other side and has been rejected since S368.
+    # Until then this script built it without `ep` without comment; the contact
+    # request based on it never went out anyway
+    # (`CleonaService.sendContactRequest` aborts without `ep`), it just
+    # did not become visible.
+    ep = data.get("userEd25519PkB64", "")
+    fp = data.get("foundingEd25519PkB64", "")
     port = data.get("port", 0)
     local_ips = data.get("localIps", [])
     public_ip = data.get("publicIp")
@@ -61,6 +76,15 @@ def build_contact_seed_uri(data, bootstrap_id=None, bootstrap_addr=None):
         uri += f"&dxk={dxk}"
     if dmk:
         uri += f"&dmk={dmk}"
+    # `toUri()` writes both as base64url WITHOUT padding; the
+    # IPC information returns standard base64. The same conversion as in
+    # `ContactSeed.toUri`.
+    if ep:
+        uri += f"&ep={_b64url(ep)}"
+    # `fp` only travels along if it differs from `ep` — just as in the
+    # producer (`contact_seed.dart`, "only for rotated identities").
+    if fp and fp != ep:
+        uri += f"&fp={_b64url(fp)}"
 
     addrs = []
     if public_ip and public_port:

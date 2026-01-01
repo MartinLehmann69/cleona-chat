@@ -13,7 +13,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'dart:io' show Platform;
+
 import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/update/update_offer.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/luminance.dart';
@@ -212,14 +215,25 @@ class _GlobalUpdateBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final appState = context.watch<CleonaAppState>();
     final manifest = appState.availableUpdateManifest;
-    if (manifest == null || appState.updateBannerDismissed ||
-        appState.service?.reducedMode == true) {
+    final state = appState.updateState;
+    final pending = appState.updateApplyPending;
+    // ── ONLY WHAT IS FINISHED (owner decision 14.09.2026, S387) ───────────
+    //
+    // The banner appears when the update is complete AND verified —
+    // not for a known manifest, not during collecting. Until
+    // S387 it showed "Update available" + [Download] and on `ready`
+    // "being installed", because `ready` back then already was the installation.
+    if (manifest == null ||
+        appState.service?.reducedMode == true ||
+        !UpdateOffer.bannerVisible(
+          state: state,
+          dismissed: appState.updateBannerDismissed,
+          installedCurrently: pending,
+        )) {
       return const SizedBox.shrink();
     }
 
     final locale = AppLocale.read(context);
-    final state = appState.updateState;
-    final progress = appState.updateProgress;
     final needsPermission = appState.updateNeedsInstallPermission;
     final cs = Theme.of(context).colorScheme;
 
@@ -228,29 +242,38 @@ class _GlobalUpdateBanner extends StatelessWidget {
     }
 
     return GestureDetector(
-      onTap: state == BinaryUpdateState.idle
-          ? appState.startInNetworkUpdate
-          : null,
+      onTap: pending ? null : appState.applyUpdate,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         color: cs.primaryContainer,
         child: Row(
           children: [
-            Expanded(child: _content(state, progress, manifest, locale, cs)),
-            if (state == BinaryUpdateState.idle ||
-                state == BinaryUpdateState.failed)
-              _actionButton(appState, state, locale, cs),
-            if (state == BinaryUpdateState.idle)
+            Expanded(child: _content(pending, manifest, locale, cs)),
+            if (!pending) ...[
+              IconButton(
+                icon: Icon(Icons.system_update_alt,
+                    size: 20, color: cs.onPrimaryContainer),
+                tooltip: _readyLabel(locale),
+                visualDensity: VisualDensity.compact,
+                onPressed: appState.applyUpdate,
+              ),
               IconButton(
                 icon: Icon(Icons.close, size: 18, color: cs.onPrimaryContainer),
                 visualDensity: VisualDensity.compact,
                 onPressed: appState.dismissUpdateBanner,
               ),
+            ],
           ],
         ),
       ),
     );
   }
+
+  /// "Update ready — tap to install" (Android) or "— restart
+  /// required" (desktop). Existing keys, all 34 languages.
+  String _readyLabel(AppLocale locale) => Platform.isAndroid
+      ? locale.get('update_ready_install')
+      : locale.get('update_ready_restart');
 
   Widget _permissionHint(
       CleonaAppState appState, AppLocale locale, ColorScheme cs) {
@@ -290,71 +313,21 @@ class _GlobalUpdateBanner extends StatelessWidget {
     );
   }
 
-  Widget _content(BinaryUpdateState state, double progress,
-      UpdateManifest manifest, AppLocale locale, ColorScheme cs) {
-    switch (state) {
-      case BinaryUpdateState.idle:
-        return Text(
-          '${locale.get('update_available_title')}: v${manifest.version}',
-          style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13),
-        );
-      case BinaryUpdateState.checking:
-        return Row(children: [
-          const SizedBox(width: 80, child: LinearProgressIndicator()),
-          const SizedBox(width: 8),
-          Text(locale.get('update_verifying'),
-              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
-        ]);
-      case BinaryUpdateState.downloading:
-      case BinaryUpdateState.assembling:
-      case BinaryUpdateState.verifying:
-        final label = state == BinaryUpdateState.downloading
-            ? locale.get('update_downloading')
-            : state == BinaryUpdateState.assembling
-                ? locale.get('update_assembling')
-                : locale.get('update_verifying');
-        final indeterminate = progress <= 0 || progress >= 1;
-        return Row(children: [
-          SizedBox(
-            width: 80,
-            child: indeterminate
-                ? const LinearProgressIndicator()
-                : LinearProgressIndicator(value: progress),
-          ),
-          const SizedBox(width: 8),
-          Text(indeterminate ? '$label...' : '$label ${(progress * 100).toInt()}%',
-              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
-        ]);
-      case BinaryUpdateState.ready:
-        return Row(children: [
-          const SizedBox(
-            width: 16, height: 16,
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
-          const SizedBox(width: 8),
-          Text('${locale.get('update_installing')}...',
-              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
-        ]);
-      case BinaryUpdateState.failed:
-        return Text(locale.get('update_failed'),
-            style: TextStyle(color: cs.error, fontSize: 13));
+  Widget _content(bool pending, UpdateManifest manifest, AppLocale locale,
+      ColorScheme cs) {
+    if (pending) {
+      return Row(children: [
+        const SizedBox(
+          width: 16, height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+        const SizedBox(width: 8),
+        Text('${locale.get('update_installing')}...',
+            style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+      ]);
     }
-  }
-
-  Widget _actionButton(CleonaAppState appState, BinaryUpdateState state,
-      AppLocale locale, ColorScheme cs) {
-    if (state == BinaryUpdateState.failed) {
-      return TextButton(
-        onPressed: appState.startInNetworkUpdate,
-        child: Text(locale.get('update_retry'),
-            style: TextStyle(color: cs.onPrimaryContainer)),
-      );
-    }
-    return TextButton(
-      onPressed: appState.startInNetworkUpdate,
-      child: Text(locale.get('update_download'),
-          style: TextStyle(color: cs.onPrimaryContainer)),
-    );
+    return Text('${_readyLabel(locale)} (v${manifest.version})',
+        style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13));
   }
 }
 
@@ -368,11 +341,66 @@ class _GlobalUpdateBanner extends StatelessWidget {
 class _GlobalCoAuthWarningBanner extends StatelessWidget {
   const _GlobalCoAuthWarningBanner();
 
+  /// One banner row. Every §7.5/§14.5 security notice renders through this so
+  /// the three kinds cannot drift apart in shape — only in words and icon.
+  static Widget _line({
+    required ColorScheme cs,
+    required IconData icon,
+    required String title,
+    required String body,
+    required VoidCallback close,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: cs.errorContainer,
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: cs.onErrorContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    color: cs.onErrorContainer,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+                Text(
+                  body,
+                  style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
+                ),
+              ],
+            ),
+          ),
+          IconButton(
+            icon: Icon(Icons.close, size: 18, color: cs.onErrorContainer),
+            visualDensity: VisualDensity.compact,
+            onPressed: close,
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<CleonaAppState>();
     final warnings = appState.coAuthWarnings;
-    if (warnings.isEmpty) return const SizedBox.shrink();
+    // S360: the two other §14.5 messages did not reach the UI
+    // at all — their callbacks were never assigned in `main.dart`
+    // (reasoned there). They stand here because they have the same property
+    // as the quorum warning: nothing to answer, but nothing that
+    // a dialog may briefly show and take away again.
+    final rotations = appState.contactRotationNotices;
+    final rejections = appState.rotationRejections;
+    if (warnings.isEmpty && rotations.isEmpty && rejections.isEmpty) {
+      return const SizedBox.shrink();
+    }
 
     final locale = AppLocale.read(context);
     final cs = Theme.of(context).colorScheme;
@@ -380,46 +408,44 @@ class _GlobalCoAuthWarningBanner extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Order by severity: an ACTIVE rejection by a device
+        // is the strongest theft signal (§7.5), the missed quorum the
+        // second strongest, the mere rotation the weakest.
+        for (final r in rejections)
+          _line(
+            cs: cs,
+            icon: Icons.gpp_bad,
+            title: locale.get('rotation_rejection_alert'),
+            body: locale
+                .tr('rotation_rejection_alert_body', {'name': r.displayName}),
+            close: () =>
+                appState.dismissRotationRejection(r.contactNodeIdHex),
+          ),
         for (final w in warnings)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            color: cs.errorContainer,
-            child: Row(
-              children: [
-                Icon(Icons.gpp_maybe, size: 18, color: cs.onErrorContainer),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        locale.get('rotation_coauth_warning_title'),
-                        style: TextStyle(
-                          color: cs.onErrorContainer,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 13,
-                        ),
-                      ),
-                      Text(
-                        locale.tr('rotation_coauth_warning_body', {
-                          'name': w.displayName,
-                          'present': '${w.tokensPresent}',
-                          'required': '${w.tokensRequired}',
-                        }),
-                        style: TextStyle(color: cs.onErrorContainer, fontSize: 13),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(Icons.close, size: 18, color: cs.onErrorContainer),
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () =>
-                      appState.dismissCoAuthWarning(w.contactNodeIdHex),
-                ),
-              ],
-            ),
+          _line(
+            cs: cs,
+            icon: Icons.gpp_maybe,
+            title: locale.get('rotation_coauth_warning_title'),
+            body: locale.tr('rotation_coauth_warning_body', {
+              'name': w.displayName,
+              'present': '${w.tokensPresent}',
+              'required': '${w.tokensRequired}',
+            }),
+            close: () =>
+                appState.dismissCoAuthWarning(w.contactNodeIdHex),
+          ),
+        for (final n in rotations)
+          _line(
+            cs: cs,
+            icon: Icons.vpn_key_off,
+            title: locale.get('contact_identity_rotated_title'),
+            body: locale.tr(
+                n.wasVerified
+                    ? 'contact_identity_rotated_body_verified'
+                    : 'contact_identity_rotated_body',
+                {'name': n.displayName}),
+            close: () =>
+                appState.dismissContactRotationNotice(n.contactNodeIdHex),
           ),
       ],
     );

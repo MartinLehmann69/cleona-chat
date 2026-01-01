@@ -2,21 +2,23 @@
 ###############################################################################
 # build-android-libs.sh — Cross-compile native libs for Android
 #
-# Baut libsodium, liboqs, libzstd, libopus, whisper.cpp (inkl. libggml) sowie
-# die libcleona_voice/libcleona_video Android-Backends (V1.2/V1.14) mit
-# 16KB Page-Alignment (Android 15+).
-# Ergebnis landet in android/app/src/main/jniLibs/<ABI>/
+# Builds libsodium, liboqs, libzstd, libopus, whisper.cpp (incl. libggml) as well as
+# the libcleona_voice/libcleona_video Android backends (V1.2/V1.14) and the
+# libcleona_link Elligator2 shim (V4, migration plan §4d) with
+# 16KB page alignment (Android 15+).
+# Result lands in android/app/src/main/jniLibs/<ABI>/
 #
-# Voraussetzungen: Android NDK (28.x), git, cmake, ninja-build, autoconf,
-#                  automake, libtool
+# Prerequisites: Android NDK (28.x), git, cmake, ninja-build, autoconf,
+#                automake, libtool
 #
-# Nutzung:
-#   ./scripts/build-android-libs.sh                        # arm64-v8a (Default)
-#   ./scripts/build-android-libs.sh --arch x86_64          # x86_64 (Emulator)
-#   ./scripts/build-android-libs.sh --arch all             # Beide Architekturen
-#   ./scripts/build-android-libs.sh --arch x86_64 sodium   # Nur libsodium x86_64
-#   ./scripts/build-android-libs.sh whisper                # Nur whisper.cpp arm64
-#   ./scripts/build-android-libs.sh voice                  # Nur libcleona_voice arm64
+# Usage:
+#   ./scripts/build-android-libs.sh                        # arm64-v8a (default)
+#   ./scripts/build-android-libs.sh --arch x86_64          # x86_64 (emulator)
+#   ./scripts/build-android-libs.sh --arch all             # Both architectures
+#   ./scripts/build-android-libs.sh --arch x86_64 sodium   # Only libsodium x86_64
+#   ./scripts/build-android-libs.sh whisper                # Only whisper.cpp arm64
+#   ./scripts/build-android-libs.sh voice                  # Only libcleona_voice arm64
+#   ./scripts/build-android-libs.sh link                   # Only libcleona_link arm64
 ###############################################################################
 set -euo pipefail
 
@@ -45,13 +47,13 @@ CMAKE_TOOLCHAIN="$NDK_DIR/build/cmake/android.toolchain.cmake"
 PAGE_SIZE_FLAG="-Wl,-z,max-page-size=16384"
 
 # Pin whisper.cpp version — MUST match iOS/macOS scripts.
-# Die ausgelieferten jniLibs/XCFrameworks sind 1.8.4 (Versions-String in der
-# Binary, plus whisper_vad_* und carry_initial_prompt, die es in v1.7.1 nicht
-# gibt) — der Pin stand trotzdem auf v1.7.1. Ein sauberer Rebuild haette damit
-# ein anderes whisper_full_params-Layout geliefert als die ausgelieferte
-# Binary: `language` liegt in v1.7.1 bei Offset 96, in 1.8.4 bei 104.
-# whisper_ffi.dart probed das Layout inzwischen zur Laufzeit, der Pin bleibt
-# trotzdem die Referenz und muss stimmen.
+# The shipped jniLibs/XCFrameworks are 1.8.4 (version string in the
+# binary, plus whisper_vad_* and carry_initial_prompt, which do not exist in v1.7.1)
+# — the pin nevertheless stood at v1.7.1. A clean rebuild would thus have
+# produced a different whisper_full_params layout than the shipped
+# binary: `language` is at offset 96 in v1.7.1, at 104 in 1.8.4.
+# whisper_ffi.dart now probes the layout at runtime, the pin nevertheless
+# remains the reference and must be correct.
 WHISPER_VERSION="v1.8.4"
 
 # Pin libopus version — MUST match scripts/build-ios-libs.sh and
@@ -75,7 +77,7 @@ setup_arch() {
             CONFIGURE_HOST="x86_64-linux-android"
             CMAKE_ABI="x86_64"
             ;;
-        *) echo "Unbekannte Architektur: $arch (arm64-v8a oder x86_64)"; exit 1 ;;
+        *) echo "Unknown architecture: $arch (arm64-v8a or x86_64)"; exit 1 ;;
     esac
     JNILIBS="$PROJECT_DIR/android/app/src/main/jniLibs/$arch"
     BUILD_DIR="/tmp/android-libs-build-$arch"
@@ -97,13 +99,13 @@ verify_alignment() {
     if [ "$align" = "0x4000" ]; then
         echo "  [✓] $name: 16KB-aligned (0x4000)"
     else
-        echo "  [✗] $name: Alignment=$align (erwartet 0x4000)"
+        echo "  [✗] $name: Alignment=$align (expected 0x4000)"
         return 1
     fi
 }
 
 build_libsodium() {
-    echo "=== libsodium bauen ==="
+    echo "=== build libsodium ==="
     local SRC="$BUILD_DIR/libsodium"
 
     if [ ! -d "$SRC" ]; then
@@ -138,7 +140,7 @@ build_libsodium() {
 }
 
 build_liboqs() {
-    echo "=== liboqs bauen ==="
+    echo "=== build liboqs ==="
     local LIBOQS_VERSION="0.15.0"
     local SRC="$BUILD_DIR/liboqs"
 
@@ -183,7 +185,7 @@ build_liboqs() {
 }
 
 build_libwhisper() {
-    echo "=== whisper.cpp bauen (inkl. libggml) ==="
+    echo "=== build whisper.cpp (incl. libggml) ==="
     local SRC="$BUILD_DIR/whisper.cpp"
 
     if [ ! -d "$SRC" ]; then
@@ -196,11 +198,11 @@ build_libwhisper() {
     mkdir -p "$BUILD"
     cd "$BUILD"
 
-    # GGML_NATIVE=OFF: kein -march=native (wäre Host-Architektur statt ARM64).
-    # GGML_NEON=ON: ARM NEON SIMD für schnellere Inference auf Android.
-    # GGML_OPENMP=OFF: OpenMP braucht libomp.so das nicht im NDK-Sysroot ist.
-    #   Whisper nutzt nur 1-4 Threads, NEON bringt mehr als OMP-Parallelismus.
-    # WHISPER_BUILD_EXAMPLES/TESTS=OFF: nur Library, kein CLI-Tool.
+    # GGML_NATIVE=OFF: no -march=native (would be host architecture instead of ARM64).
+    # GGML_NEON=ON: ARM NEON SIMD for faster inference on Android.
+    # GGML_OPENMP=OFF: OpenMP needs libomp.so, which is not in the NDK sysroot.
+    #   Whisper uses only 1-4 threads, NEON brings more than OMP parallelism.
+    # WHISPER_BUILD_EXAMPLES/TESTS=OFF: library only, no CLI tool.
     cmake -GNinja \
         -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
         -DANDROID_ABI="$CMAKE_ABI" \
@@ -218,8 +220,8 @@ build_libwhisper() {
 
     ninja -j"$(nproc)"
 
-    # whisper.cpp baut: libwhisper.so, libggml.so, libggml-base.so, libggml-cpu.so
-    # Alle .so finden (können in src/, ggml/src/ etc. liegen)
+    # whisper.cpp builds: libwhisper.so, libggml.so, libggml-base.so, libggml-cpu.so
+    # Find all .so (can live in src/, ggml/src/ etc.)
     for libname in libwhisper libggml-cpu libggml-base libggml; do
         local REAL_LIB; REAL_LIB=$(find "$BUILD" -name "${libname}.so*" -type f ! -type l 2>/dev/null | head -1)
         if [ -n "$REAL_LIB" ]; then
@@ -228,13 +230,13 @@ build_libwhisper() {
             verify_alignment "$JNILIBS/${libname}.so"
             echo "  → $JNILIBS/${libname}.so ($(du -h "$JNILIBS/${libname}.so" | cut -f1))"
         else
-            echo "  [!] ${libname}.so nicht gefunden im Build-Output"
+            echo "  [!] ${libname}.so not found in the build output"
         fi
     done
 }
 
 build_libzstd() {
-    echo "=== libzstd bauen ==="
+    echo "=== build libzstd ==="
     local SRC="$BUILD_DIR/zstd"
 
     if [ ! -d "$SRC" ]; then
@@ -262,7 +264,7 @@ build_libzstd() {
     ninja -j"$(nproc)"
     ninja install
 
-    # zstd baut libzstd.so.X.Y.Z mit Symlinks — wir brauchen nur libzstd.so
+    # zstd builds libzstd.so.X.Y.Z with symlinks — we only need libzstd.so
     local REAL_LIB; REAL_LIB=$(find "$BUILD_DIR/install/zstd/lib" -name "libzstd.so.*.*.*" -type f 2>/dev/null | head -1)
     if [ -n "$REAL_LIB" ]; then
         cp "$REAL_LIB" "$JNILIBS/libzstd.so"
@@ -275,7 +277,7 @@ build_libzstd() {
 }
 
 build_libopus() {
-    echo "=== libopus bauen ==="
+    echo "=== build libopus ==="
     local SRC="$BUILD_DIR/opus"
 
     if [ -d "$SRC" ]; then
@@ -318,7 +320,7 @@ build_libopus() {
 }
 
 build_libcleona_pow() {
-    echo "=== libcleona_pow bauen ==="
+    echo "=== build libcleona_pow ==="
     local SRC="$PROJECT_DIR/native/cleona_pow"
     local BUILD="$BUILD_DIR/cleona_pow"
     rm -rf "$BUILD"
@@ -334,8 +336,8 @@ build_libcleona_pow() {
     # presetting them short-circuits the find_* calls entirely.
     local SODIUM_PREFIX="$BUILD_DIR/install/sodium"
     if [ ! -f "$SODIUM_PREFIX/lib/libsodium.so" ]; then
-        echo "FEHLER: libsodium fuer $ARCH fehlt ($SODIUM_PREFIX)."
-        echo "        Erst bauen: $0 --arch $ARCH sodium"
+        echo "ERROR: libsodium for $ARCH missing ($SODIUM_PREFIX)."
+        echo "        Build first: $0 --arch $ARCH sodium"
         exit 1
     fi
 
@@ -364,7 +366,7 @@ build_libcleona_pow() {
 }
 
 build_libcleona_net() {
-    echo "=== libcleona_net bauen ==="
+    echo "=== build libcleona_net ==="
     local SRC="$PROJECT_DIR/native/cleona_net"
     local BUILD="$BUILD_DIR/cleona_net"
     rm -rf "$BUILD"
@@ -395,8 +397,65 @@ build_libcleona_net() {
     echo "  → $JNILIBS/libcleona_net.so.srchash ($(cat "$JNILIBS/libcleona_net.so.srchash"))"
 }
 
+build_libcleona_link() {
+    echo "=== build libcleona_link (Elligator2 shim, V4 migration plan §4d) ==="  # V3-TOUCH-OK: names the plan document, no compatibility path
+    local SRC="$PROJECT_DIR/native/cleona_link"
+    local BUILD="$BUILD_DIR/cleona_link"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    # No SODIUM_LIB fiddling as with cleona_pow: Monocypher 4.0.3 is vendored under
+    # native/cleona_link/vendor/ (migration plan §4d.5), the shim has
+    # no external dependency and is thus the only cleona_* target
+    # buildable without a pre-build step.
+    # CLEONA_LINK_BUILD_SMOKE=OFF: the step-0 gate (smoke executables + the
+    # deliberately broken cleona_link_saboteur library) belongs in the
+    # standalone build (native/cleona_link/CMakeLists.txt header), not in a
+    # production build tree — the saboteur exports the same three symbols
+    # as the real library and must never lie next to it (the same rule
+    # as CLEONA_VOICE_BUILD_MOCK=OFF above).
+    cmake -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
+        -DANDROID_ABI="$CMAKE_ABI" \
+        -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
+        -DCLEONA_LINK_BUILD_SMOKE=OFF \
+        "$SRC"
+
+    ninja -j"$(nproc)"
+
+    cp libcleona_link.so "$JNILIBS/libcleona_link.so"
+    "$STRIP" "$JNILIBS/libcleona_link.so"
+    verify_alignment "$JNILIBS/libcleona_link.so"
+    echo "  → $JNILIBS/libcleona_link.so ($(du -h "$JNILIBS/libcleona_link.so" | cut -f1))"
+
+    # Content stamp for preflight.sh Check 5 (Android native lib staleness).
+    # Multi-source formula, NOT the single-file formula of cleona_pow/cleona_net:
+    # the shim consists of cleona_link.c PLUS the vendored Monocypher — a
+    # Monocypher bump without a change to cleona_link.c must flip the stamp.
+    # The formula MUST match Check 5's default branch exactly (tracked *.c/*.h
+    # under native/cleona_link/ except test/ and smoke/, as
+    # "<path-relative-to-PROJECT_DIR> <content-sha256>" lines — rationale
+    # for relative paths and tracked-only in Check 5's comment; git ls-files
+    # instead of find, so that an untracked local CMake build tree does not
+    # poison the stamp, S299).
+    { git -C "$PROJECT_DIR" ls-files -z -- "native/cleona_link" \
+        | while IFS= read -r -d '' _rel; do
+            case "$_rel" in
+              */test/*|*/smoke/*) continue ;;
+              *.c|*.h) printf '%s\0' "$PROJECT_DIR/$_rel" ;;
+            esac
+          done | sort -z
+    } | while IFS= read -r -d '' _bl_f; do
+        printf '%s %s\n' "${_bl_f#"$PROJECT_DIR"/}" "$(sha256sum "$_bl_f" | cut -d' ' -f1)"
+      done | sha256sum | cut -d' ' -f1 > "$JNILIBS/libcleona_link.so.srchash"
+    echo "  → $JNILIBS/libcleona_link.so.srchash ($(cat "$JNILIBS/libcleona_link.so.srchash"))"
+}
+
 build_libcleona_voice() {
-    echo "=== libcleona_voice bauen (Android-Backend, V1.2) ==="
+    echo "=== build libcleona_voice (Android backend, V1.2) ==="
     local SRC="$PROJECT_DIR/native/cleona_voice"
     local BUILD="$BUILD_DIR/cleona_voice"
     rm -rf "$BUILD"
@@ -411,7 +470,7 @@ build_libcleona_voice() {
     # backend also puts wire value 100 (CLEONA_VOICE_BACKEND_MOCK) within
     # reach of a release build, exactly what preflight.sh Check 15 ("Mock
     # voice/video backend not in production build wiring") exists to prevent
-    # (native/cleona_voice/BUILD_REQUEST.md §7). CLEONA_VOICE_ANDROID_CONFORMANCE
+    # (BUGFIX_CURRENT.md AV-V0.2 §7). CLEONA_VOICE_ANDROID_CONFORMANCE
     # stays at its default OFF — the on-device conformance harness is test-only,
     # built via native/cleona_voice/android/conformance/run_conformance.sh, not
     # via this script.
@@ -448,8 +507,18 @@ build_libcleona_voice() {
     # cleona_voice_android.c is a thin shell around it, so a rate-ladder or
     # effect change there changes no .c file at all and would otherwise
     # leave a stale stamp looking current.
-    { find "$SRC" \( -name '*.c' -o -name '*.h' \) \
-        -not -path '*/test/*' -not -path '*/smoke/*' -print0 | sort -z
+    # Tracked files only (git ls-files, not find), exactly as Check 5 since
+    # S299: an untracked CMake probe under native/cleona_voice/build/
+    # (CMakeFiles/*/CompilerIdC/CMakeCCompilerId.c) otherwise enters this
+    # stamp but not the preflight's, and no rebuild can clear the mismatch
+    # (S394, measured 24.09.2026).
+    { git -C "$PROJECT_DIR" ls-files -z -- "native/cleona_voice" \
+        | while IFS= read -r -d '' _rel; do
+            case "$_rel" in
+              */test/*|*/smoke/*) continue ;;
+              *.c|*.h) printf '%s\0' "$PROJECT_DIR/$_rel" ;;
+            esac
+          done | sort -z
       printf '%s\0' "$PROJECT_DIR/android/app/src/main/kotlin/chat/cleona/cleona/VoiceSession.kt"
     } | while IFS= read -r -d '' _bv_f; do
         printf '%s %s\n' "${_bv_f#"$PROJECT_DIR"/}" "$(sha256sum "$_bv_f" | cut -d' ' -f1)"
@@ -458,7 +527,7 @@ build_libcleona_voice() {
 }
 
 build_libcleona_video() {
-    echo "=== libcleona_video bauen (Android-Backend, V1.14) ==="
+    echo "=== build libcleona_video (Android backend, V1.14) ==="
     local SRC="$PROJECT_DIR/native/cleona_video"
     local BUILD="$BUILD_DIR/cleona_video"
     rm -rf "$BUILD"
@@ -501,12 +570,18 @@ build_libcleona_video() {
     # Must match Check 5's cleona_video branch exactly: every tracked
     # *.c/*.h under native/cleona_video/ except test/ and smoke/, fed as
     # "<path-relative-to-PROJECT_DIR> <content-sha256>" pairs — NOT the
-    # absolute path (native/cleona_voice/BUILD_REQUEST_V1.2.md §4: an
+    # absolute path (BUGFIX_CURRENT.md AV-V1.2 §4: an
     # absolute path in the hash makes a .so built in one worktree read as
     # stale in every other one). Unlike cleona_voice's branch, Check 5 does
     # not fold VideoSession.kt into this hash, so this stamp does not either.
-    { find "$SRC" \( -name '*.c' -o -name '*.h' \) \
-        -not -path '*/test/*' -not -path '*/smoke/*' -print0 | sort -z
+    # Tracked files only, for the same reason as cleona_voice above (S394).
+    { git -C "$PROJECT_DIR" ls-files -z -- "native/cleona_video" \
+        | while IFS= read -r -d '' _rel; do
+            case "$_rel" in
+              */test/*|*/smoke/*) continue ;;
+              *.c|*.h) printf '%s\0' "$PROJECT_DIR/$_rel" ;;
+            esac
+          done | sort -z
     } | while IFS= read -r -d '' _bv_f; do
         printf '%s %s\n' "${_bv_f#"$PROJECT_DIR"/}" "$(sha256sum "$_bv_f" | cut -d' ' -f1)"
       done | sha256sum | cut -d' ' -f1 > "$JNILIBS/libcleona_video.so.srchash"
@@ -534,6 +609,7 @@ build_target() {
         whisper)       build_libwhisper ;;
         pow)           build_libcleona_pow ;;
         net)           build_libcleona_net ;;
+        link)          build_libcleona_link ;;
         voice)         build_libcleona_voice ;;
         video)         build_libcleona_video ;;
         all)
@@ -551,6 +627,8 @@ build_target() {
             echo ""
             build_libcleona_net
             echo ""
+            build_libcleona_link
+            echo ""
             build_libcleona_voice
             echo ""
             build_libcleona_video
@@ -558,7 +636,7 @@ build_target() {
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|opus|whisper|pow|net|voice|video|all]"
+            echo "Usage: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|opus|whisper|pow|net|link|voice|video|all]"
             exit 1
             ;;
     esac
@@ -584,7 +662,7 @@ else
 fi
 
 echo ""
-echo "=== Ergebnis ==="
+echo "=== Result ==="
 echo "Alignment-Check aller Libraries:"
 FAIL=0
 for abi_dir in "$PROJECT_DIR/android/app/src/main/jniLibs"/*/; do
@@ -597,9 +675,9 @@ for abi_dir in "$PROJECT_DIR/android/app/src/main/jniLibs"/*/; do
 done
 if [ $FAIL -eq 0 ]; then
     echo ""
-    echo "Alle Libraries 16KB-aligned. APK kann gebaut werden."
+    echo "All libraries 16KB-aligned. APK can be built."
 else
     echo ""
-    echo "WARNUNG: Nicht alle Libraries korrekt aligned!"
+    echo "WARNING: not all libraries correctly aligned!"
     exit 1
 fi

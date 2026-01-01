@@ -3,17 +3,13 @@
 # SPEC: docs/SPEC_VOICE_VIDEO_REWORK.md §7 "V1.13-V1.16 — Video-Backends".
 # Architecture: Cleona_Chat_Architecture_v3_0.md §10.6.
 #
-# STATUS: WORK IN PROGRESS, not yet acceptance-complete. See
-# BUILD_REQUEST_V1.13.md in native/cleona_video/ (one level up — same
-# placement precedent as native/cleona_voice/BUILD_REQUEST_V1.1.md) for the
-# exact state, what remains, and what the next session needs to know before
-# touching this package. Do not treat a green build of this CMakeLists.txt as
-# proof the backend is accepted — it is not.
+# STATUS: conformance-complete on the development machine (commit 3b71b760,
+# 34/34; bd9fadc4, 37/0). NOT proven: cross-implementation H.264 interop.
+# NOT done: wiring into linux/CMakeLists.txt and the libva/libdrm package
+# dependencies. Both open, see BUGFIX_CURRENT.md AV-V1.13 and AV-V0.3 §2.
 #
-# native/cleona_video/CMakeLists.txt does NOT yet have the platform-loop that
-# native/cleona_voice/CMakeLists.txt has (V0.4's test/BUILD_REQUEST.md §1 asks
-# V0.5 for it, still open) — so this directory is not picked up automatically.
-# Build standalone, matching test/CMakeLists.txt route (A):
+# Picked up by native/cleona_video/CMakeLists.txt's platform loop. It also
+# builds standalone, matching test/CMakeLists.txt route (A):
 #
 #   cmake -S native/cleona_video/linux -B build/video_linux
 #   cmake --build build/video_linux
@@ -21,8 +17,8 @@
 #   ./build/video/test/cleona_video_conformance_loader \
 #       build/video_linux/libcleona_video.so --shipping
 #
-# DEPENDENCIES (not yet installable via apt in this sandbox — see
-# BUILD_REQUEST_V1.13.md for how this was worked around locally):
+# DEPENDENCIES (build: libva-dev, libdrm-dev; not yet listed as runtime
+# dependencies in scripts/build-linux-packages.sh — BUGFIX_CURRENT.md AV-V1.13 §4):
 #   libva, libva-drm (VAAPI — Video Acceleration API core + DRM backend)
 #   Linux kernel headers for V4L2 (linux/videodev2.h — part of the standard
 #   libc-dev toolchain on any real dev machine, no extra package needed)

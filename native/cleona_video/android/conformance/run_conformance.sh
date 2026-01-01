@@ -23,12 +23,12 @@
 # ------------------------------------------------------------------
 # native/cleona_video/CMakeLists.txt does not (yet) add a platform-subdirectory
 # loop the way native/cleona_voice/CMakeLists.txt does; that loop belongs to
-# the build owner and is requested in native/cleona_video/test/BUILD_REQUEST.md
+# the build owner and is requested in BUGFIX_CURRENT.md AV-V0.4
 # §1 -- open, not blocking (route (A) does not need it). It DOES block this
 # script's route (which needs android/CMakeLists.txt reached from the parent
-# tree), so this script applies the exact snippet BUILD_REQUEST.md §1 already
+# tree), so this script applies the exact snippet BUGFIX_CURRENT.md AV-V0.4 §1 already
 # specifies to a STAGED COPY only, exactly the interim measure
-# BUILD_REQUEST_V1.2.md §5 used for the analogous voice-tree blocker (linux
+# BUGFIX_CURRENT.md AV-V1.2 §5 used for the analogous voice-tree blocker (linux
 # backend missing a host guard). Nothing under native/cleona_video/ in the
 # repository is touched.
 #
@@ -156,7 +156,7 @@ cp "$REPO_ROOT/android/app/src/main/kotlin/chat/cleona/cleona/VideoSession.kt" \
 cp "$SCRIPT_DIR/runner/ConformanceRunner.kt" "$STAGE/kotlin/ConformanceRunner.kt"
 
 # The platform-loop patch described in the file header -- verbatim from
-# native/cleona_video/test/BUILD_REQUEST.md §1, applied to the STAGED tree
+# BUGFIX_CURRENT.md AV-V0.4 §1, applied to the STAGED tree
 # only.
 #
 # The patch is now CONDITIONAL, and both reasons the original unconditional
@@ -181,7 +181,7 @@ else
 
 # --- interim patch applied ONLY to the staged copy by
 # native/cleona_video/android/conformance/run_conformance.sh (V1.14).
-# Verbatim from native/cleona_video/test/BUILD_REQUEST.md §1. Never applied to
+# Verbatim from BUGFIX_CURRENT.md AV-V0.4 §1. Never applied to
 # the repository -- see that file for the real fix, owned by the build package.
 foreach(_plat linux android apple windows)
   if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_plat}/CMakeLists.txt")
@@ -189,7 +189,7 @@ foreach(_plat linux android apple windows)
   endif()
 endforeach()
 EOF
-    echo "staging  : appended the platform loop from test/BUILD_REQUEST.md §1 (staged copy only)"
+    echo "staging  : appended the platform loop from BUGFIX_CURRENT.md AV-V0.4 §1 (staged copy only)"
 fi
 
 # `sed -i` succeeds on a pattern that matches nothing, which would silently
@@ -326,7 +326,7 @@ fi
 # ---------------------------------------------------------------------------
 echo "--- installing ---"
 # Fresh install, "Success" required, and the APK on the device must hash to
-# the APK just built -- BUILD_REQUEST_V1.2.md's documented finding
+# the APK just built -- BUGFIX_CURRENT.md AV-V1.2's documented finding
 # (`adb install -r` prints "Failure [...]" but still exits 0 on this adb) is
 # just as reachable here, so the same discipline applies unconditionally
 # rather than being re-discovered.

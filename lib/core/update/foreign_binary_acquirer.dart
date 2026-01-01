@@ -41,10 +41,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/core/network/rendezvous/binary_rendezvous_manager.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/rendezvous/binary_rendezvous_manager.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
     show EndpointAddress;
 import 'package:cleona/core/update/binary_fetch_client.dart';
 import 'package:cleona/core/update/binary_fragment_store.dart';
@@ -104,15 +104,13 @@ class ForeignBinaryAcquirer {
   final DateTime Function() _now;
 
   ForeignBinaryAcquirer({
-    required BinaryFragmentStore store,
+    required this._store,
     required BinaryFetchClient fetchClient,
-    required BinaryRendezvousManager? Function() rendezvous,
+    required this._rendezvous,
     required String profileDir,
     CLogger? logger,
     DateTime Function()? now,
   })  : _fetch = fetchClient,
-        _store = store,
-        _rendezvous = rendezvous,
         _log = logger ?? CLogger.get('foreign-bin', profileDir: profileDir),
         _now = now ?? DateTime.now;
 

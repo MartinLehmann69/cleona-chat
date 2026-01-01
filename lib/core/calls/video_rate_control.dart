@@ -15,12 +15,14 @@
 ///
 /// Two layers, two owners, on purpose:
 ///
-///   * **Transport** (package V1.11, `lib/core/network/udp_fragmenter.dart`)
-///     owns the plain-UDP delivery ceiling for one live-media frame
-///     ([UdpFragmenter.liveMediaMaxFrameBytes]) — a structural property of
-///     the fragment format (one-byte index, FEC parity share), not a taste
-///     value. This file **consumes** that constant. It is never recomputed
-///     or duplicated here — see [VideoRateController._ceiling].
+///   * **The delivery ceiling for one live-media frame**
+///     ([kLiveMediaMaxFrameBytes], `lib/core/calls/live_media_frame_budget.dart`)
+///     — 204 parts of 1188 B of payload each (§11.2). Until S392 the value sat
+///     in `lib/core/codec/udp_fragmenter.dart` and was derived from the retired
+///     CFRL wire format (one-byte index, XOR parity share); that format has no
+///     place in 4.2, so the constant moved to the layer that consumes it. This
+///     file **consumes** it. It is never recomputed or duplicated here — see
+///     [VideoRateController._ceiling].
 ///   * **Encoder** (this file) turns a bandwidth estimate into a preset
 ///     recommendation and pushes it down with
 ///     [VideoPipeline.reconfigure], under that fixed ceiling.
@@ -39,8 +41,10 @@
 ///      instead of jumping straight to the bottom, so a single lost-packet
 ///      burst does not collapse a 1080p call straight to 240p when 720p
 ///      would have done. See `_stepTowards`.
-///   3. [VideoRateControlShutdown] — not even the lowest rung
-///      ([VideoPreset.low]) fits under the ceiling
+///   3. [VideoRateControlShutdown] — not even the lowest rung fits under the
+///      ceiling ([VideoPreset.tile] since S368; it was [VideoPreset.low]
+///      before, and moving the floor down is exactly what made group video
+///      reachable on weak links at all — S368 proposal §3.4)
 ///      (`CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE`, `cleona_video.h`). The caller
 ///      — `video_engine.dart` / `call_service.dart`, packages V2.3 / V2.1,
 ///      not this file — switches own video off and shows [reason] to the
@@ -56,15 +60,27 @@
 library;
 
 import 'package:cleona/core/calls/bandwidth_estimator.dart';
+import 'package:cleona/core/calls/live_media_frame_budget.dart';
 import 'package:cleona/core/calls/video_pipeline.dart';
 import 'package:cleona/core/calls/video_preset.dart';
-import 'package:cleona/core/network/udp_fragmenter.dart';
 
 /// The preset ladder this controller walks, lowest first. Deliberately the
-/// same four rungs [BandwidthEstimator] already maps [VideoQuality] onto
-/// (`_qualityToPreset` in `bandwidth_estimator.dart`) — a fifth "ladder" here
-/// would be the second preset taxonomy this package exists to avoid.
+/// same five rungs [BandwidthEstimator] already maps [VideoQuality] onto
+/// (`_qualityToPreset` in `bandwidth_estimator.dart`) — a SECOND "ladder"
+/// here would be the second preset taxonomy this package exists to avoid.
+///
+/// **Four until S368, five since S368** — and the fifth was INSERTED,
+/// not placed alongside. That is exactly why this paragraph stands here:
+/// it also prevented the error it describes on the next occasion.
 const List<VideoPreset> kVideoRateLadder = <VideoPreset>[
+  // S368: [VideoPreset.tile] is the new lowest rung, INSERTED and not
+  // placed alongside. The warning one line above is the reason: a
+  // separate tile ladder would be the second preset taxonomy this
+  // package exists to avoid. `BandwidthEstimator._qualityToPreset`
+  // maps [VideoQuality.tile] onto exactly this rung, and the index
+  // computation `index - 1` carries the insertion, because the new level
+  // also stands at its place in the ordering there.
+  VideoPreset.tile,
   VideoPreset.low,
   VideoPreset.medium,
   VideoPreset.high,
@@ -84,10 +100,10 @@ const List<VideoPreset> kVideoRateLadder = <VideoPreset>[
 /// under `lib/core/calls/` currently imports it). The name is deliberately
 /// identical to keep the eventual mapping in `video_engine.dart` /
 /// `call_service.dart` (V2.3 / V2.1) a 1:1 lookup rather than a judgement
-/// call — see `BUILD_REQUEST_V1.17.md` for the exact handoff.
+/// call — see `BUGFIX_CURRENT.md AV-V1.17` for the exact handoff.
 enum VideoRateShutdownReason {
-  /// No encoder step — not even [VideoPreset.low] — produces frames that fit
-  /// under the delivery ceiling. Wire form:
+  /// No encoder step — not even [VideoPreset.tile], the lowest rung —
+  /// produces frames that fit under the delivery ceiling. Wire form:
   /// `CallVideoOffReason.bandwidthInsufficient`.
   bandwidthInsufficient,
 }
@@ -115,7 +131,7 @@ sealed class VideoRateControlOutcome {
 final class VideoRateControlUnchanged extends VideoRateControlOutcome {
   const VideoRateControlUnchanged({required super.estimate, required this.quality});
 
-  /// The ladder rung currently in force ([VideoQuality.low] ..
+  /// The ladder rung currently in force ([VideoQuality.tile] ..
   /// [VideoQuality.full] — never [VideoQuality.audioOnly], see
   /// [VideoRateController.appliedQuality]).
   final VideoQuality quality;
@@ -142,13 +158,14 @@ final class VideoRateControlStepped extends VideoRateControlOutcome {
   final VideoConfig negotiated;
 
   /// True when the single-rung step towards the target was itself rejected
-  /// by the backend and the controller fell back to [VideoPreset.low] — the
+  /// by the backend and the controller fell back to the lowest rung
+  /// ([VideoPreset.tile] since S368) — the
   /// last-resort attempt Abnahme criterion 3 requires before a shutdown
   /// signal is justified. False on every ordinary step.
   final bool forcedToLowest;
 }
 
-/// No encoder step fits the delivery ceiling — not even [VideoPreset.low],
+/// No encoder step fits the delivery ceiling — not even [VideoPreset.tile],
 /// which was actually attempted (never assumed). The caller stops encoding
 /// and tells the user [reason], instead of retrying silently.
 final class VideoRateControlShutdown extends VideoRateControlOutcome {
@@ -264,15 +281,15 @@ class VideoRateController {
     VideoQuality initialQuality = VideoQuality.medium,
 
     /// Test-only escape hatch. Production callers must leave this null so
-    /// the ceiling is always [UdpFragmenter.liveMediaMaxFrameBytes] — the
-    /// single source V1.11 owns (see the library doc). A smoke test uses
-    /// this to simulate a ceiling so small that even [VideoPreset.low]
-    /// cannot fit, which the real constant (242'148 B) never does on
-    /// purpose; there is no production code path that sets it.
+    /// the ceiling is always [kLiveMediaMaxFrameBytes] — the single source
+    /// (see the library doc). A smoke test uses this to simulate a ceiling
+    /// so small that even [VideoPreset.tile] cannot fit, which the real
+    /// constant (242'352 B) never does on purpose; there is no production
+    /// code path that sets it.
     int? maxFrameBytesOverrideForTests,
   })  : estimator = estimator ?? BandwidthEstimator(initialQuality: initialQuality),
         _ladder = List<VideoPreset>.unmodifiable(ladder),
-        _ceiling = maxFrameBytesOverrideForTests ?? UdpFragmenter.liveMediaMaxFrameBytes,
+        _ceiling = maxFrameBytesOverrideForTests ?? kLiveMediaMaxFrameBytes,
         _appliedRung = _rungForQuality(initialQuality, ladder.length) {
     if (_ladder.isEmpty) {
       throw ArgumentError.value(ladder, 'ladder', 'must not be empty');
@@ -301,13 +318,13 @@ class VideoRateController {
   VideoConfig? _lastNegotiated;
 
   /// The delivery ceiling every [VideoConfig] this controller builds carries
-  /// as `maxFrameBytes` — [UdpFragmenter.liveMediaMaxFrameBytes] in
-  /// production, consumed unchanged (never recomputed, never duplicated).
+  /// as `maxFrameBytes` — [kLiveMediaMaxFrameBytes] in production, consumed
+  /// unchanged (never recomputed, never duplicated).
   int get ceiling => _ceiling;
 
   /// The ladder rung currently in force. Never
   /// [VideoQuality.audioOnly] — this controller's ladder only spans
-  /// [VideoPreset.low] through [VideoPreset.full]; an audio-only fallback for
+  /// [VideoPreset.tile] through [VideoPreset.full]; an audio-only fallback for
   /// a merely-poor (not unachievable) link is signalled through
   /// [BandwidthEstimate.videoPaused] on [VideoRateControlOutcome.estimate]
   /// and is the caller's decision, same as [VideoPipeline.captureEnabled].
@@ -317,9 +334,9 @@ class VideoRateController {
   /// [evaluateAndApply].
   VideoConfig? get lastNegotiated => _lastNegotiated;
 
-  /// [VideoQuality.low] is index 1 (index 0 is [VideoQuality.audioOnly],
+  /// [VideoQuality.tile] is index 1 (index 0 is [VideoQuality.audioOnly],
   /// which has no ladder rung of its own here) through [VideoQuality.full]
-  /// at index 4. Ladder index is quality index minus one, clamped to the
+  /// at index 5. Ladder index is quality index minus one, clamped to the
   /// configured ladder length.
   static int _rungForQuality(VideoQuality q, int ladderLength) {
     final idx = q.index - 1;
@@ -398,7 +415,7 @@ class VideoRateController {
       estimate: estimate,
       reason: VideoRateShutdownReason.bandwidthInsufficient,
       detail: 'no encoder step fits the delivery ceiling of $_ceiling B '
-          '(V1.11 UdpFragmenter.liveMediaMaxFrameBytes); '
+          '(kLiveMediaMaxFrameBytes, 204 parts x 1188 B, §11.2); '
           '${_ladder[0]} was attempted and also rejected '
           '(CLEONA_VIDEO_ERR_RATE_UNACHIEVABLE)',
     );
@@ -422,8 +439,8 @@ class VideoRateController {
 
   /// Evaluates — not merely stores — [negotiated] against [requested] and
   /// against the ABI's downward-only negotiation contract (I9,
-  /// `cleona_video.h`). Abnahme criterion 2 ("`out_negotiated` wird
-  /// ausgewertet") is this method: every field is compared, not just read
+  /// `cleona_video.h`). Acceptance criterion 2 ("`out_negotiated` is
+  /// evaluated") is this method: every field is compared, not just read
   /// into a struct nobody looks at again.
   void _evaluateNegotiated(VideoConfig requested, VideoConfig negotiated) {
     if (negotiated.maxFrameBytes > _ceiling) {

@@ -1,19 +1,18 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/linkable_ring_signature.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/channels/system_channels.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart';
-import 'package:cleona/core/network/sender_identity_snapshot.dart';
-import 'package:cleona/core/network/v3_frame_codec.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
+import 'package:cleona/core/service/harvest_event.dart';
 
 class PollService {
   PollService(this._ctx);
@@ -27,7 +26,6 @@ class PollService {
   final Map<String, Set<String>> anonymousKeyImages = {};
   Timer? _pollDeadlineTimer;
   final Map<String, Timer> _pendingAnonVoteSends = {};
-  final Map<String, Completer<bool>> _anonSubmitAcks = {};
 
   // ── Callbacks (wired from CleonaService) ──────────────────────────
   void Function(String pollId, String groupId, String question)? onPollCreated;
@@ -41,7 +39,7 @@ class PollService {
     pollManager = PollManager(
       profileDir: _ctx.profileDir,
       identityId: _ctx.identity.userIdHex,
-      fileEnc: _ctx.fileEnc,
+      store: _ctx.store,
     );
     pollManager.load();
 
@@ -299,7 +297,7 @@ class PollService {
     }
 
     final payload = Uint8List.fromList(msg.writeToBuffer());
-    await _sendAnonViaReBroadcaster(
+    await _sendAnonVote(
       poll: poll,
       messageType: proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
       payload: payload,
@@ -329,16 +327,62 @@ class PollService {
     }
 
     final payload = Uint8List.fromList(msg.writeToBuffer());
-    await _sendAnonViaReBroadcaster(
+    await _sendAnonVote(
       poll: poll,
       messageType: proto.MessageTypeV3.MTV3_POLL_REVOKE,
       payload: payload,
     );
   }
 
-  // ── §11.4.8 Anonymous Vote Re-Broadcaster ────────────────────────
+  // ── ANONYMOUS VOTES: THE RE-BROADCASTER IS GONE (2026-08-31, CUT) ──
+  //
+  // WHAT STOOD HERE. §11.4.8 (v3_0) did not let an anonymous vote go
+  // directly to the members, but via a randomly chosen third node R from
+  // the routing table: the bundle travelled as POLL_ANON_SUBMIT to R, R
+  // packed every entry into its own outer frame (`V3FrameCodec.buildOuter`)
+  // and sent it on under ITS device identifier, acknowledged via
+  // POLL_ANON_SUBMIT_ACK. Part of it were `_selectReBroadcaster` (drew its
+  // candidates from `routingTable.allPeers`), `_sendAnonSubmitAck` and the
+  // two infra handlers at the end of the file.
+  //
+  // WHY IT DOES NOT MERELY FALL FOR LACK OF A CARRIER, BUT IS REJECTED.
+  // `Cleona_Chat_Architecture_v4_1.md` §18.4.2 (Anonymity toward fellow
+  // voters), literally:
+  //
+  //   "Forwarding via a randomly chosen third node that resends every
+  //    vote blob under its own device identifier is not needed for this
+  //    and would be worse: the third party would learn that device X
+  //    voted."
+  //
+  // That is a decision AGAINST the construction, not merely the loss of
+  // its carrier. Hence (T) and without replacement.
+  //
+  // WHAT V4.1 PROVIDES INSTEAD — AND WHAT OF IT IS MISSING. §18.4.2
+  // decides (2026-08-08) option B as normative: anonymous votes do NOT run
+  // via pairwise legs, but under an own mark family
+  // `tag_vote = HKDF(pollId, "vote" || n)`, which all group members
+  // subscribe to for the duration of the poll. This family is NOT built —
+  // there is no producer for `tag_vote` in the tree. That is the open gap
+  // of this section.
+  //
+  // WHAT APPLIES UNTIL THEN ALSO STANDS IN THE DOCUMENT: "Option A remains
+  // the transition state until B is implemented — until then, the UI
+  // must not assert an anonymity that the carrier does not deliver."
+  // Option A is delivery via the normal pairwise legs: anonymous in the
+  // RESULT DISPLAY (ring signature, key image), not towards the fellow
+  // voters. Exactly that is what `_sendAnonPairwise` below achieves, and
+  // the requirement on the UI is met:
+  // `lib/ui/screens/poll_editor_screen.dart:296-315` shows
+  // `poll_anonymity_scope_hint` for every anonymous poll — "Anonym in der
+  // Ergebnisanzeige — auf Netzwerkebene koennen Teilnehmer derzeit
+  // sehen, dass und wann du abgestimmt hast."
+  //
+  // So here there is NO silent switch to a weaker path: the weaker path
+  // is the transition state named by the document, and it stands like
+  // that in the UI.
 
-  Future<void> _sendAnonViaReBroadcaster({
+  /// Distributes an anonymous vote (§18.4, transition state option A).
+  Future<void> _sendAnonVote({
     required Poll poll,
     required proto.MessageTypeV3 messageType,
     required Uint8List payload,
@@ -346,101 +390,20 @@ class PollService {
     final recipients = _pollRecipients(poll.groupId);
     if (recipients == null || recipients.isEmpty) return;
 
+    // Channel special path taken over unchanged from the old version
+    // (§18.3.3): subscribers vote only at the creator, the creator then
+    // publishes the POLL_SNAPSHOT.
     final isChannel = _ctx.channels.containsKey(poll.groupId);
-    final effectiveRecipients = isChannel && poll.createdByHex != _ctx.identity.userIdHex
-        ? [poll.createdByHex]
-        : recipients.toList();
+    final effectiveRecipients =
+        isChannel && poll.createdByHex != _ctx.identity.userIdHex
+            ? [poll.createdByHex]
+            : recipients.toList();
 
-    final channel = _ctx.channels[poll.groupId];
-    final entries = <proto.PollAnonSubmitEntry>[];
-    for (final recipientHex in effectiveRecipients) {
-      final contact = _ctx.contacts[recipientHex];
-      final chMember = channel?.members[recipientHex];
-      final x25519Pk = contact?.x25519Pk ?? chMember?.x25519Pk;
-      final mlKemPk = contact?.mlKemPk ?? chMember?.mlKemPk;
-      if (x25519Pk == null || x25519Pk.isEmpty ||
-          mlKemPk == null || mlKemPk.isEmpty) {
-        continue;
-      }
-
-      final inner = proto.ApplicationFrameV3()
-        ..recipientUserId = hexToBytes(recipientHex)
-        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-        ..messageId = SodiumFFI().randomBytes(16)
-        ..messageType = messageType
-        ..payload = payload;
-
-      final kemBlob = V3FrameCodec.buildDeAttributedInner(
-        inner: inner,
-        recipientUserX25519Pk: x25519Pk,
-        recipientUserMlKemPk: mlKemPk,
-      );
-
-      final entry = proto.PollAnonSubmitEntry()
-        ..recipientUserId = hexToBytes(recipientHex)
-        ..kemBlob = kemBlob;
-      if (contact != null && contact.deviceNodeIds.isNotEmpty) {
-        for (final did in contact.deviceNodeIds) {
-          entry.deviceIds.add(hexToBytes(did));
-        }
-      }
-      entries.add(entry);
-    }
-    if (entries.isEmpty) return;
-
-    final bundle = proto.PollAnonSubmitMsg()
-      ..pollId = hexToBytes(poll.pollId);
-    bundle.entries.addAll(entries);
-    final bundleBytes = bundle.writeToBuffer();
-
-    if (bundleBytes.length > 65536 || entries.length > 64) {
-      _log.warn('Anon submit bundle too large (${bundleBytes.length}B, '
-          '${entries.length} entries) — legacy fallback');
-      await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
-      return;
-    }
-
-    for (var attempt = 0; attempt < 3; attempt++) {
-      final r = _selectReBroadcaster(poll.groupId);
-      if (r == null) {
-        _log.info('No suitable re-broadcaster found — legacy fallback');
-        await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
-        return;
-      }
-
-      final pollIdHex = poll.pollId;
-      final completer = Completer<bool>();
-      _anonSubmitAcks[pollIdHex] = completer;
-
-      final ok = await _ctx.node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT,
-        innerPayload: Uint8List.fromList(bundleBytes),
-        recipientDeviceId: r.nodeId,
-      );
-
-      if (!ok) {
-        _anonSubmitAcks.remove(pollIdHex);
-        _log.info('Anon submit to R ${_hexShort(r.nodeId)} failed (attempt $attempt)');
-        continue;
-      }
-
-      final acked = await completer.future
-          .timeout(const Duration(seconds: 10), onTimeout: () => false);
-      _anonSubmitAcks.remove(pollIdHex);
-
-      if (acked) {
-        _log.info('Anon vote re-broadcast OK via R ${_hexShort(r.nodeId)}');
-        return;
-      }
-      _log.info('Anon submit ACK timeout from R ${_hexShort(r.nodeId)} '
-          '(attempt $attempt)');
-    }
-
-    _log.info('All re-broadcaster attempts failed — legacy fallback');
-    await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
+    await _sendAnonPairwise(poll, messageType, payload, effectiveRecipients);
   }
 
-  Future<void> _sendAnonLegacy(
+  /// Option A (§18.4.2): delivery via the normal pairwise legs.
+  Future<void> _sendAnonPairwise(
     Poll poll,
     proto.MessageTypeV3 messageType,
     Uint8List payload,
@@ -476,46 +439,6 @@ class PollService {
     }
   }
 
-  PeerInfo? _selectReBroadcaster(String entityIdHex) {
-    final participantIds = <String>{};
-    final group = _ctx.groups[entityIdHex];
-    if (group != null) {
-      participantIds.addAll(group.members.keys);
-    }
-    final channel = _ctx.channels[entityIdHex];
-    if (channel != null) {
-      participantIds.addAll(channel.members.keys);
-    }
-    participantIds.add(_ctx.identity.userIdHex);
-
-    final contactIds = _ctx.contacts.keys.toSet();
-
-    final candidates = _ctx.node.routingTable.allPeers.where((p) {
-      final pHex = bytesToHex(p.nodeId);
-      final uHex = p.userId != null ? bytesToHex(p.userId!) : null;
-      if (participantIds.contains(pHex) || participantIds.contains(uHex)) return false;
-      if (contactIds.contains(pHex) || contactIds.contains(uHex)) return false;
-      return true;
-    }).toList();
-
-    if (candidates.isEmpty) return null;
-    final idx = SodiumFFI().randomBytes(4);
-    final v = ((idx[0] << 24) | (idx[1] << 16) | (idx[2] << 8) | idx[3]) & 0x7fffffff;
-    return candidates[v % candidates.length];
-  }
-
-  void _sendAnonSubmitAck(
-      Uint8List recipientDeviceId, List<int> pollId, bool accepted, String reason) {
-    final ack = proto.PollAnonSubmitAckMsg()
-      ..pollId = pollId
-      ..accepted = accepted
-      ..rejectReason = reason;
-    unawaited(_ctx.node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK,
-      innerPayload: Uint8List.fromList(ack.writeToBuffer()),
-      recipientDeviceId: recipientDeviceId,
-    ));
-  }
 
   Future<void> _sendPollUpdate(Poll poll, proto.PollAction action,
       {List<PollOption>? addedOptions,
@@ -840,6 +763,7 @@ class PollService {
       await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_DELETE);
       if (SystemChannels.isSystemChannel(poll.groupId)) {
         final conv = _ctx.conversations[poll.groupId];
+        _ctx.ensureLoaded(poll.groupId);
         conv?.messages.removeWhere((m) => m.pollId == pollId);
       }
       onPollStateChanged?.call(pollId);
@@ -878,92 +802,27 @@ class PollService {
     return true;
   }
 
-  // ── Infra Handlers (Re-Broadcaster) ──────────────────────────────
-
-  void handleIncomingPollAnonSubmit(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress from,
-    int port,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    final proto.PollAnonSubmitMsg bundle;
-    try {
-      bundle = proto.PollAnonSubmitMsg.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.warn('POLL_ANON_SUBMIT parse error: $e');
-      return;
-    }
-
-    if (frame.payload.length > 65536) {
-      _log.warn('POLL_ANON_SUBMIT too large: ${frame.payload.length}B — rejected');
-      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_large');
-      return;
-    }
-    if (bundle.entries.length > 64) {
-      _log.warn('POLL_ANON_SUBMIT too many entries: ${bundle.entries.length} — rejected');
-      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_many_entries');
-      return;
-    }
-
-    final myDeviceNodeId = _ctx.node.primaryIdentity.deviceNodeId;
-    for (final entry in bundle.entries) {
-      final recipientUserId = Uint8List.fromList(entry.recipientUserId);
-
-      List<Uint8List> deviceIds;
-      if (entry.deviceIds.isNotEmpty) {
-        deviceIds = entry.deviceIds.map((d) => Uint8List.fromList(d)).toList();
-      } else {
-        final cached = _ctx.node.routingTable.getAllPeersForUserId(recipientUserId);
-        if (cached.isEmpty) continue;
-        deviceIds = cached.map((p) => p.nodeId).toList();
-      }
-
-      for (final deviceId in deviceIds) {
-        final outer = V3FrameCodec.buildOuter(
-          nextHopDeviceId: deviceId,
-          senderDeviceId: myDeviceNodeId,
-          deviceKeys: _ctx.node.deviceKeyPair,
-          innerPayload: Uint8List.fromList(entry.kemBlob),
-          payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
-          applicationFlavor: true,
-          skipPoW: true,
-        );
-        unawaited(_ctx.node.sendToDevice(outer, deviceId));
-      }
-    }
-
-    _log.info('POLL_ANON_SUBMIT: re-originated ${bundle.entries.length} entries '
-        'from ${_hexShort(senderDeviceId)}');
-    _sendAnonSubmitAck(senderDeviceId, bundle.pollId, true, '');
-  }
-
-  void handleIncomingPollAnonSubmitAck(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-  ) {
-    final proto.PollAnonSubmitAckMsg ack;
-    try {
-      ack = proto.PollAnonSubmitAckMsg.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.warn('POLL_ANON_SUBMIT_ACK parse error: $e');
-      return;
-    }
-    final pollIdHex = bytesToHex(Uint8List.fromList(ack.pollId));
-    final completer = _anonSubmitAcks.remove(pollIdHex);
-    if (completer != null && !completer.isCompleted) {
-      completer.complete(ack.accepted);
-      _log.info('POLL_ANON_SUBMIT_ACK from ${_hexShort(senderDeviceId)}: '
-          '${ack.accepted ? "accepted" : "rejected: ${ack.rejectReason}"}');
-    }
-  }
+  // ── THE TWO INFRA HANDLERS ARE GONE (2026-08-31, CUT) ─────────
+  //
+  // `handleIncomingPollAnonSubmit` was the counterpart of the
+  // re-broadcaster: it accepted the POLL_ANON_SUBMIT bundle and produced
+  // for every entry a new outer V3 frame under the OWN device identifier
+  // (`V3FrameCodec.buildOuter` + `node.sendToDevice`).
+  // `handleIncomingPollAnonSubmitAck` acknowledged that back. Both are
+  // dropped with the construction (§18.4.2, the justification stands above
+  // at `_sendAnonVote`).
+  //
+  // CALLERS OUTSIDE THIS FILE, measured 2026-08-31:
+  // `lib/core/service/cleona_service_pure.dart:314-328` passes both
+  // through. These forwardings die along — they lie in a foreign file and
+  // are reported, not removed here.
 
   // ── V3 Application Frame Handlers ────────────────────────────────
 
-  void handlePollCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollCreateV3(HarvestEvent event) {
     try {
-      final msg = proto.PollCreateMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msg = proto.PollCreateMsg.fromBuffer(event.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
       final poll = _decodePollCreate(msg, senderHex: senderHex);
 
       if (_pollRecipients(poll.groupId) == null) {
@@ -996,14 +855,14 @@ class PollService {
       _ctx.notifyStateChanged();
       _log.info('Received POLL_CREATE ${poll.pollId.substring(0, 8)} from ${senderHex.substring(0, 8)}');
     } catch (e) {
-      _log.warn('handlePollCreateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollCreateV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollVoteV3(HarvestEvent event) {
     try {
-      final msg = proto.PollVoteMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msg = proto.PollVoteMsg.fromBuffer(event.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
       final poll = pollManager.polls[pollIdHex];
       if (poll == null) {
@@ -1025,13 +884,13 @@ class PollService {
         }
       }
     } catch (e) {
-      _log.warn('handlePollVoteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollVoteV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollVoteAnonymousV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollVoteAnonymousV3(HarvestEvent event) {
     try {
-      final msg = proto.PollVoteAnonymousMsg.fromBuffer(frame.payload);
+      final msg = proto.PollVoteAnonymousMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
       final poll = pollManager.polls[pollIdHex];
       if (poll == null) return;
@@ -1082,14 +941,14 @@ class PollService {
       onPollTallyUpdated?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollVoteAnonymousV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollVoteAnonymousV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollUpdateV3(HarvestEvent event) {
     try {
-      final msg = proto.PollUpdateMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final msg = proto.PollUpdateMsg.fromBuffer(event.payload);
+      final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
       final poll = pollManager.polls[pollIdHex];
       if (poll == null) return;
@@ -1132,6 +991,7 @@ class PollService {
         case proto.PollAction.POLL_ACTION_DELETE:
           if (SystemChannels.isSystemChannel(poll.groupId)) {
             final conv = _ctx.conversations[poll.groupId];
+            _ctx.ensureLoaded(poll.groupId);
             conv?.messages.removeWhere((m) => m.pollId == pollIdHex);
           }
           pollManager.deletePoll(pollIdHex);
@@ -1143,18 +1003,18 @@ class PollService {
       onPollStateChanged?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollSnapshotV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollSnapshotV3(HarvestEvent event) {
     try {
-      final msg = proto.PollSnapshotMsg.fromBuffer(frame.payload);
+      final msg = proto.PollSnapshotMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
       final poll = pollManager.polls[pollIdHex];
       if (poll == null) return;
 
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+      final senderHex = bytesToHex(Uint8List.fromList(event.senderUserId));
       if (senderHex != poll.createdByHex) {
         _log.warn('POLL_SNAPSHOT from non-creator, ignoring');
         return;
@@ -1191,13 +1051,13 @@ class PollService {
       onPollTallyUpdated?.call(pollIdHex);
       _ctx.notifyStateChanged();
     } catch (e) {
-      _log.warn('handlePollSnapshotV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollSnapshotV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
-  void handlePollRevokeV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handlePollRevokeV3(HarvestEvent event) {
     try {
-      final msg = proto.PollVoteRevokeMsg.fromBuffer(frame.payload);
+      final msg = proto.PollVoteRevokeMsg.fromBuffer(event.payload);
       final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
       final poll = pollManager.polls[pollIdHex];
       if (poll == null) return;
@@ -1224,13 +1084,17 @@ class PollService {
         _ctx.notifyStateChanged();
       }
     } catch (e) {
-      _log.warn('handlePollRevokeV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
+      _log.warn('handlePollRevokeV3: $e (sender=${_hexShort(Uint8List.fromList(event.senderUserId))} device=${_hexShort(event.senderDeviceId)})');
     }
   }
 
   // ── Private helpers ───────────────────────────────────────────────
 
-  static String _hexShort(Uint8List bytes) {
+  /// Short form for log lines. Tolerates `null` since the device identifier
+  /// is optional (§14.1: the V4.1 path knows no device) — a log line is no
+  /// reason to insert an untruth.
+  static String _hexShort(Uint8List? bytes) {
+    if (bytes == null) return 'kein-Geraet';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {

@@ -5,7 +5,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%h/cleona-app/cleona-daemon --profile %h/.cleona/default --port 0 --name Cleona
+# D-2 (S372): `--profile` fell in S368; since then the daemon rejects
+# unknown switches fail-closed (E-2 = A). `--base-dir %h/.cleona` instead of
+# `%h/.cleona/default` — since `--profile` was already without effect
+# before, the daemon really ran against `%h/.cleona` already (`_parseArgs`
+# default); the old value would be a new migration error. In step with
+# `install-desktop.sh` (`--base-dir $HOME/.cleona`).
+; S372 (07.09.2026): path moved to `bin/` — the same finding as in
+; `scripts/vm/cleona-bootstrap.service`, measured there during rollout as
+; `status=203/EXEC`. Since the layout switch of S367 the binary lives under
+; `cleona-app/bin/`, and it MUST run from there, because it looks for
+; `../lib/libsqlite3.so` relative to itself — from the flat path that would
+; be `~/lib/`, which does not exist, and the daemon would end when opening
+; the store.
+;
+; This file is on the publishing allowlist (`docs/PUBLISHING.md` §3.3), so
+; the flat path would have been shipped to users.
+ExecStart=%h/cleona-app/bin/cleona-daemon --base-dir %h/.cleona --port 0 --name Cleona
 Restart=on-failure
 RestartSec=5
 # Allow reading port from profile at runtime

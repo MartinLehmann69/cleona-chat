@@ -16,13 +16,13 @@
 // On-disk container layout (after FileEncryption.writeBinaryFile applies the
 // XSalsa20-Poly1305 envelope):
 //
-//   v2 (current — Welle 5):
+//   v2 (current — wave 5):
 //     [4B magic = "CLDK" / 0x43 0x4C 0x44 0x4B]
 //     [4B u32 little-endian version = 2]
 //     [DeviceKeyPair.serializedLength bytes  : Device-Sig keypair]
 //     [DeviceKemKeyPair.serializedLength bytes: Device-KEM keypair]
 //
-//   v1 (legacy — pre-Welle-5):
+//   v1 (legacy — pre-wave-5):
 //     [DeviceKeyPair.serializedLength bytes  : Device-Sig keypair only]
 //     (no header, no magic, fixed length)
 //
@@ -32,19 +32,28 @@
 // generated (CSPRNG, this is a hard-cut: there is no v1 KEM keypair to
 // migrate), and the combined v2 blob is rewritten in place. This is the
 // hard-cut-friendly path: existing devices upgrade in place at first launch
-// after the Welle 5 deployment, without requiring a manual reset of the
+// after the wave 5 deployment, without requiring a manual reset of the
 // daemon's key material.
 //
 // Storage uses the same XSalsa20-Poly1305 file encryption as the rest of the
-// profile (`db.key` keyed) — see FileEncryption.writeBinaryFile. Write is
-// crash-atomic (tmp + rename), recovery probes `.enc.tmp` / `.enc.old`
-// sidecars on read.
+// profile — see FileEncryption.writeBinaryFile. Write is crash-atomic
+// (tmp + rename), recovery probes `.enc.tmp` / `.enc.old` sidecars on read.
+//
+// THE ENVELOPE KEY IS NOT `db.key` (corrected S362 — this header said it was).
+// The caller supplies it, and the caller is `identity_context.dart:407-409`:
+// `HdWallet.deriveSharedFileEncKey(masterSeed)`, the daemon-global,
+// seed-recoverable key. `db.key` appears exactly once below, in the
+// S106 fallback inside [loadOrCreate], and that occurrence is DELIBERATE —
+// see the comment there.
 //
 // Threading: callers must serialize calls to [loadOrCreate] from a single
 // daemon-startup path; concurrent invocations would race on the
-// generate-and-persist branch. In practice CleonaNode.start() awaits this
-// before registerIdentity is called for any identity, so the constraint is
-// trivially satisfied.
+// generate-and-persist branch. Until the CUT of 2026-08-31 this guarantee
+// came from `CleonaNode.start()`, which awaited the call before every
+// `registerIdentity`; `CleonaNode` is deleted (`lib/core/node/`:
+// zero files, measured 2026-09-03). **The condition is therefore not
+// fulfilled but unproven** — it stands here as an open item and not as
+// done.
 
 import 'dart:io';
 import 'dart:typed_data';
@@ -55,7 +64,9 @@ import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 
 /// Combined device keypair bundle (Sig + KEM). What [DeviceKeysStore.loadOrCreate]
-/// returns — single value to wire into CleonaNode without two parallel calls.
+/// returns — a single value to wire into the startup path without two
+/// parallel calls. (Here stood "into CleonaNode"; deleted with the CUT of
+/// 2026-08-31.)
 class DeviceKeyBundle {
   final DeviceKeyPair sig;
   final DeviceKemKeyPair kem;
@@ -112,8 +123,24 @@ class DeviceKeysStore {
       // S106 defence-in-depth: .enc file exists but decrypt failed.
       // Most likely cause: wrong encryption key (seed-derived vs db.key
       // mismatch). Try legacy db.key as fallback before giving up.
-      final legacyEnc = FileEncryption(baseDir: baseDir);
-      final legacy = legacyEnc.readBinaryFile(path);
+      //
+      // INTENT, NOT AN OVERSIGHT (S362): the fallback MUST use the old
+      // key. It reads a legacy container that the derived key has just NOT
+      // been able to open; if it succeeds, the `fileEnc.writeBinaryFile(...)`
+      // a few lines further on immediately rewrites the bundle under the
+      // CALLER'S key, and the old envelope is gone in the same call. Passing
+      // a derived key in here would make the fallback identical to the
+      // read that just failed — so no fallback at all, and a device that
+      // loses its DeviceID and thus its routing.
+      //
+      // S368: `FileEncryption(baseDir: baseDir)` has become
+      // `FileEncryption.legacyOrNull(baseDir)`. The difference is not
+      // cosmetic — the old form CREATED a `db.key` if there was none, and
+      // then failed on the ciphertext: a freshly generated plaintext key
+      // as a side effect of a failed read attempt. Now it returns `null`,
+      // and the fail-loud throw below is the right answer.
+      final legacyEnc = FileEncryption.legacyOrNull(baseDir);
+      final legacy = legacyEnc?.readBinaryFile(path);  // V3-TOUCH-OK: legacy key fallback, normative in v4_1 §4.5.3 (db.key is one of the six files that never move into the database)
       if (legacy != null) {
         final bundle = _hasMagic(legacy) ? _decodeVersioned(legacy)
             : legacy.length == _v1Length
@@ -175,10 +202,10 @@ class DeviceKeysStore {
     fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
   }
 
-  /// D3 (§13.1.2): stelle sicher, dass die Admission-PoW-Nonce existiert.
-  /// Lazy-Pfad fuer Bestandsgeraete (v1/v2-Container) UND Fresh-Installs:
-  /// grindet im Isolate (~50-100ms Desktop, <=2s Mobile, einmalig) und
-  /// persistiert den Container als v3. No-op, wenn die Nonce schon da ist.
+  /// D3 (§13.1.2): make sure the admission PoW nonce exists.
+  /// Lazy path for existing devices (v1/v2 container) AND fresh installs:
+  /// grinds in the isolate (~50-100ms desktop, <=2s mobile, once) and
+  /// persists the container as v3. No-op if the nonce is already there.
   static Future<void> ensureAdmissionNonce(
       {required DeviceKeyBundle bundle,
       required String baseDir,
@@ -190,12 +217,8 @@ class DeviceKeysStore {
     fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
   }
 
-  /// Test/util: explicit reset path so a profile-wipe test can drop the
-  /// device key alongside the rest of the encrypted state.
-  static Uint8List? rawBytesForTest(
-      {required String baseDir, required FileEncryption fileEnc}) {
-    return fileEnc.readBinaryFile('$baseDir/$_filename');
-  }
+  // DROPPED ON 09.09.2026 (S378): no caller in lib/ or test/.
+  // A test hook that no test touches.
 
   // ===========================================================================
   // Encoding helpers

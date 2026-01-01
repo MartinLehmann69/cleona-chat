@@ -1,7 +1,7 @@
 name: cleona
 description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
 publish_to: 'none'
-version: 3.2.2+1
+version: 4.2.0+1
 
 environment:
   sdk: ^3.12.0
@@ -9,6 +9,26 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # The new delivery layer. FIRST STEP OF THE REPLACEMENT (S384) — from
+  # here on it is visible to the app; nobody imports it yet
+  # (`grep -rln "package:myzel" lib/` = 0), so nothing changes in
+  # behaviour yet.
+  #
+  # THE CYCLE IS INTENTIONAL AND IT HOLDS: `mycelium` in turn depends on
+  # `cleona` (crypto, file encryption, Reed-Solomon — 8 files,
+  # none of it delivery layer). Measured on 14.09.2026, first on two
+  # throwaway packages and then here: `flutter pub get` resolves, and a
+  # probe file in `lib/` that really uses `Dienst` and `Zustand`
+  # analyses cleanly.
+  #
+  # Why not pull the foundations into a third package: that would have given
+  # **296 files** in `lib/`, `bin/` and `test/` new import paths
+  # (measured). And why mycelium does not simply move to
+  # `lib/core/mycelium/`: then the package boundary disappears, which today
+  # ENFORCES that the new layer does not touch the old one — a
+  # gate would become an intention.
+  mycelium:
+    path: mycelium
 
   cupertino_icons: ^1.0.8
 
@@ -68,6 +88,14 @@ dependencies:
 
   # @visibleForTesting and other annotations (used in PerMessageKem v2 salt accessor).
   meta: ^1.15.0
+  sqlite3: ^3.5.2
+
+  # HMAC-SHA256 for log redaction (lib/core/log/log_redaction.dart).
+  # Until 06.09.2026 it was only transitive in pubspec.lock; a direct import
+  # of a transitive package is not a declared dependency. Pure Dart,
+  # no FFI — the daemon stays flutter-free, and redaction also runs
+  # before crypto initialisation.
+  crypto: ^3.0.7
 
 dev_dependencies:
   flutter_test:
@@ -90,11 +118,21 @@ flutter:
     - assets/icons/skins/
     - assets/cleona_maintainer_public.pem
     - assets/sounds/
-    - assets/conn_strong.png
+    # The three state images of the ONE connection indicator (§22.9,
+    # owner decision E3 = A, S388): searching -> conn_weak,
+    # connecting -> conn_medium, ready -> conn_good
+    # (`readinessIconName` in lib/core/tray/tray_status.dart).
+    # conn_strong and conn_skeleton were dropped with the five-level scale.
     - assets/conn_good.png
     - assets/conn_medium.png
     - assets/conn_weak.png
-    - assets/conn_skeleton.png
+    # The same three images as ICO — the Windows notification area only accepts
+    # an `.ico` resource via `Shell_NotifyIcon` (§22.9,
+    # owner decision V-10-b, 09.09.2026). Generated from the PNGs next to them
+    # with `dart run scripts/make_tray_icos.dart`; do not touch by hand.
+    - assets/conn_good.ico
+    - assets/conn_medium.ico
+    - assets/conn_weak.ico
     - assets/nat_wizard/router_db.json
     - assets/skins/ocean/
     - assets/skins/sunset/
@@ -103,3 +141,34 @@ flutter:
     - assets/skins/fire/
     - assets/skins/storm/
     - assets/skins/gold/
+
+# ── Store: SQLite3 Multiple Ciphers from VENDORED source (S366) ─────────
+#
+# Not the prebuilt binary package from GitHub and NOT the
+# system library. Both would be a step backwards here:
+#
+#   * System library: on this workbench SQLite 3.45.1 — below
+#     3.53.2 and thus affected by CVE-2026-11822 / CVE-2026-11824,
+#     two memory bugs in FTS5. §21.4 sets >= 3.53.3 normatively.
+#   * Prebuilt binary package: we do not co-determine the compile switches,
+#     and two of them are guarantees of the architecture —
+#     SQLITE_TEMP_STORE=3 (no plaintext temp on disk, §4.5.3) and
+#     SQLITE_SECURE_DELETE (deleted pages are overwritten,
+#     §21.5). A switch set by a third party is no guarantee.
+#
+# The source lives under native/cleona_store/vendor/sqlite3mc/, origin
+# and checksum in the header of native/cleona_store/CMakeLists.txt.
+hooks:
+  user_defines:
+    sqlite3:
+      source: source
+      path: native/cleona_store/vendor/sqlite3mc/sqlite3mc_amalgamation.c
+      defines:
+        defines:
+          - SQLITE_ENABLE_FTS5
+          - SQLITE_THREADSAFE=1
+          - SQLITE_TEMP_STORE=3
+          - SQLITE_SECURE_DELETE
+          - SQLITE_DQS=0
+          - SQLITE_DEFAULT_FOREIGN_KEYS=1
+          - SQLITE_OMIT_DEPRECATED

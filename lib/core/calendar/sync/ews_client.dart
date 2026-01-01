@@ -671,33 +671,8 @@ class EWSClient {
     };
   }
 
-  /// Convert a simple map back to an [EWSCalendarItem].
-  static EWSCalendarItem mapToItem(Map<String, dynamic> map) {
-    return EWSCalendarItem(
-      itemId: map['itemId'] as String?,
-      changeKey: map['changeKey'] as String?,
-      subject: map['subject'] as String?,
-      start: map['start'] != null
-          ? DateTime.parse(map['start'] as String)
-          : null,
-      end: map['end'] != null
-          ? DateTime.parse(map['end'] as String)
-          : null,
-      location: map['location'] as String?,
-      body: map['body'] as String?,
-      isAllDay: map['isAllDay'] as bool?,
-      sensitivity: map['sensitivity'] as String?,
-      showAs: map['showAs'] as String?,
-      organizer: map['organizer'] as String?,
-      reminderMinutes: map['reminderMinutes'] as int?,
-      lastModifiedTime: map['lastModifiedTime'] != null
-          ? DateTime.parse(map['lastModifiedTime'] as String)
-          : null,
-      categories: (map['categories'] as List?)?.cast<String>() ?? [],
-      recurrence: map['recurrence'] as String?,
-      iCalUid: map['iCalUid'] as String?,
-    );
-  }
+  // REMOVED ON 09.09.2026 (S378): no caller in lib/ or test/.
+  // Counterpart to `itemToMap`, which itself only runs internally.
 
   // ────────────────────────────────────────────────────────────────────
   // §6  XML Parsing Helpers
@@ -993,20 +968,8 @@ class EWSClient {
         '<h2>$title</h2><p>$body</p></body></html>';
   }
 
-  /// Convenience helper: list calendar items for a config in a date range.
-  static Future<List<EWSCalendarItem>> discoverAndListItems({
-    required EWSConfig config,
-    required DateTime rangeStart,
-    required DateTime rangeEnd,
-  }) async {
-    final client = EWSClient(config);
-    try {
-      return await client.findItems(
-          rangeStart: rangeStart, rangeEnd: rangeEnd);
-    } finally {
-      client.close();
-    }
-  }
+  // REMOVED ON 09.09.2026 (S378): no caller in lib/ or test/.
+  // Convenience wrapper around `listItems`; nobody called it.
 }
 
 // ──────────────────────────────────────────────────────────────────────

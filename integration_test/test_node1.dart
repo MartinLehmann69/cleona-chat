@@ -32,14 +32,14 @@ void main() {
     await pumpUntilFound(tester, find.text('Aktuell'), timeout: const Duration(seconds: 30));
 
     // ── HOME SCREEN ─────────────────────────────────────────────────
-    expect(find.textContaining('Cleona'), findsWidgets, reason: '1.01 Titel');
+    expect(find.textContaining('Cleona'), findsWidgets, reason: '1.01 title');
     expect(find.byIcon(Icons.settings), findsOneWidget, reason: '1.02 Settings-Button');
-    expect(find.text('Aktuell'), findsOneWidget, reason: '1.03 Tab Aktuell');
+    expect(find.text('Aktuell'), findsOneWidget, reason: '1.03 Tab "Aktuell"');
     expect(find.text('Favoriten'), findsOneWidget, reason: '1.04 Tab Favoriten');
     expect(find.text('Kontakte'), findsOneWidget, reason: '1.05 Tab Chats');
-    expect(find.text('Gruppen'), findsOneWidget, reason: '1.06 Tab Gruppen');
-    expect(find.text('Kanäle'), findsOneWidget, reason: '1.07 Tab Kanäle');
-    expect(find.text('Anfragen'), findsOneWidget, reason: '1.08 Tab Anfragen');
+    expect(find.text('Gruppen'), findsOneWidget, reason: '1.06 Tab "Gruppen"');
+    expect(find.text('Kanäle'), findsOneWidget, reason: '1.07 Tab "Kanäle"');
+    expect(find.text('Anfragen'), findsOneWidget, reason: '1.08 Tab "Anfragen"');
     expect(find.byIcon(Icons.cell_tower), findsOneWidget, reason: '1.09 Peer-Count');
     expect(find.byType(ListTile), findsWidgets, reason: '1.10 Conversations');
 
@@ -94,20 +94,20 @@ void main() {
     // Back
     await tester.tap(find.byIcon(Icons.arrow_back));
     await tester.pumpAndSettle();
-    expect(find.textContaining('Cleona'), findsWidgets, reason: '2.07 Zurück');
+    expect(find.textContaining('Cleona'), findsWidgets, reason: '2.07 Back');
 
     // Identity
     expect(find.textContaining('Alice', skipOffstage: false), findsWidgets,
         reason: '2.08 Alice Identity');
 
-    // ── GRUPPEN ──────────────────────────────────────────────────────
+    // ── GROUPS ───────────────────────────────────────────────────────
     await tester.tap(find.text('Gruppen'));
     await tester.pumpAndSettle();
     final groupTiles = find.byType(ListTile);
     if (groupTiles.evaluate().isNotEmpty) {
       await tester.tap(groupTiles.first);
       await tester.pumpAndSettle(const Duration(seconds: 3));
-      expect(find.byType(TextField), findsWidgets, reason: '3.01 Gruppen-Input');
+      expect(find.byType(TextField), findsWidgets, reason: '3.01 group input');
       await tester.tap(find.byIcon(Icons.arrow_back));
       await tester.pumpAndSettle();
     }
@@ -141,36 +141,36 @@ void main() {
       await tester.pumpAndSettle();
     }
 
-    // ── GRUPPENINFO-DIALOG (via PopupMenu auf Gruppen-Tab) ──────────
+    // ── GROUP INFO DIALOG (via PopupMenu on groups tab) ──────────
     await tester.tap(find.text('Gruppen'));
     await tester.pumpAndSettle();
     final groupTilesForInfo = find.byType(ListTile);
     if (groupTilesForInfo.evaluate().isNotEmpty) {
-      // Find PopupMenuButton on the group tile (3-Punkte-Menü)
+      // Find PopupMenuButton on the group tile (3-dot menu)
       final groupPopup = find.byType(PopupMenuButton<String>);
       if (groupPopup.evaluate().isNotEmpty) {
         await tester.tap(groupPopup.first);
         await tester.pump(const Duration(milliseconds: 500));
 
         // Popup should show "Gruppeninfo" item
-        final gruppeninfoItem = find.text('Gruppeninfo');
-        if (gruppeninfoItem.evaluate().isNotEmpty) {
-          expect(gruppeninfoItem, findsOneWidget, reason: '5.01 Gruppeninfo im PopupMenu');
+        final groupInfoItem = find.text('Gruppeninfo');
+        if (groupInfoItem.evaluate().isNotEmpty) {
+          expect(groupInfoItem, findsOneWidget, reason: '5.01 "Gruppeninfo" in the PopupMenu');
 
-          await tester.tap(gruppeninfoItem);
+          await tester.tap(groupInfoItem);
           await tester.pumpAndSettle(const Duration(seconds: 2));
 
           // Dialog should show group icon
-          expect(find.byIcon(Icons.group), findsWidgets, reason: '5.02 Gruppen-Icon im Dialog');
+          expect(find.byIcon(Icons.group), findsWidgets, reason: '5.02 group icon in the dialog');
 
           // Dialog should show members text
           final membersText = find.textContaining('Mitglied', skipOffstage: false);
-          expect(membersText.evaluate().isNotEmpty, true, reason: '5.03 Mitglieder-Text im Dialog');
+          expect(membersText.evaluate().isNotEmpty, true, reason: '5.03 "Mitglied" text in the dialog');
 
           // Invite button should be present (Alice is owner)
           final inviteBtn = find.text('Einladen');
           if (inviteBtn.evaluate().isNotEmpty) {
-            expect(inviteBtn, findsOneWidget, reason: '5.04 Einladen-Button im Gruppeninfo');
+            expect(inviteBtn, findsOneWidget, reason: '5.04 "Einladen" button in the group info');
           }
 
           // Close dialog
@@ -190,7 +190,7 @@ void main() {
       }
     }
 
-    // ── GRUPPENINFO AUS CHAT (via Tooltip-Button) ────────────────────
+    // ── GROUP INFO FROM CHAT (via tooltip button) ────────────────────
     await tester.tap(find.text('Gruppen'));
     await tester.pumpAndSettle();
     final groupTilesForChat = find.byType(ListTile);
@@ -201,13 +201,13 @@ void main() {
       // In chat screen, find the group-info tooltip button (Icons.info_outline)
       final groupInfoTooltip = find.byTooltip('Gruppeninfo');
       if (groupInfoTooltip.evaluate().isNotEmpty) {
-        expect(groupInfoTooltip, findsOneWidget, reason: '6.01 Gruppeninfo-Tooltip im Chat');
+        expect(groupInfoTooltip, findsOneWidget, reason: '6.01 "Gruppeninfo" tooltip in the chat');
 
         await tester.tap(groupInfoTooltip);
         await tester.pumpAndSettle(const Duration(seconds: 2));
 
         // Dialog with group icon
-        expect(find.byIcon(Icons.group), findsWidgets, reason: '6.02 Gruppen-Icon im Chat-Dialog');
+        expect(find.byIcon(Icons.group), findsWidgets, reason: '6.02 group icon in the chat dialog');
 
         // Close dialog
         final closeBtn = find.text('Schließen');
@@ -236,7 +236,7 @@ void main() {
     // Find the "+" button next to identity tabs (Icons.add, size 16, inside InkWell)
     final addIdentityIcon = find.byIcon(Icons.add);
     if (addIdentityIcon.evaluate().isNotEmpty) {
-      expect(addIdentityIcon, findsWidgets, reason: '7.01 Identity-Add-Button vorhanden');
+      expect(addIdentityIcon, findsWidgets, reason: '7.01 identity add button present');
 
       // Tap "+" → Create Identity dialog opens
       await tester.tap(addIdentityIcon.first);
@@ -251,7 +251,7 @@ void main() {
       final newIdentityTitle = find.text('Neue Identität');
       if (newIdentityTitle.evaluate().isNotEmpty) {
         expect(newIdentityTitle, findsOneWidget,
-            reason: '7.03 Dialog-Titel ist Neue Identität');
+            reason: '7.03 Dialog title is "Neue Identität"');
       }
 
       // Dialog should show "Erstellen" and "Abbrechen" buttons
@@ -263,7 +263,7 @@ void main() {
       }
       if (cancelBtn.evaluate().isNotEmpty) {
         expect(cancelBtn, findsOneWidget,
-            reason: '7.05 Abbrechen-Button im Dialog');
+            reason: '7.05 "Abbrechen" button in the dialog');
       }
 
       // Tap "Abbrechen" → Dialog closes
@@ -278,10 +278,10 @@ void main() {
 
       // Verify Alice tab is still visible after canceling
       expect(find.textContaining('Alice', skipOffstage: false), findsWidgets,
-          reason: '7.06 Alice-Tab nach Abbrechen noch sichtbar');
+          reason: '7.06 Alice tab still visible after cancel');
     }
 
-    // ── PROFILBILD-BEREICH (aus Settings) ────────────────────────────
+    // ── PROFILE PICTURE AREA (from settings) ────────────────────────────
     await tester.tap(find.byIcon(Icons.settings));
     await tester.pumpAndSettle(const Duration(seconds: 3));
 
@@ -301,7 +301,7 @@ void main() {
     final circleAvatar = find.byType(CircleAvatar);
     if (circleAvatar.evaluate().isNotEmpty) {
       expect(circleAvatar, findsWidgets,
-          reason: '8.01 CircleAvatar im Profilbild-Bereich');
+          reason: '8.01 CircleAvatar in the profile picture area');
     }
 
     // Check if delete-icon exists (means profile picture is set) or not
@@ -309,7 +309,7 @@ void main() {
     if (deleteOutlineIcon.evaluate().isNotEmpty) {
       // Profile picture is set — delete icon is shown
       expect(deleteOutlineIcon, findsOneWidget,
-          reason: '8.02 Delete-Icon vorhanden (Profilbild gesetzt)');
+          reason: '8.02 delete icon present (profile picture set)');
     }
     // If not found: no profile picture set, which is also valid
 
@@ -317,22 +317,22 @@ void main() {
     final cameraIcon = find.byIcon(Icons.photo_camera);
     if (cameraIcon.evaluate().isNotEmpty) {
       expect(cameraIcon, findsOneWidget,
-          reason: '8.03 Kamera-Button im Profilbild-Bereich');
+          reason: '8.03 camera button in the profile picture area');
     }
 
     // Gallery button should always be visible
     final galleryIcon = find.byIcon(Icons.photo_library);
     if (galleryIcon.evaluate().isNotEmpty) {
       expect(galleryIcon, findsOneWidget,
-          reason: '8.04 Galerie-Button im Profilbild-Bereich');
+          reason: '8.04 gallery button in the profile picture area');
     }
 
     // Back to Home
     await tester.tap(find.byIcon(Icons.arrow_back));
     await tester.pumpAndSettle();
 
-    // ── KONTAKT HINZUFÜGEN DIALOG ────────────────────────────────────
-    // Auf Recent-Tab: FAB (Icons.person_add) tappen
+    // ── ADD CONTACT DIALOG ────────────────────────────────────
+    // On Recent tab: tap FAB (Icons.person_add)
     await tester.tap(find.text('Aktuell'));
     await tester.pumpAndSettle();
 
@@ -341,35 +341,35 @@ void main() {
       await tester.tap(addContactFab.first);
       await tester.pump(const Duration(milliseconds: 500));
 
-      // Dialog erscheint mit TextField und "Senden"/"Abbrechen" Buttons
+      // Dialog appears with TextField and "Senden"/"Abbrechen" buttons
       final dialogTextField = find.byType(TextField);
       expect(dialogTextField.evaluate().isNotEmpty, true,
-          reason: '9.01 Kontakt-Dialog hat TextField');
+          reason: '9.01 contact dialog has TextField');
 
-      final sendenBtn = find.text('Senden');
-      if (sendenBtn.evaluate().isNotEmpty) {
-        expect(sendenBtn, findsOneWidget,
-            reason: '9.02 Senden-Button im Kontakt-Dialog');
+      final sendBtn = find.text('Senden');
+      if (sendBtn.evaluate().isNotEmpty) {
+        expect(sendBtn, findsOneWidget,
+            reason: '9.02 "Senden" button in the contact dialog');
       }
 
-      final abbrechenBtn = find.text('Abbrechen');
-      if (abbrechenBtn.evaluate().isNotEmpty) {
-        expect(abbrechenBtn, findsOneWidget,
-            reason: '9.03 Abbrechen-Button im Kontakt-Dialog');
+      final abortBtn = find.text('Abbrechen');
+      if (abortBtn.evaluate().isNotEmpty) {
+        expect(abortBtn, findsOneWidget,
+            reason: '9.03 "Abbrechen" button in the contact dialog');
       }
 
-      // "Abbrechen" tappen → Dialog schließt
-      if (abbrechenBtn.evaluate().isNotEmpty) {
-        await tester.tap(abbrechenBtn);
+      // Tap "Abbrechen" → dialog closes
+      if (abortBtn.evaluate().isNotEmpty) {
+        await tester.tap(abortBtn);
         await tester.pumpAndSettle();
       } else {
         await tester.tapAt(const Offset(10, 10));
         await tester.pumpAndSettle();
       }
 
-      // Prüfe dass wir noch auf dem Home-Screen sind
+      // Check that we are still on the home screen
       expect(find.textContaining('Cleona'), findsWidgets,
-          reason: '9.04 Noch auf Home-Screen nach Dialog-Abbrechen');
+          reason: '9.04 Still on home screen after dialog cancel');
     }
 
     // ── FAVORIT TOGGLE ─────────────────────────────────────────────────
@@ -378,48 +378,48 @@ void main() {
 
     final favToggleTiles = find.byType(ListTile);
     if (favToggleTiles.evaluate().isNotEmpty) {
-      // Stern-Icons vor LongPress zählen
+      // Count star icons before LongPress
       final starsBefore = find.byIcon(Icons.star).evaluate().length;
 
-      // LongPress auf erste ListTile
+      // LongPress on first ListTile
       await tester.longPress(favToggleTiles.first);
       await tester.pumpAndSettle();
 
-      // Prüfe ob Stern-Icon-Anzahl sich geändert hat (erscheint oder verschwindet)
+      // Check whether the star icon count has changed (appears or disappears)
       final starsAfter = find.byIcon(Icons.star).evaluate().length;
       expect(starsBefore != starsAfter || starsAfter >= 0, true,
-          reason: '9.05 Favorit-Toggle hat reagiert (Stern-Icons vorher=$starsBefore, nachher=$starsAfter)');
+          reason: '9.05 favourite toggle reacted (star icons before=$starsBefore, after=$starsAfter)');
     }
 
-    // ── IDENTITY KONTEXT-MENÜ ──────────────────────────────────────────
-    // Das Kontext-Menü öffnet sich beim Tap auf den aktiven Identity-Tab
+    // ── IDENTITY CONTEXT MENU ──────────────────────────────────────────
+    // The context menu opens on tap on the active identity tab
     final aliceText = find.text('Alice');
     if (aliceText.evaluate().isNotEmpty) {
-      // Tap auf den aktiven Identity-Tab öffnet Kontext-Menü
+      // Tap on the active identity tab opens the context menu
       await tester.tap(aliceText.first);
       await tester.pump(const Duration(milliseconds: 500));
 
-      // Prüfe ob "Umbenennen" im Popup erscheint
-      final umbenennenText = find.text('Umbenennen');
-      if (umbenennenText.evaluate().isNotEmpty) {
-        expect(umbenennenText, findsOneWidget,
-            reason: '9.06 Umbenennen im Identity-Kontext-Menü');
+      // Check whether "Umbenennen" appears in the popup
+      final renameText = find.text('Umbenennen');
+      if (renameText.evaluate().isNotEmpty) {
+        expect(renameText, findsOneWidget,
+            reason: '9.06 "Umbenennen" in identity context menu');
       }
 
-      // Popup schließen via tapAt(10,10)
+      // Close popup via tapAt(10,10)
       await tester.tapAt(const Offset(10, 10));
       await tester.pumpAndSettle();
     }
 
-    // ── NEGATIV ─────────────────────────────────────────────────────
+    // ── NEGATIVE ────────────────────────────────────────────────────
     await tester.tap(find.text('Favoriten'));
     await tester.pumpAndSettle();
     expect(find.byType(FloatingActionButton), findsNothing,
-        reason: '3.01 Kein FAB auf Favoriten');
+        reason: '3.01 No FAB on favourites');
 
     await tester.tap(find.text('Anfragen'));
     await tester.pumpAndSettle();
     expect(find.byType(FloatingActionButton), findsNothing,
-        reason: '3.02 Kein FAB auf Inbox');
+        reason: '3.02 No FAB on inbox');
   });
 }

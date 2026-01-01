@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 
 /// §19.6.6 — Embedded HTTP server for censorship-resistant binary
 /// distribution. Serves the bootstrap web app and binary/fragment
@@ -13,13 +13,71 @@ import 'package:cleona/core/network/clogger.dart';
 /// TCP connections (`GET `/`HEAD` vs. `0x16 0x03` TLS ClientHello) and
 /// hands HTTP connections to [handleConnection].
 class BinaryHttpServer {
-  static const _requestTimeout = Duration(seconds: 10);
+  /// How long a connection takes to deliver its request header.
+  ///
+  /// **5 s, and the number does not come from here (E-83, E-123(iii)).** It
+  /// stood at 10 s until 2026-08-20, and that was a
+  /// **distinguishing feature**: this server shares its port number
+  /// with the link handshake (§2.1a, §19.6.5), and the switch between the two
+  /// falls after **four bytes**. If one branch closes after 5 s and the
+  /// other after 10 s, a single probe of four bytes reveals that
+  /// the port carries two protocols — and exactly that is what §19.6.5 does not want
+  /// ("it keeps automatic scanners away"), while RL-12 limits the promise to
+  /// "learns that something is listening, but not what".
+  ///
+  /// Of the two existing numbers the normative one wins: §2.6 records with
+  /// **E-83** that a node "reads, stays silent, and closes on the
+  /// sniff timeout that already exists (**5 s**)" — decided, with a number,
+  /// in the leading document. The 10 s were a code constant **without a
+  /// normative anchor** (searched with four search phrasings over architecture doc,
+  /// decision log and migration plan: no hit). So
+  /// the code is pulled to the spec, not the other way round.
+  ///
+  /// **The price is narrowly limited:** the deadline covers solely the receipt of the
+  /// request header — `tryHandle` cancels it as soon as `\r\n\r\n` is there,
+  /// i.e. **before** any delivery. Downloads, fragments and the
+  /// bootstrap web app are untouched. Affected is solely a browser
+  /// that does not deliver its header within 5 s — it goes out in the first segment
+  /// anyway.
+  static const _requestTimeout = Duration(seconds: 5);
   static const _maxRequestLineBytes = 8192;
-  static const _maxActiveConnections = 3;
+
+  /// Upper limit of simultaneously **open connections**.
+  ///
+  /// **The predecessor form was a no-op, and that is measured.** It was called
+  /// `_maxActiveConnections = 3`, was checked in `_handleRequest`, incremented there
+  /// and decremented again in the `finally` of the same **synchronous** body
+  /// — between `++` and `--` there is **not a single `await`**.
+  /// On a single-threaded event loop a second
+  /// `_handleRequest` can therefore never run while the counter is incremented: it is 0 at
+  /// every check and reaches 1 as the maximum, never 3. Measured
+  /// were 0 of 30 requests rejected and 200 of 200 half-open
+  /// connections held. It counted "am I currently IN this function".
+  ///
+  /// Now it counts the **life cycle of the connection** — incremented on
+  /// entry, decremented when the socket is closed.
+  ///
+  /// **Why not still 3.** A browser opens several connections in parallel per remote side
+  /// (usually six). A cap of 3 on
+  /// **connections** would have made the bootstrap web app unusable for every normal
+  /// browser — repairing the counter without
+  /// raising the number would have been worse than the no-op.
+  ///
+  /// **64 is SET, not derived**, and that stands here so that
+  /// nobody takes it for derived. The corpus yields no number for this surface
+  /// (§16.7 does not list resource exhaustion;
+  /// `connection limit`, `backlog`, `half-open`: zero hits in the
+  /// architecture document). The reliable limit comes with the
+  /// stream listener: §19.6.5 puts both branches on **one** port behind
+  /// **one** four-byte switch, so the HTTP branch belongs under the same
+  /// admission rule (`lib/core/link/admission.dart`, pot B / pot U).
+  /// Until then 64 is a number that does not break a browser and does not
+  /// kill a process.
+  static const _maxOpenConnections = 64;
 
   final CLogger _log;
   bool _enabled = true;
-  int _activeConnections = 0;
+  int _openConnections = 0;
 
   /// Static HTML+JS served at GET /cleona.
   Uint8List? bootstrapWebApp;
@@ -72,6 +130,42 @@ class BinaryHttpServer {
       return;
     }
 
+    // **The cap takes effect on entry, not on delivery.** The
+    // descriptor is already occupied at this point; only counting it
+    // when a complete header is there would mean not counting exactly the
+    // connections that never send one.
+    if (_openConnections >= _maxOpenConnections) {
+      _log.debug('HTTP connection cap reached ($_maxOpenConnections) — '
+          'refusing');
+      subscription?.cancel();
+      client.destroy();
+      return;
+    }
+    _openConnections++;
+    var released = false;
+    void release() {
+      if (released) return;
+      released = true;
+      _openConnections--;
+    }
+
+    // **Decrementing happens at EVERY exit, and `Socket.done` is not
+    // the right hook for that.** The first version hung the release solely
+    // there — but `done` is the **send** future of a socket, it
+    // completes when WE have finished writing, not when the
+    // other side hangs up. Measured: after closing 64 held
+    // connections not a single new one was accepted — the counter
+    // was stuck. The guard caught that before it was committed.
+    //
+    // It now hangs at the places where the connection really
+    // ends: at the end of the incoming stream (the other side hangs up), at
+    // every own teardown, and additionally still at `done` for the
+    // case that the answer closes the socket. [release] is
+    // idempotent, multiple calls are the normal case.
+    unawaited(client.done.then((_) => release()).catchError((Object _) {
+      release();
+    }));
+
     final buffer = BytesBuilder();
     if (bufferedData != null && bufferedData.isNotEmpty) {
       buffer.add(bufferedData);
@@ -91,6 +185,7 @@ class BinaryHttpServer {
       if (buffer.length > _maxRequestLineBytes) {
         _log.debug('HTTP request line too large — destroying connection');
         finish();
+        release();
         client.destroy();
         return true;
       }
@@ -113,6 +208,7 @@ class BinaryHttpServer {
     timeout = Timer(_requestTimeout, () {
       _log.debug('HTTP request timed out — destroying connection');
       finish();
+      release();
       client.destroy();
     });
 
@@ -127,12 +223,14 @@ class BinaryHttpServer {
 
     void onDone() {
       finish();
+      release();
       client.destroy();
     }
 
     void onError(Object e) {
       _log.debug('HTTP connection error: $e');
       finish();
+      release();
       client.destroy();
     }
 
@@ -161,14 +259,12 @@ class BinaryHttpServer {
     return -1;
   }
 
+  /// **No connection counter any more.** It stood here and was a no-op —
+  /// `++` and `--` lay in the same synchronous body, with no
+  /// `await` between them, the counter never reached more than 1. It now counts the
+  /// life cycle of the connection, in [handleConnection].
   void _handleRequest(Socket client, Uint8List bytes, int headerEnd) {
-    if (_activeConnections >= _maxActiveConnections) {
-      _sendResponse(client, 503);
-      return;
-    }
-    _activeConnections++;
-
-    try {
+    {
       final headerBlock = ascii.decode(bytes.sublist(0, headerEnd), allowInvalid: true);
       final lines = headerBlock.split('\r\n');
       final requestLine = lines.isNotEmpty ? lines.first : '';
@@ -218,8 +314,6 @@ class BinaryHttpServer {
 
       _sendResponse(client, 404);
       _logRequest(method, path, 404, 0);
-    } finally {
-      _activeConnections--;
     }
   }
 

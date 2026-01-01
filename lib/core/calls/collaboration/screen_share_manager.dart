@@ -1,8 +1,9 @@
 import 'dart:typed_data';
 
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 /// Screen share quality presets (Architecture §10.5.4).
 ///

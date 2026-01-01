@@ -7,6 +7,7 @@ library;
 
 import 'dart:ffi';
 import 'dart:io' show Platform;
+import 'package:cleona/core/platform/app_paths.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -353,12 +354,30 @@ class SodiumFFI {
   }
 
   /// Opens the libsodium shared library for the current platform.
+  ///
+  /// WHY AN EXPLICIT BUNDLE PATH STANDS HERE SINCE S367.
+  /// Since the rework the daemon lies in `<bundleDir>/bin/`. Under
+  /// Windows `LoadLibrary` looks for a bare name first in the directory of
+  /// the executable — for the daemon that is now `…\Release\bin\`, and no
+  /// DLL lies there. Under macOS `@executable_path/../Frameworks` pointed
+  /// from `Contents/MacOS/bin` to `Contents/MacOS/Frameworks`, which does
+  /// not exist. Both cases disappear as soon as the path is computed via
+  /// [AppPaths.bundleDir] instead of via the own directory. Under Linux
+  /// `dlopen` does not look in the program directory anyway; the bundle
+  /// path stands there as a fallback, not as a repair.
   static DynamicLibrary _openLibsodium() {
     if (Platform.isLinux) {
-      return DynamicLibrary.open('libsodium.so');
+      for (final p in [
+        'libsodium.so',
+        '${AppPaths.bundleLibDir}/libsodium.so',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw const SodiumException('libsodium.so not found');
     } else if (Platform.isMacOS) {
       for (final p in [
         'libsodium.dylib',
+        '${AppPaths.macFrameworksDir}/libsodium.dylib',
         '@executable_path/../Frameworks/libsodium.dylib',
         '/opt/homebrew/lib/libsodium.dylib',
         '/usr/local/lib/libsodium.dylib',
@@ -367,7 +386,22 @@ class SodiumFFI {
       }
       throw const SodiumException('libsodium.dylib not found');
     } else if (Platform.isWindows) {
-      return DynamicLibrary.open('libsodium.dll');
+      // `bundleDir` (bundle root), NOT `bundleLibDir` — unlike the Linux
+      // branch above, and that is no contradiction (measured, D-1,
+      // S372): `windows/runner/CMakeLists.txt` copies libsodium/liboqs/
+      // libzstd/opus via POST_BUILD to `$<TARGET_FILE_DIR:${BINARY_NAME}>`
+      // — the directory of the GUI exe itself, not into a `lib\`. Linux, by
+      // contrast, actually installs the same DLL class into
+      // `bundle/lib/` (`linux/CMakeLists.txt`, `INSTALL_BUNDLE_LIB_DIR`).
+      // Two platforms, two real bundle forms — both branches are right for
+      // their respective one.
+      for (final p in [
+        'libsodium.dll',
+        '${AppPaths.bundleDir}\\libsodium.dll',
+      ]) {
+        try { return DynamicLibrary.open(p); } catch (_) {}
+      }
+      throw const SodiumException('libsodium.dll not found');
     } else if (Platform.isAndroid) {
       return DynamicLibrary.open('libsodium.so');
     } else if (Platform.isIOS) {

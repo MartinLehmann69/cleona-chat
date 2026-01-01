@@ -27,7 +27,7 @@ void main() {
     runApp(const CleonaApp());
     await tester.pumpAndSettle(const Duration(seconds: 15));
 
-    // ── 0. SETUP (falls kein Profil vorhanden) ────────────────────
+    // ── 0. SETUP (if no profile exists) ────────────────────
     final setupTextField = find.byType(TextField);
     final settingsIcon = find.byIcon(Icons.settings);
     if (settingsIcon.evaluate().isEmpty && setupTextField.evaluate().isNotEmpty) {
@@ -51,7 +51,7 @@ void main() {
 
     // 1.01 App title visible
     expect(find.textContaining('Cleona'), findsWidgets,
-        reason: '1.01 Cleona-Titel sichtbar');
+        reason: '1.01 Cleona title visible');
 
     // 1.02 Settings button exists
     expect(find.byIcon(Icons.settings), findsOneWidget,
@@ -61,7 +61,7 @@ void main() {
     expect(find.text('Aktuell'), findsOneWidget, reason: '1.03a Tab Recent');
     expect(find.text('Favoriten'), findsOneWidget, reason: '1.03b Tab Favoriten');
     expect(find.text('Kontakte'), findsOneWidget, reason: '1.03c Tab Chats');
-    expect(find.text('Gruppen'), findsOneWidget, reason: '1.03d Tab Gruppen');
+    expect(find.text('Gruppen'), findsOneWidget, reason: '1.03d Tab "Gruppen"');
     expect(find.text('Kanäle'), findsOneWidget, reason: '1.03e Tab Channels');
     expect(find.text('Anfragen'), findsOneWidget, reason: '1.03f Tab Inbox');
 
@@ -77,11 +77,11 @@ void main() {
 
     // 1.05 Peer count chip visible
     expect(find.byIcon(Icons.cell_tower), findsOneWidget,
-        reason: '1.05 Peer-Count Chip sichtbar');
+        reason: '1.05 peer count chip visible');
 
     // 1.06 Conversation list has entries
     expect(find.byType(ListTile), findsWidgets,
-        reason: '1.06 Conversation-Liste hat Einträge');
+        reason: '1.06 Conversation list has entries');
 
     // ── 2. SETTINGS SCREEN ──────────────────────────────────────────
 
@@ -91,11 +91,11 @@ void main() {
 
     // 2.02 Settings title visible
     expect(find.text('Einstellungen'), findsWidgets,
-        reason: '2.02 Einstellungen-Titel sichtbar');
+        reason: '2.02 "Einstellungen" title visible');
 
     // 2.03 Network info visible
     expect(find.textContaining('Node-ID'), findsWidgets,
-        reason: '2.03 Node-ID sichtbar');
+        reason: '2.03 node ID visible');
 
     // 2.04 Encryption info visible (scroll ListView to bottom, then check)
     final listView = find.byType(ListView);
@@ -138,7 +138,7 @@ void main() {
     await tester.tap(backButton);
     await tester.pumpAndSettle();
     expect(find.textContaining('Cleona'), findsWidgets,
-        reason: '2.08b Zurück auf Home-Screen');
+        reason: '2.08b Back on home screen');
 
     // ── 3. CHAT SCREEN ──────────────────────────────────────────────
 
@@ -152,11 +152,11 @@ void main() {
 
       // 3.02 Text input field visible
       expect(find.byType(TextField), findsWidgets,
-          reason: '3.02 Text-Input sichtbar');
+          reason: '3.02 text input visible');
 
       // 3.03 Send button visible
       expect(find.byIcon(Icons.send), findsWidgets,
-          reason: '3.03 Send-Button sichtbar');
+          reason: '3.03 send button visible');
 
       // 3.04 Chat settings button visible
       expect(find.byTooltip('Chat-Einstellungen'), findsWidgets,
@@ -181,8 +181,8 @@ void main() {
           stopwatch.stop();
 
           expect(stopwatch.elapsedMilliseconds < 500, true,
-              reason: '3.06 Send darf UI nicht > 500ms blockieren '
-                  '(war ${stopwatch.elapsedMilliseconds}ms)');
+              reason: '3.06 Send must not block the UI > 500ms '
+                  '(was ${stopwatch.elapsedMilliseconds}ms)');
 
           // Wait for message to appear (async crypto + send)
           for (var i = 0; i < 10; i++) {
@@ -198,7 +198,7 @@ void main() {
 
     // ── 3b. CONTACT RENAME ───────────────────────────────────────────
 
-    // 3b.01 Open Aktuell tab and check for rename option on DM conversations
+    // 3b.01 Open "Aktuell" tab and check for rename option on DM conversations
     await tester.tap(find.text('Aktuell'));
     await tester.pumpAndSettle();
     final convTiles = find.byType(ListTile);
@@ -212,7 +212,7 @@ void main() {
         // 3b.03 Rename option must exist for DM conversations
         final renameOption = find.text('Kontakt umbenennen');
         expect(renameOption.evaluate().isNotEmpty, true,
-            reason: '3b.03 Rename-Option im Kontextmenü');
+            reason: '3b.03 Rename option in context menu');
 
         // Close menu
         await tester.tapAt(Offset.zero);
@@ -220,9 +220,9 @@ void main() {
       }
     }
 
-    // ── 4. GRUPPEN-TAB ──────────────────────────────────────────────
+    // ── 4. GROUPS TAB ───────────────────────────────────────────────
 
-    // 4.01 Switch to Gruppen tab
+    // 4.01 Switch to "Gruppen" tab
     await tester.tap(find.text('Gruppen'));
     await tester.pumpAndSettle();
 
@@ -236,7 +236,7 @@ void main() {
       // 4.04 Group info button should exist
       expect(find.byIcon(Icons.info_outline).evaluate().isNotEmpty ||
              find.byTooltip('Gruppeninfo').evaluate().isNotEmpty,
-          true, reason: '4.04 Gruppeninfo-Button existiert');
+          true, reason: '4.04 "Gruppeninfo" button exists');
 
       // Back
       await tester.tap(find.byIcon(Icons.arrow_back));
@@ -283,7 +283,7 @@ void main() {
         expect(find.byType(TextField), findsOneWidget,
             reason: '6.05 Rename-Dialog hat Textfeld');
         expect(find.textContaining('Originalname'), findsOneWidget,
-            reason: '6.05b Originalname-Label sichtbar');
+            reason: '6.05b "Originalname" label visible');
 
         // 6.06 Cancel dialog
         final cancelBtn = find.text('Abbrechen');
@@ -313,7 +313,7 @@ void main() {
       final identityRename = find.text('Umbenennen');
       if (identityRename.evaluate().isNotEmpty) {
         expect(identityRename, findsOneWidget,
-            reason: '7.01 Identity Umbenennen-Option existiert');
+            reason: '7.01 identity "Umbenennen" option exists');
         // Close menu
         await tester.tapAt(Offset.zero);
         await tester.pumpAndSettle();
@@ -330,12 +330,12 @@ void main() {
 
       // 8.02 SafeArea exists in chat screen body
       expect(find.byType(SafeArea), findsWidgets,
-          reason: '8.02 SafeArea im Chat-Screen vorhanden');
+          reason: '8.02 SafeArea present in chat screen');
 
       // 8.03 Input field is accessible (not hidden behind system UI)
       final inputField = find.byType(TextField);
       expect(inputField, findsWidgets,
-          reason: '8.03 Eingabefeld sichtbar');
+          reason: '8.03 input field visible');
 
       // 8.04 Message status icon exists (sending/queued/sent)
       // Check for any status icon in message bubbles
@@ -349,7 +349,7 @@ void main() {
       if (find.byType(ListTile).evaluate().isNotEmpty) {
         // Only check if there are messages
         expect(hasStatusIcon, true,
-            reason: '8.04 Nachrichten-Status-Icon vorhanden');
+            reason: '8.04 message status icon present');
       }
 
       await tester.tap(find.byIcon(Icons.arrow_back));
@@ -379,7 +379,7 @@ void main() {
         // At least forward should always be visible
         final forwardOption = find.text('Weiterleiten');
         expect(forwardOption.evaluate().isNotEmpty || saveOption.evaluate().isNotEmpty || clipOption.evaluate().isNotEmpty,
-            true, reason: '9.03 Kontextmenü hat Aktionen');
+            true, reason: '9.03 Context menu has actions');
 
         // Close menu
         await tester.tapAt(Offset.zero);
@@ -400,7 +400,7 @@ void main() {
 
       // 10.02 Stats title visible
       expect(find.textContaining('Netzwerk'), findsWidgets,
-          reason: '10.02 Netzwerk-Statistik Titel sichtbar');
+          reason: '10.02 "Netzwerk" statistics title visible');
 
       // 10.03 Data usage section exists
       final dataUsageLabels = [
@@ -411,7 +411,7 @@ void main() {
       ];
       final hasDataUsage = dataUsageLabels.any((f) => f.evaluate().isNotEmpty);
       expect(hasDataUsage, true,
-          reason: '10.03 Datenverbrauch-Sektion vorhanden');
+          reason: '10.03 data usage section present');
 
       // 10.04 Data usage should NOT be all zeros after some network activity
       // Look for any non-zero byte count (e.g. "1.2 KB", "345 B", "0.5 MB")
@@ -424,7 +424,7 @@ void main() {
       // Note: may be 0 if no messages have been sent/received yet in this session
       if (hasNonZeroData) {
         expect(hasNonZeroData, true,
-            reason: '10.04 Datenverbrauch ist nicht 0');
+            reason: '10.04 Data usage is not 0');
       }
 
       // 10.05 Back to home
@@ -440,7 +440,7 @@ void main() {
     // 11.01 App icon asset exists (used for tray, desktop launcher)
     // This is a build-time check — the icon should be bundled with the app
     expect(find.textContaining('Cleona'), findsWidgets,
-        reason: '11.01 App-Titel mit neuem Icon sichtbar');
+        reason: '11.01 app title with new icon visible');
 
     // ── DONE ────────────────────────────────────────────────────────
     // All checks passed if we get here

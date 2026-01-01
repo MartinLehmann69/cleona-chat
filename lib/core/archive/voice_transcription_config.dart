@@ -6,6 +6,70 @@
 // [VoiceTranscriptionConfig.test] provides shortened values for tests.
 
 import 'package:cleona/core/service/service_types.dart' show Conversation;
+import 'package:cleona/core/storage/message_store.dart';
+
+/// The area of the encrypted store for the transcription settings
+/// chosen by the user (§21.4.1).
+///
+/// S366: until now they lay as `transcription_config.json` NAKED in the
+/// profile. The chosen language is a personal attribute — it says in
+/// which language this person speaks; the retention period says
+/// how long their voice recordings stay on the device.
+const String kTranscriptionSettingsArea = 'transcription_config';
+
+/// The key of the ONE record. See [kArchiveConfigKey] in
+/// `archive_config.dart` for the rationale.
+const String kTranscriptionSettingsKey = '_';
+
+/// The three values the UI actually sets.
+///
+/// Deliberately NOT the whole [VoiceTranscriptionConfig]: it carries
+/// language lists, thresholds and switches that nobody changes and that
+/// come from the code. Only what the user chose is stored
+/// — exactly the three fields the old file carried too.
+class VoiceTranscriptionSettings {
+  final String defaultLanguage;
+  final int audioRetentionDays;
+
+  /// The NAME of the model size (`tiny` / `base` / `small`), not its
+  /// index. That is the form the old file carried and that
+  /// `settings_screen.dart` still holds in `_selectedModel` today;
+  /// [VoiceTranscriptionConfig.toJson] writes an index at the same place
+  /// — the two forms were never the same and must not become
+  /// the same here either.
+  final String modelSize;
+
+  const VoiceTranscriptionSettings({
+    this.defaultLanguage = 'auto',
+    this.audioRetentionDays = 30,
+    this.modelSize = 'base',
+  });
+
+  Map<String, dynamic> toJson() => {
+        'defaultLanguage': defaultLanguage,
+        'audioRetentionDays': audioRetentionDays,
+        'modelSize': modelSize,
+      };
+
+  static VoiceTranscriptionSettings fromJson(Map<String, dynamic> j) =>
+      VoiceTranscriptionSettings(
+        defaultLanguage: j['defaultLanguage'] as String? ?? 'auto',
+        audioRetentionDays: j['audioRetentionDays'] as int? ?? 30,
+        modelSize: j['modelSize'] as String? ?? 'base',
+      );
+
+  /// Reads the setting from the store. `null` means: never changed,
+  /// so the defaults apply. If the store throws, it is NOT caught —
+  /// "unreadable" is something different from "never set".
+  static VoiceTranscriptionSettings? readFrom(MessageStore store) {
+    final j = store
+        .loadArea(kTranscriptionSettingsArea)[kTranscriptionSettingsKey];
+    return j == null ? null : fromJson(j);
+  }
+
+  void writeTo(MessageStore store) => store.replaceArea(
+      kTranscriptionSettingsArea, {kTranscriptionSettingsKey: toJson()});
+}
 
 /// Whisper model size (determines quality and resource consumption).
 enum WhisperModelSize {

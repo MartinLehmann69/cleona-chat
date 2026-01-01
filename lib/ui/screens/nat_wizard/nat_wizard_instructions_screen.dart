@@ -1,4 +1,4 @@
-/// NAT-Troubleshooting-Wizard — Step 3: Instructions + Jetzt-pruefen (§27.9.2).
+/// NAT-Troubleshooting-Wizard — Step 3: Instructions + "Jetzt pruefen" (§27.9.2).
 ///
 /// Renders resolved i18n steps + admin-URL hints (clickable via url_launcher),
 /// plus a "Jetzt pruefen" action that calls the service-side recheck and
@@ -10,7 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/network/router_db.dart';
+import 'package:cleona/core/platform/router_db.dart';
 
 enum _CheckState { idle, running, success, fail }
 

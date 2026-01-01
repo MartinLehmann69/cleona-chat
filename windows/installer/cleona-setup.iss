@@ -48,7 +48,13 @@ Name: "{group}\Cleona Chat deinstallieren"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Cleona Chat"; Filename: "{app}\cleona.exe"; Tasks: desktopicon
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CleonaDaemon"; ValueData: """{app}\cleona-daemon.exe"""; Flags: uninsdeletevalue; Tasks: autostart
+; S367: der Daemon liegt in {app}\bin\ — `dart build cli` bettet den Pfad
+; seiner Ablage-Bibliothek als ..\lib\ RELATIV ZUR BINAERDATEI ein. Aus
+; {app} heraus zeigte das eine Ebene zu hoch, und der Daemon endete beim
+; Oeffnen der Ablage mit Exit 0 — fuer die GUI ununterscheidbar von
+; "laeuft, oeffnet nur keinen Socket". Die [Files]-Zeile oben nimmt das
+; Unterverzeichnis ueber `recursesubdirs` ohnehin mit.
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "CleonaDaemon"; ValueData: """{app}\bin\cleona-daemon.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\cleona.exe"; Description: "Cleona Chat starten"; Flags: nowait postinstall skipifsilent

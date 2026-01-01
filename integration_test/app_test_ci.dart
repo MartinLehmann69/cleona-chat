@@ -17,16 +17,12 @@
 // don't share widget trees across testWidgets blocks.
 //
 // Run: flutter test integration_test/app_test_ci.dart -d macos
-import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:provider/provider.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
-import 'package:cleona/core/network/contact_seed.dart';
-import 'package:cleona/core/service/cleona_service.dart';
 
 import 'package:cleona/main.dart';
 
@@ -97,229 +93,48 @@ void main() {
         reason: '1.2 Settings-Button existiert');
 
     expect(find.byIcon(Icons.bar_chart), findsOneWidget,
-        reason: '1.2 Network-Stats-Badge sichtbar');
+        reason: '1.2 network stats badge visible');
 
-    // ── Phase 2: Network Integration ────────────────────────────────
-    if (!hasContactSeed) {
-      printOnFailure('Phase 2 skipped: BOOTSTRAP_CONTACT_SEED not set');
-      return;
-    }
-
-    // 2.1 Parse ContactSeed URI
-    final seed = ContactSeed.fromUri(contactSeedUri);
-    expect(seed, isNotNull, reason: '2.1 ContactSeed URI parsed successfully');
-
-    // 2.2 Get CleonaService from widget tree
-    final context = tester.element(find.byType(MaterialApp));
-    final appState = Provider.of<CleonaAppState>(context, listen: false);
-    expect(appState.service, isNotNull,
-        reason: '2.2 CleonaService is running');
-
-    final service = appState.service! as CleonaService;
-
-    // 2.3 Add peers from ContactSeed programmatically
-    final seedPeers = seed!.seedPeers
-        .map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses))
-        .toList();
-
-    service.addPeersFromContactSeed(
-      seed.nodeIdHex,
-      seed.ownAddresses,
-      seedPeers,
-      targetDeviceIdHex: seed.deviceIdHex,
-      targetDxkB64: seed.deviceX25519Pk != null
-          ? base64.encode(seed.deviceX25519Pk!)
-          : null,
-      targetDmkB64: seed.deviceMlKemPk != null
-          ? base64.encode(seed.deviceMlKemPk!)
-          : null,
-    );
-
-    // 2.4 Send contact request
-    await service.sendContactRequest(
-      seed.nodeIdHex,
-      seedDeviceIdHex: seed.deviceIdHex,
-      seedDxkB64: seed.deviceX25519Pk != null
-          ? base64.encode(seed.deviceX25519Pk!)
-          : null,
-      seedDmkB64: seed.deviceMlKemPk != null
-          ? base64.encode(seed.deviceMlKemPk!)
-          : null,
-    );
-    await tester.pump(const Duration(seconds: 2));
-
-    // 2.5 Wait for a CONFIRMED peer (60s timeout)
+    // ── Phase 2: Network Integration — REMOVED (S389) ─────────────
     //
-    // S280: Diese Zusicherung las frueher die Zahl aus dem Badge-Widget des
-    // Home-Screens. Das war aus zwei Gruenden falsch.
+    // Phase 2 read a ContactSeed URI from the environment variable
+    // `BOOTSTRAP_CONTACT_SEED`, parsed it with `ContactSeed.fromUri` and
+    // entered its start peers via `addPeersFromContactSeed`; after that it
+    // waited 60 s for a confirmed peer.
     //
-    // Erstens misst sie damit die UI statt das Netz: Woran der Badge gebunden
-    // ist, hat sich zweimal geaendert (07.07. service.peerCount ->
-    // 11.07. confirmedPeerCount -> heute reachablePeerCount), und der Test hat
-    // jedes Mal seine Bedeutung mitgeaendert, ohne dass jemand ihn angefasst
-    // haette.
+    // Two reasons, and both are final:
     //
-    // Zweitens — und das ist der Schaden — zaehlte service.peerCount die
-    // Peers der Routing-Tabelle, in die addPeersFromContactSeed() den Bootstrap
-    // OPTIMISTISCH eintraegt, bevor je eine Antwort kam. Der Test war deshalb
-    // monatelang gruen, ohne dass ein einziges Paket beantwortet wurde. Beleg,
-    // gruener Lauf 28893933971 vom 07.07.:
-    //   [publisher] onPeerJoined: peerCount=1
-    //   [node] sendToDevice 12d3cabd: cascade exhausted (routes=0, neighbors=0)
-    //   -> 1 test passed
-    // Ein Netzwerk-Integrationstest, der ohne Netzwerkverkehr gruen wird, ist
-    // schlimmer als keiner.
+    // 1. `ContactSeed.fromUri` no longer exists. The read side of the seed
+    //    was removed with package 17 = A (finding K-1, owner decision
+    //    15.09.2026): v4_2 §4.1 derives the identifier from Ed25519 AND
+    //    ML-DSA-65, but the seed only carries the Ed25519 anchor.
+    // 2. The entry here depends on an ENVIRONMENT VARIABLE that points to
+    //    a specific node. v4_2 §11.7 rules out exactly that:
+    //    "No address, no port, no host is built into the app or configuration,
+    //    and nothing depends on a specific node
+    //    existing" — not even an environment variable.
     //
-    // Jetzt: direkt gegen die Service-API, auf BESTAETIGTE Erreichbarkeit.
-    // reachablePeerCount ist dieselbe Semantik, die der Badge heute anzeigt
-    // (bestaetigte Peers plus DV-Ziele mit hasConfirmedRouteTo), nur aus der
-    // Quelle gelesen statt aus dem Widget-Baum.
-    var reachable = 0;
-    var confirmed = 0;
-    var routingTablePeers = 0;
-    for (var i = 0; i < 12; i++) {
-      await tester.pump(const Duration(seconds: 5));
-      reachable = service.reachablePeerCount;
-      confirmed = service.confirmedPeerCount;
-      routingTablePeers = service.peerCount;
-      if (reachable > 0) break;
+    // A replacement tests the entry the way the product takes it: via the
+    // card of the first contact (§15.2) and the neighbour sources 1-3 (§11.8).
+    // That needs a card export of the remote side in CI — the same
+    // open prerequisite as for phase 3, in the report S389-BAU-APP.md.
+    if (hasContactSeed) {
+      printOnFailure('Phase 2 dropped (V3 ContactSeed reader + fixed '
+          'entry via BOOTSTRAP_CONTACT_SEED, S389) — the variable is '
+          'no longer read');
     }
 
-    // Diagnose immer ausgeben — ein spaeterer Fehlschlag soll sagen WARUM,
-    // nicht nur "Expected: true, Actual: false".
-    printOnFailure('2.5 Peer-Zaehler nach 60s: '
-        'reachable=$reachable confirmed=$confirmed '
-        'routingTable=$routingTablePeers');
-
-    if (reachable == 0 && routingTablePeers > 0) {
-      // Der Seed wurde eingetragen, aber nichts hat je geantwortet. Genau
-      // dieses Muster zeigten die Laeufe vom 07.07. und 11.07. Geprueft und
-      // als Ursache ausgeschlossen: der Seed ist aktuell (Repo-Variable traegt
-      // die aktive WAN-IP) und der Bootstrap ist oeffentlich erreichbar (sein
-      // Journal zeigt laufend Verkehr mit externen Mobilfunk-/Provider-IPs).
-      // Bleibt als Verdacht der Rueckweg zum Runner: GitHub-Runner haengen
-      // hinter Azure-NAT ohne Port-Mapping ("[nat] External IP known
-      // (no port mapping): 13.105.220.3").
-      fail('2.5 Kein bestaetigter Peer nach 60s, obwohl $routingTablePeers '
-          'Seed-Peer(s) in der Routing-Tabelle stehen — es kam keine einzige '
-          'Antwort zurueck. Der Seed ist aktuell und der Bootstrap ist '
-          'oeffentlich erreichbar; zu pruefen ist der Rueckweg zum Runner '
-          '(Azure-NAT/UDP-Egress). Im Log gegenpruefen: "cascade exhausted", '
-          '"0 confirmed peers after 30s", "D4 self-verify MISS".');
+    // ── Phase 3: Cross-Node CR + Messaging — REMOVED ──────────────
+    //
+    // Phase 3 sent one contact request each via `sendContactRequest` to
+    // the ContactSeeds from ALICE_/ALLYCAT_CONTACT_SEED and waited for the
+    // acceptance by an IPC guard. Both are the V3 first contact that
+    // V4.2 no longer has (S388-BAU-KONTAKT): a request only arises when
+    // redeeming an invitation card (§15.5). A replacement via the card
+    // needs a card export of the remote side in CI — open, in the report.
+    if (hasPhase3) {
+      printOnFailure('Phase 3 dropped (V3 first contact, S388-BAU-KONTAKT) — '
+          'ALICE/ALLYCAT_CONTACT_SEED are no longer read');
     }
-
-    expect(reachable, greaterThan(0),
-        reason: '2.5 Bestaetigter Peer nach ContactSeed-Import (60s Timeout) — '
-            'reachable=$reachable confirmed=$confirmed '
-            'routingTable=$routingTablePeers');
-
-    // ── Phase 3: Cross-Node CR + Messaging ──────────────────────────
-    if (!hasPhase3) {
-      printOnFailure('Phase 3 skipped: ALICE/ALLYCAT_CONTACT_SEED not set');
-      return;
-    }
-
-    // 3.1 Parse Alice's and AllyCat's ContactSeeds
-    final aliceSeed = ContactSeed.fromUri(aliceSeedUri);
-    final allyCatSeed = ContactSeed.fromUri(allyCatSeedUri);
-    expect(aliceSeed, isNotNull, reason: '3.1 Alice ContactSeed parsed');
-    expect(allyCatSeed, isNotNull, reason: '3.1 AllyCat ContactSeed parsed');
-
-    // Helper: import seed + send CR
-    Future<void> importAndSendCR(ContactSeed cs) async {
-      final sp = cs.seedPeers
-          .map((p) => (nodeIdHex: p.nodeIdHex, addresses: p.addresses))
-          .toList();
-      service.addPeersFromContactSeed(
-        cs.nodeIdHex,
-        cs.ownAddresses,
-        sp,
-        targetDeviceIdHex: cs.deviceIdHex,
-        targetDxkB64: cs.deviceX25519Pk != null
-            ? base64.encode(cs.deviceX25519Pk!)
-            : null,
-        targetDmkB64: cs.deviceMlKemPk != null
-            ? base64.encode(cs.deviceMlKemPk!)
-            : null,
-      );
-      await service.sendContactRequest(
-        cs.nodeIdHex,
-        seedDeviceIdHex: cs.deviceIdHex,
-        seedDxkB64: cs.deviceX25519Pk != null
-            ? base64.encode(cs.deviceX25519Pk!)
-            : null,
-        seedDmkB64: cs.deviceMlKemPk != null
-            ? base64.encode(cs.deviceMlKemPk!)
-            : null,
-      );
-    }
-
-    // 3.2 Send CRs to Alice and AllyCat
-    await importAndSendCR(aliceSeed!);
-    await tester.pump(const Duration(seconds: 2));
-    await importAndSendCR(allyCatSeed!);
-    await tester.pump(const Duration(seconds: 2));
-
-    // 3.3 Wait for both contacts to be accepted (120s timeout)
-    var aliceAccepted = false;
-    var allyCatAccepted = false;
-    for (var i = 0; i < 24; i++) {
-      await tester.pump(const Duration(seconds: 5));
-      for (final c in service.acceptedContacts) {
-        if (c.nodeIdHex == aliceSeed.nodeIdHex) aliceAccepted = true;
-        if (c.nodeIdHex == allyCatSeed.nodeIdHex) allyCatAccepted = true;
-      }
-      if (aliceAccepted && allyCatAccepted) break;
-    }
-
-    expect(aliceAccepted, isTrue,
-        reason: '3.3 Alice accepted CR within 120s');
-    expect(allyCatAccepted, isTrue,
-        reason: '3.3 AllyCat accepted CR within 120s');
-
-    // 3.4 Send test messages to Alice and AllyCat
-    final aliceMsg = await service.sendTextMessage(
-        aliceSeed.nodeIdHex, 'CI-PING-Alice');
-    expect(aliceMsg, isNotNull, reason: '3.4 Message to Alice queued');
-
-    await tester.pump(const Duration(seconds: 1));
-
-    final allyCatMsg = await service.sendTextMessage(
-        allyCatSeed.nodeIdHex, 'CI-PING-AllyCat');
-    expect(allyCatMsg, isNotNull, reason: '3.4 Message to AllyCat queued');
-
-    // 3.5 Wait for CI-ACK messages from the IPC watcher (120s timeout)
-    var aliceAck = false;
-    var allyCatAck = false;
-    for (var i = 0; i < 24; i++) {
-      await tester.pump(const Duration(seconds: 5));
-
-      final aliceConv = service.conversations[aliceSeed.nodeIdHex];
-      if (aliceConv != null) {
-        for (final msg in aliceConv.messages) {
-          if (msg.text.startsWith('CI-ACK-')) {
-            aliceAck = true;
-            break;
-          }
-        }
-      }
-
-      final allyCatConv = service.conversations[allyCatSeed.nodeIdHex];
-      if (allyCatConv != null) {
-        for (final msg in allyCatConv.messages) {
-          if (msg.text.startsWith('CI-ACK-')) {
-            allyCatAck = true;
-            break;
-          }
-        }
-      }
-
-      if (aliceAck && allyCatAck) break;
-    }
-
-    expect(aliceAck, isTrue,
-        reason: '3.5 Received CI-ACK from Alice within 120s');
-    expect(allyCatAck, isTrue,
-        reason: '3.5 Received CI-ACK from AllyCat within 120s');
   });
 }

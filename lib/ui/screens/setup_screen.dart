@@ -6,7 +6,10 @@ import 'package:printing/printing.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
+import 'package:cleona/core/platform/app_paths.dart';
+import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/components/language_selector.dart';
@@ -205,9 +208,50 @@ class _SetupScreenState extends State<SetupScreen> {
                       color: Theme.of(ctx).colorScheme.errorContainer.withValues(alpha: 0.3),
                       borderRadius: BorderRadius.circular(8),
                     ),
-                    child: Text(
-                      locale.get('seed_phrase_backup_warning'),
-                      style: const TextStyle(fontSize: 13),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          locale.get('seed_phrase_backup_warning'),
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 8),
+                        // v4_1 §13.8: "this limit must be communicated to
+                        // the user actively and unambiguously during
+                        // onboarding and at the seed display." Until S361
+                        // this place only said "only backup" — the
+                        // LIMIT (phrase plus all devices gone = no
+                        // recovery, and no circle of contacts
+                        // helps) stood nowhere. Second mandatory place:
+                        // the same line in the settings dialog
+                        // (`settings_screen.dart`, `_SeedPhraseDialog`).
+                        Text(
+                          locale.get('social_recovery_gone_body'),
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600),
+                        ),
+                        // S363, measurement question 2: THE AVAILABILITY PRICE
+                        // BELONGS BEFORE THE DECISION — and the
+                        // decision is made HERE, at this one
+                        // button ("I have written them down"). The
+                        // lock from point 1 makes the copy in the device
+                        // fragile: a removed or changed
+                        // screen lock destroys the auth-bound
+                        // key and with it the 24 words. Until now this
+                        // was only said afterwards
+                        // (`seed_phrase_gate_invalidated`), i.e. exactly when
+                        // there is nothing left to decide. Only on
+                        // a build WITH the lock; on the desktop
+                        // the sentence would be wrong.
+                        if (IdentityManager().hasDeviceGate) ...[
+                          const SizedBox(height: 8),
+                          Text(
+                            locale.get('seed_phrase_device_copy_note'),
+                            style: const TextStyle(fontSize: 13),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -529,10 +573,59 @@ class _RestoreScreenState extends State<_RestoreScreen> {
     });
 
     try {
+      // ── §13.5.2 "WIPE BEFORE RECOVERY" — THE SECOND CALL SITE ────
+      //
+      // v4_1 §13.5.2: "Before the seed is entered, any existing profile
+      // data is deleted completely (first-start deletion rule, §21)."
+      //
+      // **The same building block, a different call.** The first-start path in
+      // `IdentityContext.initCrypto` decides by itself and checks the
+      // V4.1 markers for that; here the USER decides, and therefore
+      // nothing is checked — [FirstStartWipe.wipeBeforeRecovery] deletes
+      // unconditionally. Merging the two into one function is
+      // the way in which a user action turns into a silent
+      // start process (S363 proposal section 10).
+      //
+      // **The timing, exactly.** §13.5.2 says "before the seed is
+      // entered". Here the call stands after the CHECK of the 24 words
+      // and before their first PERSISTING: `restoreFromPhrase` is the
+      // first line that writes the seed to disk
+      // (`identity_manager.dart` `_storeMasterSeed`/`_storeSeedPhrase`).
+      // Between input and wipe no profile data is read and
+      // none written; deleting earlier would mean sacrificing a profile for
+      // an input that turns out to be invalid.
+      //
+      // **The keyring belongs to it (RB-4, S370).** "deleted
+      // completely" does not mean "the files". On Android, iOS and macOS
+      // the UI initialised the keyring itself
+      // (`main.dart:163-171`) and passes it in. On Linux and Windows
+      // the DAEMON owns it, the UI there deliberately runs without
+      // `initCrypto` — `isInitialized` is then `false`, and the old
+      // entry falls instead because `restoreFromPhrase`
+      // right below stores the NEW seed and the next
+      // daemon start pulls it into the keyring via `KeyMigration.migrateIfNeeded`
+      // (the marker `.keyring_migrated` fell with the wipe).
+      FirstStartWipe.wipeBeforeRecovery(AppPaths.dataDir,
+          keyring: KeyringService.isInitialized
+              ? KeyringService.instance
+              : null);
+
       final identityMgr = IdentityManager();
       identityMgr.restoreFromPhrase(words);
+      // §13 (S382): THE ONE PLACE at which an identity arises from the
+      // 24-word phrase. Only from here may `restoredFromPhrase`
+      // come — it is the answer to "freshly created or
+      // restored", and this question can later no longer be reconstructed
+      // from any state (a fresh and a
+      // restored identity look alike afterwards: seed there,
+      // no contacts). Exactly that is where the old probe failed.
+      //
+      // `_isAdditionalDevice` stays the SECOND, independent question:
+      // is there still a device under this phrase? Yes -> the data
+      // comes from there (§14.4). No -> recovery case.
       await identityMgr.createIdentity(name,
-          restoreAwaitingPairing: _isAdditionalDevice!);
+          restoreAwaitingPairing: _isAdditionalDevice!,
+          restoredFromPhrase: true);
 
       setState(() => _restoreStarted = true);
 

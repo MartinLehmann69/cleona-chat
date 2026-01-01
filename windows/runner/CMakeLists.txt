@@ -73,6 +73,27 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Copying cleona_pow.dll into Windows bundle"
 )
 
+# === cleona_link shim (cleona_link.dll) ===
+# V4 Elligator2 link-handshake shim — docs/MIGRATION_V3_TO_V4.md §4d, V4-Doc
+# §20.4.1. Monocypher 4.0.3 is vendored inside native/cleona_link/vendor/, so
+# unlike cleona_pow this subdirectory resolves no external package. Built from
+# native/cleona_link/ and copied next to cleona.exe — same OUTPUT pattern as
+# cleona_net/cleona_pow ($<TARGET_FILE:...>), deliberately NOT in NATIVE_DLLS
+# below: that list is for build INPUTS with a provenance script, and preflight
+# Check 14 fails if an add_subdirectory output is listed there.
+# CLEONA_LINK_BUILD_SMOKE=OFF: keeps the step-0 smoke executables and the
+# deliberately broken cleona_link_saboteur library out of the production build
+# tree (they are the standalone-build gate, native/cleona_link/CMakeLists.txt).
+set(CLEONA_LINK_BUILD_SMOKE OFF CACHE BOOL "" FORCE)
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_link" "${CMAKE_BINARY_DIR}/cleona_link_build")
+add_dependencies(${BINARY_NAME} cleona_link)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_link>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_link.dll into Windows bundle"
+)
+
 # === cleona_voice backend (cleona_voice.dll) ===
 # WASAPI voice session — Cleona_Chat_Architecture_v3_0.md §10.4, work package
 # docs/SPEC_VOICE_VIDEO_REWORK.md V1.4. Built from
@@ -83,7 +104,7 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
 # native/cleona_voice/CMakeLists.txt's own platform loop already
 # add_subdirectory()s native/cleona_voice/windows when it exists, so this
 # add_subdirectory line is what pulls native/cleona_voice/** as a whole into
-# the Flutter Windows build for the first time (BUILD_REQUEST_V1.4.md §1).
+# the Flutter Windows build for the first time (BUGFIX_CURRENT.md AV-V1.4 §1).
 # CMake target name is cleona_voice_windows (not cleona_voice — collision
 # avoidance, native/cleona_voice/windows/CMakeLists.txt), OUTPUT_NAME/PREFIX
 # make the produced file cleona_voice.dll regardless.
@@ -238,17 +259,25 @@ foreach(DLL ${NATIVE_DLLS})
   )
 endforeach()
 
-# Post-build completeness check over the finished bundle. The three above are
-# inputs and already verified at configure time, but their POST_BUILD copy can
-# still fail; cleona_net and cleona_pow are build OUTPUTS whose
-# copy can fail for a second reason (target dropped from the MSBuild solution
-# filter, destination locked by a running cleona.exe). Inspecting the directory
-# is the only place that catches both classes. Comma-separated on purpose: a
-# semicolon would be split while CMake assembles the argument list.
+# Post-build check over the finished bundle, in both directions (S338):
+# completeness AND no foreign cleona_*.dll. The four above are inputs and
+# already verified at configure time, but their POST_BUILD copy can still
+# fail; cleona_net/cleona_pow/cleona_link/cleona_voice/cleona_video are build
+# OUTPUTS whose copy can fail for a second reason (target dropped from the
+# MSBuild solution filter, destination locked by a running cleona.exe). And a
+# stale DLL of a REMOVED native module survives in the Release directory
+# forever — it is never cleared between builds; that is how cleona_audio.dll
+# outlived the §10.4 audio rework by 18 days on the build VM. Inspecting the
+# directory is the only place that catches all three classes. EXPECTED_DLLS
+# is the authoritative allowed-set; preflight Check 14b keeps it bound to the
+# tracked native/*/CMakeLists.txt in both directions, and release-build.sh
+# derives WIN_BUNDLE_DLLS from this literal — keep the -DEXPECTED_DLLS=
+# format greppable. Comma-separated on purpose: a semicolon would be split
+# while CMake assembles the argument list.
 add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
-          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_voice.dll,cleona_video.dll
+          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_link.dll,cleona_voice.dll,cleona_video.dll
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

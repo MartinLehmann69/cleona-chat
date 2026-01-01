@@ -357,7 +357,12 @@ class Skins {
   /// Look up a skin by id. Returns teal if not found.
   static Skin byId(String? id) {
     if (id == null) return teal;
-    if (id == 'crimson') return fire;
+    // S368: here stood `if (id == 'crimson') return fire;` — the
+    // renaming of an appearance, read from a profile that was
+    // written before the renaming. An unknown value falls
+    // like any other to `teal` (the line below), and that is right:
+    // an unknown identifier is an unknown identifier, not legacy data
+    // with a known meaning.
     for (final s in all) {
       if (s.id == id) return s;
     }

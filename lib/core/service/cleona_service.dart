@@ -1,3 +1,33 @@
+import 'package:cleona/core/service/twin_sync_wire.dart';
+import 'package:cleona/core/bulk/bulk_block_seal.dart'
+    show kSealedBulkBlockBytes;
+import 'package:cleona/core/bulk/bulk_control.dart';
+import 'package:cleona/core/bulk/bulk_sender.dart' show plannedBlocksFor;
+import 'package:cleona/core/bulk/bulk_keys.dart'
+    show bulkContentHash, bytesEqualConstantTime;
+import 'package:cleona/core/bulk/bulk_lane.dart';
+import 'package:cleona/core/bulk/bulk_params.dart' show kFountainWorthwhileBytes;
+import 'package:cleona/core/service/media_bulk_lane.dart';
+import 'package:cleona/core/service/media_bulk_transport.dart';
+import 'package:cleona/core/service/v41_routing.dart';
+import 'package:cleona/core/service/v41_outbox.dart';
+import 'package:cleona/core/bulk/responsibility.dart' show kResponsibleRelays;
+import 'package:cleona/core/sync/cover_stream.dart'
+    show CoverSaver, CoverSaverOutcome;
+import 'package:cleona/core/tagline/entry_sources.dart' show personEntryHints;
+import 'package:cleona/core/tagline/pair_registry.dart';
+import 'package:cleona/core/tagline/message_seal.dart';
+import 'package:cleona/core/tagline/device_line.dart';
+import 'package:cleona/core/tagline/own_line.dart';
+import 'package:cleona/core/tagline/delivery_api.dart';
+import 'package:cleona/core/tagline/delivery_state.dart';
+import 'package:cleona/core/sync/delivery_params.dart' show kDeliveryFamilies;
+import 'package:cleona/core/tagline/v41_host.dart';
+import 'package:cleona/core/tagline/frame_split.dart';
+import 'package:cleona/core/tagline/invite_line.dart';
+import 'package:cleona/core/link_io/port_mapper.dart' show PortMapper;
+import 'package:cleona/core/util/local_addresses.dart'
+    show dialableLocalAddresses;
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
@@ -9,62 +39,72 @@ import 'package:meta/meta.dart';
 import 'package:path/path.dart' as p;
 import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/crypto/plaintext_sweep.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/per_message_kem.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/recovery/legacy_guardian_state.dart';
+import 'package:cleona/core/recovery/recovery_bundle_content.dart';
+import 'package:cleona/core/tagline/recovery_line.dart';
+import 'package:cleona/core/recovery/recovery_keys.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
-import 'package:cleona/core/dht/channel_index.dart';
-import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
-import 'package:cleona/core/dht/mailbox_store.dart';
+import 'package:cleona/core/storage/channel_index.dart';
+import 'package:cleona/core/storage/mailbox_store.dart';
+import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/media/media_store.dart';
+import 'package:cleona/core/media/media_sweep.dart';
+import 'package:cleona/core/media/media_vault.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
-import 'package:cleona/core/identity_resolution/auth_manifest.dart';
-import 'package:cleona/core/identity_resolution/device_delegation.dart';
-import 'package:cleona/core/identity_resolution/rotation_co_auth.dart';
-import 'package:cleona/core/identity_resolution/linked_device_keys.dart';
-import 'package:cleona/core/identity_resolution/linked_device_keys_store.dart';
-import 'package:cleona/core/identity_resolution/identity_publisher.dart';
-import 'package:cleona/core/identity_resolution/identity_resolver.dart' show ResolvedDevice;
-import 'package:cleona/core/identity_resolution/device_kem_record.dart';
+import 'package:cleona/core/identity/kem_generation.dart';
+import 'package:cleona/core/service/cold_start_rotation_gate.dart';
+import 'package:cleona/core/identity/device_delegation.dart';
+import 'package:cleona/core/identity/rotation_co_auth.dart';
+import 'package:cleona/core/identity/linked_device_keys.dart';
+import 'package:cleona/core/identity/linked_device_keys_store.dart';
 import 'package:cleona/core/service/device_pairing_service.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
-import 'package:cleona/core/network/ack_tracker.dart';
-import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder, ContactSeedDataSource;
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
-import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceMode, MultiInterfaceManager;
-import 'package:cleona/core/network/peer_info.dart';
-import 'package:cleona/core/network/peer_message_store.dart';
-import 'package:cleona/core/network/peer_rescue_bundle.dart';
-import 'package:cleona/core/network/v3_frame_codec.dart';
-import 'package:cleona/core/network/sender_identity_snapshot.dart';
-import 'package:cleona/core/node/cleona_node.dart';
-import 'package:cleona/core/node/identity_context.dart';
-import 'package:cleona/core/erasure/erasure_placement.dart';
-import 'package:cleona/core/erasure/reed_solomon.dart';
+import 'package:cleona/core/contact/contact_seed.dart'
+    show ContactSeedBuilder, ContactSeedDataSource, EntrySeedCandidate;
+import 'package:cleona/core/contact/invite_class.dart';
+import 'package:cleona/core/contact/invite_ledger.dart';
+import 'package:cleona/core/contact/invite_store.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/link/data_port.dart';
+import 'package:cleona/core/calls/call_transport_v41.dart' show CallPlaneD;
+import 'package:cleona/core/service/multi_interface_mode.dart';
+import 'package:cleona/core/util/hex.dart';
+import 'package:cleona/core/rendezvous/peer_rescue_bundle.dart';
+import 'package:cleona/core/service/sender_identity_snapshot.dart';
+import 'package:cleona/core/identity/identity_context.dart';
+import 'package:cleona/core/codec/reed_solomon.dart';
+import 'package:cleona/core/service/app_version.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/channel_moderation_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
-import 'package:cleona/core/network/network_stats.dart';
+import 'package:cleona/core/stats/network_stats.dart';
 import 'package:cleona/core/calls/call_integration.dart';
 import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
+import 'package:cleona/core/calls/voice_session.dart' show VoiceEventRecord;
 import 'package:cleona/core/platform/app_paths.dart';
-import 'package:cleona/core/service/guardian_service.dart';
 import 'package:cleona/core/service/key_rotation_retry_manager.dart';
-import 'package:cleona/core/service/nat_wizard_trigger.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/voice_transcription_service.dart';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_types.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_manager.dart';
+import 'package:cleona/core/archive/archive_network.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
+import 'package:cleona/core/archive/share_identity.dart';
 import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/core/update/binary_fetch_client.dart';
+import 'package:cleona/core/update/binary_fountain.dart';
+import 'package:cleona/core/update/cover_fill_blocks.dart';
 import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/binary_http_server.dart';
 import 'package:cleona/core/update/binary_update_manager.dart';
@@ -76,63 +116,109 @@ import 'package:cleona/core/update/invite_link_service.dart';
 import 'package:cleona/core/update/physical_transfer_helper.dart';
 import 'package:cleona/core/update/install_source.dart';
 import 'package:cleona/core/update/binary_seeder.dart';
-import 'package:cleona/core/network/rendezvous/binary_rendezvous_manager.dart';
+import 'package:cleona/core/update/update_carrier.dart';
+import 'package:cleona/core/rendezvous/binary_rendezvous_manager.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/sync/calendar_sync_service.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/service/calendar_protocol_service.dart';
+import 'package:cleona/core/service/harvest_event.dart';
 import 'package:cleona/core/service/poll_service.dart';
 import 'package:cleona/core/service/call_service.dart';
-import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/services/key_change_policy.dart';
-import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/channels/system_channel_records.dart';
 import 'package:cleona/core/channels/contact_issue_reporter.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
-import 'package:cleona/core/network/rendezvous/first_contact_rendezvous_manager.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
+import 'package:cleona/core/rendezvous/rendezvous_types.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
     show EndpointAddress;
 import 'package:fixnum/fixnum.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
+import 'package:cleona/core/config/network_channel.dart'
+    show activeNetworkChannel, NetworkChannel;
+import 'package:cleona/core/contact/invitation_card_reader.dart';
+import 'package:cleona/core/service/mycelium_seam.dart'
+    show addressFrom, addressHeardTo, userIdFrom, SeamError;
+import 'package:mycelium/invitation.dart' as mycelium
+    show Kind, kLabelAtMostBytes, kAtMostStanding;
+import 'package:mycelium/first_contact.dart' as mycelium
+    show ContactRequest, Introduction, IntroductionError;
+import 'package:mycelium/memory.dart' as mycelium show Contact;
+import 'package:mycelium/card.dart' as mycelium show Card;
+// §7.1: "no route" means NONE of the three addresses — `routesEmpty` is the one
+// place that decides that (S390, finding B-1).
+import 'package:mycelium/card_address.dart' as mycelium show routesEmpty;
+import 'package:mycelium/card_text.dart' as mycelium
+    show CardTextError, asInvitationText;
+// Without prefix: an extension from an `as mycelium show` import is reported by the
+// analyzer as "shown, but isn't used", and without the import the getter is missing.
+import 'package:mycelium/node_invitation.dart' show InvitationBuffer;
+import 'package:mycelium/node_helpers.dart' as mycelium show hexFrom;
+import 'package:mycelium/message.dart' as mycelium show Outbound, Inbound, DeliveryState;
+import 'package:mycelium/mailbox.dart' as mycelium
+    show Mailbox, MailboxError, identifierFrom, contactPlaceholderName;
+import 'package:mycelium/mailbox_outbound.dart' as mycelium show MailboxOutbound;
+import 'package:mycelium/mailbox_inbound.dart' as mycelium show MailboxInbound;
+import 'package:mycelium/mailbox_invitation.dart' as mycelium show MailboxInvitation;
+import 'package:mycelium/envelope.dart' as mycelium show Address;
+// Without prefix, for the same reason as `node_invitation.dart` above.
+import 'package:mycelium/host_contact_seats.dart' show HostContactSeats;
 
 // Re-export types so existing imports still work
 export 'package:cleona/core/service/service_types.dart';
 
-/// Outcome of [CleonaService.handleIncomingApplicationPacket]. Drives the
-/// multi-identity dispatch loop in `service_daemon.onApplicationFramePayload`
-/// (§2.4 step [9] try-loop, §3.1 daemon-global deviceID).
-enum AppFrameDispatchOutcome {
-  /// KEM-decap + sig-verify + handle all succeeded — no retry needed.
-  delivered,
+// The ten `cleona_service_v3_*.dart` parts fell with the CUT
+// (31.08.2026, 4 022 lines). What of it was NOT V3 stands in
+// `cleona_service_pure.dart` — the cut was file-granular, and that is
+// justified there.
+part 'cleona_service_pure.dart';
+part 'cleona_service_receive.dart';
+part 'cleona_service_recovery.dart';
+part 'cleona_service_restore.dart';
+part 'cleona_service_update.dart';
+part 'cleona_service_contact_request.dart';
+part 'cleona_service_media.dart';
+part 'cleona_service_identity.dart';
+part 'cleona_service_state.dart';
+part 'cleona_service_msgstate.dart';
+part 'cleona_service_identity_deletion.dart';
+part 'cleona_service_lockout.dart';
+part 'cleona_service_deviceset.dart';
+part 'cleona_service_rotation_window.dart';
+part 'cleona_service_recovery_bundle.dart';
+part 'cleona_service_mycelium.dart';
 
-  /// KEM-decap with this identity's User-KEM-SK failed. The frame may be
-  /// addressed to another hosted identity on this daemon — caller MUST try
-  /// the remaining services.
-  notForThisIdentity,
+// `AppFrameDispatchOutcome` STOOD HERE — REMOVED ON 2026-09-03.
+//
+// The enum was the return value of
+// `CleonaService.handleIncomingApplicationPacket` and controlled the
+// multi-identity loop in `service_daemon.onApplicationFramePayload`
+// (§2.4 step 9). BOTH ends fell with the CUT of 2026-08-31:
+// the V3 receive entry point (justification in `cleona_service_receive.dart`,
+// header of the extension `V3ReceivePathOps`) and the callback of the deleted
+// `CleonaNode`. What remained was a type without producer and without consumer.
+//
+// SEARCH SET (2026-09-03, across `lib/ test/ scripts/ proto/ android/ ios/
+// macos/ windows/ linux/`): `AppFrameDispatchOutcome` as a word — 1 hit,
+// the declaration itself. Each of the three values individually as a word —
+// 1 hit each, likewise only the declaration. As a string in
+// quotation marks — 0. In `snake_case` — 0. In `proto/` — 0. As
+// `export ... show` — 0. An unqualified value in a `switch` is
+// ruled out, because the TYPE would have to be named for that.
+//
+// NO BLOCKER: the enum prevented nothing. The V4.1 receive side
+// (`V41Host.accept` -> `MessageSealer.open` -> `acceptV41Frame` ->
+// `handleApplicationFrame`) has no counterpart and needs none — it
+// has no multi-identity loop, because the cell already arrives
+// pair-bound.
 
-  /// KEM-decap succeeded (frame WAS for this identity) but a later step
-  /// failed (sig invalid, sender pubkey miss, recipientUserId mismatch,
-  /// parse error). No retry — drop is final.
-  droppedAfterDecap,
-}
-
-/// MessageTypes eligible for the live-media receive fast path (Architecture
-/// §10.3 / Appendix B.2, F-C amendment) — the strict allow-list a plaintext
-/// ApplicationFrameV3 inner must fall into before
-/// [CleonaService._tryLiveMediaFastPath] will dispatch it. Everything else
-/// MUST go through the normal per-recipient-KEM + user-sig inner path.
-const Set<proto.MessageTypeV3> _liveMediaFastPathTypes = {
-  proto.MessageTypeV3.MTV3_CALL_AUDIO,
-  proto.MessageTypeV3.MTV3_CALL_VIDEO,
-  proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO,
-  proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO,
-  // MTV3_CALL_MEDIA_STATE (87) is deliberately absent: it is signaling, not
-  // media. It has no frame deadline, it must arrive, and it carries the
-  // ordinary end-to-end authenticity. See proto/cleona.proto, §10.6 / V1.12.
-};
+// `_liveMediaFastPathTypes` stood here — the allow list of the
+// live media fast path. It fell with its only reader
+// (`_tryLiveMediaFastPath`); justification in
+// `cleona_service_receive.dart` (gap G-13, plane D).
 
 /// Why a peer is not sending video right now (§10.6, Spec-Erratum E2).
 ///
@@ -151,7 +237,7 @@ enum CallVideoOffReason {
   /// folded into [userDisabled]: claiming the peer chose this, when the wire
   /// said something we could not read, would state intent as fact. Forward
   /// compatibility depends on this staying distinct — see the extension rule
-  /// in `proto/cleona.proto`.
+  /// in `proto/app_payloads.proto::VideoOffReason`.
   unspecified,
 
   /// The peer switched their own video off. A deliberate act, not a fault.
@@ -227,21 +313,208 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   final IdentityContext identity;
 
-  /// The shared network node (transport, routing, DHT).
-  @override
-  final CleonaNode node;
+  // ── `node` IS GONE (CUT, 31.08.2026) ────────────────────────────────
+  //
+  // Here stood `final CleonaNode node` — transport, routing table, DHT,
+  // NAT, AckTracker, statistics collector in one field. `lib/core/node/` is
+  // deleted; a replacement field does NOT exist and is not supposed to.
+  //
+  // What the service needs from the network it gets via the V4.1 handles it
+  // already holds anyway: [v41Host] (sending, pair keys) and
+  // [v41Delivery] (delivery state, readiness, partners). Both are set by
+  // `attachV41`. Whoever introduces a new network field here builds the
+  // seam a second time — exactly the duplication that `NodeHost`
+  // was supposed to eliminate.
 
-  /// True ab [stop] — dieser Service ist abgeraeumt (z.B. weil die Identitaet
-  /// per `removeIdentity` entfernt wurde).
+  /// The statistics collector of this service.
   ///
-  /// Die Callbacks, die dieser Service am geteilten [node] registriert, sind
-  /// Chain-Closures (`final prev = node.onXxx; node.onXxx = (...) { prev?.call(...); ... }`).
-  /// Sie lassen sich nicht einzeln abhaengen, ohne die Kette der noch
-  /// lebenden Services zu zerreissen, und halten diese Instanz deshalb am
-  /// Leben. Jede dieser Closures ruft daher weiterhin `prev?.call(...)` —
-  /// die Kette bleibt intakt — und bricht danach bei `_disposed` ab, damit
-  /// eine entfernte Identitaet keine Arbeit mehr ausloest (Pushes, Retries,
-  /// `_saveContacts()` in ihr Profilverzeichnis).
+  /// FORMERLY `node.statsCollector` — ONE per node, shared by all
+  /// hosted identities. With the node the shared holder is
+  /// gone; the collector itself (`lib/core/stats/`) lives on
+  /// unchanged. It now sits at the service, i.e. per identity.
+  ///
+  /// WHAT THIS CHANGES, so that nobody takes it for an oversight: the
+  /// MESSAGE counters thereby become more precise (they were always
+  /// identity-related and were only booked jointly). The
+  /// WIRE BYTES on the other hand are node-wide and no longer have a feeder —
+  /// `NodeHost.wireBytesSent/Received` passed them on to `attachV41`,
+  /// and `NodeHost` no longer holds a node.
+  /// **Gap G-10 — CLOSED on 01.09.2026 (S360).** The sentence above
+  /// described the state until then and remains as a correction.
+  /// It is now wired via [v41NodeCounters], which `attachV41`
+  /// sets; reading happens on looking, not booked via callback
+  /// (justification at `NetworkStatsCollector.noteNodeCounters`).
+  final NetworkStatsCollector statsCollector = NetworkStatsCollector();
+
+  /// The counters of the V4.1 NODE, on demand (§25.5).
+  ///
+  /// Set by `attachV41` — the only place where node and service
+  /// are present at the same time. `null` as long as no node hangs; then
+  /// the four numbers stay at their last state instead of jumping to 0.
+  ///
+  /// ONE READ POINT, NO FIELD SET. Four `int` fields would be frozen after the
+  /// first look — exactly the error that the comment at
+  /// `V41Node.wireBytesSent` describes: a display that looks like
+  /// a measurement and is none.
+  ({int wireSent, int wireReceived, int relayBytes, int relayCells})
+      Function()? v41NodeCounters;
+
+  /// What is to be done at the V4.1 NODE on a network change (§22.6).
+  ///
+  /// Set by `attachV41`, for the same reason as [v41NodeCounters]:
+  /// the node belongs to the process, this service to an identity, and
+  /// `attachV41` is the only place where both are present. The body
+  /// stands there because it needs the address determiner with which the node
+  /// was started — the delivery layer knows no network interfaces
+  /// and is not supposed to know any.
+  ///
+  /// `null` if no node hangs (`CLEONA_V41=0`). Then on a
+  /// network change the same happens as before: nothing.
+  Future<void> Function()? v41OnNetworkChanged;
+
+  /// The app has returned to the foreground — edge for the
+  /// catch-up harvest of the V4.1 delivery layer (variant C, S362).
+  ///
+  /// SEPARATE from [v41OnNetworkChanged], because the two edges
+  /// do different things: the network change throws sessions away and
+  /// re-announces (that would be wrong here — the network is the same), the
+  /// foreground return only catches up. Common to them is only the
+  /// trigger type.
+  void Function()? v41OnForeground;
+
+  /// Enters the OWN line (§14.7, `own_line.dart`) into the
+  /// pair registry of the node — the twin reconciliation.
+  ///
+  /// Set by `attachV41`, for the same reason as
+  /// [v41NodeCounters]: the registry belongs to the NODE, the
+  /// user KEM secrets to the IDENTITY, and `attachV41` is the
+  /// only place where both are present.
+  ///
+  /// WHY NOT VIA `V41Delivery.rememberPeer`: the own line
+  /// needs an INCOMING DIRECTION that equals the outgoing direction
+  /// (justification in the header of `own_line.dart`), and the interface
+  /// only knows the outgoing direction. Extending it for this would have broken nine
+  /// mocks in `test/`, without any of them handling the own
+  /// line.
+  ///
+  /// CALLED FROM [primeV41Pairs], not only on attaching: `K_own`
+  /// falls out of the user KEM secrets, and they rotate on
+  /// locking out a device (§14.4). After a rotation the line must
+  /// be re-entered under the NEW key — otherwise the
+  /// remaining twins continue to harvest under the old tag, i.e. where
+  /// nobody stores any more. The call is idempotent and cheap.
+  void Function()? v41ArmOwnLine;
+
+  /// How deep the control queue of the cover stream currently is (§5.1).
+  ///
+  /// Set by `attachV41`, for the same reason as [v41NodeCounters]:
+  /// the queue belongs to the NODE, the outbox to the IDENTITY, and
+  /// `attachV41` is the only place where both are present.
+  ///
+  /// THE DRAIN OF THE OUTBOX DEPENDS ON IT, and not cosmetically. A
+  /// secure resubmission enqueues `m x R` = 60 frames at once
+  /// (§9.2), the queue holds `kMaxControlBacklog` = 120, and on
+  /// overflow `CoverStream` discards the OLDEST whole group. A
+  /// drain that enqueues three messages at once would thus put 180
+  /// frames into a queue of 120 and possibly wipe out a
+  /// message that was just regularly in transit — it would create
+  /// a defect instead of fixing one.
+  ///
+  /// `null` means "no node": then nothing drains, because without a node
+  /// nothing goes out anyway.
+  int Function()? v41PendingControl;
+
+  /// The cap of the control queue, likewise from the node
+  /// (`kMaxControlBacklog`). As a function and not as a constant, because
+  /// `core/service/` would otherwise have to import the constant from `core/sync/`
+  /// — the same layering rule that `cover_stream.dart` draws for
+  /// itself ("pulling the constants from there in here
+  /// would reverse the layering").
+  int Function()? v41ControlBacklogLimit;
+
+  /// The snapshots of the V4.1 node, on demand (§25.4).
+  ///
+  /// HERE STOOD UNTIL S361 "gap G-2" — a wrong number. G-2 is the
+  /// distribution of the system channels; the metrics of the display are
+  /// G-10, and G-10 has been closed since S360 (see [statsCollector]).
+  ///
+  /// SEPARATE FROM [v41NodeCounters], because the two sets are
+  /// READ differently: there it is booked (difference, two periods), here
+  /// it is passed through. A difference on "waiting for pieces" or
+  /// "control queue" would be no quantity — the state falls
+  /// again too.
+  ///
+  /// Set by `attachV41`. `null` as long as no node hangs; then
+  /// the last state stays in the collector instead of jumping to 0 —
+  /// a jump to 0 would look like "the cover stream has stopped", but would only be
+  /// "nobody is looking right now".
+  V41NodeGauges Function()? v41NodeGauges;
+
+  /// The entry store of the node as start peer candidates (§11) — the
+  /// SEND side of the entry bridge, gap G-11.
+  ///
+  /// Set by `attachV41`, for the same reason as [v41NodeCounters]:
+  /// the STORE belongs to the node (`V41Node.entries`, one instance per
+  /// process), the ContactSeed to an IDENTITY, and `attachV41` is the
+  /// only place where both are present.
+  ///
+  /// WHY A CALLBACK AND NO IMPORT EDGE. `core/contact/` lies
+  /// below the delivery layer and is also used by the IPC client, which
+  /// has no node at all. If `contact_seed.dart` pulled in
+  /// `core/tagline/entry_record.dart`, that would reverse the
+  /// layering — the same boundary that `smoke_link_io_milestone`
+  /// (section 5) guards. The store therefore travels in as a flat record
+  /// ([EntrySeedCandidate]) via [ContactSeedDataSource].
+  ///
+  /// THE SELECTION LIES AT THE SOURCE, not with the builder: which address
+  /// is dialable from outside is known by `isExternallyReachable`
+  /// (`core/tagline/local_addresses.dart`), and there also stands the
+  /// justification why `IpAddressClass.isPrivate` is not enough for that.
+  ///
+  /// `null` as long as no node hangs — then the ContactSeed carries no
+  /// `s=`, and that is the right answer: invented start peers
+  /// would wander into foreign codes and send third parties into the void.
+  List<EntrySeedCandidate> Function()? v41EntrySeedCandidates;
+
+  /// §19.6.5: does this node hold binary data worth announcing?
+  ///
+  /// FORMERLY `node.binaryHasContentToShare` — node-wide, because the
+  /// fragment store is. But it lies in the PROFILE DIRECTORY and thus
+  /// per identity; the flag was already in the wrong place before. Now
+  /// it stands where the store stands.
+  bool binaryHasContentToShare = false;
+
+  /// True from [stop] — this service is cleared away (e.g. because the identity
+  /// was removed via `removeIdentity`).
+  ///
+  /// SINCE THE CUT IT HAS NO READER ANY MORE, and that is not an oversight: the
+  /// chain closures it was built for all hung on the shared
+  /// `CleonaNode` (`onFirstCrStoreAck`, `onDiscoveryComplete`,
+  /// `ackTracker.onAckReceived`, the four delivery callbacks) and fell with
+  /// it. It remains because the pattern comes back as soon as
+  /// the V4.1 delivery layer in turn needs cross-identity
+  /// callbacks — and because a guard added later without a
+  /// set flag would be silently wrong.
+  ///
+  /// The callbacks this service registers on the shared [node] are
+  /// chain closures (`final prev = node.onXxx; node.onXxx = (...) { prev?.call(...); ... }`).
+  /// They cannot be unhooked individually without tearing the chain of the still
+  /// living services, and therefore keep this instance
+  /// alive. Each of these closures therefore still calls `prev?.call(...)` —
+  /// the chain stays intact — and then aborts at `_disposed`, so that
+  /// a removed identity no longer triggers work (pushes, retries,
+  /// `_saveContacts()` into its profile directory).
+  ///
+  /// SINCE THE CUT IT HAS NO READER ANY MORE, and that is not an oversight: the
+  /// chain closures it was built for ALL hung on the shared
+  /// `CleonaNode` (`onFirstCrStoreAck`, `onDiscoveryComplete`,
+  /// `ackTracker.onAckReceived`, the four delivery callbacks) and fell with
+  /// it. It nonetheless remains and continues to be set:
+  /// as soon as the V4.1 delivery layer in turn needs cross-identity
+  /// callbacks, the pattern comes back — and a guard added later
+  /// on a flag that nobody sets any more would be
+  /// silently wrong.
+  // ignore: unused_field
   bool _disposed = false;
 
   late MailboxStore mailboxStore;
@@ -253,12 +526,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   bool _callsReady = false;
   CallManager get callManager => _calls.callManager;
   GroupCallManager get groupCallManager => _calls.groupCallManager;
-  // §2.2.4: per-identity Auth+Liveness Publisher. Eine pro CleonaService-Instanz
-  // (Multi-Identity-Daemon hat N Services, sharing one CleonaNode).
-  IdentityPublisher? _identityPublisher;
-  /// Registered listener on the shared RoutingTable; wakes our publisher's
-  /// parked cold-start retry as soon as a new peer joins.
-  void Function(PeerInfo)? _publisherPeerAddedListener;
+  // §2.2.4: per-identity Auth+Liveness Publisher. One per CleonaService instance
+  // (a multi-identity daemon has N services; shared since the CUT of
+  // 2026-08-31 is the ONE V4.1 node, no longer a `CleonaNode`).
+  // ── `_identityPublisher` IS GONE — AND IT CARRIED TWO THINGS ────────────
+  //
+  // `lib/core/identity_resolution/` was deleted with the CUT. The
+  // publisher had two tasks, and only ONE of them is without replacement:
+  //
+  //   1. PUBLISHING into the 2D DHT (AuthManifest, LivenessRecord,
+  //      DeviceKemRecord). That is §4.3, and the paragraph bridge in
+  //      CLAUDE.md expressly says about it "**replaced**, not
+  //      renumbered": V4.1 has no pollable third-party knowledge,
+  //      liveness is pairwise (§6, §8). Thus (T).
+  //
+  //   2. HOLDING the device delegations and device signing keys
+  //      (`delegations`, `deviceSigKeyCount`, `addLinkedDeviceSigKeys`).
+  //      That is §7.1/§7.5 — multi-device, in v4_1 chapter §14 — and has
+  //      nothing to do with the DHT. It only fell along because it lay in the same
+  //      object. **Gap G-9.**
+  //
+  // WHY THIS MUST NOT BECOME "SIMPLY AN EMPTY LIST": every read side
+  // of `delegations` decides on a SECURITY procedure. An
+  // empty list means there "a single device", and thus the
+  // §7.5 quorum falls away without anyone noticing — an attacker with the
+  // seed could rotate, although exactly that was supposed to be prevented.
+  // Each of these places therefore reports the gap individually and takes the
+  // branch that does NOT silently claim security.
   @override
   final NotificationSoundService notificationSound = NotificationSoundService();
 
@@ -271,8 +565,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// lifecycle event arrives.
   bool _isAppResumed = true;
 
-  /// V3.2 §8.1: suppress auto-receipt for silently dropped CRs (F12-A deadlock fix).
-  bool _suppressReceiptForCurrentFrame = false;
+  // `_suppressReceiptForCurrentFrame` (V3.2 §8.1, suppressing the receipt of a silently
+  // discarded CONTACT_REQUEST) was dropped with
+  // `_handleContactRequestV3`, its only setter.
 
   /// True when the user has skipped the UpdateRequiredScreen into limited mode
   /// (sec-h5 §8.2 / T13). Per-session only — NOT persisted; every restart
@@ -323,6 +618,26 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Public accessor for archive manager (used by settings UI + IPC).
   ArchiveManager? get archiveManager => _archiveManager;
 
+  /// Guards only: sets the archive manager from outside.
+  ///
+  /// THERE IS EXACTLY ONE CASE THAT NEEDS IT, and it is not a
+  /// convenience. The only producer in operation is [_initArchive],
+  /// and that only runs from within [startService]; it builds its
+  /// transport hard via `ArchiveTransport.forProtocol(...)`, i.e. a
+  /// real `smbclient`/`sftp`/`curl`. A suite that measures the path of
+  /// retrieval via IPC (§21.6: from the share, never over the
+  /// network) would thus need a real NAS — and would then measure the NAS.
+  ///
+  /// The way out without this path would be to call the retrieval
+  /// directly on the manager, bypassing the dispatcher. That is exactly the
+  /// stand-in that S391 measured at the six commands of the invitation card:
+  /// the case was implemented, never routed, and the
+  /// guard green (`scripts/check_ipc_dispatch_reachable.dart`).
+  ///
+  /// In operation there is no caller.
+  @visibleForTesting
+  set archiveManagerForTesting(ArchiveManager? m) => _archiveManager = m;
+
   /// Inject platform-specific audio decoder (Android: MediaCodec).
   void setPlatformAudioDecoder(AudioDecoderCallback decoder) {
     _voiceTranscription?.platformAudioDecoder = decoder;
@@ -343,7 +658,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   static const int _processedMessageIdsCap = 4096;
   final LinkedHashSet<String> _processedMessageIds = LinkedHashSet<String>();
 
-  /// Befund 1 (§8.1): inner.messageId-hex of frames whose DELIVERY_RECEIPT was
+  /// Finding 1 (§8.1): inner.messageId-hex of frames whose DELIVERY_RECEIPT was
   /// deliberately suppressed (silent CR drop, F12-A deadlock fix).
   /// `_suppressReceiptForCurrentFrame` is frame-local and therefore invisible
   /// to the dedup branch above, which runs BEFORE dispatch and re-acks
@@ -358,6 +673,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Callbacks for GUI
   @override
   void Function()? onStateChanged;
+
+  /// E-9: a DIFFERENT own device has deleted this identity.
+  ///
+  /// The service has already cleared its own stores at this point
+  /// (`_wipeLocalIdentityData`). What is still outstanding here lies
+  /// one layer higher and does not belong to the service: the entry in
+  /// `identities.json` and the profile directory itself
+  /// (`IdentityManager.deleteIdentity`). The host — `service_daemon.dart`
+  /// or the in-process path in `main.dart` — hooks in here.
+  ///
+  /// NOT declared in `service_interface.dart`: the interface
+  /// belongs to a different package of this session; the wiring proposal
+  /// for host and interface stands in the session report.
+  void Function(String nodeIdHex)? onIdentityDeletedRemotely;
   @override
   void Function(String conversationId, UiMessage message)? onNewMessage;
   @override
@@ -392,6 +721,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void Function()? onResetCallAudioModeAndroid;
   void Function(String reason)? onVideoUnavailable;
 
+  /// §10.4 "Session behaviour" (V1.10, S367) — see CallService's own field
+  /// docs for the full contract. Forwarded to `_calls` once constructed
+  /// (below); `main.dart` may set these before or after that happens, the
+  /// forwarding closures read the field at call time either way.
+  Future<bool> Function()? onRequestAudioFocus;
+  Future<void> Function()? onAbandonAudioFocus;
+  void Function(bool enabled)? onSetProximityMonitoring;
+  void Function(bool interrupted)? onCallInterruptionChanged;
+
   // Contact storage
   final Map<String, ContactInfo> _contacts = {};
   // Persistent deletion flag: prevents re-import of deleted contacts
@@ -411,11 +749,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Polls (§24) — delegated to PollService
   late final PollService _polls;
 
-  // §4.11 External Rendezvous (Nostr cold-start address resolution)
-  RendezvousManager? _rendezvousManager;
-
-  // §4.11.10 First-Contact Rendezvous (URI-scoped, nonce from ContactSeed `r`)
-  FirstContactRendezvousManager? _fcRendezvous;
+  // §4.11 External Rendezvous — REMOVED (S362, owner decision
+  // 02.09.2026: "V3 compatibility is no longer necessary").
+  //
+  // Here stood `RendezvousManager? _rendezvousManager` — a field that was
+  // DECLARED and DISPOSED in the whole tree, but never assigned.
+  //
+  // S388: the first contact rendezvous (v3 §4.11.10, `_fcRendezvous`)
+  // is removed too. V4.2 §11.9 lets the public relay network carry EXACTLY ONE
+  // thing: the address entries of the fourth neighbour source
+  // (`mycelium/lib/host_outside.dart`). First contact goes via the card
+  // (§15.2). Measured before removal: the IPC command
+  // `rendezvous_uri_shared` had no handler in the server,
+  // `notifyContactSeedUriShared` no caller in `lib/ui`, and the
+  // scanner session hung solely on the V3 ContactSeed reader.
 
   // §19.6 Censorship-Resistant Distribution: in-network binary updates.
   // Node-wide singletons — only the first identity's service on a daemon
@@ -423,7 +770,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // node.rendezvousManager above).
   BinaryFragmentStore? _binaryFragmentStore;
   BinaryUpdateManager? _binaryUpdateManager;
-  BinaryUpdateManager? get binaryUpdateManager => _binaryUpdateManager;
   BinaryHttpServer? _binaryHttpServer;
   BinaryRendezvousManager? _binaryRendezvousManager;
   DeltaUpdateManager? _deltaUpdateManager;
@@ -431,6 +777,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   ForeignBinaryAcquirer? _foreignBinaryAcquirer;
   PhysicalTransferHelper? _physicalTransferHelper;
   BinarySeeder? _binarySeeder;
+  // §5.5 — the cover fill. Source and acceptance point of the fountain blocks
+  // that are put into cover slots that are due anyway. Wired in
+  // `attachV41` to `DeliveryNode.coverFill`/`onCoverFillBlock`; registration
+  // happens from the signed manifest (`reportUpdateObjectsTo`).
+  UpdateCoverFill? _updateCoverFill;
   // §19.6.2 — periodic housekeeping on the fragment store (prunes
   // superseded versions + enforces the platform storage budget).
   Timer? _binaryGcTimer;
@@ -439,6 +790,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // (§19.6.6) — the `fetchFragment` callback for BinaryUpdateManager /
   // DeltaUpdateManager downloads.
   BinaryFetchClient? _binaryFetchClient;
+  // §26.6.4 — the entry points of the V4.1 node as binary sources.
+  //
+  // Set in `attachV41` (`tagline/v41_attach.dart`), because only there
+  // node and service are present at the same time; `null` as long as V4.1 does not
+  // hang. Carries the second source class of the update download next to
+  // the Nostr rendezvous — justification and measurement at
+  // `entryBinarySources`.
+  List<EndpointAddress> Function()? binarySourcesOutEntry;
   InviteLinkService? get inviteLinkService => _inviteLinkService;
   PhysicalTransferHelper? get physicalTransferHelper => _physicalTransferHelper;
   @override
@@ -450,7 +809,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   void Function(String pollId)? onPollStateChanged;
 
-  // §26.6.2 Paket C
+  // §26.6.2 package C
   @override
   void Function(String contactNodeIdHex, int pendingCount)?
       onKeyRotationPendingExpired;
@@ -505,9 +864,43 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   final Map<String, int> _processedSyncIds = {};
   /// 7-day TTL for TWIN_SYNC dedup entries (matches S&F TTL per architecture).
   static const int _syncDedupTtlMs = 7 * 24 * 60 * 60 * 1000;
-  // Key Rotation ACK tracking (§26.6.2, Paket C): per-contact retry state,
+  // Key Rotation ACK tracking (§26.6.2, package C): per-contact retry state,
   // persisted, re-sends broadcast on 24h-tick until ACK or expiry.
-  late final KeyRotationRetryManager _keyRotationRetry;
+  //
+  // ── LAZY, NOT ASSIGNED IN `startService()` (S360) ─────────────────
+  //
+  // Here stood a bare `late final … ;` with the assignment in
+  // `startService()`. Measured on 2026-09-01, as soon as `rotateIdentityKeys()`
+  // got to step 5 at all:
+  //
+  //     LateInitializationError: Field '_keyRotationRetry@…' has not been
+  //     initialized.
+  //
+  // The path there needs no `startService()`: the UI calls
+  // `revokeDevice()` via IPC, that calls `rotateIdentityKeys()` UNAWAITED,
+  // and the throw thus lands in the zone handler — after sending the
+  // broadcast and after `rotateIdentityFull()`, i.e. AFTER the keys
+  // had already been replaced. Lost would have been the resubmission
+  // bookkeeping (step 5) AND the device set announcement (step 6).
+  // In production `startService()` today always runs before — that makes
+  // the defect latent, not harmless.
+  //
+  // The manager depends on nothing that `startService()` only establishes:
+  // `profileDir` is a constructor parameter, `identity` a field, `_fileEnc`
+  // a getter. A lazy initializer is therefore not a makeshift,
+  // but the right lifetime — it arises on first access,
+  // no matter which path gets there first, and `load()` belongs in the same
+  // line, because a manager without loaded state would silently
+  // lose every resubmission.
+  late final KeyRotationRetryManager _keyRotationRetry = (() {
+    final m = KeyRotationRetryManager(
+      profileDir: profileDir,
+      identityId: identity.userIdHex,
+      store: store,
+    );
+    m.load();
+    return m;
+  })();
   // Guard: tracks whether each data type was successfully loaded from disk.
   // Prevents _save*() from overwriting existing data with empty maps
   // if _load*() failed (e.g. decryption error, missing key).
@@ -516,16 +909,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   bool _groupsLoaded = false;
   bool _channelsLoaded = false;
   // Rate limiter: last CR retry time per contact (nodeIdHex -> timestamp)
+  //
+  // DEAD CODE, RE-MEASURED (S361) — both maps here get a `[key] = …` assignment
+  // at NO place in `lib/` any more, since the CUT
+  // (2026-08-31) removed `cleona_service_v3_retry.dart` and with it the
+  // `onPeerAdded` callback that triggered `_retryPendingContactRequests`
+  // (`cleona_service_identity.dart:_initIdentityPublisher`,
+  // detailed derivation there and in
+  // `docs/v4-redesign/S361-lueckenbuch.md`, line "CR-Wiedervorlage").
+  // NOT REMOVED, because the resubmission of unanswered
+  // contact requests (§5.1) is a real, promised property that only
+  // does not yet have its V4.1 trigger — removing would be wrong here,
+  // because the code has a purpose that it just does not reach (yet).
   final Map<String, DateTime> _lastCrRetryPerContact = {};
   // Exponential backoff counter for CR retries to unreachable contacts.
   // Backoff: 10s, 20s, 40s, 80s, 160s, 320s, then capped at 600s (10min).
   // Keeps retrying forever so eventually-online contacts still get through,
   // but at low frequency after the initial burst (~10 attempts in 20min).
+  //
+  // Likewise without a writer (see above) — the backoff CURVE
+  // (`crRetryBackoffSeconds`) nonetheless remains as a contract and is
+  // guarded by `smoke_cr_backoff_edge.dart`, so that it can be reused unchanged
+  // when the trigger is retrofitted.
   final Map<String, int> _crRetryCountPerContact = {};
-  // §5.1 CR-Kante: letzte kantengetriggerte Backoff-Verkuerzung pro Kontakt
-  // (nodeIdHex -> timestamp). Eigene Drosselung, weil `peer-came-online` pro
-  // neu bestaetigtem Peer feuert — ohne Gate wuerde ein Knoten, der beim Start
-  // dreissig Peers bestaetigt, dreissig CR-Sends nachziehen (Arbeitsregel 5).
+  // §5.1 CR edge: last edge-triggered backoff shortening per contact
+  // (nodeIdHex -> timestamp). Own throttling, because `peer-came-online` fires per
+  // newly confirmed peer — without a gate a node that confirms
+  // thirty peers at start would trigger thirty CR sends (working rule 5).
   final Map<String, DateTime> _crEdgeShortenAt = {};
   // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
   // Contacts for which the sender-side stale warning has already been written
@@ -538,12 +948,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // to avoid flooding the owner. Key = groupIdHex, value = epoch that triggered it.
   final Map<String, int> _resyncRequestedAtEpoch = {};
   Timer? _keyRotationTimer;
-  // §26.6.2 Paket C: drives _keyRotationRetry re-sends every 24h.
+  // §26.6.2 package C: drives _keyRotationRetry re-sends every 24h.
   Timer? _keyRotationRetryTimer;
   Timer? _expiryTimer;
   int _processedMsgIdsSaveCounter = 0;
-  // §27.9 NAT-Troubleshooting-Wizard trigger + dismissal timestamp.
-  NatWizardTrigger? _natWizardTrigger;
+  // ── §27.9 NAT wizard: only the SETTING remains ────────────────────
+  //
+  // `NatWizardTrigger? _natWizardTrigger` stood here until 01.09.2026
+  // (S360). The class was deleted with `lib/core/service/nat_wizard_trigger.dart`,
+  // namely for two independent reasons:
+  //
+  //  1. Its trigger condition was `stats.directConnections == 0 &&
+  //     stats.activePeerCount > 0` — two numbers that have been
+  //     constantly 0 since the CUT. The condition could NEVER become true; the
+  //     wizard has not fired by itself a single time since 31.08.
+  //  2. It no longer had any constructor caller in `lib/` at all.
+  //     The only producer was its own smoke test — a test that IS the
+  //     only use of its subject measures nothing about the
+  //     application.
+  //
+  // The SETTING stays (line below): `dismissNatWizard`,
+  // `requestNatWizard` and the two test hooks write it, and the
+  // user expects a "never again" to survive a restart. The
+  // wizard is thus user-driven — tap on the connection icon —
+  // and that is the only path that manages without the dropped numbers.
   // Unix-ms until which the NAT wizard is suppressed. 0 = never dismissed.
   // Persisted in nat_wizard_settings.json alongside the profile.
   int _natWizardDismissedUntilMs = 0;
@@ -558,8 +986,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   late LinkPreviewFetcher _linkPreviewFetcher;
   // Multi-interface send mode (Architecture §23.2)
   MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.auto;
-  // Guardian service (Shamir SSS)
-  late GuardianService guardianService;
+  // Guardian service (Shamir SSS): FALLEN. `guardian_service.dart` was
+  // deleted with the CUT (v4_1 §13.8 — no social recovery; §6.8 is
+  // the same place in the OLD v4_0 numbering and stood here wrongly until
+  // S361). The four members of the interface remain and report
+  // the refusal; see [isGuardianSetUp].
   // Groups
   final Map<String, GroupInfo> _groups = {};
   /// Pending config updates for groups not yet known (arrive before GROUP_INVITE).
@@ -594,7 +1025,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // Update checking (Architecture Section 17.5.5)
   Timer? _updateCheckTimer;
   UpdateManifest? _latestManifest;
-  UpdateManifest? get latestManifest => _latestManifest;
   /// Callback when a new version is available. UI should show banner/prompt.
   /// [inNetworkAvailable] is true when the update can additionally be
   /// fetched via §19.6 in-network binary distribution (not just the
@@ -603,9 +1033,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void Function(BinaryUpdateState state, double progress)? onUpdateStateChanged;
 
-  /// The current app version string. Single source of truth, also consumed
-  /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.2.2';
+  /// The current app version string, also consumed by `lib/main.dart` for
+  /// the Sec H-5 hard-block startup check (T13).
+  ///
+  /// S368: the source now lies in `app_version.dart` — a leaf without
+  /// imports that every layer can include. Here the string formerly stood
+  /// literally; it was thus only reachable for everything that imports this
+  /// large library, and `call_service.dart` did not.
+  /// Exactly there an own number was therefore kept (`3002`), with which
+  /// V4.1 introduced itself in the network as 3.2.0.
+  static const String kCurrentAppVersion = kAppVersion;
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -615,24 +1052,115 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   void Function(int phase, int contactsRestored, int messagesRestored)? onRestoreProgress;
   DateTime? _lastRestoreBroadcast;
+
+  /// Receiver-side acceptance limit for RESTORE_BROADCAST (§13.5.4).
+  ///
+  /// Per sender UserID: the `timestamp` of the most recently HONORED broadcast and
+  /// the time at which we honored it.
+  ///
+  /// WHY THIS LIES HERE AND NOT WITH THE SENDER. §13.5.4 says "at most 1
+  /// broadcast per UserID per 5 min is **honored**" — honoring happens at the
+  /// receiver. Until S370 the limit was built only in the SENDER
+  /// (`sendRestoreBroadcast`, `_lastRestoreBroadcast`), and a limit in the
+  /// sender binds exactly the one who observes it anyway. The receiver accepted
+  /// every broadcast: no deadline, no counter, no look at
+  /// `rb.timestamp` — the value lay in the signed body and was never held against
+  /// a clock.
+  ///
+  /// WHAT THAT COST, measured. A RESTORE_BROADCAST is a
+  /// self-carrying, signed packet. In the DOMINANT case — the
+  /// deterministic recovery from the same seed phrase — the
+  /// newly derived key is identical to the old one
+  /// (`sendRestoreBroadcast` says so itself), so `oldNodeId ==
+  /// newNodeId`. Thus the re-registration `_contacts.remove(old)` +
+  /// `_contacts[new]` does not act as protection: the contact stays under the same
+  /// key, the signature keeps verifying against the same
+  /// `ed25519Pk` — and every resubmission triggered again the three
+  /// response phases, the third of which sends the FULL message history.
+  /// Whoever has a copy of the packet could trigger that arbitrarily often;
+  /// §13.5.3 estimates a full history at ~30 MB, and the
+  /// output is capped at `R_cover = 1/8 s`.
+  ///
+  /// TWO GATES, and the first is the load-bearing one:
+  ///   1. `timestamp` must STRICTLY INCREASE. A resubmission of the same
+  ///      packet carries the same value and thus falls out — the
+  ///      timestamp lies in the signed body, so it cannot be forged.
+  ///   2. Additionally at most one honored broadcast per 5 minutes, exactly
+  ///      the number from §13.5.4.
+  ///
+  /// DELIBERATE LIMIT: the state is process-local. A restart of the daemon
+  /// resets it, after which a single resubmission is possible again. That is
+  /// noted and not fixed — persistence belongs in the
+  /// storage and is a separate decision, not a side effect of this fix.
+  final Map<String, ({Int64 stamp, DateTime honoredAt})>
+      _restoreBroadcastSeen = {};
+
+  /// How far a `timestamp` may lie in the FUTURE (clock skew).
+  static const Duration kRestoreBroadcastFutureSkew = Duration(minutes: 15);
+
+  /// Minimum interval between two honoured broadcasts of the same sender (§13.5.4).
+  static const Duration kRestoreBroadcastMinGap = Duration(minutes: 5);
   Timer? _restoreRetryTimer;
   Timer? _restorePollingTimer;
-  int _restorePollCount = 0;
 
+  // `_postDiscoveryPolledPeers` stood here: the set of peers that the
+  // catch-up run after the discovery cascade had already queried. The run
+  // itself (`_onPostDiscoveryRetrieve`, `_onPeerNewlyConfirmed`) has
+  // fallen. `_restorePollCount` next to it counted the aggressive
+  // mailbox queries after a recovery — the same fate.
   Timer? _postDiscoverySecondSweep;
   Timer? _delegationRenewalTimer;
   Timer? _crRetryTimer;
-  final Set<String> _postDiscoveryPolledPeers = {};
 
-  // §8.1 per-sender CR rate limit: max 5 CRs per hour per sender.
-  // Key: senderUserIdHex, Value: list of timestamps (kept ≤ 5, pruned on check).
-  final Map<String, List<DateTime>> _crRateTracker = {};
+  // `_crRateTracker` (§8.1 "5 CRs/hour per sender") was dropped with
+  // `_handleContactRequestV3`: V4.2 §15.10 "No rate limit per
+  // sender" — the load is limited by proof of work, invitation type and revocation.
 
   // §5.6 Key-rotation transition: previous primary mailbox ID, polled for 7
   // days after key rotation so messages stored under the old pubkey are found.
+  // ── §14.4 transition window (owner decision 01.09.2026) ──────────
+  //
+  // One record per contact, key is its UserID hex. It keeps the
+  // OLD pair line alive until the contact has the new keys —
+  // at most [_rotationWindowDays]. Derivation, evidence and the calculated
+  // price: `cleona_service_rotation_window.dart`.
+  final Map<String, RotationWindow> _rotationWindows = {};
+  bool _rotationWindowsLoaded = false;
+
+  /// Owner, 01.09.2026: "But max. 14 days. After that the
+  /// loss of contact is acceptable." The same number as
+  /// [_lockoutDeadlineDays], but deliberately an OWN constant: the one
+  /// caps the lockout transition (when does the lockout count as completed),
+  /// the other the old pair line (how long is it still harvested).
+  /// Merging them would mean binding two decisions to one number.
+  static const _rotationWindowDays = 14;
+
+  /// §14.5 path 2: counter of the own device set announcements, monotonic
+  /// and persisted (in `devices.json` under `_deviceSetSeq`, see
+  /// [DeviceSetAnnouncementOps._nextDeviceSetSeq]).
+  int _deviceSetSeq = 0;
+
   Uint8List? _previousMailboxPrimary;
   DateTime? _previousMailboxPrimarySetAt;
+  /// S366: "the stored state of the mailbox transition is authoritative".
+  /// Carries the data-loss latch in `_saveMailboxTransition` — without
+  /// it a failed load would be indistinguishable from an expired transition.
+  bool _mailboxTransitionLoaded = false;
   static const _mailboxTransitionDays = 7;
+
+  // ── E-7 lockout transition (v4_1 §14.4/§24.4.3) ──────────────────────
+  //
+  // One record per locked device, key is the device UUID.
+  // Complete justification, measurement and deadline situation:
+  // `cleona_service_lockout.dart`.
+  final Map<String, LockoutTransition> _lockouts = {};
+  bool _lockoutsLoaded = false;
+
+  /// §14.4, normative: "at the latest after the delivery window (one
+  /// recovery-epoch lifetime, **14 days**)". Not the same number as
+  /// [_mailboxTransitionDays] — that applies to the ordinary rotation without
+  /// a locked-out device (§5.6).
+  static const _lockoutDeadlineDays = 14;
 
   // ── §5.8 One-Shot-Outbox ─────────────────────────────────────────────
   // Messages that could NOT be placed into L3 (Erasure + S&F) because the
@@ -647,9 +1175,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // split-second before Kademlia finds neighbours), the entry stays until the
   // NEXT onNetworkChanged edge — guaranteeing liveness without polling.
   //
-  // Structure: messageIdHex → _OutboxEntry
-  final Map<String, _OutboxEntry> _outbox = {};
-  bool _outboxLoaded = false;
+  // S368: here stood `_outbox` (Map<String, _OutboxEntry>) and
+  // `_outboxLoaded` — the V3 outbox. Fallen, because it had EXACTLY ONE
+  // write access and that stood in its own load path: the book
+  // filled only from itself and never brought anything out. Its
+  // task is carried by the V4.1 outbox (`v41Outbox`, §21.2).
 
   // §5.1 F3′ (fourth outbox edge): last user-scoped flush attempt per sender.
   // Gates the verified-inbound edge so a chatty sender cannot re-trigger a
@@ -657,10 +1187,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // inbound frame arrives while entries for that sender are parked.
   final Map<String, DateTime> _outboxInboundFlushAt = {};
   static const Duration _outboxInboundFlushGate = Duration(seconds: 60);
-  /// §5.1 CR-Kante: Mindestabstand zwischen zwei kantengetriggerten
-  /// Backoff-Verkuerzungen fuer denselben Kontakt. Bewusst derselbe Wert wie
-  /// [_outboxInboundFlushGate] — dieselbe Aufgabe (eine haeufig feuernde Kante
-  /// darf keinen Send-Strom erzeugen), deshalb dieselbe Groessenordnung.
+  /// §5.1 CR edge: minimum interval between two edge-triggered
+  /// backoff shortenings for the same contact. Deliberately the same value as
+  /// [_outboxInboundFlushGate] — the same task (a frequently firing edge
+  /// must not produce a send stream), hence the same order of magnitude.
   static const Duration _crEdgeShortenGate = Duration(seconds: 60);
 
   // §5.8 extension: pending membership update resends.
@@ -672,30 +1202,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // cleaned up during flush.
   // Structure: entityIdHex (group or channel) → Set<recipientUserIdHex>
   final Map<String, Set<String>> _pendingMembershipResends = {};
+  /// S366: the same task as [_mailboxTransitionLoaded], for the
+  /// pending membership resends.
+  bool _membershipResendsLoaded = false;
 
   // §5.5b First-CR ACK gate: after sendToDevice, wait 15s for a
   // DELIVERY_RECEIPT before firing FIRST_CR_STORE to seed peers.
   // Key = messageIdHex of the First-CR ApplicationFrameV3.
   final Map<String, Timer> _firstCrAckGates = {};
 
+  /// [port] is now PASSED instead of derived from `node.port` (CUT,
+  /// 31.08.2026). The node that knew the port is gone; whoever builds the service
+  /// knows it — in the daemon the V4.1 node, in-process `main.dart`.
   CleonaService({
     required this.identity,
-    required this.node,
     required this.displayName,
+    required this.port,
     this.networkChannel = 'beta',
   })  : profileDir = identity.profileDir,
-        port = node.port,
         _log = CLogger.get('service', profileDir: identity.profileDir);
 
   /// Start service-level components (contacts, conversations, mailbox).
   /// The node must already be started externally.
   Future<void> startService() async {
-    // Diese Instanz ist ab jetzt (wieder) lebendig — hebt ein vorheriges
-    // [stop] auf, damit die weiter unten registrierten Chain-Closures nicht
-    // sofort in ihren _disposed-Guard laufen.
+    // This instance is alive (again) from now on — cancels a previous
+    // [stop], so that the chain closures registered further below do not
+    // immediately run into their _disposed guard.
     _disposed = false;
     serviceStartedAt = DateTime.now();
-    _log.info('Starting CleonaService "$displayName"...');
+    _log.debug('Starting CleonaService displayName="$displayName"');
+    _log.info('Starting CleonaService...');
 
     // §12.5 S254: startup catch-up phase — age-based notification suppression
     // only applies during the first 30s. After that, Doze-delayed and S&F
@@ -711,7 +1247,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     await mailboxStore.load();
 
     // Init channel index (public channel discovery cache)
-    _channelIndex = ChannelIndex(dataDir: profileDir);
+    // S366: from the encrypted storage (area `channel_index`)
+    // instead of from `channel_index.json.enc`.
+    _channelIndex = ChannelIndex(dataDir: profileDir, store: store);
     _channelIndex.load();
 
     // Init moderation sub-service
@@ -734,6 +1272,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _calls.onSetCallAudioModeAndroid = (speaker) => onSetCallAudioModeAndroid?.call(speaker);
     _calls.onResetCallAudioModeAndroid = () => onResetCallAudioModeAndroid?.call();
     _calls.onVideoUnavailable = (reason) => onVideoUnavailable?.call(reason);
+    _calls.onRequestAudioFocus = () async => await onRequestAudioFocus?.call() ?? false;
+    _calls.onAbandonAudioFocus = () async => await onAbandonAudioFocus?.call();
+    _calls.onSetProximityMonitoring = (enabled) => onSetProximityMonitoring?.call(enabled);
+    _calls.onCallInterruptionChanged = (interrupted) => onCallInterruptionChanged?.call(interrupted);
     // Forward whatever was buffered on the plain fields below (set by
     // callers that ran before startService, e.g. main.dart's
     // _wireServiceCallbacks) to the now-constructed CallService.
@@ -746,67 +1288,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _calls.onKeyframeRequested = _bufferedOnKeyframeRequested;
     _calls.init();
 
-    // §5.5b: FIRST_CR_STORE_ACK callback — chained for multi-identity
-    // (one node, N services — each checks its own _contacts).
-    final prevFirstCrStoreAck = node.onFirstCrStoreAck;
-    node.onFirstCrStoreAck = (senderDeviceId, accepted, recipientUserId) {
-      prevFirstCrStoreAck?.call(senderDeviceId, accepted, recipientUserId);
-      if (_disposed) return;
-      if (!accepted) return;
-      if (recipientUserId.isEmpty) return;
-      // Der ACK darf NUR von einem Seed stammen, der die CR auch wirklich
-      // eingelagert hat. `storedForDelivery` ist per Design retry-still —
-      // ohne diese Schranke koennte jeder Netzwerkteilnehmer, der die
-      // pending Ziel-UserId kennt, die Zustellung gezielt zum Stillstand
-      // bringen. Die Seed-Auswahl auf der Sendeseite laeuft ueber genau
-      // dieses Flag (§5.5b Direct-Fanout), also ist es hier die passende
-      // Gegenprobe.
-      final seedPeer = node.routingTable.getPeer(senderDeviceId);
-      if (seedPeer == null || !seedPeer.isProtectedSeed) {
-        _log.debug('§5.5b FIRST_CR_STORE_ACK ignoriert: Absender '
-            '${bytesToHex(senderDeviceId).substring(0, 8)} ist kein '
-            'protected seed');
-        return;
-      }
-      final recipHex = bytesToHex(recipientUserId);
-      final contact = _contacts[recipHex];
-      if (contact == null || contact.status != 'pending_outgoing') return;
-      contact.status = 'storedForDelivery';
-      _saveContacts();
-      onStateChanged?.call();
-      _log.info('§5.5b CR storedForDelivery for '
-          '${recipHex.substring(0, 8)} via seed '
-          '${bytesToHex(senderDeviceId).substring(0, 8)}');
-    };
+    // ── §5.5b FIRST_CR_STORE_ACK: FALLEN (CUT, 31.08.2026) ──────────
+    //
+    // Here the service hooked onto `node.onFirstCrStoreAck` and set
+    // a contact to `storedForDelivery` as soon as a PROTECTED SEED had stored the
+    // first request. Both are V3 store-and-forward:
+    // the callback belonged to `CleonaNode`, and the counter-check
+    // (`routingTable.getPeer(...).isProtectedSeed`) does not exist without
+    // a routing table. §5.5b as a whole is gone with the V3 line —
+    // V4.1 does not store first requests with seeds, but with the
+    // responsible relays of the tag line (§9.1).
+    //
+    // Consequence for the UI: the intermediate state `storedForDelivery`
+    // is no longer reached. A pending request stays
+    // `pending_outgoing` until it is answered.
+    //
+    // HERE UNTIL S361 IT SAID "this is the visible part of G-1
+    // (first contact)". That has not been accurate since S360: G-1 is
+    // closed, the request DOES go out (§15.3.2). What is missing here
+    // is not a carrier, but an INTERMEDIATE STATE in the display — the
+    // V4.1 equivalent would be `placed` from §22.5.1 (>= 2 receipts
+    // of independent relays), and that is not kept for contact requests.
+    // The user therefore sees "requested" until the response
+    // instead of "stored". Not a delivery error, a missing intermediate step.
 
-    // Init guardian service
-    guardianService = GuardianService(
-      identity: identity,
-      node: node,
-      profileDir: profileDir,
-    );
-    guardianService.onGuardianRestoreRequest = (ownerName, triggerName, ownerHex, mailboxHex) {
-      onGuardianRestoreRequest?.call(ownerName, triggerName, ownerHex, mailboxHex);
-    };
-    guardianService.sendFragmentStoreWithAck = (fragStoreBytes, messageId, fragmentIndex, recipientDeviceId) async {
-      final msgIdHex = bytesToHex(messageId);
-      final key = '$msgIdHex:$fragmentIndex';
-      final completer =
-          _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-        innerPayload: fragStoreBytes,
-        recipientDeviceId: recipientDeviceId,
-      ));
-      try {
-        await completer.future.timeout(_peerStoreAckTimeout);
-        _pendingFragmentStoreAcks.remove(key);
-        return true;
-      } on TimeoutException {
-        _pendingFragmentStoreAcks.remove(key);
-        return false;
-      }
-    };
+    // ── GUARDIAN SERVICE: FALLEN (CUT, 31.08.2026) ───────────────────
+    //
+    // `_initGuardianService()` stood here. `GuardianService` was passed the
+    // `CleonaNode` and sent Shamir shares as
+    // `FRAGMENT_STORE` infrastructure frames. v4_1 §13.8 records that there is
+    // no social recovery any more; the file itself lies outside
+    // this package. The four public guardian members now report the
+    // gap individually (see [isGuardianSetUp]).
 
     // Load contacts
     _loadContacts();
@@ -815,14 +1328,58 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _initLocalDevice();
 
     // §7.1: Restore linked-device delegation keys (if this is a Linked Device)
-    final restoredLinkedKeys = LinkedDeviceKeysStore.load(
-      profileDir: profileDir,
-      fileEnc: _fileEnc,
-    );
+    //
+    // [storeOrNull] and not [store]: the two cases are different,
+    // and only one of them is an error. WITHOUT A STORE there never was a
+    // pairing — a linked device arises exclusively via
+    // `_handleDevicePairApproveV3`, and that writes INTO the store; an
+    // identity without a seed-derived key thus cannot have any at all.
+    // A STORE WITHOUT A READABLE RECORD on the other hand very much is
+    // one, and that is caught by the latch in `LinkedDeviceKeysStore.load`.
+    final ldDeposit = storeOrNull;
+    final restoredLinkedKeys = ldDeposit == null
+        ? null
+        : LinkedDeviceKeysStore.load(
+            profileDir: profileDir,
+            store: ldDeposit,
+          );
     if (restoredLinkedKeys != null) {
       applyLinkedDeviceKeys(restoredLinkedKeys);
       _log.info('Restored linked-device keys from disk');
     }
+
+    // S362: one-time sweeper BEFORE any reading of the affected files.
+    // It must run before `_loadProfilePicture`, because that from now on only
+    // knows the ciphertext — without the run before it an existing
+    // profile would have lost its picture, its description and its transcripts
+    // (they would continue to lie in plaintext on the disk, only unused).
+    _sweepPlaintextUserContent();
+
+    // S362 variant B: the attachments. First register the key, then
+    // the sweeper — in this order, otherwise it would find no
+    // key and (rightly) leave everything lying.
+    //
+    // `_fileEnc.effectiveKey` and NOT an own derivation: the
+    // attachments must lie under the same base key as the
+    // messages they hang on. The separation of the uses
+    // is done by `MediaCipher` via HKDF one level deeper.
+    MediaStore.instance.register(profileDir, _fileEnc.effectiveKey);
+    _sweepPlaintextMedia();
+
+    // The decrypting reader on `127.0.0.1`. It is needed in THIS process,
+    // because the transcription feeds `ffmpeg` or the Android decoder
+    // with a source (`voice_transcription_service.dart:354`,
+    // `:376`), and in the UI process for display and playback
+    // (started there in `main.dart`). Loopback only, an ephemeral
+    // port, one path secret per process start — justification and
+    // threat model stand in `MediaVault`.
+    unawaited(MediaVault.instance
+        .start(profileDir: profileDir)
+        .catchError((Object e) {
+      _log.warn('Media reader could not be started: $e — attachments are '
+          'not playable in this run (but they stay stored '
+          'readably).');
+    }));
 
     // Load own profile picture
     _loadProfilePicture();
@@ -851,7 +1408,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final calMgr = CalendarManager(
       profileDir: profileDir,
       identityId: identity.userIdHex,
-      fileEnc: _fileEnc,
+      store: store,
     );
     calMgr.load();
     _calendarProto = CalendarProtocolService(this, calMgr);
@@ -865,7 +1422,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       profileDir: profileDir,
       identityId: identity.userIdHex,
       calendar: calMgr,
-      fileEnc: _fileEnc,
+      store: store,
     );
     calendarSyncService.load();
 
@@ -876,15 +1433,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _polls.onPollStateChanged = (id) => onPollStateChanged?.call(id);
     _polls.init();
 
-    // Key rotation retry manager (§26.6.2 Paket C): persisted per-contact
+    // Key rotation retry manager (§26.6.2 package C): persisted per-contact
     // retry state so offline contacts still receive KEY_ROTATION_BROADCAST
     // after S&F TTL expiry.
-    _keyRotationRetry = KeyRotationRetryManager(
-      profileDir: profileDir,
-      identityId: identity.userIdHex,
-      fileEnc: _fileEnc,
-    );
-    _keyRotationRetry.load();
+    //
+    // The access SUFFICES — the initializer at the field builds and loads it
+    // (justified there). The former assignment at this place was the
+    // reason why every path without `startService()` ran into a
+    // LateInitializationError.
+    _keyRotationRetry.pendingCount;
 
     // Birthday auto-sync (§23.4): derive yearly birthday events from
     // contacts that carry birthday metadata. Runs once at startup and is
@@ -903,171 +1460,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Load multi-interface settings and apply to transport (§23.2)
     _loadMultiInterfaceMode();
-    if (_multiInterfaceMode != MultiInterfaceMode.off) {
-      unawaited(node.transport.setMultiInterfaceMode(_multiInterfaceMode));
-    }
+    // The setting is READ (the UI shows it), but no longer
+    // applied: `node.transport.setMultiInterfaceMode` belonged to the
+    // V3 transport. Gap G-6 — see [setMultiInterfaceMode].
 
-    // Sync contact/channel tier registration to DV routing table
-    _syncTierRegistration();
+    // `_syncTierRegistration()` stood here: it entered contact and
+    // channel device identifiers into the tier registry of the DV routing table.
+    // Without distance-vector routing it has no subject (T).
 
-    // §4.11 External Rendezvous: Nostr cold-start address resolution.
-    // Each identity/device inits its own RendezvousManager (§4.11.7
-    // per-device independence — no "first service wins" gate).
-    _rendezvousManager = RendezvousManager(profileDir: profileDir);
-    _rendezvousManager!.init(
-      ownFoundingSk: identity.ed25519SecretKey,
-      ownUserIdHex: identity.userIdHex,
-      // §4.11.7: device-scoped rendezvous MUST use the daemon-global
-      // deviceNodeId, not the userId. identity.nodeId is a legacy alias
-      // for userId and must not be used for routing/device tags.
-      deviceId: identity.deviceNodeId,
-      contacts: _buildRendezvousContacts(),
-      addressProvider: () => node.currentSelfAddresses()
-          .map((a) => RendezvousAddress(a.ip, a.port))
-          .toList(),
-    );
-    // Primary identity's manager is used for Tier 3b contact-resolve in the
-    // discovery cascade. All managers publish independently.
-    node.rendezvousManager ??= _rendezvousManager;
+    // ── RENDEZVOUS: BOTH FALLEN ────────────────────────────────────
+    //
+    // Here `_initRendezvous()` built two managers. The general
+    // `RendezvousManager` (§4.11) fell in S362, the first contact rendezvous
+    // (§4.11.10) in S388 — justification at the field block above (V4.2 §11.9: the
+    // relay network only carries the fourth neighbour source any more, and that lies in
+    // mycelium).
 
-    // §4.11.10 First-Contact Rendezvous: URI-scoped Nostr rendezvous for the
-    // very first CR over asynchronous ContactSeed-URIs (clipboard/e-mail).
-    // Sessions are persisted in the profileDir and resumed in
-    // _onPostDiscoveryRetrieve (network is up by then).
-    _fcRendezvous = FirstContactRendezvousManager(profileDir: profileDir);
-    _fcRendezvous!.init(
-      deviceId: identity.deviceNodeId,
-      addressProvider: () => node.currentSelfAddresses()
-          .map((a) => RendezvousAddress(a.ip, a.port))
-          .toList(),
-    );
-    _fcRendezvous!.onEndpointResolved = _onFcEndpointResolved;
-
-    // §19.6 Censorship-Resistant Distribution: in-network binary updates.
-    // Node-wide subsystem (fragment store on disk, one embedded HTTP server
-    // on the shared transport, one Nostr rendezvous manager) — only the
-    // first identity's service on this daemon wires it up, mirroring the
-    // node.rendezvousManager ??= _rendezvousManager first-wins pattern above.
-    if (node.binaryRendezvousManager == null) {
-      await InstallSourceDetector.detect();
-
-      _binaryFragmentStore = BinaryFragmentStore(profileDir);
-      await _binaryFragmentStore!.init();
-
-      _binaryUpdateManager = BinaryUpdateManager(
-        store: _binaryFragmentStore!,
-        checker: UpdateChecker(log: _log),
-        profileDir: profileDir,
-      );
-      _deltaUpdateManager = DeltaUpdateManager(
-        store: _binaryFragmentStore!,
-        log: _log,
-      );
-      _inviteLinkService = InviteLinkService(profileDir: profileDir);
-      _physicalTransferHelper = PhysicalTransferHelper(
-        store: _binaryFragmentStore!,
-        profileDir: profileDir,
-      );
-      _binarySeeder = BinarySeeder(store: _binaryFragmentStore!, profileDir: profileDir);
-      _binaryFetchClient = BinaryFetchClient(profileDir: profileDir);
-      // Once a download is verified and ready, this device becomes a
-      // legitimate distribution source — (re)publish availability so
-      // other cold-starting nodes can find it.
-      _binaryUpdateManager!.onUpdateReady = (version, path) {
-        node.binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
-      };
-      _binaryUpdateManager!.onStateChanged = (state, progress) {
-        onUpdateStateChanged?.call(state, progress);
-      };
-
-      _binaryHttpServer = BinaryHttpServer(profileDir: profileDir);
-      _binaryHttpServer!.bootstrapWebApp = Uint8List.fromList(
-          utf8.encode(BootstrapWebApp.html(
-              maintainerPublicKeyHex: UpdateChecker.maintainerPublicKeyHex)));
-      _binaryHttpServer!.binaryProvider = (platform) {
-        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
-        if (versions.isEmpty) return null;
-        return _binaryFragmentStore!.getCompletePath(platform, versions.last);
-      };
-      _binaryHttpServer!.fragmentProvider = (platform, index) {
-        final versions = _binaryFragmentStore!.storedVersionsSync(platform);
-        if (versions.isEmpty) return null;
-        return _binaryFragmentStore!.getFragmentSync(platform, versions.last, index);
-      };
-      node.transport.httpServer = _binaryHttpServer;
-
-      _binaryRendezvousManager = BinaryRendezvousManager(profileDir: profileDir);
-      _binaryRendezvousManager!.init(
-        networkSecret: NetworkSecret.secret,
-        previousNetworkSecret: NetworkSecret.previousSecret,
-        deviceId: identity.deviceNodeId,
-        addressProvider: () => node.currentSelfAddresses()
-            .map((a) => RendezvousAddress(a.ip, a.port))
-            .toList(),
-      );
-      node.binaryRendezvousManager = _binaryRendezvousManager;
-      node.binaryRecordProvider = _buildBinaryAvailabilityRecords;
-
-      // §19.6.4: serve platforms this node does not run, on demand. Always
-      // active and hard-bounded inside the acquirer — one acquisition at a
-      // time, one foreign binary stored, 24h TTL eviction.
-      _foreignBinaryAcquirer = ForeignBinaryAcquirer(
-        store: _binaryFragmentStore!,
-        fetchClient: _binaryFetchClient!,
-        rendezvous: () => _binaryRendezvousManager,
-        profileDir: profileDir,
-      );
-      _binaryHttpServer!.onForeignBinaryRequested = (platform) {
-        if (platform == Platform.operatingSystem) return;
-        _foreignBinaryAcquirer!.requestAcquire(platform, _latestManifest);
-      };
-      _binaryHttpServer!.foreignStatusProvider = (platform) =>
-          _foreignBinaryAcquirer!.statusFor(platform).toJson();
-
-      // Arbeitsregel #5 (kein unnötiger Netzwerkverkehr): only start the
-      // periodic Nostr republish if this device already holds binary/
-      // fragment data worth advertising. Devices with an empty store stay
-      // silent until BinaryUpdateManager.onUpdateReady flips the flag above.
-      node.binaryHasContentToShare = ['android', 'linux', 'windows', 'macos', 'ios']
-              .any((p) => _binaryFragmentStore!.storedVersionsSync(p).isNotEmpty);
-      if (node.binaryHasContentToShare) {
-        _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager!.publishAll(_buildBinaryAvailabilityRecords());
-      }
-
-      // Self-seed: encode the running binary into RS fragments so this node
-      // can serve updates (§19.6.2). Fire-and-forget: the Isolate-based
-      // RS encoding of the ~90 MB binary must not block conversation loading
-      // and DHT bootstrap. The seed sets binaryHasContentToShare + starts
-      // rendezvous publishing on completion (line 10606-10608).
-      if (InstallSourceDetector.cached != InstallSource.playStore) {
-        unawaited(_selfSeedCurrentBinary());
-      }
-
-      _selfPublishManifest();
-      // F2: delayed push — _selfPublishManifest above runs before UDP is
-      // listening (0 peers in k-bucket). Re-push once at T+90s when routing
-      // has converged. Only pushes when manifest is newer than running version
-      // to avoid unnecessary traffic on nodes already up-to-date.
-      Timer(const Duration(seconds: 90), () {
-        final m = _latestManifest;
-        if (m != null &&
-            UpdateChecker(log: _log).isNewer(m.version, kCurrentAppVersion)) {
-          final json = jsonEncode(m.toJson());
-          _pushManifestToPeers(Uint8List.fromList(utf8.encode(json)));
-        }
-      });
-
-      // §19.6 fragment GC — prune old/excess fragment data once per hour,
-      // and once immediately at startup to clean up stale data from
-      // previous runs.
-      _runBinaryFragmentGc();
-      _binaryGcTimer = Timer.periodic(const Duration(hours: 1), (_) {
-        _runBinaryFragmentGc();
-      });
-    }
+    await _initInNetworkUpdate();
 
     // Identity registry DHT republish (P4-Publish): keep fragments alive
     // across DHT TTL (7d). Republish every 24h — low traffic, idempotent.
@@ -1096,17 +1505,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Load persisted message-ID dedup set (H12 replay-window fix).
     _loadProcessedMessageIds();
 
-    // §5.8: Load persisted outbox (messages that failed L3 placement when the
-    // sender had 0 connectivity). Flush is edge-triggered by onNetworkChanged —
-    // NOT by any startup timer.
-    _loadOutbox();
+    // §21.2: and the V4.1 outbox next to it. It is the only one that
+    // really brings something out; the drain hangs on the
+    // readiness edge (`flushV41Outbox`), NOT on this start.
+    // At start `readiness = searching` and `placeSecure` would return 0
+    // — a drain here would only use up attempts.
+    loadV41Outbox();
     _loadMailboxTransition();
     _loadPendingMembershipResends();
 
     // V3.1.44: Migrate self-entries from deviceNodeId to userIdHex in groups/channels/messages.
     // §26 Phase 2 temporarily stored deviceNodeId as member keys, but service-level
     // identification must use the stable userId (same across all devices).
-    _migrateDeviceNodeIdToUserId();
 
     // Clean up stale group/channel conversations
     final staleConvs = conversations.keys
@@ -1123,17 +1533,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     if (staleConvs.isNotEmpty) _saveConversations();
 
-    // #U1 fix: edge-triggered offline-message retrieval.
-    // S&F poll, DHT-fragment pull, and CR rebroadcast are all triggered by
-    // node.onDiscoveryComplete (fires once after §4.5 cascade + jitter).
-    // A second sweep 15s later catches peers that joined the routing table
-    // after Kademlia bootstrap. No periodic polling (Arbeitsregel #5).
-    final prevDiscoveryComplete = node.onDiscoveryComplete;
-    node.onDiscoveryComplete = () {
-      prevDiscoveryComplete?.call();
-      if (_disposed) return;
-      _onPostDiscoveryRetrieve();
-    };
+    // ── #U1 EDGE-TRIGGERED CATCH-UP: FALLEN (CUT) ──────────────
+    //
+    // `node.onDiscoveryComplete` -> `_onPostDiscoveryRetrieve()` caught up after
+    // the Kademlia bootstrap cascade on S&F messages, erasure fragments and
+    // pending first requests. All three subjects are gone with the
+    // V3 line; the harvest in V4.1 has its own tick and its
+    // own edge (`lib/core/tagline/` — readiness, partner choice,
+    // sampling), which does not hang on the service (T).
 
     // §26: TWIN_ANNOUNCE at startup so existing twins learn about this device.
     // 6 seconds lets the first peers come up first. Fire-and-forget; a no-op
@@ -1142,16 +1549,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     Timer(const Duration(seconds: 6), _sendTwinAnnounce);
 
     // Key rotation: check on startup and schedule daily check
+    //
+    // ── FIRST HARVEST, THEN ANNOUNCE (§4.5.4, S363) ─────────────────
+    //
+    // Here stood `if (identity.needsRotation()) _performKeyRotation();`
+    // — a circular that seals against the stored contact keys
+    // BEFORE a single harvest run has run. A device
+    // that comes up after days thus seals against exactly the copies
+    // it did not update during its absence, although the
+    // announcements of the other side lie at this moment with the responsible
+    // relay. Derivation and calculated price:
+    // `cold_start_rotation_gate.dart`.
+    //
+    // NO SECOND TICK (working rule 5): the harvest run reports
+    // via `reportHarvestRun` (called by `mycelium_seam.dart`/`hostStart`
+    // via `Host.start(onFirstCollection:)`; until S392 by `attachV41`,
+    // which no longer has a caller), and the fallback deadline rides along on the
+    // 30 s tick further below.
     identity.discardPreviousKeysIfExpired();
     if (identity.needsRotation()) {
-      _performKeyRotation();
+      _coldStartRotationsTor.defer(DateTime.now());
+      _log.info('Key rotation due, but DEFERRED until the first '
+          'harvest run (§4.5.4/S363: harvest first, then announce; '
+          'fallback period '
+          '${_coldStartRotationsTor.fallbackPeriod.inMinutes} min)');
+    } else {
+      _coldStartRotationsTor.withoutDeferralConsume();
     }
     _keyRotationTimer = Timer.periodic(const Duration(hours: 6), (_) {
       identity.discardPreviousKeysIfExpired();
+      // The gate is dead after the first pass; from then on the
+      // rotation runs immediately as before. If it is still armed, the
+      // due rotation already hangs in it anyway — a second call here
+      // would lead it past the gate.
+      if (!_coldStartRotationsTor.consumed) return;
       if (identity.needsRotation()) _performKeyRotation();
     });
 
-    // §26.6.2 Paket C: re-sends pending KEY_ROTATION_BROADCAST every 24h
+    // §26.6.2 package C: re-sends pending KEY_ROTATION_BROADCAST every 24h
     // until every contact either ACKs or expires (default 90d / 3 attempts).
     // Fire once on startup so a long-offline sender resumes retries at boot.
     _retryPendingKeyRotations();
@@ -1159,8 +1594,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         const Duration(hours: 24), (_) => _retryPendingKeyRotations());
 
     // Message expiry: check every 30 seconds for expired messages
+    // E-7: the lockout transition rides along on THIS tick instead of opening
+    // its own timer (working rule #5). Once immediately, so that a
+    // restart within the deadline does not close the expired lockout only 30 s
+    // later — and so that the loaded set is held against the clock
+    // at least once.
+    _sweepLockouts();
+    // §14.4 transition window on THE SAME tick — no second rhythm
+    // (working rule #5). Once immediately, so that a restart does not close an
+    // expired old line only 30 s later.
+    _sweepRotationWindows();
+    // And the still open old lines back into the harvest register: they
+    // live on the disk, the pair register does not. Without this line
+    // a restart within the window would only harvest the new line —
+    // and the messages of contacts not yet switched over would lie
+    // unreachable at the relay.
+    _registerOldLines();
     _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _checkMessageExpiry();
+      _sweepLockouts();
+      _sweepRotationWindows();
+      // §4.5.4/S363 on THE SAME tick — no second rhythm
+      // (working rule 5). Costs nothing as long as the gate is not armed.
+      _checkRotationsTorDeadline();
       _processedMsgIdsSaveCounter++;
       if (_processedMsgIdsSaveCounter >= 2) {
         _processedMsgIdsSaveCounter = 0;
@@ -1168,10 +1624,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     });
 
-    // Channel index gossip + moderation timers (delegated to sub-service)
-    // §9.5.7: system-channel record digests piggyback on the same slot.
-    _moderation.onGossipTargets = sendSysChanDigests;
-    _moderation.startChannelIndexGossip(const Duration(minutes: 5));
+    // ── CHANNEL INDEX GOSSIP: FALLEN, AND THAT IS A GAIN ───────────
+    //
+    // Here stood `_moderation.startChannelIndexGossip(5 min)` with
+    // `onGossipTargets = sendSysChanDigests` as passenger (§9.5.7). The
+    // carrier (`sendSysChanDigests`, `_sysChanPickReachablePeers`) lay in
+    // `cleona_service_v3_syschan.dart` and fell along.
+    //
+    // MEASURED (S356/S357): this loop produced **3.17 GB/day with
+    // useful share ZERO** — it did not converge, because every pass
+    // offered the same summaries again. It does NOT come back in this form;
+    // §16.0 carries the same germ and is noted with the
+    // owner.
+    //
+    // CONSEQUENCE, expressly named instead of concealed (gap G-2): the
+    // two system channels (bug log, feature requests, §9.5) thus have
+    // no distribution any more. Locally written reports stay local.
     _channelIndex.prune();
     _moderation.startModerationTimer();
 
@@ -1183,358 +1651,93 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _delegationRenewalTimer = Timer.periodic(
         const Duration(hours: 1), (_) => _checkDelegationRenewal());
 
-    // Stats wiring lives on CleonaNode now (single shared collector across
-    // all identities). #U5: previous per-Service `??=` only let the first
-    // service to start win the transport callbacks; all later services saw
-    // 0 receive bytes.
+    // Stats wiring: **HISTORIC.** Here it said "lives on CleonaNode now
+    // (single shared collector across all identities)". `CleonaNode` was
+    // deleted with the CUT of 2026-08-31. The collector
+    // (`NetworkStatsCollector`, `lib/core/stats/network_stats.dart:378`)
+    // has been wired at the composition point since S357 — `service_daemon.dart`
+    // and `main.dart` pass the bare byte callbacks into
+    // `V41Node.start` (`tagline/v41_node.dart:601-605`). The reason stays
+    // the same: #U5, the former per-service `??=` let only the first
+    // started service win the callbacks; all later ones saw
+    // 0 received bytes.
 
-    // RUDP Light: downgrade message status on ACK timeout.
-    final prevAckTimeout = node.ackTracker.onAckTimeout;
-    node.ackTracker.onAckTimeout = (msgId, recipientHex) {
-      prevAckTimeout?.call(msgId, recipientHex);
-      if (_disposed) return;
-      _handleAckTimeout(msgId, recipientHex);
-    };
-    // FRAGMENT_STORE_ACK observation (proactive-push retry-cancel +
-    // Erasure-F1 placement ACKs) is wired via the InfraFrame dispatcher →
-    // handleIncomingFragmentStoreAckInfra (S123 Erasure-F1); the previous
-    // CleonaNode.onFragmentStoreAck hook was dead code (never invoked,
-    // since the DhtRpc bridge swallowed the frame before it could fire).
-
-    // §5.1 L1 direct retry on first AckTracker timeout (transient loss).
-    final prevRetryNeeded = node.onMessageRetryNeeded;
-    node.onMessageRetryNeeded = (msgId, packet, recipient) {
-      prevRetryNeeded?.call(msgId, packet, recipient);
-      if (_disposed) return;
-      _handleRetryNeeded(msgId, packet, recipient);
-    };
-    // §5.1 Layer 3: offline cascade when all DV routes are exhausted.
-    final prevRetryExhausted = node.onMessageRetryExhausted;
-    node.onMessageRetryExhausted = (msgId, packet, recipient) {
-      prevRetryExhausted?.call(msgId, packet, recipient);
-      if (_disposed) return;
-      _handleRetryExhausted(msgId, packet, recipient);
-    };
-
-    // §4.11.11 / §5.1: contact-endpoint-confirmed is the third outbox edge
-    // (besides onNetworkChanged and first-peer-confirmed). A rendezvous-
-    // resolved contact device just answered — parked messages toward it can
-    // now complete the cascade. Chained (multi-identity: one node, N
-    // services — every service must flush its own outbox).
-    final prevEndpointConfirmed = node.onContactEndpointConfirmed;
-    node.onContactEndpointConfirmed = (contactUserIdHex) {
-      prevEndpointConfirmed?.call(contactUserIdHex);
-      if (_disposed) return;
-      unawaited(_flushOutbox(trigger: 'contact-endpoint-confirmed'));
-      // §5.1 — dieselbe Kante fuer die First-CR: sie liegt nicht in der Outbox
-      // und haengt allein am zeitgesteuerten Retry.
-      shortenCrBackoffOnEdge('contact-endpoint-confirmed');
-    };
-
-    // §5.4 V3.1.138: when a peer transitions to confirmed, re-arm proactive
-    // push (replicator side) and poll for own fragments (receiver side).
-    final prevPeerNewlyConfirmed = node.onPeerNewlyConfirmed;
-    node.onPeerNewlyConfirmed = (deviceHex) {
-      prevPeerNewlyConfirmed?.call(deviceHex);
-      if (_disposed) return;
-      _onPeerNewlyConfirmed(deviceHex);
-    };
-
-    // §5.10.2: re-trigger S&F push + fragment push when a DeviceKemRecord
-    // is newly acquired — prior sends dropped at _buildInfraPacket for a
-    // missing record are now retryable.
-    final prevKemReceived = node.onDeviceKemRecordReceived;
-    node.onDeviceKemRecordReceived = (deviceHex) {
-      prevKemReceived?.call(deviceHex);
-      if (_disposed) return;
-      _pushStoredMessagesTo(deviceHex);
-      _rearmExpiredPushes();
-    };
-
-    // Track end-to-end reachability per contact (used to stop CR-Response retry).
-    // AckTracker callback provides the deviceNodeId of the recipient (Phase 2
-    // routing). Contacts are keyed by userId with deviceNodeIds as aliases —
-    // resolve deviceNodeId → userId so the retry loop (which iterates userId
-    // keys) finds the ACK.
+    // ── FOUR CHAINED NODE CALLBACKS: FALLEN (CUT) ──────────────
     //
-    // §3.4: cleona_node has already wired its DV-bridge handler in start().
-    // Preserve it and chain — both layers need the same event but for
-    // different state (DV-routing vs. contact reachability).
-    final prevAckReceived = node.ackTracker.onAckReceived;
-    node.ackTracker.onAckReceived = (msgIdHex, recipientHex, wasDirect) {
-      prevAckReceived?.call(msgIdHex, recipientHex, wasDirect);
-      if (_disposed) return;
-
-      final now = DateTime.now();
-      _staleWarningWrittenFor.remove(recipientHex);
-      for (final entry in _contacts.entries) {
-        if (entry.key == recipientHex ||
-            entry.value.deviceNodeIds.contains(recipientHex)) {
-          entry.value.lastAckedAt = now;
-          _staleWarningWrittenFor.remove(entry.key);
-          _fcRendezvous?.onCrConfirmed(entry.key);
-          return;
-        }
-      }
-      _fcRendezvous?.onCrConfirmed(recipientHex);
-    };
-
-    // Contact device resolution for onRouteDown userId→device fallback
-    // and PEER_LIST_WANT IPv6 refresh.
-    node.resolveContactDeviceIds = getContactDeviceIds;
-
-    // D1 (§4.3 Trust anchor): Contact-Pubkey-Lookup fuer den Contact-Match/
-    // Continuity-Pfad des Resolvers. Multi-Identity: Services teilen einen
-    // Node — chainen statt ueberschreiben, damit Kontakte aller gehosteten
-    // Identitaeten gefunden werden (Pattern wie onAckReceived oben).
-    final prevContactPkLookup = node.identityResolver.contactEd25519PkLookup;
-    node.identityResolver.contactEd25519PkLookup = (userId) {
-      // Kein `return null` bei _disposed — sonst verliert die Kette die
-      // Kontakte aller noch lebenden Identitaeten.
-      if (_disposed) return prevContactPkLookup?.call(userId);
-      final pk = _contacts[bytesToHex(userId)]?.ed25519Pk;
-      if (pk != null && pk.isNotEmpty) return pk;
-      return prevContactPkLookup?.call(userId);
-    };
-    // D1 Self-Heal: ebenfalls chainen statt `??=`. Mit `??=` gewann bei
-    // Multi-Identity nur der zuerst startende Service den Slot — alle
-    // weiteren Identitaeten haetten nie einen Self-Heal-Pfad bekommen.
-    // Ein blosser _disposed-Guard ohne Kette waere schlimmer: beim Entfernen
-    // der Gewinner-Identitaet waere der Self-Heal fuer ALLE still tot,
-    // statt den Slot freizugeben. Deshalb prev-call VOR dem Guard.
-    final prevKeyMismatch = node.identityResolver.onContactKeyMismatch;
-    node.identityResolver.onContactKeyMismatch = (userId, embeddedPk, manifest) {
-      prevKeyMismatch?.call(userId, embeddedPk, manifest);
-      if (_disposed) return;
-
-      final userHex = bytesToHex(userId);
-      final contact = _contacts[userHex];
-      if (contact == null) return;
-
-      // A3 (2026-07-27): (a) Das Manifest muss zum ANGEFRAGTEN Kontakt
-      // gehoeren. Der Resolver prueft das seit A2 selbst, hier bleibt es
-      // als zweite Schranke stehen — dieser Callback ist oeffentlich
-      // gesetzt und darf sich nicht darauf verlassen, dass jeder Aufrufer
-      // die Bindung schon geprueft hat.
-      if (!constantTimeEquals(Uint8List.fromList(manifest.userId), userId)) {
-        _log.warn('D1 self-heal abgelehnt: AuthManifest gehoert zu '
-            '${manifest.userId.hex} — Lookup war '
-            'fuer ${userHex.substring(0, 16)} (§4.3 record binding)');
-        return;
-      }
-
-      // (b) Anker-Pruefung OHNE Kontakt-Pk — bewusst. §4.3 (Zeile 1487)
-      // definiert drei gleichwertige Bindungspfade (Founding-Key-Hash,
-      // Rotationskette, Contact-Match); greift EINER, wird der gespeicherte
-      // Key automatisch nachgezogen. Genau das deckt den dokumentierten
-      // Fall "veralteter Kontakt-Key nach delete+re-add" ab, der ohne
-      // Rotationskette auskommt und nur ueber den Founding-Hash bindet.
-      //
-      // Ein Kontakt-Pk hier wuerde `contactMismatch` zum harten Veto machen
-      // (auth_manifest.dart:245-249) und diesen Pfad unerreichbar machen:
-      // der Resolver hat bereits mit dem Kontakt-Pk geprueft, sonst waere
-      // dieser Callback gar nicht gelaufen.
-      //
-      // Sicher ist das seit A2: der Resolver verwirft Antworten, die nicht
-      // zur angefragten userId gehoeren, und (a) oben ist die zweite
-      // Schranke. Ein FREMDES Manifest erreicht diesen Punkt nicht mehr —
-      // und fuer ein Manifest, das nachweislich zu dieser userId gehoert,
-      // ist die Founding-Hash-Bindung ein legitimer Anker.
-      final status = manifest.verifySelfCertified(
-        deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.identitySecret),
-        contactEd25519Pk: null,
-      );
-
-      if (status != AnchorStatus.verified) {
-        _log.warn('D1 trust anchor: contact ${userHex.substring(0, 8)} key mismatch '
-            '(status=$status) — Record verworfen (§4.3 contact continuity)');
-        return;
-      }
-
-      // (c) Idempotent: identischer Key → nichts tun (kein _saveContacts,
-      // kein §8.3-Downgrade bei jedem wiederholten Lookup).
-      final storedPk = contact.ed25519Pk;
-      if (storedPk != null && constantTimeEquals(storedPk, embeddedPk)) {
-        return;
-      }
-
-      // Das Hybrid-Paar wird GEMEINSAM uebernommen — Ed25519 und ML-DSA
-      // duerfen nie auseinanderlaufen. Der alte Code schrieb nur ed25519Pk;
-      // der Datensatz war danach hybrid-inkonsistent und konnte selbst bei
-      // legitimer Rotation nie wieder verifizieren (v3_frame_codec verlangt
-      // beide). x25519Pk/mlKemPk stehen nicht im AuthManifest und bleiben
-      // unangetastet — die Device-KEM-Keys liefert der DeviceKemRecord-Pfad
-      // (§4.3 4b).
-      //
-      // KEIN §8.3-Downgrade: §4.3 stuft den gebundenen Nachzug ausdruecklich
-      // als automatische lokale Reparatur ein. Die Key-Change-Detection
-      // gehoert an den Ablehnungspfad (kein Bindungspfad greift), nicht an
-      // den Erfolgsfall. Der Vorgang ist ueber die Logzeile nachvollziehbar,
-      // seit der Resolver-Logger einen profileDir hat.
-      final oldPkHex = storedPk != null
-          ? bytesToHex(storedPk).substring(0, 16) : '<null>';
-      if (!_setContactTrustAnchor(
-          contact,
-          userHex,
-          Uint8List.fromList(embeddedPk),
-          Uint8List.fromList(manifest.userMlDsaPk),
-          source: 'D1 self-heal')) {
-        return;
-      }
-      _saveContacts();
-      _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
-          '$oldPkHex… replaced with AuthManifest key '
-          '${bytesToHex(embeddedPk).substring(0, 16)}… (§4.3 bound path)');
-      onStateChanged?.call();
-    };
-
-    // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't
-    // reset uptime every time a second/third identity comes up.
-    await notificationSound.init(identity.profileDir);
-
-    // §2.2.4: 2D-DHT Identity Publisher pro Identität. The publisher needs
-    // access to the local IdentityDhtHandler so it can self-store every
-    // record it publishes — without that self-store, a 2-node setup stalls
-    // because the publisher itself ranks among the k-closest replicators
-    // for its own dht-keys (and Kademlia retrieve probes us first), but we
-    // would have nothing to answer with.
-    _identityPublisher = IdentityPublisher(
-      identity: identity,
-      routingTable: node.routingTable,
-      sender: _IdentityPublisherSender(node),
-      dhtHandler: node.identityDhtHandler,
-      // D4 (§4.3 Publisher self-verify): post-publish self-lookup channel.
-      dhtRpc: node.dhtRpc,
-    );
-    // D4 observability: feed the idSelfVerifyOk/Miss network-stats counters.
-    _identityPublisher!.onSelfVerifyResult =
-        (ok) => node.statsCollector.recordIdSelfVerify(ok);
-    _identityPublisher!.setForeground(_isAppResumed);
-    _identityPublisher!.setAddressProvider(() => node.currentSelfAddresses());
-    // Welle 5 (§3.5b + §4.3): publisher braucht die Device-KEM-Pubkeys, um
-    // den DeviceKemRecord zu signen und ueber `kem-key = SHA-256("kem" ||
-    // userId || deviceId)` ins 2D-DHT zu replizieren. Quelle ist das
-    // node-eigene Device-KEM-Keypair (locally generated, NICHT seed-derived
-    // per §3.6 #5).
-    _identityPublisher!.setDeviceKemPkProvider(() => (
-          x25519Pk: node.deviceKem.x25519PublicKey,
-          mlKemPk: node.deviceKem.mlKemPublicKey,
-        ));
-    // §7.5: Device-Sig-Pubkeys fuer Co-Authorization im AuthManifest.
-    _identityPublisher!.setDeviceSigPkProvider(() => (
-          ed25519Pk: node.deviceKeyPair.ed25519PublicKey,
-          mlDsaPk: node.deviceKeyPair.mlDsaPublicKey,
-        ));
-    // §7.5: the device-set change proof for the manifest being signed right
-    // now. Installed once and consulted on every Auth publish; it answers
-    // `null` unless a device removal is currently holding countersignatures
-    // that describe exactly this manifest.
+    // `_wireDeliveryRetryCallbacks()` hooked onto four callbacks of the
+    // node: `ackTracker.onAckTimeout`, `onMessageRetryNeeded`,
+    // `onMessageRetryExhausted` and the outbox edge. `AckTracker` fell
+    // with `lib/core/network/`, and with it the whole
+    // RUDP-light resubmission. In V4.1 the storage signal acknowledges
+    // (`PlacementAck` -> `V41Delivery.bindPlacementAcked`), not a
+    // timer at the transport.
     //
-    // FAIL-CLOSED, IN THREE PLACES. A fabricated proof is strictly worse than
-    // no proof: the receiver would read `quorumMet` and stop reporting the
-    // shrink, so the theft signal §7.5 exists for would be silenced
-    // permanently rather than raised once. Hence null when (1) no removal is
-    // pending, (2) the hash does not describe this manifest — device list or
-    // seq drifted — or (3) fewer devices consented than the quorum demands.
-    // The publisher re-derives the hash a second time in
-    // `_resolveDeviceSetChangeProof`; both checks must pass.
-    _identityPublisher!.deviceSetChangeProofProvider = (deviceNodeIds, seq) {
-      final pending = _pendingDeviceSetChange;
-      if (pending == null) return null;
-      final hash = computeDeviceSetChangeHash(
-        userId: identity.userId,
-        newDeviceNodeIds: deviceNodeIds,
-        newSeq: seq,
-      );
-      if (bytesToHex(hash) != pending.changeHashHex) {
-        _log.warn('§7.5: no device-set change proof for this manifest — the '
-            'collected countersignatures cover a different '
-            '(device list, seq) than the one being signed (seq=$seq, '
-            '${deviceNodeIds.length} device(s)). Publishing without proof.');
-        return null;
-      }
-      if (pending.approvers.length < pending.requiredApprovers) {
-        _log.warn('§7.5: device-set change publishes WITHOUT proof — '
-            '${pending.approvers.length}/${pending.requiredApprovers} '
-            'device(s) consented. No proof is fabricated; contacts will see '
-            'the shrink and raise the §7.5 warning.');
-        return null;
-      }
-      _log.info('§7.5: attaching device-set change proof — '
-          '${pending.approvers.length}/${pending.requiredApprovers} '
-          'countersignature(s), seq=$seq');
-      return DeviceSetChangeProof(
-        previousDeviceCount: pending.previousDeviceCount,
-        changeHash: hash,
-        approvals: List<RotationApprovalToken>.from(pending.tokens),
-      );
-    };
-    // §7 (Einleitung): seed the publisher with the persisted device set BEFORE
-    // start() so the very first manifest already lists every authorised device
-    // instead of only this one. `_devices` was loaded from disk in
-    // `_initLocalDevice()`, so a restart restores the full set here.
-    _syncAuthorizedDevicesToPublisher();
-    // §7.5: detect device-set shrink without co-auth proof in incoming manifests.
-    node.identityDhtHandler.onDeviceSetShrinkWithoutProof =
-        (userId, oldCount, newCount) {
-      final userHex = bytesToHex(userId);
-      final contact = _contacts[userHex];
-      if (contact == null) return;
-      _log.warn('§7.5 Device-set shrink for ${contact.displayName}: '
-          '$oldCount→$newCount without valid proof');
-      // The number shown to the user must be the number that was actually
-      // demanded, and for a shrink that is the quorum over the REMAINING
-      // devices (`deviceSetChangeQuorum`), not over the pre-shrink set.
-      // `rotationQuorum(oldCount)` reported a target the sender was never
-      // asked to reach — e.g. "0/2" for a 2→1 shrink whose real target is 1.
-      onRotationCoAuthWarning?.call(
-          userHex, contact.displayName, 0, deviceSetChangeQuorum(newCount));
-    };
-    // Wake parked cold-start retry as soon as new peers join the routing table.
-    // Without this hook the publisher only ever re-checks every 60s after
-    // initial timeout — meaning a daemon that started before any peer was
-    // known (Bootstrap-Restart, Cold-Start) would not republish until the
-    // 20h auth-refresh tick.
-    void onPeerAdded(PeerInfo peer) {
-      _identityPublisher?.onPeerJoined();
-      // Architecture §3.5 (V3.1.75): no re-push on reachability events. The
-      // 3-attempt push budget per (fragment, owner) is consumed in one
-      // contiguous retry window starting at the initial store-with-known-owner
-      // trigger. Recovery for owners that come online later happens via the
-      // owner's FRAGMENT_RETRIEVE startup poll (§3.3.6), not via sender-side
-      // re-pushes.
+    // `_wireDeviceKemRetrigger()` likewise stood here (§5.10.2): a newly
+    // arrived `DeviceKemRecord` triggered S&F and fragment pushes
+    // again. Neither push exists any more.
+    //
+    // `node.ackTracker.onAckReceived` moreover maintained
+    // `contact.lastAckedAt` and reported a confirmed request to the first contact
+    // rendezvous. THIS BOOKKEEPING SURVIVES — it has always
+    // also hung on the receive path (`handleApplicationFrame` sets
+    // `lastAckedAt` on every verified frame) and does not need the
+    // transport callback.
+    //
+    // `node.resolveContactDeviceIds = getContactDeviceIds` served the
+    // userId->device fallback on route failure and the IPv6 refresh
+    // of the peer list — both V3 routing (T).
 
-      // §8.1.1: retry pending CRs when a new peer appears — the CR target
-      // may now be reachable. Backoff gates inside the method prevent flooding.
-      if (_contacts.values.any((c) => c.status == 'pending_outgoing')) {
-        _retryPendingContactRequests();
-      }
-    }
-    node.routingTable.addOnPeerAddedListener(onPeerAdded);
-    _publisherPeerAddedListener = onPeerAdded;
-    // Fire-and-forget: Publisher startet eigene cold-start-wait + scheduling
-    unawaited(_identityPublisher!.start());
+    _wireTrustAnchorLookup();
+
+    // Uptime clock. FORMERLY it ran on `node._startBase`, so that a
+    // multi-identity daemon did not reset it with every further identity.
+    // The collector now sits at the service (see
+    // [statsCollector]); every service has its own, so none can
+    // reset that of another.
+    statsCollector.markStarted();
+
+    // The own reachable addresses — V4.1 counterpart of
+    // `node.localIps` (`lib/core/tagline/local_addresses.dart`). Once
+    // at start; a network change rewrites them in [onNetworkChanged].
+    await _refreshLocalAddresses();
+
+    // S366: `store` along, otherwise the service would continue to write its setting
+    // to `notification_settings.json` — the last bare
+    // plaintext writer in the profile (in none of the S363 inventories).
+    await notificationSound.init(identity.profileDir, store: store);
+
+    _initIdentityPublisher();
 
     // Init voice transcription service (whisper.cpp)
-    // Load saved config from transcription_config.json (user may have changed language).
+    //
+    // S366: the chosen language, the retention period and the
+    // model size come from the area `transcription_config` of the
+    // storage, no longer from `transcription_config.json`. The reader MUST
+    // migrate along: if it stayed at the file, it would never find it again after the
+    // switch, silently fall back to `production()` —
+    // language `auto`, 30 days, `base` — and nobody would see that the
+    // user's choice no longer arrives at all.
     var vtConfig = VoiceTranscriptionConfig.production();
-    final vtConfigFile = File('$profileDir/transcription_config.json');
-    if (vtConfigFile.existsSync()) {
-      try {
-        final j = json.decode(vtConfigFile.readAsStringSync()) as Map<String, dynamic>;
+    try {
+      final vts = VoiceTranscriptionSettings.readFrom(store);
+      if (vts != null) {
         vtConfig = VoiceTranscriptionConfig(
-          defaultLanguage: j['defaultLanguage'] as String? ?? 'auto',
-          audioRetentionDays: j['audioRetentionDays'] as int? ?? 30,
-          modelSize: _parseModelSize(j['modelSize'] as String? ?? 'base'),
+          defaultLanguage: vts.defaultLanguage,
+          audioRetentionDays: vts.audioRetentionDays,
+          modelSize: _parseModelSize(vts.modelSize),
         );
         _log.info('Voice transcription config loaded: lang=${vtConfig.defaultLanguage}');
-      } catch (e) {
-        _log.warn('Failed to load transcription config: $e');
       }
+    } catch (e) {
+      _log.warn('Failed to load transcription config: $e');
     }
     _voiceTranscription = VoiceTranscriptionService(
       config: vtConfig,
       profileDir: profileDir,
+      // S366: the wording lies in the area `voice_transcriptions` of the
+      // storage, no longer in `voice_transcriptions.json.enc` — hence
+      // `store` instead of `fileEnc`.
+      store: store,
     );
     _voiceTranscription!.onTranscriptionComplete = _onLocalTranscriptionComplete;
     if (_platformAudioDecoder != null) {
@@ -1545,103 +1748,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Init media auto-archive manager (if configured)
     await _initArchive();
 
-    // Update checking: bootstrap _latestManifest from cache so the version
-    // guard in _checkForUpdates rejects stale DHT fragments on the very first
-    // poll (otherwise _latestManifest is null → any version passes).
-    try {
-      final cacheFile = File(
-          '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
-      if (cacheFile.existsSync()) {
-        final cached = UpdateChecker(log: _log)
-            .verifyManifest(cacheFile.readAsStringSync());
-        if (cached != null) _latestManifest = cached;
-      }
-    } catch (_) {}
-    // Startup scan: check mailbox store for manifest fragments that were
-    // stored but never processed (e.g. handler failed after store, crash,
-    // or duplicate-identical race). Process any that are newer than cache.
-    try {
-      final dhtKey = UpdateManifest.dhtKey();
-      final storedFrags = mailboxStore.retrieveFragments(dhtKey);
-      if (storedFrags.isNotEmpty) {
-        final checker = UpdateChecker(log: _log);
-        for (final frag in storedFrags) {
-          try {
-            final json = utf8.decode(frag.data);
-            final m = checker.verifyManifest(json);
-            if (m == null) continue;
-            if (_latestManifest == null ||
-                checker.isNewer(m.version, _latestManifest!.version)) {
-              _latestManifest = m;
-              try {
-                final cacheFile = File(
-                    '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
-                cacheFile.parent.createSync(recursive: true);
-                cacheFile.writeAsStringSync(json, flush: true);
-              } catch (_) {}
-              _log.info('[update] Startup scan: found stored manifest '
-                  'v${m.version} (promoted from mailbox store)');
-            }
-          } catch (_) {}
-        }
-      }
-    } catch (_) {}
-    // If the cached manifest is already newer than the running version,
-    // fire the notification directly after a short delay (UI is ready by
-    // then). This bypasses checkForUpdate() intentionally — the monotoneSeq
-    // anti-downgrade guard in checkForUpdate() correctly rejects the same
-    // manifest on restart (§19.6.2: "lower than or equal to"), which is the
-    // right behavior for first-time discovery but wrong for re-notification.
-    // Instead, we read the persisted inNetworkAvailable flag that was saved
-    // when the manifest was first successfully checked.
-    if (_latestManifest != null) {
-      final cachedManifest = _latestManifest!;
-      final checker = UpdateChecker(log: _log);
-      if (!checker.isNewer(cachedManifest.version, kCurrentAppVersion)) {
-        _saveInNetworkFlag(false);
-      } else {
-        Timer(const Duration(seconds: 5), () {
-          _log.info('[update] Cached manifest v${cachedManifest.version} '
-              'is newer than running v$kCurrentAppVersion — re-firing notification');
-          final hasDhtTag = cachedManifest.dhtBinaryTag
-                  ?.containsKey(Platform.operatingSystem) ??
-              false;
-          final hasBinHash = cachedManifest.binaryHashes
-                  ?.containsKey(Platform.operatingSystem) ??
-              false;
-          if (!hasDhtTag && !hasBinHash) {
-            _log.debug('[update] Suppressing cached-update notification: '
-                'no binary for ${Platform.operatingSystem}');
-          } else {
-            var inNetworkAvailable = _loadInNetworkFlag();
-            if (!inNetworkAvailable && (hasDhtTag || hasBinHash)) {
-              inNetworkAvailable =
-                  _binaryUpdateManager?.shouldUseInNetworkUpdate() ?? false;
-            }
-            onUpdateAvailable?.call(cachedManifest, inNetworkAvailable);
-          }
-        });
-      }
-    }
-    Timer(const Duration(seconds: 30), _checkForUpdates); // Initial check after 30s
-    Timer(const Duration(minutes: 5), _checkForUpdates); // F3: one retry for mobile
-    _updateCheckTimer = Timer.periodic(const Duration(hours: 6), (_) => _checkForUpdates());
+    _initUpdateChecking();
 
-    // §27.9 NAT-Troubleshooting-Wizard trigger (10-min hold, 1-min tick).
+    // Of the NAT wizard the SETTING remains, not the trigger: the
+    // `NatWizardTrigger` read `getNetworkStats()` and
+    // `statsCollector.uptime`, both without V4.1 counterpart. A
+    // "never show again" must nonetheless survive the restart, so
+    // the file continues to be read (justification in
+    // `cleona_service_pure.dart`).
     _loadNatWizardSettings();
-    _natWizardTrigger = NatWizardTrigger(
-      getSignals: () => NatWizardSignals(
-        stats: getNetworkStats(),
-        externalIpv4: publicIp,
-        dismissedUntilMs: _natWizardDismissedUntilMs,
-        uptimeSeconds: node.statsCollector.uptime.inSeconds,
-      ),
-      onTrigger: () {
-        _log.info('NAT-Wizard trigger fired (§27.9.1)');
-        onNatWizardTriggered?.call();
-      },
-    );
-    _natWizardTrigger!.start();
 
     _log.info('CleonaService started. User-ID: ${identity.userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${identity.deviceNodeIdHex.substring(0, 16)}...');
@@ -1650,13 +1765,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Initialize media auto-archive if configured.
   Future<void> _initArchive() async {
     try {
-      final configFile = File('$profileDir/archive_config.json');
-      if (!configFile.existsSync()) return;
-      final config = ArchiveConfig.fromJson(
-          json.decode(configFile.readAsStringSync()) as Map<String, dynamic>);
+      // S366: from the area `archive_config` of the storage instead of from
+      // `archive_config.json`. The same reason as with the transcription
+      // one screen page further up — a reader that stayed hanging on the
+      // file would silently leave out the archive after the switch.
+      final config = ArchiveConfig.readFrom(store);
+      if (config == null) return;
       if (!config.enabledByDefault || config.archiveHost.isEmpty) return;
 
-      final transport = ArchiveTransport.forProtocol(config.defaultProtocol);
+      final transport = ArchiveTransport.forProtocol(config.defaultProtocol,
+          profileDir: profileDir);
       await transport.connect(
         host: config.archiveHost,
         path: config.archivePath,
@@ -1669,8 +1787,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         config: config,
         transport: transport,
         profileDir: profileDir,
+        // S366: the archive index lies in the area `archive_entries` of the
+        // storage, no longer in `archive_entries.json`.
+        store: store,
       );
-      await _archiveManager!.startScheduler();
+      // S392 — **this is where the tick is wired to the conversations.**
+      // Up to here the scheduler called `runArchiveCheck()` without them;
+      // the loop that searches for archivable media was therefore skipped
+      // on EVERY tick. The archive only worked when the surface sent
+      // `archive_trigger_check`.
+      //
+      // `ensureAllLoaded()` belongs TO the source, not beside it: after
+      // start-up a conversation carries only its most recent message
+      // (§21.4.1, S366 stage B), and the archive run searches by AGE.
+      // Without the loading it would walk a one-line window per
+      // conversation and find practically nothing — silently, because "no
+      // archivable media" looks exactly like "nothing was loaded".
+      // `ipc_server.dart` does the same before its own `runArchiveCheck`;
+      // the guard `smoke_lazy_load_deckung` holds both call sites to it.
+      await _archiveManager!.startScheduler(
+        conversationSource: () {
+          ensureAllLoaded();
+          return conversations;
+        },
+      );
       _log.info('ArchiveManager started (${config.defaultProtocol.name}://${config.archiveHost})');
     } catch (e) {
       _log.warn('ArchiveManager init failed: $e');
@@ -1678,13 +1818,90 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// Legacy: Full start creating its own node. Used by daemon / in-process fallback.
-  Future<void> start() async {
-    await startService();
+  // ── Media archive: share identity and narrowing (§21.6, S394) ──────────
+  //
+  // One implementation for both surfaces: Android/iOS call it in-process,
+  // the desktop surface reaches it through `archive_status`,
+  // `archive_rebind_share`, `archive_capture_network` and
+  // `archive_clear_networks`. None of them carries the archive password.
+
+  /// The status map of [getArchiveShareStatus]; also the answer of the
+  /// IPC command `archive_status`.
+  Map<String, dynamic> archiveShareStatus() {
+    final mgr = _archiveManager;
+    ArchiveConfig? cfg = mgr?.config;
+    if (cfg == null) {
+      try {
+        cfg = ArchiveConfig.readFrom(store);
+      } catch (_) {}
+    }
+    final pin = cfg?.activeShareIdentity;
+    return {
+      'active': mgr != null,
+      'entriesCount': mgr?.entries.length ?? 0,
+      'pendingCount': mgr?.pendingEntries.length ?? 0,
+      'identityState': mgr?.shareIdentityState?.name,
+      'identityDetail': mgr?.shareIdentityDetail ?? '',
+      'identityPin': pin == null ? null : shortShareIdentity(pin),
+      'networks': [
+        for (final n in cfg?.allowedNetworks ?? const <ArchiveNetwork>[])
+          n.toJson(),
+      ],
+      'ssidSupported': ssidReadableHere,
+    };
   }
 
-  /// Legacy alias.
-  Future<void> startQuick() async {
+  @override
+  Future<Map<String, dynamic>?> getArchiveShareStatus() async =>
+      archiveShareStatus();
+
+  @override
+  Future<bool> rebindArchiveShare() async {
+    final mgr = _archiveManager;
+    if (mgr != null) {
+      mgr.rebindShareIdentity();
+      return true;
+    }
+    try {
+      final c = ArchiveConfig.readFrom(store);
+      if (c != null) c.withShareIdentity(null).writeTo(store);
+      ArchiveManager.forgetSftpHostKey(profileDir);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<Map<String, dynamic>?> captureArchiveNetwork() async {
+    final n = (await readCurrentNetwork()).capture();
+    if (n == null) return null;
+    final ok = _changeArchiveNetworks((l) => l.contains(n) ? l : [...l, n]);
+    return ok ? n.toJson() : null;
+  }
+
+  @override
+  Future<bool> clearArchiveNetworks() async =>
+      _changeArchiveNetworks((_) => const []);
+
+  bool _changeArchiveNetworks(
+      List<ArchiveNetwork> Function(List<ArchiveNetwork>) change) {
+    final mgr = _archiveManager;
+    if (mgr != null) {
+      mgr.setAllowedNetworks(change(mgr.config.allowedNetworks));
+      return true;
+    }
+    try {
+      final c = ArchiveConfig.readFrom(store) ?? ArchiveConfig.production();
+      c.withAllowedNetworks(change(c.allowedNetworks)).writeTo(store);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Legacy: Full start creating its own node. Used by daemon / in-process fallback.
+  Future<void> start() async {
     await startService();
   }
 
@@ -1704,473 +1921,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return DateTime.now().difference(ts).inSeconds < 5;
   }
 
-  /// RUDP Light: ACK timeout — downgrade message status from "sent" to "queued".
-  void _handleAckTimeout(String messageIdHex, String recipientUserIdHex) {
-    for (final conv in conversations.values) {
-      for (final msg in conv.messages) {
-        if (msg.id == messageIdHex && msg.isOutgoing &&
-            msg.status.canTransitionTo(MessageStatus.queued)) {
-          msg.status = MessageStatus.queued;
-          _log.info('ACK timeout for ${messageIdHex.substring(0, 8)} to '
-              '${recipientUserIdHex.substring(0, 8)} — status downgraded to queued');
-          onStateChanged?.call();
-          return;
-        }
-      }
-    }
-  }
-
-  /// Check for expired messages and delete them.
-  void _checkMessageExpiry() {
-    final now = DateTime.now().millisecondsSinceEpoch;
-    var changed = false;
-
-    for (final conv in conversations.values) {
-      final expiryMs = conv.config.expiryDurationMs;
-      if (expiryMs == null || expiryMs <= 0) continue;
-
-      for (final msg in conv.messages) {
-        if (msg.isDeleted) continue;
-        if (msg.readAt == null) continue;
-        final elapsed = now - msg.readAt!.millisecondsSinceEpoch;
-        if (elapsed >= expiryMs) {
-          msg.text = '';
-          msg.isDeleted = true;
-          changed = true;
-          _log.debug('Message ${msg.id.substring(0, 8)} expired after ${elapsed}ms');
-        }
-      }
-    }
-
-    if (changed) {
-      _saveConversations();
-      onStateChanged?.call();
-    }
-
-    // Prune service-level cooldown maps to prevent unbounded growth.
-    final nowDt = DateTime.now();
-    _lastNotifiedAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 1);
-    _lastCrRetryPerContact.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
-    _crEdgeShortenAt.removeWhere((_, ts) => nowDt.difference(ts).inHours > 2);
-    _peerStoreRateLog.removeWhere((_, log) => log.isEmpty ||
-        log.every((ts) => nowDt.difference(ts).inHours > 1));
-    _resyncRequestedAtEpoch.removeWhere((_, epoch) => epoch > 0 &&
-        nowDt.millisecondsSinceEpoch ~/ 1000 - epoch > 86400);
-  }
-
-  /// FRAGMENT_STORE handler (Architecture §5.4 + §23.3 InfraFrame). Stores
-  /// the fragment in the local mailbox; if storage succeeds, sends a
-  /// FRAGMENT_STORE_ACK back to the sender's device. If the fragment
-  /// targets our own mailbox, triggers reassembly; otherwise, if we know
-  /// the mailbox owner, kicks off a proactive push (§3.5).
-  void _handleFragmentStore(Uint8List payload, Uint8List senderDeviceId) {
-    // D3 Phase 2 (§13.1.2): reject fragment stores from non-admitted senders
-    // (unless the sender is a local identity — self-store for own mailbox).
-    if (senderDeviceId.isNotEmpty &&
-        !node.routingTable.isLocalNode(senderDeviceId)) {
-      final senderPeer = node.routingTable.getPeer(senderDeviceId);
-      if (senderPeer != null &&
-          !senderPeer.idPowVerified &&
-          !senderPeer.isProtectedSeed) {
-        _log.debug('D3: FRAGMENT_STORE from non-admitted '
-            '${bytesToHex(senderDeviceId).substring(0, 8)} — rejected');
-        return;
-      }
-    }
-    try {
-      final frag = proto.FragmentStore.fromBuffer(payload);
-      final storeResult = mailboxStore.storeFragment(StoredFragment(
-        mailboxId: Uint8List.fromList(frag.mailboxId),
-        messageId: Uint8List.fromList(frag.messageId),
-        fragmentIndex: frag.fragmentIndex,
-        totalFragments: frag.totalFragments,
-        requiredFragments: frag.requiredFragments,
-        data: Uint8List.fromList(frag.fragmentData),
-        originalSize: frag.originalSize,
-      ));
-
-      // ACK only on actual acceptance (stored or identical duplicate)
-      if (storeResult != FragmentStoreResult.rejected) {
-        final ackPayload = (proto.FragmentStoreAck()
-              ..messageId = frag.messageId
-              ..fragmentIndex = frag.fragmentIndex)
-            .writeToBuffer();
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK,
-          innerPayload: Uint8List.fromList(ackPayload),
-          recipientDeviceId: senderDeviceId,
-        );
-      }
-
-      final mailboxId = Uint8List.fromList(frag.mailboxId);
-      if (_isOurMailbox(mailboxId)) {
-        _tryReassemble(Uint8List.fromList(frag.messageId));
-      } else {
-        if (constantTimeEquals(mailboxId, UpdateManifest.dhtKey())) {
-          _handleIncomingManifestFragment(frag);
-        }
-        if (storeResult == FragmentStoreResult.stored) {
-          _proactivePush(frag, mailboxId);
-        }
-      }
-    } catch (e) {
-      _log.debug('Fragment store error: $e');
-    }
-  }
-
-  /// Immediately verify a pushed manifest fragment instead of waiting
-  /// for the next 6h poll cycle.
-  void _handleIncomingManifestFragment(proto.FragmentStore frag) {
-    try {
-      final jsonData = utf8.decode(frag.fragmentData);
-      final checker = UpdateChecker(log: _log);
-      final manifest = checker.verifyManifest(jsonData);
-      if (manifest == null) return;
-
-      final prev = _latestManifest;
-      if (prev != null && !checker.isNewer(manifest.version, prev.version)) {
-        if (checker.isNewer(prev.version, manifest.version)) return;
-        final newSeq = manifest.minMonotoneSeq ?? 0;
-        final prevSeq = prev.minMonotoneSeq ?? 0;
-        if (newSeq <= prevSeq) return;
-        _log.info('[update] Same version v${manifest.version} '
-            'but higher seq ($newSeq > $prevSeq) — accepting');
-      }
-      _latestManifest = manifest;
-      try {
-        final cacheFile = File(
-            '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
-        cacheFile.parent.createSync(recursive: true);
-        cacheFile.writeAsStringSync(jsonData, flush: true);
-      } catch (_) {}
-
-      final isNewer = checker.isNewer(manifest.version, currentAppVersion);
-      if (isNewer) {
-        _log.info('[update] Pushed update available: '
-            'v${manifest.version} (current: v$currentAppVersion)');
-        final isHardBlock = checker.isHardBlocked(manifest, currentAppVersion);
-        final hasDhtTag = manifest.dhtBinaryTag
-                ?.containsKey(Platform.operatingSystem) ??
-            false;
-        final hasBinHash = manifest.binaryHashes
-                ?.containsKey(Platform.operatingSystem) ??
-            false;
-        if (!isHardBlock && !hasDhtTag && !hasBinHash) {
-          _log.debug('[update] Suppressing soft-update notification: '
-              'no binary for ${Platform.operatingSystem}');
-        } else {
-          () async {
-            var inNetworkAvailable = false;
-            if ((hasDhtTag || hasBinHash) && _binaryUpdateManager != null) {
-              try {
-                inNetworkAvailable = await _binaryUpdateManager!
-                    .checkForUpdate(manifest, currentAppVersion,
-                        Platform.operatingSystem);
-                if (inNetworkAvailable) _saveInNetworkFlag(true);
-              } catch (_) {}
-            }
-            onUpdateAvailable?.call(manifest, inNetworkAvailable);
-          }();
-        }
-      }
-    } catch (e) {
-      _log.debug('[update] Incoming manifest check failed: $e');
-    }
-  }
-
-  /// Proactive fragment push: forward a stored fragment to the mailbox owner
-  /// if we know their address. Push-based delivery (< 1s latency) replaces
-  /// polling for online recipients. Per Architecture Section 3.5.
-  /// Checks both contacts AND routing table peers (PeerExchange provides PKs).
-  void _proactivePush(proto.FragmentStore frag, Uint8List mailboxId) {
-    final ownerNodeId = _findMailboxOwner(mailboxId);
-    if (ownerNodeId == null) return;
-    _attemptPush(frag, mailboxId, ownerNodeId);
-  }
-
-  /// Resolve mailboxId to ownerNodeId via contacts + routing table.
-  /// Checks both primary (`"mailbox" + ed25519Pk`) and fallback
-  /// (`"mailbox-nid" + nodeId`) salts — mirroring `_isOurMailbox`.
-  Uint8List? _findMailboxOwner(Uint8List mailboxId) {
-    final sodium = SodiumFFI();
-    final seen = <String>{};
-
-    bool tryCandidate(Uint8List nodeId, Uint8List ed25519Pk) {
-      final primaryMailbox = sodium.sha256(Uint8List.fromList(
-        [...utf8.encode('mailbox'), ...ed25519Pk],
-      ));
-      if (constantTimeEquals(mailboxId, primaryMailbox)) return true;
-      final fallbackMailbox = sodium.sha256(Uint8List.fromList(
-        [...utf8.encode('mailbox-nid'), ...nodeId],
-      ));
-      return constantTimeEquals(mailboxId, fallbackMailbox);
-    }
-
-    for (final contact in _contacts.values) {
-      if (contact.ed25519Pk == null) continue;
-      final hex = bytesToHex(contact.nodeId);
-      if (!seen.add(hex)) continue;
-      if (tryCandidate(contact.nodeId, contact.ed25519Pk!)) {
-        return contact.nodeId;
-      }
-    }
-    for (final peer in node.routingTable.allPeers) {
-      if (peer.ed25519PublicKey == null || peer.ed25519PublicKey!.isEmpty) continue;
-      final hex = bytesToHex(peer.nodeId);
-      if (!seen.add(hex)) continue;
-      if (tryCandidate(peer.nodeId, peer.ed25519PublicKey!)) {
-        return peer.nodeId;
-      }
-    }
-    return null;
-  }
-
-  /// Single push attempt with retry-on-no-ACK.
-  /// Idempotent per (mailboxId, messageId, fragmentIndex, ownerNodeId):
-  /// reuses the FragmentPushState retryTimer to avoid concurrent chains.
-  /// Architecture §3.5 Push reliability: up to 3 attempts (initial + 2 retries),
-  /// backoffs 500 ms / 2 s. Cancelled on FRAGMENT_STORE_ACK.
-  void _attemptPush(proto.FragmentStore frag, Uint8List mailboxId, Uint8List ownerNodeId) {
-    final storeKey = '${bytesToHex(mailboxId)}:'
-        '${frag.messageId.hex}:'
-        '${frag.fragmentIndex}';
-
-    final state = mailboxStore.pushStateFor(storeKey, ownerNodeId);
-    if (state == null) return;        // fragment already evicted
-    if (state.pushAcked) return;      // owner already received
-    if (state.attempts >= MailboxStore.maxPushAttempts) return;
-
-    final peer = node.routingTable.getPeer(ownerNodeId);
-    if (peer == null) {
-      _log.debug('Proactive push deferred: owner '
-          '${bytesToHex(ownerNodeId).substring(0, 8)} not in routing table '
-          'frag=${frag.fragmentIndex} (will re-arm on discovery)');
-      return;
-    }
-
-    state.cancelRetry();
-    mailboxStore.recordPushAttempt(storeKey, ownerNodeId);
-    final attemptNum = state.attempts;
-
-    // V3 proactive push: notify owner via InfrastructureFrame
-    // (MTV3_FRAGMENT_STORE) targeted at their deviceId. Fire-and-forget;
-    // ACK arrives via FRAGMENT_STORE_ACK → onProactivePushAcked() which
-    // cancels the retry timer. Architecture §3.5 push-pacing.
-    final fragBytes = Uint8List.fromList(frag.writeToBuffer());
-    unawaited(node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-      innerPayload: fragBytes,
-      recipientDeviceId: ownerNodeId,
-    ).then((sent) {
-      if (sent) {
-        _log.debug('Proactive push sent: attempt $attemptNum/'
-            '${MailboxStore.maxPushAttempts} frag=${frag.fragmentIndex} '
-            'owner=${bytesToHex(ownerNodeId).substring(0, 8)} '
-            'targets=${peer.allConnectionTargets().length}');
-      } else {
-        _log.debug('Proactive push send failed (no DV-route or KEM-PK): '
-            'attempt $attemptNum frag=${frag.fragmentIndex} '
-            'owner=${bytesToHex(ownerNodeId).substring(0, 8)}');
-      }
-    }, onError: (Object e, StackTrace st) {
-      _log.warn('Proactive push exception: attempt $attemptNum '
-          'frag=${frag.fragmentIndex} '
-          'owner=${bytesToHex(ownerNodeId).substring(0, 8)} err=$e');
-    }));
-
-    if (attemptNum >= MailboxStore.maxPushAttempts) return;
-
-    // Backoff after attempt 1 → 500ms; after attempt 2 → 2s.
-    final backoff = attemptNum == 1
-        ? const Duration(milliseconds: 500)
-        : const Duration(seconds: 2);
-    state.retryTimer = Timer(backoff, () {
-      _attemptPush(frag, mailboxId, ownerNodeId);
-    });
-  }
-
-  /// Called by Node when a FRAGMENT_STORE_ACK is observed for a push we issued.
-  /// Marks the corresponding push as completed and cancels its retry timer.
-  void onProactivePushAcked(Uint8List messageId, int fragmentIndex) {
-    final storeKey = mailboxStore.markPushAcked(messageId, fragmentIndex);
-    if (storeKey != null) {
-      _log.debug('Proactive push ACKed: frag=$fragmentIndex msg=${bytesToHex(messageId).substring(0, 8)}');
-    }
-  }
-
-  // ── §5.4 V3.1.138: Re-arm on owner reappearance ───────────────────
-
-  DateTime _lastRearmAt = DateTime(2000);
-
-  /// Called when a peer transitions from not-confirmed to confirmed.
-  /// Replicator side: re-arm proactive push for exhausted fragments.
-  /// Receiver side: poll late-arriving peers for own fragments.
-  void _onPeerNewlyConfirmed(String deviceHex) {
-    // Receiver side: if this peer was not polled during startup, poll now.
-    if (_postDiscoveryPolledPeers.add(deviceHex)) {
-      final peer = node.routingTable.getPeer(hexToBytes(deviceHex));
-      if (peer != null) {
-        // §5.6: primary + fallback + (im 7-Tage-Fenster) Uebergangs-Primary.
-        // Die dritte ID ist genau so lange dabei, wie _activeMailboxIds() sie
-        // liefert — danach faellt der Mehr-Traffic von selbst weg.
-        for (final id in _activeMailboxIds()) {
-          _requestFragments(peer, id);
-        }
-        _requestStoredMessages(peer);
-        _log.info('§5.4 late-peer poll: ${deviceHex.substring(0, 8)}');
-      }
-    }
-
-    // Sender side: flush parked outbox entries — the recipient (or a relay
-    // toward it) just came online, so L1/L2/L3 may now succeed.
-    unawaited(_flushOutbox(trigger: 'peer-came-online'));
-    // §5.1 — dieselbe Kante fuer die First-CR. Diese Kante feuert pro neu
-    // bestaetigtem Peer, deshalb ist die Drosselung in
-    // shortenCrBackoffOnEdge hier tragend und nicht kosmetisch.
-    shortenCrBackoffOnEdge('peer-came-online');
-
-    // Store-host side: proactively push S&F messages to the newly confirmed
-    // peer (they may be the intended recipient). Ungedrosselt und gewollt —
-    // der Aufwand ist auf dieses eine Geraet begrenzt.
-    _pushStoredMessagesTo(deviceHex);
-
-    // Replicator side: re-arm exhausted pushes. Die 60s-Drossel sitzt in
-    // _rearmExpiredPushes() selbst, damit jeder Trigger sie erbt.
-    _rearmExpiredPushes();
-  }
-
-  /// Re-arm proactive push for stalled fragments (never started,
-  /// stranded mid-chain, or budget exhausted) whose owners are now reachable.
-  /// Also picks up post-restart orphans: fragments loaded from disk that
-  /// lost their in-memory push state (§5.4 restart budget reset).
-  ///
-  /// §5.4: "The re-arm fires at most once per 60 s per mailbox to prevent
-  /// push storms during rapid peer-flap." Die Drossel liegt bewusst HIER und
-  /// nicht im Aufrufer — dieser Sweep ist global (er setzt das Push-Budget
-  /// JEDES rearmable Eintrags zurueck und startet je eine frische 3-Versuch-
-  /// Kette), und `rearmablePushEntries()` hat selbst kein Zeitgate. Ein
-  /// ungedrosselter Trigger — etwa der KEM-Record-Pfad (§5.10.2), dessen
-  /// Records in Bursts eintreffen — wuerde sonst pro Event einen vollen
-  /// globalen Sweep ausloesen (Arbeitsregel #5).
-  void _rearmExpiredPushes() {
-    final now = DateTime.now();
-    if (now.difference(_lastRearmAt).inSeconds < 60) return;
-    _lastRearmAt = now;
-
-    final exhausted = mailboxStore.rearmablePushEntries();
-    final orphaned = mailboxStore.orphanedFragmentKeys();
-    if (exhausted.isEmpty && orphaned.isEmpty) return;
-    var rearmed = 0;
-    for (final entry in exhausted) {
-      final frag = mailboxStore.retrieveByKey(entry.key);
-      if (frag == null) continue;
-      final mailboxId = Uint8List.fromList(frag.mailboxId);
-      final ownerNodeId = _findMailboxOwner(mailboxId);
-      if (ownerNodeId == null) continue;
-      final peer = node.routingTable.getPeer(ownerNodeId);
-      if (peer == null) continue;
-      mailboxStore.resetPushBudget(entry.key);
-      final fragStore = proto.FragmentStore()
-        ..mailboxId = frag.mailboxId
-        ..messageId = frag.messageId
-        ..fragmentIndex = frag.fragmentIndex
-        ..totalFragments = frag.totalFragments
-        ..requiredFragments = frag.requiredFragments
-        ..originalSize = frag.originalSize
-        ..fragmentData = frag.data;
-      _attemptPush(fragStore, mailboxId, ownerNodeId);
-      rearmed++;
-    }
-    for (final storeKey in orphaned) {
-      final frag = mailboxStore.retrieveByKey(storeKey);
-      if (frag == null) continue;
-      final mailboxId = Uint8List.fromList(frag.mailboxId);
-      final ownerNodeId = _findMailboxOwner(mailboxId);
-      if (ownerNodeId == null) continue;
-      final peer = node.routingTable.getPeer(ownerNodeId);
-      if (peer == null) continue;
-      final fragStore = proto.FragmentStore()
-        ..mailboxId = frag.mailboxId
-        ..messageId = frag.messageId
-        ..fragmentIndex = frag.fragmentIndex
-        ..totalFragments = frag.totalFragments
-        ..requiredFragments = frag.requiredFragments
-        ..originalSize = frag.originalSize
-        ..fragmentData = frag.data;
-      _attemptPush(fragStore, mailboxId, ownerNodeId);
-      rearmed++;
-    }
-    if (rearmed > 0) {
-      _log.info('§5.4 re-armed $rearmed proactive pushes on peer reappearance');
-    }
-  }
-
-  /// FRAGMENT_RETRIEVE handler (Architecture §5.4 + §23.3 InfraFrame).
-  /// Looks up fragments stored for [req.mailboxId] in the local mailbox
-  /// and forwards each one back to [senderDeviceId] as a fresh
-  /// FRAGMENT_STORE via the DV cascade.
-  void _handleFragmentRetrieve(Uint8List payload, Uint8List senderDeviceId) {
-    try {
-      final req = proto.FragmentRetrieve.fromBuffer(payload);
-      final mailboxId = Uint8List.fromList(req.mailboxId);
-      final fragments = mailboxStore.retrieveFragments(mailboxId);
-
-      for (final frag in fragments) {
-        final fragStore = proto.FragmentStore()
-          ..mailboxId = frag.mailboxId
-          ..messageId = frag.messageId
-          ..fragmentIndex = frag.fragmentIndex
-          ..totalFragments = frag.totalFragments
-          ..requiredFragments = frag.requiredFragments
-          ..fragmentData = frag.data
-          ..originalSize = frag.originalSize;
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
-          recipientDeviceId: senderDeviceId,
-        );
-      }
-      final resp = proto.FragmentRetrieveResponse()
-        ..mailboxId = req.mailboxId
-        ..fragmentCount = fragments.length;
-      node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE,
-        innerPayload: Uint8List.fromList(resp.writeToBuffer()),
-        recipientDeviceId: senderDeviceId,
-      );
-      _log.info('FRAGMENT_RETRIEVE: sent ${fragments.length} fragments + response '
-          'to ${bytesToHex(senderDeviceId).substring(0, 8)}');
-    } catch (e) {
-      _log.debug('Fragment retrieve error: $e');
-    }
-  }
-
-  void handleIncomingFragmentRetrieveResponseInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-  ) {
-    try {
-      final resp = proto.FragmentRetrieveResponse.fromBuffer(frame.payload);
-      _log.info('FRAGMENT_RETRIEVE_RESPONSE from '
-          '${bytesToHex(senderDeviceId).substring(0, 8)}: '
-          '${resp.fragmentCount} fragments');
-    } catch (e) {
-      _log.debug('Fragment retrieve response error: $e');
-    }
-  }
-
-  /// FRAGMENT_DELETE handler (Architecture §5.4 + §23.3 InfraFrame).
-  /// Mailbox-owner explicitly evicts a reassembled fragment-bundle; no
-  /// reply, no ACK.
-  void _handleFragmentDelete(Uint8List payload) {
-    try {
-      final del = proto.FragmentDelete.fromBuffer(payload);
-      mailboxStore.deleteFragments(
-        Uint8List.fromList(del.mailboxId),
-        Uint8List.fromList(del.messageId),
-      );
-    } catch (_) {}
-  }
+  // ── §5.4 RE-ARM ON RETURN OF THE OWNER: FALLEN (CUT) ──────
+  //
+  // `_onPeerNewlyConfirmed(deviceHex)` stood here. Its body was
+  // completely V3: get the peer from the routing table, re-request fragments and
+  // S&F messages for the own mailbox IDs, let parked
+  // outbox entries drain, re-arm expired pushes.
+  // Not a single one of these subjects exists any more.
+  //
+  // The caller was the node. Re-measured on 31.08.2026: there is no other
+  // in `lib/` (T).
+  //
+  // `_lastRearmAt` falls with it — it exclusively throttled
+  // `_rearmExpiredPushes`.
 
   // Pending media: maps messageIdHex -> local file path (sender keeps file until accepted).
   // Persisted to $profileDir/pending_media_sends.json so Two-Stage transfers
@@ -2186,26 +1949,43 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Send a media file (image, file, etc.) to a contact or group.
   /// Two-Stage: sends MEDIA_ANNOUNCEMENT first, actual content on MEDIA_ACCEPT.
   @override
-  Future<UiMessage?> sendMediaMessage(String conversationId, String filePath) async {
+  Future<UiMessage?> sendMediaMessage(
+      String conversationId, String filePath) async {
     _log.info('sendMediaMessage: convId=$conversationId path=$filePath');
     if (_reducedMode) {
       _log.warn('sendMediaMessage blocked: reducedMode active');
       return null;
     }
+    // ── TWO KINDS OF SOURCE (S362) ──────────────────────────────────
+    //
+    // (1) a file that the user has just chosen — it lies
+    //     outside the profile and in plaintext;
+    // (2) an attachment that already lies in the storage — forwarding
+    //     (`forwardMessage`) and resending pass `msg.filePath`
+    //     in here, and that has been encrypted since S362.
+    //
+    // Whoever only knows (1) breaks the forwarding of media: `File(...)`
+    // on the plaintext path finds nothing any more after the transfer.
     final file = File(filePath);
-    if (!file.existsSync()) {
+    final bool outTheDeposit =
+        !file.existsSync() && MediaStore.instance.exists(filePath);
+    if (!file.existsSync() && !outTheDeposit) {
       _log.warn('sendMediaMessage: file does not exist at $filePath');
       return null;
     }
 
     const maxFileSize = 500 * 1024 * 1024; // 500 MB
-    final fileSizeOnDisk = file.lengthSync();
+    final fileSizeOnDisk = outTheDeposit
+        ? (MediaStore.instance.plainLength(filePath) ?? 0)
+        : file.lengthSync();
     if (fileSizeOnDisk > maxFileSize) {
       _log.warn('sendMediaMessage: file too large (${fileSizeOnDisk ~/ (1024 * 1024)} MB), max ${maxFileSize ~/ (1024 * 1024)} MB');
       return null;
     }
 
-    final audioBytes = await file.readAsBytes();
+    final audioBytes = outTheDeposit
+        ? MediaStore.instance.readAll(filePath)!
+        : await file.readAsBytes();
     final filename = p.basename(filePath);
     final mimeType = _guessMimeType(filename);
     final fileSize = audioBytes.length;
@@ -2215,34 +1995,42 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     if (!isGroup && !isChannel) _maybeWriteStaleContactWarning(conversationId);
 
-    // Copy file to media directory so sent media survives source deletion
+    // ── THE COPY INTO THE PROFILE GOES ENCRYPTED (S362) ───────────────
+    //
+    // Until S362 three `file.copySync(persistentPath)` stood here. They were
+    // the fourth write place of the finding and the only one on the
+    // SEND SIDE: what the user sent then lay in plaintext in the
+    // own profile — even if he deleted the source file.
+    //
+    // The bytes are already present as `audioBytes` (they are needed anyway
+    // for hash and sending), hence `writeBytes` instead of a
+    // second read from the disk.
     final mediaDir = Directory('$profileDir/media');
     if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
     var persistentPath = '${mediaDir.path}/$filename';
     if (filePath != persistentPath) {
-      final existing = File(persistentPath);
-      if (existing.existsSync()) {
-        if (existing.lengthSync() == fileSize) {
-          final existingHash = SodiumFFI().sha256(existing.readAsBytesSync());
-          final newHash = SodiumFFI().sha256(audioBytes);
-          if (constantTimeEquals(existingHash, newHash)) {
-            // Identical content — skip copy
-          } else {
-            final dot = filename.lastIndexOf('.');
-            final base = dot > 0 ? filename.substring(0, dot) : filename;
-            final ext = dot > 0 ? filename.substring(dot) : '';
-            persistentPath = '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
-            file.copySync(persistentPath);
-          }
-        } else {
-          final dot = filename.lastIndexOf('.');
-          final base = dot > 0 ? filename.substring(0, dot) : filename;
-          final ext = dot > 0 ? filename.substring(dot) : '';
-          persistentPath = '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
-          file.copySync(persistentPath);
+      String fallbackNames() {
+        final dot = filename.lastIndexOf('.');
+        final base = dot > 0 ? filename.substring(0, dot) : filename;
+        final ext = dot > 0 ? filename.substring(dot) : '';
+        return '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
+      }
+
+      if (MediaStore.instance.existsEitherWay(persistentPath)) {
+        // Same name already taken. If it carries the same content,
+        // there is nothing to do; otherwise the new attachment moves to a different
+        // name, so that it does not overwrite the old one.
+        final present = MediaStore.instance.readAll(persistentPath);
+        final equal = present != null &&
+            present.length == fileSize &&
+            constantTimeEquals(
+                SodiumFFI().sha256(present), SodiumFFI().sha256(audioBytes));
+        if (!equal) {
+          persistentPath = fallbackNames();
+          MediaStore.instance.writeBytes(persistentPath, audioBytes);
         }
       } else {
-        file.copySync(persistentPath);
+        MediaStore.instance.writeBytes(persistentPath, audioBytes);
       }
     }
 
@@ -2260,7 +2048,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: filename,
       timestamp: DateTime.now(),
       type: _msgTypeFromMime(mimeType),
-      status: MessageStatus.sending,
+      status: MessageStatus.resting,
       isOutgoing: true,
       filePath: persistentPath,
       mimeType: mimeType,
@@ -2282,7 +2070,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         msg.transcriptLanguage = senderTranscript.language;
         msg.transcriptConfidence = senderTranscript.confidence;
         onStateChanged?.call(); // Update UI with transcript
-        _log.info('Voice transcribed: "${senderTranscript.text.length > 40 ? '${senderTranscript.text.substring(0, 40)}...' : senderTranscript.text}"');
+        // S362: HERE STOOD THE WORDING. The first 40 characters of the
+        // transcript went into the log in plaintext — while the
+        // transcript file itself was encrypted in the same session.
+        // Length and language suffice for diagnostics; whoever
+        // wants to know WHAT was spoken has the message.
+        _log.info('Voice transcribed: ${senderTranscript.text.length} chars');
       }
     }
 
@@ -2350,11 +2143,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..filename = filename
       ..contentHash = contentHash;
     if (thumbnail != null) metadata.thumbnail = thumbnail;
-    // Transkript auch in die Metadata (§14.9). Inline traegt es zusaetzlich im
-    // VoicePayload; im Two-Stage-Pfad ist die Metadata der einzige Traeger,
-    // weil MEDIA_ANNOUNCE ohne Payload sendet und die Stage-2-Chunks rohe
-    // Dateibytes sind. Ohne das kam jede Sprachnachricht >256KB (~16s bei
-    // 128kbps AAC) beim Empfaenger ohne Text an.
+    // Transcript also into the metadata (§14.9). Inline it is additionally carried in the
+    // VoicePayload; in the two-stage path the metadata is the only carrier,
+    // because MEDIA_ANNOUNCE sends without payload and the stage 2 chunks are raw
+    // file bytes. Without this every voice message >256KB (~16s at
+    // 128kbps AAC) arrived at the recipient without text.
     if (senderTranscript != null) {
       metadata.transcriptText = senderTranscript.text;
       metadata.transcriptLanguage = senderTranscript.language;
@@ -2381,6 +2174,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           mlKemPk: mlKemPk,
           ed25519Pk: ed25519Pk,
           status: 'accepted',
+          // §15.2: this record is a throwaway image for ONE sending,
+          // and `ed25519Pk` in it comes from `_resolveMemberKeys` — i.e.
+          // the CURRENT key of the member. Without the anchor of the
+          // real contact record the group leg would compute after a
+          // rotation of the member under a different tag than the
+          // 1:1 path to the same human.
+          peerFoundingEd25519Pk: v41PeerFoundingPk(_contacts[m.nodeIdHex]),
         ));
       }
     } else if (isChannel) {
@@ -2403,6 +2203,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           mlKemPk: mlKemPk,
           ed25519Pk: ed25519Pk,
           status: 'accepted',
+          // §15.2, see the group branch above: the anchor comes from
+          // the real contact record, not from the throwaway image.
+          peerFoundingEd25519Pk:
+              v41PeerFoundingPk(_contacts[member.nodeIdHex]),
         ));
       }
     } else {
@@ -2416,13 +2220,102 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       recipients = [contact];
     }
 
-    // V3 send path. Inline (≤256KB) → MTV3_MEDIA_INLINE with the raw
-    // content as payload + ContentMetadata on the frame. Two-Stage (>256KB)
-    // → MTV3_MEDIA_ANNOUNCE with empty payload (metadata in frame), Stage-2
-    // (MEDIA_REQUEST/CHUNK/COMPLETE) is wired in C4 (bulk + S&F + mailbox).
-    final twoStage = fileSize > 256 * 1024;
-    _log.info('[E2E media-send-path-v3] mode=${twoStage ? "two-stage-announce-only" : "inline"} '
-        'fileSize=$fileSize recipients=${recipients.length} convId=${conversationId.substring(0, 8)}');
+    // ── STEP 1 OF THE CUT (31.08.2026): THE LANE CHOICE FROM §9.3 ────────
+    //
+    // Until the cut here stood `final twoStage = fileSize > 256 * 1024;`
+    // and sent everything above it on the V3 two-stage path
+    // (MEDIA_ANNOUNCE -> MEDIA_REQUEST -> MEDIA_CHUNK -> MEDIA_COMPLETE).
+    // The 256 KB were the same number as §9.3's lower limit at the time and
+    // meant something different: there they separated "inline" from
+    // "two-stage", here "cell path" from "media lane". The lower limit
+    // has stood at 32 KB since 31.08.2026 ([kFountainWorthwhileBytes]);
+    // the 256 KB of this line are thus finally history.
+    //
+    // THE DECISION IS MADE IN A FUNCTION, NOT IN A `?:`.
+    // §9.3: the lane is "decided per transfer by the viability cascade
+    // of §17.6, **never by silent preference**". A decision that is to be
+    // made that way must be exhaustively testable — hence
+    // `chooseMediaLane` (`lib/core/bulk/bulk_lane.dart`) and not a
+    // condition in this line.
+    //
+    // ONE INPUT IS FIXED TO `false` TODAY, with reason (D-4, S372: until
+    // then this said "TWO inputs" — the paragraph had been outdated since
+    // 02.09.2026, see "THE SEAM..." below):
+    //
+    // **ADDENDUM 31.08.2026 on the order:** `chooseMediaLane` has since
+    // checked the SIZE before the consent. Whoever builds the path for
+    // `perTransferConsent` must therefore show the dialog only from
+    // [kFountainWorthwhileBytes] on — below that the object does not enter
+    // any media lane at all, there is nothing to downgrade, and a
+    // dialog appearing for no reason is clicked away.
+    //
+    //   * `bothOnline`/`volunteerViable` — the stream lane (§17.6) runs
+    //     via plane D, and that does not exist. As long as no volunteer
+    //     can commit, "both online" is not a condition that
+    //     selects anything. §9.3 covers exactly that: "Otherwise → the bulk lane."
+    //
+    // NO MODE AT THIS PLACE ANY MORE (S389, §3.3/§12.1). Here
+    // `secureChat` read until S389 `Contact.secureMode`/`Group.secureMode` — the
+    // switch from the chat settings dialog that §12.1 excludes —
+    // and `perTransferConsent` carried the answer of the consent dialog,
+    // i.e. a second choice of the send path, this time per file. Both are
+    // gone. The lane choice is thus solely a question of SIZE, as §9.4
+    // keeps it anyway: "Media take one of three lanes, first
+    // by size."
+    //
+    // `chooseMediaLane` keeps its two parameters — the file lies
+    // in `lib/core/bulk/` and belongs to the superseded layer, whose
+    // teardown is not the subject of this task. They get here the
+    // value that means "no mode".
+    final lane = chooseMediaLane(
+      payloadBytes: fileSize,
+      secureChat: false,
+      perTransferConsent: false,
+      isGroup: isGroup || isChannel,
+      bothOnline: false,
+      volunteerViable: false,
+    );
+    // WHAT IS MEASURED IS THE OBJECT, not the frame — unlike in
+    // `routeFor`. The two gates carry the same number
+    // (`kFountainWorthwhileBytes`) and see different quantities; neither
+    // replaces the other.
+    //
+    // ── TWO LANES, ONE PATH (S372, decision E-3 = D) ───────────────
+    //
+    // `MediaLane.reedSolomon` and `MediaLane.bulk` take THE SAME
+    // send path: the same tag, the same seal, the same `0x05` frame,
+    // the same holder, the same harvest. Different is only the codec,
+    // and that is chosen by `MediaBulkLane.beginSend` from the object size
+    // (`mediaCodecFor`). That is why an OR stands here and no third
+    // branch — a second send loop would be a second
+    // wire format with the same bytes.
+    final onMediaLane =
+        lane.lane == MediaLane.bulk || lane.lane == MediaLane.reedSolomon;
+    _log.info('[E2E media-send-path-v41] entscheidung=$lane '
+        'fileSize=$fileSize '
+        'recipients=${recipients.length} '
+        'convId=${conversationId.substring(0, 8)}');
+    if (lane.refusal == MediaRefusal.secureWithoutConsent) {
+      _log.warn('sendMediaMessage: Secure chat without consent for THIS '
+          'transfer (§9.3 „Mode coupling", §12) — ALL media lanes '
+          'are speed class or weaker (B-29), and a remembered '
+          'blanket consent would be the silent mode switch. Not '
+          'sent.');
+      return null;
+    }
+    if (lane.refusal == MediaRefusal.aboveCodecLimit) {
+      _log.warn('sendMediaMessage: $fileSize B exceed the '
+          'block format (objectLength is 4 B wide) — not sent.');
+      return null;
+    }
+    if (lane.lane == MediaLane.stream) {
+      // Unreachable today (`volunteerViable: false`). Stands here
+      // nonetheless, so that the stream lane later steps NEXT to the bulk lane and
+      // not in its place — §9.3: "Blocks are lane-neutral."
+      _log.warn('sendMediaMessage: stream lane (§17.6) chosen, but it '
+          'needs Layer D and is not built — not sent.');
+      return null;
+    }
     // GM-1 (§9.1.4): group/channel media must carry groupId + membership tag
     final groupForMedia = isGroup ? _groups[conversationId] : null;
     final channelForMedia = isChannel ? _channels[conversationId] : null;
@@ -2434,7 +2327,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             ? _computeChannelMembershipHash(channelForMedia.membershipEpoch, conversationId, channelForMedia.members)
             : null;
     String? firstMsgId;
-    if (!twoStage) {
+    if (!onMediaLane) {
+      // BELOW THE LOWER LIMIT (§9.3, normative): "neither lane is
+      // used … Small media therefore ride the cell path like any
+      // message." Exactly that happens here — MEDIA_INLINE goes through
+      // `sendToUser`, and `routeFor` leads it onto the cell path.
+      //
+      // THE GAP THAT STOOD HERE IS CLOSED — AND SINCE S372 WITHOUT A
+      // SIDE EFFECT. The cell path splits up to `kMaxSplitPayloadBytes` =
+      // 32768 B; §9.3 set the lower limit of the lanes to 262144 B, and
+      // in between the document named no path — a photo of 200 KB
+      // simply did not go out. On 31.08.2026 the gap was
+      // closed by the lower limit dropping to 32 KB; thereby the
+      // band 32..256 KB however rode the RATELESS lane, i.e. exactly the one that the
+      // measurement in appendix A shows there as the worst. Since
+      // decision E-3 = D this band is carried by Reed-Solomon
+      // (`codec/erasure_stripes.dart`), and both limits still
+      // abut each other. What reaches THIS branch is really
+      // small enough for the cell path.
       for (final recipient in recipients) {
         if (recipient.x25519Pk == null || recipient.mlKemPk == null) continue;
         final ok = await sendToUser(
@@ -2450,61 +2360,308 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientMlKemPkOverride: recipient.mlKemPk,
           recipientEd25519PkOverride: recipient.ed25519Pk,
         );
-        if (ok) node.statsCollector.addMessageSent();
+        if (ok) statsCollector.addMessageSent();
       }
       firstMsgId = tempId;
     } else {
-      // Two-Stage Stage 1: announce only — content stays pending until
-      // receiver triggers MEDIA_REQUEST. V3 trägt die Metadata strukturiert
-      // im frame.contentMetadata, der Payload bleibt leer.
-      for (final recipient in recipients) {
-        if (recipient.x25519Pk == null || recipient.mlKemPk == null) continue;
-        await sendToUser(
-          recipientUserId: recipient.nodeId,
-          messageType: proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
-          payload: Uint8List(0),
-          contentMetadata: metadata,
-          messageId: messageIdBytes,
-          groupId: mediaGroupId,
-          groupMembershipEpoch: mediaGmEpoch,
-          groupMembershipHash: mediaGmHash,
-          recipientX25519PkOverride: recipient.x25519Pk,
-          recipientMlKemPkOverride: recipient.mlKemPk,
-          recipientEd25519PkOverride: recipient.ed25519Pk,
-        );
+      // ── THE BULK LANE (§9.3) ────────────────────────────────────────
+      //
+      // No MEDIA_CHUNK, no `_pendingMediaSends`, no waiting for a
+      // MEDIA_REQUEST of the recipient: the object is encoded ratelessly,
+      // EVERY BLOCK stored EXACTLY ONCE with a responsible always-on holder,
+      // and the recipient SAMPLES. "No block is special, no
+      // index is allocated."
+      final offer = await _sendOnBulkLane(
+        conversationId: conversationId,
+        messageId: tempId,
+        object: bytes,
+        isGroupOrChannel: isGroup || isChannel,
+        preview: _microPreview(thumbnail, mimeType),
+        metadata: metadata,
+        recipients: recipients,
+        messageIdBytes: messageIdBytes,
+        groupId: mediaGroupId,
+        groupMembershipEpoch: mediaGmEpoch,
+        groupMembershipHash: mediaGmHash,
+      );
+      if (!offer) {
+        // NO FALLBACK TO V3. The message stays lying visibly with the
+        // user; a secret second path would be the
+        // dual stack from §7 and would be invisible, because both
+        // "work".
+        _log.warn('[E2E media-send-path-v41] bulk lane stored '
+            'nothing — not sent, no fallback to V3');
       }
       firstMsgId = tempId;
-      // Touch announcementBytes so the unused-local lint stays quiet —
-      // keeps the helper available for the C4 fallback path.
+      // `announcementBytes` carries the V3 metadata and is not the carrier on the
+      // bulk lane: there the offer travels as
+      // `BulkAnnounce` (full content hash, object length, drawn
+      // root, micro preview <= kAnnouncePreviewBudgetBytes). The value
+      // remains computed for the application's stores (preview in the chat).
       // ignore: unnecessary_statements
       announcementBytes;
     }
 
-    // Store pending media for two-stage delivery (C4 will look this up
-    // when the receiver sends MEDIA_REQUEST).
-    if (twoStage) {
-      _pendingMediaSends[firstMsgId] = persistentPath;
-      _savePendingMediaSends();
-    }
-
     // Update message with final ID and status
+    //
+    // THE IDENTIFIER CHANGES HERE (§21.4.1). The message was already
+    // inserted further up with its provisional identifier and thus
+    // also stored; without the reversal an orphan row would remain under the old identifier
+    // that would appear as a second hit in every full-text search.
+    // It must be saved BEFORE overwriting.
+    final previousId = msg.id;
     msg.id = firstMsgId;
     final thumbnailB64 = thumbnail != null ? base64Encode(thumbnail) : null;
     msg.thumbnailBase64 = thumbnailB64;
-    msg.status = MessageStatus.sent;
+    // AP-4 (§5.1c K2): here stood `msg.status = MessageStatus.sent` — without
+    // taking back a return value, without `l3Result`, without any
+    // observation. The statement has been dropped without replacement with `sent` (v4_1
+    // §22.5.1: "Neither a socket write, nor an address, nor a counter sets
+    // a delivery state").
+    //
+    // NOT EVEN AFTER THE CUT. On the bulk lane `delivered` flips
+    // exclusively on the DECODED receipt of the recipient (§9.3, D2)
+    // — storage receipts and relay signals are transport diagnostics and
+    // flip nothing. The message stays at `placing` until exactly this
+    // receipt comes (`MediaBulkLane.acceptReceipt`).
+    if (previousId != msg.id) forgetMessage(previousId);
+    persistMessage(conversationId, msg);
     _saveConversations();
     onStateChanged?.call();
 
     _log.info('[E2E media-send-done] msgId=${msg.id.substring(0, 8)} '
         'filename=$filename size=$fileSize recipient=${conversationId.substring(0, 8)} '
-        'mode=${twoStage ? "two-stage (announcement only)" : "inline (full content)"}');
+        'mode=${onMediaLane ? "${lane.lane!.name} lane (§9.3)" : "cell path (§9.3 lower bound)"}');
     return msg;
+  }
+
+  /// The micro preview of the offer — at most
+  /// [kAnnouncePreviewBudgetBytes] (969 B, "one cell").
+  ///
+  /// ── WHY NOT SIMPLY `thumbnail` (31.08.2026) ────────────────────
+  ///
+  /// `thumbnail` is the V3 preview image according to §3.4.1 and may be **100 KB**
+  /// large (320x320 JPEG q=70, built at the top of this method). Until
+  /// today exactly this buffer was passed as micro preview, and
+  /// `MediaBulkLane.beginSend` cut it off at byte 979. A JPEG cut off at
+  /// byte 979 is however not a smaller image, but a
+  /// header without a body: at the recipient it landed as
+  /// `thumbnailBase64` in the bubble, and `Image.memory` failed on it
+  /// — the same error that §3.4.1 already had once ("Codec failed to
+  /// produce an image", justification of the real thumbnail further up).
+  ///
+  /// Here instead an OWN, tiny image is encoded: 48x48,
+  /// q=40, and if that still does not fit, q=25. If it then
+  /// still does not fit, there is no preview — that costs an image in
+  /// the bubble, not the transfer.
+  ///
+  /// Non-images get none at all: a file has no preview image,
+  /// and a prefix of its bytes would not be one.
+  Uint8List? _microPreview(Uint8List? thumbnail, String mimeType) {
+    if (thumbnail == null || thumbnail.isEmpty) return null;
+    if (!mimeType.startsWith('image/')) return null;
+    if (thumbnail.length <= kAnnouncePreviewBudgetBytes) return thumbnail;
+    try {
+      final decoded = img.decodeImage(thumbnail);
+      if (decoded == null) return null;
+      final small = img.copyResize(
+        decoded,
+        width: decoded.width >= decoded.height ? 48 : null,
+        height: decoded.height > decoded.width ? 48 : null,
+        interpolation: img.Interpolation.average,
+      );
+      for (final q in <int>[40, 25]) {
+        final bytes = Uint8List.fromList(img.encodeJpg(small, quality: q));
+        if (bytes.length <= kAnnouncePreviewBudgetBytes) return bytes;
+      }
+      _log.warn('Bulk offer: micro preview does not fit even at q=25 into '
+          'one cell ($kAnnouncePreviewBudgetBytes B) — offer without '
+          'preview. The transfer runs anyway.');
+      return null;
+    } catch (e) {
+      _log.warn('Bulk offer: micro preview cannot be built ($e) — '
+          'offer without preview');
+      return null;
+    }
+  }
+
+  /// Submits an object on the bulk lane (§9.3).
+  ///
+  /// ── THE ORDER IS ESSENTIAL ─────────────────────────────────
+  ///
+  /// FIRST STORE, THEN ANNOUNCE. The offer names the full
+  /// content hash and the object length; as soon as the recipient has it,
+  /// he computes the same transfer tag and starts to sample
+  /// (§9.3: "the recipient **scans** the holding relais"). If it came
+  /// first, he would sample an empty line and produce a
+  /// re-request for something that is not even in transit yet.
+  ///
+  /// ── WHAT DOES *NOT* HAPPEN HERE ──────────────────────────────────────
+  ///
+  /// No `m x R`. [MediaBulkLane.emit] hands the transport a
+  /// list of blocks, and the length of this list is the number of
+  /// cells that may go out. §9.3: "Each block is placed
+  /// **once** … per-block `m × R` would cost a factor of **60** on the
+  /// wire and buys nothing a rateless code does not already provide."
+  ///
+  /// No `_pendingMediaSends`. That was the V3 two-stage path: the
+  /// sender held the file ready and waited for a MEDIA_REQUEST. On
+  /// the bulk lane the blocks lie in the network and the recipient fetches them
+  /// himself — that is the offline promise (j).
+  ///
+  /// Returns `true` if at least one store was accepted AND the
+  /// offer went out to at least one recipient.
+  Future<bool> _sendOnBulkLane({
+    required String conversationId,
+    required String messageId,
+    required Uint8List object,
+    required bool isGroupOrChannel,
+    required Uint8List? preview,
+    required proto.ContentMetadata metadata,
+    required List<ContactInfo> recipients,
+    required Uint8List messageIdBytes,
+    Uint8List? groupId,
+    int? groupMembershipEpoch,
+    Uint8List? groupMembershipHash,
+  }) async {
+    final lane = mediaBulkLane;
+    if (lane.transport == null) {
+      // THE HOLDER SIDE HAS BEEN BUILT SINCE 02.09.2026, so this
+      // branch is no longer the normal case, but the exceptional case: it
+      // now means "no V4.1 node hangs on this identity".
+      // `attachV41` assembles the transport (`media_bulk_transport_v41.dart`)
+      // together with plane D; without a node — `CLEONA_V41=0`, a pure
+      // service setup in the test — it does not exist.
+      //
+      // REFUSED AND NOT FALLEN BACK TO V3, unchanged since
+      // S349: a silent V3 path would be the dual stack from §7 and would be
+      // invisible, because both "work".
+      _log.warn('Bulk lane (§9.3): no MediaBulkTransport attached — '
+          'no V4.1 node is attached to this identity (attachV41 sets '
+          'it together with Layer D). No fallback to V3.');
+      return false;
+    }
+
+    // ── THE TRANSFER KEY IS DRAWN, NOT DERIVED ─────────
+    //
+    // Until 31.08.2026 a lookup of `K_AB` stood here, from which in the
+    // 1:1 case `K_T = HKDF(K_AB, "media/<hash>")` fell. The branch is
+    // struck: `K_AB` falls out of pure X25519
+    // (`tagline/pair_registry.dart:99-114`, no ML-KEM), thus the
+    // media content was the ONLY payload stream without PQ coverage — and because
+    // §15.2 keeps `K_AB` rotation-stable, without any forward secrecy.
+    //
+    // `K_T` is now drawn per transfer and travels along in the offer.
+    // The offer goes below through `sendToUser` -> `routeFor` ->
+    // `DeliveryRoute.v41` -> `MessageSealer.seal`, and there
+    // `_combine` mixes the ML-KEM-768 daily capsule with the X25519 DH
+    // (`message_seal.dart:374`). Exactly there the PQ coverage
+    // of the media content has lain since then.
+    //
+    // A side effect that should expressly stand here: the bulk lane
+    // thus no longer needs a pair key for 1:1. Where previously a
+    // sending failed on a missing `K_AB`, it now goes through —
+    // failure only happens when the offer is not deliverable.
+    final started = lane.beginSend(
+      conversationId: conversationId,
+      messageId: messageId,
+      object: object,
+      preview: preview,
+    );
+    if (started == null) {
+      _log.warn('Bulk lane: the object cannot be encoded '
+          '(${lane.lastError}) — not sent, no fallback to V3.');
+      return false;
+    }
+
+    // ── THE PARTIAL LOSS BECOMES VISIBLE (S363) ──────────────────────────
+    //
+    // Until 03.09.2026 only `deposited == 0` stood here, and that was the
+    // ONLY question this caller could ask. A PARTIAL loss was
+    // thus invisible: at 200 MB 98.4 % of the planned
+    // blocks were lost before a cell went out, and this method
+    // reported success (B-1). The callback says it now — it comes when
+    // the storing is through, and in the pull model that is only hours after
+    // this line.
+    lane.onPlacementDone = _bulkShipmentDonePlaced;
+    final deposited = lane.emit(started.ticket);
+    if (deposited == 0) {
+      // §9.3: "`failed` is reserved for 'no volunteer and no holder
+      // accepted anything'." Exactly this case.
+      lane.endSend(started.ticket);
+      return false;
+    }
+    _log.event('V4.1 BULK ${started.ticket.sender.sourceBlocks} source blocks, '
+        '${started.ticket.sender.plannedBlocks} planned, $deposited deposited, '
+        '${started.ticket.blocksRemaining} follow at the pace of the egress '
+        '(EXACTLY ONE per block, §9.3)');
+
+    // ── THE OFFER: AN ORDINARY MESSAGE ───────────────────────
+    //
+    // §9.3: "Control flow — announce with a one-cell micro-preview,
+    // request, refill, DECODED receipt — rides the delivery layer in the
+    // chat's mode." It therefore goes through `sendToUser` like any text.
+    //
+    // WITHOUT THE V3 PREVIEW IMAGE. `metadata.thumbnail` carries up to 100 KB
+    // (§3.4.1) and would thus burst every cell and also the
+    // split limit. On the bulk lane the preview is part of the
+    // offer and capped at [kAnnouncePreviewBudgetBytes] ("one
+    // cell"); it is built in [_microPreview]. The large
+    // preview image stays locally attached to `msg.thumbnailBase64`.
+    final lean = proto.ContentMetadata()
+      ..mergeFromMessage(metadata)
+      ..clearThumbnail();
+    final offer = started.announce.encode();
+    var delivered = 0;
+    for (final recipient in recipients) {
+      if (recipient.x25519Pk == null || recipient.mlKemPk == null) continue;
+      final ok = await sendToUser(
+        recipientUserId: recipient.nodeId,
+        messageType: proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE,
+        payload: offer,
+        contentMetadata: lean,
+        messageId: messageIdBytes,
+        groupId: groupId,
+        groupMembershipEpoch: groupMembershipEpoch,
+        groupMembershipHash: groupMembershipHash,
+        recipientX25519PkOverride: recipient.x25519Pk,
+        recipientMlKemPkOverride: recipient.mlKemPk,
+        recipientEd25519PkOverride: recipient.ed25519Pk,
+      );
+      if (ok) delivered++;
+    }
+    if (delivered == 0) {
+      lane.endSend(started.ticket);
+      return false;
+    }
+    return true;
   }
 
   /// Accept a media download (Two-Stage: send MEDIA_ACCEPT).
   @override
   Future<bool> acceptMediaDownload(String conversationId, String messageId) async {
     _log.info('[E2E media-accept-send] msgId=${messageId.substring(0, 8)} convId=${conversationId.substring(0, 8)}');
+    // ── ON THE BULK LANE "ACCEPTING" IS A SAMPLING (§9.3) ─────────
+    //
+    // The V3 path sent a MEDIA_REQUEST here, which the sender answered with
+    // MEDIA_CHUNKs — he had to hold the file ready for that
+    // (`_pendingMediaSends`). On the bulk lane the blocks lie in the
+    // network, and the recipient fetches them himself: "the recipient
+    // **scans** the holding relays". There is thus nobody left to whom
+    // a request would have to be addressed.
+    //
+    // THE CHECK IS MADE ON THE RUNNING HARVEST, not on a switch: only
+    // if `_handleBulkAnnounce` has created a harvest for this identifier
+    // is it a bulk message. Everything else falls unchanged
+    // through into the previous path.
+    final harvest = mediaBulkLane.receiveFor(messageId);
+    if (harvest != null) {
+      final ok = mediaBulkLane.scan(harvest);
+      _log.info('[E2E media-accept-bulk] msgId=${messageId.substring(0, 8)} '
+          'scanned=$ok (run ${harvest.scans}) — no MEDIA_REQUEST, the '
+          'blocks are in the network (§9.3)');
+      return ok;
+    }
     final conv = conversations[conversationId];
     if (conv == null) {
       _log.warn('[E2E media-accept-send] ABORT: conversation not found');
@@ -2517,6 +2674,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return false;
     }
 
+    ensureLoaded(conversationId);
     final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
     if (msg == null || msg.mediaState != MediaDownloadState.announced) {
       _log.warn('[E2E media-accept-send] ABORT: msg=${msg != null ? "exists state=${msg.mediaState.name}" : "MISSING"} '
@@ -2527,6 +2685,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // For now, just mark as downloading (the actual content delivery is handled
     // when we receive the IMAGE/FILE response from sender)
     msg.mediaState = MediaDownloadState.downloading;
+    persistMessage(conversationId, msg);
     onStateChanged?.call();
     _saveConversations();
 
@@ -2550,42 +2709,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return ok;
   }
 
+  /// A not yet used name in the media directory.
+  ///
+  /// **`existsEitherWay` and not `File(...).existsSync()` (S362).** The
+  /// attachment now lies under `<name>.cmenc`; whoever only checks the plaintext name
+  /// considers EVERY taken name free and overwrites on the
+  /// next receipt of the same name the previous attachment. Both versions
+  /// are asked, because during the transfer both occur.
   static String _uniqueMediaPath(String dirPath, String filename) {
     var path = '$dirPath/$filename';
-    if (!File(path).existsSync()) return path;
+    if (!MediaStore.instance.existsEitherWay(path)) return path;
     final dot = filename.lastIndexOf('.');
     final base = dot > 0 ? filename.substring(0, dot) : filename;
     final ext = dot > 0 ? filename.substring(dot) : '';
     for (var i = 1; i < 1000; i++) {
       path = '$dirPath/${base}_$i$ext';
-      if (!File(path).existsSync()) return path;
+      if (!MediaStore.instance.existsEitherWay(path)) return path;
     }
     return '$dirPath/${DateTime.now().millisecondsSinceEpoch}$ext';
-  }
-
-  String _guessMimeType(String filename) {
-    final ext = filename.split('.').last.toLowerCase();
-    switch (ext) {
-      case 'jpg': case 'jpeg': return 'image/jpeg';
-      case 'png': return 'image/png';
-      case 'gif': return 'image/gif';
-      case 'webp': return 'image/webp';
-      case 'mp4': return 'video/mp4';
-      case 'webm': return 'video/webm';
-      case 'mov': return 'video/quicktime';
-      case 'mkv': return 'video/x-matroska';
-      case 'mpeg': case 'mpg': return 'video/mpeg';
-      case 'mp3': return 'audio/mpeg';
-      case 'ogg': case 'oga': return 'audio/ogg';
-      case 'wav': return 'audio/wav';
-      case 'm4a': case 'aac': return 'audio/aac';
-      case 'flac': return 'audio/flac';
-      case 'opus': return 'audio/opus';
-      case 'pdf': return 'application/pdf';
-      case 'txt': return 'text/plain';
-      case 'zip': return 'application/zip';
-      default: return 'application/octet-stream';
-    }
   }
 
   /// Maps MIME type to the correct MessageType.
@@ -2601,10 +2742,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (mimeType.startsWith('video/')) return UiMessageType.video;
     return UiMessageType.file;
   }
-
-  /// True iff [mimeType] denotes a voice/audio recording (audio/*).
-  /// V3 send-paths use this for transcription/voice-payload branching.
-  bool _isVoiceFromMime(String mimeType) => mimeType.startsWith('audio/');
 
   /// Whether this V3 message type carries user-authored content that must
   /// be dropped while reduced-mode (sec-h5 §8.2 / T11) is active. Returning
@@ -2679,6 +2816,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (conv == null) return;
 
     // Apply locally
+    ensureLoaded(conversationId);
     final msgIndex = conv.messages.indexWhere((m) => m.id == messageId);
     if (msgIndex >= 0) {
       final msg = conv.messages[msgIndex];
@@ -2689,6 +2827,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         msg.reactions.putIfAbsent(emoji, () => {});
         msg.reactions[emoji]!.add(identity.userIdHex);
       }
+      // BEHIND both branches, not in one: an added reaction
+      // belongs in the storage just as much as a removed one. When the call stood
+      // only in the `remove` branch, the coverage for the more frequent case was
+      // open — and the guard saw it as covered, because it only checks
+      // whether storing happens ANYWHERE in the method.
+      persistMessage(conversationId, msg);
     }
 
     // Build reaction payload
@@ -2698,9 +2842,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..remove = remove;
     final basePayload = Uint8List.fromList(reaction.writeToBuffer());
 
-    // V3: pairwise fan-out via sendToUser. Group-Conversation-ID auf der
-    // Wire-Side wandert mit C4-Groups; bis dahin landet die Reaction beim
-    // Empfänger als DM-Reaction auf seinem Sender-Tab.
+    // V3: pairwise fan-out via sendToUser. The group conversation ID on the
+    // wire side moves with C4 groups; until then the reaction lands at the
+    // recipient as a DM reaction on his sender tab.
     final group = _groups[conversationId];
     if (group != null) {
       final groupIdBytes = hexToBytes(conversationId);
@@ -2740,7 +2884,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (msgIndex >= 0) {
       onStateChanged?.call();
       _saveConversations();
-      _log.info('Reaction ${remove ? "removed" : "added"}: $emoji on ${messageId.substring(0, 8)}');
+      // WITHOUT the emoji: it is user content, and "no user content in
+      // logs" is an owner decision (02.09.2026). A stand-in
+      // does not help here — what diagnostics need is "on which
+      // message was a reaction made", and that stands next to it.
+      _log.info('Reaction ${remove ? "removed" : "added"} '
+          'on ${messageId.substring(0, 8)}');
     } else {
       _log.warn('sendReaction: message ${messageId.substring(0, 8)} not found locally, sent to network only');
     }
@@ -2775,397 +2924,48 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     _log.info('IDENTITY_DELETED broadcast sent to $sent contacts');
+
+    // ── AND TO THE OWN DEVICES (E-9, v4_1 §14.7 / §21.5.2) ────────
+    //
+    // THE FINDING: the loop above runs over `_contacts.values` and
+    // never touched `_devices`. A second device of the same identity
+    // kept contacts, keys and the whole history INDEFINITELY and
+    // never learned that deletion happened.
+    //
+    // WHY THIS IS SOMETHING DIFFERENT FROM §21.5.2/B-9. There it says deleting is
+    // local and at foreign RELAYS ciphertext lies until the deadline — ciphertext
+    // without key. On the second phone of THE SAME user lies
+    // PLAINTEXT, because this device has the key. Exactly this
+    // difference is what someone who deletes means.
+    //
+    // THE SAME MESSAGE AS FOR THE CONTACTS, no second format: the
+    // payload is the same `IdentityDeletedNotification` buffer. Two
+    // formats for the same fact would drift apart.
+    //
+    // `_sendTwinSync` bails out itself at `_devices.length <= 1` — the
+    // single-device case thus costs no frame.
+    _sendTwinSync(proto.TwinSyncType.TWIN_IDENTITY_DELETED, payload);
+    _log.info('TWIN_IDENTITY_DELETED queued for ${_devices.isEmpty ? 0 : _devices.length - 1} '
+        'own devices');
   }
 
-  // ── Fragment Ownership Check ────────────────────────────────────────
 
-  /// Check if a mailbox ID belongs to this identity.
-  ///
-  /// Deckungsgleich mit [_activeMailboxIds] — was wir abholen, akzeptieren
-  /// wir auch, und umgekehrt. Keine eigene Ableitung mehr (§5.6).
-  bool _isOurMailbox(Uint8List mailboxId) {
-    for (final id in _activeMailboxIds()) {
-      if (constantTimeEquals(mailboxId, id)) return true;
-    }
-    return false;
-  }
-
-  /// Primaere Mailbox-ID dieser Identitaet: SHA-256("mailbox" + ed25519Pk).
-  ///
-  /// Einzige Ableitungsstelle fuer die eigene Primary. Wird ausserdem von
-  /// [rotateIdentityKeys] genutzt, um die Pre-Rotation-ID festzuhalten.
-  Uint8List _primaryMailboxId() => SodiumFFI().sha256(Uint8List.fromList(
-        [...utf8.encode('mailbox'), ...identity.ed25519PublicKey],
-      ));
-
-  /// Alle Mailbox-IDs, unter denen diese Identitaet Fragmente/S&F abholen
-  /// bzw. annehmen muss:
-  ///   1. Primary  — SHA-256("mailbox" + ed25519Pk)
-  ///   2. Fallback — SHA-256("mailbox-nid" + nodeId)
-  ///   3. §5.6 Uebergangs-Primary nach einer Key-Rotation, solange sie
-  ///      juenger als [_mailboxTransitionDays] ist.
-  ///
-  /// Einzige Ableitungsstelle fuer alle Poll-Pfade ([_pollMailbox],
-  /// [_pollConfirmedPeersOnce], [_onPeerNewlyConfirmed]) und fuer
-  /// [_isOurMailbox]. Vor dem Fix war die Ableitung viermal dupliziert und
-  /// nur *ein* Pfad (der Restore-Aggressive-Poll) kannte die Uebergangs-ID —
-  /// die real laufenden Polls fragten sie nie ab, sodass unter der alten
-  /// Primary abgelegte Nachrichten nach 7 Tagen verfielen.
-  ///
-  /// Der Ablauf-Check sitzt bewusst hier und nicht in einem Timer: er greift
-  /// damit auf jedem Poll-Pfad, und die Uebergangs-ID kann den Traffic nicht
-  /// dauerhaft um eine ID pro Peer erhoehen (Arbeitsregel #5). Ein gesetztes
-  /// `_previousMailboxPrimary` ohne `_previousMailboxPrimarySetAt` gilt als
-  /// abgelaufen — fail closed statt unbegrenzt pollen.
-  List<Uint8List> _activeMailboxIds() {
-    final sodium = SodiumFFI();
-    final ids = <Uint8List>[
-      _primaryMailboxId(),
-      sodium.sha256(Uint8List.fromList(
-        [...utf8.encode('mailbox-nid'), ...identity.nodeId],
-      )),
-    ];
-
-    // §5.6 Key-rotation transition: expire old primary after 7 days.
-    if (_previousMailboxPrimary != null) {
-      final setAt = _previousMailboxPrimarySetAt;
-      final expired = setAt == null ||
-          DateTime.now().difference(setAt).inDays >= _mailboxTransitionDays;
-      if (expired) {
-        _log.info('Mailbox transition: dropping old primary '
-            '(setAt=${setAt?.toIso8601String() ?? 'unknown'})');
-        _previousMailboxPrimary = null;
-        _previousMailboxPrimarySetAt = null;
-        _saveMailboxTransition();
-      } else {
-        ids.add(_previousMailboxPrimary!);
-      }
-    }
-
-    return ids;
-  }
-
-  /// Test-Hook: liefert [_activeMailboxIds] fuer Smoke-Tests. Keine eigene
-  /// Logik — reine Sichtbarkeitsbruecke.
-  @visibleForTesting
-  List<Uint8List> activeMailboxIdsForTest() => _activeMailboxIds();
-
-  /// Test-Hook: setzt den §5.6-Uebergangszustand direkt, ohne eine echte
-  /// Key-Rotation zu fahren. Nicht in Produktion verwenden.
-  @visibleForTesting
-  void setMailboxTransitionForTest(Uint8List? previousPrimary, DateTime? setAt) {
-    _previousMailboxPrimary = previousPrimary;
-    _previousMailboxPrimarySetAt = setAt;
-  }
-
-  /// Test-Hook: liest den §5.6-Uebergangszustand (Ablauf-Verifikation).
-  @visibleForTesting
-  Uint8List? get previousMailboxPrimaryForTest => _previousMailboxPrimary;
-
-
-  /// First-CR §8.1.1 backward-compat picker. Filters `resolved` to devices
-  /// that carry a complete Device-KEM (X25519 + ML-KEM) and returns the
-  /// candidate with the freshest `deviceKemPublishedAtMs`. When `preferred`
-  /// is supplied (legacy ContactSeed `did`), candidates matching that
-  /// deviceNodeId win over fresher non-matching ones — but only if at least
-  /// one match has KEM material; otherwise the filter falls back to "any
-  /// device with KEM". Returns `null` when no resolved device carries
-  /// KEM material at all.
-  static ResolvedDevice? firstCrPickDeviceKem(
-      List<ResolvedDevice> resolved, Uint8List? preferred) {
-    var withKem = resolved
-        .where((d) => d.deviceX25519Pk != null && d.deviceMlKemPk != null)
-        .toList();
-    if (withKem.isEmpty) return null;
-    if (preferred != null) {
-      final byId = withKem
-          .where((d) =>
-              constantTimeEquals(Uint8List.fromList(d.deviceNodeId), preferred))
-          .toList();
-      if (byId.isNotEmpty) withKem = byId;
-    }
-    withKem.sort((a, b) =>
-        (b.deviceKemPublishedAtMs ?? 0).compareTo(a.deviceKemPublishedAtMs ?? 0));
-    return withKem.first;
-  }
-
-  // ── Fragment Reassembly ────────────────────────────────────────────
-
-  /// Reed-Solomon reassembly (Architecture §5.4). Once K=7 of N=10 fragments
-  /// for a given `messageId` are present in the mailbox store, decode the
-  /// canonical `NetworkPacketV3` wire bytes and re-inject them through the
-  /// node's reassembly entrypoint. Outer-Sig-Verify, KEM-Decap and
-  /// Inner-Sig-Verify run there identically to a UDP-received packet.
-  ///
-  /// Multi-device: fragments are *not* deleted after a successful local
-  /// reassembly. Sibling devices of the same user polling the same mailbox
-  /// need them too; expiry is via the 7-day DHT TTL.
-  void _tryReassemble(Uint8List messageId) {
-    final fragments = mailboxStore.getFragmentsForMessage(messageId);
-    if (fragments.isEmpty) return;
-
-    final first = fragments.first;
-    if (fragments.length < first.requiredFragments) return;
-
-    final fragMap = <int, Uint8List>{};
-    for (final f in fragments) {
-      fragMap[f.fragmentIndex] = f.data;
-    }
-
-    try {
-      final rs = ReedSolomon();
-      final data = rs.decode(fragMap, first.originalSize);
-      node.dispatchReassembledPacket(data);
-      _log.info('Reassembled message ${bytesToHex(messageId).substring(0, 8)}');
-    } catch (e) {
-      _log.debug('Reassembly failed for ${bytesToHex(messageId).substring(0, 8)}: $e');
-    }
-  }
-
-  // ── Mailbox Polling ────────────────────────────────────────────────
-
-  void _pollMailbox() {
-    // §5.6: primary + fallback + (falls im 7-Tage-Fenster) Uebergangs-Primary.
-    final mailboxIds = _activeMailboxIds();
-
-    // Phase 1: confirmed peers → FRAGMENT_RETRIEVE + PEER_RETRIEVE
-    final confirmedPeers = node.routingTable.allPeers
-        .where((p) => node.isPeerConfirmed(p.nodeIdHex))
-        .toList();
-    for (final peer in confirmedPeers) {
-      for (final id in mailboxIds) {
-        _requestFragments(peer, id);
-      }
-      _requestStoredMessages(peer);
-    }
-
-    // Phase 2: DHT-closest peers per mailbox-ID → FRAGMENT_RETRIEVE only
-    // (§5.4: receiver lookup is mailbox-ID-keyed, matching sender placement).
-    final polled = <String>{};
-    for (final hex in confirmedPeers.map((p) => p.nodeIdHex)) {
-      polled.add(hex);
-    }
-    var dhtCount = 0;
-    for (final mboxId in mailboxIds) {
-      final closest = node.routingTable.findClosestPeers(mboxId,
-          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-      for (final peer in closest) {
-        if (polled.add(peer.nodeIdHex)) {
-          for (final id in mailboxIds) {
-            _requestFragments(peer, id);
-          }
-          dhtCount++;
-        }
-      }
-    }
-
-    _log.info('Mailbox poll: ${confirmedPeers.length} confirmed + $dhtCount DHT-closest'
-        '${_previousMailboxPrimary != null ? ' (+ transition primary)' : ''}');
-  }
-
-  void _requestFragments(PeerInfo peer, Uint8List mailboxId) {
-    // V3 (Architecture §23.3): FRAGMENT_RETRIEVE is an infrastructure
-    // message — route via DV cascade as InfrastructureFrame.
-    final req = proto.FragmentRetrieve()..mailboxId = mailboxId;
-    node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE,
-      innerPayload: Uint8List.fromList(req.writeToBuffer()),
-      recipientDeviceId: Uint8List.fromList(peer.nodeId),
-    );
-  }
-
-  /// Send a single PEER_RETRIEVE to one peer.
-  void _requestStoredMessages(PeerInfo peer) {
-    // V3 (Architecture §23.3): PEER_RETRIEVE is an infrastructure message —
-    // route via DV cascade as InfrastructureFrame.
-    final retrieve = proto.PeerRetrieve()..requesterNodeId = identity.nodeId;
-    node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE,
-      innerPayload: Uint8List.fromList(retrieve.writeToBuffer()),
-      recipientDeviceId: Uint8List.fromList(peer.nodeId),
-    );
-  }
-
-  /// §5.5 proactive S&F push: when a peer comes online, check if we hold
-  /// stored messages for that peer's userId and push them proactively.
-  /// Uses peekMessages() rate-limiting (3 pushes max, 5min interval) to
-  /// prevent flooding.
-  Future<void> _pushStoredMessagesTo(String deviceHex) async {
-    final store = node.peerMessageStore;
-    final recipientIds = store.recipientUserIds.toList();
-    if (recipientIds.isEmpty) return;
-
-    // Resolve deviceHex → userId: check contacts and routing table.
-    final deviceBytes = hexToBytes(deviceHex);
-    String? matchedUserHex;
-
-    // Path 1: contact with this deviceNodeId
-    for (final entry in _contacts.entries) {
-      if (entry.value.deviceNodeIds.contains(deviceHex)) {
-        matchedUserHex = entry.key;
-        break;
-      }
-    }
-
-    // Path 2: PeerInfo.userId in routing table
-    if (matchedUserHex == null) {
-      final peer = node.routingTable.getPeer(deviceBytes);
-      final uid = peer?.userIdHex;
-      if (uid != null && recipientIds.contains(uid)) {
-        matchedUserHex = uid;
-      }
-    }
-
-    if (matchedUserHex == null) return;
-    if (!recipientIds.contains(matchedUserHex)) return;
-
-    final recipientUserId = hexToBytes(matchedUserHex);
-    final attemptAt = DateTime.now();
-    final envelopes =
-        store.peekMessages(recipientUserId, attemptAt: attemptAt);
-    if (envelopes.isEmpty) return;
-
-    final response = proto.PeerRetrieveResponse()
-      ..storedEnvelopes.addAll(envelopes)
-      ..remaining = 0;
-    // S299 (A1): the send result decides whether the push budget is charged.
-    // `sendInfraTo` returns false when _buildInfraPacket dropped the packet —
-    // most commonly because the recipient's Device-KEM record is missing, in
-    // which case nothing left the machine and charging an attempt would burn
-    // the budget against a failure the recipient never caused.
-    final ok = await node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE,
-      innerPayload: Uint8List.fromList(response.writeToBuffer()),
-      recipientDeviceId: deviceBytes,
-    );
-    if (ok) {
-      store.commitPushAttempt(recipientUserId, attemptAt);
-      _log.info('S&F proactive push: sent ${envelopes.length} stored messages '
-          'to ${deviceHex.substring(0, 8)} (user ${matchedUserHex.substring(0, 8)})');
-    } else {
-      // Not charged — the next interval may find the peer reachable. Logged
-      // at INFO because the silent version of this was invisible for months.
-      _log.info('S&F proactive push: transport failed for '
-          '${deviceHex.substring(0, 8)} (${envelopes.length} messages) — '
-          'push budget NOT charged, will retry after the push interval');
-    }
-  }
-
-  /// Returns device node IDs for a contact identified by userIdHex.
-  /// If userIdHex is null, returns ALL contact device IDs (for iteration).
-  /// Used by CleonaNode.onRouteDown to resolve userId→devices when the
-  /// routing table's secondary index is incomplete.
-  List<String>? getContactDeviceIds(String? userIdHex) {
-    if (userIdHex == null) {
-      final all = <String>[];
-      for (final c in _contacts.values) {
-        all.addAll(c.deviceNodeIds);
-      }
-      return all;
-    }
-    final contact = _contacts[userIdHex];
-    if (contact == null) return null;
-    return contact.deviceNodeIds.toList();
-  }
-
-  /// §4.11: build RendezvousContact list from accepted contacts.
-  List<RendezvousContact> _buildRendezvousContacts() {
-    return _contacts.entries
-        .where((e) => e.value.status == 'accepted' && e.value.ed25519Pk != null)
-        .map((e) => RendezvousContact(
-              userIdHex: e.key,
-              foundingEd25519Pk: e.value.ed25519Pk!,
-              deviceNodeIds: e.value.deviceNodeIds.toList(),
-            ))
-        .toList();
-  }
-
-  /// §4.11: notify rendezvous manager about contact list changes.
-  void _updateRendezvousContacts() {
-    _rendezvousManager?.updateContacts(_buildRendezvousContacts());
-  }
-
-  /// Edge-triggered offline-message retrieval. Fires once from
-  /// [node.onDiscoveryComplete] after the §4.5 discovery cascade completes.
-  void _onPostDiscoveryRetrieve() {
-    _log.info('#U1 discovery-complete: starting one-shot offline retrieval');
-    _postDiscoveryPolledPeers.clear();
-    _pollConfirmedPeersOnce();
-    _retryPendingContactRequests();
-    _startCrRetryTimer();
-
-    // §4.11: initial rendezvous publish + start periodic refresh (4h).
-    _rendezvousManager?.publishForAllContacts();
-    _rendezvousManager?.startPeriodicRefresh();
-
-    // §4.11.10: resume persisted First-Contact rendezvous sessions
-    // (republish records + re-arm owner polls). No-op without sessions.
-    _fcRendezvous?.resumeSessions();
-
-    // §9.5.7 (S119 D1): edge-triggered initial anti-entropy sync — a fresh
-    // or long-offline node pulls the system-channel record sets once; the
-    // hourly digest piggyback keeps it converged afterwards.
-    final syncPeers = List<PeerInfo>.from(node.routingTable.allPeers)
-      ..shuffle();
-    sendSysChanDigests(syncPeers.take(_sysChanFanout));
-
-    _postDiscoverySecondSweep?.cancel();
-    _postDiscoverySecondSweep = Timer(const Duration(seconds: 15), () {
-      _postDiscoverySecondSweep = null;
-      final count = _pollConfirmedPeersOnce();
-      if (count > 0) {
-        _retryPendingContactRequests();
-      }
-      _log.info('#U1 second sweep complete '
-          '(${_postDiscoveryPolledPeers.length} total peers polled)');
-    });
-  }
-
-  /// Send FRAGMENT_RETRIEVE + PEER_RETRIEVE to all confirmed peers not
-  /// yet polled, PLUS FRAGMENT_RETRIEVE to DHT-closest peers for each
-  /// mailbox-ID (§5.4: receiver lookup is mailbox-ID-keyed).
-  /// Dedup via [_postDiscoveryPolledPeers].
-  int _pollConfirmedPeersOnce() {
-    // §5.6: primary + fallback + (falls im 7-Tage-Fenster) Uebergangs-Primary.
-    final mailboxIds = _activeMailboxIds();
-
-    // Phase 1: confirmed peers → FRAGMENT_RETRIEVE + PEER_RETRIEVE
-    final newPeers = node.routingTable.allPeers
-        .where((p) => node.isPeerConfirmed(p.nodeIdHex) &&
-            _postDiscoveryPolledPeers.add(p.nodeIdHex))
-        .toList();
-    for (final peer in newPeers) {
-      for (final id in mailboxIds) {
-        _requestFragments(peer, id);
-      }
-      _requestStoredMessages(peer);
-    }
-
-    // Phase 2: DHT-closest peers per mailbox-ID → FRAGMENT_RETRIEVE only.
-    // Sender places fragments via findClosestPeers (count:30 deeper pool);
-    // receiver must query the same DHT locus to reach those holders.
-    // PEER_RETRIEVE stays confirmed-only (S&F uses mutual-contact model).
-    var dhtCount = 0;
-    for (final mboxId in mailboxIds) {
-      final closest = node.routingTable.findClosestPeers(mboxId,
-          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-      for (final peer in closest) {
-        if (_postDiscoveryPolledPeers.add(peer.nodeIdHex)) {
-          for (final id in mailboxIds) {
-            _requestFragments(peer, id);
-          }
-          dhtCount++;
-        }
-      }
-    }
-
-    final total = newPeers.length + dhtCount;
-    if (total > 0) {
-      _log.info('#U1 polled ${newPeers.length} confirmed + $dhtCount DHT-closest '
-          '(total ${_postDiscoveryPolledPeers.length})');
-    }
-    return total;
-  }
+  // `firstCrPickDeviceKem(...)` stood here: the §8.1.1 selector that took
+  // from the devices resolved by the `IdentityResolver` the one with the
+  // freshest device KEM. `ResolvedDevice` came from
+  // `lib/core/identity_resolution/`, and the only caller was the
+  // first contact branch in the then `sendContactRequest`. HERE UNTIL
+  // S361 IT SAID "which today ends at gap G-1"; that had been wrong since S360 —
+  // that branch no longer ended, it delivered via the invitation line
+  // (§15.3.2).
+  //
+  // S389: `sendContactRequest` has not existed since S388-BAU-KONTAKT.
+  // On V4.2 the request is packet (2) of first contact in mycelium (§15.5);
+  // it arises on redeeming an invitation card and leaves the
+  // device via the one seam `sendToUser` (§22.5, `mycelium_seam.dart`).
+  // This changes nothing about the (T), on the contrary: there are no resolved
+  // devices any more to choose from — the card carries the
+  // key bundle itself (§15.2).
 
   // ── Sending ────────────────────────────────────────────────────────
 
@@ -3184,6 +2984,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     _maybeWriteStaleContactWarning(recipientUserIdHex);
 
+    // S368: see `_isWireFaehigeNachrichtenkennung`. If the reference falls,
+    // it falls on BOTH sides — before building the local message.
+    if (replyToMessageId != null &&
+        replyToMessageId.isNotEmpty &&
+        !_isWireCapableMessageIdentifier(replyToMessageId)) {
+      _log.warn('sendTextMessage: replyToMessageId is not a 32-digit '
+          'hex identifier — the reply reference is dropped entirely, locally too. On '
+          'this line that can only come from a damaged store.');
+      replyToMessageId = null;
+      replyToText = null;
+      replyToSender = null;
+    }
+
     // Optimistic UI msg.id is the wire messageId so DELIVERY_RECEIPT
     // (which carries inner.messageId) can match this local message and
     // upgrade `sent → delivered` in `_handleDeliveryReceiptV3`.
@@ -3196,7 +3009,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: text,
       timestamp: DateTime.now(),
       type: UiMessageType.text,
-      status: MessageStatus.sending,
+      status: MessageStatus.resting,
       isOutgoing: true,
       forwardedFrom: forwardedFrom,
       replyToMessageId: replyToMessageId,
@@ -3223,13 +3036,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..text = text
       ..formatHint = 'plain';
     if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
-      try {
-        tm.replyToMessageId = hexToBytes(replyToMessageId);
-      } catch (_) {
-        // Non-hex (legacy) replyToMessageId — log + skip wire-tag, local-only.
-        _log.debug(
-            'sendTextMessage: replyToMessageId not hex — wire-tag dropped');
-      }
+      // S368: checked above — here `hexToBytes` can no longer throw, and
+      // a silent fallback to "locally yes, on the wire no" is no longer
+      // possible.
+      tm.replyToMessageId = hexToBytes(replyToMessageId);
       if (replyToText != null && replyToText.isNotEmpty) {
         // Bound the snippet so we don't bloat the frame.
         tm.replyToSnippet = replyToText.length > 120
@@ -3237,24 +3047,31 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             : replyToText;
       }
     }
-    // §5.8: track L3 placement result via optional output parameter.
-    final l3Out = [false];
-    final sent = await sendToUser(
+    // Enter the leg in the index BEFORE sending (S393): the mailbox sets
+    // `inTransit` synchronously when the packet goes out, and
+    // `_myceliumSend` carries that over at once (`_v41ReflectStatus`). Without
+    // the entry the display only learned the state after `sendToUser`
+    // returned — and a receipt that arrived before that let the ONE tick of
+    // §12.2 be skipped (resting -> delivered, `smoke_four_states_run`).
+    _v41ApplyOutgoingStatus(msg, <String>[messageIdHex]);
+    await sendToUser(
       recipientUserId: contact.nodeId,
       messageType: proto.MessageTypeV3.MTV3_TEXT,
       payload: tm.writeToBuffer(),
       messageId: messageIdBytes,
-      l3Result: l3Out,
     );
-    node.statsCollector.addMessageSent();
+    statsCollector.addMessageSent();
 
-    // §5.8 status assignment:
-    //   sent=true  → direct UDP dispatch succeeded → MessageStatus.sent
-    //   sent=false + l3Out[0]=true  → L3 artefacts placed → queuedOffline
-    //   sent=false + l3Out[0]=false → 0 connectivity, parked in outbox → failed
-    msg.status = sent
-        ? MessageStatus.sent
-        : (l3Out[0] ? MessageStatus.queuedOffline : MessageStatus.failed);
+    // AP-4 (§5.1b/§5.1c K2): here stood the ternary
+    //   `sent ? sent : (l3Out[0] ? queuedOffline : failed)`
+    // including the comment "sent=true → direct UDP dispatch succeeded".
+    // It has been dropped WITHOUT REPLACEMENT, not renamed: its trigger was a
+    // successful socket write or a completed L3 placement, and neither
+    // is a delivery event in V4.1 any more (v4_1 §22.5.1). The
+    // return value of `sendToUser` is therefore no longer read at all.
+    //
+    // What moves the status now is solely the delivery register (§9.2, D2).
+    _v41ApplyOutgoingStatus(msg, <String>[messageIdHex]);
     _saveConversations();
     onStateChanged?.call();
 
@@ -3306,37 +3123,42 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// §5.8: Check if any queuedOffline messages in [conversationId] have
-  /// exceeded the 7-day TTL and mark them [MessageStatus.expired].
-  /// Pure local timestamp comparison — zero network traffic.
-  @override
-  void checkExpiredMessages(String conversationId) {
-    _checkAndMarkExpired(conversationId);
-  }
+  // `checkExpiredMessages` stood here and called `_checkAndMarkExpired`.
+  // Both fell with S390 (§9.3: "There is no timer that expires
+  // messages"); the justification stands at the deleted method in
+  // `cleona_service_msgstate.dart`.
 
-  /// §5.8: Re-send a message that has [MessageStatus.expired].
+  /// §9.3: send the message [messageId] once more, after the
+  /// user has given up.
   ///
-  /// Looks up the original message text, removes the old expired message,
-  /// and queues a fresh send through [sendTextMessage]. The old message is
-  /// replaced by the new one so the conversation stays coherent.
+  /// **Only from [MessageStatus.failed]**, because §12.2 offers the
+  /// action "again" for exactly this one state. Until S390 it hung
+  /// on `expired` — a state that a clock produced; thus the
+  /// decision "give up" lay with a timer instead of with the application, and
+  /// §9.3 expressly puts it in the application.
+  ///
+  /// §9.3 on the procedure: "Where a user retries, the message is sent again
+  /// under a new identifier; the old one is closed as `failed`." Exactly
+  /// that happens here — the old entry is taken out of the conversation
+  /// and [sendTextMessage] creates a new one with a new identifier.
   @override
-  Future<UiMessage?> resendExpiredMessage(
+  Future<UiMessage?> resendFailedMessage(
       String conversationId, String messageId) async {
     if (_reducedMode) {
-      _log.warn('resendExpiredMessage blocked: reducedMode active');
+      _log.warn('resendFailedMessage blocked: reducedMode active');
       return null;
     }
     final conv = conversations[conversationId];
     if (conv == null) return null;
+    ensureLoaded(conversationId);
     final idx = conv.messages.indexWhere((m) => m.id == messageId);
     if (idx < 0) return null;
     final original = conv.messages[idx];
-    if (original.status != MessageStatus.expired) return null;
+    if (original.status != MessageStatus.failed) return null;
     if (!original.isOutgoing) return null;
-    // Remove the expired entry from the outbox (if still there) and
-    // the conversation, then re-send via the normal path.
-    _outbox.remove(messageId);
-    _saveOutbox();
+    // Take out the abandoned entry, then send anew via the normal path.
+    // (S368: here additionally stood `_outbox.remove` — the
+    // V3 outbox has fallen, it could never carry the entry anyway.)
     conv.messages.removeAt(idx);
     _saveConversations();
     return sendTextMessage(
@@ -3358,6 +3180,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final conv = conversations[conversationId];
     if (conv == null) return false;
 
+    ensureLoaded(conversationId);
     final msgIndex = conv.messages.indexWhere((m) => m.id == messageId);
     if (msgIndex < 0) return false;
 
@@ -3437,6 +3260,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Apply locally
       original.text = newText;
       original.editedAt = DateTime.now();
+      persistMessage(conversationId, original);
       onStateChanged?.call();
       _saveConversations();
       _log.info('Message edited: $messageId');
@@ -3462,6 +3286,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final conv = conversations[conversationId];
     if (conv == null) return false;
 
+    ensureLoaded(conversationId);
     final msgIndex = conv.messages.indexWhere((m) => m.id == messageId);
     if (msgIndex < 0) return false;
 
@@ -3489,6 +3314,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (!original.isDeleted) {
         original.text = '';
         original.isDeleted = true;
+        // Tombstone, not removal: the message stays in the list
+        // and in the storage, its content is gone (§21.5.1).
+        persistMessage(conversationId, original);
         _saveConversations();
       }
       onStateChanged?.call();
@@ -3550,6 +3378,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Apply locally
       original.text = '';
       original.isDeleted = true;
+      persistMessage(conversationId, original);
       onStateChanged?.call();
       _saveConversations();
       _log.info('Message deleted: $messageId');
@@ -3605,7 +3434,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     _sendChatConfigUpdate(contact, conversationId, config, isRequest: true);
     onStateChanged?.call();
-    _log.info('Chat config proposal sent to ${contact.displayName}');
+    _log.debug('Chat config proposal — displayName="${contact.displayName}"');
+    _log.info('Chat config proposal sent');
     return true;
   }
 
@@ -3631,7 +3461,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     onStateChanged?.call();
-    _log.info('DM config proposal accepted for ${contact?.displayName ?? conversationId.substring(0, 8)}');
+    _log.debug('DM config accepted — displayName="${contact?.displayName}"');
+    _log.info('DM config proposal accepted for '
+        '${conversationId.substring(0, 8)}');
     return true;
   }
 
@@ -3656,7 +3488,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     onStateChanged?.call();
-    _log.info('DM config proposal rejected for ${contact?.displayName ?? conversationId.substring(0, 8)}');
+    _log.debug('DM config rejected — displayName="${contact?.displayName}"');
+    _log.info('DM config proposal rejected for '
+        '${conversationId.substring(0, 8)}');
     return true;
   }
 
@@ -3675,6 +3509,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     // Find the original message
+    ensureLoaded(sourceConversationId);
     final msg = sourceConv?.messages.where((m) => m.id == messageId).firstOrNull;
     if (msg == null || msg.isDeleted) return null;
 
@@ -3685,7 +3520,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Check if this is a media message
     if (msg.isMedia) {
-      if (msg.filePath != null && File(msg.filePath!).existsSync()) {
+      if (msg.filePath != null &&
+          MediaStore.instance.existsEitherWay(msg.filePath!)) {
         final result = await sendMediaMessage(targetConversationId, msg.filePath!);
         if (result != null) {
           result.forwardedFrom = originalSenderName;
@@ -3742,12 +3578,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (config.expiryDurationMs != null) {
       configMsg.expiryDurationMs = Int64(config.expiryDurationMs!);
     }
-    sendToUser(
+    _detachedSend('MTV3_CHAT_CONFIG_UPDATE', sendToUser(
       recipientUserId: contact.nodeId,
       messageType: proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE,
       payload: Uint8List.fromList(configMsg.writeToBuffer()),
       groupId: groupIdHex != null ? hexToBytes(groupIdHex) : null,
-    );
+    ));
   }
 
   /// Resolve best available encryption keys for a group/channel member.
@@ -3788,7 +3624,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
           memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk, memberEd25519Pk: member.ed25519Pk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_CHAT_CONFIG_UPDATE', sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE,
         payload: configPayload,
@@ -3796,7 +3632,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-      );
+      ));
     }
     _log.info('Broadcast config update for "${group.name}" to ${group.members.length - 1} members');
   }
@@ -3823,7 +3659,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
           memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk, memberEd25519Pk: member.ed25519Pk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_CHAT_CONFIG_UPDATE', sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE,
         payload: configPayload,
@@ -3831,537 +3667,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-      );
+      ));
     }
     _log.info('Broadcast config update for channel "${channel.name}" to ${channel.members.length - 1} members');
   }
 
-  /// Store erasure-coded backup of an envelope on DHT peers near the recipient's mailbox.
-  /// Works with ContactInfo (uses ed25519Pk for mailbox) or plain nodeId (fallback).
-  /// Reed-Solomon offline-delivery (Architecture §5.4): split the canonical
-  /// `NetworkPacketV3` wire bytes [packetBytes] into N=10 fragments (K=7
-  /// reassemble threshold) and FRAGMENT_STORE them onto the K=10 closest
-  /// DHT replicators of the recipient's mailbox.
-  ///
-  /// The recipient mailbox is keyed by the user's Ed25519 pubkey for
-  /// AppFrame payloads (`recipientUserEd25519Pk` non-null); for InfraFrame
-  /// payloads where the recipient is a specific device (RESTORE_BROADCAST,
-  /// Emergency KEY_ROTATION_BROADCAST), the mailbox derives from the
-  /// recipient's user node-ID via the `mailbox-nid` salt, since the
-  /// recipient may not have published its Device-KEM-PK yet at offline-time.
-  /// [messageId] is the packet's end-to-end identifier (16-byte UUID v4),
-  /// used by the receiver's reassembly buffer to gather all 10 fragments
-  /// of the same logical send.
-  ///
-  /// ACK-verified placement (S123 Erasure-F1): wave 1 sends N=10 fragments
-  /// x min(3, P) replicas to the P closest DHT replicators exactly like the
-  /// pre-F1 fire-and-forget placement, then waits (Completer + 8s timeout,
-  /// [_peerStoreAckTimeout], reused from the S&F F1 pattern) for
-  /// FRAGMENT_STORE_ACKs. Up to 2 retry waves target only the fragment
-  /// indices still unconfirmed, drawing fresh candidates from a deeper pool
-  /// (count:30) — see [ErasurePlacementCoordinator]. Success = at least
-  /// K=[ReedSolomon.defaultK] distinct fragment indices confirmed.
-  /// Returns true iff K-of-N placement was ACK-confirmed within the wave
-  /// budget. Returns false when no DHT replicators are reachable at all, or
-  /// when fewer than K indices could be confirmed (truly offline / eclipse).
-  Future<bool> _distributeErasureFragments({
-    required Uint8List packetBytes,
-    required Uint8List messageId,
-    Uint8List? recipientUserEd25519Pk,
-    Uint8List? recipientUserNodeId,
-  }) async {
-    try {
-      final sodium = SodiumFFI();
-      final Uint8List mailboxId;
-      if (recipientUserEd25519Pk != null && recipientUserEd25519Pk.isNotEmpty) {
-        mailboxId = sodium.sha256(Uint8List.fromList(
-            [...utf8.encode('mailbox'), ...recipientUserEd25519Pk]));
-      } else if (recipientUserNodeId != null && recipientUserNodeId.isNotEmpty) {
-        mailboxId = sodium.sha256(Uint8List.fromList(
-            [...utf8.encode('mailbox-nid'), ...recipientUserNodeId]));
-      } else {
-        _log.debug('Erasure offline-delivery skipped: no recipient pk/node-id');
-        return false;
-      }
-
-      final rs = ReedSolomon();
-      final fragments = rs.encode(packetBytes);
-      // D4 (§4.3): subnet-diverse replicator selection (same store/retrieve
-      // pattern as the identity records — eclipse cost binding).
-      final initialPeers = node.routingTable.findClosestPeers(mailboxId,
-          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-      if (initialPeers.isEmpty) {
-        _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
-        return false;
-      }
-
-      final msgIdHex = bytesToHex(messageId);
-
-      Future<bool> sendAndWait(int fragmentIndex, PeerInfo peer) async {
-        final fragStore = proto.FragmentStore()
-          ..mailboxId = mailboxId
-          ..messageId = messageId
-          ..fragmentIndex = fragmentIndex
-          ..totalFragments = fragments.length
-          ..requiredFragments = ReedSolomon.defaultK
-          ..fragmentData = fragments[fragmentIndex]
-          ..originalSize = packetBytes.length;
-        final key = '$msgIdHex:$fragmentIndex';
-        // Multiple replicas of the SAME fragment index (within or across
-        // waves) share one Completer: FragmentStoreAck carries only
-        // (messageId, fragmentIndex) — no per-send correlation id — so any
-        // one ACK for this index resolves every in-flight wait for it.
-        final completer =
-            _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
-        unawaited(node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
-          recipientDeviceId: Uint8List.fromList(peer.nodeId),
-        ));
-        try {
-          await completer.future.timeout(_peerStoreAckTimeout);
-          return true;
-        } on TimeoutException {
-          return false;
-        }
-      }
-
-      final coordinator = ErasurePlacementCoordinator<PeerInfo>(
-        totalFragments: fragments.length,
-        requiredFragments: ReedSolomon.defaultK,
-        peerId: (p) => p.nodeIdHex,
-        isPeerConfirmed: (p) => node.isPeerConfirmed(p.nodeIdHex),
-      );
-      final result = await coordinator.run(
-        initialPool: initialPeers,
-        deeperPool: () => node.routingTable.findClosestPeers(mailboxId,
-            count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup),
-        sendAndWait: sendAndWait,
-      );
-
-      // Aufraeumen nach Abschluss (kein Leak): every wait for this
-      // messageId's Completers has already resolved by the time
-      // `coordinator.run()` returns (each wave `await`s Future.wait before
-      // the next starts), so it's safe to drop any remaining entries —
-      // a late/duplicate ACK arriving afterwards is a harmless no-op in
-      // `handleIncomingFragmentStoreAckInfra`.
-      for (var i = 0; i < fragments.length; i++) {
-        _pendingFragmentStoreAcks.remove('$msgIdHex:$i');
-      }
-
-      if (result.success) {
-        if (result.fragile) {
-          _log.warn('Erasure placement fragile '
-              '(${result.confirmedCount}/${result.totalFragments} indices confirmed)');
-        } else {
-          _log.info('Erasure: ${result.confirmedCount}/${result.totalFragments} '
-              'indices confirmed');
-        }
-        return true;
-      }
-      _log.info('Erasure placement FAILED: '
-          '${result.confirmedCount}/${result.totalFragments} indices confirmed');
-      return false;
-    } catch (e) {
-      _log.debug('Erasure offline-delivery failed: $e');
-      return false;
-    }
-  }
-
-  /// §5.4 (S123 Erasure-F1): pending FRAGMENT_STORE ACKs keyed by
-  /// `'<messageIdHex>:<fragmentIndex>'`. Distinct from
-  /// [_pendingPeerStoreAcks] (S&F path, keyed by a random per-send storeId)
-  /// because `FragmentStoreAck` carries no correlation id beyond
-  /// (messageId, fragmentIndex) — replicas of the same index share one
-  /// Completer.
-  final Map<String, Completer<void>> _pendingFragmentStoreAcks = {};
-
-  /// Routed from the InfraFrame dispatchers. Resolves the sender-side
-  /// per-fragment-index ACK wait started by `_distributeErasureFragments`
-  /// AND drives the proactive-push retry-cancel path (`onProactivePushAcked`)
-  /// — both concerns share this one FRAGMENT_STORE_ACK observation point
-  /// since S123 Erasure-F1 (previously `onProactivePushAcked` was wired via
-  /// the now-removed `CleonaNode.onFragmentStoreAck` hook, which was never
-  /// invoked because the type was swallowed by the DhtRpc bridge before
-  /// S123).
-  void handleIncomingFragmentStoreAckInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
-    try {
-      final ack = proto.FragmentStoreAck.fromBuffer(frame.payload);
-      final messageId = Uint8List.fromList(ack.messageId);
-      final msgIdHex = bytesToHex(messageId);
-      final key = '$msgIdHex:${ack.fragmentIndex}';
-      final pending = _pendingFragmentStoreAcks.remove(key);
-      if (pending != null && !pending.isCompleted) {
-        pending.complete();
-      }
-      onProactivePushAcked(messageId, ack.fragmentIndex);
-    } catch (_) {/* malformed ACK — ignore */}
-  }
-
-  // ── §5.1 L1 Direct Retry (AckTracker timeout) ─────────────────────
-
-  Future<void> _handleRetryNeeded(
-      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) async {
-    final recipientHex = bytesToHex(recipientUserId);
-    _log.info('L1 direct retry for ${messageIdHex.substring(0, 8)} '
-        '→ ${recipientHex.substring(0, 8)}');
-
-    final devices = await node.identityResolver.resolve(recipientUserId);
-    if (devices.isNotEmpty) {
-      for (final dev in devices) {
-        if (dev.addresses.isNotEmpty) {
-          var peer = node.routingTable.getPeer(dev.deviceNodeId);
-          if (peer == null) {
-            peer = PeerInfo(nodeId: dev.deviceNodeId, userId: recipientUserId);
-            for (final addr in dev.addresses) {
-              peer.addresses.add(addr);
-            }
-            node.routingTable.addPeer(peer);
-          } else {
-            for (final addr in dev.addresses) {
-              final key = '${addr.ip}:${addr.port}';
-              if (!peer.addresses.any((a) => '${a.ip}:${a.port}' == key)) {
-                peer.addresses.add(addr);
-              }
-            }
-            node.routingTable.addPeer(peer);
-          }
-        }
-      }
-
-      final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
-      V3FrameCodec.refreshTimestampAndSign(packet, node.deviceKeyPair);
-      final resignedBytes = packet.writeToBuffer();
-      for (final dev in devices) {
-        final res = await node.sendToDeviceTracked(packet, dev.deviceNodeId);
-        if (res.ok) {
-          _log.info('L1 retry: direct delivery OK for '
-              '${messageIdHex.substring(0, 8)} → re-tracking ACK');
-          final destDevHex = bytesToHex(dev.deviceNodeId);
-          final wasRelay =
-              res.viaHopHex != null && res.viaHopHex != destDevHex;
-          unawaited(node.ackTracker.trackSend(
-            messageIdHex,
-            recipientHex,
-            const <PeerAddress>[],
-            AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
-                hopCount: wasRelay ? 2 : 1),
-            viaNextHopHex: res.viaHopHex,
-            estimatedHops: wasRelay ? 2 : 1,
-            serializedPacket: resignedBytes,
-            recipientUserId: recipientUserId,
-          ));
-          return;
-        }
-      }
-      _log.debug('L1 retry: all resolved devices unreachable for '
-          '${recipientHex.substring(0, 8)} — re-tracking for retry budget');
-      unawaited(node.ackTracker.trackSend(
-        messageIdHex,
-        recipientHex,
-        const <PeerAddress>[],
-        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
-        serializedPacket: serializedPacket,
-        recipientUserId: recipientUserId,
-      ));
-      return;
-    }
-
-    // Fallback: no Auth-Manifest in DHT (legacy peer) — use locally cached
-    // deviceNodeIds from the contact record, consistent with the initial
-    // sendToUser fast-path (cleona_service.dart:11820). Only at empty
-    // resolve (never merged with manifest results) to preserve device
-    // revocation semantics when a manifest exists.
-    final contact = _contacts[recipientHex];
-    if (contact == null || contact.deviceNodeIds.isEmpty) {
-      _log.debug('L1 retry: no devices resolved and no cached deviceNodeIds '
-          'for ${recipientHex.substring(0, 8)} — re-tracking for retry budget');
-      unawaited(node.ackTracker.trackSend(
-        messageIdHex,
-        recipientHex,
-        const <PeerAddress>[],
-        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
-        serializedPacket: serializedPacket,
-        recipientUserId: recipientUserId,
-      ));
-      return;
-    }
-    _log.info('L1 retry: legacy fallback via ${contact.deviceNodeIds.length} '
-        'cached deviceNodeIds for ${recipientHex.substring(0, 8)}');
-    final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
-    for (final devHex in contact.deviceNodeIds) {
-      final devId = hexToBytes(devHex);
-      final res = await node.sendToDeviceTracked(packet, devId);
-      if (res.ok) {
-        _log.info('L1 retry: legacy delivery OK for '
-            '${messageIdHex.substring(0, 8)} → re-tracking ACK');
-        // Befund 2: relay sends (hop != destination device) need the 8s
-        // relay floor from computeTimeout(hopCount: 2).
-        final wasRelay = res.viaHopHex != null && res.viaHopHex != devHex;
-        unawaited(node.ackTracker.trackSend(
-          messageIdHex,
-          recipientHex,
-          const <PeerAddress>[],
-          AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
-              hopCount: wasRelay ? 2 : 1),
-          viaNextHopHex: res.viaHopHex,
-          // S281: direct/relay discriminator for address scoring in
-          // _handleTimeout — same value the timeout above already uses.
-          estimatedHops: wasRelay ? 2 : 1,
-          serializedPacket: serializedPacket,
-          recipientUserId: recipientUserId,
-        ));
-        return;
-      }
-    }
-    _log.debug('L1 retry: all legacy devices unreachable for '
-        '${recipientHex.substring(0, 8)} — re-tracking for retry budget');
-    unawaited(node.ackTracker.trackSend(
-      messageIdHex,
-      recipientHex,
-      const <PeerAddress>[],
-      AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
-      serializedPacket: serializedPacket,
-      recipientUserId: recipientUserId,
-    ));
-  }
-
-  // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
-
-  Future<void> _handleRetryExhausted(
-      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) async {
-    _log.info('Offline cascade for message $messageIdHex '
-        '→ ${_hexShort(recipientUserId)}');
-    final recipientHex = bytesToHex(recipientUserId);
-    final contact = _contacts[recipientHex];
-
-    // §5.1: size-based L3 branching — only ONE of S&F or Erasure fires
-    final useErasure = serializedPacket.length > _l3SizeThresholdBytes;
-    bool l3Ok;
-    if (useErasure) {
-      final fragmentBundleId =
-          SodiumFFI().sha256(serializedPacket).sublist(0, 16);
-      l3Ok = await _distributeErasureFragments(
-        packetBytes: serializedPacket,
-        messageId: fragmentBundleId,
-        recipientUserEd25519Pk: contact?.ed25519Pk,
-        recipientUserNodeId: recipientUserId,
-      );
-    } else {
-      l3Ok = await _storeSafOnNetworkPeers(
-        recipientUserId: recipientUserId,
-        wrappedEnvelope: serializedPacket,
-      );
-    }
-
-    if (l3Ok) {
-      _updateMessageStatusById(
-          messageIdHex, recipientHex, MessageStatus.queuedOffline);
-      _log.info('L3 placed via ${useErasure ? "erasure" : "S&F"}: $messageIdHex');
-    } else {
-      _addToOutbox(
-        messageIdHex: messageIdHex,
-        recipientUserIdHex: recipientHex,
-        recipientEd25519PkHex:
-            contact?.ed25519Pk != null ? bytesToHex(contact!.ed25519Pk!) : null,
-        canonicalPacket: serializedPacket,
-      );
-      _log.warn('L3 ${useErasure ? "erasure" : "S&F"} failed '
-          '— $messageIdHex parked in outbox');
-    }
-  }
-
-  /// §5.1 size threshold: messages <= this use S&F, larger use Erasure.
-  static const int _l3SizeThresholdBytes = 10240;
-
-  /// §5.5: pending PEER_STORE ACKs keyed by storeIdHex. The storage peer
-  /// answers every store with `PEER_STORE_ACK{accepted}` — accepted=false
-  /// only when budget/rate-limit/size limits are exceeded.
-  final Map<String, Completer<bool>> _pendingPeerStoreAcks = {};
-
-  /// Per-store ACK wait. 8 s covers relay paths (min relay ACK budget §2).
-  static const Duration _peerStoreAckTimeout = Duration(seconds: 8);
-
-  /// §5.5 target redundancy: confirmed copies we aim for per message.
-  static const int _safTargetCopies = 3;
-
-  /// Routed from the InfraFrame dispatchers (was silently dropped before
-  /// S121 F1 — the sender could never distinguish accepted from rejected
-  /// or lost stores).
-  void handleIncomingPeerStoreAckInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
-      {bool wasDirect = false}) {
-    // L3 fix (S258): PEER_STORE_ACK is a response to our PEER_STORE —
-    // proves outbound reachability to this infra peer. Befund 15: only
-    // when the ACK arrived DIRECTLY (hopCount==0, real source address) —
-    // a relayed ACK must not confirm a direct route to the storage peer.
-    if (wasDirect) {
-      final senderHex = bytesToHex(senderDeviceId);
-      node.dvRouting.confirmRoute(senderHex);
-    }
-    try {
-      final ack = proto.PeerStoreAck.fromBuffer(frame.payload);
-      final storeIdHex = ack.storeId.hex;
-      final pending = _pendingPeerStoreAcks.remove(storeIdHex);
-      if (pending != null && !pending.isCompleted) {
-        pending.complete(ack.accepted);
-      }
-    } catch (_) {/* malformed ACK — ignore */}
-  }
-
-  /// §5.5: Store a complete message copy on network peers with ACK-verified
-  /// placement. Sends in waves toward [_safTargetCopies] confirmed copies,
-  /// drawing fresh candidates per wave until the pool is dry. Success = at
-  /// least one storage peer ACCEPTED.
-  Future<bool> _storeSafOnNetworkPeers({
-    required Uint8List recipientUserId,
-    required Uint8List wrappedEnvelope,
-  }) async {
-    // Draw a deep candidate pool (3 waves worth) so rejected stores can
-    // fall through to the next candidates per spec.
-    final pool = _findStoragePeerDeviceIds(recipientUserId,
-        limit: _safTargetCopies * 3);
-    if (pool.isEmpty) {
-      _log.debug('S&F: no storage peers for ${_hexShort(recipientUserId)}');
-      return false;
-    }
-
-    var accepted = 0;
-    var attempted = 0;
-    var cursor = 0;
-    while (accepted < _safTargetCopies && cursor < pool.length) {
-      final need = _safTargetCopies - accepted;
-      final wave = pool.skip(cursor).take(need).toList();
-      cursor += wave.length;
-
-      final waits = <Future<bool>>[];
-      for (final deviceId in wave) {
-        final sid = SodiumFFI().randomBytes(16);
-        final sidHex = bytesToHex(sid);
-        final peerStore = proto.PeerStore()
-          ..recipientNodeId = recipientUserId
-          ..wrappedEnvelope = wrappedEnvelope
-          ..storeId = sid
-          ..ttlMs = Int64(PeerMessageStore.defaultTtlMs);
-        final completer = Completer<bool>();
-        _pendingPeerStoreAcks[sidHex] = completer;
-        attempted++;
-        // Evaluate the send result instead of discarding it. A store that
-        // never left the machine — no route, or no Device-KEM record for
-        // this storage peer (§2.4.1) — is otherwise indistinguishable from
-        // a lost ACK: both surface as an 8 s timeout and both end up in the
-        // same "0/N stores ACCEPTED" line. That ambiguity is why the
-        // 2026-07-27 field failure could not be attributed. Failing fast
-        // also lets the next wave start immediately instead of burning the
-        // full timeout on a peer we demonstrably never reached.
-        unawaited(node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_PEER_STORE,
-          innerPayload: Uint8List.fromList(peerStore.writeToBuffer()),
-          recipientDeviceId: deviceId,
-        ).then((sent) {
-          if (sent) return;
-          final pending = _pendingPeerStoreAcks.remove(sidHex);
-          if (pending != null && !pending.isCompleted) {
-            _log.info('S&F: store to ${_hexShort(deviceId)} never dispatched '
-                '(no route or no Device-KEM record) — not waiting for ACK');
-            pending.complete(false);
-          }
-        }));
-        waits.add(completer.future.timeout(_peerStoreAckTimeout,
-            onTimeout: () {
-          _pendingPeerStoreAcks.remove(sidHex);
-          return false;
-        }));
-      }
-      final results = await Future.wait(waits);
-      accepted += results.where((ok) => ok).length;
-    }
-
-    if (accepted == 0) {
-      _log.warn('S&F: 0/$attempted stores ACCEPTED for '
-          '${_hexShort(recipientUserId)} — placement failed');
-      return false;
-    }
-    if (accepted < _safTargetCopies) {
-      _log.warn('S&F: only $accepted/$_safTargetCopies confirmed stores for '
-          '${_hexShort(recipientUserId)} ($attempted attempted) — '
-          'offline delivery fragile');
-    } else {
-      _log.info('S&F: $accepted confirmed stores for '
-          '${_hexShort(recipientUserId)} ($attempted attempted)');
-    }
-    return true;
-  }
-
-  /// §5.5: Find storage peers for S&F offline delivery. Tier 1: accepted
-  /// contacts (high confidence the recipient knows them). Tier 2: confirmed
-  /// routing-table peers (the recipient polls confirmed peers via
-  /// PEER_RETRIEVE). Excludes the recipient itself.
-  List<Uint8List> _findStoragePeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
-    final recipientHex = bytesToHex(recipientUserId);
-    final selfDeviceHex = identity.deviceNodeIdHex;
-    final recipientContact = _contacts[recipientHex];
-    final recipientDeviceHexes = recipientContact?.deviceNodeIds ?? <String>{};
-    final seen = <String>{};
-
-    // Phase 1: accepted contacts (high confidence mutual). S121 F2: rank
-    // confirmed peers (bidirectional UDP within TTL) far above merely
-    // alive-routed ones — stale relay routes are never pruned without
-    // traffic, so `isAlive` alone selected devices that had been offline
-    // for days (field evidence 2026-07-03: S&F copy on a 6-days-dead
-    // device; the §5.5 receiver-pull then never finds the message).
-    final phase1 = <(Uint8List, int)>[];
-    for (final entry in _contacts.entries) {
-      if (entry.key == recipientHex) continue;
-      final c = entry.value;
-      if (c.status != 'accepted') continue;
-      if (c.deviceNodeIds.isEmpty) continue;
-      for (final devHex in c.deviceNodeIds) {
-        final devBytes = hexToBytes(devHex);
-        final peer = node.routingTable.getPeer(devBytes);
-        if (peer == null) continue;
-        final confirmed = node.isPeerConfirmed(devHex);
-        final routes = node.dvRouting.routesTo(devHex);
-        final aliveCount = routes.where((r) => r.isAlive).length;
-        if (confirmed || aliveCount > 0) {
-          phase1.add((devBytes, (confirmed ? 1000 : 0) + aliveCount));
-          seen.add(devHex);
-          break;
-        }
-      }
-    }
-
-    // Phase 2: confirmed routing-table peers as fallback. Reserved slots
-    // ensure Tier-2 diversity even when Tier-1 has enough contacts.
-    // Only confirmed peers qualify — the receiver polls confirmed peers
-    // via PEER_RETRIEVE, and push-on-store requires confirmed status.
-    final reservedSlots = _safTargetCopies;
-    final phase1Cap = limit > reservedSlots ? limit - reservedSlots : 0;
-    phase1.sort((a, b) => b.$2.compareTo(a.$2));
-
-    final phase2 = <(Uint8List, int)>[];
-    for (final peer in node.routingTable.allPeers) {
-      final peerHex = peer.nodeIdHex;
-      if (peerHex == selfDeviceHex) continue;
-      if (peerHex == recipientHex || recipientDeviceHexes.contains(peerHex)) continue;
-      final peerUserId = peer.userId;
-      if (peerUserId != null && bytesToHex(peerUserId) == recipientHex) continue;
-      if (seen.contains(peerHex)) continue;
-      if (!node.isPeerConfirmed(peerHex)) continue;
-      final routes = node.dvRouting.routesTo(peerHex);
-      final aliveCount = routes.where((r) => r.isAlive).length;
-      if (aliveCount > 0) {
-        phase2.add((Uint8List.fromList(peer.nodeId), aliveCount));
-      }
-    }
-    phase2.sort((a, b) => b.$2.compareTo(a.$2));
-
-    return [
-      ...phase1.take(phase1Cap).map((c) => c.$1),
-      ...phase2.take(reservedSlots).map((c) => c.$1),
-    ];
-  }
+  // ── FIVE V3 STORAGE CONSTANTS: FALLEN (CUT) ──────────────────────
+  //
+  // `_pendingFragmentStoreAcks`, `_l3SizeThresholdBytes` (10 KB —
+  // below S&F, above Reed-Solomon), `_pendingPeerStoreAcks`,
+  // `_peerStoreAckTimeout` and `_safTargetCopies` (three confirmed
+  // copies). They exclusively described the layer 3 cascade, and that
+  // no longer exists: V4.1 stores with the responsible relays of the
+  // tag line (§9.1), with `m x R` as the redundancy measure instead of three copies.
 
   /// Add peers from a scanned ContactSeed QR code to the routing table.
   /// This ensures the target node and its seed peers are reachable before sending a CR.
@@ -4385,139 +3703,81 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     String? targetEpB64,
     String? targetRendezvousNonceB64,
   }) {
-    // Add the target node itself — always, even without addresses.
-    // Without addresses the Three-Layer Cascade will relay via seed peers.
-    final targetUserId = hexToBytes(targetNodeIdHex);
-    final hasDeviceId = targetDeviceIdHex != null && targetDeviceIdHex.isNotEmpty;
-    final routingNodeId = hasDeviceId ? hexToBytes(targetDeviceIdHex) : targetUserId;
-    final addresses = <PeerAddress>[];
-    for (final addr in targetAddresses) {
-      final parsed = _parseAddrString(addr);
-      if (parsed != null) {
-        addresses.add(PeerAddress(ip: parsed.$1, port: parsed.$2));
-      }
-    }
-    final targetPeer = PeerInfo(nodeId: routingNodeId, addresses: addresses)
-      ..userId = hasDeviceId ? targetUserId : null
-      ..isProtectedSeed = true; // Survive Doze pruning (§27)
-    node.routingTable.addPeer(targetPeer);
-    if (hasDeviceId) {
-      // Do NOT add the target as a DV direct-neighbor here. If the target
-      // is reachable (same LAN), the PING below will get a PONG which
-      // establishes the direct route naturally. If the target is NOT
-      // reachable (cross-network/CGNAT), a premature direct-neighbor entry
-      // causes sendToDevice to fire-and-forget via UDP to the unreachable
-      // private IP — which "succeeds" locally and prevents the relay
-      // cascade from ever trying Bootstrap as relay.
-      //
-      // Welle 5/6 (§4.3 / §3.5b): prime the DeviceKemRecord cache so
-      // `_buildInfraPacket → _lookupDeviceKemPk` hits the canonical path [1]
-      // for this device. The seed-derived record carries no User-Sig (we
-      // don't hold the contact's user-Ed25519-Sk yet), but handleKemPublish
-      // does not verify — the wire-layer does that on a real
-      // IDENTITY_KEM_PUBLISH. sequenceNumber=0 means a real publish will
-      // strictly supersede this seed.
-      if (targetDxkB64 != null && targetDmkB64 != null) {
-        try {
-          final dxk = base64Decode(targetDxkB64);
-          final dmk = base64Decode(targetDmkB64);
-          final primed = DeviceKemRecord(
-            userId: targetUserId,
-            deviceId: routingNodeId,
-            deviceX25519Pk: dxk,
-            deviceMlKemPk: dmk,
-            ttlSeconds: 24 * 3600,
-            sequenceNumber: 0,
-            publishedAtMs: DateTime.now().millisecondsSinceEpoch,
-            userEd25519Pk: Uint8List(0),
-            ed25519Sig: Uint8List(0),
-          );
-          node.identityDhtHandler.handleKemPublish(primed);
-        } catch (e) {
-          _log.warn('QR seed: malformed dxk/dmk — DKR cache not primed: $e');
-        }
-      }
-      final hasDkr = targetDxkB64 != null && targetDmkB64 != null;
-      final hasEp = targetEpB64 != null;
-      _log.info('QR seed: added target user=${targetNodeIdHex.substring(0, 8)} '
-          'device=${targetDeviceIdHex.substring(0, 8)} '
-          'with ${addresses.length} addresses'
-          '${hasDkr ? " + DKR cache" : hasEp ? " + ep trust-anchor" : " (no keys)"}'
-          ' (protected, no DV-neighbor)');
-    } else {
-      _log.info('QR seed: added target ${targetNodeIdHex.substring(0, 8)} '
-          'with ${addresses.length} addresses (protected, legacy URI)');
-    }
-
-    // Ping the target's own addresses — the target was added to the routing
-    // table above but no PONG cycle was kicked off (unlike seed peers below).
-    for (final addr in addresses) {
-      node.sendPing(addr.ip, addr.port);
-    }
-
-    // Add seed peers (bootstrap, mutual contacts, etc.)
+    // ── THE V3 HALF OF THIS METHOD HAS FALLEN (CUT) ─────────────
     //
-    // §5.5b: remember which peers came from THIS ContactSeed. The
-    // `isProtectedSeed` flag alone is the union over every ContactSeed ever
-    // scanned, and the First-CR fanout must not deposit on unrelated older
-    // seeds (Arch §5.5b flow step 3).
-    final importedSeedIds = <String>[];
-    for (final sp in seedPeers) {
-      final peerNodeId = hexToBytes(sp.nodeIdHex);
-      final spAddresses = <PeerAddress>[];
-      for (final addr in sp.addresses) {
-        final parsed = _parseAddrString(addr);
-        if (parsed != null) {
-          spAddresses.add(PeerAddress(ip: parsed.$1, port: parsed.$2)..score = 0.95);
-        }
-      }
-      if (spAddresses.isNotEmpty) {
-        final seedPeer = PeerInfo(nodeId: peerNodeId, addresses: spAddresses)
-          ..isProtectedSeed = true; // Survive Doze pruning (§27)
-        node.routingTable.addPeer(seedPeer);
-        // Seed peers must be DV neighbors so they can serve as default gateway
-        // for the First-CR when no direct route to the target exists yet.
-        node.dvRouting.addDirectNeighbor(peerNodeId, ConnectionType.publicUdp);
-        importedSeedIds.add(bytesToHex(peerNodeId));
-        _log.info('QR seed: added peer ${sp.nodeIdHex.substring(0, 8)} with ${spAddresses.length} addresses + DV neighbor (protected)');
-        // Ping seed peer to establish connection
-        for (final addr in spAddresses) {
-          node.sendPing(addr.ip, addr.port);
-        }
-      }
-    }
-    _recordContactSeedPeerIds(targetNodeIdHex, importedSeedIds);
+    // Here stood the takeover into `node.routingTable`: register the target node under
+    // its device identifier, prime `DeviceKemRecord` from
+    // `dxk`/`dmk` into the DHT cache, register seed peers as
+    // DV neighbours, choose the default gateway and ping
+    // everything. Five V3 subsystems (routing table, 2D DHT,
+    // distance vector, NAT ping) — none of them exists any more.
+    //
+    // The V4.1 half below STAYS and has been the actual
+    // purpose of this method since S356.
+    final hasDeviceId =
+        targetDeviceIdHex != null && targetDeviceIdHex.isNotEmpty;
+    // §5.5b: the seed identifiers continue to be noted at the contact. They
+    // cost nothing and are the only trace from which it can later be
+    // reconstructed which ContactSeed brought this contact.
+    _recordContactSeedPeerIds(targetNodeIdHex,
+        seedPeers.map((sp) => sp.nodeIdHex).toList(growable: false));
+    _log.info('QR seed: target ${targetNodeIdHex.substring(0, 8)}'
+        '${hasDeviceId ? " (Geraet ${targetDeviceIdHex.substring(0, 8)})" : ""}'
+        ', ${targetAddresses.length} address(es), ${seedPeers.length} '
+        'seed peer(s) — only the V4.1 entry is taken over.');
 
-    // Elect default gateway now that seed peers are DV neighbors — ensures
-    // sendToDevice has a last-resort relay path for the First-CR even if
-    // no PONG has arrived yet.
-    node.dvRouting.updateDefaultGateway();
-
-    // §4.11.10 First-Contact Rendezvous, scanner side: a pasted URI carries
-    // the `r` nonce → resolve the owner-tag (fresher addresses than `a=`),
-    // publish our own EndpointRecord under the scanner-tag, and let the
-    // existing CR retry re-resolve before each attempt.
-    if (targetRendezvousNonceB64 != null && hasDeviceId) {
-      try {
-        final nonce = Uint8List.fromList(
-            base64Url.decode(base64Url.normalize(targetRendezvousNonceB64)));
-        _fcRendezvous?.startScannerSession(
-            nonce, targetNodeIdHex.toLowerCase(), targetDeviceIdHex);
-      } catch (e) {
-        _log.warn('FC-RV: malformed rendezvous nonce in ContactSeed — '
-            'scanner session not started: $e');
-      }
+    // ── AND THE SAME ADDRESSES FOR THE V4.1 ENTRY (§11.3 line C) ──
+    //
+    // Until S356 a read-in ContactSeed ended EXCLUSIVELY in
+    // `node.routingTable` — i.e. in V3. The V4.1 entry cascade saw
+    // nothing of it: `v41.entries.remember` knew exactly three origins
+    // (`extern`, `lan`, `partner/*`), and `person` was none of them.
+    //
+    // That is the path that §11.3 calls "always, and it is the normal way in"
+    // and §15 fixes as "the peer list handed over in the process becomes
+    // **entry hints** and serves exclusively the network entry".
+    // It had no effect whatsoever on the V4.1 line — a user who
+    // scans a QR code to get in thereby only helped the layer
+    // that this migration removes.
+    //
+    // THEY ARE ADDRESSES, NOT RECORDS. From `ip:port` no
+    // signed `EntryRecord` can be built, and that should stay so — the
+    // hint only says WHERE one can ask; the record is issued by the
+    // peer, and it verifies itself on arrival. A
+    // slipped-in hint costs at most one request into the void.
+    //
+    // NODE-WIDE, not per identity: the V4.1 node runs once per
+    // process (§3.1, `L_node` belongs to the node). Hence the shared
+    // store instead of a field at this service.
+    final v41Hints = personEntryHints.add([
+      ...targetAddresses,
+      for (final sp in seedPeers) ...sp.addresses,
+    ]);
+    if (v41Hints > 0) {
+      _log.info('V4.1 entry: $v41Hints hint(s) from the ContactSeed '
+          'adopted (§11.3 step „human")');
     }
+
+    // S388: here an `r` nonce started the scanner session of the
+    // first contact rendezvous (§4.11.10). Removed (justification at the
+    // field block above); [targetRendezvousNonceB64] has not been read
+    // since. The parameter falls with the V3 ContactSeed reader
+    // (owner decision 15.09.2026, point 17), not here.
   }
 
   /// §5.5b: seed-peer node-IDs of the most recently scanned ContactSeed,
   /// keyed by target user-ID (lowercase hex). Bridges the window in which the
-  /// contact record does not exist yet: `addPeersFromContactSeed` always runs
-  /// BEFORE `sendContactRequest` creates the `pending_outgoing` ContactInfo
-  /// (qr_contact_screen, home_screen, deep_link_receiver all follow that
-  /// order), so the list cannot be written to the contact at scan time. It is
-  /// flushed onto the contact by [_seedPeerIdsForTarget] at the first First-CR
-  /// fanout — which happens inside that very same `sendContactRequest` call.
+  /// contact record does not exist yet: `addPeersFromContactSeed` runs BEFORE
+  /// the `pending_outgoing` ContactInfo exists, so the list cannot be written
+  /// to the contact at scan time. It is flushed onto the contact by
+  /// [_seedPeerIdsForTarget] when that record appears.
+  ///
+  /// S389: the caller `sendContactRequest` formerly named here has been
+  /// dropped (S388-BAU-KONTAKT). On V4.2 the `pending_outgoing` arises
+  /// on redeeming an invitation card (§15.5), and the request goes out via
+  /// `sendToUser` (§22.5). The order — first addresses, then
+  /// contact record — has stayed the same; only the second step is called
+  /// differently.
   final Map<String, List<String>> _pendingSeedPeerIdsHex = {};
 
   /// §5.5b: persist the seed peers of a freshly scanned ContactSeed at the
@@ -4541,104 +3801,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         '${contact != null ? " (persisted)" : " (pending contact creation)"}');
   }
 
-  /// §5.5b: the seed peers the First-CR fanout may deposit on for this
-  /// recipient. An empty result means "no per-contact list known" — the
-  /// caller then falls back to the legacy all-protected-seeds behaviour.
-  List<String> _seedPeerIdsForTarget(String recipientUserIdHex) {
-    final key = recipientUserIdHex.toLowerCase();
-    final contact = _contacts[recipientUserIdHex] ?? _contacts[key];
-    final stored = contact?.seedPeerIdsHex ?? const <String>[];
-    if (stored.isNotEmpty) return stored;
-    final pending = _pendingSeedPeerIdsHex[key];
-    if (pending == null || pending.isEmpty) return const <String>[];
-    if (contact != null) {
-      // The contact record exists by now (sendContactRequest created it just
-      // before this fanout) — flush, so the narrow fanout also survives a
-      // daemon restart and holds for every CR retry cycle.
-      contact.seedPeerIdsHex = List<String>.from(pending);
-      _saveContacts();
-    }
-    return pending;
-  }
+  // `_seedPeerIdsForTarget(...)` stood here: the seed peers on which the
+  // first-CR fanout was allowed to store a first request (§5.5b). Its only
+  // reader was this fanout. The identifiers themselves continue to be noted at the
+  // contact ([_recordContactSeedPeerIds]).
+  //
+  // HERE UNTIL S361 IT SAID "(gap G-1)". That was a confusion of
+  // cause and time: the fanout fell with §5.5b and the
+  // routing table, not with the first contact carrier — and first contact
+  // has stood since S360 (§15.3.2). V4.1 stores first requests with the
+  // responsible relays of the tag line (§9.1), not with seed peers.
 
-  /// §4.11.10 First-Contact Rendezvous, owner side: the UI copied/shared a
-  /// ContactSeed-URI carrying the given `r` nonce (base64url). Starts (or
-  /// resumes — idempotent per nonce) the owner session: publish own
-  /// EndpointRecord under the owner-tag + poll the scanner-tag.
-  @override
-  void notifyContactSeedUriShared(String rendezvousNonceB64) {
-    try {
-      final nonce = Uint8List.fromList(
-          base64Url.decode(base64Url.normalize(rendezvousNonceB64)));
-      _fcRendezvous?.startOwnerSession(nonce);
-    } catch (e) {
-      _log.warn('FC-RV: malformed rendezvous nonce from UI — '
-          'owner session not started: $e');
-    }
-  }
+  // `notifyContactSeedUriShared` (owner session) and
+  // `_onFcEndpointResolved` (result after `personEntryHints`) stood
+  // here — the first contact rendezvous, removed in S388 (justification at the
+  // field block above).
 
-  /// §4.11.10: the other side's EndpointRecord was resolved via the
-  /// First-Contact rendezvous. Merge the addresses into the routing table
-  /// and PING all of them (simultaneous-open: both sides send → carrier
-  /// firewalls/NATs open bidirectionally). Fired on every poll hit while
-  /// the session is active, so the PINGs are repeated.
-  void _onFcEndpointResolved(
-      FcSession session, String deviceIdHex, List<EndpointAddress> addresses) {
-    if (deviceIdHex == bytesToHex(identity.deviceNodeId)) return; // self-echo
-    final deviceId = hexToBytes(deviceIdHex);
-    final existing = node.routingTable.getPeer(deviceId);
-    if (existing == null) {
-      final peer = PeerInfo(
-        nodeId: deviceId,
-        addresses:
-            addresses.map((a) => PeerAddress(ip: a.ip, port: a.port)).toList(),
-      )..isProtectedSeed = true; // survive Doze pruning, like ContactSeed peers
-      if (session.role == kFcRoleScanner && session.targetUserIdHex != null) {
-        peer.userId = hexToBytes(session.targetUserIdHex!);
-      }
-      node.routingTable.addPeer(peer);
-      _log.info('FC-RV: added peer ${deviceIdHex.substring(0, 8)} with '
-          '${addresses.length} rendezvous address(es)');
-    } else {
-      var merged = 0;
-      for (final a in addresses) {
-        final known = existing.addresses
-            .any((pa) => pa.ip == a.ip && pa.port == a.port);
-        if (!known) {
-          existing.addresses.add(PeerAddress(ip: a.ip, port: a.port));
-          merged++;
-        }
-      }
-      if (merged > 0) {
-        _log.info('FC-RV: merged $merged fresh rendezvous address(es) into '
-            'peer ${deviceIdHex.substring(0, 8)}');
-      }
-    }
-    for (final a in addresses) {
-      node.sendPing(a.ip, a.port);
-    }
-  }
+  // `_parseAddrString` stood here — the parser for "ip:port" or
+  // "[v6]:port". Its last reader was the V3 half of
+  // [addPeersFromContactSeed]; the V4.1 half passes the strings
+  // unparsed to `personEntryHints`, which checks them itself.
 
-  /// Parse address string: "1.2.3.4:5678" (IPv4) or "[2001:db8::1]:5678" (IPv6).
-  static (String, int)? _parseAddrString(String addr) {
-    if (addr.startsWith('[')) {
-      // IPv6: [2001:db8::1]:port
-      final closeBracket = addr.indexOf(']');
-      if (closeBracket < 0) return null;
-      final ip = addr.substring(1, closeBracket);
-      if (closeBracket + 2 >= addr.length || addr[closeBracket + 1] != ':') return null;
-      final port = int.tryParse(addr.substring(closeBracket + 2));
-      if (port == null || ip.isEmpty || ip == '::') return null;
-      return (ip, port);
-    }
-    // IPv4: ip:port
-    final parts = addr.split(':');
-    if (parts.length != 2) return null;
-    final ip = parts[0];
-    final port = int.tryParse(parts[1]);
-    if (port == null || ip.isEmpty || ip == '0.0.0.0') return null;
-    return (ip, port);
-  }
 
   // ── Manual Peer Entry (Architecture Section 2.3.4) ──────────────────
 
@@ -4649,9 +3832,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// table by this call, and a DHT_PING is normally not sent either, because
   /// an `InfrastructureFrameV3` needs a recipient deviceId that a bare
   /// `ip:port` does not supply. What this call does is send plaintext
-  /// discovery probes. Registration happens later, when the target answers:
+  /// discovery probes. **HISTORIC from 2026-08-31 (CUT):** here it said
+  /// "Registration happens later, when the target answers:
   /// `CleonaNode._onDiscoveryReceived` creates the `PeerInfo` and fires the
-  /// ping from there.
+  /// ping from there." Both subjects — `CleonaNode` and `PeerInfo` —
+  /// are deleted; there is no registration any more on which this call
+  /// could hang.
   ///
   /// The previous doc claimed "the peer is added to the routing table and
   /// pinged" — measured 2026-07-28, neither half held at call time:
@@ -4666,37 +3852,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return false;
     }
 
-    // V3 path (post-Welle 3): the InfrastructureFrame BOOT-pipeline (§2.4.1a)
-    // requires the recipient's deviceId — without it `_sendPing` silently
-    // drops because no addressee can be encoded in the frame header. Manual
-    // peer entry by definition supplies only an (ip, port) pair, so we use
-    // the LAN-Discovery wire format instead: a 38-byte unicast probe to the
-    // recipient's discovery socket. The receiver's `LocalDiscovery._onEvent`
-    // registers us via the standard discovery callback, after which V3
-    // BOOT-bonding can proceed in both directions.
+    // ── V4.1: A MANUAL PEER IS AN ENTRY HINT ─────────────
     //
-    // The discovery port (41338) is well-known protocol-wide. The user-
-    // supplied `port` is usually the daemon's *data* port — we send the
-    // probe to discoveryPort regardless. If the user knows the recipient
-    // binds discovery on a non-standard port, they can override by sending
-    // a SECOND probe to the supplied port; we cover that fallback so manual
-    // entry remains operator-friendly across uncommon topologies.
-    node.localDiscovery.sendUnicastDiscovery(ip);
-    if (port != LocalDiscovery.discoveryPort) {
-      node.localDiscovery.sendUnicastDiscovery(ip, port);
-    }
-    // Cross-NAT: LAN-Discovery probes fail across CGNAT (no pinhole on
-    // discovery port 41338). Also send a V3 DHT_PING to the data port —
-    // works if the target is a KNOWN peer whose addresses include ip:port.
-    // Report what actually happened. The old line announced "V3 PING sent"
-    // unconditionally, 30 microseconds after _sendPing had skipped — which is
-    // how the gap survived unnoticed in the field logs for so long.
-    unawaited(node.sendPing(ip, port).then((pinged) {
-      _log.info('Manual peer entry: discovery probe sent to $ip:$port '
-          '(discoveryPort=${LocalDiscovery.discoveryPort}); '
-          '${pinged ? "V3 PING also sent (address already known)" : "no V3 PING "
-              "— address not in routing table yet, waiting for the probe answer"}');
-    }));
+    // FORMERLY two V3 paths stood here side by side: a 38-byte
+    // unicast probe to the LAN discovery port (41338) via
+    // `node.localDiscovery`, and a `DHT_PING` to the data port via
+    // `node.sendPing`. Both subsystems fell with `lib/core/network/`.
+    //
+    // The V4.1 subject is the same as with the ContactSeed and the
+    // rendezvous: §11.3 names an address at which one can ask,
+    // a HINT, and the entry store of the node collects them.
+    // The entry cascade asks there on its own tick; it
+    // needs no probe from this place, and a probe would
+    // anyway be a second path to the same thing.
+    //
+    // WHAT THE RETURN VALUE MEANS NOW: "the hint is in the store",
+    // not "a probe is out". The doc comment above already said
+    // expressly before that it does NOT mean reachability.
+    final fresh = personEntryHints.add([
+      ip.contains(':') ? '[$ip]:$port' : '$ip:$port',
+    ]);
+    _log.info('Manueller Peer $ip:$port — '
+        '${fresh > 0 ? "neu im" : "schon im"} V4.1-Eintrittsvorrat (§11.3)');
     return true;
   }
 
@@ -4762,7 +3939,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    unawaited(node.onNetworkChanged(force: true));
+    unawaited(onNetworkChanged(force: true));
 
     return {
       'networkTagValid': true,
@@ -4827,518 +4004,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// Send a contact request.
-  /// If the contact already exists as "accepted", re-sends CR with fresh keys
-  /// so the remote side can re-establish the relationship (e.g. after data loss).
-  @override
-  Future<bool> sendContactRequest(String recipientUserIdHex,
-      {String message = '',
-      String? seedDeviceIdHex,
-      String? seedDxkB64,
-      String? seedDmkB64,
-      String? seedEpB64}) async {
-    final existing = _contacts[recipientUserIdHex];
-    final isReContact = existing != null && existing.status == 'accepted';
-
-    final recipientUserId = hexToBytes(recipientUserIdHex);
-
-    final cr = proto.ContactRequestMsg()
-      ..displayName = displayName
-      ..ed25519PublicKey = identity.ed25519PublicKey
-      ..mlDsaPublicKey = identity.mlDsaPublicKey
-      ..x25519PublicKey = identity.x25519PublicKey
-      ..mlKemPublicKey = identity.mlKemPublicKey
-      ..message = message;
-    if (_profilePictureBase64 != null) {
-      cr.profilePicture = base64Decode(_profilePictureBase64!);
-    }
-    final crBytes = Uint8List.fromList(cr.writeToBuffer());
-
-    if (!isReContact) {
-      if (_deletedContacts.remove(recipientUserIdHex)) {
-        _log.info('sendContactRequest: cleared deletedContacts marker for ${recipientUserIdHex.substring(0, 8)}');
-      }
-      _contacts[recipientUserIdHex] = ContactInfo(
-        nodeId: recipientUserId,
-        displayName: 'Pending...',
-        status: 'pending_outgoing',
-        message: message.isEmpty ? null : message,
-        seedDeviceIdHex: seedDeviceIdHex,
-        seedDxkB64: seedDxkB64,
-        seedDmkB64: seedDmkB64,
-        seedEpB64: seedEpB64,
-      );
-      _saveContacts();
-    } else {
-      _log.info(
-          'Re-contact to accepted ${existing.displayName} — sending CR with fresh keys');
-    }
-
-    // V3 path: re-contact (recipient KEM pubkeys already known) — sendToUser.
-    if (isReContact &&
-        existing.x25519Pk != null &&
-        existing.mlKemPk != null) {
-      final ok = await sendToUser(
-        recipientUserId: recipientUserId,
-        messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST,
-        payload: crBytes,
-      );
-      _log.event('CR SENT (re-contact) to ${recipientUserIdHex.substring(0, 8)} ok=$ok');
-      return true;
-    }
-
-    // First-contact CR (Welle 5 §8.1.1 First-CR-Bootstrap): wrap a
-    // User-signed ApplicationFrameV3 (recipientUserId=recipient, payload=CR)
-    // into an InfrastructureFrame whose KEM-encap subject is the recipient's
-    // *Device*-KEM-PK (NOT User-KEM-PK — the sender doesn't have that yet, the
-    // CR is what bootstraps the User-KEM exchange). The Device-KEM-PK pair
-    // is delivered out-of-band via the ContactSeed `dxk`/`dmk` parameters.
-    //
-    // §8.1.1 Backward-compat: legacy ContactSeed-URIs predate Welle 5 and
-    // carry only `did` (or nothing). When `dxk`/`dmk` are missing the sender
-    // falls back to a synchronous 2D-DHT lookup of the recipient's
-    // DeviceKemRecord (§4.3 step 4b) via `IdentityResolver.resolve(userId)`.
-    // If a specific `did` was supplied, the resolver result is filtered to
-    // that device; otherwise the freshest published Device-KEM is picked.
-    Uint8List dxk;
-    Uint8List dmk;
-    Uint8List recipientDeviceId;
-    final hasFullSeed = seedDeviceIdHex != null &&
-        seedDeviceIdHex.isNotEmpty &&
-        seedDxkB64 != null &&
-        seedDmkB64 != null;
-    if (hasFullSeed) {
-      try {
-        dxk = base64Decode(seedDxkB64);
-        dmk = base64Decode(seedDmkB64);
-        recipientDeviceId = hexToBytes(seedDeviceIdHex);
-      } catch (e) {
-        _log.warn('CONTACT_REQUEST drop: malformed seed parameters: $e');
-        return false;
-      }
-    } else {
-      // §8.1.1 rev3 Deferred Key Exchange step 1a: resolve Device-KEM-PK
-      // from DHT (primary path for v2 ContactSeeds with ep trust-anchor).
-      _log.info('CONTACT_REQUEST First-CR: Deferred Key Exchange — '
-          'DHT lookup for ${recipientUserIdHex.substring(0, 8)}'
-          '${seedEpB64 != null ? " (v2 seed with ep)" : " (legacy seed)"}');
-      final resolved = await node.identityResolver.resolve(recipientUserId);
-      Uint8List? preferred;
-      if (seedDeviceIdHex != null && seedDeviceIdHex.isNotEmpty) {
-        try {
-          preferred = hexToBytes(seedDeviceIdHex);
-        } catch (_) {}
-      }
-      final picked = firstCrPickDeviceKem(resolved, preferred);
-      if (picked != null) {
-        dxk = Uint8List.fromList(picked.deviceX25519Pk!);
-        dmk = Uint8List.fromList(picked.deviceMlKemPk!);
-        recipientDeviceId = Uint8List.fromList(picked.deviceNodeId);
-        _log.info('CONTACT_REQUEST First-CR: DHT resolved device '
-            '${bytesToHex(recipientDeviceId).substring(0, 8)} for '
-            '${recipientUserIdHex.substring(0, 8)} '
-            '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
-      } else if (seedEpB64 != null &&
-          seedDeviceIdHex != null &&
-          seedDeviceIdHex.isNotEmpty) {
-        // §8.1.1 rev3 Deferred Key Exchange step 1b: the DHT had no
-        // DeviceKemRecord (the common case for a fresh QR-scan between two
-        // isolated networks — AP-isolation + CGNAT — where neither side's
-        // 2D-DHT has converged). v2 ContactSeeds carry no inline dxk/dmk, so
-        // we ask the recipient directly: a plaintext BOOT DEVICE_KEM_REQUEST
-        // is routed to the target device (relayed through the ContactSeed's
-        // seed peers via the DV cascade — the same path the CR itself uses).
-        // The recipient answers with a DEVICE_KEM_OFFER signed by its user
-        // Ed25519 key; handleIncomingDeviceKemOffer verifies that against the
-        // `ep` trust-anchor, persists dxk/dmk onto this contact, and
-        // re-triggers the CR. This is self-healing: we do NOT block on a
-        // single timeout window — the CR stays pending_outgoing and the retry
-        // timer re-issues the request until an OFFER arrives (or the user
-        // gives up). See §8.1.1 step 1b.
-        final targetDeviceId = hexToBytes(seedDeviceIdHex);
-        _requestDeviceKem(recipientUserId, targetDeviceId, seedEpB64);
-        _log.info('CONTACT_REQUEST First-CR: DHT miss for '
-            '${recipientUserIdHex.substring(0, 8)} — sent DEVICE_KEM_REQUEST '
-            '(step 1b); waiting up to 15s for DEVICE_KEM_OFFER...');
-        final completer = _dkeCompleters.putIfAbsent(
-            recipientUserIdHex, () => Completer<void>());
-        // §4.5 DKE retry: resend after DV routing converges. The first
-        // attempt often hits an incomplete routing table (discovery cascade
-        // not finished, Bootstrap routes not yet accepted via D3 PoW
-        // verification). A retry at 8s (matching the per-device rate-limit
-        // cooldown) gives the mesh time to converge and picks up the newly
-        // elected default-GW (typically Bootstrap with 50+ routes).
-        final retryTimer = Timer(const Duration(seconds: 8), () {
-          if (!completer.isCompleted) {
-            _requestDeviceKem(recipientUserId, targetDeviceId, seedEpB64);
-          }
-        });
-        try {
-          await completer.future.timeout(const Duration(seconds: 15));
-          retryTimer.cancel();
-          _dkeCompleters.remove(recipientUserIdHex);
-          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER received for '
-              '${recipientUserIdHex.substring(0, 8)} — CR sent by offer handler');
-          return true;
-        } on TimeoutException {
-          retryTimer.cancel();
-          _dkeCompleters.remove(recipientUserIdHex);
-          _log.warn('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER timeout for '
-              '${recipientUserIdHex.substring(0, 8)} — no RUDP-Light confirmation '
-              'received. CR stays pending_outgoing for background retry '
-              '(exponential backoff).');
-          return true;
-        }
-      } else {
-        _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
-            'no DeviceKemRecord in DHT for '
-            '${recipientUserIdHex.substring(0, 8)} and no ep+seedDeviceId for '
-            'the step-1b fallback. CR stays pending_outgoing for '
-            'background DHT re-resolve (backoff capped at 1200s).');
-        return true;
-      }
-    }
-
-    // Build inner ApplicationFrameV3, User-signed. Sender pubkeys are
-    // carried in the CR payload itself so the receiver can verify even
-    // before any contact-registry entry exists (§8.1.1 trust-bootstrap).
-    final innerFrame = proto.ApplicationFrameV3()
-      ..version = 1
-      ..senderUserId = identity.userId
-      ..recipientUserId = recipientUserId
-      ..messageType = proto.MessageTypeV3.MTV3_CONTACT_REQUEST
-      ..messageId = SodiumFFI().randomBytes(16)
-      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..payload = crBytes;
-    final signedInnerBytes = V3FrameCodec.signApplicationFrameInner(
-      inner: innerFrame,
-      senderUserEd25519Sk: identity.signingEd25519Sk,
-      senderUserMlDsaSk: identity.signingMlDsaSk,
-    );
-
-    // Build InfrastructureFrame with §8.1.1-relaxed selector
-    // (MTV3_CONTACT_REQUEST), KEM-encapped under the recipient's
-    // Device-KEM-PK pair from the seed.
-    final packet = V3FrameCodec.buildInfrastructureFrame(
-      recipientDeviceId: recipientDeviceId,
-      senderDeviceId: node.primaryIdentity.deviceNodeId,
-      senderDeviceKeys: node.deviceKeyPair,
-      messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST,
-      payload: signedInnerBytes,
-      recipientDeviceX25519Pk: dxk,
-      recipientDeviceMlKemPk: dmk,
-    );
-    final firstCrMsgIdHex = innerFrame.messageId.hex;
-
-    // §8.1.1 / §4.3 — pin the recipient's self-certified user signature keys
-    // BEFORE the send so the DELIVERY_RECEIPT answering this CR verifies on
-    // the normal path. Without them the receipt fails inner verify with
-    // `userPubkeysMissing` and is silently dropped; the 15 s gate below then
-    // fires FIRST_CR_STORE against a recipient that is online and already
-    // holds the CR, and every retry arms a fresh gate (~8 kB per seed peer
-    // per round — Arbeitsregel 5).
-    _pinRecipientUserSigPks(recipientUserId, recipientUserIdHex);
-
-    final sendResult = await node.sendToDeviceTracked(packet, recipientDeviceId);
-    final ok = sendResult.ok;
-    _log.event('CR SENT (First-CR) to '
-        '${recipientUserIdHex.substring(0, 8)} (device='
-        '${bytesToHex(recipientDeviceId).substring(0, 8)}) ok=$ok');
-
-    // §5.8 RUDP-Light — CONTACT_REQUEST is ack-worthy (`isAckWorthyV3`), but
-    // the First-CR path used untracked `sendToDevice`: no tracker entry, so
-    // no timeout ever fired, so a silently dropped CR never marked its route
-    // DOWN and each retry replayed over the very same dead path (gui-01a WIN
-    // 1c.03 — 90 s, three attempts, one route).
-    //
-    // Deliberately WITHOUT `serializedPacket`/`recipientUserId`: those arm
-    // the tracker's own retry + offline cascade, and the offline path for a
-    // First-CR is §5.5b, owned by the gate below. What we want here is only
-    // the surgical part — address scoring plus 3× timeout → Route DOWN.
-    if (ok) {
-      final destDevHex = bytesToHex(recipientDeviceId);
-      final wasRelay =
-          sendResult.viaHopHex != null && sendResult.viaHopHex != destDevHex;
-      unawaited(node.ackTracker.trackSend(
-        firstCrMsgIdHex,
-        recipientUserIdHex,
-        // Befund 5 (§5.8): the addresses the winning cascade attempt actually
-        // wrote to. Previously `const <PeerAddress>[]`, which made
-        // `_handleTimeout` fall back to `onResolveAddresses` and penalise
-        // EVERY reachable address of the hop on one missing receipt.
-        sendResult.usedAddresses,
-        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientDeviceId),
-            hopCount: wasRelay ? 2 : 1),
-        viaNextHopHex: sendResult.viaHopHex,
-        // S281: direct/relay discriminator for address scoring in
-        // _handleTimeout — same value the timeout above already uses.
-        estimatedHops: wasRelay ? 2 : 1,
-      ));
-    }
-
-    // §5.5b First-CR ACK gate: wait 15s for DELIVERY_RECEIPT before
-    // falling back to FIRST_CR_STORE on seed peers. If the recipient is
-    // online and reachable, the receipt cancels the timer (see
-    // _handleDeliveryReceiptV3). If not, the timer fires and deposits
-    // the CR on seed peers for offline retrieval.
-    final crBlob = Uint8List.fromList(packet.writeToBuffer());
-    _firstCrAckGates[firstCrMsgIdHex]?.cancel();
-    _firstCrAckGates[firstCrMsgIdHex] = Timer(const Duration(seconds: 15), () {
-      if (_firstCrAckGates.remove(firstCrMsgIdHex) != null) {
-        _log.info('§5.5b First-CR ACK timeout (15s) for '
-            '${firstCrMsgIdHex.substring(0, 8)} — firing FIRST_CR_STORE');
-        _sendFirstCrStoreToSeedPeers(
-          recipientUserId: recipientUserId,
-          recipientDeviceId: recipientDeviceId,
-          encryptedCrBlob: crBlob,
-        );
-      }
-    });
-
-    // First-contact CRs are persisted as pending_outgoing and retried by
-    // _retryPendingContactRequests regardless of the initial send result.
-    // Return true so the UI shows "sent" rather than "failed" — the retry
-    // timer handles delivery even when the routing table isn't warm yet.
-    _startCrRetryTimer();
-    return true;
-  }
-
-  /// §8.1.1 / §4.3 — pin the recipient's **self-certified** user signature
-  /// keys onto the `pending_outgoing` contact.
-  ///
-  /// Source is a verified AuthManifest: `verifySelfCertified` binds the
-  /// Ed25519/ML-DSA pair to the manifest's `userId` via `deriveUserId`, and
-  /// the resolver additionally rejects manifests answering for a different
-  /// userId than the one asked for (A2). The anchor therefore says exactly
-  /// "these are the keys of the identity I intend to contact" — the same
-  /// anchor §4.3 uses everywhere else, not a new trust assumption.
-  ///
-  /// Why it is needed: the First-CR DELIVERY_RECEIPT is signed with the
-  /// recipient's *user* keys, which the sender only learns from the
-  /// CR-Response — i.e. after the receipt. Inner verify therefore fails with
-  /// `userPubkeysMissing`, the receipt is dropped, and the §5.5b gate fires
-  /// FIRST_CR_STORE against an online recipient.
-  ///
-  /// Interaction with RC-1: if the later CR-Response carries different keys
-  /// than the manifest did, the existing key-change path fires and resets the
-  /// verification level (§8.3). That is the desired outcome — DHT anchor and
-  /// CRR disagreeing is a genuine anomaly, not noise.
-  void _pinRecipientUserSigPks(
-      Uint8List recipientUserId, String recipientUserIdHex) {
-    final contact = _contacts[recipientUserIdHex];
-    if (contact == null) return;
-    if (contact.ed25519Pk != null &&
-        contact.ed25519Pk!.isNotEmpty &&
-        contact.mlDsaPk != null &&
-        contact.mlDsaPk!.isNotEmpty) {
-      return; // already anchored — never overwrite here
-    }
-
-    void apply(({Uint8List edPk, Uint8List mlDsaPk}) pks, String how) {
-      final c = _contacts[recipientUserIdHex];
-      if (c == null) return;
-      if (c.ed25519Pk != null &&
-          c.ed25519Pk!.isNotEmpty &&
-          c.mlDsaPk != null &&
-          c.mlDsaPk!.isNotEmpty) {
-        return;
-      }
-      // Hybrid pair written together — a half-written record can never be
-      // verified again (the historical failure mode behind the S280
-      // contact-key corruption).
-      if (!_setContactTrustAnchor(c, recipientUserIdHex, pks.edPk, pks.mlDsaPk,
-          source: 'AuthManifest pin (\$how)')) {
-        return;
-      }
-      _saveContacts();
-      _log.info('§8.1.1: pinned self-certified user sig keys for '
-          '${recipientUserIdHex.substring(0, 8)} ($how) — First-CR receipt '
-          'is now verifiable');
-    }
-
-    final cached = node.identityResolver.userSigPks(recipientUserId);
-    if (cached != null) {
-      apply(cached, 'resolver cache');
-      return;
-    }
-
-    // Full-seed path never ran a resolve (dxk/dmk came from the ContactSeed).
-    // Kick one off and pin whatever lands. Fire-and-forget so first contact
-    // is not delayed by a DHT round-trip — the resolver de-duplicates
-    // in-flight lookups, so a concurrent resolve costs nothing extra.
-    //
-    // Residual race, deliberately accepted: a recipient that answers faster
-    // than the lookup completes still loses its first receipt and takes one
-    // FIRST_CR_STORE round. That degrades to the documented offline
-    // behaviour instead of failing, and the CR retry closes it.
-    unawaited(node.identityResolver
-        .resolve(recipientUserId)
-        .then((_) {
-          final late = node.identityResolver.userSigPks(recipientUserId);
-          if (late != null) apply(late, 'DHT lookup');
-        })
-        .catchError((Object e) {
-          _log.debug('§8.1.1: user-sig-pk resolve for '
-              '${recipientUserIdHex.substring(0, 8)} failed: $e');
-        }));
-  }
-
-  // ── §5.5b First-CR-Store on seed peers ───────────────────────────────────
-
-  Future<void> _sendFirstCrStoreToSeedPeers({
-    required Uint8List recipientUserId,
-    required Uint8List recipientDeviceId,
-    required Uint8List encryptedCrBlob,
-  }) async {
-    final recipDevHex = bytesToHex(recipientDeviceId);
-    final storeMsg = proto.FirstCrStoreV3()
-      ..recipientUserId = recipientUserId
-      ..recipientDeviceId = recipientDeviceId
-      ..encryptedCrBlob = encryptedCrBlob
-      ..senderDeviceId = node.primaryIdentity.deviceNodeId
-      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..ttlMs = Int64(const Duration(days: 7).inMilliseconds);
-    final storeBytes = Uint8List.fromList(storeMsg.writeToBuffer());
-
-    // S299: brought in line with Arch:2690 / Arch:3664, which prescribe a
-    // DIRECT infrastructure send to EVERY known address of each seed peer
-    // (IPv4 + IPv6, fire-and-forget to all, first-ACK-wins) and explicitly
-    // "not via the DV relay cascade".
-    //
-    // Two deviations were corrected here:
-    //
-    //  1. Seed SELECTION. The old loop walked `dvRouting.neighborIds`, so a
-    //     seed peer from the scanned ContactSeed that is not (or no longer) a
-    //     DV neighbour was silently skipped, while protected seeds from
-    //     unrelated, older ContactSeeds were included — depositing dead
-    //     copies that only consume someone else's §5.5b quota. The seed peers
-    //     of a ContactSeed are imported into the routing table as
-    //     `isProtectedSeed`, so that flag is the correct source.
-    //
-    //  2. TRANSPORT. The cascade was chosen over the direct send with a CGNAT
-    //     rationale, but the architecture already answers that objection: it
-    //     is exactly why the fanout includes the seed's global IPv6, and an
-    //     outbound UDP datagram to a public seed address works from DS-Lite
-    //     (the ACK returns through the fresh NAT mapping — _sendFirstCrStoreAck
-    //     answers to `from:fromPort`). The cascade is kept as a documented
-    //     FALLBACK for the case the code comment actually described: a seed
-    //     that is itself behind an unpinholed NAT.
-    //
-    //  3. Seed SCOPE (S300/B-D3). `isProtectedSeed` alone is the UNION over
-    //     every ContactSeed ever scanned plus every FC-rendezvous peer, so
-    //     correcting (1) widened the set instead of narrowing it: the fanout
-    //     reached unrelated older scan targets, which then hold FIRST_CR_STOREs
-    //     for recipients they do not know, and each deposit burns one of the
-    //     sender's 5/h slots at that peer (§5.5b criterion 4) — the sender
-    //     starves itself at the seeds that actually matter. Arch §5.5b flow
-    //     step 3 is explicit: "The seed peers are those imported from the
-    //     scanned ContactSeed ..., and protected seeds from unrelated older
-    //     ContactSeeds must not [be used]." The per-contact seed list recorded
-    //     at scan time (`ContactInfo.seedPeerIdsHex`) is that scope.
-    //
-    // The direct path also bypasses the D3 relay-admission gate (§13.1.2) by
-    // construction, which is the architectural reason the doc insists on it.
-    var sent = 0;
-    final seedIdsForTarget = _seedPeerIdsForTarget(bytesToHex(recipientUserId));
-    final seeds = node.routingTable.allPeers
-        .where((p) =>
-            p.isProtectedSeed &&
-            p.nodeIdHex != recipDevHex &&
-            // Deliberate legacy fallback, NOT a forgotten filter: contacts
-            // created before seedPeerIdsHex existed (and contacts that never
-            // came from a ContactSeed) carry no list. For those the old
-            // all-protected-seeds behaviour is kept — narrowing them to zero
-            // seeds would silently disable the First-CR-Mailbox for exactly
-            // the pending_outgoing CRs that are already in flight.
-            (seedIdsForTarget.isEmpty ||
-                seedIdsForTarget.contains(p.nodeIdHex)))
-        .toList();
-    for (final peer in seeds) {
-      final seedHex = peer.nodeIdHex;
-      var directOk = false;
-      for (final target in peer.allConnectionTargets()) {
-        if (target.ip.isEmpty || target.ip == '0.0.0.0' || target.ip == '::') {
-          continue;
-        }
-        try {
-          final ok = await node.sendInfraDirect(
-            messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
-            innerPayload: storeBytes,
-            recipientDeviceId: peer.nodeId,
-            addr: InternetAddress(target.ip),
-            port: target.port,
-          );
-          if (ok) directOk = true;
-        } catch (e) {
-          _log.debug('§5.5b FIRST_CR_STORE direct to ${seedHex.substring(0, 8)} '
-              'at ${target.ip}:${target.port} error: $e');
-        }
-      }
-      if (directOk) {
-        sent++;
-        _log.info('§5.5b FIRST_CR_STORE → ${seedHex.substring(0, 8)} '
-            'direct fanout ok');
-        continue;
-      }
-      // Fallback: seed unreachable on every known address — try the cascade.
-      try {
-        final ok = await node.sendInfraViaDeviceRoute(
-          messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
-          innerPayload: storeBytes,
-          recipientDeviceId: peer.nodeId,
-        );
-        if (ok) sent++;
-        _log.info('§5.5b FIRST_CR_STORE → ${seedHex.substring(0, 8)} '
-            'direct fanout failed, DV cascade fallback ok=$ok');
-      } catch (e) {
-        _log.debug('§5.5b FIRST_CR_STORE cascade to ${seedHex.substring(0, 8)} '
-            'error: $e');
-      }
-    }
-    if (sent > 0) {
-      // S299 (A3): "$sent" counts transport (sendInfraViaDeviceRoute returned
-      // true = written to a route), NOT storage. Only FIRST_CR_STORE_ACK
-      // proves a seed stored the CR. The old wording made "all seeds
-      // rejected" read identically to "all seeds stored".
-      _log.info('§5.5b FIRST_CR_STORE: dispatched to $sent seed peers '
-          '(awaiting ACK) '
-          'for ${recipDevHex.substring(0, 8)} '
-          '[scope=${seedIdsForTarget.isEmpty ? "legacy-all-protected" : "contactseed(${seedIdsForTarget.length})"}]');
-    } else {
-      // Clean no-op: seeds with a public own address may legitimately carry
-      // an empty seed-peer list (relaxed §8.1.1 readiness gate) — the CR
-      // then relies on Direct + Relay + rendezvous instead of FIRST_CR_STORE.
-      _log.info('§5.5b FIRST_CR_STORE: no protected seed peers available '
-          'for ${recipDevHex.substring(0, 8)} — skipped (no-op) '
-          '[scope=${seedIdsForTarget.isEmpty ? "legacy-all-protected" : "contactseed(${seedIdsForTarget.length})"}]');
-
-      // S301 Befund 1: dieser Zweig war ein reines Log. Wir stehen hier NUR,
-      // weil das 15s-ACK-Gate abgelaufen ist — das ist der Beweis, dass der
-      // First-CR verloren ging, und ohne Seed-Peer hat ihn niemand aufgefangen.
-      // Gemessen im Voll-E2E: der erste CR ging ueber Relay (cost=11), weil
-      // beide Direktadressen in einem 5s-Backoff standen; 5s spaeter war das
-      // Backoff weg, der naechste Versuch kam aber erst nach 30s — 34 ms nach
-      // Ablauf des Testbudgets. Genau dieses Fenster schliessen wir hier.
-      //
-      // Bewusst KEIN eigener Sendepfad: `shortenCrBackoffOnEdge` raeumt die
-      // Wartezeit (rate-limited ueber `crEdgeShortenAllowed`, deshalb terminiert
-      // das auch, wenn der Resend wieder hier landet), und
-      // `_retryPendingContactRequests` traegt die gesamte bestehende Logik —
-      // Seed-Parameter, `_crRetryCountPerContact` fuer die Backoff-Kurve
-      // (Arbeitsregel #5), den 24h-`lastAckedAt`-Stopp und den
-      // `_lastCrRetryPerContact`-Schutz gegen Doppelversand.
-      final recipUserHex = bytesToHex(recipientUserId);
-      final pendingContact = _contacts[recipUserHex];
-      if (pendingContact != null &&
-          pendingContact.status == 'pending_outgoing') {
-        shortenCrBackoffOnEdge('first-cr-ack-timeout',
-            onlyUserHex: recipUserHex);
-        // Sofort statt erst beim naechsten 30s-Tick — die verlorene Zustellung
-        // ist bereits belegt, weiteres Warten kostet nur Zeit.
-        _retryPendingContactRequests();
-      }
-    }
-  }
+  // ── `sendContactRequest` HAS BEEN DROPPED (S388-BAU-KONTAKT, B-1 = A) ──
+  //
+  // On V4.2 the contact request is packet (2) of first contact in mycelium
+  // (§15.5): name and greeting are carried by the introduction, the acceptance follows from
+  // the response (3), the profile picture from PROFILE_UPDATE (§15.8). The
+  // app message CONTACT_REQUEST, which until S388 went after the acceptance,
+  // was answered by the inviter a second time — measured: two
+  // CONTACT_REQUEST_RESPONSE per acceptance. The V4.1 branches (invitation line,
+  // pair key) were dead as long as a mailbox hangs (l. 4073 old).
 
   // ── §8.1.1 rev3 Deferred Key Exchange (step 1b) ─────────────────────────
   //
@@ -5353,231 +4027,95 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // carry the security properties; the request/offer themselves cannot be
   // KEM-encrypted because the KEM-PK is precisely what they are discovering.
 
-  /// In-flight throttle for outbound DEVICE_KEM_REQUEST, keyed by target
-  /// deviceHex → last-sent time. The CR retry timer replays sendContactRequest
-  /// every backoff tick; without this guard a deferred v2 first-CR would emit a
-  /// fresh request on every tick. Throttled to the OFFER round-trip budget (8s).
-  final Map<String, DateTime> _lastKemRequestSent = {};
+  // ── DEFERRED KEY EXCHANGE (§8.1.1 rev3, step 1b): FALLEN ───────
+  //
+  // Three state stores (`_lastKemRequestSent`, `_dkeCompleters`,
+  // `_kemRequestTimes`) and the canonical signature input
+  // `_kemOfferSigInput`. They belonged to `DEVICE_KEM_REQUEST`/`OFFER` —
+  // the plaintext infrastructure frame with which a requester asked for the
+  // device KEM key of the peer when the ContactSeed
+  // did not carry it. Their producers and consumers lay in
+  // `cleona_service_v3_dke.dart` and fell along; the caller was
+  // the first contact branch.
+  //
+  // HERE UNTIL S361 IT SAID "(gap G-1)" — as if first contact bore the
+  // blame for the removal. It does not: `DEVICE_KEM_REQUEST`/`OFFER` was
+  // a PLAINTEXT infrastructure frame and falls with the CUT, and
+  // first contact has not needed it since S360 either — it draws its
+  // secret from `ki`/`ep` in the ContactSeed, not from a query
+  // to the peer. (T), not a gap.
 
-  /// Completers for DKE step 1b synchronous wait. sendContactRequest() awaits
-  /// these (15s timeout) so the UI gets a real success/failure. Completed by
-  /// handleIncomingDeviceKemOffer() when the OFFER arrives.
-  final Map<String, Completer<void>> _dkeCompleters = {};
-
-  /// Per-sender anti-flood for inbound DEVICE_KEM_REQUEST (§8.2 Layer-3 rate
-  /// limit). senderDeviceHex → recent request timestamps (sliding 60s window).
-  final Map<String, List<DateTime>> _kemRequestTimes = {};
-
-  /// §8.1.1 rev3 step 1b sender: ask [deviceId] (owned by [userId]) for its
-  /// Device-KEM-PK pair. Fire-and-forget — the reply is handled asynchronously
-  /// by [handleIncomingDeviceKemOffer]. [epB64] is already persisted on the
-  /// contact (used there to verify the OFFER); passed here only for logging.
-  void _requestDeviceKem(Uint8List userId, Uint8List deviceId, String epB64) {
-    final devHex = bytesToHex(deviceId);
-    final now = DateTime.now();
-    final last = _lastKemRequestSent[devHex];
-    if (last != null && now.difference(last).inSeconds < 8) return;
-    _lastKemRequestSent[devHex] = now;
-
-    final request = proto.DeviceKemRequestV3()
-      ..targetUserId = userId
-      ..targetDeviceId = deviceId
-      ..nonce = SodiumFFI().randomBytes(16)
-      ..timestampMs = Int64(now.millisecondsSinceEpoch);
-    final payload = Uint8List.fromList(request.writeToBuffer());
-    unawaited(node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
-      innerPayload: payload,
-      recipientDeviceId: deviceId,
-    ));
-    // §8.1.1 step 1b direct-path: also send directly to the target's known
-    // addresses (from ContactSeed). If the target is on the same LAN, this
-    // arrives immediately — the DV cascade above handles cross-network relay.
-    final targetPeer = node.routingTable.getPeer(deviceId);
-    if (targetPeer != null) {
-      var directCount = 0;
-      for (final addr in targetPeer.allConnectionTargets()) {
-        if (addr.ip.isEmpty || addr.port <= 0) continue;
-        if (!addr.isReachableFromCurrentNetwork) continue;
-        unawaited(node.sendInfraDirect(
-          messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
-          innerPayload: payload,
-          recipientDeviceId: deviceId,
-          addr: InternetAddress(addr.ip),
-          port: addr.port,
-        ));
-        directCount++;
-      }
-      if (directCount > 0) {
-        _log.info('DEVICE_KEM_REQUEST → ${devHex.substring(0, 8)} '
-            'also sent direct to $directCount address(es)');
-      }
-    }
-    _log.info('DEVICE_KEM_REQUEST → ${devHex.substring(0, 8)} '
-        '(user ${bytesToHex(userId).substring(0, 8)}, §8.1.1 step 1b)');
-  }
-
-  /// §8.1.1 rev3 step 1b receiver (recipient side): a DEVICE_KEM_REQUEST
-  /// addressed to this identity+device arrived. Answer with a DEVICE_KEM_OFFER
-  /// carrying our Device-KEM-PK pair, signed with our user Ed25519 SK so the
-  /// requester can verify it against the `ep` trust-anchor from our ContactSeed.
-  void handleIncomingDeviceKemRequest(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-  ) {
+  /// §15.4: "he … **revokes the QR invitation himself after the first
+  /// acceptance**."
+  ///
+  /// ── WHY AT THIS PLACE AND AT NO EARLIER ONE ──────────────────
+  ///
+  /// §15.4 ties the revocation to the ACCEPTANCE, not to the arrival, and
+  /// the difference is not formal: a refused request must not burn the
+  /// invitation, otherwise the photographer with his
+  /// request locks out the one for whom the code was shown. `accepted`
+  /// is the only state in which §15.4 "first acceptance" is fulfilled,
+  /// and this method is the only place that sets it.
+  ///
+  /// On the self-acceptance path (§15.4, QR/NFC) arrival and acceptance coincide
+  /// in the same move; on all other paths minutes or
+  /// a restart lie in between — that is why the contact record carries the
+  /// assignment persistently ([ContactInfo.viaInviteIndex]).
+  ///
+  /// ── WHAT IT COSTS IF IT DOES NOT HAPPEN ───────────────────────────
+  ///
+  /// Until S361 `consumeSingleUse` was **never** called in `lib/`. Thus
+  /// the only defence from §15.4 against photographing a
+  /// displayed QR code was missing: the line stayed armed until `exp` (default 90 days),
+  /// and every holder of the photo could store on it. The
+  /// UI promised the defence verbatim the whole time
+  /// (`invite_qr_single_use`).
+  ///
+  /// ── THREE THINGS THAT BELONG TOGETHER HERE ───────────────────────────
+  ///
+  /// 1. **Consume** — `consumeSingleUse` revokes; `isHarvestedAt`
+  ///    then says `false` (§15.3.3: "remove the entry from the
+  ///    expectation set, drop the harvest, done").
+  /// 2. **Write** — without `inviteStore.save` the invitation would be
+  ///    armed again after the next start. The same argument as with
+  ///    [issueInvitation], only the other way round.
+  /// 3. **Withdraw** — [armV41InviteLines] forgets the
+  ///    pseudo-peer and the standing seal secret. Without this
+  ///    call the line would keep running until the next tick; it would
+  ///    thus keep running while the user has already put the code away.
+  ///
+  /// Called multiple times it is a no-op: an already revoked
+  /// invitation is not written again. `acceptContactRequest` runs
+  /// through the same record more often on re-contact.
+  void _consumeSingleUseInvitation(ContactInfo contact) {
+    final idx = contact.viaInviteIndex;
+    if (idx == null) return;
+    final gen = contact.viaInviteGeneration;
+    final InviteLedger book;
     try {
-      final req = proto.DeviceKemRequestV3.fromBuffer(frame.payload);
-      // Multi-identity fan-out: only the addressed identity + device answers.
-      if (req.targetUserId.hex !=
-          identity.userIdHex) {
-        return;
-      }
-      if (req.targetDeviceId.hex !=
-          identity.deviceNodeIdHex) {
-        return;
-      }
-      // §8.2 Layer-3 anti-flood: max 5 requests / minute per sender device.
-      final senderHex = bytesToHex(senderDeviceId);
-      final now = DateTime.now();
-      final times = _kemRequestTimes.putIfAbsent(senderHex, () => <DateTime>[]);
-      times.removeWhere((t) => now.difference(t).inSeconds > 60);
-      if (times.length >= 5) {
-        _log.debug('DEVICE_KEM_REQUEST from ${senderHex.substring(0, 8)} '
-            'rate-limited (>5/min)');
-        return;
-      }
-      times.add(now);
-
-      final dxk = node.deviceKem.x25519PublicKey;
-      final dmk = node.deviceKem.mlKemPublicKey;
-      final nonce = Uint8List.fromList(req.nonce);
-      final sig =
-          SodiumFFI().signEd25519(_kemOfferSigInput(dxk, dmk, nonce),
-              identity.ed25519SecretKey);
-
-      final offer = proto.DeviceKemOfferV3()
-        ..deviceX25519Pk = dxk
-        ..deviceMlKemPk = dmk
-        ..nonce = nonce
-        ..userEd25519Sig = sig
-        ..timestampMs = Int64(now.millisecondsSinceEpoch);
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER,
-        innerPayload: Uint8List.fromList(offer.writeToBuffer()),
-        recipientDeviceId: senderDeviceId,
-      ));
-      _log.info('DEVICE_KEM_REQUEST from ${senderHex.substring(0, 8)} '
-          '→ replied DEVICE_KEM_OFFER (§8.1.1 step 1b)');
+      book = inviteLedger;
     } catch (e) {
-      _log.warn('DEVICE_KEM_REQUEST handle error: $e');
+      // An unreadable book must not prevent the acceptance — the
+      // contact already stands. But it is a finding: this invitation
+      // stays armed.
+      _log.error('§15.4: invitation book not readable ($e) — the invitation '
+          'i=$idx can NOT be consumed and stays open');
+      return;
     }
-  }
-
-  /// §8.1.1 rev3 step 1b requester side: a DEVICE_KEM_OFFER arrived. Verify it
-  /// against the `ep` trust-anchor of the matching pending contact, persist the
-  /// resolved Device-KEM-PK pair onto the contact (so the CR + retries take the
-  /// hasFullSeed fast path), prime the local DKR cache, and re-trigger the
-  /// deferred first-CR immediately (self-healing).
-  void handleIncomingDeviceKemOffer(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-  ) {
-    try {
-      final offer = proto.DeviceKemOfferV3.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(senderDeviceId);
-
-      // Find the pending contact whose scanned ContactSeed names this device.
-      ContactInfo? contact;
-      String? contactUserHex;
-      for (final e in _contacts.entries) {
-        if (e.value.seedDeviceIdHex == senderHex &&
-            e.value.seedEpB64 != null &&
-            (e.value.status == 'pending_outgoing' ||
-             e.value.status == 'storedForDelivery')) {
-          contact = e.value;
-          contactUserHex = e.key;
-          break;
-        }
-      }
-      if (contact == null || contactUserHex == null) {
-        _log.debug('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
-            'no matching pending contact, ignoring');
-        return;
-      }
-
-      final dxk = Uint8List.fromList(offer.deviceX25519Pk);
-      final dmk = Uint8List.fromList(offer.deviceMlKemPk);
-      final nonce = Uint8List.fromList(offer.nonce);
-      final sig = Uint8List.fromList(offer.userEd25519Sig);
-      final ep = base64Url.decode(base64Url.normalize(contact.seedEpB64!));
-
-      // Trust-anchor verify: the signature (by the recipient's user Ed25519
-      // key) over (dxk + dmk + nonce) must validate against `ep`. This binds
-      // the resolved Device-KEM-PK to the identity the user actually scanned —
-      // a malicious relay cannot substitute its own keys.
-      if (!SodiumFFI().verifyEd25519(_kemOfferSigInput(dxk, dmk, nonce), sig, ep)) {
-        _log.warn('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
-            'Ed25519 sig verify FAILED against ep trust-anchor, dropping');
-        return;
-      }
-      // Length sanity before KEM-encap (X25519=32, ML-KEM-768=1184).
-      if (dxk.length != 32 || dmk.length != 1184) {
-        _log.warn('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} — '
-            'bad key lengths (dxk=${dxk.length}, dmk=${dmk.length}), dropping');
-        return;
-      }
-
-      // Persist resolved keys onto the contact (CR fast path) + prime DKR cache.
-      contact.seedDxkB64 = base64Encode(dxk);
-      contact.seedDmkB64 = base64Encode(dmk);
-      _saveContacts();
-      node.identityDhtHandler.handleKemPublish(DeviceKemRecord(
-        userId: contact.nodeId,
-        deviceId: senderDeviceId,
-        deviceX25519Pk: dxk,
-        deviceMlKemPk: dmk,
-        ttlSeconds: 24 * 3600,
-        sequenceNumber: 0,
-        publishedAtMs: DateTime.now().millisecondsSinceEpoch,
-        userEd25519Pk: ep,
-        ed25519Sig: Uint8List(0),
-      ));
-
-      _log.info('DEVICE_KEM_OFFER from ${senderHex.substring(0, 8)} verified '
-          'against ep — Device-KEM-PK resolved, re-triggering first-CR');
-
-      // Wake up the synchronous DKE waiter if still active (step 1b path).
-      final dkeCompleter = _dkeCompleters.remove(contactUserHex);
-      if (dkeCompleter != null && !dkeCompleter.isCompleted) {
-        dkeCompleter.complete();
-      }
-
-      // Self-healing: send the CR right now via the hasFullSeed fast path.
-      unawaited(sendContactRequest(
-        contactUserHex,
-        message: contact.message ?? '',
-        seedDeviceIdHex: contact.seedDeviceIdHex,
-        seedDxkB64: contact.seedDxkB64,
-        seedDmkB64: contact.seedDmkB64,
-        seedEpB64: contact.seedEpB64,
-      ));
-    } catch (e) {
-      _log.warn('DEVICE_KEM_OFFER handle error: $e');
-    }
-  }
-
-  /// Canonical bytes signed/verified for a DEVICE_KEM_OFFER: dxk ++ dmk ++
-  /// nonce. Signer (recipient) and verifier (requester) MUST build this
-  /// identically, else the Ed25519 check fails.
-  static Uint8List _kemOfferSigInput(
-      Uint8List dxk, Uint8List dmk, Uint8List nonce) {
-    final out = Uint8List(dxk.length + dmk.length + nonce.length);
-    out.setRange(0, dxk.length, dxk);
-    out.setRange(dxk.length, dxk.length + dmk.length, dmk);
-    out.setRange(dxk.length + dmk.length, out.length, nonce);
-    return out;
+    final rec = book.byIndex(idx, generation: gen);
+    if (rec == null || !rec.singleUse || rec.revoked) return;
+    if (!book.consumeSingleUse(idx, DateTime.now(), generation: gen)) return;
+    // `consumeSingleUse` changes EXACTLY this record — so exactly
+    // it is written too (S366). Point 2 of the paragraph above applies
+    // unchanged: without this write the invitation would be armed again after the
+    // next start.
+    inviteStore.persistRecord(book, rec);
+    final lines = armV41InviteLines();
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('§15.4 REDEEMED: invitation i=$idx g=${rec.generation}'
+        '${rec.label.isEmpty ? '' : ' "${rec.label}"'} is used up with the acceptance '
+        'by ${contact.displayName} and revoked — still '
+        '$lines invitation line(s) armed');
   }
 
   /// Accept a pending (or re-) contact request.
@@ -5585,10 +4123,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Future<bool> acceptContactRequest(String nodeIdHex) async {
     final contact = _contacts[nodeIdHex];
     if (contact == null) return false;
-    // Allow 'pending' (normal accept), 'accepted' (re-contact response),
-    // 'pending_outgoing' and 'storedForDelivery' (bidirectional CR auto-accept).
-    if (contact.status != 'pending' && contact.status != 'accepted' &&
-        contact.status != 'pending_outgoing' && contact.status != 'storedForDelivery') {
+    // Only a waiting question can be accepted (§12.5). Until S388
+    // 'accepted' (re-contact response), 'pending_outgoing' and
+    // 'storedForDelivery' (silent acceptance of mutual requests) were added —
+    // their only caller was `_handleContactRequestV3` (S388-BAU-KONTAKT).
+    if (contact.status != 'pending') return false;
+
+    // ── V4.2 §12.5: THE DECISION IN mycelium, BEFORE EVERYTHING ELSE (S388) ──
+    //
+    // Only the acceptance teaches the mailbox the way to the requester
+    // (`Mailbox.requestAccepted`), and only it ends his joining.
+    // Hence before the CONTACT_REQUEST_RESPONSE. `false` means mycelium could
+    // no longer accept (single-use invitation consumed in the meantime) — then
+    // the contact stays as it is, instead of sending a response to someone
+    // the mailbox does not know.
+    if (_myceliumRequestDecide(contact, accept: true) == false) {
+      _log.warn('acceptContactRequest ${nodeIdHex.substring(0, 8)}: mycelium '
+          'did not accept the request (invitation consumed) — nothing sent');
       return false;
     }
 
@@ -5598,6 +4149,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _staleWarningWrittenFor.remove(nodeIdHex);
     contact.lastAckedAt = DateTime.now();
     _saveContacts();
+
+    // §15.4 — HERE the consumption of the single-use invitation happens. Justification
+    // and costs stand at [_consumeSingleUseInvitation].
+    _consumeSingleUseInvitation(contact);
     // A newly-accepted contact may carry a birthday set locally; refresh.
     _syncCalendarBirthdays();
 
@@ -5608,7 +4163,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (entry.key == nodeIdHex) continue;
         if (entry.value.status != 'accepted') continue;
         if (entry.value.displayName == contact.displayName) {
-          _log.warn('DUPLICATE-CONTACT-DIAG: acceptContactRequest creating conversation for '
+          // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+          _log.debug('DUPLICATE-CONTACT-DIAG: acceptContactRequest creating conversation for '
               '"${contact.displayName}" userId=${nodeIdHex.substring(0, 16)} '
               'but accepted contact with SAME displayName already exists at '
               'userId=${entry.key.substring(0, 16)}');
@@ -5619,6 +4175,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _saveConversations();
     }
 
+    // On V4.2 THIS is the one decision point (§12.5); the decision
+    // in mycelium has already been made above (`_myceliumRequestDecide`, S388).
     final resp = proto.ContactRequestResponse()
       ..accepted = true
       ..ed25519PublicKey = identity.ed25519PublicKey
@@ -5645,7 +4203,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE,
         payload: Uint8List.fromList(resp.writeToBuffer()),
       );
-      _log.event('CR ACCEPTED ${contact.displayName} (${nodeIdHex.substring(0, 8)}) — response sent ok=$sent');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('CR ACCEPTED ${contact.displayName} (${nodeIdHex.substring(0, 8)}) — response sent ok=$sent');
     } else {
       sent = false;
       _log.warn('CONTACT_REQUEST_RESPONSE drop: contact ${nodeIdHex.substring(0, 8)} '
@@ -5665,12 +4224,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final dataToSign = rotationMsg.writeToBuffer();
       rotationMsg.signature = SodiumFFI().signEd25519(
           dataToSign, identity.ed25519SecretKey);
-      sendToUser(
+      _detachedSend('MTV3_KEY_ROTATION_BROADCAST', sendToUser(
         recipientUserId: contact.nodeId,
         messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
         payload: Uint8List.fromList(rotationMsg.writeToBuffer()),
-      );
-      _log.info('Sent KEY_ROTATION_BROADCAST to newly accepted '
+      ));
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Sent KEY_ROTATION_BROADCAST to newly accepted '
           '${contact.displayName} (${nodeIdHex.substring(0, 8)}) — '
           'rotation pending');
     }
@@ -5683,6 +4243,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (contact.x25519Pk != null) 'x25519Pk': bytesToHex(contact.x25519Pk!),
       if (contact.mlKemPk != null) 'mlKemPk': bytesToHex(contact.mlKemPk!),
       if (contact.mlDsaPk != null) 'mlDsaPk': bytesToHex(contact.mlDsaPk!),
+      // §15.2: the founding anchor MUST travel along. The twin cannot
+      // reconstruct it from anything — it would only see `ed25519Pk`, i.e. the
+      // respective current key, and would compute for the same
+      // human a different `K_AB` than this device. Two devices
+      // of the same user would talk past the same tag line.
+      if (contact.peerFoundingEd25519Pk != null)
+        'peerFoundingEd25519Pk': bytesToHex(contact.peerFoundingEd25519Pk!),
       if (contact.deviceNodeIds.isNotEmpty) 'deviceNodeIds': contact.deviceNodeIds.toList(),
     }))));
 
@@ -5692,9 +4259,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Delete a contact and its conversation.
   @override
   void deleteContact(String nodeIdHex, {required String source}) {
+    // V4.2 §12.5 (S388): a `pending` contact is a waiting question —
+    // deleting is the refusal (inbox `inbox_reject`). Without this
+    // decision the joiner would wait endlessly for a response.
+    final deleted = _contacts[nodeIdHex];
+    if (deleted != null && deleted.status == 'pending') {
+      _myceliumRequestDecide(deleted, accept: false);
+    } else if (deleted != null) {
+      // §15.9: deleted also means no contact any more in the delivery layer.
+      // Otherwise mycelium would answer the next request as a re-contact
+      // WITHOUT a question (`Mailbox.requestCheck`) — measured S388-BAU-KONTAKT
+      // E3: the request after deletion was answered silently.
+      _myceliumContactForget(deleted);
+    }
     _contacts.remove(nodeIdHex);
     _deletedContacts.add(nodeIdHex);
-    _crRateTracker.remove(nodeIdHex);
+    // ── AND THE DELIVERY LAYER FORGETS HIM TOO (§21.5.1, S354) ─────
+    //
+    // Until now the pair key stayed in the `V41Node`: the node
+    // continued to publish its liveness for this contact (§6 —
+    // cost per speed contact and epoch), continued to harvest under its
+    // tags, and `K_AB` survived the deletion. `PairRegistry.forget`
+    // was built and had not a single caller in `lib/`.
+    try {
+      v41Delivery?.forgetPeer(_v41PeerKey(hexToBytes(nodeIdHex)));
+    } catch (e) {
+      // A malformed identifier must not stop the deletion —
+      // the contact is already gone above, and that is the part the
+      // user sees.
+      _log.debug('forgetPeer for $nodeIdHex failed: $e');
+    }
     conversations.remove(nodeIdHex);
     _saveContacts();
     _saveConversations();
@@ -5730,6 +4324,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     return false;
   }
+
+  // NO SETTER FOR A SEND MODE (S389). Here stood the
+  // implementation of `setSecureMode`: it wrote `secureMode` and
+  // `secureExplained` onto contact or group and also reported the choice
+  // to the V4.1 layer (`v41Delivery?.setChatMode`). Both fields
+  // are gone (§12.1 — no switch, no setting per chat), and the
+  // layer that was reported to is no longer attached in the 4.2 start
+  // (`attachV41` has no caller in `lib/`).
 
   /// Set or clear a local alias for a contact.
   @override
@@ -5812,28 +4414,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Route through _addMessageToConversation so badge + Launcher counter
     // pick up the warning (#U15 — direct conv.messages.add bypassed both).
     _addMessageToConversation(userIdHex, systemMsg);
-    _log.info('Stale sender-side warning for ${userIdHex.substring(0, 8)} (${contact.displayName})');
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('Stale sender-side warning for ${userIdHex.substring(0, 8)} (${contact.displayName})');
   }
 
   // ── CR Retry ───────────────────────────────────────────────────────
 
-  /// §5.8 CR-Retry-Backoff in Sekunden fuer [attemptCount] bisherige Versuche.
+  /// §5.8 CR retry backoff in seconds for [attemptCount] previous attempts.
   ///
-  /// Herausgezogen, damit die Kurve testbar ist — ohne das waere die
-  /// Verkuerzung aus [shortenCrBackoffOnEdge] unbewacht.
+  /// Extracted so that the curve is testable — without that the
+  /// shortening from [shortenCrBackoffOnEdge] would be unguarded.
   ///
-  /// Kurve: 10s, 20s, 40s, 80s, 160s, 320s, 640s, danach gedeckelt auf 600s
-  /// (Seed) bzw. 1200s (seedless — der DHT-Re-Resolve ist pro Versuch
-  /// billiger, dafuer laengerer Schwanz; §8.1.1 und §5.8 halten beide Deckel
-  /// normativ fest).
+  /// Curve: 10s, 20s, 40s, 80s, 160s, 320s, 640s, then capped at 600s
+  /// (seed) or 1200s (seedless — the DHT re-resolve is cheaper per attempt,
+  /// in exchange a longer tail; §8.1.1 and §5.8 record both caps
+  /// normatively).
   ///
-  /// Die shift-Grenze folgt dem jeweiligen Deckel. Bis S290 war sie fuer beide
-  /// Faelle 6, damit war der ungedeckelte Wert maximal 10 * (1 << 6) = 640s —
-  /// der Seed-Deckel 600 griff dadurch, der seedless-Deckel 1200 aber NIE. Der
-  /// dokumentierte Unterschied von Faktor zwei schrumpfte auf 7 % (600 gegen
-  /// 640), und die 1200 waren toter Code. Vermutlich wurde die Grenze zusammen
-  /// mit dem Seed-Deckel gewaehlt (640 ist der erste Wert darueber) und beim
-  /// spaeteren Hinzufuegen des seedless-Falls nicht mitgezogen.
+  /// The shift limit follows the respective cap. Until S290 it was 6 for both
+  /// cases, so the uncapped value was at most 10 * (1 << 6) = 640s —
+  /// the seed cap 600 thereby applied, the seedless cap 1200 however NEVER. The
+  /// documented difference of a factor of two shrank to 7 % (600 against
+  /// 640), and the 1200 were dead code. Presumably the limit was chosen together
+  /// with the seed cap (640 is the first value above it) and not carried along
+  /// when the seedless case was added later.
   static int crRetryBackoffSeconds(int attemptCount, {required bool isSeedless}) {
     final maxShift = isSeedless ? 7 : 6;
     final shift = attemptCount > maxShift ? maxShift : attemptCount;
@@ -5842,254 +4445,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return uncapped > capSec ? capSec : uncapped;
   }
 
-  /// §5.1 CR-Kante: darf fuer diesen Kontakt jetzt verkuerzt werden?
+  /// §5.1 CR edge: may shortening happen now for this contact?
   ///
-  /// Sichtbar fuer Tests. [lastShorten] ist der Zeitstempel der letzten
-  /// Verkuerzung oder `null`, wenn noch keine stattfand.
+  /// Visible for tests. [lastShorten] is the timestamp of the last
+  /// shortening or `null` if none has taken place yet.
   static bool crEdgeShortenAllowed(DateTime? lastShorten, DateTime now) =>
       lastShorten == null ||
       now.difference(lastShorten) >= _crEdgeShortenGate;
-
-  /// §5.1 — verkuerzt die Wartezeit des CR-Retrys auf einer Kante, die fuer
-  /// gewoehnliche Nachrichten einen Outbox-Flush ausloest.
-  ///
-  /// Warum das noetig ist: der CR-Retry ist rein zeitgesteuert (Backoff bis
-  /// 600s/1200s, siehe [crRetryBackoffSeconds]) und wurde von keinem
-  /// Konnektivitaetsereignis verkuerzt — `_lastCrRetryPerContact` wird sonst
-  /// nirgends kantengetriggert geleert. Kommt das Netz zurueck, waehrend ein
-  /// Kontakt tief im Backoff sitzt, blieb die First-CR bis zu zwanzig Minuten
-  /// liegen, obwohl die Bedingung, die den letzten Versuch scheitern liess,
-  /// sich nachweislich geaendert hat.
-  ///
-  /// Zurueckgesetzt wird NUR der Zeitstempel, nicht der Zaehler in
-  /// `_crRetryCountPerContact`: die Backoff-Kurve bleibt erhalten, gekuerzt
-  /// wird ausschliesslich die aktuell laufende Wartezeit. Sonst haette eine
-  /// haeufig feuernde Kante den Backoff dauerhaft auf 10s gehalten.
-  ///
-  /// Layer 3 bleibt unberuehrt: §5.5b (FIRST_CR_STORE an Protected Seeds) ist
-  /// und bleibt alleiniger Layer-3-Eigentuemer der First-CR. Diese Kante zieht
-  /// einen bereits geplanten L1/L2-Send vor, sie erzeugt keinen neuen Pfad.
-  void shortenCrBackoffOnEdge(String trigger, {String? onlyUserHex}) {
-    final now = DateTime.now();
-    var shortened = 0;
-    for (final entry in _contacts.entries) {
-      if (entry.value.status != 'pending_outgoing') continue;
-      if (onlyUserHex != null && entry.key != onlyUserHex) continue;
-      // Noch kein Versuch gelaufen -> es gibt keine Wartezeit zu kuerzen.
-      if (!_lastCrRetryPerContact.containsKey(entry.key)) continue;
-      if (!crEdgeShortenAllowed(_crEdgeShortenAt[entry.key], now)) continue;
-      _crEdgeShortenAt[entry.key] = now;
-      _lastCrRetryPerContact.remove(entry.key);
-      shortened++;
-    }
-    if (shortened > 0) {
-      // Der 24h-Stopp ueber `lastAckedAt` bleibt im Retry-Loop vorgeschaltet;
-      // ein bereits quittierter Kontakt wird also weiterhin nicht behelligt,
-      // auch wenn hier sein Zeitstempel fiel.
-      _log.info('§5.1 CR-Kante ($trigger): Backoff fuer $shortened Kontakt(e) '
-          'verkuerzt — naechster Retry-Tick sendet (<=30s)');
-    }
-  }
-
-  void _retryPendingContactRequests() {
-    final now = DateTime.now();
-    final pending = _contacts.entries
-        .where((e) => e.value.status == 'pending_outgoing')
-        .toList();
-
-    for (final entry in pending) {
-      final recipientUserId = entry.value.nodeId;
-      final ci = entry.value;
-      final hasV1Seed = ci.seedDxkB64 != null && ci.seedDmkB64 != null;
-      final hasV2Seed = ci.seedEpB64 != null;
-      final isSeedless = ci.seedDeviceIdHex == null ||
-          (!hasV1Seed && !hasV2Seed);
-
-      // §5.8 / §8.1.1 step 4 — a DELIVERY_RECEIPT proves the CR reached the
-      // recipient. Replaying an ~8 kB CR every 10 minutes after that is pure
-      // noise (Arbeitsregel 5): the ball is in the recipient's court until
-      // they accept or reject. A slow re-offer stays for the case where the
-      // CR was discarded without an answer.
-      //
-      // This only became reachable with the receipt fix — before it, the
-      // First-CR receipt was dropped at inner verify and `lastAckedAt` was
-      // never set for a pending_outgoing contact.
-      final ackedAt = ci.lastAckedAt;
-      if (ackedAt != null &&
-          now.difference(ackedAt) < const Duration(hours: 24)) {
-        continue;
-      }
-
-      // Exponential backoff: 10s, 20s, 40s, …, capped at 600s (seed) or
-      // 1200s (seedless DHT re-resolve — cheaper per attempt, longer tail).
-      final count = _crRetryCountPerContact[entry.key] ?? 0;
-      final backoffSec =
-          crRetryBackoffSeconds(count, isSeedless: isSeedless);
-      final lastRetry = _lastCrRetryPerContact[entry.key];
-      if (lastRetry != null && now.difference(lastRetry).inSeconds < backoffSec) continue;
-
-      // Seedless First-CR (§4.3): re-resolve DeviceKemRecord via DHT.
-      // No routing-table gate — FIND_VALUE goes through any reachable DHT
-      // peer, not directly to the target.
-      if (isSeedless) {
-        _lastCrRetryPerContact[entry.key] = now;
-        _crRetryCountPerContact[entry.key] = count + 1;
-        unawaited(sendContactRequest(entry.key, message: ci.message ?? ''));
-        _log.info('CR retry (seedless, DHT re-resolve) for '
-            '${entry.key.substring(0, 8)} (attempt ${count + 1}, '
-            'backoff ${backoffSec}s)');
-        continue;
-      }
-
-      // Only retry if peer is in routing table (known peer).
-      // DV routing only carries deviceNodeIds — the userId secondary index
-      // is often empty for first-CR contacts. Fall back to the persisted
-      // seedDeviceIdHex from the QR/ContactSeed.
-      final seedDevId = entry.value.seedDeviceIdHex;
-      if (node.routingTable.getPeer(recipientUserId) == null &&
-          node.routingTable.getPeerByUserId(recipientUserId) == null &&
-          (seedDevId == null || node.routingTable.getPeer(hexToBytes(seedDevId)) == null)) {
-        continue;
-      }
-
-      _lastCrRetryPerContact[entry.key] = now;
-      _crRetryCountPerContact[entry.key] = count + 1;
-      // §4.11.10: before each CR retry, re-resolve the owner-tag of an
-      // active First-Contact rendezvous session (fresher owner addresses
-      // than the URI's `a=`). Fire-and-forget + rate-limited inside the
-      // manager (min 60s) — no own timer, docks onto this existing retry.
-      final fcResolve = _fcRendezvous?.resolveOwnerForContact(entry.key);
-      if (fcResolve != null) unawaited(fcResolve);
-      unawaited(sendContactRequest(
-        entry.key,
-        message: ci.message ?? '',
-        seedDeviceIdHex: ci.seedDeviceIdHex,
-        seedDxkB64: ci.seedDxkB64,
-        seedDmkB64: ci.seedDmkB64,
-        seedEpB64: ci.seedEpB64,
-      ));
-      _log.info(
-          'CR retry replayed for ${entry.key.substring(0, 8)} (attempt '
-          '${count + 1}, backoff ${backoffSec}s)');
-    }
-
-    // V3.1: Also retry CR-Response for recently accepted contacts.
-    // If the first Response was sent via a DV route that silently drops packets
-    // (e.g. AP isolation), it was lost. After ACK-based Route-DOWN, the retry
-    // goes through the full cascade again and finds the working relay path.
-    final recentlyAccepted = _contacts.entries
-        .where((e) => e.value.status == 'accepted')
-        .where((e) => e.value.acceptedAt != null)
-        .where((e) => now.difference(e.value.acceptedAt!).inMinutes < 5)
-        .where((e) => !_deletedContacts.contains(e.key))
-        .toList();
-
-    for (final entry in recentlyAccepted) {
-      final contact = entry.value;
-      // Rate limit: skip contacts retried less than 10s ago
-      final lastRetry = _lastCrRetryPerContact[entry.key];
-      if (lastRetry != null && now.difference(lastRetry).inSeconds < 10) continue;
-
-      // Only retry if we have their keys (received their CR)
-      if (contact.ed25519Pk == null) continue;
-      // contact.nodeId is the USER nodeId; peer may be indexed under DEVICE nodeId
-      if (node.routingTable.getPeer(contact.nodeId) == null &&
-          node.routingTable.getPeerByUserId(contact.nodeId) == null) {
-        continue;
-      }
-
-      // Stop retrying once delivery to this contact is ACK-confirmed.
-      // Primary check: any DELIVERY_RECEIPT from this contact since acceptance
-      // proves end-to-end reachability (works for direct AND relay receipts —
-      // critical for CGNAT peers where receipts only arrive via relay and
-      // dvRouting.confirmRoute is never called).
-      final lastAck = contact.lastAckedAt;
-      if (lastAck != null &&
-          contact.acceptedAt != null &&
-          lastAck.isAfter(contact.acceptedAt!)) {
-        continue;
-      }
-      // Fallback: dvRouting direct-route confirmation.
-      final route = node.dvRouting.bestRouteTo(entry.key);
-      if (route != null && route.ackConfirmed) continue;
-
-      final resp = proto.ContactRequestResponse()
-        ..accepted = true
-        ..ed25519PublicKey = identity.ed25519PublicKey
-        ..mlDsaPublicKey = identity.mlDsaPublicKey
-        ..x25519PublicKey = identity.x25519PublicKey
-        ..mlKemPublicKey = identity.mlKemPublicKey
-        ..displayName = displayName;
-
-      // V3: by retry time we have the contact's KEM pubkeys (CR was already
-      // received and accepted) — sendToUser handles the rest.
-      if (contact.x25519Pk != null && contact.mlKemPk != null) {
-        sendToUser(
-          recipientUserId: contact.nodeId,
-          messageType: proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE,
-          payload: Uint8List.fromList(resp.writeToBuffer()),
-        );
-      } else {
-        // Defensive: should be unreachable — accepted contacts always have
-        // KEM pubkeys (CR carried them). A missing-pks contact at retry
-        // time is a data-integrity issue.
-        _log.warn('CR-Response retry skipped for ${entry.key.substring(0, 8)}: '
-            'accepted contact lacks KEM pubkeys (data corruption?)');
-      }
-      _lastCrRetryPerContact[entry.key] = now;
-      _log.debug('CR-Response retry to ${entry.key.substring(0, 8)}');
-    }
-  }
-
-  // Proactive auto-repair: when an accepted contact hasn't ACKed anything
-  // for 7+ days, automatically send a re-contact CR. On the other side,
-  // auto-accept (S161) re-establishes the relationship without user action.
-  // Covers the case where the remote side deleted us — their app drops our
-  // messages (userPubkeysMissing) but would auto-accept a fresh CR.
-  void _autoRepairStaleContacts() {
-    final now = DateTime.now();
-    const staleThreshold = Duration(days: 7);
-    for (final entry in _contacts.entries) {
-      final contact = entry.value;
-      if (contact.status != 'accepted') continue;
-      if (contact.autoRepairAttempted) continue;
-      if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-      final acceptedAt = contact.acceptedAt;
-      if (acceptedAt == null || now.difference(acceptedAt) < staleThreshold) continue;
-      final lastAck = contact.lastAckedAt;
-      if (lastAck != null && now.difference(lastAck) < staleThreshold) continue;
-
-      contact.autoRepairAttempted = true;
-      _saveContacts();
-      _log.event('AUTO-REPAIR: sending re-contact CR to stale contact '
-          '${contact.displayName} (${entry.key.substring(0, 8)})');
-      sendContactRequest(entry.key);
-    }
-  }
-
-  void _startCrRetryTimer() {
-    _crRetryTimer?.cancel();
-    final hasPending = _contacts.values.any((c) => c.status == 'pending_outgoing');
-    final hasRecentAccepted = _contacts.values.any((c) =>
-        c.status == 'accepted' &&
-        c.acceptedAt != null &&
-        DateTime.now().difference(c.acceptedAt!).inMinutes < 5);
-    final hasStaleContacts = _contacts.entries.any((e) =>
-        e.value.status == 'accepted' &&
-        !e.value.autoRepairAttempted &&
-        e.value.acceptedAt != null &&
-        DateTime.now().difference(e.value.acceptedAt!).inDays >= 7 &&
-        (e.value.lastAckedAt == null ||
-            DateTime.now().difference(e.value.lastAckedAt!).inDays >= 7));
-    if (hasPending || hasRecentAccepted || hasStaleContacts) {
-      _crRetryTimer = Timer(const Duration(seconds: 30), () {
-        _crRetryTimer = null;
-        _retryPendingContactRequests();
-        _autoRepairStaleContacts();
-        _startCrRetryTimer();
-      });
-    }
-  }
 
   // ── Conversation Management ────────────────────────────────────────
 
@@ -6139,11 +4501,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // row in the conversation with the same msg.id. User-visible symptom:
     // "4× screen_now.png with placeholder" (Bug #R2, 2026-04-18).
     if (msg.id.isNotEmpty) {
+      ensureLoaded(conversationId);
       final existingIdx = conv.messages.indexWhere((m) => m.id == msg.id);
       if (existingIdx >= 0) {
         final existing = conv.messages[existingIdx];
         // Upgrade fields conservatively: prefer the newer/stronger state.
-        if (msg.mediaState.index > existing.mediaState.index) {
+        // `mergeRank`, not `index`: AP-4b froze this order as an explicit
+        // literal, because V4 §5.5 replaces the media stages and would
+        // otherwise reorder this rule along with the enum (MIGRATION §5.1d).
+        if (msg.mediaState.mergeRank > existing.mediaState.mergeRank) {
           existing.mediaState = msg.mediaState;
         }
         if (msg.filePath != null && existing.filePath == null) {
@@ -6159,6 +4525,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           existing.readAt = msg.readAt;
         }
         onStateChanged?.call();
+        persistMessage(conversationId, existing);
         _saveConversations();
         return false;
       }
@@ -6181,8 +4548,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _updateBadgeCount();
     }
 
+    conv.totalMessages++;
     onNewMessage?.call(conversationId, msg);
     onStateChanged?.call();
+    persistMessage(conversationId, msg);
     _saveConversations();
     return true;
   }
@@ -6212,20 +4581,26 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     var sentReceipts = false;
+    ensureLoaded(conversationId);
     for (final msg in conv.messages) {
-      if (!msg.isOutgoing && msg.status != MessageStatus.read) {
-        msg.status = MessageStatus.read;
+      // S390: the flag carries "my read receipt has already gone out",
+      // not the delivery state (§9.1 lists four, and a read note
+      // is none of them). It prevents the same as before: a second
+      // receipt for the same message on every opening (§1.2).
+      if (!msg.isOutgoing && !msg.readReceiptSent) {
+        msg.readReceiptSent = true;
+        persistMessage(conv.id, msg);
         sentReceipts = true;
         if (msg.senderNodeIdHex.isEmpty) continue;
         final senderUserId = hexToBytes(msg.senderNodeIdHex);
         final receipt = proto.ReadReceipt()
           ..messageId = hexToBytes(msg.id)
           ..readAt = Int64(DateTime.now().millisecondsSinceEpoch);
-        sendToUser(
+        _detachedSend('MTV3_READ_RECEIPT', sendToUser(
           recipientUserId: senderUserId,
           messageType: proto.MessageTypeV3.MTV3_READ_RECEIPT,
           payload: receipt.writeToBuffer(),
-        );
+        ));
       }
     }
 
@@ -6244,13 +4619,84 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   void setActiveConversationId(String? conversationId) {
     _activeConversationId = conversationId;
+
+    // ── THE CHAT IS OPENED: FETCH LIVENESS (§6, E-E) ────────────
+    //
+    // "Liveness is fetched lazily when a chat is opened, not at
+    // contact-add and not only on first send." Exactly this sentence had
+    // no counterpart in the application — the read side of the speed path
+    // was missing completely (S353, finding 2), and therefore EVERY
+    // message took the secure path to `m x R` cells.
+    //
+    // HERE AND NOT IN `sendToUser`: the point of this place is that the
+    // route already stands when the user types the first line. Fetched in the
+    // send path, the first message of every conversation would
+    // necessarily be the slow one.
+    //
+    // ONLY 1:1. For a group it would be one request PER MEMBER — with
+    // twenty members twenty slots (~160 s egress) for merely
+    // opening a chat in which perhaps nobody writes. The
+    // members that matter are covered by the second trigger:
+    // whose frame arrives, for him the route is fetched
+    // (`acceptV41Frame`) — and exactly there the response goes.
+    //
+    // FREE WHEN THERE IS NOTHING TO DO: `prepareSpeed` returns immediately
+    // if the route for the current epoch already stands, and
+    // throttles repetitions via its own counter.
+    final v41 = v41Delivery;
+    if (v41 == null || conversationId == null) return;
+    final conv = conversations[conversationId];
+    if (conv == null || conv.isGroup || conv.isChannel) return;
+    try {
+      v41.prepareSpeed(_v41PeerKey(hexToBytes(conversationId)));
+    } catch (e) {
+      // A malformed identifier must not crash the opening of a chat
+      // — the route then simply stays away, and the
+      // message takes secure.
+      _log.debug('prepareSpeed for $conversationId failed: $e');
+    }
   }
 
   @override
-  void setAppResumed(bool isResumed) {
+  void setAppResumed(bool isResumed, {bool triggerNodeHarvest = true}) {
+    final before = _isAppResumed;
     _isAppResumed = isResumed;
-    // §2.2.4: adaptive Liveness-TTL — Foreground 15min, Background 1h.
-    _identityPublisher?.setForeground(isResumed);
+    // Here stood `_identityPublisher?.setForeground(isResumed)` — the
+    // adaptive liveness TTL of the 2D DHT (§2.2.4). V4.1 has no
+    // published liveness (T).
+
+    // ── THE FOREGROUND EDGE FOR THE CATCH-UP HARVEST (S362) ───────────
+    //
+    // ONLY ON THE EDGE, not on every call: the lifecycle
+    // observer reports `resumed` even when the app was already in front
+    // (dialogs, keyboard, permission prompts). Without the edge an edge
+    // would have become a timer — exactly what working rule 5
+    // excludes.
+    //
+    // FREE WITHOUT ABSENCE: `catchUpHarvest` measures itself and returns
+    // without a single tag if the node was away for less than one
+    // epoch. That is the normal case on every wake-up.
+    // ── ONCE PER PROCESS, NOT PER IDENTITY (S376, P5 find. 5) ────
+    //
+    // `catchUpHarvest` is a matter of the NODE — there is one
+    // responsibility set and one have-list. The
+    // lifecycle loop in `main.dart` however calls this method per
+    // identity; with N = 3 that was three harvest runs for ONE
+    // return to the foreground, i.e. three times network traffic for
+    // the same information (working rule 5).
+    //
+    // AS WITH `onNetworkChanged` NEXT TO IT: the default value stays `true`,
+    // so that a single caller loses nothing; whoever has already run the node part
+    // himself says so.
+    if (isResumed && !before && triggerNodeHarvest) {
+      try {
+        v41OnForeground?.call();
+      } catch (e) {
+        // A catch-up harvest must not crash the lifecycle
+        // — it is a precaution, not a delivery path.
+        _log.debug('V4.1-Nachholernte bei Vordergrund-Rueckkehr: $e');
+      }
+    }
   }
 
   /// Decide whether the in-app notification (sound + vibrate + Android banner)
@@ -6327,11 +4773,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final indicator = proto.TypingIndicator()
       ..conversationId = conversationId
       ..isTyping = true;
-    sendToUser(
+    _detachedSend('MTV3_TYPING_INDICATOR', sendToUser(
       recipientUserId: contact.nodeId,
       messageType: proto.MessageTypeV3.MTV3_TYPING_INDICATOR,
       payload: indicator.writeToBuffer(),
-    );
+    ));
   }
 
   // ── Mutual Peer Selection (Architecture Section 3.3.7) ─────────
@@ -6369,6 +4815,37 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Insert a system message into a conversation.
   /// Replaces the 9-line UiMessage constructor that was copy-pasted at 12+ sites.
+  /// Is this identifier fit as a reply reference ON THE WIRE?
+  ///
+  /// S368 — WHY THIS NEEDS A CHECK AND NOT A try/catch.
+  ///
+  /// `TextMessageV3.replyToMessageId` is a 16-byte field. Both send paths
+  /// converted the identifier with `hexToBytes` and caught the error case with
+  /// `catch (_) { _log.debug('… not hex — wire-tag dropped'); }` — the
+  /// comment on it called the case "legacy". The consequence was a SILENT
+  /// DIVERGENCE: the sender saw a reply in his history,
+  /// the recipient an ordinary message, and the only
+  /// trace was a debug line.
+  ///
+  /// MEASURED who creates an identifier on this line at all: all
+  /// `UiMessage.id` arise as `bytesToHex(SodiumFFI().randomBytes(16))`
+  /// (text, group text, media, system messages) or as `.hex` of a
+  /// received `messageId`. There is no path by which a non-hex
+  /// identifier arises. The "legacy" case meant legacy profiles — they do not reach
+  /// this version (`FirstStartWipe`).
+  ///
+  /// If the case occurs nonetheless, it is damage to the local stock.
+  /// Then the reply reference falls on BOTH sides — not only on the
+  /// wire —, so that sender and recipient see the same, and the report
+  /// is a warning instead of a debug line.
+  static bool _isWireCapableMessageIdentifier(String id) =>
+      RegExp(r'^[0-9a-fA-F]{32}$').hasMatch(id);
+
+  /// Test access to EXACTLY the production path — no second mechanism.
+  @visibleForTesting
+  static bool isWireCapableMessageIdentifierForTest(String id) =>
+      _isWireCapableMessageIdentifier(id);
+
   void _addSystemMessage(String conversationId, String text, {
     bool isGroup = false,
     bool isChannel = false,
@@ -6390,11 +4867,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Standard warn-log for a `_handleXxxV3` catch block: `$handler: $messageType: $e`
   /// plus sender (and optionally device) hex prefix. Replaces the copy-pasted
   /// `_log.warn('...: parse fail: $e (sender=${_hexShort(...)})')` blocks.
-  void _logHandlerError(String handler, Object e, proto.ApplicationFrameV3 frame,
-      {Uint8List? senderDeviceId, String messageType = 'parse fail'}) {
-    final senderHex = _hexShort(Uint8List.fromList(frame.senderUserId));
-    final devicePart = senderDeviceId != null ? ' device=${_hexShort(senderDeviceId)}' : '';
-    _log.warn('$handler: $messageType: $e (sender=$senderHex$devicePart)');
+  /// Uniform error log for handlers. The frame-based version
+  /// next to it was dropped with step 5 — it no longer had a caller.
+  void _logHandlerErrorEvent(String handler, Object e, HarvestEvent event,
+      {String messageType = 'parse fail'}) {
+    _log.warn('$handler: $messageType: $e '
+        '(sender=${_hexShort(event.senderUserId)} '
+        'device=${_hexShort(event.senderDeviceId)})');
   }
 
   // ── Groups ──────────────────────────────────────────────────────
@@ -6498,7 +4977,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientEd25519PkOverride: ed25519Pk,
       );
       if (!ok) {
-        _log.warn('GROUP_INVITE: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName}) — S&F path not yet implemented');
+        // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+        _log.debug('GROUP_INVITE: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName}) — S&F path not yet implemented');
       }
     }
 
@@ -6515,6 +4995,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     final group = _groups[groupIdHex];
     if (group == null) return null;
+
+    // S368: see `_isWireFaehigeNachrichtenkennung`. If the reference falls,
+    // it falls on BOTH sides.
+    if (replyToMessageId != null &&
+        replyToMessageId.isNotEmpty &&
+        !_isWireCapableMessageIdentifier(replyToMessageId)) {
+      _log.warn('sendGroupTextMessage: replyToMessageId is not a '
+          '32-digit hex identifier — the reply reference is dropped entirely, also '
+          'locally.');
+      replyToMessageId = null;
+      replyToText = null;
+      replyToSender = null;
+    }
 
     // V3 group fan-out: TextMessageV3 sub-message + sendToUser per member.
     // ApplicationFrameV3.group_id (Field 17) carries the conversation tag so
@@ -6541,12 +5034,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     if (wirePreview != null) tm.linkPreview = wirePreview;
     if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
-      try {
-        tm.replyToMessageId = hexToBytes(replyToMessageId);
-      } catch (_) {
-        _log.debug(
-            'sendGroupTextMessage: replyToMessageId not hex — wire-tag dropped');
-      }
+      // S368: checked above — `hexToBytes` can no longer throw here.
+      tm.replyToMessageId = hexToBytes(replyToMessageId);
       if (replyToText != null && replyToText.isNotEmpty) {
         tm.replyToSnippet = replyToText.length > 120
             ? '${replyToText.substring(0, 120)}…'
@@ -6567,7 +5056,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: text,
       timestamp: DateTime.now(),
       type: UiMessageType.text,
-      status: MessageStatus.sending,
+      status: MessageStatus.resting,
       isOutgoing: true,
       replyToMessageId: replyToMessageId,
       replyToText: replyToText,
@@ -6590,8 +5079,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // member that sent it. A shared id would collide in `AckTracker._pending`
     // (keyed by messageId alone) and evict each previous member's timer.
     bool anySent = false;
-    bool anyPlacedNowhere = false;
-    bool anyL3Only = false;
     for (final member in group.members.values) {
       if (member.nodeIdHex == identity.userIdHex) continue;
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
@@ -6599,7 +5086,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (x25519Pk == null || mlKemPk == null) continue;
       final legId = SodiumFFI().randomBytes(16);
       msg.fanoutLegs[member.nodeIdHex] = bytesToHex(legId);
-      final l3Out = [false];
       final ok = await sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_TEXT,
@@ -6611,25 +5097,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-        l3Result: l3Out,
       );
-      if (ok) {
-        anySent = true;
-      } else if (l3Out[0]) {
-        anyL3Only = true;
-      } else {
-        anyPlacedNowhere = true;
-      }
+      if (ok) anySent = true;
     }
 
-    // Aggregate over the weakest leg: an offline member is not a failure —
-    // the message sits in S&F/erasure until they come back (§5.4/§5.5).
-    // `failed` is reserved for legs that could not be placed anywhere and
-    // are parked in the local outbox (§5.8).
-    msg.status = anyPlacedNowhere
-        ? MessageStatus.failed
-        : (anyL3Only ? MessageStatus.queuedOffline : MessageStatus.sent);
-    if (anySent) node.statsCollector.addMessageSent();
+    // AP-4 (§5.1b/§5.1c K2): the ternary over `anyPlacedNowhere`/`anyL3Only`
+    // has been dropped without replacement — "L3 placed" is no longer an event in V4.1.
+    // The aggregate over the WEAKEST leg stays (v4_1 §21.5.5
+    // "Aggregation per leg"), but it now reads the delivery register instead
+    // of the send result. An offline recipient is still
+    // NO error: for him the cell lies on the tag line.
+    _v41ApplyOutgoingStatus(msg, msg.fanoutLegs.values.toList());
+    if (anySent) statsCollector.addMessageSent();
     onStateChanged?.call();
     _saveConversations();
     return msg;
@@ -6647,7 +5126,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           ?? otherMembers.first;
       newOwner.role = 'owner';
       group.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Ownership transferred to ${newOwner.displayName} before leaving');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Ownership transferred to ${newOwner.displayName} before leaving');
     }
 
     // Remove self from member list before broadcasting
@@ -6667,7 +5147,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
           memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk, memberEd25519Pk: member.ed25519Pk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_GROUP_LEAVE', sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_GROUP_LEAVE,
         payload: leaveBytes,
@@ -6675,7 +5155,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-      );
+      ));
     }
 
     _groups.remove(groupIdHex);
@@ -6718,10 +5198,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     await _broadcastGroupUpdate(group);
 
     // System message
-    _addSystemMessage(groupIdHex, '${contact.displayName} wurde eingeladen',
+    _addSystemMessage(groupIdHex, '${contact.displayName} was invited',
         type: UiMessageType.groupInvite, isGroup: true);
 
-    _log.info('Invited ${contact.displayName} to group "${group.name}"');
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('Invited ${contact.displayName} to group "${group.name}"');
     return true;
   }
 
@@ -6744,7 +5225,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     await _broadcastGroupUpdate(group);
 
     // System message
-    _addSystemMessage(groupIdHex, '$memberName wurde entfernt',
+    _addSystemMessage(groupIdHex, '$memberName was removed',
         type: UiMessageType.groupLeave, isGroup: true);
 
     onStateChanged?.call();
@@ -6791,7 +5272,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       _addSystemMessage(entityIdHex, '${member.displayName}: $oldRole → $role',
           type: UiMessageType.channelRoleUpdate, isGroup: true);
-      _log.info('Role changed: ${member.displayName} $oldRole -> $role in group "${group.name}"');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Role changed: ${member.displayName} $oldRole -> $role in group "${group.name}"');
 
     } else {
       // Channel — same rule as groups: Owner only can change roles (§10.2).
@@ -6815,7 +5297,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       _addSystemMessage(entityIdHex, '${member.displayName}: $oldRole → $role',
           type: UiMessageType.channelRoleUpdate, isChannel: true);
-      _log.info('Role changed: ${member.displayName} $oldRole -> $role in channel "${channel.name}"');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Role changed: ${member.displayName} $oldRole -> $role in channel "${channel.name}"');
     }
 
     onStateChanged?.call();
@@ -6842,7 +5325,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           memberMlKemPk: m.mlKemPk as Uint8List?,
           memberEd25519Pk: m.ed25519Pk as Uint8List?);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_CHANNEL_ROLE_UPDATE', sendToUser(
         recipientUserId: hexToBytes(mHex),
         messageType: proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE,
         payload: roleBytes,
@@ -6850,7 +5333,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-      );
+      ));
     }
   }
 
@@ -6913,14 +5396,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientEd25519PkOverride: ed25519Pk,
       );
       if (!ok) {
-        _log.warn('GROUP_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
+        // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+        _log.debug('GROUP_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
         _pendingMembershipResends
             .putIfAbsent(group.groupIdHex, () => {})
             .add(m.nodeIdHex);
         anyFailed = true;
       }
     }
-    if (anyFailed) _savePendingMembershipResends();
+    // S366: ONE row for THIS group instead of the whole stock.
+    if (anyFailed) _persistMembershipResend(group.groupIdHex);
     _log.info('Broadcast group update for "${group.name}" to ${group.members.length - 1} members');
   }
 
@@ -7053,7 +5538,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         ownerNodeIdHex: identity.userIdHex,
         createdAt: channel.createdAt,
       ));
-      _channelIndex.save();
+      // S366: `upsert` writes its ONE row itself. The `save()` that formerly
+      // stood here would now have rewritten the whole index.
     }
 
     onStateChanged?.call();
@@ -7078,7 +5564,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final stored = await _publishSystemChannelRecord(
           channelIdHex: channelIdHex, kind: SysChanKind.post, text: text);
       if (stored == null) return null;
-      node.statsCollector.addMessageSent();
+      statsCollector.addMessageSent();
       final conv = conversations[channelIdHex];
       final recordIdHex =
           stored.record.recordId.hex;
@@ -7132,15 +5618,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // No leg tracking here: `CHANNEL_POST` is not ack-worthy
     // (`AckTracker.isAckWorthyV3`), so no receipt ever comes back and a
     // channel post can never reach `delivered` (§14.7.4 "Channels").
-    bool anyPlacedNowhere = false;
-    bool anyL3Only = false;
+    // AP-4 (§5.1c K2): `anyPlacedNowhere`/`anyL3Only` fell away with the ternary.
+    // For the channel path there is NO replacement from the
+    // delivery register: it does not pass `sendToUser` an own identifier per
+    // subscriber (unlike the group fan-out), so the
+    // application cannot find the register's records again. The post
+    // stays at `placing`. That is more honest than the old `sent`, but it
+    // is a reported gap, not a final state.
     for (final member in channel.members.values) {
       if (member.nodeIdHex == identity.userIdHex) continue;
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
           memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk, memberEd25519Pk: member.ed25519Pk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      final l3Out = [false];
-      final ok = await sendToUser(
+      await sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_CHANNEL_POST,
         payload: basePayload,
@@ -7150,21 +5640,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-        l3Result: l3Out,
       );
-      if (!ok) {
-        if (l3Out[0]) {
-          anyL3Only = true;
-        } else {
-          anyPlacedNowhere = true;
-        }
-      }
     }
 
     // If no other members received the post, generate a local message ID
     // (e.g. owner-only public channel — post is stored locally for future subscribers)
     firstMsgId ??= bytesToHex(SodiumFFI().randomBytes(16));
-    node.statsCollector.addMessageSent();
+    statsCollector.addMessageSent();
 
     // Create single UI message
     final msg = UiMessage(
@@ -7174,9 +5656,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: text,
       timestamp: DateTime.now(),
       type: UiMessageType.channelPost,
-      status: anyPlacedNowhere
-          ? MessageStatus.failed
-          : (anyL3Only ? MessageStatus.queuedOffline : MessageStatus.sent),
+      status: MessageStatus.resting,
       isOutgoing: true,
     );
     if (previewUrl != null) {
@@ -7204,7 +5684,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           ?? otherMembers.first;
       newOwner.role = 'owner';
       channel.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Channel ownership transferred to ${newOwner.displayName} before leaving');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Channel ownership transferred to ${newOwner.displayName} before leaving');
     }
 
     // Remove self from member list before broadcasting
@@ -7224,7 +5705,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(member.nodeIdHex,
           memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk, memberEd25519Pk: member.ed25519Pk);
       if (x25519Pk == null || mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_CHANNEL_LEAVE', sendToUser(
         recipientUserId: hexToBytes(member.nodeIdHex),
         messageType: proto.MessageTypeV3.MTV3_CHANNEL_LEAVE,
         payload: leaveBytes,
@@ -7232,7 +5713,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientX25519PkOverride: x25519Pk,
         recipientMlKemPkOverride: mlKemPk,
         recipientEd25519PkOverride: ed25519Pk,
-      );
+      ));
     }
 
     _channels.remove(channelIdHex);
@@ -7272,10 +5753,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     await _broadcastChannelUpdate(channel);
 
     // System message
-    _addSystemMessage(channelIdHex, '${contact.displayName} wurde eingeladen',
+    _addSystemMessage(channelIdHex, '${contact.displayName} was invited',
         type: UiMessageType.channelInvite, isChannel: true);
 
-    _log.info('Invited ${contact.displayName} to channel "${channel.name}"');
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('Invited ${contact.displayName} to channel "${channel.name}"');
     return true;
   }
 
@@ -7297,7 +5779,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     await _broadcastChannelUpdate(channel);
 
     // System message
-    _addSystemMessage(channelIdHex, '$memberName wurde entfernt',
+    _addSystemMessage(channelIdHex, '$memberName was removed',
         type: UiMessageType.channelLeave, isChannel: true);
 
     onStateChanged?.call();
@@ -7384,14 +5866,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientEd25519PkOverride: ed25519Pk,
       );
       if (!ok) {
-        _log.warn('CHANNEL_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
+        // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+        _log.debug('CHANNEL_UPDATE broadcast: no route to ${m.nodeIdHex.substring(0, 8)} (${m.displayName})');
         _pendingMembershipResends
             .putIfAbsent(channel.channelIdHex, () => {})
             .add(m.nodeIdHex);
         anyFailed = true;
       }
     }
-    if (anyFailed) _savePendingMembershipResends();
+    // S366: ONE row for THIS channel instead of the whole stock.
+    if (anyFailed) _persistMembershipResend(channel.channelIdHex);
     _log.info('Broadcast channel update for "${channel.name}" to ${channel.members.length - 1} members');
   }
 
@@ -7424,7 +5908,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ownerNodeIdHex: channel.ownerNodeIdHex,
       createdAt: channel.createdAt,
     ));
-    _channelIndex.save();
+    // S366: `upsert` writes its ONE row itself.
     _log.info('Published channel "${channel.name}" to index');
     return true;
   }
@@ -7440,7 +5924,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   List<JuryRequest> get pendingJuryRequests => _moderation.pendingJuryRequestsList;
   @override
-  Map<String, dynamic> getChannelModerationInfo(String channelIdHex) =>
+  Future<Map<String, dynamic>> getChannelModerationInfo(
+          String channelIdHex) async =>
       _moderation.getChannelModerationInfo(channelIdHex);
   @override
   Future<bool> dismissPostReport(String channelIdHex, String reportId) =>
@@ -7513,13 +5998,122 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return true;
   }
 
+  /// One-time sweeper for the at-rest user content from S362.
+  ///
+  /// Without it the switch only protected what is written from now on —
+  /// the profile picture, the self-description and the wording of every already
+  /// transcribed voice message would have stayed lying open in the profile.
+  ///
+  /// The run is cheap and may run at every start: if no
+  /// plaintext lies there (any more), it costs three `existsSync`. It is therefore deliberately
+  /// NOT secured via a marker file — a marker would skip a
+  /// run that failed last time on an unreadable ciphertext,
+  /// and the plaintext would stay lying forever.
+  ///
+  /// Order and abort safety stand in [PlaintextSweep].
+  void _sweepPlaintextUserContent() {
+    for (final (path, toJson) in <(String, Map<String, dynamic> Function(String))>[
+      // The wording of spoken messages. Content is already JSON.
+      ('$profileDir/voice_transcriptions.json', PlaintextSweep.asJson),
+      // The own profile picture, base64 JPEG, max. 64 KB decoded.
+      //
+      // S366: picture and self-description now lie in the storage
+      // (area `profile`), so there is no writer any more for these two files.
+      // The sweeper stays nonetheless,
+      // because its statement is a different one from "is still read": it
+      // says "under this name there lies no plaintext in this profile".
+      // Striking it here would mean leaving a plaintext remnant found
+      // from the time before S362 lying open — and precisely
+      // the remnant that nobody touches any more and that therefore
+      // nobody notices any more either. The paths stand literally, because the
+      // getters with the file path have been dropped.
+      ('$profileDir/profile_picture.b64', PlaintextSweep.asText('b64')),
+      // The own self-description, max. 500 characters.
+      ('$profileDir/profile_description.txt', PlaintextSweep.asText('text')),
+      // ── S362, section 2.2: the interaction graph ───────────────────
+      //
+      // `reputation.json` carries an interaction graph: for every ever
+      // seen node identifier counters and ban state. Whoever has the disk
+      // reads from it WITH WHOM and HOW OFTEN this device had to do
+      // — even without being able to decrypt a single message.
+      //
+      // S366: ITS WRITER IS DELETED.
+      // `lib/core/moderation/peer_reputation.dart` had not a single
+      // caller in `lib/` and served solely the V3 line; the
+      // owner ordered the deletion. The sweeper stays
+      // nonetheless, and precisely because of that: WITHOUT a writer no
+      // read ever triggers a migration either, a `reputation.json` found in a legacy profile
+      // would thus stay lying open forever
+      // and nobody would ever find it again. This line is the
+      // only reason why that does not happen.
+      ('$profileDir/reputation.json', PlaintextSweep.asJson),
+    ]) {
+      final outcome = PlaintextSweep.sweepOne(
+        fileEnc: _fileEnc,
+        path: path,
+        toJson: toJson,
+        log: _log,
+      );
+      if (outcome == SweepOutcome.failed) {
+        _log.warn('S362 sweep: $path could not be moved into the '
+            'encrypted store — the plaintext version '
+            'still lies open in the profile.');
+      }
+    }
+  }
+
+  /// One-time sweeper for the media attachments (S362 variant B).
+  ///
+  /// Counterpart of [_sweepPlaintextUserContent], only streaming: an
+  /// attachment may be 500 MB large (see `maxFileSize` in
+  /// [sendMediaMessage]), so it does not fit into memory as a whole.
+  /// Order and abort safety stand in [MediaSweep].
+  ///
+  /// Like the sister run it is NOT secured via a marker file:
+  /// a marker would skip a run that failed last time on a file,
+  /// and its plaintext would stay lying forever.
+  /// If nothing lies in plaintext any more, the run costs one
+  /// `listSync` over one directory.
+  void _sweepPlaintextMedia() {
+    final dir = '$profileDir/media';
+    if (!Directory(dir).existsSync()) return;
+    final r = MediaSweep.sweepDirectory(dir, log: _log);
+    if (r.touched > 0 || r.tmpRemoved > 0) {
+      _log.info('S362 media cleaner: $r');
+    }
+    if (r.failed > 0) {
+      _log.warn('S362 media sweep: ${r.failed} attachments could NOT '
+          'be moved into the encrypted store — they still lie '
+          'open in $dir.');
+    }
+  }
+
+  // ── The own profile in the storage (§21.4.1, S366) ─────────────────
+  //
+  // Picture and self-description share ONE area with TWO
+  // keys. That is the reason why `putEntry`/`removeEntry`
+  // stand here and not `replaceArea` as with the settings: a
+  // `replaceArea('profile', …)` with only one of the two entries
+  // would delete the respective other along with it. The user sets picture and text
+  // independently of each other.
+  //
+  // Deleting (`removeEntry`) is the actual improvement here
+  // over the file path: there it needed `deleteFile`, because a
+  // leftover `.enc.old` side piece would have brought back a removed picture on the
+  // next start from crash recovery. A
+  // deleted row has no side piece.
+  static const String _areaProfile = 'profile';
+  static const String _profileKeyImage = 'picture';
+  static const String _profileKeyText = 'description';
+
   void _loadProfilePicture() {
     try {
-      final file = File('$profileDir/profile_picture.b64');
-      if (file.existsSync()) {
-        _profilePictureBase64 = file.readAsStringSync().trim();
-        if (_profilePictureBase64!.isEmpty) _profilePictureBase64 = null;
-      }
+      // S362: the own profile picture lay as a bare base64 file in the profile.
+      // S366: it lies in the encrypted storage, under the same
+      // seed-derived key as the conversations.
+      final json = store.loadArea(_areaProfile)[_profileKeyImage];
+      final b64 = json?['b64'] as String?;
+      _profilePictureBase64 = (b64 == null || b64.isEmpty) ? null : b64;
     } catch (e) {
       _log.debug('Failed to load profile picture: $e');
     }
@@ -7527,11 +6121,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveProfilePicture() {
     try {
-      final file = File('$profileDir/profile_picture.b64');
       if (_profilePictureBase64 != null) {
-        file.writeAsStringSync(_profilePictureBase64!);
-      } else if (file.existsSync()) {
-        file.deleteSync();
+        store.putEntry(_areaProfile, _profileKeyImage,
+            {'b64': _profilePictureBase64});
+      } else {
+        store.removeEntry(_areaProfile, _profileKeyImage);
       }
     } catch (e) {
       _log.debug('Failed to save profile picture: $e');
@@ -7563,11 +6157,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _loadProfileDescription() {
     try {
-      final file = File('$profileDir/profile_description.txt');
-      if (file.existsSync()) {
-        final text = file.readAsStringSync().trim();
-        _profileDescription = text.isNotEmpty ? text : null;
-      }
+      // S362: the self-description lay as a bare text file in the profile.
+      // S366: it lies in the storage, area `profile`, key
+      // `description` — next to the picture, but as its own row.
+      final json = store.loadArea(_areaProfile)[_profileKeyText];
+      final text = (json?['text'] as String?)?.trim();
+      _profileDescription = (text == null || text.isEmpty) ? null : text;
     } catch (e) {
       _log.debug('Failed to load profile description: $e');
     }
@@ -7575,11 +6170,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveProfileDescription() {
     try {
-      final file = File('$profileDir/profile_description.txt');
       if (_profileDescription != null) {
-        file.writeAsStringSync(_profileDescription!);
-      } else if (file.existsSync()) {
-        file.deleteSync();
+        store.putEntry(_areaProfile, _profileKeyText,
+            {'text': _profileDescription});
+      } else {
+        store.removeEntry(_areaProfile, _profileKeyText);
       }
     } catch (e) {
       _log.debug('Failed to save profile description: $e');
@@ -7593,8 +6188,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   Future<bool> setPort(int newPort) async {
+    // The in-process path — this is what Android and iOS take, where no IPC
+    // handler sits in front to reject anything. Until now it checked NOTHING,
+    // not even the LAN-discovery port: on mobile the settings dialog was the
+    // only guard in existence, and a guard that lives solely in the UI is one
+    // refactor away from being gone.
+    //
+    // S376: `isReservedLanPort` instead of `== lanDiscoveryPort` — both
+    // fixed LAN ports (41338 and 41340) are checked via the one
+    // place of definition in `link/data_port.dart`.
+    if (DataPort.isReservedLanPort(newPort) ||
+        IdentityManager.isBrowserBlockedPort(newPort)) {
+      _log.warn('setPort refused $newPort: '
+          '${DataPort.isReservedLanPort(newPort)
+              ? 'reserved for the LAN sockets (§4.5.2)'
+              : 'refused by browsers — invitation links would be dead'}');
+      return false;
+    }
     try {
-      await node.changePort(newPort);
+      // FORMERLY `node.changePort(newPort)` — the V3 transport rebound the
+      // socket. Gap G-15: the V4.1 node holds its port
+      // (`attachV41`, one port per node) and has no rebind command.
+      // The value is saved and takes effect at the next start; the
+      // running node stays on its old port.
+      _log.warn('setPort: the running node stays on port $port — V4.1 '
+          'cannot rebind the socket at runtime (gap G-15). '
+          '$newPort applies from the next start.');
       port = newPort;
       IdentityManager().updatePort(newPort);
       onStateChanged?.call();
@@ -7612,11 +6231,49 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _log.info('Media settings updated');
   }
 
+  // ── The settings areas of the storage (§21.4.1, S366) ─────────────
+  //
+  // S362, section 2.3: the three settings files lay open in the
+  // profile. Individually each is harmless; together they are a DEVICE PROFILE
+  // — the auto-download limits reveal whether a mobile contract
+  // is being economised on, the link preview setting whether this device
+  // may reach into the open network at all, and the
+  // multi-interface mode how many network paths it has.
+  //
+  // S366: they no longer lie each in their own
+  // `FileEncryption` file, but in the encrypted storage
+  // (`messages.db`, table `state`). Thus one file per setting
+  // drops out of the profile — and with it the statement that its mere
+  // EXISTENCE already carries: whoever sees the directory reads off the
+  // file list which settings this device has ever
+  // touched at all. In the storage that is encrypted too.
+  //
+  // PER AREA EXACTLY ONE ENTRY under the key `_`. That is
+  // right here and not the full-state writer that `replaceArea`
+  // warns against: a setting is a state with fixed fields, not a
+  // growing collection. `replaceArea` writes it in ONE transaction —
+  // a crash in the middle leaves either the old or the new
+  // state, never a mixture.
+  //
+  // NO DATA-LOSS LATCH, and that is a decision, not a
+  // gap: if one of these settings is lost, the
+  // default value applies (`MediaSettings()`, `LinkPreviewSettings()`,
+  // `MultiInterfaceMode.auto`), and the user sets it again. With
+  // `invites` it is different — there a latch stands
+  // (`InviteStore.load`), because an empty book would assign the same
+  // invitation key a second time.
+  static const String _areaMediaSettings = 'media_settings';
+  static const String _areaLinkPreviewSettings = 'link_preview_settings';
+  static const String _areaMultiInterfaceMode = 'multi_interface_mode';
+
+  /// The key of the one entry in a settings area.
+  static const String _settingKey = '_';
+
   void _loadMediaSettings() {
     try {
-      final file = File('$profileDir/media_settings.json');
-      if (file.existsSync()) {
-        final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      final json =
+          store.loadArea(_areaMediaSettings)[_settingKey];
+      if (json != null) {
         _mediaSettings = MediaSettings.fromJson(json);
       }
     } catch (e) {
@@ -7626,8 +6283,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveMediaSettings() {
     try {
-      final file = File('$profileDir/media_settings.json');
-      file.writeAsStringSync(jsonEncode(_mediaSettings.toJson()));
+      store.replaceArea(_areaMediaSettings,
+          {_settingKey: _mediaSettings.toJson()});
     } catch (e) {
       _log.debug('Failed to save media settings: $e');
     }
@@ -7655,9 +6312,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _loadLinkPreviewSettings() {
     try {
-      final file = File('$profileDir/link_preview_settings.json');
-      if (file.existsSync()) {
-        final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
+      final json =
+          store.loadArea(_areaLinkPreviewSettings)[_settingKey];
+      if (json != null) {
         _linkPreviewSettings = LinkPreviewSettings.fromJson(json);
       }
     } catch (e) {
@@ -7667,8 +6324,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveLinkPreviewSettings() {
     try {
-      final file = File('$profileDir/link_preview_settings.json');
-      file.writeAsStringSync(jsonEncode(_linkPreviewSettings.toJson()));
+      store.replaceArea(_areaLinkPreviewSettings,
+          {_settingKey: _linkPreviewSettings.toJson()});
     } catch (e) {
       _log.debug('Failed to save link preview settings: $e');
     }
@@ -7683,17 +6340,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Future<void> setMultiInterfaceMode(MultiInterfaceMode mode) async {
     _multiInterfaceMode = mode;
     _saveMultiInterfaceMode();
-    await node.transport.setMultiInterfaceMode(mode);
+    // FORMERLY `node.transport.setMultiInterfaceMode(mode)` (§23.2: send
+    // over several interfaces simultaneously). The V3 transport has
+    // fallen, the V4.1 node holds one socket per family and knows
+    // no multi-interface choice. **Gap G-6**: the setting is
+    // saved and displayed, but NOT applied.
+    _log.warn('Multi-interface mode ${mode.name} saved, but not '
+        'applied — V4.1 has no multi-interface choice (gap G-6).');
     onStateChanged?.call();
-    _log.info('Multi-interface mode set to ${mode.name}');
   }
 
   void _loadMultiInterfaceMode() {
     try {
-      final file = File('$profileDir/multi_interface_mode.json');
-      if (file.existsSync()) {
-        final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-        _multiInterfaceMode = MultiInterfaceManager.modeFromString(
+      final json =
+          store.loadArea(_areaMultiInterfaceMode)[_settingKey];
+      if (json != null) {
+        _multiInterfaceMode = MultiInterfaceMode.modeFromString(
             json['mode'] as String?);
       }
     } catch (e) {
@@ -7703,10 +6365,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveMultiInterfaceMode() {
     try {
-      final file = File('$profileDir/multi_interface_mode.json');
-      file.writeAsStringSync(jsonEncode({
-        'mode': MultiInterfaceManager.modeToString(_multiInterfaceMode),
-      }));
+      store.replaceArea(_areaMultiInterfaceMode, {
+        _settingKey: {
+          'mode': MultiInterfaceMode.modeToString(_multiInterfaceMode),
+        }
+      });
     } catch (e) {
       _log.debug('Failed to save multi-interface mode: $e');
     }
@@ -7738,29 +6401,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   bool verifyEd25519(Uint8List message, Uint8List signature, Uint8List publicKey) =>
       SodiumFFI().verifyEd25519(message, signature, publicKey);
 
-  @override
-  void addNfcContact(Contact contact) {
-    final hex = bytesToHex(contact.nodeId);
-    final info = ContactInfo(
-      nodeId: Uint8List.fromList(contact.nodeId),
-      displayName: contact.displayName,
-      ed25519Pk: contact.ed25519Pk,
-      mlDsaPk: contact.mlDsaPk,
-      x25519Pk: contact.x25519Pk,
-      mlKemPk: contact.mlKemPk,
-      status: 'accepted',
-      verificationLevel: 'verified',
-      acceptedAt: DateTime.now(),
-      profilePictureBase64: contact.profilePicture != null
-          ? base64Encode(contact.profilePicture!)
-          : null,
-    );
-    _contacts[hex] = info;
-    _saveContacts();
-    onContactAccepted?.call(hex);
-    onStateChanged?.call();
-    _log.info('NFC contact added: ${contact.displayName} (verified)');
-  }
+  // `addNfcContact` stood here (V3 NFC: `accepted` contact without request and
+  // without response, `verified`). Dropped with S388-BAU-KONTAKT — the NFC screen
+  // exchanges invitation cards and redeems them (§15.5).
 
   /// Update own display name and broadcast to all contacts.
   ///
@@ -7811,66 +6454,108 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_PROFILE_UPDATE', sendToUser(
         recipientUserId: contact.nodeId,
         messageType: proto.MessageTypeV3.MTV3_PROFILE_UPDATE,
         payload: payload,
-      );
+      ));
     }
   }
 
-  // ── Guardian Recovery ─────────────────────────────────────────────
+  // ── Guardian recovery: REFUSED, NOT CONCEALED ────────────────
+  //
+  // `GuardianService` was deleted with the CUT (v4_1 §13.8: no social
+  // recovery; the Shamir shares travelled as `FRAGMENT_STORE` infra
+  // frames over the V3 DHT). The four members stand in
+  // `ICleonaService` and therefore cannot simply disappear.
+  //
+  // § NUMBER CORRECTED (S361): here it said "V4 §6.8". That is the
+  // v4_0 numbering; on the V4.1 line §6 is "Liveness" and a §6.8
+  // does not exist there. The same wording stands in §13.8 "Limits of
+  // recovery": "No set of other people can restore an identity — in no
+  // number, in no combination, under no threshold."
+  //
+  // THEY DO NOT RETURN "NO" AS IF NOTHING HAD BEEN SET UP. A
+  // hard-wired `false` told the UI "you have no
+  // recovery guardians" — for a user who HAS set up five,
+  // that was a false statement about his backup (gap G-8).
 
+  /// Measured once and remembered. The stores can no longer arise
+  /// anew — the only writer `_saveGuardianList()` fell with
+  /// `guardian_service.dart` (`91b566dd`) —, and the getter
+  /// runs along on EVERY state snapshot
+  /// (`cleona_service_state.dart:82`). Before S361 it wrote an error line into the log there on every
+  /// pass.
+  LegacyGuardianDeposit? _legacyGuardianDeposit;
+
+  /// The measurement for both readers — state snapshot and guard.
+  LegacyGuardianDeposit get legacyGuardianDeposit =>
+      _legacyGuardianDeposit ??= LegacyGuardianDeposit.probe(profileDir);
+
+  /// Whether a guardian setup from before the
+  /// CUT lies in THIS profile directory — measured, not claimed.
+  ///
+  /// **That is no promise of a working backup.** Social
+  /// recovery does not exist in V4.1 (§13.8); a `true` means
+  /// exclusively "legacy data of a setup that
+  /// no longer carries still lies here" — exactly the information the UI
+  /// needs in order to warn instead of reassure.
+  ///
+  /// **`false` does not mean "you never had guardians".** The guardian list lay
+  /// device-locally and was never reconciled between devices (no
+  /// guardian type among the fifteen twin types,
+  /// `proto/app_payloads.proto:985-1019`); a second device regularly reports
+  /// `false`. Where the measurement was not possible at all, it also falls
+  /// to `false` here — the interface is `bool` and cannot
+  /// carry the third value.
+  ///
+  /// **The UI therefore does NOT read this getter**, but
+  /// `LegacyGuardianDeposit.probe` directly and distinguishes there
+  /// `none` / `present` / `unknown`
+  /// (`lib/core/recovery/legacy_guardian_state.dart:36-48`).
   @override
-  bool get isGuardianSetUp => guardianService.isSetUp;
+  bool get isGuardianSetUp =>
+      legacyGuardianDeposit.ownGuardians == LegacyGuardianTrace.present;
 
   @override
   Future<bool> setupGuardians(List<String> guardianNodeIds) async {
-    if (identity.isLinkedDevice) {
-      _log.warn('setupGuardians: blocked — Linked Device cannot set up guardians');
-      return false;
-    }
-    if (guardianNodeIds.length != 5) return false;
-
-    // Resolve contacts
-    final guardians = <ContactInfo>[];
-    for (final nodeIdHex in guardianNodeIds) {
-      final contact = _contacts[nodeIdHex];
-      if (contact == null || contact.status != 'accepted') {
-        _log.error('Guardian $nodeIdHex is not an accepted contact');
-        return false;
-      }
-      guardians.add(contact);
-    }
-
-    // Get master seed from identity
-    final masterSeed = identity.masterSeed;
-    if (masterSeed == null) {
-      _log.error('No master seed available for guardian setup');
-      return false;
-    }
-
-    return guardianService.setupGuardians(masterSeed, guardians);
+    _log.error('setupGuardians: refused — v4_1 §13.8 no longer knows social '
+        'recovery, and the carrier (Shamir shares over the '
+        'V3 DHT) fell with the CUT (gap G-8). The UI '
+        'has not offered the path since S361; if this '
+        'call reaches us anyway, it comes from a foreign IPC client.');
+    return false;
   }
 
   @override
-  Future<Map<String, dynamic>?> triggerGuardianRestore(String contactNodeIdHex) async {
-    final contact = _contacts[contactNodeIdHex];
-    if (contact == null) return null;
-
-    return guardianService.triggerGuardianRestore(
-      contactNodeIdHex,
-      contact.displayName,
-      _contacts.values.toList(),
-    );
+  Future<Map<String, dynamic>?> triggerGuardianRestore(
+      String contactNodeIdHex) async {
+    _log.error('triggerGuardianRestore: cancelled — see [setupGuardians] '
+        '(gap G-8).');
+    return null;
   }
 
   @override
-  Future<bool> confirmGuardianRestore(String ownerNodeIdHex, String recoveryMailboxIdHex) async {
-    return guardianService.confirmRestore(ownerNodeIdHex, recoveryMailboxIdHex);
+  Future<bool> confirmGuardianRestore(
+      String ownerNodeIdHex, String recoveryMailboxIdHex) async {
+    _log.error('confirmGuardianRestore: cancelled — see [setupGuardians] '
+        '(gap G-8).');
+    return false;
   }
 
   // ── Calls (delegated to CallService) ──────────────────────────────
+
+  /// Hangs the D socket of the V4.1 NODE onto the call transport of this
+  /// identity (§17.4).
+  ///
+  /// NO `@override` and not in `ICleonaService`: this is not an
+  /// application operation, but a seam of the setup. It is called
+  /// exactly once per identity, from `attachV41` — the only place where
+  /// node and service are present at the same time. The UI and the IPC
+  /// do not see it.
+  ///
+  /// `null` deregisters it; that is the path when shutting down the node.
+  void attachCallPlaneD(CallPlaneD? planeD) => _calls.attachPlaneD(planeD);
 
   @override
   CallInfo? get currentCall => _calls.currentCall;
@@ -7947,6 +6632,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (_callsReady && v != null) _calls.callIntegration = v;
   }
 
+  /// §10.4 "Session behaviour" (S367): forwards a `SessionBehaviourChannel
+  /// .onInterruption`-sourced event to the active call's `SessionBehaviour`
+  /// — see `CallService.feedVoiceInterruptionEvent`'s field doc. A no-op
+  /// before `_calls` exists (no call can be active yet) or outside an active
+  /// voice session — never throws, the OS bridge has no notion of Cleona's
+  /// call state.
+  void feedVoiceInterruptionEvent(VoiceEventRecord event) {
+    if (_callsReady) _calls.feedVoiceInterruptionEvent(event);
+  }
+
+  /// Whether the current call is considered interrupted by the OS audio
+  /// session right now (architecture §10.4). `false` before `_calls` exists.
+  bool get isCallInterrupted => _callsReady && _calls.isCallInterrupted;
+
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
       _bufferedCreateVideoEngine;
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
@@ -7977,30 +6676,97 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── Network Change ─────────────────────────────────────────────────
 
+  /// Reads the own reachable addresses anew.
+  ///
+  /// V4.1 counterpart of `node.localIps`. `dialableLocalAddresses()` is
+  /// asynchronous (it queries the interfaces), [localIps] must not
+  /// be — hence the cache.
+  Future<void> _refreshLocalAddresses() async {
+    try {
+      _localAddresses = await dialableLocalAddresses();
+    } catch (e) {
+      _log.debug('Local addresses could not be determined: $e');
+    }
+  }
+
   @override
-  Future<void> onNetworkChanged({bool triggerNodeReset = true}) async {
-    // The node-side reset is global (transport, NAT, DV, discovery) — running
-    // it once per identity on a multi-identity daemon multiplies the work and
-    // floods the log with N+1 "ignored" lines per polling tick. Daemon-style
-    // callers already trigger `node.onNetworkChanged()` directly and pass
-    // `false` here; single-service callers (legacy in-process path) keep the
-    // default and rely on this forward.
-    if (triggerNodeReset) await node.onNetworkChanged();
-    // §2.2.4: Liveness-Republish bei Adress-Wechsel (debounced 5s im Publisher)
-    _identityPublisher?.onAddressesChanged();
-    // §4.11.10: debounced First-Contact rendezvous republish (10s) so the
-    // other side resolves our new address. No-op without active sessions.
-    _fcRendezvous?.onNetworkChanged();
-    // §5.8: Edge-triggered one-shot outbox flush.
-    // Fire-and-forget — errors are logged inside _flushOutbox; the flush does
-    // not block the network-change recovery path.
-    // IMPORTANT: NO timer is involved here.  The flush happens exactly once per
-    // onNetworkChanged event (= a real network interface transition), NOT
-    // periodically.
-    unawaited(_flushOutbox(trigger: 'network-change'));
-    // §5.1 — dieselbe Kante fuer die First-CR.
+  /// [triggerNodeReset] HAS BECOME INEFFECTIVE and only remains in the
+  /// call contract (`ICleonaService`, IPC server, `main.dart`).
+  ///
+  /// It passed through to the node and skipped there the
+  /// "already known" guard. The node is gone with the CUT; the
+  /// network change is handled in V4.1 by the delivery layer itself
+  /// (`lib/core/tagline/` — entry cascade and partner choice run on
+  /// their own tick). What remains of it for the SERVICE stands below: reading
+  /// the own addresses anew and triggering the edge-triggered resends.
+  Future<void> onNetworkChanged(
+      {bool triggerNodeReset = true, bool force = false}) async {
+    await _refreshLocalAddresses();
+    // ── AND THE RUNNING CALLS (§17.4, S376/A-2) ──────────────────
+    //
+    // BEFORE everything else, and the order is the point: a call is
+    // the only thing in this service with a loss deadline of 10 s
+    // (§17.4). Everything else here — rendezvous, resends, the
+    // node — tolerates seconds; a call does not.
+    //
+    // Without a running call the call sends nothing (working rule 5).
+    if (_callsReady) _calls.onNetworkChanged();
+    // §5.1 — edge for the first CR: shorten a running backoff.
     shortenCrBackoffOnEdge('network-change');
+    // §5.8: the membership resends go via [sendToUser] and
+    // thus via the V4.1 switch — this edge continues to carry.
     unawaited(_flushPendingMembershipResends());
+    // The §5.8 outbox drain likewise stood here. It fell with the
+    // V3 cascade (gap G-4, see `cleona_service_pure.dart`).
+
+    // ── AND THE V4.1 NODE (§22.6, S360) ───────────────────────────
+    //
+    // UNTIL NOW IT LEARNED NOTHING. This method refreshed a local
+    // address list, reported it to the rendezvous and shortened a
+    // backoff — the node kept running unchanged, with sessions into the
+    // old network, with observed addresses from the old network and with
+    // an announcement pointing to the old network. On a phone
+    // that is the normal case, not the special case: WLAN after mobile data and
+    // back, several times a day.
+    //
+    // ── AND `triggerNodeReset` CONTROLS IT AGAIN (S376, P5 find. 5) ──
+    //
+    // HERE IT SAID: "`triggerNodeReset` does NOT control it. … there is exactly
+    // ONE node per process and exactly ONE seam to it. Hanging it here on
+    // a parameter that stems from the V3 era would be the
+    // drift that the cut has just eliminated."
+    //
+    // The sentence is right and the conclusion was wrong. There is exactly
+    // one seam — but N SERVICES that reach through it. All three
+    // entry points call this method IN A LOOP over their
+    // identities; without the parameter the node part ran three times with N = 3:
+    // three session teardowns, three priority announcements,
+    // three LAN calls for ONE event (working rule 5). The second and
+    // third pass thereby tore down sessions that the partner choice
+    // had just rebuilt after the first.
+    //
+    // The parameter does exactly what its contract in
+    // `service_interface.dart` has always said: "Daemon-style callers
+    // that already invoke `node.onNetworkChanged()` once for all
+    // identities should pass `false`". The three entry points ALWAYS PASSED
+    // it — it was just no longer read.
+    //
+    // THE DEFAULT VALUE STAYS `true`, and that is essential: a
+    // caller that really is single and still needs the node part
+    // gets it without doing anything. `importPeerBundle` is exactly
+    // such a one — there the one service is the whole occasion.
+    final nodeSeam = triggerNodeReset ? v41OnNetworkChanged : null;
+    if (nodeSeam != null) {
+      // NOT AWAITED, but HANDLED. The body determines
+      // network interfaces — that can take seconds on a device with a just
+      // changed network, and this method is called from
+      // a connectivity event. An uncaught error
+      // from an `unawaited` killed the whole daemon in S348 (B-3);
+      // hence the `catchError`.
+      unawaited(nodeSeam().catchError((Object e) {
+        _log.warn('V4.1 network change failed: $e');
+      }));
+    }
   }
 
   // ── Persistence ────────────────────────────────────────────────────
@@ -8020,29 +6786,250 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return _fileEncCached!;
   }
 
-  void _loadContacts() {
+  // ── The storage for messages (S366, §4.5.3 form 1 / §21.4.1) ────
+  //
+  // EXPRESSLY WITHOUT FALLBACK. `FileEncryption` falls back to a
+  // random `db.key` file NEXT TO the ciphertext if no
+  // key was passed through — S362 measured eleven such places.
+  // For the storage this fallback would be a step backwards:
+  // it carries the entire message stock, and a key that lies
+  // unencrypted next to it does not protect it. If the seed is missing,
+  // it therefore THROWS and does not evade.
+  /// S366, second part: THE OPENER HAS LAIN IN THE IDENTITY SINCE `keys.json`.
+  /// Here stood `MessageStore.open(...)` — that held as long as
+  /// only service collections were switched. `IdentityContext.initKeys`
+  /// however runs before this service exists, and needs the same
+  /// file. Two openers would have meant two handles on one file;
+  /// that is why [IdentityContext.storeOrNull] now owns the storage, and
+  /// here only the forwarding stands.
+  ///
+  /// THE ASSURANCE STAYS UNCHANGED: if the seed is missing, it THROWS
+  /// and does not evade to a substitute key (§21.4.1).
+  MessageStore? _storeCached;
+
+  /// The storage, or `null` if this identity has no
+  /// seed-derived key.
+  ///
+  /// For the few places where "there is no storage" is a
+  /// DIFFERENT statement from "the storage cannot be read". Everywhere
+  /// else [store] applies and thus the assurance from §21.4.1.
+  MessageStore? get storeOrNull => _storeCached ?? identity.storeOrNull;
+
+  @override
+  MessageStore get store {
+    if (_storeCached != null) return _storeCached!;
+    final s = identity.storeOrNull;
+    if (s == null) {
+      throw StateError(
+          'MessageStore: no master seed for identity ${identity.userIdHex} '
+          '— the store is NOT opened with a substitute key '
+          '(§21.4.1; the db.key fallback of FileEncryption does not apply here)');
+    }
+    return s;
+  }
+
+  /// Guards only: sets the storage from outside.
+  ///
+  /// THERE IS EXACTLY ONE CASE THAT NEEDS IT, and it is not a
+  /// convenience: a suite that MUST measure an identity WITHOUT an HD wallet.
+  /// `smoke_rotation_transition_window` is such a one —
+  /// since S361 `v41PairKeyFor` takes the founding secret key,
+  /// and that changes on a rotation only if the identity
+  /// has no seed. But precisely to this identity [store] refuses
+  /// (rightly) opening. Without this path the suite would have to either
+  /// take an HD identity — then it measures something other than
+  /// what its name says — or rebuild the storage, and a rebuilt
+  /// proof checks the rebuild.
+  ///
+  /// In operation there is no caller: [store] derives its
+  /// key from the seed and does not evade (§21.4.1).
+  @visibleForTesting
+  set storeForTesting(MessageStore s) => _storeCached = s;
+
+  /// Closes the storage. Callable separately from `stop()`, so that an
+  /// identity switch does not leave the file open.
+  void closeStore() {
+    _storeCached?.close();
+    _storeCached = null;
+    identity.closeStore();
+  }
+
+  /// Writes ONE message into the storage (§21.4.1).
+  ///
+  /// Is called at every place that creates or changes a `UiMessage`.
+  /// **That is intentional and not an oversight:** a `dirty` flag
+  /// via setters in `UiMessage` would be more convenient, but would not catch the eleven
+  /// places that change COLLECTIONS (`msg.deliveredBy.add(...)`,
+  /// `msg.reactions[...]`) — there the field is never assigned, only its
+  /// content. A tracking that sees 24 of 35 places looks like
+  /// completeness and would silently lose the rest.
+  void persistMessage(String conversationId, UiMessage msg) {
+    if (_disposed) return;
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/contacts.json');
-      if (json == null) {
-        final encFile = File('$profileDir/contacts.json.enc');
-        if (encFile.existsSync()) {
-          _log.warn('contacts.json.enc exists (${encFile.lengthSync()} bytes) '
-              'but could not be decrypted — preserving file, saves '
-              'refused until a clean load succeeds');
-          return;
-        }
-        _log.info('No contacts file found (fresh profile)');
-        _contactsLoaded = true;
-        return;
+      final conv = conversations[conversationId];
+      if (conv != null) _upsertConversationRow(conversationId, conv);
+      store.upsertMessage(
+        id: hexToBytes(msg.id),
+        convId: hexToBytes(conversationId),
+        sender: msg.senderNodeIdHex.isEmpty
+            ? null
+            : hexToBytes(msg.senderNodeIdHex),
+        ts: msg.timestamp.millisecondsSinceEpoch,
+        type: msg.type.wireValue,
+        status: msg.status.wireName,
+        isOutgoing: msg.isOutgoing,
+        text: msg.text,
+        extra: messageExtraForStore(msg),
+      );
+    } catch (e) {
+      _log.warn('persistMessage($conversationId/${msg.id}): $e');
+    }
+  }
+
+  /// Removes a message from the storage (§21.5: `SECURE_DELETE` is
+  /// compiled in, the pages are overwritten).
+  void forgetMessage(String messageId) {
+    if (_disposed) return;
+    try {
+      store.deleteMessage(hexToBytes(messageId));
+    } catch (e) {
+      _log.warn('forgetMessage($messageId): $e');
+    }
+  }
+
+  void _upsertConversationRow(String id, Conversation conv) {
+    store.upsertConversation(
+      id: hexToBytes(id),
+      displayName: conv.displayName,
+      lastActivity: conv.lastActivity.millisecondsSinceEpoch,
+      isGroup: conv.isGroup,
+      isChannel: conv.isChannel,
+      isFavorite: conv.isFavorite,
+      unreadCount: conv.unreadCount,
+      profilePicture: conv.profilePictureBase64 == null
+          ? null
+          : Uint8List.fromList(utf8.encode(conv.profilePictureBase64!)),
+      // LEGACY FINDING, fixed along here: `notificationsEnabled` and
+      // `notificationSoundName` were read on LOADING and never written on
+      // SAVING — the choice per conversation survived
+      // no restart. The same held for `config` and the pending
+      // proposal. They now lie in `extra` and come along.
+      extra: {
+        if (conv.notificationsEnabled != null)
+          'notificationsEnabled': conv.notificationsEnabled,
+        if (conv.notificationSoundName != null)
+          'notificationSoundName': conv.notificationSoundName,
+        'config': conv.config.toJson(),
+        if (conv.pendingConfigProposal != null)
+          'pendingConfigProposal': conv.pendingConfigProposal!.toJson(),
+        if (conv.pendingConfigProposer != null)
+          'pendingConfigProposer': conv.pendingConfigProposer,
+      },
+    );
+  }
+
+  /// Makes sure that [conversationId] has its complete history
+  /// in memory (S366, stage B).
+  ///
+  /// At start a conversation carries only its youngest message. Every
+  /// place that needs more than the last row — searching a message by
+  /// identifier, running over the history, counting — calls this
+  /// beforehand. The second call is free.
+  @override
+  void ensureLoaded(String conversationId) {
+    final conv = conversations[conversationId];
+    if (conv == null || conv.messagesLoaded) return;
+    try {
+      final loaded = store
+          .messagesOf(hexToBytes(conversationId))
+          .map(messageFromStoreRow)
+          .toList();
+      conv.messages
+        ..clear()
+        ..addAll(loaded);
+      conv.messagesLoaded = true;
+      conv.totalMessages = conv.messages.length;
+    } catch (e) {
+      // Do NOT mark as loaded: a failed lookup must
+      // not lead to the history afterwards COUNTING as empty and
+      // a full overwrite fixing it in place.
+      _log.warn('ensureLoaded($conversationId): $e');
+    }
+  }
+
+  /// Load all conversations completely. Only for the few operations
+  /// that really need the total stock (expiry check,
+  /// recovery response) — not as a convenient substitute for
+  /// [ensureLoaded], because here the memory peak comes back.
+  @override
+  void ensureAllLoaded() {
+    for (final id in conversations.keys.toList()) {
+      ensureLoaded(id);
+    }
+  }
+
+  /// Builds a `UiMessage` from a row of the storage. Counterpart of
+  /// [_messageExtra]: the columns carry what is searched and sorted
+  /// by, `extra` the rest — together they again yield the form that
+  /// `UiMessage.fromJson` expects.
+  static UiMessage messageFromStoreRow(Map<String, Object?> r) {
+    final j = <String, dynamic>{
+      'id': bytesToHex(r['id'] as Uint8List),
+      'conversationId': bytesToHex(r['convId'] as Uint8List),
+      'sender': r['sender'] == null ? '' : bytesToHex(r['sender'] as Uint8List),
+      'text': r['text'],
+      'timestamp': r['ts'],
+      'type': r['type'],
+      'status': r['status'],
+      'isOutgoing': r['isOutgoing'],
+      ...?(r['extra'] as Map<String, dynamic>?),
+    };
+    return UiMessage.fromJson(j);
+  }
+
+  /// The rarer fields as JSON — they lie in the column `extra`
+  /// and are compressed there as soon as the probe gains 10 % (§4.5.3).
+  /// What is missing here is not forgotten, but has its own column.
+  static Map<String, dynamic>? messageExtraForStore(UiMessage msg) {
+    final j = msg.toJson();
+    for (final field in const [
+      'id', 'conversationId', 'sender', 'text', 'timestamp',
+      'type', 'status', 'isOutgoing',
+      // §21.6/S392-B3: the archive state is a PROJECTION from the
+      // archive index and must NOT be written along here. It travels
+      // via IPC, because the UI on Linux/Windows/macOS is a
+      // separate process — as a second copy in the message storage
+      // however it would be a fact with two sources that age
+      // separately: after a stage advance the index knows `mini`,
+      // the row in `messages` would continue to stand at `thumbnail`, and the
+      // UI would show something different depending on the path (snapshot or history).
+      // `applyArchiveView` stamps both paths freshly.
+      'archiveTier', 'archiveShareUrl', 'archivedAt', 'archiveMiniBase64',
+    ]) {
+      j.remove(field);
+    }
+    // Null values out. `UiMessage.toJson` writes `filePath` UNCONDITIONALLY,
+    // even if it is null — thereby `extra` was never empty, the
+    // short circuit below dead code, and every row carried 17 B JSON for
+    // a null value. With 150 000 messages that is around 2.5 MB that
+    // carry nothing. `fromJson` reads missing keys as
+    // null anyway, so the round trip stays the same.
+    j.removeWhere((_, v) => v == null);
+    return j.isEmpty ? null : j;
+  }
+
+  void _loadContacts() {
+    // S366: from the storage. The tombstones lie in an OWN
+    // area instead of under the special key `_deleted` of the same
+    // map — in a table with (area, key) no
+    // namespace trick is needed any more, and the special handling
+    // "skip keys with `_`" falls away.
+    try {
+      for (final id in store.loadArea('contacts_deleted').keys) {
+        _deletedContacts.add(id);
       }
-      // Load deleted contacts set
-      final deleted = json['_deleted'] as List<dynamic>?;
-      if (deleted != null) {
-        _deletedContacts.addAll(deleted.cast<String>());
-      }
-      for (final entry in json.entries) {
-        if (entry.key.startsWith('_')) continue; // Skip metadata keys
-        _contacts[entry.key] = ContactInfo.fromJson(entry.value as Map<String, dynamic>);
+      for (final entry in store.loadArea('contacts').entries) {
+        _contacts[entry.key] = ContactInfo.fromJson(entry.value);
       }
       _contactsLoaded = true;
       _log.info('Loaded ${_contacts.length} contacts, ${_deletedContacts.length} deleted');
@@ -8067,7 +7054,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// instead of clearing it — clearing would open the §8.1.1 "Restluecke A"
   /// silent-refill path to the next incoming CR.
   void _auditContactTrustAnchors() {
-    final ownPks = node.hostedUserEd25519Pks.toList();
+    // FORMERLY `node.hostedUserEd25519Pks` — ALL identities of this
+    // node. Without a shared node a service only knows its own.
+    //
+    // THE CHECK THEREBY BECOMES NARROWER, NOT WRONG: it is supposed to prevent
+    // an OWN key from landing as trust anchor of a CONTACT
+    // (§8.3). The frequent case — the own identity with which
+    // this service runs — is still caught. No longer caught
+    // is the rare case "key of a DIFFERENT own identity
+    // of the same daemon"; for that a node-wide
+    // view would again be needed. Noted as part of gap G-16.
+    final ownPks = <Uint8List>[
+      identity.ed25519PublicKey,
+      identity.foundingEd25519Pk,
+    ];
     var changed = 0;
     for (final entry in _contacts.entries) {
       final c = entry.value;
@@ -8133,8 +7133,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     if (!edOk) return false; // nothing to write
 
-    if (node.hostedUserEd25519Pks
-        .any((own) => constantTimeEquals(edPk, own))) {
+    if (constantTimeEquals(edPk, identity.ed25519PublicKey) ||
+        constantTimeEquals(edPk, identity.foundingEd25519Pk)) {
       contact.trustAnchorQuarantined = true;
       contact.trustAnchorQuarantineReason =
           'write attempt with a locally hosted identity key ($source)';
@@ -8144,567 +7144,218 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return false;
     }
 
+    // ── §15.2: THE FOUNDING ANCHOR IS RESCUED HERE ─────────────────
+    //
+    // This line stands BEFORE the overwrite, and that is the core of
+    // path A (S361): `contact.ed25519Pk` is the ONLY place where the
+    // founding key of an existing contact still lies, and the
+    // next line overwrites it. After an accepted
+    // `KEY_ROTATION_BROADCAST` it would be gone without replacement — there is no
+    // second local source from which one could retrieve it.
+    //
+    // WHY AT THIS PLACE AND NOT AT THE SEVEN CALLERS: this is
+    // the only writer of `ed25519Pk` (see header of
+    // `contact_manager.dart`). An anchor that had to be rescued at every caller individually
+    // would be lost again at the eighth caller.
+    //
+    // At the FIRST labelling `contact.ed25519Pk` is still empty and
+    // `edPk` itself is the founding value (a brand-new contact has not rotated before
+    // its first message). Every later call
+    // bounces off [ContactInfo.rememberFoundingAnchor] — exactly that is
+    // the promise there.
+    if (contact.rememberFoundingAnchor(contact.ed25519Pk ?? edPk)) {
+      _log.info('§15.2: founding anchor for ${contactHex.substring(0, 8)} '
+          'recorded ($source) — from now on it survives every rotation');
+    }
     contact.ed25519Pk = edPk;
     contact.mlDsaPk = mlDsaPk;
     return true;
   }
 
+  /// Contacts whose pair key already stands in the delivery layer.
+  ///
+  /// Keeps [primeV41Pairs] incremental: `_saveContacts()` has 43 callers,
+  /// and computing over all contacts would be per save operation one
+  /// key derivation PER CONTACT. `K_AB` hangs on the
+  /// founding keys (§15.2) and no longer changes once it
+  /// has been formed — a second entry would carry the same value.
+  final Set<String> _v41Primed = <String>{};
+
+  /// The pseudo-peers of the armed invitation lines (§15.3.2).
+  ///
+  /// They are kept so that `armV41InviteLines` can withdraw them.
+  /// Without this set the withdrawal would have to search `pairs.peers` by the
+  /// prefix — a second truth about the same thing, and
+  /// it would drift apart as soon as another path entered a pseudo-peer.
+  final Set<String> _v41InviteLines = <String>{};
+
   void _saveContacts() {
+    // ── AND THE DELIVERY LAYER LEARNS OF IT (30.08.) ──────────────────
+    //
+    // `primeV41Pairs()` previously ran ONLY on hooking in. A contact that
+    // only gets its founding anchor later — on completion of a
+    // contact request, via an AuthManifest, after a rotation —, never
+    // came into the registry afterwards. The harvest skips a pair
+    // without `K_AB` silently, so this identity stayed deaf for incoming
+    // messages until it sent itself (whereby `sendToUser` enters
+    // the pair in passing).
+    //
+    // HERE, because every change to a contact runs through this funnel
+    // — 43 callers, and the alternative would be to find and supplement every single
+    // assignment of `ed25519Pk`. Thanks to `_v41Primed` the call is
+    // in O(new contacts), not in O(all).
+    if (_contactsLoaded) {
+      try {
+        primeV41Pairs();
+      } catch (_) {
+        // The delivery layer must never prevent saving the contacts
+        // — it is the beneficiary, not the condition.
+      }
+    }
+
     // Guard: don't overwrite existing contacts file with empty data
     // if loading failed (decryption error, wrong key, etc.)
     if (!_contactsLoaded && _contacts.isEmpty && _deletedContacts.isEmpty) {
-      final encFile = File('$profileDir/contacts.json.enc');
-      if (encFile.existsSync()) {
-        _log.warn('REFUSED to save empty contacts — load failed but file exists '
-            '(${encFile.lengthSync()} bytes). Would cause data loss!');
+      // S366: the latch asks the storage. On the file it would never have
+      // kicked in again after the switch — the same dead latch as
+      // with the conversations and in the `_saveEncMap` funnel.
+      var present = false;
+      try {
+        present = store.countArea('contacts') > 0 ||
+            store.countArea('contacts_deleted') > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save contacts — store unreadable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save empty contacts — load failed but the '
+            'store still holds entries. Would cause data loss!');
         return;
       }
     }
     try {
-      final json = <String, dynamic>{};
+      final json = <String, Map<String, dynamic>>{};
       for (final entry in _contacts.entries) {
         json[entry.key] = entry.value.toJson();
       }
-      if (_deletedContacts.isNotEmpty) {
-        json['_deleted'] = _deletedContacts.toList();
-      }
-      _fileEnc.writeJsonFile('$profileDir/contacts.json', json);
-      _syncTierRegistration();
-      _updateRendezvousContacts();
+      // `replaceArea` and not `putEntry`: all 39 callers call
+      // "save everything", and the contact count practically stays in the
+      // range of dozens to hundreds. For a collection that
+      // really goes into the thousands, this would be the old error in
+      // new clothes — `putEntry` belongs there.
+      store.replaceArea('contacts', json);
+      store.replaceArea('contacts_deleted',
+          {for (final id in _deletedContacts) id: const <String, dynamic>{}});
+      // `_syncTierRegistration()` (DV tier registry) and
+      // `_updateRendezvousContacts()` (contact list of the Nostr rendezvous
+      // at the service's `RendezvousManager`) stood here. The former is
+      // (T) — no distance vector any more. The latter has belonged since S349 to the
+      // V4.1 wiring in `attachV41`; the service no longer holds its own
+      // rendezvous manager that would have to be updated.
     } catch (e) {
       _log.warn('Failed to save contacts: $e');
     }
   }
 
-  // ── §5.8 Outbox persistence ─────────────────────────────────────────
 
-  void _loadOutbox() {
-    try {
-      final json = _fileEnc.readJsonFile('$profileDir/outbox.json');
-      if (json == null) {
-        _outboxLoaded = true;
-        return;
-      }
-      for (final entry in json.entries) {
-        try {
-          _outbox[entry.key] =
-              _OutboxEntry.fromJson(entry.value as Map<String, dynamic>);
-        } catch (e) {
-          _log.debug('Outbox: skipped corrupt entry ${entry.key}: $e');
-        }
-      }
-      _outboxLoaded = true;
-      if (_outbox.isNotEmpty) {
-        _log.info('Outbox: loaded ${_outbox.length} pending entries');
-      }
-    } catch (e) {
-      _log.warn('Outbox: load failed: $e');
-    }
-  }
+  // `_latestWinsTypes` stood here: the kinds for which in the §5.8 outbox
+  // only the YOUNGEST entry per (recipient, kind) counted. Its reader was
+  // `_addToOutbox`, and that fell with the outbox filler
+  // (gap G-4).
 
-  void _saveOutbox() {
-    if (!_outboxLoaded && _outbox.isEmpty) return;
-    try {
-      if (_outbox.isEmpty) {
-        // Remove the file when the outbox is empty — no stale entry leak.
-        final f = File('$profileDir/outbox.json.enc');
-        if (f.existsSync()) f.deleteSync();
-        return;
-      }
-      _fileEnc.writeJsonFile('$profileDir/outbox.json',
-          {for (final e in _outbox.entries) e.key: e.value.toJson()});
-    } catch (e) {
-      _log.warn('Outbox: save failed: $e');
-    }
-  }
-
-  void _loadMailboxTransition() {
-    try {
-      final json = _fileEnc.readJsonFile('$profileDir/mailbox_transition.json');
-      if (json == null) return;
-      final hexId = json['previousMailboxPrimary'] as String?;
-      final setAtMs = json['setAtMs'] as int?;
-      if (hexId != null && setAtMs != null) {
-        final setAt = DateTime.fromMillisecondsSinceEpoch(setAtMs);
-        if (DateTime.now().difference(setAt).inDays < _mailboxTransitionDays) {
-          _previousMailboxPrimary = hexToBytes(hexId);
-          _previousMailboxPrimarySetAt = setAt;
-          _log.info('Mailbox transition: loaded previous primary (age: ${DateTime.now().difference(setAt)})');
-        } else {
-          final f = File('$profileDir/mailbox_transition.json.enc');
-          if (f.existsSync()) f.deleteSync();
-        }
-      }
-    } catch (e) {
-      _log.debug('Mailbox transition: load failed: $e');
-    }
-  }
-
-  void _saveMailboxTransition() {
-    try {
-      if (_previousMailboxPrimary == null) {
-        final f = File('$profileDir/mailbox_transition.json.enc');
-        if (f.existsSync()) f.deleteSync();
-        return;
-      }
-      _fileEnc.writeJsonFile('$profileDir/mailbox_transition.json', {
-        'previousMailboxPrimary': bytesToHex(_previousMailboxPrimary!),
-        'setAtMs': _previousMailboxPrimarySetAt!.millisecondsSinceEpoch,
-      });
-    } catch (e) {
-      _log.warn('Mailbox transition: save failed: $e');
-    }
-  }
-
-  /// §5.8: Add a message to the one-shot outbox.
-  static const _latestWinsTypes = {
-    'MTV3_CONTACT_REQUEST', 'MTV3_CONTACT_REQUEST_RESPONSE',
-    'MTV3_KEY_ROTATION_BROADCAST',
-  };
-
-  void _addToOutbox({
-    required String messageIdHex,
-    required String recipientUserIdHex,
-    String? recipientEd25519PkHex,
-    required Uint8List canonicalPacket,
-    String? messageType,
-  }) {
-    // A7 Latest-Wins: for semantically idempotent system messages, only the
-    // latest outbox entry per (recipient, type) matters.
-    if (messageType != null && _latestWinsTypes.contains(messageType)) {
-      _outbox.removeWhere((_, e) =>
-          e.recipientUserIdHex == recipientUserIdHex &&
-          e.messageType == messageType);
-    }
-    _outbox[messageIdHex] = _OutboxEntry(
-      messageIdHex: messageIdHex,
-      recipientUserIdHex: recipientUserIdHex,
-      recipientEd25519PkHex: recipientEd25519PkHex,
-      canonicalPacketB64: base64Encode(canonicalPacket),
-      sentAtMs: DateTime.now().millisecondsSinceEpoch,
-      messageType: messageType,
-    );
-    _saveOutbox();
-    _log.info('Outbox: parked $messageIdHex → ${recipientUserIdHex.substring(0, 8)} '
-        '(total: ${_outbox.length})');
-  }
-
-  /// §5.1 F3′ (fourth outbox edge): verified inbound from [senderUserHex]
-  /// while entries for that user are parked → user-scoped flush. Gated per
-  /// sender (60 s) so a still-failing flush is not re-triggered per frame;
-  /// after a successful flush the entries are gone and this is a no-op.
-  void _maybeFlushOutboxForSender(String senderUserHex) {
-    if (!_outbox.values.any((e) => e.recipientUserIdHex == senderUserHex)) {
-      return;
-    }
-    final last = _outboxInboundFlushAt[senderUserHex];
-    if (last != null &&
-        DateTime.now().difference(last) < _outboxInboundFlushGate) {
-      return;
-    }
-    _outboxInboundFlushAt[senderUserHex] = DateTime.now();
-    _log.info('Outbox: F3-edge — verified inbound from '
-        '${senderUserHex.substring(0, 8)} with parked entries → flush');
-    unawaited(_flushOutbox(onlyUserIdHex: senderUserHex));
-  }
-
-  /// §5.1 One-shot outbox flush (full cascade: L1→L2→L3).
+  /// AP-4: deadline after which an outgoing, never acknowledged message falls to
+  /// `expired`.
   ///
-  /// Called ONLY from the §5.1 edges (network-change, first-peer,
-  /// contact-endpoint-confirmed, F3′ verified-inbound) — NOT from any timer.
-  /// For each parked entry we first attempt direct delivery (L1
-  /// identity-resolve + L2 sendToDevice — the recipient may now be online),
-  /// then fall back to L3 (Erasure + S&F) on L2 failure.  On success the
-  /// entry is removed and the message status is upgraded.  On continued
-  /// failure (still zero peers) the entry is retained for the next edge.
-  /// With [onlyUserIdHex] (F3′) the flush is scoped to that recipient.
-  /// [trigger] names the §5.1 edge that caused this flush. It exists purely
-  /// for diagnosability: the log line used to say "network-change edge" for
-  /// every unscoped flush, so a log showing four flushes in nine hours gave
-  /// no way to tell an interface transition apart from a peer that just came
-  /// online — three different causes, one indistinguishable label.
-  Future<void> _flushOutbox(
-      {String? onlyUserIdHex, String trigger = 'unspecified'}) async {
-    if (_outbox.isEmpty) return;
-    _log.info('Outbox flush: ${_outbox.length} entries on '
-        '${onlyUserIdHex == null ? "$trigger edge" : "F3-edge for ${onlyUserIdHex.substring(0, 8)}"}');
-    final toRemove = <String>[];
-    // Snapshot: a DELIVERY_RECEIPT for a just-flushed entry mutates _outbox
-    // (_handleDeliveryReceiptV3 → remove) while this loop is suspended at an
-    // await — iterating the live map throws ConcurrentModificationError
-    // (killed the daemon in the S122 gui-11 run: receipt for entry 1 arrived
-    // before entry 2 was processed).
-    for (final entry in _outbox.values.toList()) {
-      if (onlyUserIdHex != null &&
-          entry.recipientUserIdHex != onlyUserIdHex) {
-        continue;
-      }
-      // Removed meanwhile (receipt arrived) → already delivered, skip.
-      if (!_outbox.containsKey(entry.messageIdHex)) continue;
-      // Skip entries younger than 10s — AckTracker L1 retry handles those.
-      // Without this gate, every crash-safety-parked message gets re-sent
-      // on the first F3-edge inbound (double-send on every message).
-      final ageMs = DateTime.now().millisecondsSinceEpoch - entry.sentAtMs;
-      if (ageMs < 10000) continue;
-      try {
-        final recipientUserId = hexToBytes(entry.recipientUserIdHex);
-        final canonicalBytes = base64Decode(entry.canonicalPacketB64);
-
-        // ── Layer 1+2: Try direct delivery first ──
-        var directOk = false;
-        String? sentViaHopHex;
-        String? sentDestDevHex;
-        final devices = await node.identityResolver
-            .resolve(recipientUserId);
-        proto.NetworkPacketV3? resignedPacket;
-        if (devices.isNotEmpty) {
-          resignedPacket = proto.NetworkPacketV3.fromBuffer(canonicalBytes);
-          V3FrameCodec.refreshTimestampAndSign(resignedPacket, node.deviceKeyPair);
-          for (final dev in devices) {
-            final res = await node.sendToDeviceTracked(
-              resignedPacket, dev.deviceNodeId);
-            if (res.ok) {
-              directOk = true;
-              sentViaHopHex = res.viaHopHex;
-              sentDestDevHex = bytesToHex(dev.deviceNodeId);
-              break;
-            }
-          }
-        }
-
-        if (directOk) {
-          _updateMessageStatusById(
-              entry.messageIdHex,
-              entry.recipientUserIdHex,
-              MessageStatus.sent);
-          _log.info('Outbox flush: re-sent '
-              '${entry.messageIdHex.substring(0, 8)} → sent (awaiting receipt)');
-          final baseRtt = node.dhtRpc.getRtt(recipientUserId);
-          // Befund 2: relay sends (hop != destination device) need the 8s
-          // relay floor from computeTimeout(hopCount: 2).
-          final wasRelay =
-              sentViaHopHex != null && sentViaHopHex != sentDestDevHex;
-          final timeout =
-              AckTracker.computeTimeout(baseRtt, hopCount: wasRelay ? 2 : 1);
-          unawaited(node.ackTracker.trackSend(
-            entry.messageIdHex,
-            entry.recipientUserIdHex,
-            const <PeerAddress>[],
-            timeout,
-            viaNextHopHex: sentViaHopHex,
-            // S281: direct/relay discriminator for address scoring in
-            // _handleTimeout — same value the timeout above already uses.
-            estimatedHops: wasRelay ? 2 : 1,
-            serializedPacket: resignedPacket!.writeToBuffer(),
-            recipientUserId: recipientUserId,
-          ));
-          continue;
-        }
-
-        // ── Layer 3: size-based S&F or Erasure ──
-        if (!_outbox.containsKey(entry.messageIdHex)) continue;
-        final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
-        bool l3Ok;
-        if (useErasure) {
-          final fragmentBundleId =
-              SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-          final recipientEd25519Pk = entry.recipientEd25519PkHex != null
-              ? hexToBytes(entry.recipientEd25519PkHex!)
-              : null;
-          l3Ok = await _distributeErasureFragments(
-            packetBytes: canonicalBytes,
-            messageId: Uint8List.fromList(fragmentBundleId),
-            recipientUserEd25519Pk: recipientEd25519Pk,
-            recipientUserNodeId: recipientUserId,
-          );
-        } else {
-          l3Ok = await _storeSafOnNetworkPeers(
-            recipientUserId: recipientUserId,
-            wrappedEnvelope: canonicalBytes,
-          );
-        }
-
-        if (l3Ok) {
-          toRemove.add(entry.messageIdHex);
-          _updateMessageStatusById(
-              entry.messageIdHex,
-              entry.recipientUserIdHex,
-              MessageStatus.queuedOffline);
-          _log.info('Outbox flush: L3 placed via ${useErasure ? "erasure" : "S&F"}: '
-              '${entry.messageIdHex.substring(0, 8)}');
-        } else {
-          _log.debug('Outbox flush: still no peers for '
-              '${entry.messageIdHex.substring(0, 8)} — retaining');
-        }
-      } catch (e) {
-        _log.warn('Outbox flush: error on ${entry.messageIdHex}: $e');
-      }
-    }
-    for (final id in toRemove) {
-      _outbox.remove(id);
-    }
-    if (toRemove.isNotEmpty) {
-      _saveOutbox();
-      // F3′ gate cleanup: drop per-sender timestamps for users that no
-      // longer have parked entries (keeps the gate map bounded).
-      _outboxInboundFlushAt.removeWhere((user, _) =>
-          !_outbox.values.any((e) => e.recipientUserIdHex == user));
-    }
-  }
-
-  // ── §5.8 extension: pending membership update resends ────────────
-
-  void _loadPendingMembershipResends() {
-    try {
-      final json = _fileEnc.readJsonFile('$profileDir/membership_resend.json');
-      if (json == null) return;
-      for (final entry in json.entries) {
-        final list = entry.value as List<dynamic>;
-        _pendingMembershipResends[entry.key] =
-            list.map((e) => e as String).toSet();
-      }
-      if (_pendingMembershipResends.isNotEmpty) {
-        _log.info('Membership resend: loaded ${_pendingMembershipResends.length} entities');
-      }
-    } catch (e) {
-      _log.warn('Membership resend: load failed: $e');
-    }
-  }
-
-  void _savePendingMembershipResends() {
-    try {
-      if (_pendingMembershipResends.isEmpty) {
-        final f = File('$profileDir/membership_resend.json.enc');
-        if (f.existsSync()) f.deleteSync();
-        return;
-      }
-      _fileEnc.writeJsonFile('$profileDir/membership_resend.json', {
-        for (final e in _pendingMembershipResends.entries)
-          e.key: e.value.toList()
-      });
-    } catch (e) {
-      _log.warn('Membership resend: save failed: $e');
-    }
-  }
-
-  Future<void> _flushPendingMembershipResends() async {
-    if (_pendingMembershipResends.isEmpty) return;
-    _log.info('Membership resend flush: ${_pendingMembershipResends.length} entities');
-    final toRemoveEntities = <String>[];
-    for (final entry in _pendingMembershipResends.entries.toList()) {
-      final entityId = entry.key;
-      final recipients = entry.value;
-      final group = _groups[entityId];
-      final channel = _channels[entityId];
-      if (group == null && channel == null) {
-        toRemoveEntities.add(entityId);
-        continue;
-      }
-      final succeeded = <String>{};
-      final stale = <String>{};
-      final Uint8List inviteBytes;
-      final proto.MessageTypeV3 msgType;
-      final bool Function(String) isMember;
-      final Uint8List? Function(String) memberX25519;
-      final Uint8List? Function(String) memberMlKem;
-      final Uint8List? Function(String) memberEd25519;
-      if (group != null) {
-        inviteBytes = _buildSignedGroupInviteBytes(group);
-        msgType = proto.MessageTypeV3.MTV3_GROUP_INVITE;
-        isMember = group.members.containsKey;
-        memberX25519 = (h) => group.members[h]?.x25519Pk;
-        memberMlKem = (h) => group.members[h]?.mlKemPk;
-        memberEd25519 = (h) => group.members[h]?.ed25519Pk;
-      } else {
-        inviteBytes = _buildSignedChannelInviteBytes(channel!);
-        msgType = proto.MessageTypeV3.MTV3_CHANNEL_INVITE;
-        isMember = channel.members.containsKey;
-        memberX25519 = (h) => channel.members[h]?.x25519Pk;
-        memberMlKem = (h) => channel.members[h]?.mlKemPk;
-        memberEd25519 = (h) => channel.members[h]?.ed25519Pk;
-      }
-      final entityIdBytes = hexToBytes(entityId);
-      for (final recipientHex in recipients) {
-        if (!isMember(recipientHex)) {
-          stale.add(recipientHex);
-          continue;
-        }
-        final (x25519Pk, mlKemPk, ed25519Pk) = _resolveMemberKeys(recipientHex,
-            memberX25519Pk: memberX25519(recipientHex),
-            memberMlKemPk: memberMlKem(recipientHex),
-            memberEd25519Pk: memberEd25519(recipientHex));
-        if (x25519Pk == null || mlKemPk == null) continue;
-        try {
-          final ok = await sendToUser(
-            recipientUserId: hexToBytes(recipientHex),
-            messageType: msgType,
-            payload: inviteBytes,
-            groupId: entityIdBytes,
-            recipientX25519PkOverride: x25519Pk,
-            recipientMlKemPkOverride: mlKemPk,
-            recipientEd25519PkOverride: ed25519Pk,
-          );
-          if (ok) {
-            succeeded.add(recipientHex);
-            _log.info('Membership resend: sent to ${recipientHex.substring(0, 8)}');
-          }
-        } catch (e) {
-          _log.warn('Membership resend: error for ${recipientHex.substring(0, 8)}: $e');
-        }
-      }
-      recipients.removeAll(succeeded);
-      recipients.removeAll(stale);
-      if (recipients.isEmpty) toRemoveEntities.add(entityId);
-    }
-    for (final id in toRemoveEntities) {
-      _pendingMembershipResends.remove(id);
-    }
-    if (toRemoveEntities.isNotEmpty || _pendingMembershipResends.isEmpty) {
-      _savePendingMembershipResends();
-    }
-  }
-
-  /// §5.8: Update a message status by its wire message-ID hex.
+  /// Checked lazily when opening the conversation (chat screen). No
+  /// network traffic — pure timestamp comparison.
   ///
-  /// Scans all conversations — this is acceptable because outbox entries are
-  /// rare and the status update is triggered only by onNetworkChanged (not
-  /// per-message). Fires onStateChanged when a match is found.
-  void _updateMessageStatusById(
-      String messageIdHex, String recipientHex, MessageStatus newStatus) {
-    // Search own conversations first — recipient hex may be a userId or deviceId
-    for (final conv in conversations.values) {
-      for (final msg in conv.messages) {
-        if (msg.id == messageIdHex && msg.isOutgoing) {
-          if (!msg.status.canTransitionTo(newStatus)) return;
-          msg.status = newStatus;
-          _log.debug('Status update: $messageIdHex → $newStatus');
-          onStateChanged?.call();
-          _saveConversations();
-          return;
-        }
-      }
-    }
-  }
-
-  /// §5.8: Check all queuedOffline messages in a conversation for TTL expiry.
-  ///
-  /// Called lazily at conversation-open time (chat screen load).
-  /// Zero network traffic — purely local timestamp comparison.
-  ///
-  /// The 7-day TTL matches the S&F / Reed-Solomon fragment lifetime
-  /// (Architecture §5.4, §5.5).
-  static const int _offlineTtlMs = 7 * 24 * 60 * 60 * 1000; // 7 days
-
-  bool _checkAndMarkExpired(String conversationId) {
-    final conv = conversations[conversationId];
-    if (conv == null) return false;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    var changed = false;
-    for (final msg in conv.messages) {
-      if (msg.status == MessageStatus.queuedOffline && msg.isOutgoing) {
-        final age = now - msg.timestamp.millisecondsSinceEpoch;
-        if (age > _offlineTtlMs) {
-          msg.status = MessageStatus.expired;
-          changed = true;
-        }
-      }
-    }
-    if (changed) {
-      _saveConversations();
-      onStateChanged?.call();
-    }
-    return changed;
-  }
-
-  /// Sync contact + channel member IDs to the DV routing table's tier registry.
-  /// Called after loading contacts/channels and after any membership change.
-  /// §3.1: registers deviceIds (not userIds) — routing operates on devices.
-  void _syncTierRegistration() {
-    final dv = node.dvRouting;
-    final contactDeviceIds = <String>{};
-    for (final entry in _contacts.entries) {
-      if (entry.value.status == 'accepted') {
-        contactDeviceIds.addAll(entry.value.deviceNodeIds);
-      }
-    }
-    dv.replaceContactIds(contactDeviceIds);
-
-    final channelDeviceIds = <String>{};
-    for (final channel in _channels.values) {
-      for (final memberHex in channel.members.keys) {
-        final contact = _contacts[memberHex];
-        if (contact != null) {
-          channelDeviceIds.addAll(contact.deviceNodeIds);
-        }
-      }
-    }
-    dv.replaceChannelMemberIds(channelDeviceIds);
-  }
+  /// **14 days, no longer 7.** The old number was the lifetime of the
+  /// S&F/Reed-Solomon fragments; those no longer exist in V4.1. The new one
+  /// is the default TTL of the delivery layer: v4_1 §21.8 "Time bound for the
+  /// delivery-layer share: **max. 14 days** (default TTL) or **31 days**
+  /// (management types)", §22.5.1 `TtlClass ttl = TtlClass.standard // 14 d
+  /// default`. Had the check stayed at 7 days, the
+  /// UI would have shown `expired` for a week for cells that still
+  /// lie on the tag line and can be harvested.
+  static const int _placementTtlMs = 14 * 24 * 60 * 60 * 1000; // 14 days
 
   void _loadConversations() {
+    // §21.4.1: from the storage. The latch from before — "file there, but
+    // not decryptable, so do NOT overwrite" — is
+    // stronger here: `MessageStore.open` throws if the key does not match,
+    // and without an open storage `_saveConversationsNow` cannot write anything
+    // at all. `_conversationsLoaded` nonetheless stays the guard,
+    // so that a load error does not fix an empty conversation picture in place.
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/conversations.json');
-      if (json == null) {
-        final encFile = File('$profileDir/conversations.json.enc');
-        if (encFile.existsSync()) {
-          // The file is present but could not be decrypted (transient FFI/key
-          // hiccup, partial write the sidecar-recovery didn't catch, etc.).
-          // Do NOT mark _conversationsLoaded — leaving it false makes
-          // _saveConversations REFUSE to overwrite, so the on-disk data is
-          // preserved for the next start instead of being clobbered with an
-          // empty set. (Closes the second data-loss vector alongside the
-          // seed-before-load fix.)
-          _log.warn('conversations.json.enc exists (${encFile.lengthSync()} '
-              'bytes) but could not be decrypted — preserving file, saves '
-              'refused until a clean load succeeds');
-          return;
-        }
-        // Genuine first run: no file yet → loading is "done" (empty is correct).
-        _conversationsLoaded = true;
-        return;
-      }
-      for (final entry in json.entries) {
-        final convData = entry.value as Map<String, dynamic>;
-        final msgs = (convData['messages'] as List<dynamic>?)?.map((m) {
-          final mm = m as Map<String, dynamic>;
-          // Use UiMessage.fromJson for complete deserialization (media, transcripts, reactions, etc.)
-          return UiMessage.fromJson(mm);
-        }).toList() ?? [];
-
-        conversations[entry.key] = Conversation(
-          id: entry.key,
-          displayName: convData['displayName'] as String? ?? entry.key.substring(0, 8),
-          messages: msgs,
-          lastActivity: DateTime.fromMillisecondsSinceEpoch(convData['lastActivity'] as int? ?? 0),
-          isGroup: convData['isGroup'] as bool? ?? false,
-          isChannel: convData['isChannel'] as bool? ?? false,
-          profilePictureBase64: convData['profilePicture'] as String?,
-          isFavorite: convData['isFavorite'] as bool? ?? false,
-          unreadCount: convData['unreadCount'] as int? ?? 0,
-          notificationsEnabled: convData['notificationsEnabled'] as bool?,
-          notificationSoundName: convData['notificationSoundName'] as String?,
+      for (final row in store.allConversations()) {
+        final id = bytesToHex(row['id'] as Uint8List);
+        final extra = (row['extra'] as Map<String, dynamic>?) ?? const {};
+        final pic = row['profilePicture'];
+        // STAGE B: only the YOUNGEST message. It is everything the
+        // conversation list needs for display; the history comes via
+        // `ensureLoaded` as soon as someone needs it.
+        final last = store.lastMessageOf(hexToBytes(id));
+        conversations[id] = Conversation(
+          id: id,
+          displayName: row['displayName'] as String,
+          messages: last == null ? [] : [messageFromStoreRow(last)],
+          lastActivity:
+              DateTime.fromMillisecondsSinceEpoch(row['lastActivity'] as int),
+          isGroup: row['isGroup'] as bool,
+          isChannel: row['isChannel'] as bool,
+          isFavorite: row['isFavorite'] as bool,
+          unreadCount: row['unreadCount'] as int,
+          profilePictureBase64:
+              pic == null ? null : utf8.decode(pic as Uint8List),
+          config: extra['config'] == null
+              ? null
+              : ChatConfig.fromJson(extra['config'] as Map<String, dynamic>),
+          notificationsEnabled: extra['notificationsEnabled'] as bool?,
+          notificationSoundName: extra['notificationSoundName'] as String?,
         );
+        final conv = conversations[id]!;
+        // The history is still missing — exactly that is the gain of this stage.
+        conv.messagesLoaded = false;
+        // The NUMBER costs nothing (a `count(*)` in the storage) and
+        // spares every statistic the full load.
+        conv.totalMessages = store.countMessagesOf(hexToBytes(id));
+        if (extra['pendingConfigProposal'] != null) {
+          conv.pendingConfigProposal = ChatConfig.fromJson(
+              extra['pendingConfigProposal'] as Map<String, dynamic>);
+        }
+        conv.pendingConfigProposer = extra['pendingConfigProposer'] as String?;
       }
       _conversationsLoaded = true;
-      _log.info('Loaded ${conversations.length} conversations');
+      _log.info('Loaded ${conversations.length} conversations from the store');
+      return;
     } catch (e) {
-      _log.warn('Failed to load conversations: $e');
+      _log.warn('Failed to load conversations from the store: $e');
+      return;
     }
   }
 
   void _recoverStuckMedia() {
     var resetCount = 0;
     for (final conv in conversations.values) {
+      ensureAllLoaded();
       for (final msg in conv.messages) {
         if (msg.mediaState == MediaDownloadState.downloading) {
           msg.mediaState = MediaDownloadState.announced;
           msg.filePath = null;
+          persistMessage(conv.id, msg);
           resetCount++;
         } else if (msg.mediaState == MediaDownloadState.completed &&
             msg.filePath != null &&
-            !File(msg.filePath!).existsSync()) {
+            // S362: `existsEitherWay`. With `File(...).existsSync()` it would
+            // be true after the switch for EVERY media message that
+            // "the file is missing" — the attachment now lies under
+            // `<path>.cmenc`. This branch would have nulled
+            // all `filePath` at the first start and marked all media as
+            // downloadable again.
+            !MediaStore.instance.existsEitherWay(msg.filePath!)) {
           msg.mediaState = MediaDownloadState.announced;
           msg.filePath = null;
+          persistMessage(conv.id, msg);
           resetCount++;
         }
       }
@@ -8715,15 +7366,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  /// S366: from the area [kPendingMediaSendsArea] of the storage instead of from
+  /// `pending_media_sends.json`.
+  ///
+  /// The file named in PLAINTEXT the storage location and the file name of every
+  /// pending attachment. The attachment itself has lain encrypted as `.cmenc`
+  /// since S362 — its NAME lay open next to it, and a file name
+  /// often says more than the content.
   void _loadPendingMediaSends() {
-    final path = '$profileDir/pending_media_sends.json';
-    final file = File(path);
-    if (!file.existsSync()) return;
     try {
-      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-      for (final entry in json.entries) {
-        final filePath = entry.value as String;
-        if (File(filePath).existsSync()) {
+      final j = store.loadArea(kPendingMediaSendsArea)
+          [kSingleStateKey];
+      if (j == null) return;
+      for (final entry in j.entries) {
+        final filePath = entry.value;
+        // A path that no longer exists is not taken over —
+        // the same behaviour as before.
+        if (filePath is String && File(filePath).existsSync()) {
           _pendingMediaSends[entry.key] = filePath;
         }
       }
@@ -8732,31 +7391,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     } catch (e) {
       _log.warn('Failed to load pending media sends: $e');
-    }
-  }
-
-  String? _recoverPendingMediaPath(String messageId) {
-    for (final conv in conversations.values) {
-      for (final msg in conv.messages) {
-        if (msg.id == messageId && msg.filePath != null && File(msg.filePath!).existsSync()) {
-          return msg.filePath;
-        }
-      }
-    }
-    return null;
-  }
-
-  void _savePendingMediaSends() {
-    final path = '$profileDir/pending_media_sends.json';
-    try {
-      if (_pendingMediaSends.isEmpty) {
-        final file = File(path);
-        if (file.existsSync()) file.deleteSync();
-        return;
-      }
-      File(path).writeAsStringSync(jsonEncode(_pendingMediaSends));
-    } catch (e) {
-      _log.warn('Failed to save pending media sends: $e');
     }
   }
 
@@ -8813,6 +7447,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return true;
   }
 
+  /// §15.10 (D2 = a): "never use as a fixed neighbour". Stored on the
+  /// contact record and handed to the delivery layer at once
+  /// ([CleonaServiceMycelium.myceliumNeverFixedNeighbourApply]), which
+  /// checks the fixed neighbour seats at that edge. Without an attached
+  /// mailbox the mark is handed over at the attach.
+  @override
+  bool setContactNeverFixedNeighbour(String nodeIdHex, bool never) {
+    final contact = _contacts[nodeIdHex];
+    if (contact == null) return false;
+    if (contact.neverFixedNeighbour != never) {
+      contact.neverFixedNeighbour = never;
+      _saveContacts();
+    }
+    myceliumNeverFixedNeighbourApply(contact);
+    onStateChanged?.call();
+    return true;
+  }
+
   /// Recalculate total unread count and notify badge listeners.
   void _updateBadgeCount() {
     if (onBadgeCountChanged == null) return;
@@ -8834,30 +7486,91 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _saveChannels();
   }
 
-  /// Befund 1 (§8.1): the suppression set rides in the SAME file as the dedup
+  /// Finding 1 (§8.1): the suppression set rides in the SAME file as the dedup
   /// set, under a second key. Both must survive a receiver restart together —
   /// a surviving dedup entry paired with a lost suppression entry re-acks the
   /// next L1 retry of a deliberately dropped CONTACT_REQUEST, sets the
   /// sender's `lastAckedAt`, and parks its CR retry for 24h: exactly the
   /// deadlock the drop prevents. Same file, same call sites — no extra
-  /// write frequency (Arbeitsregel #5 applies to disk I/O too).
+  /// write frequency (working rule #5 applies to disk I/O too).
+  /// The area in the table `state` (S366).
+  ///
+  /// BOTH SETS LIE IN THE SAME AREA, because they already lay in
+  /// the same file before — and for the reason the block
+  /// above names: a surviving dedup set next to a lost
+  /// suppression set is exactly the deadlock case. A shared
+  /// area makes this coupling visible in the carrier and allows the
+  /// latch below to check it.
+  static const String areaProcessedIds = 'processed_msg_ids';
+  static const String _keyDedup = 'dedup';
+  static const String _keySuppressed = 'suppressed';
+
+  /// S366: snapshot into the storage instead of rewriting a file.
+  ///
+  /// DELIBERATELY `putEntry` AND NOT `replaceArea`: the two rows are
+  /// capped (4096 + 1024), so NOT growing — but `replaceArea`
+  /// would first delete the area entirely. Two `putEntry` calls
+  /// overwrite in place instead; the area is never
+  /// empty in between.
+  ///
+  /// BOTH ROWS ARE ALWAYS WRITTEN, including the empty one. Thus
+  /// the area holds exactly 0 or 2 rows after every write, and
+  /// `countArea` is a reliable statement about completeness —
+  /// on which the latch below relies.
   void _saveProcessedMessageIds() {
     if (_processedMessageIds.isEmpty && _suppressedReceiptMsgIds.isEmpty) return;
     try {
-      _fileEnc.writeJsonFile('$profileDir/processed_msg_ids.json', {
-        'ids': _processedMessageIds.toList(),
-        'suppressedReceipts': _suppressedReceiptMsgIds.toList(),
-      });
+      store.putEntry(areaProcessedIds, _keyDedup,
+          {'ids': _processedMessageIds.toList()});
+      store.putEntry(areaProcessedIds, _keySuppressed,
+          {'ids': _suppressedReceiptMsgIds.toList()});
     } catch (e) {
       _log.warn('Failed to save processed message IDs: $e');
     }
   }
 
+  /// Loads both sets (§8.1 finding 1).
+  ///
+  /// ── THE DATA-LOSS LATCH, AND WHY IT DOES NOT THROW HERE ────
+  ///
+  /// There was none here — a read error fell silently to "empty". For
+  /// BOTH sets together that is also defensible: the repeat detection
+  /// starts over, in the worst case an old message is processed a
+  /// second time.
+  ///
+  /// For ONE of the two it is not. A surviving dedup row next to a lost
+  /// suppression row acknowledges the next L1 repetition of a
+  /// deliberately discarded CONTACT_REQUEST, sets `lastAckedAt` at the
+  /// sender and parks its repetition for 24 h — the deadlock that the
+  /// discard is meant to prevent (§8.1 finding 1).
+  ///
+  /// The latch therefore measures, at the new carrier, the statement "the
+  /// area is COMPLETELY readable": if `countArea` holds more rows than
+  /// `loadArea` could unpack, it falls back to the DOCUMENTED SAFE
+  /// state — both sets empty — instead of to the half one.
+  /// It deliberately does not throw: an unreadable repeat lock must not
+  /// prevent a start, and the empty state is the same as at the very
+  /// first start.
   void _loadProcessedMessageIds() {
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/processed_msg_ids.json');
-      if (json == null) return;
-      final ids = json['ids'] as List<dynamic>?;
+      final lines = store.loadArea(areaProcessedIds);
+      final present = store.countArea(areaProcessedIds);
+      if (present == 0) return;
+
+      if (lines.length < present) {
+        _log.error(
+            'Replay lock: the area `$areaProcessedIds` holds '
+            '$present row(s), of which only ${lines.length} '
+            'can be unpacked — BOTH sets stay empty. A half '
+            'restore (dedup without suppression) would acknowledge the '
+            'next repetition of a discarded CONTACT_REQUEST and '
+            'park its repetition for 24 h (§8.1 finding 1).');
+        _processedMessageIds.clear();
+        _suppressedReceiptMsgIds.clear();
+        return;
+      }
+
+      final ids = lines[_keyDedup]?['ids'] as List<dynamic>?;
       if (ids != null) {
         for (final id in ids) {
           _processedMessageIds.add(id as String);
@@ -8866,11 +7579,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           _processedMessageIds.remove(_processedMessageIds.first);
         }
       }
-      // Backward compatible: a file written before Befund 1 has no
-      // 'suppressedReceipts' key — the set stays empty, the dedup set loads
-      // unchanged. Cap applied on load as well, so a grown/tampered file
-      // cannot pin unbounded memory.
-      final suppressed = json['suppressedReceipts'] as List<dynamic>?;
+      // Cap also on load, so that a grown or manipulated
+      // stock does not hold on to unbounded memory.
+      final suppressed =
+          lines[_keySuppressed]?['ids'] as List<dynamic>?;
       if (suppressed != null) {
         for (final id in suppressed) {
           _suppressedReceiptMsgIds.add(id as String);
@@ -8881,7 +7593,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _log.info('Loaded ${_processedMessageIds.length} processed message IDs '
           '(replay protection), ${_suppressedReceiptMsgIds.length} '
-          'receipt-suppressed IDs (§8.1 Befund 1)');
+          'receipt-suppressed IDs (§8.1 finding 1)');
     } catch (e) {
       _log.warn('Failed to load processed message IDs: $e');
     }
@@ -8911,28 +7623,37 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // NOTE: the guard deliberately does NOT also require `conversations.isEmpty`
     // — the original bug was a pre-load save with a NON-empty (seeded) map.
     if (!_conversationsLoaded) {
-      final encFile = File('$profileDir/conversations.json.enc');
-      if (encFile.existsSync()) {
+      // S366: the latch asks the STORE, no longer the file.
+      //
+      // Up to here it checked `conversations.json.enc` — which since the
+      // switch-over is never written again. So it would never have
+      // triggered again, and the protection that once prevented a real
+      // data loss (seed-before-load) would have silently vanished.
+      // Exactly the class of error a rebuild leaves behind when one only
+      // checks whether the NEW works, instead of also what the OLD held.
+      var present = false;
+      try {
+        present = store.conversationCount > 0;
+      } catch (e) {
+        // Store cannot be opened: fail closed. Not saving is
+        // always right when we do not know what is on the disk.
+        _log.warn('REFUSED to save conversations — store unreadable: $e');
+        return;
+      }
+      if (present) {
         _log.warn('REFUSED to save conversations before load completed — '
-            'on-disk file exists (prevents pre-load overwrite)');
+            'the store already holds conversations (prevents pre-load '
+            'overwrite)');
         return;
       }
     }
+    // §21.4.1: only the CONVERSATIONS now. The messages have lived in the
+    // store since S366 and arrive there via `persistMessage` — one row
+    // per change instead of the whole file on every change.
     try {
-      final json = <String, dynamic>{};
       for (final entry in conversations.entries) {
-        json[entry.key] = {
-          'displayName': entry.value.displayName,
-          'lastActivity': entry.value.lastActivity.millisecondsSinceEpoch,
-          if (entry.value.isGroup) 'isGroup': true,
-          if (entry.value.isChannel) 'isChannel': true,
-          if (entry.value.isFavorite) 'isFavorite': true,
-          if (entry.value.profilePictureBase64 != null) 'profilePicture': entry.value.profilePictureBase64,
-          if (entry.value.unreadCount > 0) 'unreadCount': entry.value.unreadCount,
-          'messages': entry.value.messages.map((m) => m.toJson()).toList(),
-        };
+        _upsertConversationRow(entry.key, entry.value);
       }
-      _fileEnc.writeJsonFile('$profileDir/conversations.json', json);
     } catch (e) {
       _log.warn('Failed to save conversations: $e');
     }
@@ -8950,25 +7671,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     required void Function(bool) setLoaded,
     String label = 'items',
   }) {
+    // S366: from the STORE, no longer from one file per collection.
+    // `filename` is now the area name (`groups`, `channels`, …) —
+    // it stays the same identifier so that the origin is readable.
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/$filename.json');
-      if (json == null) {
-        final encFile = File('$profileDir/$filename.json.enc');
-        if (encFile.existsSync()) {
-          _log.warn('$filename.json.enc exists (${encFile.lengthSync()} bytes) '
-              'but could not be decrypted — preserving file, saves '
-              'refused until a clean load succeeds');
-          return;
-        }
-        setLoaded(true);
-        return;
-      }
-      for (final entry in json.entries) {
-        target[entry.key] = fromJson(entry.value as Map<String, dynamic>);
+      final entries = store.loadArea(filename);
+      for (final entry in entries.entries) {
+        target[entry.key] = fromJson(entry.value);
       }
       setLoaded(true);
       _log.info('Loaded ${target.length} $label');
     } catch (e) {
+      // Do NOT mark as loaded: otherwise empty counts as stock, and the
+      // latch in `_saveEncMap` would let a full overwrite through.
       _log.warn('Failed to load $label: $e');
     }
   }
@@ -8983,19 +7698,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     String label = 'items',
     void Function()? onSaved,
   }) {
+    // S366: the latch asks the STORE, no longer the file.
+    //
+    // Up to here it checks `File('$filename.json.enc').existsSync()`.
+    // These files are no longer written — the latch would thus have
+    // silently vanished, just like the one for the conversations. Both
+    // times the same error of a rebuild: checking whether the NEW works,
+    // and overlooking what the OLD held.
     if (!loaded && source.isEmpty) {
-      final encFile = File('$profileDir/$filename.json.enc');
-      if (encFile.existsSync()) {
-        _log.warn('REFUSED to save empty $label — load failed but file exists');
+      var present = false;
+      try {
+        present = store.countArea(filename) > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save $label — store unreadable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save empty $label — load failed but the store '
+            'still holds entries');
         return;
       }
     }
     try {
-      final json = <String, dynamic>{};
+      final json = <String, Map<String, dynamic>>{};
       for (final entry in source.entries) {
         json[entry.key] = toJson(entry.value);
       }
-      _fileEnc.writeJsonFile('$profileDir/$filename.json', json);
+      // `replaceArea` and not `putEntry`: the callers of this funnel
+      // hold manageable collections (groups, channels) and call
+      // "save everything". For GROWING collections that is the wrong
+      // way — `putEntry` belongs there, otherwise full writing is
+      // back, just in the store instead of in a file.
+      store.replaceArea(filename, json);
       onSaved?.call();
     } catch (e) {
       _log.warn('Failed to save $label: $e');
@@ -9018,7 +7752,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   void _saveChannels() => _saveEncMap<ChannelInfo>(
       'channels', _channels, (c) => c.toJson(),
-      loaded: _channelsLoaded, label: 'channels', onSaved: _syncTierRegistration);
+      // `onSaved: _syncTierRegistration` entfaellt — DV-Tier-Registry (T).
+      loaded: _channelsLoaded, label: 'channels');
 
   // ── System Channels (§9.5) ────────────────────────────────────────
 
@@ -9086,15 +7821,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     evicted += _sysChanStore.evictToLimit(SystemChannels.bugLogChannelIdHex);
     evicted +=
         _sysChanStore.evictToLimit(SystemChannels.featureReqChannelIdHex);
-    if (evicted > 0) _saveSysChanRecords();
+    // S366: here stood `if (evicted > 0) _saveSysChanRecords();`.
+    // `evictToLimit` now writes its deletions and tombstones itself,
+    // row by row — there is nothing to catch up on. `evicted`
+    // remains as the return value of the two calls because it carries
+    // the log statement of the expiries.
+    if (evicted > 0) {
+      _log.info('syschan: $evicted record(s) evicted (§9.5.5)');
+    }
   }
 
   void _evictChannel(String channelIdHex, int maxBytes,
       {required bool oldestFirst}) {
     final conv = conversations[channelIdHex];
+    ensureLoaded(channelIdHex);
     if (conv == null || conv.messages.isEmpty) return;
 
     int totalBytes = 0;
+    ensureLoaded(channelIdHex);
     for (final msg in conv.messages) {
       totalBytes += msg.text.length;
     }
@@ -9149,58 +7893,40 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Local record set for the ownerless system channels. Gossip-converged
   /// (SYSCHAN_DIGEST/SUMMARY/WANT/PUSH, BOOT-path InfrastructureFrames).
   late final SystemChannelRecordStore _sysChanStore =
-      SystemChannelRecordStore(profileDir: profileDir);
-  Timer? _sysChanSaveDebounce;
+      SystemChannelRecordStore(profileDir: profileDir, store: store);
   bool _sysChanLoaded = false;
 
   /// §9.5.7 push budget: eager-flood TTL for freshly created/learned records.
   static const int _sysChanPushTtl = 5;
 
-  /// k adaptive: eager pushes and anti-entropy digests go to at most this
-  /// many random peers per event.
-  static const int _sysChanFanout = 3;
-
-  /// SUMMARY cap: beyond this the newest fingerprints win; the tail
-  /// converges over subsequent hourly rounds (bounded message size).
-  static const int _sysChanSummaryCap = 4000;
-
-  /// PUSH batching: keep each SysChanPush under this many payload bytes so
-  /// the app-level UDP fragmenter (§2.4) never sees an oversized frame.
-  static const int _sysChanPushBatchBytes = 100 * 1024;
+  // `_sysChanFanout` (k=3 random peers per event), `_sysChanSummaryCap`
+  // (4000 fingerprints per summary) and `_sysChanPushBatchBytes`
+  // (100 KB per batch) stood here — the three tuning knobs of the
+  // system-channel gossip. It has fallen (gap G-2, measured
+  // 3.17 GB/day without useful share).
 
   void _loadSysChanRecords() {
     if (_sysChanLoaded) return;
     _sysChanLoaded = true;
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/syschan_records.json');
-      if (json != null) {
-        _sysChanStore.loadFromJson(json);
-        // Re-bridge stored POSTs into the conversation (idempotent) so the
-        // UI list survives a conversations/records divergence.
-        for (final chHex in [
-          SystemChannels.bugLogChannelIdHex,
-          SystemChannels.featureReqChannelIdHex,
-        ]) {
-          for (final r in _sysChanStore.allRecords(chHex)) {
-            if (r.record.kind == SysChanKind.post) _bridgeSysChanPost(r);
-          }
+      // S366: from the store (areas `syschan_records` and
+      // `syschan_gone`) instead of from `syschan_records.json` — the
+      // second-largest file of the field profile (1 838 533 B), which was
+      // rewritten entirely on every change.
+      _sysChanStore.loadFromStore();
+      // Re-bridge stored POSTs into the conversation (idempotent) so the
+      // UI list survives a conversations/records divergence.
+      for (final chHex in [
+        SystemChannels.bugLogChannelIdHex,
+        SystemChannels.featureReqChannelIdHex,
+      ]) {
+        for (final r in _sysChanStore.allRecords(chHex)) {
+          if (r.record.kind == SysChanKind.post) _bridgeSysChanPost(r);
         }
       }
     } catch (e) {
       _log.warn('syschan: load failed: $e');
     }
-  }
-
-  void _saveSysChanRecords() {
-    _sysChanSaveDebounce?.cancel();
-    _sysChanSaveDebounce = Timer(const Duration(seconds: 2), () {
-      try {
-        _fileEnc.writeJsonFile(
-            '$profileDir/syschan_records.json', _sysChanStore.toJson());
-      } catch (e) {
-        _log.warn('syschan: save failed: $e');
-      }
-    });
   }
 
   /// Create, sign, store, UI-bridge and eager-push a system-channel record.
@@ -9228,10 +7954,26 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: text,
       targetRecordId: targetRecordId,
       voteOption: voteOption,
+      // S392: after a rotation the UserID NO LONGER follows from the
+      // inline keys (§4.1) — the proof of it travels with the record, as
+      // §14.5 provides for proofs ("proofs accompany the
+      // action"). Empty as long as no rotation happened; then it costs nothing.
+      rotationChain:
+          SystemChannelRecordStore.wireChainOf(identity.rotationChain),
     );
     final bytes = record.writeToBuffer();
     final admission = _sysChanStore.tryAdmit(bytes, parsed: record);
-    if (admission == SysChanAdmission.rejected) return null;
+    if (admission == SysChanAdmission.rejected) {
+      // The own record does not get through the own admission. Until
+      // S392 that was a wordless `null` — i.e. exactly the "silent
+      // delivery failure" from §14.5. A foreign revocation target is the
+      // one expected reason; every other one deserves to be seen.
+      _log.warn('syschan: OWN record rejected by own admission '
+          '(kind=$kind, channel=${channelIdHex.substring(0, 8)}, '
+          'chain=${identity.rotationChain.length} link(s)) — '
+          'nothing was published, not even locally');
+      return null;
+    }
     final stored = StoredSysChanRecord(
         record: record,
         bytes: bytes,
@@ -9244,324 +7986,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _applySysChanRetract(
             channelIdHex, record.targetRecordId.hex);
     }
-    _saveSysChanRecords();
+    // S366: `tryAdmit` above has already written the record into the
+    // store. The `_saveSysChanRecords()` that used to stand here batched
+    // for two seconds — whoever stopped in this window lost the record
+    // just published, because `stop()` cancelled the timer.
     _sysChanEagerPush(channelIdHex, [stored], ttl: _sysChanPushTtl);
     onStateChanged?.call();
     return stored;
-  }
-
-  /// Materializes an admitted POST record as a conversation message so the
-  /// existing channel UI (SystemChannelPost cards, eviction, dedup scans)
-  /// keeps working. Idempotent per record id.
-  ///
-  /// F5-R3: For Bug Log crash_report posts, deduplicates at the storage
-  /// layer — if a post with the same crash fingerprint already exists, the
-  /// incoming record is stored as a crash_duplicate instead of a second
-  /// full report (gossip divergence no longer floods the channel).
-  UiMessage? _bridgeSysChanPost(StoredSysChanRecord stored) {
-    final channelIdHex = stored.record.channelId.hex;
-    final conv = conversations[channelIdHex];
-    if (conv == null) return null;
-    final recordIdHex = stored.record.recordId.hex;
-    for (final m in conv.messages) {
-      if (m.id == recordIdHex) return m;
-    }
-
-    var text = stored.record.text;
-
-    if (SystemChannels.isBugLogChannel(channelIdHex)) {
-      text = _sysChanDedupCrashReport(text, conv);
-    }
-
-    final authorHex = stored.record.authorUserId.hex;
-    final isOwn = authorHex == identity.userIdHex;
-    final msg = UiMessage(
-      id: recordIdHex,
-      conversationId: channelIdHex,
-      senderNodeIdHex: authorHex,
-      text: text,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(
-          stored.record.timestampMs.toInt()),
-      type: UiMessageType.channelPost,
-      status: isOwn ? MessageStatus.sent : MessageStatus.delivered,
-      isOutgoing: isOwn,
-    );
-    _addMessageToConversation(channelIdHex, msg, isChannel: true);
-    return msg;
-  }
-
-  /// If [text] is a crash_report whose crash fingerprint already exists in
-  /// [conv], demote it to a lightweight crash_duplicate record.
-  String _sysChanDedupCrashReport(String text, Conversation conv) {
-    if (!text.contains('"crash_report"')) return text;
-    try {
-      final json = jsonDecode(text) as Map<String, dynamic>;
-      if (json['type'] != 'crash_report') return text;
-      final fp = json['fingerprint'] as String?;
-      if (fp == null) return text;
-      for (final m in conv.messages) {
-        final mText = m.text;
-        if (mText.isEmpty || m.isDeleted) continue;
-        if (!mText.contains(fp)) continue;
-        try {
-          final mj = jsonDecode(mText) as Map<String, dynamic>;
-          if (mj['type'] == 'crash_report' && mj['fingerprint'] == fp) {
-            final dupe = CrashDuplicateReply(
-              fingerprint: fp,
-              appVersion: json['appVersion'] as String? ?? '',
-              platform: json['platform'] as String? ?? '',
-              timestampMs: json['timestampMs'] as int? ?? 0,
-            );
-            return dupe.toPostText();
-          }
-        } catch (_) {}
-      }
-    } catch (_) {}
-    return text;
-  }
-
-  /// D2: marks the bridged conversation message of a retracted record as
-  /// deleted (tombstone effect in the UI).
-  void _applySysChanRetract(String channelIdHex, String targetRecordIdHex) {
-    final conv = conversations[channelIdHex];
-    if (conv == null) return;
-    for (final m in conv.messages) {
-      if (m.id == targetRecordIdHex && !m.isDeleted) {
-        m.text = '';
-        m.isDeleted = true;
-        _saveConversations();
-        break;
-      }
-    }
-  }
-
-  void _sysChanPushTo(Uint8List recipientDeviceId, String channelIdHex,
-      List<StoredSysChanRecord> records, {required int ttl}) {
-    if (records.isEmpty) return;
-    final recipHex = bytesToHex(recipientDeviceId).substring(0, 8);
-    var batch = proto.SysChanPush()
-      ..channelId = hexToBytes(channelIdHex)
-      ..ttl = ttl;
-    var batchBytes = 0;
-    void flush() {
-      if (batch.records.isEmpty) return;
-      final payload = Uint8List.fromList(batch.writeToBuffer());
-      node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_SYSCHAN_PUSH,
-        innerPayload: payload,
-        recipientDeviceId: recipientDeviceId,
-      ).then((ok) {
-        if (!ok) {
-          _log.debug('syschan: push to $recipHex failed (${records.length} records, ttl=$ttl)');
-        }
-      });
-      batch = proto.SysChanPush()
-        ..channelId = hexToBytes(channelIdHex)
-        ..ttl = ttl;
-      batchBytes = 0;
-    }
-
-    for (final r in records) {
-      if (batchBytes + r.bytes.length > _sysChanPushBatchBytes &&
-          batch.records.isNotEmpty) {
-        flush();
-      }
-      batch.records.add(r.bytes);
-      batchBytes += r.bytes.length;
-    }
-    flush();
-  }
-
-  /// Eager new-record flood (§9.5.7 push budget): k random peers, TTL
-  /// decremented per hop, fingerprint dedup at every receiver.
-  void _sysChanEagerPush(
-      String channelIdHex, List<StoredSysChanRecord> records,
-      {required int ttl, String? excludeDeviceHex}) {
-    if (records.isEmpty || ttl <= 0) return;
-    final targets = _sysChanPickReachablePeers(
-        _sysChanFanout, excludeDeviceHex: excludeDeviceHex);
-    for (final peer in targets) {
-      _sysChanPushTo(Uint8List.fromList(peer.nodeId), channelIdHex, records,
-          ttl: ttl);
-    }
-  }
-
-  /// Pick up to [count] peers that are likely reachable (seen within the last
-  /// 5 minutes). Falls back to all peers when fewer than [count] are recent.
-  List<PeerInfo> _sysChanPickReachablePeers(int count,
-      {String? excludeDeviceHex}) {
-    final cutoff = DateTime.now().subtract(const Duration(minutes: 5));
-    final all = List<PeerInfo>.from(node.routingTable.allPeers)
-      ..removeWhere((p) =>
-          p.nodeIdHex == excludeDeviceHex ||
-          p.nodeIdHex == identity.nodeIdHex);
-    final recent = all.where((p) => p.lastSeen.isAfter(cutoff)).toList()
-      ..shuffle();
-    if (recent.length >= count) return recent.take(count).toList();
-    final stale = all.where((p) => !p.lastSeen.isAfter(cutoff)).toList()
-      ..shuffle();
-    return [...recent, ...stale.take(count - recent.length)];
-  }
-
-  /// Hourly anti-entropy digest (piggy-backed on the channel-index gossip
-  /// slot) + edge-triggered initial sync after discovery-complete.
-  void sendSysChanDigests(Iterable<PeerInfo> targets) {
-    final targetList = targets.toList();
-    if (targetList.isEmpty) return;
-    for (final chHex in [
-      SystemChannels.bugLogChannelIdHex,
-      SystemChannels.featureReqChannelIdHex,
-    ]) {
-      final digest = proto.SysChanDigest()
-        ..channelId = hexToBytes(chHex)
-        ..recordCount = _sysChanStore.recordCount(chHex)
-        ..setHash = _sysChanStore.setHash(chHex);
-      final payload = Uint8List.fromList(digest.writeToBuffer());
-      for (final peer in targetList) {
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_SYSCHAN_DIGEST,
-          innerPayload: payload,
-          recipientDeviceId: Uint8List.fromList(peer.nodeId),
-        ).then((ok) {
-          if (!ok) {
-            _log.debug('syschan: digest to ${peer.nodeIdHex.substring(0, 8)} failed');
-          }
-        });
-      }
-    }
-  }
-
-  /// DIGEST: peer advertises its record set. On mismatch, reply with our
-  /// fingerprint SUMMARY so the peer can WANT/PUSH the difference.
-  void handleIncomingSysChanDigestInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
-    try {
-      final digest = proto.SysChanDigest.fromBuffer(frame.payload);
-      final chHex = digest.channelId.hex;
-      if (!SystemChannels.isSystemChannel(chHex)) return;
-      final localHash = bytesToHex(_sysChanStore.setHash(chHex));
-      final remoteHash =
-          digest.setHash.hex;
-      if (localHash == remoteHash) return; // converged
-      final summary = proto.SysChanSummary()..channelId = digest.channelId;
-      final fps = _sysChanStore.storedFingerprints(chHex);
-      for (final fp in fps.take(_sysChanSummaryCap)) {
-        summary.fingerprints.add(hexToBytes(fp));
-      }
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_SYSCHAN_SUMMARY,
-        innerPayload: Uint8List.fromList(summary.writeToBuffer()),
-        recipientDeviceId: senderDeviceId,
-      ));
-    } catch (e) {
-      _log.debug('syschan: digest handling failed: $e');
-    }
-  }
-
-  /// SUMMARY: peer's fingerprint set. WANT what we lack, PUSH what it
-  /// lacks (ttl 0 — anti-entropy transfers do not re-flood).
-  void handleIncomingSysChanSummaryInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
-    try {
-      final summary = proto.SysChanSummary.fromBuffer(frame.payload);
-      final chHex = summary.channelId.hex;
-      if (!SystemChannels.isSystemChannel(chHex)) return;
-      final theirs = summary.fingerprints
-          .map((f) => Uint8List.fromList(f))
-          .toList();
-
-      final missing = _sysChanStore.missingFingerprints(chHex, theirs);
-      if (missing.isNotEmpty) {
-        final want = proto.SysChanWant()..channelId = summary.channelId;
-        want.fingerprints.addAll(missing);
-        unawaited(node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_SYSCHAN_WANT,
-          innerPayload: Uint8List.fromList(want.writeToBuffer()),
-          recipientDeviceId: senderDeviceId,
-        ));
-      }
-
-      final extra = _sysChanStore.extraRecords(chHex, theirs);
-      if (extra.isNotEmpty) {
-        _sysChanPushTo(senderDeviceId, chHex, extra, ttl: 0);
-      }
-    } catch (e) {
-      _log.debug('syschan: summary handling failed: $e');
-    }
-  }
-
-  void handleIncomingSysChanWantInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
-    try {
-      final want = proto.SysChanWant.fromBuffer(frame.payload);
-      final chHex = want.channelId.hex;
-      if (!SystemChannels.isSystemChannel(chHex)) return;
-      final records = _sysChanStore.recordsForFingerprints(
-          chHex, want.fingerprints.map((f) => Uint8List.fromList(f)).toList());
-      if (records.isNotEmpty) {
-        _sysChanPushTo(senderDeviceId, chHex, records, ttl: 0);
-      }
-    } catch (e) {
-      _log.debug('syschan: want handling failed: $e');
-    }
-  }
-
-  /// PUSH: admit each record (§8.2 context-proof happens inside tryAdmit:
-  /// hybrid self-signature + founding binding + known channel_id), bridge
-  /// UI effects, forward fresh records while TTL remains.
-  void handleIncomingSysChanPushInfra(
-      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
-    try {
-      final push = proto.SysChanPush.fromBuffer(frame.payload);
-      final chHex = push.channelId.hex;
-      if (!SystemChannels.isSystemChannel(chHex)) return;
-
-      final fresh = <StoredSysChanRecord>[];
-      var votesChanged = false;
-      for (final blob in push.records.take(500)) {
-        final bytes = Uint8List.fromList(blob);
-        if (bytes.length > SystemChannels.maxManualPostBytes) continue;
-        proto.SystemChannelRecord record;
-        try {
-          record = proto.SystemChannelRecord.fromBuffer(bytes);
-        } catch (_) {
-          continue;
-        }
-        final admission = _sysChanStore.tryAdmit(bytes, parsed: record);
-        if (admission == SysChanAdmission.duplicate ||
-            admission == SysChanAdmission.rejected) {
-          continue;
-        }
-        final stored = StoredSysChanRecord(
-            record: record,
-            bytes: bytes,
-            fingerprintHex: SystemChannelRecordStore.fingerprintHexOf(bytes));
-        fresh.add(stored);
-        switch (admission) {
-          case SysChanAdmission.postAdmitted:
-            _bridgeSysChanPost(stored);
-          case SysChanAdmission.retractAdmitted:
-            _applySysChanRetract(chHex,
-                record.targetRecordId.hex);
-          case SysChanAdmission.voteAdmitted:
-            votesChanged = true;
-          default:
-            break;
-        }
-      }
-
-      if (fresh.isEmpty) return;
-      _sysChanStore.evictToLimit(chHex);
-      _saveSysChanRecords();
-      if (votesChanged) onStateChanged?.call();
-      final ttl = push.ttl;
-      if (ttl > 1) {
-        _sysChanEagerPush(chHex, fresh,
-            ttl: ttl - 1, excludeDeviceHex: bytesToHex(senderDeviceId));
-      }
-    } catch (e) {
-      _log.debug('syschan: push handling failed: $e');
-    }
   }
 
   /// D3 (§9.5.3): programmatic Feature-Request submission. Posts a
@@ -9587,7 +8018,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (stored == null) return null;
     final recordIdHex = stored.record.recordId.hex;
     // Auto-Ja embedded: the submitter implicitly supports their request.
-    await voteFeatureRequest(recordIdHex, SysChanVote.ja);
+    await voteFeatureRequest(recordIdHex, SysChanVote.yes);
     final conv = conversations[SystemChannels.featureReqChannelIdHex];
     for (final m in conv?.messages ?? const <UiMessage>[]) {
       if (m.id == recordIdHex) return m;
@@ -9600,7 +8031,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   Future<bool> voteFeatureRequest(String recordIdHex, int option) async {
     if (_reducedMode) return false;
-    if (option < SysChanVote.ja || option > SysChanVote.egal) return false;
+    if (option < SysChanVote.yes || option > SysChanVote.irrelevant) return false;
     final stored = await _publishSystemChannelRecord(
       channelIdHex: SystemChannels.featureReqChannelIdHex,
       kind: SysChanKind.vote,
@@ -9619,132 +8050,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final own =
         _sysChanStore.ownVote(chHex, recordIdHex, identity.userIdHex) ?? -1;
     return {
-      'ja': tally.ja,
-      'nein': tally.nein,
-      'egal': tally.egal,
+      'ja': tally.yes,
+      'nein': tally.no,
+      'egal': tally.irrelevant,
       'net': tally.net,
       'own': own,
     };
-  }
-
-  // ── Migration: deviceNodeId → userIdHex (V3.1.44) ─────────────────
-
-  /// One-time migration: §26 Phase 2 temporarily used deviceNodeId as member key
-  /// in groups/channels and as senderNodeIdHex in messages. Service-level
-  /// identification must use the stable userId. This migrates stored data.
-  void _migrateDeviceNodeIdToUserId() {
-    final deviceHex = identity.nodeIdHex; // = deviceNodeIdHex
-    final userHex = identity.userIdHex;
-    if (deviceHex == userHex) return;
-
-    var migrated = false;
-
-    // ── Groups ──
-    for (final group in _groups.values) {
-      if (group.members.containsKey(userHex)) {
-        // Already correct — only fix ownerNodeIdHex if stale
-        if (group.ownerNodeIdHex != userHex && _isOurOldKey(group.ownerNodeIdHex)) {
-          group.ownerNodeIdHex = userHex;
-          migrated = true;
-        }
-        continue;
-      }
-
-      final oldKey = _findOurOldMemberKey(group.members, deviceHex);
-      if (oldKey != null) {
-        final self = group.members.remove(oldKey)!;
-        group.members[userHex] = GroupMemberInfo(
-          nodeIdHex: userHex,
-          displayName: self.displayName,
-          role: self.role,
-          ed25519Pk: identity.ed25519PublicKey,
-          x25519Pk: identity.x25519PublicKey,
-          mlKemPk: identity.mlKemPublicKey,
-        );
-        if (group.ownerNodeIdHex == oldKey) {
-          group.ownerNodeIdHex = userHex;
-        }
-        migrated = true;
-        _log.info('Migrated self in group "${group.name}": $oldKey → $userHex');
-      }
-    }
-
-    // ── Channels ──
-    for (final channel in _channels.values) {
-      if (channel.members.containsKey(userHex)) {
-        if (channel.ownerNodeIdHex != userHex && _isOurOldKey(channel.ownerNodeIdHex)) {
-          channel.ownerNodeIdHex = userHex;
-          migrated = true;
-        }
-        continue;
-      }
-
-      final oldKey = _findOurOldMemberKey(channel.members, deviceHex);
-      if (oldKey != null) {
-        final self = channel.members.remove(oldKey)!;
-        channel.members[userHex] = ChannelMemberInfo(
-          nodeIdHex: userHex,
-          displayName: self.displayName,
-          role: self.role,
-          ed25519Pk: identity.ed25519PublicKey,
-          x25519Pk: identity.x25519PublicKey,
-          mlKemPk: identity.mlKemPublicKey,
-        );
-        if (channel.ownerNodeIdHex == oldKey) {
-          channel.ownerNodeIdHex = userHex;
-        }
-        migrated = true;
-        _log.info('Migrated self in channel "${channel.name}": $oldKey → $userHex');
-      }
-    }
-
-    // ── Conversations: senderNodeIdHex + reactions + pendingConfigProposer ──
-    for (final conv in conversations.values) {
-      if (conv.pendingConfigProposer == deviceHex) {
-        conv.pendingConfigProposer = userHex;
-        migrated = true;
-      }
-      for (final msg in conv.messages) {
-        if (msg.senderNodeIdHex == deviceHex) {
-          msg.senderNodeIdHex = userHex;
-          migrated = true;
-        }
-        for (final reactionSet in msg.reactions.values) {
-          if (reactionSet.remove(deviceHex)) {
-            reactionSet.add(userHex);
-            migrated = true;
-          }
-        }
-      }
-    }
-
-    if (migrated) {
-      _saveGroups();
-      _saveChannels();
-      _saveConversations();
-      _log.info('Migration deviceNodeId→userId complete');
-    }
-  }
-
-  /// Find the old member-map key for self: first try the local deviceNodeId,
-  /// then fall back to ed25519 public key matching (cross-device migration).
-  String? _findOurOldMemberKey(Map<String, dynamic> members, String deviceHex) {
-    if (members.containsKey(deviceHex)) return deviceHex;
-    for (final entry in members.entries) {
-      final m = entry.value;
-      final Uint8List? pk = m.ed25519Pk;
-      if (pk != null && _isOurEd25519Pk(pk)) return entry.key;
-    }
-    return null;
-  }
-
-  bool _isOurEd25519Pk(Uint8List pk) {
-    return constantTimeEquals(pk, identity.foundingEd25519Pk) ||
-           constantTimeEquals(pk, identity.ed25519PublicKey);
-  }
-
-  bool _isOurOldKey(String hex) {
-    return hex == identity.nodeIdHex;
   }
 
   // ── Multi-Device Persistence (§26) ─────────────────────────────────
@@ -9758,8 +8069,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (existing.isNotEmpty) {
       _localDeviceId = existing.first.deviceId;
       existing.first.lastSeen = DateTime.now();
-      // §26 Phase 4: ensure deviceNodeIdHex is set (migration from pre-Phase-4)
-      existing.first.deviceNodeIdHex ??= bytesToHex(identity.deviceNodeId);
+      // S368: here stood `deviceNodeIdHex ??= bytesToHex(identity.deviceNodeId)`
+      // with the justification "migration from pre-Phase-4". A device row
+      // without `deviceNodeIdHex` can only come from a profile before §26
+      // Phase 4; such profiles do not exist on this line.
       _saveDevices();
       return;
     }
@@ -9791,34 +8104,45 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return 'unknown';
   }
 
+  /// Areas of the device keeping (S366, formerly `devices.json`).
+  ///
+  /// THREE AREAS AND NOT ONE, and that is the actual gain here: the file
+  /// carried, NEXT TO the (at most five, §26) devices, a dedup window
+  /// with cap 10 000. Because both lay in one map, EVERY device change —
+  /// a `lastSeen`, a renamed device — wrote all 10 000 rows along.
+  /// Separated, a device change no longer touches the window, and a new
+  /// dedup identifier costs ONE row instead of the whole collection.
+  static const String _areaDevices = 'devices';
+  static const String _areaDeviceMeta = 'device_meta';
+  static const String _areaSyncDedup = 'device_sync_dedup';
+
+  /// What LAY in the area [_areaSyncDedup] last. The difference to
+  /// [_processedSyncIds] is exactly what has to be written —
+  /// without this shadow `_saveDevices` would have to write the window
+  /// as a whole again, and the rebuild would be for nothing.
+  final Set<String> _syncIdsPersisted = <String>{};
+
   void _loadDevices() {
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/devices.json');
-      if (json == null) {
-        _devicesLoaded = true;
-        return;
-      }
-      for (final entry in json.entries) {
-        if (entry.key.startsWith('_')) continue;
-        _devices[entry.key] = DeviceRecord.fromJson(entry.value as Map<String, dynamic>);
-      }
-      // Load sync dedup window.
-      // New format: map of syncIdHex → firstSeen epoch-ms.
-      // Legacy format: list of syncIdHex (seed with current timestamp so 7d TTL
-      // applies from now on — safer than dropping all entries).
-      final syncIdsMap = json['_syncIdTs'] as Map<String, dynamic>?;
-      if (syncIdsMap != null) {
-        for (final e in syncIdsMap.entries) {
-          _processedSyncIds[e.key] = (e.value as num).toInt();
+      // S366: from the store instead of from `devices.json`.
+      for (final entry in store.loadArea(_areaDevices).entries) {
+        try {
+          _devices[entry.key] = DeviceRecord.fromJson(entry.value);
+        } catch (e) {
+          _log.warn('Skipping corrupt device ${entry.key}: $e');
         }
-      } else {
-        final legacy = json['_syncIds'] as List<dynamic>?;
-        if (legacy != null) {
-          final now = DateTime.now().millisecondsSinceEpoch;
-          for (final id in legacy.cast<String>()) {
-            _processedSyncIds[id] = now;
-          }
-        }
+      }
+      // §14.5 path 2: the announcement counter. It used to lie as the
+      // special key `_deviceSetSeq` in the same map; in a table with
+      // (area, key) the namespace trick is no longer needed.
+      final meta = store.loadArea(_areaDeviceMeta)['seq'];
+      _deviceSetSeq = (meta?['v'] as num?)?.toInt() ?? 0;
+      // Dedup window: key = syncIdHex, value = firstSeen epoch-ms.
+      for (final entry in store.loadArea(_areaSyncDedup).entries) {
+        final ts = (entry.value['ts'] as num?)?.toInt();
+        if (ts == null) continue;
+        _processedSyncIds[entry.key] = ts;
+        _syncIdsPersisted.add(entry.key);
       }
       // Prune expired entries (>7 days) on load
       _pruneSyncDedup();
@@ -9830,18 +8154,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   void _saveDevices() {
+    // THE DATA-LOSS LATCH. It stood on `devices.json.enc` — a file that
+    // is never written again after the switch-over. It would thus have
+    // been silently dead: never red, just ineffective. It now asks the
+    // STORE, and if that is not readable, it fails CLOSED (no writing).
     if (!_devicesLoaded && _devices.isEmpty) {
-      final encFile = File('$profileDir/devices.json.enc');
-      if (encFile.existsSync()) {
-        _log.warn('REFUSED to save empty devices — load failed but file exists');
+      var present = false;
+      try {
+        present = store.countArea(_areaDevices) > 0 ||
+            store.countArea(_areaSyncDedup) > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save devices — store unreadable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save empty devices — load failed but the store '
+            'still holds entries. Would cause data loss!');
         return;
       }
     }
     try {
-      final json = <String, dynamic>{};
-      for (final entry in _devices.entries) {
-        json[entry.key] = entry.value.toJson();
-      }
+      // `replaceArea` for the devices: §26 caps them at five, and all 14
+      // callers call "save everything". That is the case `replaceArea`
+      // exists for.
+      store.replaceArea(_areaDevices,
+          {for (final e in _devices.entries) e.key: e.value.toJson()});
+      store.putEntry(_areaDeviceMeta, 'seq', {'v': _deviceSetSeq});
+
       // Persist sync dedup IDs with 7-day TTL (matches S&F window, §26 Dedup).
       _pruneSyncDedup();
       // Hard cap on the map size to bound memory (evict oldest first) even if
@@ -9854,17 +8193,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           _processedSyncIds.remove(id);
         }
       }
-      json['_syncIdTs'] = Map<String, int>.from(_processedSyncIds);
-      _fileEnc.writeJsonFile('$profileDir/devices.json', json);
+      // ONLY THE DIFFERENCE. `putEntry`/`removeEntry` per changed
+      // identifier instead of `replaceArea` over up to 10 000 rows — a
+      // pure device change writes NOTHING here from now on.
+      for (final id in _processedSyncIds.keys) {
+        if (_syncIdsPersisted.contains(id)) continue;
+        store.putEntry(_areaSyncDedup, id, {'ts': _processedSyncIds[id]});
+        _syncIdsPersisted.add(id);
+      }
+      final dropped =
+          _syncIdsPersisted.where((id) => !_processedSyncIds.containsKey(id))
+              .toList();
+      for (final id in dropped) {
+        store.removeEntry(_areaSyncDedup, id);
+        _syncIdsPersisted.remove(id);
+      }
     } catch (e) {
       _log.warn('Failed to save devices: $e');
     }
-  }
-
-  /// Drop TWIN_SYNC dedup entries older than 7 days (§26 Dedup TTL).
-  void _pruneSyncDedup() {
-    final cutoff = DateTime.now().millisecondsSinceEpoch - _syncDedupTtlMs;
-    _processedSyncIds.removeWhere((_, ts) => ts < cutoff);
   }
 
   /// Fire devices-updated + state-changed callbacks. Wrapper so every
@@ -9876,61 +8222,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.warn('onDevicesUpdated callback failed: $e');
     }
     onStateChanged?.call();
-  }
-
-  /// §7 (Einleitung): push the current authorised device set into the
-  /// IdentityPublisher so the next AuthManifest lists *all* DeviceIDs of this
-  /// UserID — "the IdentityResolver returns them as a list, and sendToUser
-  /// fans out automatically". Without this the publisher can only attest to
-  /// the device it runs on and every contact sees a one-device identity.
-  ///
-  /// Source is `_devices`, the same registry the §7.2 self fan-out in
-  /// `sendToUser` routes to — manifest and fan-out therefore describe one
-  /// device set. Two properties of that source matter here:
-  ///
-  ///  - `deviceNodeIdHex` is nullable (`injectTestDevice` and pre-Phase-4
-  ///    records leave it unset). A record without it names no routable device
-  ///    node, so it cannot be published as an authorised DeviceID and is
-  ///    skipped rather than guessed at.
-  ///  - the publisher's own delegation list is deliberately NOT unioned in.
-  ///    `revokeDevice` removes the device from `_devices` but has no way to
-  ///    retract the already-issued `DeviceDelegationCert`, so a delegation-
-  ///    sourced list would re-authorise every revoked device on the next
-  ///    publish. `_devices` is the revocable source and therefore the only one.
-  ///
-  /// This device's own node id is added unconditionally — it is authorised by
-  /// construction, and `_devices` may not carry it yet on a first run.
-  void _syncAuthorizedDevicesToPublisher() {
-    final pub = _identityPublisher;
-    if (pub == null) return;
-    pub.setAuthorizedDevices(_buildAuthorizedDeviceNodeIds());
-  }
-
-  /// §7 (Einleitung): the authorised device-node-id set derived from
-  /// `_devices` plus this device.
-  ///
-  /// Extracted from [_syncAuthorizedDevicesToPublisher] because §7.5 needs the
-  /// list WITHOUT publishing it: `computeDeviceSetChangeHash` has to run over
-  /// exactly the ids the manifest will carry, and it concatenates them without
-  /// de-duplicating — so this must normalise the same way
-  /// `IdentityPublisher.setAuthorizedDevices` does (own id first, collapsed by
-  /// hex, malformed entries skipped). A list that differs by one duplicate
-  /// produces a different hash, i.e. a proof the receiver reads as invalid.
-  List<Uint8List> _buildAuthorizedDeviceNodeIds() {
-    final byHex = <String, Uint8List>{
-      bytesToHex(identity.deviceNodeId): identity.deviceNodeId,
-    };
-    for (final d in _devices.values) {
-      final hex = d.deviceNodeIdHex;
-      if (hex == null || hex.isEmpty) continue;
-      try {
-        byHex[hex] = hexToBytes(hex);
-      } catch (e) {
-        _log.warn('Skipping device ${d.deviceId} in authorized-device set: '
-            'malformed deviceNodeIdHex ($e)');
-      }
-    }
-    return byHex.values.toList();
   }
 
   /// §7.4 Device Revocation: retract everything the publisher still attests
@@ -10004,165 +8295,43 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _syncAuthorizedDevicesToPublisher();
     }
 
-    final pub = _identityPublisher;
-    if (pub == null) {
-      applyRetraction();
-      return;
+    // ── §7.5 PROOF: GAP G-9 ───────────────────────────────────────
+    //
+    // Until now it was checked here whether the removal becomes visible
+    // to the other side as a SHRINKING at all (`deviceSigKeyCount` before
+    // and after), and only then was a quorum of countersignatures collected.
+    // Both numbers came from `_identityPublisher`, and the
+    // countersignature of this device needed `node.deviceKeyPair` — no
+    // holder, no key (see field above).
+    //
+    // The revocation itself continues UNCHANGED: a removed device must be
+    // removed, regardless of whether the proof for it can be built. That
+    // matches the `catch` branch this method already had for exactly
+    // this case ("A failure here must not strand the revocation").
+    if (!identity.isLinkedDevice && _devices.length > 1) {
+      _log.error('§7.5: device removal WITHOUT co-signature proof — '
+          'neither the delegation list nor the device key has a holder in '
+          'V4.1 (gap G-9). Contacts will see the '
+          'shrinkage uncovered and show the §7.5 warning. '
+          '${_devices.length} device(s) in the set.');
     }
-    // §7: only the Primary publishes the AuthManifest, so only the Primary can
-    // attach a proof. On a Linked Device there is nothing to prove and nobody
-    // to ask.
-    if (identity.isLinkedDevice) {
-      applyRetraction();
-      return;
-    }
-
-    // Both candidate keys, same reasoning as in [_retractDeviceFromPublisher]:
-    // `_devices` is keyed by node-id hex for pairing-created records and by
-    // UUID hex once a DEVICE_ANNOUNCE superseded them.
-    final revokedHexes = <String>{};
-    if (deviceIdKey.isNotEmpty) revokedHexes.add(deviceIdKey);
-    final nodeHex = device?.deviceNodeIdHex;
-    if (nodeHex != null && nodeHex.isNotEmpty) revokedHexes.add(nodeHex);
-
-    final previousCount = pub.deviceSigKeyCount;
-    final remainingCount = pub.deviceSigKeyCountExcluding(revokedHexes);
-    // Mirror of the receiver's trigger condition in
-    // `IdentityDhtHandler.handleAuthPublish`. If no shrink will be visible
-    // there, no proof is expected — prompting the user for a countersignature
-    // nobody asked for would be noise, and traffic (Arbeitsregel #5).
-    final shrinkVisible = previousCount >= 2 &&
-        remainingCount > 0 &&
-        remainingCount < previousCount;
-    if (!shrinkVisible) {
-      applyRetraction();
-      return;
-    }
-
-    try {
-      final newDeviceIds = _buildAuthorizedDeviceNodeIds()
-          .where((id) => !revokedHexes.contains(bytesToHex(id)))
-          .toList();
-      // The seq has to be fixed BEFORE the request goes out: the receiver
-      // recomputes the change hash from the manifest's own sequence number,
-      // so a countersignature over any other seq is unverifiable.
-      final seq = pub.reserveAuthSeq();
-      final changeHash = computeDeviceSetChangeHash(
-        userId: identity.userId,
-        newDeviceNodeIds: newDeviceIds,
-        newSeq: seq,
-      );
-      await _collectDeviceSetChangeApprovals(
-        changeHash: changeHash,
-        newDeviceNodeIds: newDeviceIds,
-        previousDeviceCount: previousCount,
-        requiredApprovers: deviceSetChangeQuorum(remainingCount),
-      );
-    } catch (e) {
-      // A failure here must not strand the revocation. Worst case the
-      // manifest goes out without a proof — see the class of outcomes
-      // documented above.
-      _log.error('§7.5 device-set change co-auth failed: $e — publishing the '
-          'removal without a proof');
-    } finally {
-      applyRetraction();
-    }
+    applyRetraction();
   }
 
-  /// §7.5: ask the remaining devices to countersign [changeHash] and wait for
-  /// the quorum, up to [_rotationApprovalWaitWindow].
-  ///
-  /// The result is left in [_pendingDeviceSetChange] for the publisher's
-  /// `deviceSetChangeProofProvider` to pick up. This method never decides
-  /// whether the proof is good enough — the provider does, from the token
-  /// bucket, so there is a single place that can turn tokens into a published
-  /// proof.
-  Future<void> _collectDeviceSetChangeApprovals({
-    required Uint8List changeHash,
-    required List<Uint8List> newDeviceNodeIds,
-    required int previousDeviceCount,
-    required int requiredApprovers,
-  }) async {
-    final pending = _PendingDeviceSetChange(
-      changeHash: changeHash,
-      changeHashHex: bytesToHex(changeHash),
-      previousDeviceCount: previousDeviceCount,
-      requiredApprovers: requiredApprovers,
-    );
-    _pendingDeviceSetChange = pending;
-
-    // This device consents by construction — it is one of the remaining
-    // devices and it is the one performing the removal. It signs with its
-    // Device-Sig key, which is locally generated and NOT seed-derived (§7.5):
-    // that is what makes even a single-token proof worth something. Someone
-    // who stole only the seed can mint a manifest but cannot produce one
-    // valid token, so a proof that verifies against the pre-change pubkeys
-    // shows the shrink came from a device that was already in the set.
-    final deviceKp = node.deviceKeyPair;
-    pending.add(RotationApprovalToken(
-      deviceNodeId: identity.deviceNodeId,
-      rotationHash: changeHash,
-      deviceEd25519Sig:
-          SodiumFFI().signEd25519(changeHash, deviceKp.ed25519PrivateKey),
-      deviceMlDsaSig: OqsFFI().mlDsaSign(changeHash, deviceKp.mlDsaPrivateKey),
-    ));
-
-    if (pending.approvers.length >= requiredApprovers) {
-      // One remaining device (the 2→1 case): nobody else can be asked, and
-      // `deviceSetChangeQuorum(1) == 1` is already satisfied. Sending a
-      // request here would only produce traffic no device can answer.
-      _log.info('§7.5 device-set change co-auth complete without asking — '
-          '${pending.approvers.length}/$requiredApprovers (this device is '
-          'the only remaining signer)');
-      return;
-    }
-
-    pending.completer = Completer<void>();
-    final reqPayload = proto.RotationApprovalRequestPayload()
-      ..rotationHash = changeHash
-      ..approvalKind = proto.ApprovalKindV3.APPROVAL_KIND_DEVICE_SET_CHANGE
-      // Descriptive only — lets the dialog name what is being removed. The
-      // signature covers `changeHash`, and the receiving contact recomputes
-      // that from the manifest, so a lie here yields a mismatch, not a proof.
-      ..newDeviceNodeIds.addAll(newDeviceNodeIds);
-    _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_REQUEST,
-        Uint8List.fromList(reqPayload.writeToBuffer()));
-    _log.info('§7.5 ROTATION_APPROVAL_REQUEST (device-set change) sent, '
-        'waiting up to ${_rotationApprovalWaitWindow.inMinutes} min for '
-        '$requiredApprovers approver(s)');
-
-    await pending.completer!.future
-        .timeout(_rotationApprovalWaitWindow, onTimeout: () {
-      _log.warn('§7.5 device-set change co-auth timed out with '
-          '${pending.approvers.length}/$requiredApprovers approver(s) — the '
-          'removal proceeds, the manifest publishes WITHOUT a proof and '
-          'contacts will raise the §7.5 shrink warning. Silence is not '
-          'consent, and no proof is fabricated.');
-    });
-    pending.completer = null;
-  }
-
-  void _retractDeviceFromPublisher(DeviceRecord? device, String deviceIdKey) {
-    final pub = _identityPublisher;
-    if (pub == null) return;
-    final candidates = <String>{};
-    if (deviceIdKey.isNotEmpty) candidates.add(deviceIdKey);
-    final nodeHex = device?.deviceNodeIdHex;
-    if (nodeHex != null && nodeHex.isNotEmpty) candidates.add(nodeHex);
-    var retracted = false;
-    for (final hex in candidates) {
-      // Both calls are made unconditionally — no `||` short-circuit, which
-      // would skip the sig-key removal whenever the delegation removal already
-      // returned true.
-      final delGone = pub.removeDelegation(hex);
-      final sigGone = pub.removeLinkedDeviceSigKeys(hex);
-      retracted = retracted || delGone || sigGone;
-    }
-    if (retracted) {
-      _log.info('§7.4: retracted delegation/sig-keys for revoked device '
-          '$deviceIdKey from the published AuthManifest');
-    }
-  }
+  // ── §7.5 CO-SIGNING OF A DEVICE-SET CHANGE: FALLEN ────────
+  //
+  // `_collectDeviceSetChangeApprovals(...)` stood here. It created a
+  // `_PendingDeviceSetChange`, signed it with the DEVICE key of this
+  // device (`node.deviceKeyPair` — and that was exactly the point:
+  // "locally generated and NOT seed-derived", which is why even a
+  // single token was worth something) and collected the answers of the
+  // other devices.
+  //
+  // Without a holder for the device key this cannot be built
+  // (gap G-9), and the only caller ([_applyDeviceSetRemoval]) reports
+  // the gap there. A proof with invented or missing tokens would be
+  // worse than none: the receiver would read `quorumMet` and stop
+  // reporting the shrinking.
 
   /// Public accessor: list of registered twin devices (for IPC/GUI).
   @override
@@ -10171,6 +8340,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Local device ID (UUID hex).
   @override
   String get localDeviceId => _localDeviceId;
+
+  /// §24.4.3 — the transition state of running device lock-outs, for the
+  /// display.
+  ///
+  /// ── WHY THE BODY STANDS HERE AND NOT NEXT TO THE CALCULATION ───────
+  ///
+  /// The data side lives in `DeviceLockoutOps` — an EXTENSION on
+  /// `CleonaService` (`cleona_service_lockout.dart:170`). An extension
+  /// method does NOT satisfy an interface member: it is not a class
+  /// member, and `CleonaService implements ICleonaService` inherits no
+  /// body. Measured on a minimal source, not assumed — the analyzer then
+  /// says `non_abstract_class_inherits_abstract_member`, and it does so
+  /// even when one tries it via `augment class` in a `part` file.
+  /// The class member therefore has to stand in the class body; the
+  /// calculation stays over there.
+  ///
+  /// **AND IT IS NAMED DIFFERENTLY FROM THE METHOD.** A class member
+  /// `deviceLockoutStates` would HIDE the extension method of the same
+  /// name (class members take precedence), and the eight calls in
+  /// `smoke_device_lockout_transition.dart` would then read as a call
+  /// of the getter RESULT. The name separates the two roles:
+  /// `deviceLockoutStates()` calculates, `deviceLockouts` displays.
+  @override
+  List<Map<String, dynamic>> get deviceLockouts => deviceLockoutStates();
 
   /// Rename a twin device and broadcast via TWIN_SYNC.
   @override
@@ -10214,22 +8407,82 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       revokedRecord.deviceNodeId = hexToBytes(device.deviceNodeIdHex!);
     }
     final revokePayload = Uint8List.fromList(revokedRecord.writeToBuffer());
+
+    // ── THE LOCK-OUT TRANSITION STARTS HERE (E-7, §14.4/§24.4.3) ───────
+    //
+    // UP TO HERE THE ANNOUNCEMENT WAS THROWN AWAY: `_detachedSend`
+    // catches the throw and drops the result, and `sendToUser` got no
+    // `messageId` — so the delivery register did not create a record
+    // that could be assigned to a contact either. Thus there was no
+    // "informed", no pending set, no deadline, and the old inbound line
+    // expired after a blind timer.
+    //
+    // EVERY LEG NOW GETS ITS OWN IDENTIFIER. It is exactly the key under
+    // which `sendToUser` creates the record in the register
+    // (`_v41NoteSend`) and under which the contact's delivery receipt
+    // finds it again (`_handleDeliveryReceiptV3`). Without its own
+    // identifier a fan-out message would throw all contacts into one
+    // record, and "3 of 47 open" could not be calculated.
+    final transition = _beginLockout(deviceId, device.deviceName);
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
+      final contactHex = bytesToHex(contact.nodeId);
+      final legId = SodiumFFI().randomBytes(16);
       try {
-        sendToUser(
-          recipientUserId: contact.nodeId,
-          messageType: proto.MessageTypeV3.MTV3_DEVICE_REVOCATION,
-          payload: revokePayload,
-        );
+        _noteLockoutLeg(
+            transition,
+            contactHex,
+            bytesToHex(legId),
+            sendToUser(
+              recipientUserId: contact.nodeId,
+              messageType: proto.MessageTypeV3.MTV3_DEVICE_REVOCATION,
+              payload: revokePayload,
+              messageId: legId,
+            ));
       } catch (e) {
-        _log.warn('Failed to send DEVICE_REVOCATION to ${contact.displayName}: $e');
+        // `sendToUser` is `async` and never throws synchronously; this
+        // branch remains for a throw BEFORE the call (key derivation in the
+        // argument). The contact then counts as not sent, not as
+        // informed.
+        transition.pendingLegs[contactHex] = bytesToHex(legId);
+        transition.notSent.add(contactHex);
+        // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+        _log.debug('Failed to send DEVICE_REVOCATION to ${contact.displayName}: $e');
       }
     }
+    // S366: ONE row for THIS device instead of the whole stock.
+    _persistLockout(deviceId);
+    _log.info('Lockout transition opened for ${deviceId.substring(0, 8)}: '
+        '${transition.total} contacts to inform, deadline '
+        '$_lockoutDeadlineDays days (§14.4)');
 
     _devices.remove(deviceId);
+    // ── AND ITS DEVICE LINE FROM THE REGISTRY (§14.7, §21.5.1) ───
+    //
+    // A locked-out device must no longer be a deposit target. The
+    // entry was created when sending (`sendToUser`, pure deposit line) and
+    // would otherwise have survived the lock-out — the same error class as
+    // `forgetPeer`, which until S354 had no caller for deleted contacts.
+    //
+    // WHAT THIS DOES NOT ACHIEVE, and that should be said openly: the
+    // device root falls out of `K_own`, and `K_own` keeps holding the
+    // locked-out device until the user KEM keys rotate
+    // (§14.4, "That is why this rotates along at lock-out too"). It can
+    // therefore keep harvesting its line itself. Deleting the entry here
+    // only prevents THIS node from still depositing there.
+    final lockedOutNodeId = device.deviceNodeIdHex;
+    if (lockedOutNodeId != null && lockedOutNodeId.isNotEmpty) {
+      v41Delivery?.forgetPeer(
+          deviceLineKey(identity.userId, hexToBytes(lockedOutNodeId)));
+    }
     _saveDevices();
+    // §14.5 path 2: the shrunken device set goes pairwise to the
+    // contacts. AFTER `_devices.remove`, so that the announcement carries
+    // the state AFTER the change — §14.8 counts the quorum over the
+    // REMAINING devices ("On a device-set change, the quorum counts the
+    // *remaining* devices `M`, not the state before it").
+    _announceDeviceSetToContacts(occasion: 'Geraete-Widerruf');
     // §7.4 + §7.5: retract the device-bound authority (delegation cert +
     // Device-Sig keys) and rebuild the published device set. Both live in
     // [_applyDeviceSetRemoval] now, because the Auth re-publish they trigger
@@ -10243,6 +8496,33 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // The local removal above has already taken effect, and contacts were
     // told via MTV3_DEVICE_REVOCATION before this point.
     unawaited(_applyDeviceSetRemoval(device, deviceId));
+
+    // §14.10: a revoked device still holds every user key it saw before
+    // removal — it POSSESSES them, revocation alone only stops it from being
+    // ADDRESSED. "A mere inbox rotation would be a label, not a lock." This
+    // is the same Emergency Key Rotation the "Identitaet neu schluesseln"
+    // IPC path (`rotate_identity_keys`) already triggers by hand — replaces
+    // User-Sig (Ed25519+ML-DSA) AND User-KEM (X25519+ML-KEM) together, so
+    // the stolen/lost device can neither keep signing as this user nor keep
+    // reading what contacts encrypt to it from here on.
+    //
+    // Safe to fire without waiting for `_applyDeviceSetRemoval` above to
+    // finish retracting the delegation: `rotateIdentityKeys()`'s twin-sync
+    // fan-out (LD-8 delegation rotation + legacy-twin entropy) resolves
+    // recipients from `_devices` (§7.2 self fan-out, see `sendToUser`), not
+    // from the publisher's delegation list — and `_devices.remove(deviceId)`
+    // above already ran. The revoked device is excluded from that fan-out
+    // regardless of how long the §7.5 device-set-change proof above still
+    // takes to collect.
+    //
+    // Not awaited for the same reason as `_applyDeviceSetRemoval`: the
+    // rotation's OWN §7.5 co-auth (a Linked Device countersigning the new
+    // keys) can wait up to 5 min (`_rotationApprovalWaitWindow`) before it
+    // proceeds anyway — see `rotateIdentityKeys()`. No-op with a log line on
+    // a Linked Device (`identity.isLinkedDevice` guard); the Primary picks
+    // it up via the mirrored call in `_handleTwinDeviceRevoked` when the
+    // revocation was initiated from a Linked Device instead.
+    unawaited(rotateIdentityKeys());
     _notifyDevicesChanged();
     return true;
   }
@@ -10262,6 +8542,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _notifyDevicesChanged();
     _log.info('Test device injected: $deviceId ($name)');
   }
+
+  /// Test-only: initialize `_localDeviceId` without running the full
+  /// `startService()` chain. `revokeDevice()` reads `_localDeviceId` on its
+  /// very first line, so a smoke test that wants to exercise it on a bare,
+  /// offline `CleonaService` needs this primed first — no existing smoke
+  /// test in this repo calls `startService()` itself (it additionally
+  /// needs `node.start()` for `node.transport`/`routingTable`, see
+  /// `smoke_service_wiring.dart`), and `_initLocalDevice()` has no network
+  /// dependency of its own (disk only), so this is a narrower, offline-safe
+  /// substitute — not a shortcut around the fields that DO need the node.
+  void testInitLocalDeviceForTesting() => _initLocalDevice();
 
   /// Test-only: read-only snapshot of the key-rotation retry state. Used by
   /// E2E harness (gui-52-key-rotation-retry) to assert pending/acked counts
@@ -10297,40 +8588,232 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   String get nodeIdHex => identity.userIdHex;
   @override
   String get deviceNodeIdHex => identity.deviceNodeIdHex;
+  // ── DEVICE KEM KEY: GAP G-9 ─────────────────────────────
+  //
+  // `node.deviceKem` was the node-wide, LOCALLY generated (not
+  // seed-derived, §3.6 #5) device KEM pair. It was loaded by
+  // `DeviceKeysStore` — the file lives on unchanged in
+  // `lib/core/crypto/` —, it was held by `CleonaNode`.
+  //
+  // THE SERVICE MUST NOT LOAD IT ITSELF. `DeviceKeysStore.loadOrCreate`
+  // wants a `baseDir`, and the node used `primaryIdentity` for that.
+  // Every service with its own `identity.baseDir` would get a
+  // DIFFERENT device key pair — and thus a daemon would have as many
+  // "devices" as identities. §3.1 C-1 says the opposite: all hosted
+  // identities share ONE deviceNodeId. That would not be a stopgap, but
+  // the breach of an invariant.
+  //
+  // ── WHY AN EMPTY FIELD AND NOT A THROW ────────────────────────────
+  //
+  // The first version threw `UnsupportedError`. That was well thought out
+  // at the point of decision and wrong in the result: the two foreign
+  // readers are `ipc_server.dart` (in the state snapshot the UI fetches
+  // on EVERY tick) and `contact_share_card.dart` (in building a widget).
+  // A throw there would not have cancelled the invitation, but torn
+  // apart the whole state line or the frame build — a defect at a
+  // place that has nothing to do with device keys.
+  //
+  // AN EMPTY FIELD IS NOT A DUMMY HERE, and that is measured, not hoped:
+  // `contact_seed.dart:220` writes `&dxk=` ONLY if
+  // `dxk.length == deviceX25519PkLength`. An empty list fails this check
+  // and the seed goes out as a v2 seed — with `ep` as trust anchor and
+  // WITHOUT device keys. That is a documented form supported by the
+  // parser, not a broken one: the receiver sees "this seed carries no
+  // device keys" and not "wrong ones stand here".
+  //
+  // The log line nevertheless stays at `error`: that every issued seed
+  // now has the weaker form is a finding and not an operating state.
+
+  /// The public device KEM key (X25519 half).
+  ///
+  /// ── G-9 CLOSED ON 09.09.2026 (S378) ───────────────────────────
+  ///
+  /// Here stood an empty list and an `error` log line. The holder was
+  /// not missing — it was just not connected: `IdentityContext` has
+  /// loaded the bundle itself since S360 (`identity_context.dart:760`,
+  /// `DeviceKeysStore.loadOrCreate`) and KEEPS it in `_deviceKeys`.
+  ///
+  /// WHAT THIS COST, measured on 09.09.2026 on cleona1/cleona2:
+  /// `contact_seed.dart:220` writes `&dxk=` only at the correct length,
+  /// the empty list failed, and EVERY outgoing seed went out in the
+  /// weaker v2 form. The other side could not answer it —
+  /// `sendToUser: no KEM pubkeys for … (contact=true,
+  /// x25519=false, mlKem=false)`. Result: contacts created, but not
+  /// addressable, first contact on NO platform, and the QR code stayed
+  /// at 95 % because `ready` never occurred.
+  ///
+  /// WHY THIS DOES NOT VIOLATE THE OLD JUSTIFICATION. The comment above
+  /// forbids ONE thing: that the service calls
+  /// `DeviceKeysStore.loadOrCreate` ITSELF. The reason is compelling —
+  /// the store wants a `baseDir`, and every service with its own
+  /// `identity.baseDir` would get a DIFFERENT pair; a daemon would then
+  /// have as many "devices" as identities (§3.1 C-1 says the opposite).
+  ///
+  /// This path does NOT load. It reads what the context has already
+  /// loaded — and it does so device-wide, measured at
+  /// `identity_context.dart:742-750`: "all IdentityContexts in this
+  /// daemon load the SAME DeviceKeysStore (single file in baseDir) […]
+  /// Device keys use the daemon-global SHARED encryption key (not the
+  /// per-identity key)". The invariant stays untouched.
+  ///
+  /// It stays empty only BEFORE `initKeys` — then `deviceKeys` is null,
+  /// and the log line says exactly that, instead of claiming a missing
+  /// holder. Readers still check the length
+  /// (`contact_seed.dart` does).
   @override
-  Uint8List get deviceX25519Pk => node.deviceKem.x25519PublicKey;
+  Uint8List get deviceX25519Pk {
+    final b = identity.deviceKeys;
+    if (b == null) {
+      _log.error('deviceX25519Pk: `IdentityContext.deviceKeys` is still null '
+          '— initKeys() has not run. The seed falls back to the v2 form '
+          'with `ep`.');
+      return Uint8List(0);
+    }
+    return b.kem.x25519PublicKey;
+  }
+
+  /// The ML-KEM half of the same bundle. See [deviceX25519Pk].
   @override
-  Uint8List get deviceMlKemPk => node.deviceKem.mlKemPublicKey;
+  Uint8List get deviceMlKemPk =>
+      identity.deviceKeys?.kem.mlKemPublicKey ?? Uint8List(0);
+
   @override
   Uint8List get userEd25519Pk => identity.ed25519PublicKey;
 
   /// SR-2 (§8.1.1): founding anchor for the ContactSeed `fp` field.
   @override
   Uint8List get foundingEd25519Pk => identity.foundingEd25519Pk;
-  @override
-  int get peerCount => node.routingTable.peerCount;
-  @override
-  int get confirmedPeerCount => node.confirmedPeerIds.length;
-  @override
-  int get reachablePeerCount => node.reachablePeerIds.length;
-  @override
-  bool get hasPortMapping => node.natTraversal.hasPortMapping;
+  // ── PEER COUNTS: ONE V4.1 QUANTITY INSTEAD OF THREE V3 QUANTITIES ───────────
+  //
+  // V3 distinguished three sets: everything in the routing table
+  // (`peerCount`), bidirectionally confirmed (`confirmedPeerIds`) and
+  // reachable via a live relay (`reachablePeerIds`). This distinction
+  // presupposes a routing table, and that no longer exists.
+  //
+  // V4.1 knows exactly one quantity of this kind: the established
+  // sessions of the tagline, separated by direction (§25.4). All three
+  // getters therefore read THE SAME number. Inventing three different
+  // numbers would be the worse answer — the UI shows them side by side,
+  // and a difference would claim a distinction that does not exist.
+  int get _v41SessionPartner => syncPartnersOutbound + syncPartnersInbound;
 
   @override
-  bool get hasSessionConfirmedPeers => node.hasSessionConfirmedPeers;
+  int get peerCount => _v41SessionPartner;
+  @override
+  int get confirmedPeerCount => _v41SessionPartner;
+  @override
+  int get reachablePeerCount => _v41SessionPartner;
+
+  /// The port-mapping coordinator of this PROCESS (UPnP/IGD +
+  /// NAT-PMP/PCP), set by `attachV41`.
+  ///
+  /// `null` as long as no node is attached — then [hasPortMapping] is
+  /// false as well, and rightly so: without a node no port is bound that
+  /// a mapping could reach.
+  ///
+  /// ONE COORDINATOR PER PROCESS, but one service per identity: two
+  /// identities on one node read the same object here. That is correct
+  /// — there is one port and one forwarding.
+  PortMapper? v41PortMapper;
+
+  /// Whether an inbound port mapping is open (§25.9, gap G-12).
+  ///
+  /// ── UNTIL S373 A CONSTANT STOOD HERE ────────────────────────────
+  ///
+  /// `bool get hasPortMapping => false;`, with the justification "V4.1
+  /// requests none". For the period between the CUT (31.08.2026) and
+  /// today that was correctly measured, but it was never an architecture
+  /// decision: v4_1 §25.9 lists "UPnP/PCP status, router info" as a
+  /// metric, §23.4 calls port forwarding "useful — it turns the node
+  /// into a point of contact for others", and E-64 presupposes a
+  /// `publicPort` assigned by UPnP-IGD for the invitation link.
+  /// The carriers had been deleted along with `lib/core/network/`, nothing more.
+  ///
+  /// As long as the constant stood, FOUR display places permanently
+  /// showed "no": `system_channel_post.dart:340/:441` (chip "UPnP"/"kein
+  /// UPnP"), `system_channels.dart:282/:300/:396`,
+  /// `crash_reporter.dart:273`, `contact_issue_reporter.dart:74`. Every
+  /// error report from the field thus carried the same useless line.
+  @override
+  bool get hasPortMapping => v41PortMapper?.hasMapping ?? false;
 
   @override
-  DateTime? get nodeStartedAt => node.nodeStartedAt;
+  bool get hasSessionConfirmedPeers => _v41SessionPartner > 0;
+
+  /// In-process: GUI and service are the same binary, so the derivation cannot
+  /// disagree with itself. The measurement that matters happens in `IpcClient`,
+  /// where the two halves are separately deployed artefacts.
   @override
-  List<String> get localIps => node.localIps.isNotEmpty ? node.localIps : ['127.0.0.1'];
+  IdentityDerivationSkew get identityDerivationSkew =>
+      IdentityDerivationSkew.ok;
+
+  /// FORMERLY `node.nodeStartedAt`. The node and the service started in
+  /// the same sequence; the display ("since when is this running?") means both.
   @override
-  String? get publicIp => node.natTraversal.publicIp;
+  DateTime? get nodeStartedAt => serviceStartedAt;
+
+  /// Filled in [startService] from `dialableLocalAddresses()`
+  /// (`lib/core/tagline/local_addresses.dart`) — the V4.1 counterpart of
+  /// `node.localIps`. A field and not a getter, because the V4.1 version
+  /// is asynchronous and this getter must not be.
+  List<String> _localAddresses = const <String>[];
+
   @override
-  int? get publicPort => node.natTraversal.publicPort;
+  List<String> get localIps =>
+      _localAddresses.isNotEmpty ? _localAddresses : const ['127.0.0.1'];
+
+  /// `null` here means "unknown", not "none" — the UI already shows an
+  /// empty state for it.
+  ///
+  /// UNTIL S361 THIS SAID: "Gap G-12: without NAT traversal the node does
+  /// NOT learn its public address." The first half-sentence is true (no
+  /// UPnP/PCP, no port mapping), the second is measured false. The node
+  /// DOES learn it, without any NAT traversal and without STUN: flight 2
+  /// of the link handshake mirrors the observed source address back in
+  /// the AEAD (`link/handshake.dart:151` `kObservedOffset2`, read at `:526`),
+  /// `link_io/link_demux.dart:526` reads it from flight 2, and
+  /// `link_io/link_host.dart:446` stores it in an `ObservedAddressBook`
+  /// — wired in production via `LinkHost.start`
+  /// (`tagline/v41_node.dart:644`). The book even answers the right
+  /// question: `agreed({required bool ipv6})` (`link_host.dart:166`)
+  /// only outputs an address when several observers agree, and
+  /// `disagrees` (`:173`) is the finding "symmetric NAT".
+  ///
+  /// WHAT IS REALLY MISSING is the pass-through TO THIS PLACE: the
+  /// service holds `V41Host`, not the `V41Node`/`LinkHost`. That is why
+  /// `null` stays here instead of inventing a number. Listed in the gap
+  /// book under G-12 (`docs/v4-redesign/S361-lueckenbuch.md`).
+  ///
+  /// **CORRECTED ON 2026-09-03 — half of the sentence was outdated.**
+  /// Here it said: "the only access to the book in all of `lib/` is
+  /// `host.observed.clearAll()` on network change (`v41_node.dart:3515`).
+  /// No `agreed(`, no `candidates` is read anywhere."
+  /// Re-measured on 2026-09-03 over `lib/` and `test/`, separately for
+  /// `ObservedAddressBook`, `observed.`, `allCandidates` and `agreed(`:
+  ///
+  ///   * **Became false:** the book HAS a second reader. The
+  ///     call candidates read `observed.allCandidates`
+  ///     (`calls/address_candidates.dart:241` in `ownCallCandidates`),
+  ///     called from `calls/call_transport_v41.dart:239` and `:327`,
+  ///     wired in `tagline/v41_attach.dart:1025`.
+  ///   * **Still true:** `agreed(` has ZERO callers in `lib/` — only
+  ///     the declaration (`link_host.dart:166`) and smokes. And
+  ///     `publicIp`/`publicPort` below have no producer; G-12 is
+  ///     open.
+  ///   * The line number `v41_node.dart:3515` for `clearAll()` was
+  ///     also wrong; today it is at `:4380`.
+  @override
+  String? get publicIp => null;
+  @override
+  int? get publicPort => null;
   @override
   int get fragmentCount => mailboxStore.fragmentCount;
+
+  /// "Running" means in V4.1: the delivery layer is attached to the
+  /// service. Without it no message goes out, regardless of what else lives.
   @override
-  bool get isRunning => node.isRunning;
+  bool get isRunning =>
+      myceliumMailbox != null || (v41Host != null && v41Delivery != null);
   @override
   bool get isLinkedDevice => identity.isLinkedDevice;
 
@@ -10381,62 +8864,57 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   List<PeerSummary> get peerSummaries {
-    // S119 B: reachable = confirmed ∪ alive DV route (NOT allDestinations —
-    // that set contains dead routes and inflated the list, Problem 2).
-    final confirmed = node.confirmedPeerIds;
-    final reachable = node.reachablePeerIds;
-    return node.routingTable.allPeers
-        .where((p) => reachable.contains(p.nodeIdHex))
-        .where((p) => p.publicIp.isNotEmpty || p.localIp.isNotEmpty || p.addresses.isNotEmpty)
-        .map((p) {
-      // Collect addresses: local + public IPv4 + IPv6 global (§27)
-      final addrs = <String>[];
-      final seen = <String>{};
-      if (p.localIp.isNotEmpty && p.localPort > 0) {
-        final key = '${p.localIp}:${p.localPort}';
-        addrs.add(key);
-        seen.add(key);
-      }
-      if (p.publicIp.isNotEmpty && p.publicPort > 0) {
-        final key = '${p.publicIp}:${p.publicPort}';
-        if (seen.add(key)) addrs.add(key);
-      }
-      // Include ALL addresses from the multi-address list: private IPv4,
-      // public IPv4, IPv6 global. §8.1.1 seed-peer selection needs all
-      // addresses so the scanner can choose the optimal one for its network
-      // position (private when on same LAN, public when external).
-      for (final addr in p.addresses) {
-        if (addr.type == PeerAddressType.ipv6LinkLocal) continue;
-        final key = addr.ip.contains(':')
-            ? '[${addr.ip}]:${addr.port}'
-            : '${addr.ip}:${addr.port}';
-        if (seen.add(key)) addrs.add(key);
-      }
-      // Primary address: prefer IPv6 global > public IPv4 > local IPv4
-      // Check both legacy publicIp field AND multi-address list for public IPv4
-      final ipv6Addr = p.addresses.where((a) => a.type == PeerAddressType.ipv6Global).toList();
-      final pubV4Addr = p.addresses.where((a) => a.type == PeerAddressType.ipv4Public).toList();
-      final effectivePublicIp = p.publicIp.isNotEmpty ? p.publicIp
-          : pubV4Addr.isNotEmpty ? pubV4Addr.first.ip : '';
-      final effectivePublicPort = p.publicPort > 0 ? p.publicPort
-          : pubV4Addr.isNotEmpty ? pubV4Addr.first.port : 0;
-      final primaryIp = ipv6Addr.isNotEmpty ? ipv6Addr.first.ip
-          : effectivePublicIp.isNotEmpty ? effectivePublicIp : p.localIp;
-      final primaryPort = ipv6Addr.isNotEmpty ? ipv6Addr.first.port
-          : effectivePublicPort > 0 ? effectivePublicPort : p.localPort;
-      return PeerSummary(
-        nodeIdHex: p.nodeIdHex,
-        address: primaryIp,
-        port: primaryPort,
-        lastSeen: p.lastSeen,
-        allAddresses: addrs,
-        stabilityTierIndex: p.stabilityTier.index,
-        // S119 B: direct = confirmed bidirectional UDP; otherwise the peer
-        // is only reachable via an alive relay route (amber in the sheet).
-        isDirect: confirmed.contains(p.nodeIdHex),
-      );
-    }).toList();
+    // ── GAP G-11: V4.1 HAS NO ADDRESS LIST PER PARTNER ────────────
+    //
+    // This list was a projection of the V3 routing table: per peer
+    // several `PeerAddress` with type (private/public/IPv6), a
+    // `lastSeen`, a stability level, plus the distinction
+    // direct/via-relay. V4.1 keeps none of that: `V41Delivery` names
+    // partner counts (§25.4), not addresses — and that is intent, not
+    // incompleteness (§7: whoever knows the address set of a node can
+    // link).
+    //
+    // WHAT THIS COSTS, explicitly named instead of concealed:
+    //   * the connection overview in the UI stays empty;
+    //   * `getNetworkStats().reachablePeerCount` drops to 0 — which is why
+    //     [getNetworkStats] now reads the partner count directly;
+    //   * ContactSeeds no longer carried start peers, because
+    //     `ContactSeedBuilder` read exactly this list. **CLOSED on
+    //     10.09.2026 (S380):** the builder now reads the
+    //     entry pool (`V41Node.entries`, §11) via
+    //     [entrySeedCandidates]; the receiving side of the same bridge
+    //     already stood (`addPeersFromContactSeed` -> `personEntryHints`).
+    //     This list here stays empty and rightly so — it was never the
+    //     right source for that.
+    //
+    //     UNTIL S361 THIS SAID "that belongs to gap G-1". It does NOT
+    //     belong there: G-1 (the carrier of the first request) has been
+    //     closed since S360, and a seed WITHOUT start peers still triggers
+    //     first contact — it carries `ki` and `ep`, and that suffices for
+    //     the invitation line. What is missing without start peers is the
+    //     ENTRY into the network for a node that has no partner yet:
+    //     §11 entry records. That is a separate, open item and listed in
+    //     the gap book as G-1/rest
+    //     (`docs/v4-redesign/S361-lueckenbuch.md`).
+    //
+    // An empty list is the only honest answer here. Invented entries —
+    // say the own address as a "peer" — would wander into foreign
+    // ContactSeeds and send third parties into the void.
+    _log.debug('peerSummaries: empty — V4.1 keeps no peer address list '
+        '(gap G-11). Session partner: $_v41SessionPartner');
+    return const <PeerSummary>[];
   }
+
+  /// Start-peer candidates for the ContactSeed (§11) — the sending side of
+  /// the entry bridge, gap G-11.
+  ///
+  /// The SELECTION (cap, freshness, family diversity) is made by the
+  /// builder, not this service: it depends on the format of the code, and
+  /// the format is known to `contact_seed.dart`. Here stands only the
+  /// forwarding to the node — and the empty list when none is attached.
+  @override
+  List<EntrySeedCandidate> get entrySeedCandidates =>
+      v41EntrySeedCandidates?.call() ?? const <EntrySeedCandidate>[];
 
   @override
   List<Conversation> get sortedConversations {
@@ -10445,90 +8923,37 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return list;
   }
 
-  /// Get full state snapshot for IPC.
-  Map<String, dynamic> getStateSnapshot() {
-    // Sync profile pictures from contacts into conversations
-    for (final conv in conversations.values) {
-      if (!conv.isGroup && !conv.isChannel) {
-        final contact = _contacts[conv.id];
-        if (contact?.profilePictureBase64 != null) {
-          conv.profilePictureBase64 = contact!.profilePictureBase64;
-        }
-      }
-    }
-    return {
-      'nodeIdHex': nodeIdHex,
-      'displayName': displayName,
-      'port': port,
-      'publicIp': publicIp,
-      'publicPort': publicPort,
-      'localIps': localIps,
-      'peerCount': peerCount,
-      'confirmedPeerCount': confirmedPeerCount,
-      'reachablePeerCount': reachablePeerCount,
-      'hasPortMapping': hasPortMapping,
-      'mobileFallbackActive': node.transport.isMobileFallbackActive,
-      'fragmentCount': fragmentCount,
-      'isRunning': isRunning,
-      'isLinkedDevice': isLinkedDevice,
-      'linkedDeviceStatus': linkedDeviceStatus.toJson(),
-      'profilePicture': _profilePictureBase64,
-      'profileDescription': _profileDescription,
-      'isGuardianSetUp': isGuardianSetUp,
-      'groups': _groups.map((k, v) => MapEntry(k, v.toJson())),
-      'channels': _channels.map((k, v) => MapEntry(k, v.toJson())),
-      'conversations': conversations.map((k, v) => MapEntry(k, v.toJson())),
-      'acceptedContacts': acceptedContacts.map((c) => c.toJson()).toList(),
-      'pendingContacts': pendingContacts.map((c) => c.toJson()).toList(),
-      'pendingOutgoingContacts': pendingOutgoingContacts.map((c) => c.toJson()).toList(),
-      'storedForDeliveryContacts':
-          storedForDeliveryContacts.map((c) => c.toJson()).toList(),
-      'currentCall': currentCall?.toJson(),
-      'isMuted': isMuted,
-      'isSpeakerEnabled': isSpeakerEnabled,
-      'peerSummaries': peerSummaries.map((p) => p.toJson()).toList(),
-      'typingContacts': _typingTimestamps.entries
-          .where((e) => DateTime.now().difference(e.value).inSeconds < 5)
-          .map((e) => e.key)
-          .toList(),
-      'mediaSettings': _mediaSettings.toJson(),
-      'multiInterfaceMode': MultiInterfaceManager.modeToString(_multiInterfaceMode),
-      'notificationSettings': notificationSound.settings.toJson(),
-      'devices': _devices.values.map((d) => d.toJson()).toList(),
-      'localDeviceId': _localDeviceId,
-      'deviceNodeIdHex': deviceNodeIdHex,
-      'deviceX25519PkB64': base64Encode(deviceX25519Pk),
-      'deviceMlKemPkB64': base64Encode(deviceMlKemPk),
-      'userEd25519PkB64': base64Encode(userEd25519Pk),
-      // SR-2: founding anchor (== userEd25519Pk for never-rotated identities).
-      'foundingEd25519PkB64': base64Encode(foundingEd25519Pk),
-      if (_latestManifest != null &&
-          UpdateChecker().isNewer(_latestManifest!.version, kCurrentAppVersion))
-        'updateManifest': _latestManifest!.toJson(),
-      if (_binaryUpdateManager != null) ...{
-        'updateState': _binaryUpdateManager!.state.index,
-        'updateProgress': _binaryUpdateManager!.progress,
-        'updateTargetVersion': _binaryUpdateManager!.targetVersion,
-      },
-    };
-  }
-
   // ── Network Statistics ──────────────────────────────────────────
 
   /// Collect a full network statistics snapshot.
   @override
   NetworkStats getNetworkStats() {
-    return node.statsCollector.collect(
-      routingTable: node.routingTable,
-      mailboxStore: mailboxStore,
-      natTraversal: node.natTraversal,
-      rttMap: node.dhtRpc.rttMap,
+    // FIRST UPDATE THE NODE'S NUMBERS, then collect (§25.5).
+    // Without these two lines `bytesSentTotal`,
+    // `bytesReceivedTotal`, `messagesRelayed` and `relayDataVolume`
+    // stood permanently at 0 — four tiles showing a zero that looked like
+    // a measurement. In the field at the same time it was ~24.5 MB/day
+    // out and ~24.9 MB/day in (measured S357).
+    final counter = v41NodeCounters?.call();
+    if (counter != null) {
+      statsCollector.noteNodeCounters(
+        wireSent: counter.wireSent,
+        wireReceived: counter.wireReceived,
+        relayBytes: counter.relayBytes,
+        relayCells: counter.relayCells,
+      );
+    }
+    // AND THE SNAPSHOTS (§25.4). Twenty tiles which until 01.09.2026
+    // either did not exist at all or sat on a V3 source that has been
+    // deleted. They are REMEMBERED and not booked —
+    // justification at `NetworkStatsCollector.noteNodeGauges`.
+    final states = v41NodeGauges?.call();
+    if (states != null) {
+      statsCollector.noteNodeGauges(states);
+    }
+    return statsCollector.collect(
       isRunning: isRunning,
       profileDir: profileDir,
-      reachablePeerCount: peerSummaries.length,
-      // D5 (§13.1.3): collective-quota observability.
-      poolDropsRate: node.rateLimiter.poolDroppedPackets,
-      poolDropsRelay: node.relayPoolDrops,
     );
   }
 
@@ -10548,11 +8973,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   @override
-  LogReport buildLogReport() => crashReporter.buildLogReport();
+  Future<LogReport> buildLogReport() async => crashReporter.buildLogReport();
 
   @override
   Future<bool> publishLogReport() async {
-    final report = buildLogReport();
+    final report = await buildLogReport();
     return crashReporter.publishLogReport(report);
   }
 
@@ -10619,53 +9044,65 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // §27.9.2 Step 3: re-run UPnP discovery + hole-punch round + 30s
     // observation of directConnections > 0. No implicit retry — user must
     // have already edited the router rule before clicking "Jetzt pruefen".
-    _log.info('NAT-Wizard recheck: resetting port mapper + punch round');
-    try {
-      await node.portMapper.reset();
-      // Start port mapping in background — don't await (completes async).
-      node.portMapper.start();
-    } catch (e) {
-      _log.debug('NAT-Wizard recheck: portMapper reset failed — $e');
-      // Continue anyway; the direct-connection observation below is the
-      // real success signal.
+    // ── PORT MAPPING RUNS AGAIN (S373) ────────────────────────
+    //
+    // Between the CUT (31.08.2026) and today only an observation stood
+    // here: "without port mapping (gap G-12)". The contract text in
+    // `service_interface.dart` promised the whole time "re-run UPnP
+    // discovery + hole-punch round" — it was outdated, and this body
+    // was half the method.
+    //
+    // SEARCH AGAIN, NOT JUST WATCH. §27.9.2 step 3 is the button
+    // "Jetzt pruefen" that the user presses AFTER changing something at
+    // their router. Exactly then a new discovery is the question they
+    // ask — the previous one ran before their change.
+    //
+    // NOT AWAITED: a discovery run can take minutes (RFC 6886 backoff),
+    // the observation below runs 30 s. If the mapping comes about in the
+    // meantime, the user sees it at the connection icon; the return value
+    // of this method stays the observation of inbound sync partners,
+    // because THAT is the question a port forwarding answers.
+    final mapping = v41PortMapper;
+    if (mapping != null) {
+      _log.info('NAT wizard recheck: port mapping is searched again '
+          '(UPnP/IGD + NAT-PMP/PCP), and it is observed whether an '
+          'incoming sync partner comes about.');
+      unawaited(mapping.reset().then((_) => mapping.start()).catchError(
+          (Object e) {
+        _log.warn('NAT-Wizard recheck: port mapping failed: $e');
+      }));
+    } else {
+      _log.info('NAT wizard recheck: no V4.1 node is attached to this '
+          'identity (attachV41 sets `v41PortMapper`) — it is only '
+          'observed whether a direct connection comes about.');
     }
 
+    // ── WHAT IS OBSERVED HERE, SINCE S360 ───────────────────────────
+    //
+    // Until 01.09.2026 here stood `getNetworkStats().directConnections
+    // > 0`. Since the CUT this number was constantly 0 — the method RAN 30
+    // seconds and then necessarily returned `false`, regardless of what
+    // the user had set at their router. A spinner that always has the
+    // same result is worse than no spinner: it makes the user believe
+    // their correct setting is wrong.
+    //
+    // INBOUND SYNC PARTNERS ARE THE QUESTION A PORT FORWARDING
+    // ANSWERS. §25.4 on this number: it "states how much the node
+    // contributes for others; a precondition for inbound calls (§17)" —
+    // i.e. exactly "does someone reach me from outside". If it rises from
+    // 0 to > 0 after the router change, the forwarding worked.
     final deadline = DateTime.now().add(const Duration(seconds: 30));
     while (DateTime.now().isBefore(deadline)) {
-      final snap = getNetworkStats();
-      if (snap.directConnections > 0) {
-        _log.info('NAT-Wizard recheck: direct connection observed '
-            '(${snap.directConnections})');
+      final incoming = syncPartnersInbound;
+      if (incoming > 0) {
+        _log.info('NAT-Wizard recheck: incoming sync partners observed '
+            '($incoming)');
         return true;
       }
       await Future<void>.delayed(const Duration(seconds: 1));
     }
-    _log.info('NAT-Wizard recheck: no direct connections after 30s');
+    _log.info('NAT wizard recheck: no incoming sync partner after 30 s');
     return false;
-  }
-
-  void _loadNatWizardSettings() {
-    try {
-      final file = File('$profileDir/nat_wizard_settings.json');
-      if (file.existsSync()) {
-        final j = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-        _natWizardDismissedUntilMs =
-            (j['nat_wizard_dismissed_until'] as num?)?.toInt() ?? 0;
-      }
-    } catch (e) {
-      _log.debug('Failed to load nat wizard settings: $e');
-    }
-  }
-
-  void _saveNatWizardSettings() {
-    try {
-      final file = File('$profileDir/nat_wizard_settings.json');
-      file.writeAsStringSync(jsonEncode({
-        'nat_wizard_dismissed_until': _natWizardDismissedUntilMs,
-      }));
-    } catch (e) {
-      _log.debug('Failed to save nat wizard settings: $e');
-    }
   }
 
   // ── Key Rotation ──────────────────────────────────────────────────
@@ -10674,10 +9111,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Async: ML-KEM keygen runs in background isolate (ANR fix).
   Future<void> _performKeyRotation() async {
     await identity.rotateKemKeys();
-    // §5.11 — periodic 120 s peer-exchange tick is gone; rotations are an
-    // event the mesh learns about explicitly. Push our refreshed PeerInfo
-    // (carries new KEM PK) to every known peer once.
-    node.broadcastAddressUpdate();
+    // `node.broadcastAddressUpdate()` stood here (§5.11: the fresh
+    // `PeerInfo` with the new KEM key once to all known peers). V4.1 does
+    // not distribute peer records; the new key reaches the contacts via
+    // the KEY_ROTATION broadcast below, which goes via [sendToUser] and
+    // thus via the V4.1 switch (T).
 
     // Build KEY_ROTATION message
     final rotationMsg = proto.KeyRotation()
@@ -10694,11 +9132,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
       if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
-      sendToUser(
+      _detachedSend('MTV3_KEY_ROTATION_BROADCAST', sendToUser(
         recipientUserId: contact.nodeId,
         messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
         payload: payload,
-      );
+      ));
     }
 
     _log.info('Key rotation complete, broadcast to ${acceptedContacts.length} contacts');
@@ -10717,14 +9155,118 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return;
     }
 
+    // ── WHAT V4.1 ALLOWS HERE, AND WHERE IT STAYS FAIL-CLOSED ───────────
+    //
+    // Here stood an UNCONDITIONAL abort. It relied on two sentences from
+    // the v3_0 line, one of which V4.1 has REPLACED:
+    //
+    //  * "The KEY_ROTATION_BROADCAST MUST go via the §7.4 infra path."
+    //    On the V4 line the opposite applies. v4_1 §14.4, "How contacts
+    //    learn of the rotation": "Only **pairwise**: `K_AB` is independent
+    //    of the shared key, every contact is reached individually. A public
+    //    object is out." The pairwise way IS the prescribed one, and in
+    //    this codebase it is called [sendToUser]. The infra receive path
+    //    `handleIncomingKeyRotationBroadcastInfra`
+    //    (`cleona_service_identity.dart:236`) has had ZERO callers since
+    //    the CUT — so there was no path one could have preferred it to;
+    //    the abort was not the safe way, but the only one.
+    //
+    //  * "§7.5 co-signing is missing." That still holds, and exactly there
+    //    the abort stays — one condition deeper. For the single-device
+    //    case, however, §14.4 says literally: "**At exactly one device, the
+    //    rule does not apply** — there, that one device suffices", and
+    //    §14.8 repeats it. For these identities rotation without quorum is
+    //    not a fallback, but the normative case.
+    //
+    // WHAT HAS NOT CHANGED ABOUT THE OLD CONCERN: a locally performed
+    // rotation that no contact learns of would still be the worst outcome.
+    // That is why the work below is done in this order — first send
+    // (with the OLD key, which must still be present for it), then apply.
+    // Not the other way round.
+    if (_devices.length > 1) {
+      // ── SINCE S361 THE REASON IS A DIFFERENT ONE AGAIN ─────────────────
+      //
+      // The justification has moved twice, and both times because the
+      // stated reason had gone away. So that it does not stay standing a
+      // third time after it is no longer true, here is what has
+      // FALLEN and what CARRIES.
+      //
+      // FALLEN (S360): "without a self-send path the rotation material does
+      // not reach the own devices" — the shared twin line is built
+      // (`own_line.dart`).
+      //
+      // FALLEN (S361): "the device-bound line from §14.1 is not built" —
+      // it is built (`device_line.dart`) and is entered by `sendToUser`.
+      // Addressing a device specifically works.
+      //
+      // ── WHAT CARRIES, AND IT IS TWO THINGS ────────────────────────
+      //
+      // **1. There is no package that could be sent.** §14.4 describes
+      // kind 16 as "the package of wrapped new keys — one for each
+      // remaining device", wrapped "with that device's own device key":
+      // `wrap_d = Enc(device_key_d, shared_key(n))`. Exactly that cannot
+      // be formed in the build:
+      //
+      //   * `TwinSyncType.DEVICE_SET_CHANGED` (kind 16) occurs NOWHERE in
+      //     `lib/` — neither a producer nor a case in the receive `switch`
+      //     (`_handleTwinSync`). A package the receiver does not interpret
+      //     is not a delivery.
+      //   * The `shared_key` from §14.4 does not exist (measured in
+      //     `own_line.dart`; that is why `K_own` falls back to deriving from
+      //     the user KEM secrets).
+      //   * `device_key_d` of a SIBLING has no holder: `DeviceRecord`
+      //     keeps no keys, only `deviceNodeIdHex` (gap G-9, the same one at
+      //     which `_announceableDeviceSet` exits with `null` when
+      //     `_devices.length > 1`).
+      //
+      // **2. Without the wrap the lock-out would be ineffective.** §14.4
+      // names exactly that as the carrying property: "the exclusion is
+      // structural, not rule-based". The device line does NOT achieve it
+      // and cannot: its root falls out of `K_own`, and `K_own` still holds
+      // a just-locked-out device — it could compute every device line
+      // along and open every cell (§14.2). The separation this line
+      // achieves is an OPERATIONAL one (who harvests what), not a
+      // cryptographic one. Distributing it via the device line would look
+      // like a solution and would not be one.
+      //
+      // **3. The quorum is still missing** (§14.4/§14.8,
+      // `max(2, ceil(M/2))`): `approveRotation` cannot co-sign on a
+      // sibling device, and `_announceableDeviceSet` cannot prove the
+      // set — both gap G-9.
+      //
+      // The consequence of carrying on would still be the worst possible:
+      // the sibling devices would not get their new keys and would be
+      // locked out of the own identity after the rotation. Fail-closed
+      // remains the right answer.
+      _log.error('rotateIdentityKeys: ABORTED — ${_devices.length} '
+          'devices on this identity. The DEVICE-BOUND line from '
+          '§14.1 has been built and entered since S361; what is missing is the '
+          'CONTENT: kind 16 (DEVICE_SET_CHANGED) has in this codebase '
+          'neither producer nor receive case, the `shared_key` from §14.4 '
+          'does not exist, and the device key of a sibling has '
+          'no holder (gap G-9) — without it the lock-out is not '
+          'structural, but does not happen at all. Also missing is the quorum '
+          'max(2, ceil(M/2)) from §14.4/§14.8 (likewise G-9). '
+          'NOTHING was rotated; the existing keys are unchanged. '
+          '${_contacts.length} contact(s), ${_devices.length} device(s) '
+          'would have had to be notified.');
+      onStateChanged?.call();
+      return;
+    }
+
     final sodium = SodiumFFI();
 
-    // §5.6: save current primary mailbox ID before Ed25519 changes
-    _previousMailboxPrimary = _primaryMailboxId();
-    _previousMailboxPrimarySetAt = DateTime.now();
-    _saveMailboxTransition();
-
-    // 1. Generate new seed → new keys (BEFORE sending, so we can dual-sign)
+    // 1. Form new keys — BEFORE any sending, so that it can be
+    //    double-signed (the old signature proves "I am your contact", the
+    //    new one proves "I control the new key").
+    //
+    //    The new keys come from FRESH entropy, not from the existing
+    //    seed. §14.4: "Rotated sig keys are — like rotated KEM
+    //    keys (§4.5) — random and **not seed-derivable**: the founding key
+    //    remains the identity anchor from the seed". The HD path serves
+    //    here only as a derivation function over the NEW seed, so that the
+    //    PQ keys match it reproducibly — the same mechanism that
+    //    `_handleTwinSettingsChanged` runs on the twin side.
     final newEntropy = sodium.randomBytes(32);
     final newMasterSeed = SeedPhrase.entropyToSeed(newEntropy);
     final hdIndex = identity.hdIndex ?? 0;
@@ -10732,227 +9274,155 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final newEd25519 = HdWallet.deriveEd25519(newMasterSeed, hdIndex);
     final newX25519Pk = sodium.ed25519PkToX25519(newEd25519.publicKey);
     final newX25519Sk = sodium.ed25519SkToX25519(newEd25519.secretKey);
+    final pqKeys =
+        await generatePqKeysDeterministicIsolated(newMasterSeed, hdIndex);
 
-    // PQ keygen: deterministic from new seed (recovery must reproduce same keys)
-    final pqKeys = await generatePqKeysDeterministicIsolated(newMasterSeed, hdIndex);
-    final newMlDsa = (publicKey: pqKeys.mlDsaPk, secretKey: pqKeys.mlDsaSk);
-    final newMlKem = (publicKey: pqKeys.mlKemPk, secretKey: pqKeys.mlKemSk);
-
-    // 2. Build KeyRotationBroadcast with dual signatures
+    // 2. Build the broadcast, double-signed.
     final broadcast = proto.KeyRotationBroadcast()
       ..newEd25519Pk = newEd25519.publicKey
-      ..newMlDsaPk = newMlDsa.publicKey
+      ..newMlDsaPk = pqKeys.mlDsaPk
       ..newX25519Pk = newX25519Pk
-      ..newMlKemPk = newMlKem.publicKey;
-
-    // Sign the data payload (without signature fields) with BOTH keys
+      ..newMlKemPk = pqKeys.mlKemPk;
     final dataToSign = broadcast.writeToBuffer();
     broadcast.oldSignatureEd25519 =
-        sodium.signEd25519(dataToSign, identity.ed25519SecretKey); // OLD key
+        sodium.signEd25519(dataToSign, identity.ed25519SecretKey);
     broadcast.newSignatureEd25519 =
-        sodium.signEd25519(dataToSign, newEd25519.secretKey); // NEW key
+        sodium.signEd25519(dataToSign, newEd25519.secretKey);
 
-    // §7.5 Co-Auth: collect Device-Sig countersigs from Linked Devices
-    final pub0 = _identityPublisher;
-    final linkedDelegations = pub0?.delegations ?? <DeviceDelegation>[];
-    final totalDevices = linkedDelegations.length + 1; // +1 for Primary
-    final approvalTokens = <RotationApprovalToken>[];
-
-    if (totalDevices >= 2) {
-      final rotHash = computeRotationHash(
-        newEd25519Pk: newEd25519.publicKey,
-        newMlDsaPk: newMlDsa.publicKey,
-        newX25519Pk: newX25519Pk,
-        newMlKemPk: newMlKem.publicKey,
-        userId: identity.userId,
-      );
-
-      // Primary's own approval token
-      final deviceKp = node.deviceKeyPair;
-      approvalTokens.add(RotationApprovalToken(
-        deviceNodeId: identity.deviceNodeId,
-        rotationHash: rotHash,
-        deviceEd25519Sig: SodiumFFI().signEd25519(rotHash, deviceKp.ed25519PrivateKey),
-        deviceMlDsaSig: OqsFFI().mlDsaSign(rotHash, deviceKp.mlDsaPrivateKey),
-      ));
-
-      // Request approval from Linked Devices. The wait window is
-      // `_rotationApprovalWaitWindow`; the Linked Devices' own TTL is derived
-      // from it and deliberately LONGER (see `_rotationApprovalTtl`), so a
-      // late user decision still produces a token that can reach us instead
-      // of expiring on the other side at the same second we stop listening.
-      _pendingRotationHash = rotHash;
-      _collectedApprovalTokens.clear();
-      _rotationApprovalCompleter = Completer<void>();
-
-      final reqPayload = proto.RotationApprovalRequestPayload()
-        ..rotationHash = rotHash
-        // §7.5 (P4): stated explicitly rather than left to the proto default,
-        // so the two senders on this channel are symmetric and a reader does
-        // not have to know which default means what.
-        ..approvalKind = proto.ApprovalKindV3.APPROVAL_KIND_KEY_ROTATION;
-      _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_REQUEST,
-          Uint8List.fromList(reqPayload.writeToBuffer()));
-      _log.info('§7.5 ROTATION_APPROVAL_REQUEST sent to ${linkedDelegations.length} '
-          'linked device(s), waiting up to '
-          '${_rotationApprovalWaitWindow.inMinutes}min');
-
-      await _rotationApprovalCompleter!.future
-          .timeout(_rotationApprovalWaitWindow, onTimeout: () {
-        _log.warn('§7.5 Approval timeout — proceeding with '
-            '${_collectedApprovalTokens.length + 1}/$totalDevices tokens');
-      });
-
-      approvalTokens.addAll(_collectedApprovalTokens);
-      _pendingRotationHash = null;
-      _collectedApprovalTokens.clear();
-      _rotationApprovalCompleter = null;
-
-      _log.info('§7.5 Co-Auth complete: ${approvalTokens.length}/$totalDevices '
-          'tokens (quorum=${rotationQuorum(totalDevices)})');
+    // §7.5/§14.5: the co-signature of THIS device. With exactly one device
+    // it forms no quorum (§14.8: "the rule does not apply") — the
+    // receiver treats a device set of size 1 as `singleDevice`.
+    // It is attached anyway, so that ONE form stands on the wire and not
+    // two; as soon as a self-send path exists, further tokens join it
+    // without the format changing.
+    final rotHash = computeRotationHash(
+      newEd25519Pk: newEd25519.publicKey,
+      newMlDsaPk: pqKeys.mlDsaPk,
+      newX25519Pk: newX25519Pk,
+      newMlKemPk: pqKeys.mlKemPk,
+      userId: identity.userId,
+    );
+    final ownToken = _ownApprovalToken(rotHash);
+    if (ownToken != null) {
+      broadcast.approvalTokens.add(ownToken.toProto());
     }
+    broadcast.preRotationDeviceCount = _devices.length;
+    final payload = Uint8List.fromList(broadcast.writeToBuffer());
 
-    // Embed approval tokens in broadcast
-    broadcast.approvalTokens.addAll(approvalTokens.map((t) => t.toProto()));
-    broadcast.preRotationDeviceCount = totalDevices;
-
-    // 3. Send KEY_ROTATION_BROADCAST to all contacts (signed with OLD identity).
-    //    Welle 6 §7.4 Variant (b) — Emergency-flavor MUST go on the
-    //    InfrastructureFrame path: KEM-encap under each contact's
-    //    Device-KEM-PK, Outer Device-Sig under the unchanged Device-Sig keys
-    //    (rotation-stable per §3.5b). The dual-sig in the body is the inner
-    //    authentication subject. Every recipient device gets its own frame
-    //    (per-device fan-out via 2D-DHT auth-manifest).
-    final payloadBytes = Uint8List.fromList(broadcast.writeToBuffer());
-    // Paket C: pre-rotation hex for the persisted retry state. SR-2: the
-    // userId is a stable anchor (§3.1) and no longer changes on rotation —
-    // this now always equals the post-rotation hex; kept for the persisted
-    // retry-state format.
-    final oldUserIdHex = identity.userIdHex;
-    final sentToHex = <String>[];
+    // 3. Pairwise to every accepted contact (§14.4), signed with the
+    //    OLD key — hence BEFORE step 4.
+    final recipient = <String>[];
     for (final contact in _contacts.values) {
       if (contact.status != 'accepted') continue;
-      try {
-        final resolved = await node.identityResolver.resolve(contact.nodeId);
-        if (resolved.isEmpty) {
-          _log.warn('KEY_ROTATION_BROADCAST: no devices resolved for '
-              '${contact.displayName} '
-              '(${bytesToHex(contact.nodeId).substring(0, 8)}) — skipped, '
-              'retry timer will pick this up');
-          // Still register for retry so an offline contact eventually receives
-          // the rotation when their AuthManifest becomes reachable again.
-          sentToHex.add(bytesToHex(contact.nodeId));
-          continue;
-        }
-        var anyOk = false;
-        for (final dev in resolved) {
-          final ok = await node.sendInfraTo(
+      if (contact.x25519Pk == null || contact.mlKemPk == null) continue;
+      recipient.add(bytesToHex(contact.nodeId));
+      // ── THE 31-DAY CLASS, AND HERE ALONE (§21.1, S361) ─────
+      //
+      // v4_1 lines 1007-1008 name exactly this delivery by name:
+      // "**Distribution:** as a delivery of **the 31-day TTL class**,
+      // pairwise to contacts, via twin sync to one's own devices."
+      //
+      // WHY THIS IS MORE THAN A DEADLINE. A contact who does not harvest
+      // the announcement keeps writing against the OLD KEM key (§14.4:
+      // "Contacts who missed the announcement lose the encryption, but
+      // not addressability"). With the ordinary deadline of three days the
+      // announcement would expire before a contact is back from a longer
+      // holiday — and the rotation, which ran precisely because of a
+      // suspected compromise, would stay invisible to them.
+      //
+      // NOT the routine rotation next door (`_performKeyRotation`, and
+      // the latecomer copy in `_acceptContactRequest`): §4.5.4 says
+      // explicitly for it "the rotation is announced pairwise as an
+      // **ordinary** delivery". Both share the wire kind with this one —
+      // the class hangs on the SENDING SITE, not on the type.
+      _detachedSend(
+          'MTV3_KEY_ROTATION_BROADCAST (emergency)',
+          sendToUser(
+            recipientUserId: contact.nodeId,
             messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
-            innerPayload: payloadBytes,
-            recipientDeviceId: dev.deviceNodeId,
-          );
-          anyOk = anyOk || ok;
-        }
-        if (anyOk) {
-          _log.info('KEY_ROTATION_BROADCAST (Emergency, InfraFrame) sent to '
-              '${contact.displayName} '
-              '(${bytesToHex(contact.nodeId).substring(0, 8)}) — '
-              '${resolved.length} device(s)');
-        } else {
-          _log.warn('KEY_ROTATION_BROADCAST: all ${resolved.length} device(s) '
-              'sends failed for ${contact.displayName} — registering for '
-              'retry');
-        }
-        sentToHex.add(bytesToHex(contact.nodeId));
-      } catch (e) {
-        _log.warn('Failed to send KEY_ROTATION_BROADCAST to '
-            '${contact.displayName}: $e');
-      }
-    }
-    final sentCount = sentToHex.length;
-
-    // 4. Send rotation material to twin devices (encrypted with OLD key).
-    //    §7.1 LD-8: Linked Devices get per-device delegation keys (no seed!).
-    //    Legacy twins (seed-on-every-device) get entropy as before.
-    if (_devices.length > 1) {
-      final pub = _identityPublisher;
-      final linkedDeviceIds = pub != null
-          ? pub.delegations.map((d) => bytesToHex(d.deviceId)).toSet()
-          : <String>{};
-
-      // 4a. Linked devices: per-device delegation rotation
-      for (final delegation in pub?.delegations ?? <DeviceDelegation>[]) {
-        _sendDelegationRotation(
-          targetDeviceId: delegation.deviceId,
-          capabilities: delegation.capabilities,
-          maxValidUntilMs: delegation.maxValidUntilMs,
-          newMasterSeed: newMasterSeed,
-          newEd25519Pk: newEd25519.publicKey,
-          newMlDsaPk: newMlDsa.publicKey,
-          newX25519Pk: newX25519Pk,
-          newMlKemPk: newMlKem.publicKey,
-          newX25519Sk: newX25519Sk,
-          newMlKemSk: newMlKem.secretKey,
-        );
-      }
-
-      // 4b. Legacy twins only: entropy (they already hold the seed)
-      final hasLegacyTwins = _devices.keys.any((devHex) =>
-          devHex != _localDeviceId && !linkedDeviceIds.contains(devHex));
-      if (hasLegacyTwins) {
-        final seedPayload = utf8.encode(jsonEncode({
-          'emergencyRotation': true,
-          'newEntropy': bytesToHex(newEntropy),
-          'hdIndex': hdIndex,
-        }));
-        _sendTwinSync(
-            proto.TwinSyncType.SETTINGS_CHANGED, Uint8List.fromList(seedPayload));
-      }
+            payload: payload,
+            management: true,
+          ));
     }
 
-    // 5. NOW apply new keys locally (after all messages sent with OLD key)
+    // 3b. THE TRANSITION WINDOWS — MANDATORILY BEFORE STEP 4.
+    //
+    // `K_AB` derives from the OWN current secret key and the founding
+    // pubkey of the counterpart (`pair_registry.dart:211`), and step 4
+    // overwrites exactly this secret key. After that `K_AB_alt` can no
+    // longer be formed. Derivation, proof and the calculated price:
+    // `cleona_service_rotation_window.dart`.
+    _beginRotationWindows();
+
+    // 4. ONLY NOW apply locally. `rotateIdentityFull` first appends the
+    //    continuity proof old->new to the rotation chain
+    //    (`identity_context.dart`, `StoredRotationLink`) — that is proof
+    //    (i) from §14.4 "Verification levels at sig rotation".
     identity.rotateIdentityFull(
       newEd25519Pk: newEd25519.publicKey,
       newEd25519Sk: newEd25519.secretKey,
-      newMlDsaPk: newMlDsa.publicKey,
-      newMlDsaSk: newMlDsa.secretKey,
+      newMlDsaPk: pqKeys.mlDsaPk,
+      newMlDsaSk: pqKeys.mlDsaSk,
       newX25519Pk: newX25519Pk,
       newX25519Sk: newX25519Sk,
-      newMlKemPk: newMlKem.publicKey,
-      newMlKemSk: newMlKem.secretKey,
+      newMlKemPk: pqKeys.mlKemPk,
+      newMlKemSk: pqKeys.mlKemSk,
     );
 
-    // §5.11 — periodic peer-exchange tick is gone. After full identity
-    // rotation, push refreshed PeerInfo (carries new Ed25519/ML-DSA + KEM
-    // PKs) to every known peer once so transit/non-contact peers can heal
-    // their stale-PK caches without waiting for the §5.12 cold-path 1 h tick.
-    node.broadcastAddressUpdate();
+    // 4b. THE NEW LINES MUST BE REGISTERED AGAIN — and that was a
+    //     separate, silent total failure.
+    //
+    // `primeV41Pairs` skips every contact that is in `_v41Primed`,
+    // with the justification "A pair already registered does not change
+    // — `K_AB` hangs on the FOUNDING keys (§15.2), not on the current key
+    // state" (`cleona_service_receive.dart`).
+    // That holds for the OTHER SIDE of the DH and is correct there. For the
+    // OWN side it is wrong: `v41PairKeyFor` takes
+    // `identity.ed25519SecretKey` — the CURRENT key that step 4 has just
+    // replaced. `_v41Primed` was cleared nowhere.
+    //
+    // Without this clearing the harvest after a rotation would have
+    // listened permanently only on the OLD line and never registered the
+    // new one — i.e. exactly the opposite of the decision.
+    _v41Primed.clear();
+    primeV41Pairs();
 
-    // SR-2: republish the Auth-Manifest promptly so the DHT carries the
-    // chained manifest (new embedded keys + rotation chain, §4.3 path 2)
-    // instead of waiting for the 20h refresh tick. The 7-day old-KEM
-    // retention covers senders still resolving the pre-rotation manifest.
-    final pub = _identityPublisher;
-    if (pub != null) {
-      pub.stop();
-      unawaited(pub.start());
-    }
+    // 4c. And now the old lines ALONGSIDE — under their own identifier,
+    //     so that they do not overwrite the new ones.
+    _registerOldLines();
 
-    // 6. Initialize ACK tracking + persisted retry state (§26.6.2 Paket C).
-    // The retry manager stores `payloadBytes` (the dual-signed inner
-    // broadcast) so we can re-send to contacts that have not ACKed without
-    // needing the OLD signing key (which is already wiped).
+    // 5. Bookkeeping for the resubmission (§26.6.2 package C). The manager
+    //    holds the double-signed bytes, so that resending is possible
+    //    without the just-overwritten old signing key.
     _keyRotationRetry.startNewRotation(
-      broadcastBytes: payloadBytes,
-      contactNodeIdsHex: sentToHex,
-      oldUserIdHex: oldUserIdHex,
+      broadcastBytes: payload,
+      contactNodeIdsHex: recipient,
+      oldUserIdHex: identity.userIdHex,
       now: DateTime.now().millisecondsSinceEpoch,
     );
 
-    _log.info('Emergency key rotation complete. '
-        'Broadcast to $sentCount contacts. '
-        'UserID ${identity.userIdHex.substring(0, 16)}... unchanged '
-        '(stable anchor, chain ${identity.rotationChain.length} link(s))');
+    // 6. §14.5 path 2: the device set goes along pairwise. Without it
+    //    the receiver would have no device keys after this rotation
+    //    against which it could check a quorum next time.
+    _announceDeviceSetToContacts(occasion: 'Schluesselrotation');
+
+    // OPEN AND NAMED, not silently omitted:
+    //  * §14.4 "The transition (normative)" requires a window in which the
+    //    old and new inbound line are valid at the same time. The carrier
+    //    for that was `_previousMailboxPrimary = _primaryMailboxId()`;
+    //    `_primaryMailboxId()` fell with the CUT and is NOT invented here
+    //    as a substitute — v4_1 §21.2 explicitly denies the mark
+    //    ("There is no mailbox derivable from a pubkey"). Which mark the
+    //    harvest still queries after a rotation is an open
+    //    V4.1-INTERNAL design question and belongs to the owner.
+    //  * §14.3: the prekey pool is not discarded separately. The reason
+    //    is in §14.10 and is measured there: every sealing today falls
+    //    back to the long-lived user KEM keys, and step 4 replaces
+    //    them.
+    _log.info('§14.10: emergency rotation carried out — all four keys '
+        'replaced, broadcast to ${recipient.length} contact(s) pairwise '
+        '(§14.4), co-signature '
+        '${ownToken != null ? "1 eigenes Geraet" : "keine"} (§14.8).');
     onStateChanged?.call();
   }
 
@@ -10987,9 +9457,49 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
       }
 
+      // ── THE ORDER, AND BEFORE WRITING (S363) ─────────
+      //
+      // `rotationTimestamp` is signed (it stands above in the
+      // signature buffer) and was afterwards DISCARDED WITHOUT REPLACEMENT.
+      // This place was thus order-blind: the announcement that ARRIVED
+      // last won, not the newest.
+      //
+      // WHY THIS HAS BEEN A FINDING SINCE S361 AND HARDLY SHOWED BEFORE:
+      // since S361 the harvest reaches back up to 30 epochs
+      // (`harvestEpochsPlan`, `tiefe = kManagementKeepEpochs`). An
+      // announcement from a deep backlog therefore regularly arrives AFTER
+      // a newer one. Applied, it set the contact back to a generation the
+      // counterpart has long stopped keeping — and from then on every
+      // message to this contact is sealed against a dead key, silently
+      // (§4.5.4: there is exactly ONE predecessor slot).
+      //
+      // It is at the same time the replay protection: the cell is
+      // signed, so it is reusable unchanged as long as nothing checks its
+      // order.
+      //
+      // A TIE is discarded as well — a second copy of the same
+      // announcement (m x R = 60 deposits per message, §9.2, several
+      // families can arrive) carries nothing new.
+      final newState =
+          DateTime.fromMillisecondsSinceEpoch(rotation.rotationTimestamp.toInt());
+      final soFar = contact.kemRotationAt;
+      if (!announcementIsNew(soFar: soFar, fresh: newState)) {
+        _log.warn('KEY_ROTATION from ${senderHex.substring(0, 8)} DISCARDED: '
+            'announcement of ${newState.toUtc().toIso8601String()} is '
+            'not newer than the stored state '
+            '${soFar?.toUtc().toIso8601String()} — stale or '
+            'replayed announcement (S363).');
+        return;
+      }
+
       // Update contact's KEM keys
       contact.x25519Pk = Uint8List.fromList(rotation.newX25519Pk);
       contact.mlKemPk = Uint8List.fromList(rotation.newMlKemPk);
+      // §4.5.4: the point in time against which freshness AND order are
+      // measured in future. From the ANNOUNCEMENT, not from the own clock:
+      // the own clock would treat a deeply late-harvested announcement as
+      // brand new.
+      contact.kemRotationAt = newState;
       _saveContacts();
 
       // Update keys in group member entries
@@ -11012,14 +9522,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _saveChannels();
 
-      // Update routing table
-      final peer = node.routingTable.getPeer(senderUserId);
-      if (peer != null) {
-        peer.x25519PublicKey = contact.x25519Pk!;
-        peer.mlKemPublicKey = contact.mlKemPk!;
-      }
+      // The routing table held a second copy of these keys and was
+      // updated here. It has fallen; the contact record above is now the
+      // only storage (T).
 
-      _log.info('Key rotation received from ${contact.displayName}');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Key rotation received from ${contact.displayName}');
     } on KemVersionRejectedException catch (e) {
       _warnKemVersionRejected('KEY_ROTATION', e);
     } catch (e) {
@@ -11052,31 +9560,39 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Pre-mark with current timestamp to avoid processing our own sync + 7d TTL
     _processedSyncIds[syncIdHex] = DateTime.now().millisecondsSinceEpoch;
 
-    final syncEnvelope = proto.TwinSyncEnvelope()
-      ..syncId = syncId
-      ..deviceId = hexToBytes(_localDeviceId)
-      ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-      ..syncType = syncType
-      ..payload = payload;
-
-    final syncBytes = Uint8List.fromList(syncEnvelope.writeToBuffer());
+    // ONE derivation site (`twin_sync_wire.dart`) — the envelope was built
+    // by hand twice, here and in `_sendTwinAnnounce`, and neither of the
+    // two places was checkable from outside.
+    final syncBytes = buildTwinSyncEnvelope(
+      syncId: syncId,
+      deviceId: hexToBytes(_localDeviceId),
+      timestampMs: DateTime.now().millisecondsSinceEpoch,
+      syncType: syncType,
+      payload: payload,
+    );
 
     // V3: TWIN_SYNC fan-out to our own user-id resolves all our authorized
-    // device-ids — kanonischer Multi-Device-Use-Case for sendToUser.
-    try {
-      sendToUser(
-        recipientUserId: identity.nodeId,
-        messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC,
-        payload: syncBytes,
-        targetDeviceId: hasTarget ? targetDeviceId : null,
-      );
-      _log.debug(hasTarget
-          ? 'TWIN_SYNC($syncType) sent to device '
-              '${_hexShort(targetDeviceId)}'
-          : 'TWIN_SYNC($syncType) sent to ${_devices.length - 1} twins');
-    } catch (e) {
-      _log.warn('Failed to send TWIN_SYNC: $e');
-    }
+    // device-ids — canonical multi-device use case for sendToUser.
+    //
+    // HERE STOOD A `try { … } catch (e) { _log.warn(…) }` AROUND THE CALL.
+    // It never caught anything and was therefore worse than no
+    // protection: it made the place LOOK safeguarded. `sendToUser` is
+    // `async`, and an `async` function NEVER throws synchronously — every
+    // throw in its body lands in the returned `Future`, which was thrown
+    // away here, and went from there into the zone
+    // (`service_daemon.dart` ~L424) and into `exit(99)`. Measured in
+    // `test/smoke/smoke_self_send_v41_guard.dart`. `_detachedSend` is
+    // the latch that really takes hold at this place.
+    _detachedSend('MTV3_TWIN_SYNC', sendToUser(
+      recipientUserId: identity.nodeId,
+      messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC,
+      payload: syncBytes,
+      targetDeviceId: hasTarget ? targetDeviceId : null,
+    ));
+    _log.debug(hasTarget
+        ? 'TWIN_SYNC($syncType) sent to device '
+            '${_hexShort(targetDeviceId)}'
+        : 'TWIN_SYNC($syncType) sent to ${_devices.length - 1} twins');
   }
 
   /// Send TWIN_ANNOUNCE to register this device with existing twins.
@@ -11095,17 +9611,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // V3: no MTV3_TWIN_ANNOUNCE — wrapped as TWIN_SYNC sub-type DEVICE_ANNOUNCE.
     try {
-      final wrapper = proto.TwinSyncEnvelope()
-        ..syncId = SodiumFFI().randomBytes(16)
-        ..deviceId = hexToBytes(_localDeviceId)
-        ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
-        ..syncType = proto.TwinSyncType.DEVICE_ANNOUNCE
-        ..payload = payload;
-      sendToUser(
+      final wrapper = buildTwinSyncEnvelope(
+        syncId: SodiumFFI().randomBytes(16),
+        deviceId: hexToBytes(_localDeviceId),
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        syncType: proto.TwinSyncType.DEVICE_ANNOUNCE,
+        payload: payload,
+      );
+      _detachedSend('MTV3_TWIN_SYNC', sendToUser(
         recipientUserId: identity.nodeId,
         messageType: proto.MessageTypeV3.MTV3_TWIN_SYNC,
-        payload: Uint8List.fromList(wrapper.writeToBuffer()),
-      );
+        payload: wrapper,
+      ));
       _log.info('TWIN_ANNOUNCE (V3 TWIN_SYNC/DEVICE_ANNOUNCE) sent for $_localDeviceId');
     } catch (e) {
       _log.warn('Failed to send TWIN_ANNOUNCE: $e');
@@ -11151,6 +9668,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         mlDsaPk: json['mlDsaPk'] != null ? hexToBytes(json['mlDsaPk'] as String) : null,
         status: 'accepted',
         acceptedAt: DateTime.now(),
+        // §15.2: the twin's anchor, if it sent it along.
+        // If it is missing (twin on old version), the initial filling in
+        // `v41PeerFoundingPk` falls back to `ed25519Pk` — the same
+        // behaviour as before S361, just without the advantage.
+        peerFoundingEd25519Pk: json['peerFoundingEd25519Pk'] != null
+            ? hexToBytes(json['peerFoundingEd25519Pk'] as String)
+            : null,
       );
       final twinDeviceIds = json['deviceNodeIds'];
       if (twinDeviceIds is List) {
@@ -11158,26 +9682,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _contacts[nodeIdHex] = contact;
       _saveContacts();
-      _log.info('Twin-synced contact added: ${json['displayName']}');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Twin-synced contact added: ${json['displayName']}');
       onStateChanged?.call();
     } catch (e) {
       _log.warn('Twin CONTACT_ADDED failed: $e');
-    }
-  }
-
-  void _handleTwinContactDeleted(List<int> payload) {
-    try {
-      final nodeIdHex = utf8.decode(payload);
-      if (_contacts.containsKey(nodeIdHex)) {
-        final name = _contacts[nodeIdHex]!.displayName;
-        _contacts.remove(nodeIdHex);
-        _deletedContacts.add(nodeIdHex);
-        _saveContacts();
-        _log.info('Twin-synced contact deleted: $name');
-        onStateChanged?.call();
-      }
-    } catch (e) {
-      _log.warn('Twin CONTACT_DELETED failed: $e');
     }
   }
 
@@ -11192,6 +9701,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       // Avoid duplicate if we already have this message
       final conv = conversations[conversationId];
+      ensureLoaded(conversationId);
       if (conv != null && conv.messages.any((m) => m.id == messageId)) return;
 
       final msg = UiMessage(
@@ -11201,12 +9711,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         text: text,
         timestamp: timestamp,
         type: UiMessageType.text,
-        status: MessageStatus.sent,
+        // AP-4: the twin mirrors a message that was never sent on THIS
+        // device — there is no observation here, only the other device's
+        // notice. `placing` is the only value that claims nothing.
+        status: MessageStatus.resting,
         isOutgoing: true,
       );
 
       if (conv != null) {
         int insertIdx = conv.messages.length;
+        ensureLoaded(conversationId);
         for (int i = conv.messages.length - 1; i >= 0; i--) {
           if (conv.messages[i].timestamp.compareTo(msg.timestamp) <= 0) {
             insertIdx = i + 1;
@@ -11234,11 +9748,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
       if (msg == null) return;
 
       msg.text = newText;
       msg.editedAt = DateTime.now();
+      persistMessage(conversationId, msg);
       _saveConversations();
       onStateChanged?.call();
       _log.debug('Twin-synced message edit in $conversationId');
@@ -11255,11 +9771,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
       if (msg == null) return;
 
       msg.isDeleted = true;
       msg.text = '';
+      persistMessage(conversationId, msg);
       _saveConversations();
       onStateChanged?.call();
       _log.debug('Twin-synced message delete in $conversationId');
@@ -11277,46 +9795,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (conv == null) return;
       if (conv.unreadCount == 0) return;
       conv.unreadCount = 0;
-      // Bug #U3+#U15: Twin-Device-Read muss auch Android-Launcher-Badge
-      // aktualisieren — sonst bleibt Badge auf Primary hängen, obwohl der
-      // User auf dem Zweitgerät gelesen hat.
+      // Bug #U3+#U15: twin-device read must also update the Android launcher
+      // badge — otherwise the badge stays stuck on the primary, although
+      // the user has read on the second device.
       onCancelNotificationAndroid?.call(conversationId);
       _updateBadgeCount();
       _saveConversations();
       onStateChanged?.call();
     } catch (e) {
       _log.warn('Twin READ_RECEIPT failed: $e');
-    }
-  }
-
-  void _handleTwinGroupCreated(List<int> payload) {
-    try {
-      final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
-      final groupInfo = GroupInfo.fromJson(json);
-      if (_groups.containsKey(groupInfo.groupIdHex)) return;
-      _groups[groupInfo.groupIdHex] = groupInfo;
-      _saveGroups();
-      _log.info('Twin-synced group created: ${groupInfo.name}');
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('Twin GROUP_CREATED failed: $e');
-    }
-  }
-
-  void _handleTwinProfileChanged(List<int> payload) {
-    try {
-      final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
-      if (json.containsKey('displayName')) {
-        displayName = json['displayName'] as String;
-      }
-      if (json.containsKey('profilePicture')) {
-        _profilePictureBase64 = json['profilePicture'] as String?;
-        _saveProfilePicture();
-      }
-      onStateChanged?.call();
-      _log.info('Twin-synced profile change');
-    } catch (e) {
-      _log.warn('Twin PROFILE_CHANGED failed: $e');
     }
   }
 
@@ -11367,13 +9854,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // §5.11 — same as the originating-device path: push refreshed
         // PeerInfo to all known peers so the mesh heals stale-PK caches
         // without waiting for the §5.12 cold-path 1 h tick.
-        node.broadcastAddressUpdate();
-        // SR-2: prompt chained-manifest republish (see originating path).
-        final pub = _identityPublisher;
-        if (pub != null) {
-          pub.stop();
-          unawaited(pub.start());
-        }
+        // `node.broadcastAddressUpdate()` and the manifest republish
+        // stood here — both §4.3/§5.11 and fallen with the CUT (T).
         _log.info('Emergency key rotation applied from twin. '
             'UserID ${identity.userIdHex.substring(0, 16)}... unchanged '
             '(stable anchor)');
@@ -11381,22 +9863,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     } catch (e) {
       _log.warn('Twin SETTINGS_CHANGED failed: $e');
-    }
-  }
-
-  void _handleTwinDeviceRenamed(List<int> payload) {
-    try {
-      final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
-      final deviceId = json['deviceId'] as String;
-      final newName = json['deviceName'] as String;
-      if (_devices.containsKey(deviceId)) {
-        _devices[deviceId]!.deviceName = newName;
-        _saveDevices();
-        _log.info('Twin device renamed: $deviceId → $newName');
-        _notifyDevicesChanged();
-      }
-    } catch (e) {
-      _log.warn('Twin DEVICE_RENAMED failed: $e');
     }
   }
 
@@ -11420,48 +9886,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // value: `deviceNodeIdHex` is needed to key the delegation, and it is
       // gone from the map by now.
       unawaited(_applyDeviceSetRemoval(revoked, deviceIdHex));
+      // §14.10: mirror of the call in `revokeDevice` — this is the path the
+      // PRIMARY takes when a LINKED DEVICE initiated the revocation over
+      // twin-sync. `rotateIdentityKeys()` self-guards on `isLinkedDevice`, so
+      // calling it unconditionally here is safe: on the Primary it does the
+      // real work, on every other Linked Device this twin-sync message also
+      // reaches it just logs and returns.
+      unawaited(rotateIdentityKeys());
       _log.info('Twin device revoked: $deviceIdHex');
       _notifyDevicesChanged();
     } catch (e) {
       _log.warn('Twin DEVICE_REVOKED failed: $e');
-    }
-  }
-
-  /// Handle KEY_ROTATION_BROADCAST from a contact.
-  /// Dispatches between periodic KEM rotation (legacy KeyRotation format)
-  /// and emergency full rotation (KeyRotationBroadcast with dual-signature).
-  /// KEY_ROTATION_BROADCAST handler (§7.4). [payload] is the already-
-  /// decrypted+authenticated `KeyRotationBroadcast` proto bytes (V3 inner
-  /// User-Sig + outer Device-Sig + KEM-decap chain verified upstream;
-  /// for the Emergency variant on InfraFrame the inner dual-sig in the
-  /// body is the canonical authenticator). [senderUserId] is the
-  /// rotating peer's user-id (frame.senderUserId on AppFrame, or the
-  /// inferred old-userId via `_findSenderUserIdForKeyRotation` on
-  /// InfraFrame).
-  ///
-  /// Discriminator (defence in depth — wire-path bridges already enforce
-  /// it upstream): dual-sig populated → Emergency, single-sig → Periodic.
-  void _handleKeyRotationBroadcast(Uint8List payload, Uint8List senderUserId) {
-    final senderHex = bytesToHex(senderUserId);
-    final contact = _contacts[senderHex];
-    if (contact == null || contact.status != 'accepted') return;
-
-    try {
-      final broadcast = proto.KeyRotationBroadcast.fromBuffer(payload);
-      if (broadcast.oldSignatureEd25519.isNotEmpty &&
-          broadcast.newSignatureEd25519.isNotEmpty) {
-        _handleEmergencyKeyRotation(senderUserId, contact, senderHex, broadcast);
-      } else {
-        // Periodic KEM rotation — delegate to legacy handler. Re-serialize
-        // the parsed body so the periodic handler parses a clean
-        // KeyRotation proto (the body is wire-compatible since the dual-
-        // sig fields are absent).
-        _handleKeyRotation(payload, senderUserId);
-      }
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('KEY_ROTATION_BROADCAST', e);
-    } catch (e) {
-      _log.error('KEY_ROTATION_BROADCAST processing failed: $e');
     }
   }
 
@@ -11513,13 +9948,37 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final newX25519Pk = Uint8List.fromList(broadcast.newX25519Pk);
     final newMlKemPk = Uint8List.fromList(broadcast.newMlKemPk);
 
-    // §7.5 Co-Auth verification: check Device-Sig countersigs against
-    // cached AuthManifest device_sig_keys before applying new keys.
-    final cachedManifest = node.identityDhtHandler.getAuthManifest(senderUserId);
-    final cachedDeviceSigKeys = cachedManifest?.deviceSigKeys ?? <DeviceSigInfo>[];
+    // §7.5 co-auth: check the co-signatures against the device signing
+    // keys that this node has stored for the contact.
+    //
+    // HERE STOOD `const cachedDeviceSigKeys = <DeviceSigInfo>[]` — a list
+    // empty at compile time, because in V4.1 there was no storage place
+    // for the device keys of A CONTACT (gap G-9, receiving side).
+    // Consequence: the `else` branch below was dead code, the result was
+    // without exception `legacy`, and every emergency rotation was applied
+    // UNCHECKED — the §7.5 protection against a seed thief was universally
+    // absent.
+    //
+    // The storage place is now `ContactInfo.deviceSigKeys`, filled by the
+    // pairwise device-set announcement from §14.5 path 2
+    // (`cleona_service_deviceset.dart`).
+    //
+    // `legacy` REMAINS a valid outcome, and that is not a residual gap,
+    // but §14.5 literally: "A brand-new contact does not know `N`, a
+    // long-absent one has a stale state. Then: the case counts as a legacy
+    // case … and the new key is **applied anyway** — the **visibility
+    // principle**." The difference to before is that it is now the
+    // exception instead of the rule.
+    final cachedDeviceSigKeys = contact.deviceSigKeys
+        .map((d) => d.toSigInfo())
+        .whereType<DeviceSigInfo>()
+        .toList();
     RotationCoAuthResult coAuthResult;
 
     if (cachedDeviceSigKeys.isEmpty) {
+      _log.info('§7.5: no stored device set for '
+          '${senderHex.substring(0, 8)} — „legacy" per §14.5 (new or '
+          'long absent contact): apply with visible warning.');
       coAuthResult = RotationCoAuthResult.legacy;
     } else {
       final rotHash = computeRotationHash(
@@ -11550,7 +10009,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     // Keys are applied for every rotation the §8.3 setter ACCEPTS (SR-1:
-    // visibility, not prevention). Befund 11: a refused anchor write is the
+    // visibility, not prevention). Finding 11: a refused anchor write is the
     // one exception — a rotation onto one of our own hosted identity keys (or
     // a half hybrid pair) must not be applied at all. Writing only the KEM
     // keys would leave the record on its old signing anchor while every
@@ -11563,6 +10022,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     contact.x25519Pk = newX25519Pk;
     contact.mlKemPk = newMlKemPk;
+    // §4.5.4/S363: the copy is observed NOW. The emergency rotation carries
+    // no `rotationTimestamp` (`KeyRotationBroadcast` does not have the
+    // field), so the own clock is the only source here — and it is
+    // admissible because this path checks the double signature, so it
+    // cannot come from an old deposit without both signatures still being
+    // valid. Without this line the freshness measurement after an
+    // emergency rotation kept using `acceptedAt` and reported a contact
+    // that had only just been refreshed as stale.
+    contact.kemRotationAt = DateTime.now();
 
     // SR-1 (§7.4b step 6 / §8.3): route the rotation through Key-Change-
     // Detection (policy in key_change_policy.dart). The dual-sig + chain make
@@ -11573,7 +10041,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // silently at full trust. Reset the verification level and surface a
     // key-change warning, exactly like any other identity-key change.
     final prevLevel = contact.verificationLevel;
-    final keyChange = onIdentityRotation(prevLevel);
+    // §14.4 "Verification levels at sig rotation (normative)": the level
+    // stays if BOTH proofs are present — the continuity proof with the
+    // old key (checked above, otherwise we would not be here) and the
+    // quorum. Until S360 (ii) never existed, because the device set had no
+    // storage place; the level therefore dropped without exception.
+    final keyChange = onIdentityRotation(
+      prevLevel,
+      quorumMet: coAuthResult == RotationCoAuthResult.quorumMet,
+      oldSignatureValid: true,
+    );
     final wasVerified = keyChange.wasVerified;
     contact.verificationLevel = keyChange.newLevel;
 
@@ -11586,15 +10063,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // (The pre-SR-2 implementation recomputed the UserID here and migrated
     // contact/groups/channels/conversations to the new hex — that
     // contradicted §3.1 and wiped per-identity continuity.)
-    final peer = node.routingTable.getPeer(contact.nodeId);
-    if (peer != null) {
-      // firstParty per §17.3: the broadcast is authenticated with the old
-      // key (verified above), so the new key is first-party provenance.
-      peer.ed25519PublicKey = newEd25519Pk;
-      peer.x25519PublicKey = newX25519Pk;
-      peer.mlKemPublicKey = newMlKemPk;
-      peer.pkSource = PkSource.firstParty;
-    }
+    // The same for the emergency rotation: the second copy in the
+    // routing table including `PkSource.firstParty` fell with it (T).
     for (final group in _groups.values) {
       final member = group.members[senderHex];
       if (member != null) {
@@ -11618,14 +10088,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // §26.6.2 Send KEY_ROTATION_ACK back to the rotator — same UserID as
     // before (stable anchor). Pure ACK — empty payload. V3 inner User-Sig +
-    // outer Device-Sig + KEM-decap chain provides Paket-C-F2 forge defence.
+    // outer Device-Sig + KEM-decap chain provides package-C-F2 forge defence.
     unawaited(sendToUser(
       recipientUserId: senderUserId,
       messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK,
       payload: Uint8List(0),
     ));
 
-    _log.info('Emergency key rotation from ${contact.displayName}: '
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('Emergency key rotation from ${contact.displayName}: '
         'all keys updated in place, UserID ${senderHex.substring(0, 8)} '
         'unchanged (stable anchor); verification reset '
         '$prevLevel→${contact.verificationLevel} (SR-1 visibility), '
@@ -11657,14 +10128,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// V3 handler for MTV3_KEY_ROTATION_ACK (§26.6.2). Pure ACK — frame.payload
   /// is empty. Auth is the §23.3 inner User-Sig + outer Device-Sig + KEM-
   /// decap chain (verified upstream by the V3 receive pipeline), providing
-  /// Paket-C-F2 forge defence.
-  void _handleKeyRotationAckV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  /// package-C-F2 forge defence.
+  void _handleKeyRotationAckV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
     if (!_contacts.containsKey(senderHex)) {
       _log.warn('KEY_ROTATION_ACK V3 from unknown sender ${senderHex.substring(0, 8)} — dropped');
       return;
     }
     _keyRotationRetry.markAcked(senderHex);
+    // §14.4 / owner decision 01.09.: THIS ACK IS THE PROOF that the
+    // contact has the new keys — it can only authenticate it under
+    // `K_AB_neu` once it has adopted the new pubkey, and a frame whose MAC
+    // does not hold never arrives here (`verifyV41Sender`, verdict
+    // `forged` is discarded). The old pair line of this contact therefore
+    // falls IMMEDIATELY, not only at the cap.
+    _noteContactHasNewKeys(senderHex);
     final acked = _keyRotationRetry.ackedCount;
     final pending = _keyRotationRetry.pendingCount;
     final expired = _keyRotationRetry.expiredCount;
@@ -11703,10 +10181,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// fallback check that would be worth anything here, because the whole
   /// point of §7.5 is that Device-Sig keys are the one thing a seed thief
   /// cannot produce.
-  void _handleRotationRejectionAlertV3(proto.ApplicationFrameV3 frame,
-      Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleRotationRejectionAlertV3(HarvestEvent event) {
     try {
-      final alert = proto.RotationRejectionAlertPayload.fromBuffer(frame.payload);
+      final alert = proto.RotationRejectionAlertPayload.fromBuffer(event.payload);
       final alertUserId = Uint8List.fromList(alert.userId);
       final userIdHex = bytesToHex(alertUserId);
       final contact = _contacts[userIdHex];
@@ -11720,7 +10197,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // verified upstream by the V3 pipeline — so a mismatch means someone is
       // making a statement about a *third party*, which this message type
       // cannot do.
-      final frameSenderUserId = Uint8List.fromList(frame.senderUserId);
+      final frameSenderUserId = Uint8List.fromList(event.senderUserId);
       if (!constantTimeEquals(alertUserId, frameSenderUserId)) {
         _log.warn('§7.5 ROTATION_REJECTION_ALERT: payload userId '
             '${userIdHex.substring(0, 8)} != frame sender '
@@ -11729,163 +10206,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
 
       // Device-Sig pubkeys of that user, as published in their AuthManifest.
-      final manifest = node.identityDhtHandler.getAuthManifest(alertUserId);
-      final sigKeys = manifest?.deviceSigKeys ?? const <DeviceSigInfo>[];
-      if (sigKeys.isEmpty) {
-        _log.warn('§7.5 ROTATION_REJECTION_ALERT from ${contact.displayName}: '
-            'no cached device_sig_keys for ${userIdHex.substring(0, 8)} — '
-            'cannot verify, dropped (no unverified theft alarm)');
-        return;
-      }
-
-      // Condition 2: is the claimed device authorized for this user at all?
-      final alertDeviceId = Uint8List.fromList(alert.deviceNodeId);
-      final alertDeviceHex = bytesToHex(alertDeviceId);
-      DeviceSigInfo? signer;
-      for (final info in sigKeys) {
-        if (bytesToHex(info.deviceNodeId) == alertDeviceHex) {
-          signer = info;
-          break;
-        }
-      }
-      if (signer == null) {
-        _log.warn('§7.5 ROTATION_REJECTION_ALERT from ${contact.displayName}: '
-            'device ${_hexShort(alertDeviceId)} is not in the '
-            '${sigKeys.length} authorized device(s) of '
-            '${userIdHex.substring(0, 8)} — dropped');
-        return;
-      }
-
-      // Condition 1: do the Device-Sigs actually verify over the rotation hash?
-      final token = RotationApprovalToken(
-        deviceNodeId: alertDeviceId,
-        rotationHash: Uint8List.fromList(alert.rotationHash),
-        deviceEd25519Sig: Uint8List.fromList(alert.deviceEd25519Sig),
-        deviceMlDsaSig: Uint8List.fromList(alert.deviceMlDsaSig),
-      );
-      if (!token.verify(signer.deviceEd25519Pk, signer.deviceMlDsaPk)) {
-        _log.warn('§7.5 ROTATION_REJECTION_ALERT from ${contact.displayName}: '
-            'Device-Sig verification FAILED for device '
-            '${_hexShort(alertDeviceId)} — dropped (forged alert?)');
-        return;
-      }
-
-      _log.warn('§7.5 ROTATION_REJECTION_ALERT: linked device '
-          '${_hexShort(alertDeviceId)} of ${contact.displayName} actively '
-          'rejected a key rotation (Device-Sig verified) — '
-          'possible Primary theft!');
-      try {
-        onRotationRejectionAlert?.call(userIdHex, contact.displayName);
-      } catch (e) {
-        _log.warn('onRotationRejectionAlert listener threw: $e');
-      }
-    } catch (e) {
-      _log.error('ROTATION_REJECTION_ALERT processing failed: $e');
-    }
-  }
-
-  /// §26.6.2 Paket C: called from the 24h retry timer (and once at daemon
-  /// start). Re-sends the stored dual-signed broadcast to every pending
-  /// contact whose last attempt is older than the retry interval. Expired
-  /// contacts (too many attempts or past the 90d window) are surfaced via
-  /// `key_rotation_pending_contact` IPC events so the UI can warn.
-  void _retryPendingKeyRotations() {
-    if (!_keyRotationRetry.hasActiveRotation) {
-      // Still drain notifications — contacts may have expired on a prior tick
-      // before the UI had a chance to listen.
-      _emitKeyRotationRetryEvents();
+      // FORMERLY from the AuthManifest cache (§4.3, fallen).
+      // The doc comment above says explicitly that a missing manifest
+      // means "drop" and that there is no weaker substitute —
+      // "the whole point of §7.5 is that Device-Sig keys are the one
+      // thing a seed thief cannot produce". Exactly this branch now
+      // always applies (gap G-9). A theft alarm is therefore NO LONGER
+      // shown; that is the fail-closed outcome and the consequence is in
+      // the log.
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('§7.5 ROTATION_REJECTION_ALERT from ${contact.displayName}: '
+          'the device signature keys of ${userIdHex.substring(0, 8)} '
+          'have no storage location in V4.1 (gap G-9) — not verifiable, '
+          'discarded. No unverified theft alarm.');
       return;
-    }
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final due = _keyRotationRetry.duePending(now: now);
-    // Welle 6 §7.4: Emergency KEY_ROTATION_BROADCAST migrates to the
-    // InfrastructureFrame path. Per-device fan-out via the IdentityResolver
-    // — the Outer Device-Sig signs under the post-rotation Device-Sig-Keys
-    // (rotation-stable per §3.5b), and the dual-sig in the inner body is
-    // the only authentication subject the receiver checks against.
-    // Note: the legacy `oldUserIdHex` from `due` is no longer wired into the
-    // wire (the InfraFrame envelope has no senderUserId field), but the
-    // receiver looks up the contact-record by ed25519Pk-derived old keys
-    // already cached locally — so the F1 correlation still works.
-
-    for (final hex in due.contacts) {
-      final contact = _contacts[hex];
-      if (contact == null || contact.status != 'accepted') {
-        // Contact removed / invalid — just count it as an attempt so it will
-        // eventually expire instead of being retried every tick forever.
-        _keyRotationRetry.markAttempt(hex, now: now);
-        continue;
-      }
-      // Resolve the recipient's authorized device-set on each retry. The
-      // 2D-DHT may have grown new devices since the last attempt, and the
-      // local DeviceKemRecord cache may have warmed up — both are normal
-      // catch-up patterns for an offline contact coming back online.
-      unawaited(_retryKeyRotationToContact(hex, contact, due.broadcastBytes,
-          now: now));
-    }
-
-    _emitKeyRotationRetryEvents();
-  }
-
-  Future<void> _retryKeyRotationToContact(
-    String hex,
-    ContactInfo contact,
-    Uint8List broadcastBytes, {
-    required int now,
-  }) async {
-    try {
-      final resolved = await node.identityResolver.resolve(contact.nodeId);
-      if (resolved.isEmpty) {
-        _log.debug('KEY_ROTATION_BROADCAST retry: no devices resolved for '
-            '${hex.substring(0, 8)} (${contact.displayName}) — '
-            'will retry on next tick');
-        _keyRotationRetry.markAttempt(hex, now: now);
-        return;
-      }
-      var anyOk = false;
-      for (final dev in resolved) {
-        final ok = await node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST,
-          innerPayload: broadcastBytes,
-          recipientDeviceId: dev.deviceNodeId,
-        );
-        anyOk = anyOk || ok;
-      }
-      _keyRotationRetry.markAttempt(hex, now: now);
-      if (anyOk) {
-        _log.info('KEY_ROTATION_BROADCAST retry (InfraFrame) to '
-            '${hex.substring(0, 8)} (${contact.displayName}) — '
-            '${resolved.length} device(s)');
-      } else {
-        _log.debug('KEY_ROTATION_BROADCAST retry: all ${resolved.length} '
-            'device(s) sends failed for ${hex.substring(0, 8)} — '
-            'will retry on next tick');
-      }
     } catch (e) {
-      _log.warn('Retry KEY_ROTATION_BROADCAST to '
-          '${hex.substring(0, 8)} failed: $e');
-      // Still count attempt so we do not loop forever on permanent failure.
-      _keyRotationRetry.markAttempt(hex, now: now);
+      _log.warn('§7.5 ROTATION_REJECTION_ALERT: processing failed: $e');
     }
   }
-
-  /// Drain new `expired` transitions into IPC events. Idempotent — if there
-  /// is nothing to report this is a no-op.
-  void _emitKeyRotationRetryEvents() {
-    final newlyExpired = _keyRotationRetry.drainNewlyExpired();
-    if (newlyExpired.isEmpty) return;
-    final listener = onKeyRotationPendingExpired;
-    if (listener == null) return;
-    for (final hex in newlyExpired) {
-      try {
-        listener(hex, _keyRotationRetry.pendingCount);
-      } catch (e) {
-        _log.warn('onKeyRotationPendingExpired listener threw: $e');
-      }
-    }
-  }
-
-  // ── Calendar (§23) ──────────────────────────────────────────────────
 
   /// Send an encrypted payload to a single contact (V3 sendToUser path).
   /// `messageType` is already a V3 `MessageTypeV3` — KEM/Sig/zstd are
@@ -11909,7 +10247,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       payload: payload,
       groupId: groupId,
     );
-    node.statsCollector.addMessageSent();
+    statsCollector.addMessageSent();
   }
 
   // ── Calendar (§23) — forwarded to CalendarProtocolService ─────────
@@ -11990,15 +10328,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Future<bool> revokePollVoteAnonymous(String pollId) =>
       _polls.revokePollVoteAnonymous(pollId);
 
-  void handleIncomingPollAnonSubmit(
-    proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
-    InternetAddress from, int port, SenderIdentitySnapshot snapshot,
-  ) => _polls.handleIncomingPollAnonSubmit(frame, senderDeviceId, from, port, snapshot);
-
-  void handleIncomingPollAnonSubmitAck(
-    proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
-  ) => _polls.handleIncomingPollAnonSubmitAck(frame, senderDeviceId);
-
   @override
   Future<bool> updatePoll(String pollId, {
     bool? close,
@@ -12038,529 +10367,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
     await createCalendarEvent(event);
     return event.eventId;
-  }
-
-  // ── Recovery / Restore ──────────────────────────────────────────────
-
-  /// Handle incoming RESTORE_BROADCAST from a former contact trying to recover.
-  /// We check if the sender's old_node_id matches one of our contacts,
-  /// verify the signature with the old key, then send back our contact list
-  /// and recent messages progressively.
-  /// RESTORE_BROADCAST handler (Architecture §6.3 + §23.3 InfraFrame).
-  /// [payload] is the plain `RestoreBroadcast` proto (NOT KEM-encrypted —
-  /// the recovering peer's user-keys just changed, so the recipient cannot
-  /// run the standard inner User-Sig path; the inner old-Ed25519 sig in
-  /// the body is the canonical authenticity check). Sender lookup keys
-  /// off `rb.oldNodeId` so no separate sender argument is needed.
-  void _handleRestoreBroadcast(Uint8List payload) {
-    try {
-      // RestoreBroadcast is NOT encrypted (sender has new keys, we don't know them yet)
-      // but it IS signed with the OLD key to prove ownership
-      final rb = proto.RestoreBroadcast.fromBuffer(payload);
-      final oldNodeIdHex = rb.oldNodeId.hex;
-      final newNodeIdHex = rb.newNodeId.hex;
-
-      // Check: is old_node_id one of our accepted contacts?
-      final contact = _contacts[oldNodeIdHex];
-      if (contact == null || contact.status != 'accepted') {
-        _log.debug('RESTORE_BROADCAST from unknown node ${oldNodeIdHex.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      // H-2: verify the inner restore proof against the contact's STORED
-      // keys (before we apply the broadcast's new keys). The canonical
-      // bytes are the body with both signature fields empty.
-      if (contact.ed25519Pk != null) {
-        final dataToVerify = (proto.RestoreBroadcast()
-              ..oldNodeId = rb.oldNodeId
-              ..newNodeId = rb.newNodeId
-              ..newEd25519Pk = rb.newEd25519Pk
-              ..newX25519Pk = rb.newX25519Pk
-              ..newMlKemPk = rb.newMlKemPk
-              ..newMlDsaPk = rb.newMlDsaPk
-              ..displayName = rb.displayName
-              ..timestamp = rb.timestamp)
-            .writeToBuffer();
-        final edValid = SodiumFFI().verifyEd25519(
-          dataToVerify,
-          Uint8List.fromList(rb.signature),
-          contact.ed25519Pk!,
-        );
-        if (!edValid) {
-          _log.warn('RESTORE_BROADCAST Ed25519 signature invalid from ${oldNodeIdHex.substring(0, 8)}');
-          return;
-        }
-        // H-2 hybrid: when the sender supplied an ML-DSA signature AND we
-        // hold the contact's ML-DSA key, the PQ proof MUST verify too — a
-        // classical-only forge is rejected. A missing `signature_ml_dsa`
-        // (pre-H-2 sender) is accepted as legacy-classical during the
-        // transition; a present-but-invalid one is a forge and rejected.
-        if (rb.signatureMlDsa.isNotEmpty) {
-          if (contact.mlDsaPk == null) {
-            _log.warn('RESTORE_BROADCAST carries ML-DSA sig but no stored '
-                'mlDsaPk for ${oldNodeIdHex.substring(0, 8)} — accepting '
-                'classical proof (legacy transition)');
-          } else {
-            final pqValid = OqsFFI().mlDsaVerify(
-              dataToVerify,
-              Uint8List.fromList(rb.signatureMlDsa),
-              contact.mlDsaPk!,
-            );
-            if (!pqValid) {
-              _log.warn('RESTORE_BROADCAST ML-DSA signature INVALID from '
-                  '${oldNodeIdHex.substring(0, 8)} — rejected (H-2 forge defence)');
-              return;
-            }
-          }
-        } else {
-          _log.info('RESTORE_BROADCAST from ${oldNodeIdHex.substring(0, 8)} '
-              'is Ed25519-only (legacy-classical, pre-H-2 sender)');
-        }
-      }
-
-      _log.warn('RESTORE-BROADCAST-DIAG: "${contact.displayName}" userId migration '
-          'old=${oldNodeIdHex.substring(0, 16)} → new=${newNodeIdHex.substring(0, 16)} '
-          '— contact map entry will be re-keyed');
-
-      // H-2 Part B: detect whether this restore actually CHANGES the
-      // contact's identity key (new-seed re-identity or forge attempt) vs.
-      // a deterministic same-seed recovery where the keys are unchanged.
-      // Captured before the overwrite below.
-      final identityKeyChanged = contact.ed25519Pk == null ||
-          !constantTimeEquals(contact.ed25519Pk!,
-              Uint8List.fromList(rb.newEd25519Pk));
-      final prevVerification = contact.verificationLevel;
-
-      // Update contact with new keys and node ID.
-      // §8.3 (Befund 11): the anchor is written BEFORE the contact map is
-      // re-keyed. If the setter refuses, the record stays untouched under its
-      // old key and the whole migration — including the RestoreResponse
-      // phases that ship our contact list and message history to the
-      // recovering peer — is skipped. Aborting after the `remove` would have
-      // dropped the contact from the map entirely.
-      if (!_setContactTrustAnchor(contact, newNodeIdHex,
-          Uint8List.fromList(rb.newEd25519Pk),
-          Uint8List.fromList(rb.newMlDsaPk),
-          source: 'restore broadcast')) {
-        _log.warn('§8.3: RESTORE_BROADCAST from ${oldNodeIdHex.substring(0, 8)} '
-            '— anchor write REFUSED, migration aborted, contact unchanged');
-        return;
-      }
-      _contacts.remove(oldNodeIdHex);
-      contact.nodeId = Uint8List.fromList(rb.newNodeId);
-      contact.x25519Pk = Uint8List.fromList(rb.newX25519Pk);
-      contact.mlKemPk = Uint8List.fromList(rb.newMlKemPk);
-      if (rb.displayName.isNotEmpty) contact.displayName = rb.displayName;
-      // H-2 Part B (§8.3, SR-1-consistent): if the restore changed the
-      // contact's identity key, run Key-Change-Detection — reset the
-      // verification level so a re-identity / forge is never followed
-      // silently at full trust. A deterministic same-seed recovery leaves
-      // the key unchanged and keeps the verification level.
-      if (identityKeyChanged) {
-        contact.verificationLevel =
-            onIdentityRotation(contact.verificationLevel).newLevel;
-      }
-      _contacts[newNodeIdHex] = contact;
-      _saveContacts();
-
-      // Update group/channel memberships
-      for (final group in _groups.values) {
-        final member = group.members.remove(oldNodeIdHex);
-        if (member != null) {
-          group.members[newNodeIdHex] = GroupMemberInfo(
-            nodeIdHex: newNodeIdHex,
-            displayName: contact.displayName,
-            role: member.role,
-            ed25519Pk: contact.ed25519Pk,
-            x25519Pk: contact.x25519Pk,
-            mlKemPk: contact.mlKemPk,
-          );
-        }
-        if (group.ownerNodeIdHex == oldNodeIdHex) {
-          group.ownerNodeIdHex = newNodeIdHex;
-        }
-      }
-      _saveGroups();
-
-      for (final channel in _channels.values) {
-        final member = channel.members.remove(oldNodeIdHex);
-        if (member != null) {
-          channel.members[newNodeIdHex] = ChannelMemberInfo(
-            nodeIdHex: newNodeIdHex,
-            displayName: contact.displayName,
-            role: member.role,
-            ed25519Pk: contact.ed25519Pk,
-            x25519Pk: contact.x25519Pk,
-            mlKemPk: contact.mlKemPk,
-          );
-        }
-        if (channel.ownerNodeIdHex == oldNodeIdHex) {
-          channel.ownerNodeIdHex = newNodeIdHex;
-        }
-      }
-      _saveChannels();
-
-      // Migrate conversation from old to new node ID
-      final oldConv = conversations.remove(oldNodeIdHex);
-      if (oldConv != null) {
-        conversations[newNodeIdHex] = Conversation(
-          id: newNodeIdHex,
-          displayName: contact.displayName,
-          messages: oldConv.messages,
-          unreadCount: oldConv.unreadCount,
-          lastActivity: oldConv.lastActivity,
-          profilePictureBase64: oldConv.profilePictureBase64,
-          config: oldConv.config,
-          isFavorite: oldConv.isFavorite,
-          notificationsEnabled: oldConv.notificationsEnabled,
-          notificationSoundName: oldConv.notificationSoundName,
-        );
-        _saveConversations();
-      }
-
-      // Send RestoreResponse Phase 1: contact list
-      _sendRestoreResponse(contact, 1);
-
-      // Phase 2: recent messages (after short delay)
-      Timer(const Duration(seconds: 2), () {
-        _sendRestoreResponse(contact, 2);
-      });
-
-      // Phase 3: full history (after longer delay, in background)
-      Timer(const Duration(seconds: 10), () {
-        _sendRestoreResponse(contact, 3);
-      });
-
-      // H-2 Part B (§6.3.5): surface the restore to the UI. Fired for EVERY
-      // accepted restore (the §6.3.5 "[Name] has set up a new device"
-      // notification, now real). `identityKeyChanged` tells the UI whether
-      // to escalate to a key-change warning (verification was reset above).
-      _log.info('RESTORE_BROADCAST visibility: ${contact.displayName} '
-          'keyChanged=$identityKeyChanged verification '
-          '$prevVerification→${contact.verificationLevel}');
-      try {
-        onContactRestoreDetected?.call(
-            newNodeIdHex, contact.displayName, identityKeyChanged);
-      } catch (e) {
-        _log.warn('onContactRestoreDetected listener threw: $e');
-      }
-
-      onStateChanged?.call();
-    } catch (e) {
-      _log.error('RESTORE_BROADCAST processing failed: $e');
-    }
-  }
-
-  /// Send RestoreResponse to a recovering contact.
-  Future<void> _sendRestoreResponse(ContactInfo recipient, int phase) async {
-    if (recipient.x25519Pk == null || recipient.mlKemPk == null) return;
-
-    final response = proto.RestoreResponse()..phase = phase;
-
-    if (phase == 1) {
-      // Phase 1: Send our contact list (contacts the recovering node might want to re-add)
-      for (final c in _contacts.values) {
-        if (c.status != 'accepted') continue;
-        final entry = proto.ContactEntry()
-          ..nodeId = c.nodeId
-          ..displayName = c.displayName;
-        if (c.ed25519Pk != null) entry.ed25519Pk = c.ed25519Pk!;
-        if (c.x25519Pk != null) entry.x25519Pk = c.x25519Pk!;
-        if (c.mlKemPk != null) entry.mlKemPk = c.mlKemPk!;
-        if (c.mlDsaPk != null) entry.mlDsaPk = c.mlDsaPk!;
-        if (c.profilePictureBase64 != null) {
-          entry.profilePicture = base64Decode(c.profilePictureBase64!);
-        }
-        response.contacts.add(entry);
-      }
-
-      // Also add ourselves as a contact entry
-      final selfEntry = proto.ContactEntry()
-        ..nodeId = identity.nodeId
-        ..displayName = displayName
-        ..ed25519Pk = identity.ed25519PublicKey
-        ..x25519Pk = identity.x25519PublicKey
-        ..mlKemPk = identity.mlKemPublicKey
-        ..mlDsaPk = identity.mlDsaPublicKey;
-      if (_profilePictureBase64 != null) {
-        selfEntry.profilePicture = base64Decode(_profilePictureBase64!);
-      }
-      response.contacts.add(selfEntry);
-
-      // Add group structures + member contacts
-      for (final group in _groups.values) {
-        if (!group.members.containsKey(recipient.nodeIdHex)) continue;
-
-        // Add group structure
-        final groupInfo = proto.RestoreGroupInfo()
-          ..groupId = hexToBytes(group.groupIdHex)
-          ..name = group.name
-          ..ownerNodeIdHex = group.ownerNodeIdHex;
-        if (group.description != null) groupInfo.description = group.description!;
-
-        for (final member in group.members.values) {
-          final gm = proto.RestoreGroupMember()
-            ..nodeIdHex = member.nodeIdHex
-            ..displayName = member.displayName
-            ..role = member.role;
-          if (member.ed25519Pk != null) gm.ed25519Pk = member.ed25519Pk!;
-          if (member.x25519Pk != null) gm.x25519Pk = member.x25519Pk!;
-          if (member.mlKemPk != null) gm.mlKemPk = member.mlKemPk!;
-          groupInfo.members.add(gm);
-
-          // Also add member as contact (dedup)
-          if (!response.contacts.any((c) => c.nodeId.hex == member.nodeIdHex)) {
-            final entry = proto.ContactEntry()
-              ..nodeId = hexToBytes(member.nodeIdHex)
-              ..displayName = member.displayName;
-            if (member.ed25519Pk != null) entry.ed25519Pk = member.ed25519Pk!;
-            if (member.x25519Pk != null) entry.x25519Pk = member.x25519Pk!;
-            if (member.mlKemPk != null) entry.mlKemPk = member.mlKemPk!;
-            response.contacts.add(entry);
-          }
-        }
-        response.groups.add(groupInfo);
-      }
-
-      // Add channel structures + subscriber contacts
-      for (final channel in _channels.values) {
-        if (!channel.members.containsKey(recipient.nodeIdHex)) continue;
-
-        final channelInfo = proto.RestoreChannelInfo()
-          ..channelId = hexToBytes(channel.channelIdHex)
-          ..name = channel.name
-          ..ownerNodeIdHex = channel.ownerNodeIdHex
-          // NSFW rating travels with the restore payload (proto field 6). Until
-          // the field existed the recovering side could only fall back to the
-          // ChannelInfo default, so an adult channel silently lost its flag.
-          ..isAdult = channel.isAdult;
-        if (channel.description != null) channelInfo.description = channel.description!;
-
-        for (final member in channel.members.values) {
-          final cm = proto.RestoreChannelMember()
-            ..nodeIdHex = member.nodeIdHex
-            ..displayName = member.displayName
-            ..role = member.role;
-          if (member.ed25519Pk != null) cm.ed25519Pk = member.ed25519Pk!;
-          if (member.x25519Pk != null) cm.x25519Pk = member.x25519Pk!;
-          if (member.mlKemPk != null) cm.mlKemPk = member.mlKemPk!;
-          channelInfo.members.add(cm);
-
-          if (!response.contacts.any((c) => c.nodeId.hex == member.nodeIdHex)) {
-            final entry = proto.ContactEntry()
-              ..nodeId = hexToBytes(member.nodeIdHex)
-              ..displayName = member.displayName;
-            if (member.ed25519Pk != null) entry.ed25519Pk = member.ed25519Pk!;
-            if (member.x25519Pk != null) entry.x25519Pk = member.x25519Pk!;
-            if (member.mlKemPk != null) entry.mlKemPk = member.mlKemPk!;
-            response.contacts.add(entry);
-          }
-        }
-        response.channels.add(channelInfo);
-      }
-    } else if (phase == 2 || phase == 3) {
-      // Phase 2: Last 50 messages from our DM conversation
-      // Phase 3: ALL messages from ALL conversations (full history)
-      final convIds = phase == 3
-          ? conversations.keys.toList()
-          : [recipient.nodeIdHex];
-      final maxMessages = phase == 3 ? null : 50;
-
-      for (final convId in convIds) {
-        final conv = conversations[convId];
-        if (conv == null) continue;
-
-        final msgs = (maxMessages != null && conv.messages.length > maxMessages)
-            ? conv.messages.sublist(conv.messages.length - maxMessages)
-            : conv.messages;
-
-        for (final msg in msgs) {
-          if (msg.isDeleted) continue;
-          response.messages.add(proto.StoredMessage()
-            ..messageId = hexToBytes(msg.id)
-            ..senderId = hexToBytes(msg.senderNodeIdHex)
-            ..recipientId = identity.nodeId
-            ..conversationId = convId
-            ..timestamp = Int64(msg.timestamp.millisecondsSinceEpoch)
-            ..uiMessageType = msg.type.wireValue
-            ..payload = utf8.encode(msg.text));
-        }
-      }
-    }
-
-    // V3 (Architecture §23.3 + §6.3): RESTORE_RESPONSE rides as an
-    // ApplicationFrameV3 via sendToUser. The codec handles per-message KEM
-    // (X25519 + ML-KEM-768) on the inner frame, so we hand it the raw
-    // RestoreResponse protobuf as payload (no pre-encryption). Receiver-
-    // side `_handleRestoreResponseV3` is wired by Cluster C4.
-    //
-    // Spec-note: RESTORE flow uses recipient.nodeId from the old contact
-    // list and `recipient.x25519Pk`/`mlKemPk` are pre-rotation. sendToUser
-    // resolves recipient → devices via 2D-DHT and uses the KEM pubkeys on
-    // the contact record — best-effort. If the recipient already rotated,
-    // the resolve may return new device-IDs whose decap-SK doesn't match
-    // the contact-cached User-KEM-PK, and the receiver silently drops.
-    // That matches §2.4.1 [10'] semantics; the broadcaster's retry on
-    // RESTORE_BROADCAST will eventually reach a freshly-keyed device.
-    final ok = await sendToUser(
-      recipientUserId: recipient.nodeId,
-      messageType: proto.MessageTypeV3.MTV3_RESTORE_RESPONSE,
-      payload: Uint8List.fromList(response.writeToBuffer()),
-    );
-
-    _log.info('Sent RestoreResponse phase $phase to ${recipient.displayName} '
-        '(${phase == 1 ? '${response.contacts.length} contacts' : '${response.messages.length} messages'}) ok=$ok');
-  }
-
-  /// Handle incoming RESTORE_RESPONSE: restore contacts and messages.
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// RestoreResponse proto bytes (KEM-decap + inner User-Sig + outer
-  /// Device-Sig already verified by the V3 receive pipeline).
-  /// [senderUserId] is the recovering peer's user-id from the inbound
-  /// ApplicationFrame.
-  void _handleRestoreResponse(Uint8List payload, Uint8List senderUserId, Uint8List senderDeviceId) {
-    try {
-      final response = proto.RestoreResponse.fromBuffer(payload);
-      final senderHex = bytesToHex(senderUserId);
-      var contactsRestored = 0;
-      var messagesRestored = 0;
-
-      if (response.phase == 1) {
-        // Phase 1: Restore contacts
-        for (final entry in response.contacts) {
-          final nodeIdHex = entry.nodeId.hex;
-          if (nodeIdHex == identity.userIdHex) continue; // Skip self
-          if (_contacts.containsKey(nodeIdHex)) continue; // Already known
-          if (_deletedContacts.contains(nodeIdHex)) continue; // Explicitly deleted
-
-          _contacts[nodeIdHex] = ContactInfo(
-            nodeId: Uint8List.fromList(entry.nodeId),
-            displayName: entry.displayName,
-            ed25519Pk: entry.ed25519Pk.isNotEmpty ? Uint8List.fromList(entry.ed25519Pk) : null,
-            x25519Pk: entry.x25519Pk.isNotEmpty ? Uint8List.fromList(entry.x25519Pk) : null,
-            mlKemPk: entry.mlKemPk.isNotEmpty ? Uint8List.fromList(entry.mlKemPk) : null,
-            mlDsaPk: entry.mlDsaPk.isNotEmpty ? Uint8List.fromList(entry.mlDsaPk) : null,
-            status: 'accepted',
-            profilePictureBase64: entry.profilePicture.isNotEmpty
-                ? base64Encode(entry.profilePicture)
-                : null,
-            acceptedAt: DateTime.now(),
-          );
-          contactsRestored++;
-        }
-        // §3.1 A-5: the A-2 central fix ran before this handler but
-        // _contacts was still empty at that point. Now that contacts are
-        // restored, record the sender's deviceNodeId.
-        final senderContact = _contacts[senderHex];
-        if (senderContact != null) {
-          senderContact.deviceNodeIds.add(bytesToHex(senderDeviceId));
-        }
-        if (contactsRestored > 0) _saveContacts();
-
-        // Restore groups
-        var groupsRestored = 0;
-        for (final gi in response.groups) {
-          final groupIdHex = gi.groupId.hex;
-          if (_groups.containsKey(groupIdHex)) continue;
-
-          final members = <String, GroupMemberInfo>{};
-          for (final gm in gi.members) {
-            members[gm.nodeIdHex] = GroupMemberInfo(
-              nodeIdHex: gm.nodeIdHex,
-              displayName: gm.displayName,
-              role: gm.role,
-              ed25519Pk: gm.ed25519Pk.isNotEmpty ? Uint8List.fromList(gm.ed25519Pk) : null,
-              x25519Pk: gm.x25519Pk.isNotEmpty ? Uint8List.fromList(gm.x25519Pk) : null,
-              mlKemPk: gm.mlKemPk.isNotEmpty ? Uint8List.fromList(gm.mlKemPk) : null,
-            );
-          }
-
-          _groups[groupIdHex] = GroupInfo(
-            groupIdHex: groupIdHex,
-            name: gi.name,
-            description: gi.description.isNotEmpty ? gi.description : null,
-            ownerNodeIdHex: gi.ownerNodeIdHex,
-            members: members,
-          );
-          groupsRestored++;
-        }
-        if (groupsRestored > 0) _saveGroups();
-
-        // Restore channels
-        var channelsRestored = 0;
-        for (final ci in response.channels) {
-          final channelIdHex = ci.channelId.hex;
-          if (_channels.containsKey(channelIdHex)) continue;
-
-          final members = <String, ChannelMemberInfo>{};
-          for (final cm in ci.members) {
-            members[cm.nodeIdHex] = ChannelMemberInfo(
-              nodeIdHex: cm.nodeIdHex,
-              displayName: cm.displayName,
-              role: cm.role,
-              ed25519Pk: cm.ed25519Pk.isNotEmpty ? Uint8List.fromList(cm.ed25519Pk) : null,
-              x25519Pk: cm.x25519Pk.isNotEmpty ? Uint8List.fromList(cm.x25519Pk) : null,
-              mlKemPk: cm.mlKemPk.isNotEmpty ? Uint8List.fromList(cm.mlKemPk) : null,
-            );
-          }
-
-          _channels[channelIdHex] = ChannelInfo(
-            channelIdHex: channelIdHex,
-            name: ci.name,
-            description: ci.description.isNotEmpty ? ci.description : null,
-            ownerNodeIdHex: ci.ownerNodeIdHex,
-            members: members,
-            // Carry the sender's NSFW rating instead of inheriting a default.
-            // A sender still on the old build leaves field 6 unset and this
-            // reads the protobuf default false — same as before the change.
-            isAdult: ci.isAdult,
-          );
-          channelsRestored++;
-        }
-        if (channelsRestored > 0) _saveChannels();
-
-        _log.info('Restore Phase 1: $contactsRestored contacts, $groupsRestored groups, $channelsRestored channels from ${senderHex.substring(0, 8)}');
-      } else if (response.phase == 2) {
-        // Phase 2: Restore recent messages
-        for (final stored in response.messages) {
-          final msgId = stored.messageId.hex;
-          final convId = stored.conversationId;
-          final senderIdHex = stored.senderId.hex;
-
-          // Skip if already have this message
-          final conv = conversations[convId];
-          if (conv != null && conv.messages.any((m) => m.id == msgId)) continue;
-
-          final isOutgoing = senderIdHex == identity.userIdHex;
-          final text = utf8.decode(stored.payload, allowMalformed: true);
-          if (text.isEmpty) continue;
-
-          final msg = UiMessage(
-            id: msgId,
-            conversationId: convId,
-            senderNodeIdHex: senderIdHex,
-            text: text,
-            timestamp: DateTime.fromMillisecondsSinceEpoch(stored.timestamp.toInt()),
-            type: UiMessageType.text,
-            status: MessageStatus.delivered,
-            isOutgoing: isOutgoing,
-          );
-
-          _addMessageToConversation(convId, msg);
-          messagesRestored++;
-        }
-        if (messagesRestored > 0) _saveConversations();
-        _log.info('Restore Phase 2: $messagesRestored messages from ${senderHex.substring(0, 8)}');
-      }
-
-      onRestoreProgress?.call(response.phase, contactsRestored, messagesRestored);
-      onStateChanged?.call();
-    } on KemVersionRejectedException catch (e) {
-      _warnKemVersionRejected('RESTORE_RESPONSE', e);
-    } catch (e) {
-      _log.error('RESTORE_RESPONSE processing failed: $e');
-    }
   }
 
   /// Send a Restore Broadcast to all known contacts, requesting they re-send
@@ -12610,119 +10416,117 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     final broadcastBytes = rb.writeToBuffer();
-    var sent = 0;
 
-    // V3.0 Welle 6 §6.3: per-recipient-DEVICE fanout via InfrastructureFrame
-    // path. The recovering peer's User-Sig-Keys just changed, so we cannot
-    // sign an ApplicationFrame; the InfrastructureFrame Outer-Sig under the
-    // (rotation-stable) Device-Sig-Keys carries routing-authenticity, and
-    // the inner old-Ed25519-sig in the RestoreBroadcast body proves we
-    // controlled the previous User-Identity. KEM-encrypt under each
-    // recipient's Device-KEM-PK (§3.5b) — looked up via 2D-DHT
-    // (IdentityResolver). One RestoreBroadcast InfrastructureFrame per
-    // *device* of each accepted contact.
+    // ── G-17 CLOSED: THE BROADCAST IS ORDINARY PAIR TRAFFIC ───
     //
-    // Erasure-coded offline-delivery (§5.4 + §6.3.1 step 4): the canonical
-    // NetworkPacket built for the contact's first-resolved device is
-    // fragmented onto the K=10 closest DHT replicators of the contact's
-    // user-mailbox. Per §5.4 InfraFrame KEM is device-PK-keyed, so the
-    // encoded blob can only reach that one device; sibling devices of the
-    // same contact recover via subsequent Direct-Send retries or via S&F
-    // (§5.5).
-    for (final contact in oldContacts) {
-      if (contact.status != 'accepted') continue;
-
-      final resolved =
-          await node.identityResolver.resolve(contact.nodeId);
-      if (resolved.isEmpty) {
-        _log.debug('Restore broadcast: no devices resolved for '
-            '${contact.nodeIdHex.substring(0, 8)} — skipping (no canonical '
-            'packet possible without device-set)');
-        continue;
-      }
-
-      var anyDeviceSent = false;
-      proto.NetworkPacketV3? canonicalPacket;
-      for (var i = 0; i < resolved.length; i++) {
-        final device = resolved[i];
-        final deviceId = Uint8List.fromList(device.deviceNodeId);
-        if (i == 0) {
-          canonicalPacket = node.buildInfraPacket(
-            messageType: proto.MessageTypeV3.MTV3_RESTORE_BROADCAST,
-            innerPayload: broadcastBytes,
-            recipientDeviceId: deviceId,
-          );
-          if (canonicalPacket != null) {
-            final ok = await node.sendToDevice(canonicalPacket, deviceId);
-            if (ok) anyDeviceSent = true;
-            _log.debug('Restore broadcast → ${contact.nodeIdHex.substring(0, 8)} '
-                'device=${bytesToHex(deviceId).substring(0, 8)} ok=$ok '
-                '(canonical)');
-          }
-        } else {
-          final ok = await node.sendInfraTo(
-            messageType: proto.MessageTypeV3.MTV3_RESTORE_BROADCAST,
-            innerPayload: broadcastBytes,
-            recipientDeviceId: deviceId,
-          );
-          if (ok) anyDeviceSent = true;
-          _log.debug('Restore broadcast → ${contact.nodeIdHex.substring(0, 8)} '
-              'device=${bytesToHex(deviceId).substring(0, 8)} ok=$ok');
-        }
-      }
-
-      if (canonicalPacket != null) {
-        final canonicalBytes =
-            node.serializePacketForOfflineDelivery(canonicalPacket);
-        final fragmentBundleId =
-            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-        await _distributeErasureFragments(
-          packetBytes: canonicalBytes,
-          messageId: Uint8List.fromList(fragmentBundleId),
-          recipientUserNodeId: contact.nodeId,
-        );
-      }
-
-      if (anyDeviceSent) sent++;
+    // Until S360 a hard `false` stood here, with the justification that
+    // falling back to [sendToUser] was "NOT possible … the receiver cannot
+    // check a message signed with the NEW user key against its old
+    // anchor". **This justification is V3 thinking and wrong in V4.1**,
+    // for two independent reasons, both measured against the document and
+    // the code:
+    //
+    //   1. §15.6 lists the broadcast in the table "Every operation that
+    //      must reach a recipient rests on its own key relationship"
+    //      explicitly as `tag(K_AB)` — the same row as an ordinary
+    //      message, NO infrastructure special path. §13.5 says it once
+    //      more: "the entire remaining procedure is
+    //      **ordinary traffic** … the Restore Broadcast runs under the
+    //      pairwise tag `tag(K_AB)` and needs no KEX-gate exception."
+    //
+    //   2. `K_AB` does not hang on the user keys that can change at all.
+    //      It derives from the FOUNDING keys of both sides (§15.2,
+    //      `deriveDeliveryPairKeyFromFounding` in `pair_registry.dart`),
+    //      and those are seed-derived and rotation-stable — the comment
+    //      there says it literally: "`K_AB` survives every key rotation
+    //      without a transition window." In a genuine seed recovery,
+    //      moreover, NO identity key changes (§13.5.1: "In a genuine
+    //      seed recovery, **no** identity key changes (deterministic
+    //      derivation)"), because the PQ keys are deterministic too
+    //      (`oqs_ffi.dart:372,548`).
+    //
+    // §13.5.1 requires exactly one delivery per contact ("**One**
+    // delivery per contact under `tag(K_AB, A→C)`"), and one delivery
+    // serves all devices of the receiver (§14.2) — that is why there is
+    // NO device loop here and there must not be one.
+    //
+    // ── WHAT THIS BROADCAST DOES NOT CARRY YET, OPENLY NAMED ───────────
+    //
+    // §13.5.1 lists as content: "`oldUserId = newUserId` …, current
+    // pubkeys, **new `inbox_key`**, **fresh prekey batch**, and **pool
+    // identifier** (§13.4.4), display name, timestamp, hybrid inner
+    // signature (H-2)". Of these, built are: identifiers, current public
+    // keys, display name, timestamp and the hybrid signature. NOT built
+    // are the three in bold:
+    //
+    //   * `inbox_key` has no consumer in V4.1. The built delivery lies
+    //     under `secureTag(K_AB, …)` per pair (`secure_mode.dart`), not
+    //     under a mailbox line; apart from `inboxShardPrefix`
+    //     (`lib/core/field/field_tag.dart`, a V4.0 remnant without caller
+    //     in `lib/`) the quantity does not exist.
+    //   * The prekey pool identifier from §13.4.4 does not exist:
+    //     `prekey_pool.dart` keeps no `prekey_pool_epoch`. As long as it is
+    //     missing, the **silent prekey break** described there applies —
+    //     contacts seal for up to 15 days against lost one-time keys, and
+    //     the sender only notices it by the missing receipt.
+    //   * Consequently a fresh prekey batch does not travel along either.
+    //
+    // This stands here and not only in the draft, because a caller who
+    // sees `true` would otherwise read "the recovery is delivered".
+    // What is delivered is the IDENTITY announcement; the prekey part is
+    // missing. See `docs/v4-redesign/S360-recovery-entwurf.md`.
+    final recipient =
+        oldContacts.where((c) => c.status == 'accepted').toList();
+    if (recipient.isEmpty) {
+      // §13.2.3/§13.9: no contacts is not an error — it is the bundle
+      // case before the bundle. But it is not a success either.
+      // CORRECTED (S362): here it said "both are not built (G-3)".
+      // For §13.3 that has no longer been true since 02.09.2026 — the
+      // rescue bundle is deposited, searched and adopted
+      // (`cleona_service_recovery_bundle.dart`,
+      // `tagline/recovery_line.dart`). Whoever believes the old sentence
+      // looks for a gap that is closed. §13.4 stays open.
+      _log.warn('Restore broadcast: no accepted contact known — '
+          'nothing to send. The contacts come from the rescue bundle '
+          '(§13.3, built — the search runs when a seed exists and '
+          'no contact is known) or from the emergency call answer (§13.4, '
+          'not built — G-3, step 2).');
+      return false;
     }
 
-    _log.info('Restore broadcast sent to $sent contacts (V3 InfrastructureFrame)');
-
-    // Aggressive mailbox polling: 10 polls à 3s to catch RestoreResponses quickly
-    _startAggressivePolling();
-
-    // Schedule retry after 30 seconds
-    _restoreRetryTimer?.cancel();
-    _restoreRetryTimer = Timer(const Duration(seconds: 30), () {
-      _log.info('Retrying restore broadcast...');
-      sendRestoreBroadcast(
-        oldEd25519Sk: oldEd25519Sk,
-        oldEd25519Pk: oldEd25519Pk,
-        oldNodeId: oldNodeId,
-        oldContacts: oldContacts,
-        oldMlDsaSk: oldMlDsaSk,
-      );
-    });
-
-    return sent > 0;
-  }
-
-  /// Aggressive mailbox polling after restore: 10 polls à 3 seconds.
-  /// Kademlia bootstrap takes ~15-20s, so first meaningful responses
-  /// arrive after ~20s. Polling aggressively ensures we catch them fast.
-  void _startAggressivePolling() {
-    _restorePollingTimer?.cancel();
-    _restorePollCount = 0;
-    _restorePollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      _restorePollCount++;
-      _pollMailbox();
-      _log.info('Aggressive restore poll $_restorePollCount/10');
-      if (_restorePollCount >= 10) {
-        timer.cancel();
-        _restorePollingTimer = null;
-        _log.info('Aggressive restore polling complete');
+    var delivered = 0;
+    for (final c in recipient) {
+      try {
+        final ok = await sendToUser(
+          recipientUserId: c.nodeId,
+          messageType: proto.MessageTypeV3.MTV3_RESTORE_BROADCAST,
+          payload: Uint8List.fromList(broadcastBytes),
+        );
+        if (ok) delivered++;
+      } catch (e) {
+        // ONE contact must not abort the broadcast: §13.5.1 says that in
+        // the bundle case zero contacts suffice and nobody has to be
+        // online at the same time. A throw at the third of twenty must
+        // not cost the remaining seventeen.
+        // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+        _log.debug('Restore broadcast to ${c.displayName}: $e');
       }
-    });
+    }
+
+    // NO RESUBMISSION TIMER. §13.10.5: "There is **no**
+    // restore-specific progress state and no timer retry." The cell
+    // lies with the responsible relays until the contact harvests.
+    _restoreRetryTimer?.cancel();
+    _restoreRetryTimer = null;
+
+    _log.info('Restore broadcast (§13.5.1): $delivered of '
+        '${recipient.length} contact(s) accepted, '
+        '${broadcastBytes.length} B per delivery, '
+        'route tag(K_AB) (§15.6)');
+    // `false` means "queued at NO contact" — not "not arrived". Whether a
+    // delivery arrives is only said by the receipt (§9, D2); a return
+    // value claiming that would be the status-line-as-evidence confusion.
+    return delivered > 0;
   }
 
   // ── Voice Transcription ─────────────────────────────────────────────
@@ -12738,14 +10542,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void _onLocalTranscriptionComplete(String messageId, VoiceTranscription transcription) {
     // Find the message and update its transcript fields.
     for (final conv in conversations.values) {
+      ensureAllLoaded();
       final msg = conv.messages.where((m) => m.id == messageId).firstOrNull;
       if (msg != null) {
         msg.transcriptText = transcription.text;
         msg.transcriptLanguage = transcription.language;
         msg.transcriptConfidence = transcription.confidence;
+        persistMessage(conv.id, msg);
         onStateChanged?.call();
         _saveConversations();
-        _log.info('Local transcription complete for $messageId: "${transcription.text.length > 40 ? '${transcription.text.substring(0, 40)}...' : transcription.text}"');
+        // S362: see the justification at the receive path — no wording
+        // in the log.
+        _log.info('Local transcription complete for $messageId: '
+            '${transcription.text.length} chars');
         return;
       }
     }
@@ -12755,11 +10564,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   Future<void> stop() async {
-    // Zuerst: ab hier duerfen die am geteilten Node registrierten
-    // Chain-Closures keine Arbeit mehr fuer diese Identitaet ausloesen.
-    // Die expliziten Saves weiter unten sind Direktaufrufe und vom Flag
-    // nicht betroffen.
+    // First: from here on the chain closures registered at the shared
+    // node must no longer trigger work for this identity. The explicit
+    // saves further below are direct calls and not affected by the
+    // flag.
     _disposed = true;
+    // ── AND THE BUNDLE LINE FROM THE SLOT CLOCK (§13.3, S362) ──────────────
+    //
+    // FOR THE SAME REASON as the line above, and it is not tidying up for
+    // tidiness' sake: the slot clock belongs to the SHARED node, the line
+    // to this identity. If it stayed attached, a stopped identity would
+    // keep depositing its rescue bundle every 14 days — with the key state
+    // it had when stopping, and without any caller knowing about it.
+    // Exactly the class of leak that until S389 `unbindSecureProbe` closed
+    // for the secure probe one line higher — the probe no longer exists,
+    // this line does.
+    v41RecoveryBundle?.detach();
     _saveConversationsTimer?.cancel();
     _saveConversationsTimer = null;
     if (_saveConversationsPending) {
@@ -12785,39 +10605,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _polls.dispose();
     _systemChannelEvictionTimer?.cancel();
     _systemChannelEvictionTimer = null;
-    _sysChanSaveDebounce?.cancel();
-    _sysChanSaveDebounce = null;
     _updateCheckTimer?.cancel();
     _updateCheckTimer = null;
     _registryRepublishTimer?.cancel();
     _registryRepublishTimer = null;
     _delegationRenewalTimer?.cancel();
     _delegationRenewalTimer = null;
-    _natWizardTrigger?.stop();
-    _natWizardTrigger = null;
-    if (node.rendezvousManager == _rendezvousManager) {
-      node.rendezvousManager = null;
-    }
-    _rendezvousManager?.dispose();
-    _rendezvousManager = null;
-    _fcRendezvous?.dispose();
-    _fcRendezvous = null;
-    // §19.6: tear down the binary-distribution subsystem — only the
-    // identity that originally wired it onto the shared node clears it.
-    if (node.transport.httpServer == _binaryHttpServer) {
-      node.transport.httpServer = null;
-    }
+    // FORMERLY three subsystems were detached here from the SHARED node
+    // (`node.rendezvousManager`, `node.transport.httpServer`,
+    // `node.binaryRendezvousManager` + `binaryRecordProvider` +
+    // `binaryHasContentToShare`) — each only by the identity that had
+    // attached it. Without a shared node there is nothing to detach;
+    // each of these objects now belongs only to this service and is
+    // disposed of regularly below (T).
+    // (The general `RendezvousManager` stood here until S362 and has been
+    // removed — it was never created, so there was nothing to dispose of
+    // either.) The first-contact rendezvous followed in S388.
+    // §19.6: tear down the binary-distribution subsystem.
     _binaryHttpServer?.dispose();
     _binaryHttpServer = null;
     _binaryGcTimer?.cancel();
     _binaryGcTimer = null;
     _binaryUpdateManager?.dispose();
     _binaryUpdateManager = null;
-    if (node.binaryRendezvousManager == _binaryRendezvousManager) {
-      node.binaryRendezvousManager = null;
-      node.binaryRecordProvider = null;
-      node.binaryHasContentToShare = false;
-    }
     _binaryRendezvousManager?.dispose();
     _binaryRendezvousManager = null;
     _deltaUpdateManager?.dispose();
@@ -12831,12 +10641,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _binaryFetchClient = null;
     _binaryFragmentStore = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
-    if (_publisherPeerAddedListener != null) {
-      node.routingTable.removeOnPeerAddedListener(_publisherPeerAddedListener!);
-      _publisherPeerAddedListener = null;
-    }
-    _identityPublisher?.stop();
-    _identityPublisher = null;
     _saveContacts();
     _saveGroups();
     _saveConversations();
@@ -12847,18 +10651,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Do NOT stop the shared node here — the daemon manages its lifecycle
     await CLogger.flushAll();
     _log.info('CleonaService stopped');
-  }
-
-  // ── Update Checking (Architecture Section 17.5.5) ──────────────────
-
-  bool _loadInNetworkFlag() {
-    try {
-      final f = File(
-          '${AppPaths.dataDir}${Platform.pathSeparator}update_in_network.flag');
-      return f.existsSync();
-    } catch (_) {
-      return false;
-    }
   }
 
   void _saveInNetworkFlag(bool available) {
@@ -12874,130 +10666,429 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     } catch (_) {}
   }
 
-  /// Check the DHT for a signed update manifest.
-  ///
-  /// Uses FRAGMENT_RETRIEVE on the update manifest's DHT key, then
-  /// verifies the Ed25519 signature before presenting to the UI.
-  void _checkForUpdates() {
-    final checker = UpdateChecker(log: _log);
-    final dhtKey = UpdateManifest.dhtKey();
-
-    // Poll for update manifest fragments from all known peers
-    final peers = node.routingTable.allPeers;
-    for (final peer in peers) {
-      _requestFragments(peer, dhtKey);
-    }
-
-    // Check collected fragments after a delay
-    Timer(const Duration(seconds: 8), () async {
-      final localFrags = mailboxStore.retrieveFragments(dhtKey);
-      if (localFrags.isEmpty) {
-        _log.debug('[update] Poll returned 0 manifest fragments');
-        return;
-      }
-
-      try {
-        UpdateManifest? best;
-        Uint8List? bestData;
-        String? bestJson;
-        for (final frag in localFrags) {
-          try {
-            final json = utf8.decode(frag.data);
-            final m = checker.verifyManifest(json);
-            if (m == null) continue;
-            if (best == null || checker.isNewer(m.version, best.version) ||
-                (checker.isSameVersion(m.version, best.version) &&
-                    (m.minMonotoneSeq ?? 0) > (best.minMonotoneSeq ?? 0))) {
-              best = m;
-              bestData = frag.data;
-              bestJson = json;
-            }
-          } catch (_) {}
-        }
-        if (best == null || bestData == null || bestJson == null) return;
-
-        _log.info('[update] Poll: best manifest v${best.version} '
-            '(from ${localFrags.length} fragments)');
-
-        final prev = _latestManifest;
-        if (prev != null && !checker.isNewer(best.version, prev.version)) {
-          if (checker.isNewer(prev.version, best.version)) {
-            _log.debug('[update] Poll manifest v${best.version} older than cached v${prev.version}');
-            final prevJson = utf8.encode(jsonEncode(prev.toJson()));
-            _pushManifestToPeers(Uint8List.fromList(prevJson));
-            return;
-          }
-          final bestSeq = best.minMonotoneSeq ?? 0;
-          final prevSeq = prev.minMonotoneSeq ?? 0;
-          if (bestSeq <= prevSeq) {
-            _log.debug('[update] No update available '
-                '(manifest: v${best.version} seq=$bestSeq, '
-                'cached: v${prev.version} seq=$prevSeq)');
-            return;
-          }
-          _log.info('[update] Poll: same version v${best.version} '
-              'but higher seq ($bestSeq > $prevSeq) — accepting');
-        }
-
-        _latestManifest = best;
-        try {
-          final cacheFile = File('${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
-          cacheFile.parent.createSync(recursive: true);
-          cacheFile.writeAsStringSync(bestJson, flush: true);
-        } catch (e) {
-          _log.debug('Failed to cache update manifest: $e');
-        }
-        final isNewer = checker.isNewer(best.version, currentAppVersion);
-
-        if (isNewer) {
-          _log.info('[update] Update available: v${best.version} '
-              '(current: v$currentAppVersion)');
-
-          final isHardBlock = checker.isHardBlocked(best, currentAppVersion);
-          final hasDhtTag = best.dhtBinaryTag
-                  ?.containsKey(Platform.operatingSystem) ??
-              false;
-          final hasBinHash = best.binaryHashes
-                  ?.containsKey(Platform.operatingSystem) ??
-              false;
-          if (!isHardBlock && !hasDhtTag && !hasBinHash) {
-            _log.debug('[update] Suppressing soft-update notification: '
-                'no binary for ${Platform.operatingSystem}');
-          } else {
-            var inNetworkAvailable = false;
-            if ((hasDhtTag || hasBinHash) && _binaryUpdateManager != null) {
-              try {
-                inNetworkAvailable = await _binaryUpdateManager!
-                    .checkForUpdate(best, currentAppVersion, Platform.operatingSystem);
-                if (inNetworkAvailable) {
-                  _log.info('[update] In-network update available for '
-                      '${Platform.operatingSystem}: v${best.version}');
-                  _saveInNetworkFlag(true);
-                }
-              } catch (e) {
-                _log.debug('[update] In-network update check failed: $e');
-              }
-            }
-
-            onUpdateAvailable?.call(best, inNetworkAvailable);
-          }
-        } else {
-          _log.debug('[update] No update available '
-              '(manifest: v${best.version}, current: v$currentAppVersion)');
-        }
-
-        _pushManifestToPeers(bestData);
-      } catch (e) {
-        _log.debug('[update] Update manifest check failed: $e');
-      }
-    });
-  }
-
   /// Get the latest known update manifest (null if never checked or no update).
   UpdateManifest? get latestUpdateManifest => _latestManifest;
 
+  // ── Invitation line (§15.3) ─────────────────────────────────────
+  //
+  // WHY IT LIVES HERE AND NOT IN THE UI. `K_inv(i)` is computed from the
+  // master seed (`InviteLedger.keyFor`), and the index `i` must be
+  // MONOTONIC per identity (§15.3.1: "i monotonic per invitation").
+  // Both together allow exactly ONE writer: if there were two processes
+  // calling `issue()` independently, both would read the same
+  // `highwater` and assign the same index — two invitations under ONE
+  // key, i.e. the same promise for two different people. The daemon is
+  // this one writer.
+
+  InviteStore? _inviteStoreCached;
+
+  /// The encrypted storage of this identity's invitation ledger.
+  ///
+  /// S366: lives in the area `invites` of the store, no longer in
+  /// `invites.json.enc`.
+  InviteStore get inviteStore =>
+      _inviteStoreCached ??= InviteStore(profileDir: profileDir, store: store);
+
+  InviteLedger? _inviteLedgerCached;
+
+  /// The invitation ledger of this identity.
+  ///
+  /// **There is deliberately no `?? InviteLedger()` here.** `FileEncryption`
+  /// returns `null` for two different situations — "file missing" and
+  /// "file there, but not decryptable". A fallback to an empty ledger
+  /// would silently turn the second case into the first, and the next
+  /// [issueInvitation] would start again at index 0. Exactly that is
+  /// forbidden by §15.3.1.
+  ///
+  /// [InviteStore.load] already separates the two cases: after
+  /// `readJsonFile == null` it additionally asks whether `invites.json.enc`
+  /// (or the unencrypted form) EXISTS in the file system. If it is missing,
+  /// a fresh ledger is right — an identity that has never invited is the
+  /// normal case. If it is there, `load()` throws a `StateError`.
+  /// This access does NOT catch it; it passes it on to the caller, where
+  /// it becomes visible as an error instead of as a quiet reset.
+  ///
+  /// The access is lazy: an unreadable ledger thus does not paralyse the
+  /// start of the service, but exactly the invitation function that needs
+  /// it.
+  InviteLedger get inviteLedger => _inviteLedgerCached ??= inviteStore.load();
+
+  /// Issues an invitation and writes the ledger BEFORE the key leaves the
+  /// house.
+  ///
+  /// The order is not style but the guarantee: if this method returned the
+  /// record and only wrote afterwards, a crash in between would lose the
+  /// increased `highwater` — the next issuing would assign the same index
+  /// a second time. After writing, the index is used up, even if the
+  /// caller never uses the record; a burnt number is cheaper than a
+  /// duplicate key.
+  ///
+  /// Throws [InviteIssueException] when the cap is reached (§15.3.2, ten
+  /// invitations open at the same time).
+  InviteRecord issueInvitation({
+    required InviteClass inviteClass,
+    required Duration? validity,
+    String label = '',
+    bool singleUse = false,
+    DateTime? now,
+  }) {
+    final ledger = inviteLedger;
+    final rec = ledger.issue(
+      inviteClass: inviteClass,
+      validity: validity,
+      now: now ?? DateTime.now(),
+      label: label,
+      singleUse: singleUse,
+    );
+    // S366: ONE row for the new record plus the header, instead of
+    // rewriting the whole — monotonically growing — ledger. The guarantee
+    // from the paragraph above stays literally the same: it is written
+    // BEFORE the return, so that a crash in between does not lose the
+    // increased `highwater`.
+    inviteStore.persistRecord(ledger, rec);
+    // ── THE NEW LINE MUST BE ARMED IMMEDIATELY ───────────────────────
+    //
+    // Between issuing and the next restart lies the whole benefit: the
+    // issuer shows the QR code NOW, and the scanner deposits its request
+    // seconds later. If the line were only armed at the next attach, the
+    // request would lie at the responsible relays and expire after three
+    // epochs without anyone ever having asked for it.
+    armV41InviteLines();
+    _log.info('§15.3.1 invitation issued: i=${rec.index} g=${rec.generation} '
+        'class=${rec.inviteClass.wireChar} '
+        'exp=${rec.expiresAtMs ?? "unlimited"} singleUse=${rec.singleUse}');
+    return rec;
+  }
+
+  /// §15.3/§15.5 via the interface — see
+  /// `ICleonaService.issueInviteForSharing` for the justification.
+  ///
+  /// Here stands only the combination of the three steps that the UI ran
+  /// itself until S380: remember the default, issue, derive the key. They
+  /// belong together — an issued invitation without `K_inv(i)` would be a
+  /// ledger record without a carrier.
   @override
-  String? generateInviteLinkUrl() {
+  Future<InviteIssueResult> issueInviteForSharing({
+    required String inviteClassCode,
+    Duration? validity,
+    bool singleUse = false,
+    String label = 'qr-card',
+  }) async {
+    final cls = InviteClass.fromWireChar(inviteClassCode);
+    if (cls == null) {
+      _log.warn('§15.3: unknown invitation class "$inviteClassCode" — '
+          'not issued');
+      return const InviteIssueResult.refused(InviteIssueRefusal.unknownClass);
+    }
+    try {
+      setInviteDefaults(
+          inviteClass: cls, validity: validity, unlimited: validity == null);
+      final rec = issueInvitation(
+        inviteClass: cls,
+        validity: validity,
+        label: label,
+        singleUse: singleUse,
+      );
+      final ki = inviteKeyFor(rec);
+      if (ki == null) {
+        // §15.3.1: without a master seed there is no carrier. That is not
+        // an error one may gloss over — the caller gets the REASON and
+        // omits `ki` instead of sending a placeholder.
+        return const InviteIssueResult.refused(
+            InviteIssueRefusal.noMasterSeed);
+      }
+      return InviteIssueResult.issued(IssuedInvite(
+        inviteClassCode: rec.inviteClass.wireChar,
+        index: rec.index,
+        inviteKey: ki,
+        expiresAtMs: rec.expiresAtMs,
+      ));
+    } on InviteIssueException catch (e) {
+      _log.warn('§15.3.4 invitation not issued: ${e.reason}');
+      return const InviteIssueResult.refused(InviteIssueRefusal.capReached);
+    } on StateError catch (e) {
+      // §21.4: the ledger is there but cannot be decrypted.
+      _log.warn('§21.4 invitation book unreadable: $e');
+      return const InviteIssueResult.refused(
+          InviteIssueRefusal.ledgerUnreadable);
+    }
+  }
+
+  /// The open invitations of this identity (§15.3.2).
+  ///
+  /// ── WHY THIS CALL EXISTS (S381, 11.09.2026) ───────────────────
+  ///
+  /// The cap from §15.3.2 is ten invitations open at the same time.
+  /// When it was reached, the UI used to say "Zehn Einladungen sind
+  /// bereits offen. Widerrufe eine, bevor du eine neue erstellst." — and
+  /// there was **no way to revoke one**. `InviteLedger.revoke` has always
+  /// existed and had zero callers in `lib/`. By the S370 rule, needed dead
+  /// code is not dead code but a WIRING ERROR.
+  ///
+  /// A dead end with a signpost is worse than one without: the user
+  /// looks for the button the message promises.
+  @override
+  Future<List<OpenInvitation>> listOpenInvitations({DateTime? now}) async {
+    final InviteLedger book;
+    try {
+      book = inviteLedger;
+    } on StateError catch (e) {
+      // §21.4: unreadable is not empty. An empty list would here be the
+      // false statement "you have no open invitations".
+      _log.warn('§21.4 invitation book unreadable: $e');
+      rethrow;
+    }
+    return book
+        .openAt(now ?? DateTime.now())
+        .map((r) => OpenInvitation(
+              index: r.index,
+              inviteClassCode: r.inviteClass.wireChar,
+              expiresAtMs: r.expiresAtMs,
+              label: r.label,
+              singleUse: r.singleUse,
+            ))
+        .toList(growable: false);
+  }
+
+  /// §15.3.3 single revocation of an open invitation.
+  ///
+  /// The three steps are the same as when redeeming a single-use
+  /// invitation ([_consumeSingleUseInvitation]) — and deliberately the
+  /// same line for line, so that there are not two ways of
+  /// decommissioning an invitation:
+  ///
+  ///   1. **Ledger** — `revoke` sets the marker.
+  ///   2. **Write** — without `persistRecord` the invitation would be
+  ///      armed again after the next start.
+  ///   3. **Withdraw** — `armV41InviteLines` forgets the pseudo
+  ///      counterpart and the standing seal secret; without this call the
+  ///      line would keep running until the next tick.
+  ///
+  /// **What this call does NOT achieve, and that stands here instead of a
+  /// claim:** §14.7 lists `INVITE_LIST` as twin-sync type 14 of 17,
+  /// "carries the revocation of an invitation, which is therefore not a
+  /// purely local act". This propagation is as little wired here as in
+  /// the existing [_consumeSingleUseInvitation], which also calls
+  /// `revoke` with the default value `multiDevice: false`. The revocation
+  /// thus takes effect locally at once and on a second device only after
+  /// its next sync. That is an open item, not a silent one.
+  @override
+  Future<bool> revokeInvitation(int index, {DateTime? now}) async {
+    final InviteLedger book;
+    try {
+      book = inviteLedger;
+    } on StateError catch (e) {
+      _log.warn('§21.4 invitation book unreadable: $e — i=$index NOT '
+          'revoked');
+      return false;
+    }
+    final rec = book.byIndex(index);
+    if (rec == null || rec.revoked) return false;
+    if (!book.revoke(index, now ?? DateTime.now())) return false;
+    inviteStore.persistRecord(book, rec);
+    final lines = armV41InviteLines();
+    _log.info('§15.3.3 REVOKED: invitation i=$index g=${rec.generation}'
+        '${rec.label.isEmpty ? '' : ' "${rec.label}"'} — still $lines '
+        'invitation line(s) armed');
+    return true;
+  }
+
+  // ── V4.2 invitation card (§15.2, §15.3, §15.6) — S387 ───────────────
+  //
+  // Contract: `mycelium/berichte/S387-API-KARTE.md`. The bodies are in
+  // the mycelium part (`cleona_service_mycelium.dart`); without an attached
+  // mailbox they report `notConnected` — named, not silently empty.
+  //
+  // [label] has been built since S390: mycelium keeps it as
+  // `Invitation.label`, it goes to disk with the invitation
+  // (memory version 10) and comes back in [standingInvitations].
+  // It NEVER stands in the card and never goes onto the wire (§15.3).
+
+  @override
+  Future<InvitationIssueResult> issueInvitationCard({
+    InvitationKind kind = InvitationKind.single,
+    InvitationValidity? validity,
+    String label = '',
+    bool faceToFace = false,
+  }) async => _cardIssue(
+      kind: kind, validity: validity, label: label, faceToFace: faceToFace);
+
+  @override
+  Future<InvitationRedeemResult> redeemInvitationText(String text) =>
+      _cardRedeem(readInvitationText(text,
+          ownChannel: _ownCardChannel,
+          nowUnixSeconds: DateTime.now().millisecondsSinceEpoch ~/ 1000));
+
+  @override
+  Future<InvitationRedeemResult> redeemInvitationCardBytes(Uint8List packed) =>
+      _cardRedeem(readInvitationBytes(packed,
+          ownChannel: _ownCardChannel,
+          nowUnixSeconds: DateTime.now().millisecondsSinceEpoch ~/ 1000));
+
+  @override
+  Future<StandingInvitationsResult> standingInvitations() async =>
+      _cardStanding();
+
+  @override
+  Future<InvitationRevokeOutcome> revokeInvitationCard(
+          String invitationId) async =>
+      _cardRevoke(invitationId);
+
+  @override
+  Future<InvitationRevokeAllResult> revokeAllInvitationCards() async =>
+      _cardAllRevoke();
+
+  /// `K_inv(i)` for [rec] — 32 B, or `null` if this identity carries no
+  /// master seed (old profile without HD derivation).
+  ///
+  /// `null` here is NOT an error one may gloss over: without a seed there
+  /// is no invitation key, and a seed without `ki` is the documented
+  /// state "the issuer has said nothing". The caller then omits the
+  /// field instead of sending a placeholder.
+  Uint8List? inviteKeyFor(InviteRecord rec) {
+    final seed = identity.masterSeed;
+    final idx = identity.hdIndex;
+    if (seed == null || idx == null) {
+      _log.warn('§15.3.1: no master seed / hd index for this identity — '
+          'invitation $rec gets no K_inv(i); the seed goes out without `ki`');
+      return null;
+    }
+    return inviteLedger.keyFor(seed, idx, rec);
+  }
+
+  // ── The user's default (§15.3.1, §15.3.3) ──────────────────
+  //
+  // NO LITERAL. A class set in code would be "a promise that nobody has
+  // given" (contact_seed.dart) — §15.3.1 says the class hangs on the WAY,
+  // and only the issuer knows it. That is why the default is `null`
+  // until the user has chosen it ONCE; until then seeds go out without
+  // `cls`/`exp`/`ki`, i.e. exactly as they went out until today.
+  //
+  // The deadline is the opposite case: §15.3.3 explicitly names "Default
+  // **90 days**", so the UI may PRESELECT 90 days. That too does not stand
+  // here as a literal, but comes from `kInviteDefaultValidity` and is only
+  // stored with the choice.
+
+  bool _invitePrefsLoaded = false;
+  InviteClass? _inviteDefaultClass;
+  Duration? _inviteDefaultValidity;
+  bool _inviteDefaultUnlimited = false;
+  int? _inviteLinkIndex;
+
+  /// Area of the store for the invitation defaults (§21.4.1, S366).
+  ///
+  /// Four scalars with fixed fields — the same construction as the
+  /// settings areas above, i.e. one entry under `_` and `replaceArea`.
+  /// The area is deliberately NOT `invites`: the invitation ledger grows
+  /// and is written row by row (`InviteStore`), this default is a state.
+  /// If both lay in the same area, a `replaceArea` on the default would
+  /// wipe out the whole ledger.
+  static const String _areaInvitePrefs = 'invite_prefs';
+
+  void _loadInvitePrefs() {
+    if (_invitePrefsLoaded) return;
+    _invitePrefsLoaded = true;
+    try {
+      final json =
+          store.loadArea(_areaInvitePrefs)[_settingKey];
+      if (json == null) return;
+      _inviteDefaultClass = InviteClass.fromWireChar(json['cls'] as String?);
+      _inviteDefaultUnlimited = json['unlimited'] == true;
+      final days = json['validityDays'];
+      _inviteDefaultValidity =
+          (!_inviteDefaultUnlimited && days is int) ? Duration(days: days) : null;
+      final li = json['linkIndex'];
+      _inviteLinkIndex = li is int ? li : null;
+    } catch (e) {
+      _log.warn('invite prefs unreadable: $e');
+    }
+  }
+
+  void _saveInvitePrefs() {
+    try {
+      store.replaceArea(_areaInvitePrefs, {
+        _settingKey: {
+          if (_inviteDefaultClass != null) 'cls': _inviteDefaultClass!.wireChar,
+          'unlimited': _inviteDefaultUnlimited,
+          if (_inviteDefaultValidity != null)
+            'validityDays': _inviteDefaultValidity!.inDays,
+          if (_inviteLinkIndex != null) 'linkIndex': _inviteLinkIndex,
+        }
+      });
+    } catch (e) {
+      _log.warn('invite prefs not saved: $e');
+    }
+  }
+
+  /// The stored default class, or `null` — "not chosen yet".
+  InviteClass? get inviteDefaultClass {
+    _loadInvitePrefs();
+    return _inviteDefaultClass;
+  }
+
+  /// The stored default deadline. `null` means UNLIMITED if
+  /// [inviteDefaultUnlimited] holds, otherwise "not chosen yet".
+  Duration? get inviteDefaultValidity {
+    _loadInvitePrefs();
+    return _inviteDefaultValidity;
+  }
+
+  bool get inviteDefaultUnlimited {
+    _loadInvitePrefs();
+    return _inviteDefaultUnlimited;
+  }
+
+  /// The user has chosen. Only from here on is there a default.
+  void setInviteDefaults({
+    required InviteClass inviteClass,
+    required Duration? validity,
+    required bool unlimited,
+  }) {
+    _loadInvitePrefs();
+    _inviteDefaultClass = inviteClass;
+    _inviteDefaultValidity = unlimited ? null : validity;
+    _inviteDefaultUnlimited = unlimited;
+    _saveInvitePrefs();
+  }
+
+  /// The standing invitation for the app invitation link.
+  ///
+  /// **Why reused and not newly issued per call.**
+  /// [generateInviteLinkUrl] runs every time the share dialog opens. One
+  /// issuing per call would have reached the cap from §15.3.2 (ten
+  /// invitations open at the same time) after ten dialog calls and then
+  /// rejected every further one with `capReached` — the link would have
+  /// vanished without the user having done anything. That is why
+  /// `invite_prefs.json` holds the index of the standing invitation and
+  /// returns it as long as it may still be handed out.
+  ///
+  /// Returns `null` if the user has not chosen a default yet.
+  InviteRecord? standingLinkInvitation({DateTime? now}) {
+    _loadInvitePrefs();
+    final cls = _inviteDefaultClass;
+    if (cls == null) return null;
+    final t = now ?? DateTime.now();
+    final existing =
+        _inviteLinkIndex == null ? null : inviteLedger.byIndex(_inviteLinkIndex!);
+    if (existing != null && existing.isOfferableAt(t)) return existing;
+    try {
+      final rec = issueInvitation(
+        inviteClass: cls,
+        validity: _inviteDefaultUnlimited ? null : _inviteDefaultValidity,
+        label: 'app-invite-link',
+        now: t,
+      );
+      _inviteLinkIndex = rec.index;
+      _saveInvitePrefs();
+      return rec;
+    } on InviteIssueException catch (e) {
+      _log.warn('§15.3.2 standing link invitation not issued: ${e.reason}');
+      return null;
+    }
+  }
+
+  @override
+  Future<String?> generateInviteLinkUrl() async {
     final manifest = _latestManifest;
     if (manifest == null) return null;
     final hashes = manifest.binaryHashes;
@@ -13011,14 +11102,70 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final pport = publicPort;
     if (pip == null || pport == null) return null;
 
+    // The link is an HTTP URL the recipient opens in a BROWSER — that is the
+    // whole point of it: they do not have Cleona yet, so a `cleona://`
+    // ContactSeed would be useless to them. A browser refuses to open certain
+    // ports outright (`ERR_UNSAFE_PORT` / "This address is restricted"), and
+    // it refuses LOCALLY, before a single packet leaves their machine. This
+    // node would therefore never see a request, never log an error, and go on
+    // looking perfectly healthy while none of its invitations can be redeemed.
+    //
+    // The `f=` fallback download does not rescue that case: it travels in the
+    // link's hash fragment, so the browser never gets far enough to read it.
+    //
+    // Why this check cannot live in `drawDataPort` alone (E-64 stopped there):
+    // the link does not carry the drawn port, it carries `publicPort` — either
+    // UPnP-mapped by the router or STUN-observed through a translating NAT.
+    // Neither is constrained by the draw, and both can be any value in
+    // 1–65535, which is why the FULL browser list applies here and not just
+    // the one member that falls inside the draw range.
+    //
+    // Returning null suppresses the invitation block in `ShareCleonaDialog`
+    // (`share_cleona_dialog.dart`, `if (inviteUrl != null)`) — the same path
+    // already taken when no manifest or no public address is known. A missing
+    // invitation beats a dead one: the dead link fails at the recipient, where
+    // nobody can diagnose it.
+    if (IdentityManager.isBrowserBlockedPort(pport)) {
+      _log.warn('invite link suppressed: public port $pport is refused by '
+          'browsers (ERR_UNSAFE_PORT) — the link would be dead for every '
+          'recipient. Change the node port to restore invitation links.');
+      return null;
+    }
+
+    // §15.3: the invitation fields come from the user's STORED default,
+    // not from a literal. If they never chose, `rec` is null and the seed
+    // goes out without `cls`/`exp`/`ki` — the documented state "the
+    // issuer has said nothing", not a silently claimed promise.
+    final rec = standingLinkInvitation();
+    // GAP G-9: the ContactSeed in the invitation link CARRIES the device
+    // KEM keys (`dxk`/`dmk`) — the receiver encrypts its first request
+    // with them. [deviceX25519Pk] throws because there is no holder.
+    //
+    // Since the CUT both getters return an EMPTY list, and
+    // `ContactSeedBuilder` then omits `dxk`/`dmk` (length check in
+    // `contact_seed.dart:220`). The invitation link thus carries the
+    // v2 form: `ep` as trust anchor, no device keys. That is irrelevant
+    // for first contact. UNTIL S361 THIS SAID "as long as G-1 is open" —
+    // G-1 has been closed since S360, and the sentence is still true, just
+    // for another reason: the invitation line draws `K_inv` from `ki` and
+    // `ep`, not from `dxk`/`dmk`. The device keys in the seed have nothing
+    // to do with first contact; what is missing about them belongs under
+    // G-9 (no holder).
     final seed = contactSeedBuilder.getContactSeedFor(
       nodeIdHex: identity.userIdHex,
       displayName: identity.displayName,
       channelTag: networkChannel == 'live' ? 'l' : 'b',
       userEd25519Pk: identity.ed25519PublicKey,
       foundingEd25519Pk: identity.foundingEd25519Pk,
-      deviceX25519Pk: node.deviceKem.x25519PublicKey,
-      deviceMlKemPk: node.deviceKem.mlKemPublicKey,
+      // S388 (v4.2 §4.1): the builder's self-check computes the UserID
+      // from Ed25519 AND ML-DSA; the seed does not carry the ML-DSA key,
+      // so the issuer passes it in here.
+      foundingMlDsaPk: identity.foundingMlDsaPk,
+      deviceX25519Pk: deviceX25519Pk,
+      deviceMlKemPk: deviceMlKemPk,
+      inviteClass: rec?.inviteClass,
+      inviteExpiresAtMs: rec?.expiresAtMs,
+      inviteKey: rec == null ? null : inviteKeyFor(rec),
     );
     if (seed == null) return null;
 
@@ -13039,132 +11186,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return link.toUrl();
   }
 
-  /// Builds the current [BinaryAvailabilityRecord] for this device (§19.6.5)
-  /// — a snapshot of what this node currently holds in its
-  /// [BinaryFragmentStore] for the running platform/version. `addresses` and
-  /// `seq` are placeholders overwritten by [BinaryRendezvousManager.publish].
-  /// Synchronous because [RendezvousManager]-style record providers are
-  /// invoked from debounce/periodic timers, not awaited call sites.
-  List<BinaryAvailabilityRecord> _buildBinaryAvailabilityRecords() {
-    final store = _binaryFragmentStore;
-    if (store == null) return const [];
-    final version = currentAppVersion;
-    final records = <BinaryAvailabilityRecord>[];
-    for (final platform in ['android', 'linux', 'windows', 'macos', 'ios']) {
-      // §19.6.4: a binary fetched on demand for one visitor is transient — it
-      // is capped at one, TTL-evicted after 24h and excluded from the
-      // bootstrap storage budget. Advertising it network-wide would contradict
-      // all of that and turn the node into a public mirror for a platform it
-      // does not run, for a day, without the user ever asking. It stays
-      // retrievable for the visitor who triggered it; it is just not promoted.
-      if (_foreignBinaryAcquirer?.isOnDemand(platform, version) ?? false) {
-        continue;
-      }
-      final fragments = store.availableFragmentsSync(platform, version);
-      final hasComplete = store.hasCompleteSync(platform, version);
-      if (fragments.isEmpty && !hasComplete) continue;
-      records.add(BinaryAvailabilityRecord(
-        deviceId: identity.deviceNodeId,
-        platform: platform,
-        version: version,
-        addresses: const [],
-        binaryHash: _latestManifest?.binaryHashes?[platform] ?? '',
-        hasFullBinary: hasComplete,
-        fragmentIndices: fragments,
-        seq: _latestManifest?.minMonotoneSeq ?? 0,
-      ));
-    }
-    return records;
-  }
-
-  /// §19.6.2 fragment-store housekeeping: drops fragments/complete binaries
-  /// for versions superseded by [kCurrentAppVersion] and enforces a
-  /// platform-dependent storage budget on what's left. Invoked once at
-  /// startup and then hourly via [_binaryGcTimer].
-  Future<void> _runBinaryFragmentGc() async {
-    final updater = _binaryUpdateManager;
-    final store = _binaryFragmentStore;
-    if (updater == null || store == null) return;
-
-    final currentPlatform = Platform.operatingSystem;
-
-    // §19.6.4: drop on-demand foreign binaries past their TTL first, so the
-    // budget decision below sees the post-eviction state.
-    final acquirer = _foreignBinaryAcquirer;
-    try {
-      final n = await (acquirer?.evictExpired() ?? Future.value(0));
-      if (n > 0) _log.info('[update] evicted $n expired on-demand binary/-ies');
-    } catch (e) {
-      _log.debug('[update] on-demand eviction failed: $e');
-    }
-
-    // Cross-platform content switches the store to the unlimited bootstrap
-    // budget — but ONLY when the node deliberately seeds other platforms.
-    // An on-demand acquisition is transient and must not disable the budget
-    // for the whole store, otherwise one visitor permanently unbounds it.
-    final hasCrossPlatform = ['android', 'linux', 'windows', 'macos', 'ios']
-        .where((p) => p != currentPlatform)
-        .any((p) => store.storedVersionsSync(p)
-            .any((v) => acquirer == null || !acquirer.isOnDemand(p, v)));
-    final budgetBytes = hasCrossPlatform
-        ? BinaryFragmentStore.kBootstrapBudgetBytes
-        : (Platform.isAndroid || Platform.isIOS)
-            ? BinaryFragmentStore.kMobileBudgetBytes
-            : BinaryFragmentStore.kDesktopBudgetBytes;
-
-    try {
-      updater.gc(kCurrentAppVersion, budgetBytes);
-    } catch (e) {
-      _log.debug('[update] Fragment GC failed: $e');
-    }
-  }
-
   /// The §19.6 binary seeder for this device, if wired (null on the
   /// non-first identity of a multi-identity daemon, or before startup).
   BinarySeeder? get binarySeeder => _binarySeeder;
-  BinaryFragmentStore? get binaryFragmentStore => _binaryFragmentStore;
-
-  /// Self-seed: encode the currently-running binary into Reed-Solomon
-  /// fragments so this node becomes a distribution source for its own
-  /// platform/version immediately at startup, without waiting for an
-  /// update download (§19.6.2). Only meaningful for sideloaded installs —
-  /// Play Store builds never self-update, so seeding their own binary
-  /// serves no purpose.
-  Future<void> _selfSeedCurrentBinary() async {
-    final platform = Platform.operatingSystem;
-    final version = kCurrentAppVersion;
-    final existing = _binaryFragmentStore!.storedVersionsSync(platform);
-    if (existing.contains(version)) {
-      final frags = _binaryFragmentStore!.availableFragmentsSync(platform, version);
-      if (frags.isNotEmpty) {
-        _log.debug('[update] Already seeded $platform/$version (${frags.length} fragments)');
-        return;
-      }
-      _log.info('[update] $platform/$version directory exists but 0 fragments — re-seeding');
-    }
-    try {
-      final binaryPath = await _resolveCurrentBinaryPath();
-      if (binaryPath == null) return;
-      if (!File(binaryPath).existsSync()) {
-        _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
-        return;
-      }
-      final expectedHash = _latestManifest?.binaryHashes?[platform];
-      final profileDir = _binaryFragmentStore!.profileDir;
-      final maxFragments = Platform.isAndroid ? 2 : 8;
-      final count = await _runSeedIsolate(
-          binaryPath, profileDir, platform, version, maxFragments,
-          expectedHash: expectedHash);
-      if (count > 0) {
-        _log.info('[update] Self-seeded $count fragments for $platform/$version');
-        node.binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
-      }
-    } catch (e) {
-      _log.warn('[update] Self-seed failed: $e');
-    }
-  }
 
   static Future<int> _runSeedIsolate(String binaryPath, String profileDir,
       String platform, String version, int maxFragments,
@@ -13179,44 +11203,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     ));
   }
 
-  Future<String?> _resolveCurrentBinaryPath() async {
-    if (Platform.isAndroid) {
-      final resolver = CleonaService.apkPathResolver;
-      if (resolver == null) return null;
-      try {
-        return await resolver();
-      } catch (e) {
-        _log.debug('[update] Failed to resolve APK path: $e');
-        return null;
-      }
-    }
-    return Platform.resolvedExecutable;
-  }
-
-  void selfPublishManifest() => _selfPublishManifest();
-
-  /// IPC entry: seed an external binary file into the fragment store.
-  Future<Map<String, dynamic>> seedBinaryFromFile(
-      String platform, String version, String filePath) async {
-    final store = _binaryFragmentStore;
-    if (store == null) return {'error': 'fragment store not initialized'};
-    final file = File(filePath);
-    if (!file.existsSync()) return {'error': 'file not found: $filePath'};
-    try {
-      final profileDir = store.profileDir;
-      final count = await _runSeedIsolate(filePath, profileDir, platform, version, 50);
-      if (count > 0) {
-        node.binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
-        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
-      }
-      final binary = file.readAsBytesSync();
-      final hash = bytesToHex(SodiumFFI().sha256(binary));
-      return {'fragmentCount': count, 'hash': hash};
-    } catch (e) {
-      return {'error': '$e'};
-    }
-  }
+  // `void selfPublishManifest() => _selfPublishManifest();` STOOD HERE —
+  // REMOVED ON 2026-09-03. A public wrapper around a private method,
+  // without any reader. The neighbours in this section are IPC entry
+  // points and are called from `ipc_server.dart`
+  // (`getSeededPlatforms` e.g. from `ipc_server.dart:4221`) — this one
+  // was not.
+  //
+  // SEARCH SET (2026-09-03, over `lib/ test/ scripts/ proto/ android/ ios/
+  // macos/ windows/ linux/`): as a word 1 hit (the declaration itself),
+  // as a string `'selfPublishManifest'`/`"..."` 0 — so no IPC command
+  // name either —, in `snake_case` (`self_publish_manifest`) 0, in
+  // `proto/` 0, as `export ... show` 0.
+  //
+  // `_selfPublishManifest` LIVES and stays untouched:
+  // `cleona_service_pure.dart:957` declares it,
+  // `cleona_service_update.dart:615` and the IPC entry `reloadManifest`
+  // (further down in this file) call it.
 
   /// IPC entry: list all seeded platforms and versions.
   Map<String, List<String>> getSeededPlatforms() {
@@ -13254,633 +11257,576 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     };
   }
 
-  void _selfPublishManifest() {
-    try {
-      var manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest.json';
-      var file = File(manifestPath);
-      if (!file.existsSync()) {
-        manifestPath = '${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json';
-        file = File(manifestPath);
-        if (!file.existsSync()) return;
-      }
-      final jsonData = file.readAsStringSync();
-      final checker = UpdateChecker(log: _log);
-      final manifest = checker.verifyManifest(jsonData);
-      if (manifest == null) {
-        _log.warn('[update] update_manifest.json has invalid signature — ignoring');
-        return;
-      }
-      final dhtKey = UpdateManifest.dhtKey();
-      final data = Uint8List.fromList(utf8.encode(jsonData));
-      final messageId = SodiumFFI().sha256(data);
-      final storeRes = mailboxStore.storeFragment(StoredFragment(
-        mailboxId: dhtKey,
-        messageId: messageId,
-        fragmentIndex: 0,
-        totalFragments: 1,
-        requiredFragments: 1,
-        data: data,
-        originalSize: data.length,
-        expiresAt: DateTime.now().add(const Duration(days: 30)),
-      ));
-      final isNew = _latestManifest == null ||
-          checker.isNewer(manifest.version, _latestManifest!.version);
-      if (isNew) _latestManifest = manifest;
-      if (storeRes == FragmentStoreResult.stored) {
-        _log.info('[update] Published manifest v${manifest.version} to local DHT store');
-        _pushManifestToPeers(data);
-      } else if (isNew) {
-        _pushManifestToPeers(data);
-      }
-    } catch (e) {
-      _log.debug('[update] Self-publish manifest failed: $e');
-    }
-  }
-
-  /// Push a verified manifest fragment to all confirmed peers via
-  /// FRAGMENT_STORE so the update spreads virally through the network
-  /// instead of requiring each node to poll.
-  void _pushManifestToPeers(Uint8List manifestData) {
-    final dhtKey = UpdateManifest.dhtKey();
-    final messageId = SodiumFFI().sha256(manifestData);
-    final fragStore = proto.FragmentStore(
-      mailboxId: dhtKey,
-      messageId: messageId,
-      fragmentIndex: 0,
-      totalFragments: 1,
-      requiredFragments: 1,
-      fragmentData: manifestData,
-      originalSize: manifestData.length,
-    );
-    final payload = Uint8List.fromList(fragStore.writeToBuffer());
-    final peers = node.routingTable.allPeers;
-    var sent = 0;
-    for (final peer in peers) {
-      if (node.routingTable.isLocalNode(Uint8List.fromList(peer.nodeId))) {
-        continue;
-      }
-      node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-        innerPayload: payload,
-        recipientDeviceId: Uint8List.fromList(peer.nodeId),
-      );
-      sent++;
-    }
-    if (sent > 0) {
-      _log.info('[update] Pushed manifest v${_latestManifest?.version} to $sent peers');
-    }
-  }
-
-  /// §19.6.2 — trigger an in-network binary update download. Public entry
-  /// point for the UI layer: once [onUpdateAvailable] has fired with
-  /// `inNetworkAvailable == true` and the user has consented to installing
-  /// (no auto-install — §19.6.1 principle 6 / architecture §19.6.2 step 6),
-  /// the UI calls this to actually fetch, verify and seed the binary via
-  /// peers instead of falling back to `manifest.downloadUrl`.
-  Future<void> startInNetworkUpdate(UpdateManifest manifest) =>
-      _startInNetworkUpdate(manifest);
-
-  /// Orchestrates the full in-network update flow (§19.6.2): resolve
-  /// binary sources via [BinaryRendezvousManager], download erasure-coded
-  /// fragments (or the full binary in one shot when a peer has it) from
-  /// those sources, assemble + verify the result against the
-  /// maintainer-signed hash carried in [manifest], and seed the verified
-  /// binary back into this node's fragment store so it becomes a
-  /// distribution source for other nodes too.
-  Future<void> _startInNetworkUpdate(UpdateManifest manifest) async {
-    // S287: the UI may hold a stale cached manifest (e.g. v3.1.158) while
-    // the poll has already promoted _latestManifest to a newer version
-    // (e.g. v3.1.159). Using the stale manifest causes a binSize mismatch
-    // because expectedSize comes from the manifest's binarySizes map.
-    final latest = _latestManifest;
-    if (latest != null) {
-      final checker = UpdateChecker(log: _log);
-      if (checker.isNewer(latest.version, manifest.version)) {
-        _log.info('startInNetworkUpdate: upgrading stale UI manifest '
-            'v${manifest.version} → v${latest.version}');
-        manifest = latest;
-      }
-    }
-
-    final platform = Platform.operatingSystem;
-    final store = _binaryFragmentStore;
-    final updater = _binaryUpdateManager;
-    final fetchClient = _binaryFetchClient;
-    final seeder = _binarySeeder;
-    if (store == null || updater == null || fetchClient == null || seeder == null) {
-      _log.warn('startInNetworkUpdate: binary-update subsystem not initialized');
-      return;
-    }
-    onUpdateStateChanged?.call(BinaryUpdateState.checking, 0.0);
-
-    // The manifest's per-platform hash/signature/size is the trust anchor —
-    // without it there is nothing to verify the downloaded binary against,
-    // so refuse rather than install an unverified download.
-    final expectedHash = manifest.binaryHashes?[platform];
-    final signatureB64 = manifest.binarySignatures?[platform];
-    final originalSize = manifest.binarySizes?[platform];
-    if (expectedHash == null || signatureB64 == null || originalSize == null) {
-      _log.warn('startInNetworkUpdate: manifest v${manifest.version} has no '
-          'binaryHash/signature/size for platform=$platform — cannot verify, aborting');
-      onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
-      return;
-    }
-    final Uint8List signatureBytes;
-    try {
-      signatureBytes = base64Decode(signatureB64);
-    } catch (e) {
-      _log.warn('startInNetworkUpdate: malformed binarySignature for platform=$platform: $e');
-      onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
-      return;
-    }
-
-    // 3. Reed-Solomon parameters for this platform (§19.6.2).
-    final params = BinarySeeder.paramsFor(platform);
-
-    // Fast path: if the complete binary is already in the local fragment
-    // store (e.g. from a previous download or self-seeding), skip the
-    // network download and go straight to assemble+verify.
-    final localComplete = File(store.completePath(platform, manifest.version));
-    if (localComplete.existsSync() && localComplete.lengthSync() == originalSize) {
-      _log.info('startInNetworkUpdate: complete binary already cached locally '
-          '(${localComplete.lengthSync()}B) — skipping download');
-    } else {
-      // 1. Resolve binary sources via BinaryRendezvousManager (§19.6.5).
-      final resolvedAll = await node.binaryRendezvousManager?.resolve(platform);
-      if (resolvedAll == null || resolvedAll.isEmpty) {
-        _log.warn('startInNetworkUpdate: no binary sources found for platform=$platform');
-        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
-        return;
-      }
-      // Filter: only sources advertising the target version (V3.1.149 hardening).
-      // Prevents downloading stale binaries from nodes that haven't seeded yet.
-      final resolved = resolvedAll
-          .where((ep) => ep.version == manifest.version)
-          .toList();
-      if (resolved.isEmpty) {
-        _log.warn('startInNetworkUpdate: ${resolvedAll.length} source(s) found but '
-            'none advertise v${manifest.version} (versions seen: '
-            '${resolvedAll.map((e) => e.version).toSet().join(', ')})');
-        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
-        return;
-      }
-
-      // 2. Convert ResolvedBinaryEndpoint -> FragmentSource.
-      // Enrich with routing-table addresses: the Rendezvous record only
-      // carries public IPs, but LAN peers are reachable via their private
-      // addresses in the routing table. Append those as extra targets so
-      // the download layer can reach them even without public IPv4/IPv6.
-      // Interleave addresses across devices (round-robin) so the download
-      // layer quickly tries one address per device instead of exhausting all
-      // addresses of device A before ever contacting device B.
-      final perDevice = resolved.map((ep) {
-        final allAddrs = <EndpointAddress>[...ep.addresses];
-        final peer = node.routingTable.getPeer(hexToBytes(ep.deviceIdHex));
-        if (peer != null) {
-          final seen = allAddrs.map((a) => '${a.ip}:${a.port}').toSet();
-          for (final a in peer.addresses) {
-            if (!seen.contains('${a.ip}:${a.port}')) {
-              allAddrs.add(EndpointAddress(a.ip, a.port));
-              seen.add('${a.ip}:${a.port}');
-            }
-          }
-        }
-        return allAddrs
-            .map((addr) => FragmentSource(
-                  address: addr,
-                  fragmentIndices: ep.fragmentIndices,
-                  hasFullBinary: ep.hasFullBinary,
-                ))
-            .toList();
-      }).toList();
-      final fragmentSources = <FragmentSource>[];
-      var idx = 0;
-      bool added;
-      do {
-        added = false;
-        for (final addrs in perDevice) {
-          if (idx < addrs.length) {
-            fragmentSources.add(addrs[idx]);
-            added = true;
-          }
-        }
-        idx++;
-      } while (added);
-      if (fragmentSources.isEmpty) {
-        _log.warn('startInNetworkUpdate: resolved sources carry no usable addresses');
-        onUpdateStateChanged?.call(BinaryUpdateState.idle, 0.0);
-        return;
-      }
-
-      // 4./5. Delta path (§19.6.3): findDeltaPath() is a free, side-effect-free
-      // check — only logged here. Actually applying a delta requires
-      // libcleona_bsdiff, which DeltaUpdateManager.applyDelta() documents as
-      // not yet implemented (always returns null), and the manifest carries no
-      // delta-hash trust anchor yet either. So this stays a guarded no-op
-      // until both land — full-binary download below is the functioning path.
-      final deltaFromVersion = _deltaUpdateManager?.findDeltaPath(
-        manifest: manifest,
-        currentVersion: currentAppVersion,
-        platform: platform,
-      );
-      if (deltaFromVersion != null) {
-        _log.debug('startInNetworkUpdate: delta path $deltaFromVersion -> '
-            '${manifest.version} advertised, but bsdiff is not yet wired — '
-            'falling back to full binary');
-      }
-
-      // 6. Download (full binary in one shot if a source has it, else
-      // K-of-N fragments assembled below).
-      await updater.startDownload(
-        platform: platform,
-        version: manifest.version,
-        n: params.n,
-        k: params.k,
-        expectedHash: expectedHash,
-        sources: fragmentSources,
-        fetchFragment: (addr, plat, idx) => fetchClient.fetch(addr, plat, idx),
-        fetchWithSize: fetchClient.fetch,
-        expectedSize: originalSize,
-      );
-      if (updater.state == BinaryUpdateState.failed) {
-        _log.warn('startInNetworkUpdate: download failed: ${updater.errorMessage}');
-        return;
-      }
-    }
-
-    // 7. Assemble the binary from downloaded fragments (or reuse the
-    // complete binary if a full-binary fetch already stored it).
-    final binary = await updater.assemble(
-        platform, manifest.version, params.n, params.k, originalSize);
-    if (binary == null) {
-      _log.warn('startInNetworkUpdate: assemble failed: ${updater.errorMessage}');
-      // RS decode exception = corrupt fragments → purge cache to allow fresh download
-      // "Cannot assemble: have/only N fragments" = transient → preserve partial download
-      if (updater.errorMessage != null && updater.errorMessage!.contains('assemble failed:')) {
-        _log.warn('startInNetworkUpdate: corrupt fragment cache detected, purging v${manifest.version} ($platform)');
-        await store.deleteVersion(platform, manifest.version);
-      }
-      return;
-    }
-
-    // 8. Verify SHA-256 hash + Ed25519 maintainer signature over that hash.
-    // On success this also fires BinaryUpdateManager.onUpdateReady, which
-    // republishes this node's binary-availability record.
-    final verified = await updater.verify(binary, expectedHash, signatureBytes);
-    if (!verified) {
-      _log.error('startInNetworkUpdate: verification FAILED for v${manifest.version} '
-          '($platform) — refusing to seed or offer for install, purging all fragments');
-      await store.deleteVersion(platform, manifest.version);
-      return;
-    }
-
-    node.binaryHasContentToShare = true;
-    _log.info('startInNetworkUpdate: v${manifest.version} verified and ready '
-        '(${binary.length}B)');
-
-    // 9. Seed — encode into RS fragments so this node also becomes a
-    // fragment-serving distribution source, not just a full-binary source.
-    // Fire-and-forget: RS encoding is CPU-intensive (synchronous FFI) and
-    // must not block the auto-install flow on Android.
-    final maxFragments = Platform.isAndroid || Platform.isIOS ? 2 : 8;
-    unawaited(Future(() async {
-      final seededCount = await seeder.seed(
-        binary: binary,
-        platform: platform,
-        version: manifest.version,
-        maxFragments: maxFragments,
-      );
-      _log.info('startInNetworkUpdate: seeded $seededCount fragment(s) for '
-          'v${manifest.version}');
-    }));
-  }
-
-  // ── DHT Identity Registry Recovery (Architecture Section 6.4.3) ────
-
-  /// Poll the DHT for identity registry fragments after seed recovery.
-  ///
-  /// [masterSeed] is the recovered master seed (from 24-word phrase).
-  /// Returns the recovered identity list, or null if no registry found.
-  /// Retries up to 3 times with increasing delay (10s/20s/30s).
-  Future<({List<Map<String, dynamic>> identities, int nextIndex})?> pollRegistryFromDht(
-    Uint8List masterSeed,
-  ) async {
-    final registry = IdentityDhtRegistry(masterSeed: masterSeed, profileDir: profileDir);
-    final registryMailboxId = registry.registryDhtKey;
-
-    _log.info('Registry recovery: polling DHT for registry fragments (key: ${registry.registryDhtKeyHex.substring(0, 16)}...)');
-
-    const delays = [Duration(seconds: 10), Duration(seconds: 20), Duration(seconds: 30)];
-    for (var attempt = 0; attempt < delays.length; attempt++) {
-      final peers = node.routingTable.allPeers;
-      if (peers.isEmpty) {
-        _log.debug('Registry recovery attempt ${attempt + 1}: no peers yet');
-      } else {
-        for (final peer in peers) {
-          _requestFragments(peer, registryMailboxId);
-        }
-      }
-
-      await Future<void>.delayed(delays[attempt]);
-
-      final fragments = mailboxStore.retrieveFragments(registryMailboxId);
-      if (fragments.isEmpty) {
-        _log.info('Registry recovery attempt ${attempt + 1}/${delays.length}: no fragments');
-        continue;
-      }
-
-      // Group fragments by messageId (generation), then decode each group separately
-      final groups = <String, Map<int, Uint8List>>{};
-      final groupOrigSize = <String, int>{};
-      for (final frag in fragments) {
-        final msgKey = bytesToHex(frag.messageId);
-        (groups[msgKey] ??= {})[frag.fragmentIndex] = Uint8List.fromList(frag.data);
-        if ((groupOrigSize[msgKey] ?? 0) == 0 && frag.originalSize > 0) {
-          groupOrigSize[msgKey] = frag.originalSize;
-        }
-      }
-
-      // Try each group that has enough fragments, pick highest updated_at
-      Map<String, dynamic>? bestPayload;
-      int bestUpdatedAt = 0;
-      for (final entry in groups.entries) {
-        final gFrags = entry.value;
-        final gOrigSize = groupOrigSize[entry.key] ?? 0;
-        if (gFrags.length < ReedSolomon.defaultK || gOrigSize == 0) continue;
-
-        final payload = registry.recoverFromFragments(gFrags, gOrigSize);
-        if (payload == null) continue;
-
-        final updatedAt = payload['updated_at'] as int? ?? 0;
-        if (updatedAt > bestUpdatedAt) {
-          bestUpdatedAt = updatedAt;
-          bestPayload = payload;
-        }
-      }
-
-      if (bestPayload == null) {
-        if (groups.isNotEmpty) {
-          _log.warn('Registry recovery attempt ${attempt + 1}: ${groups.length} generation(s) found but none decodable');
-        } else {
-          _log.info('Registry recovery attempt ${attempt + 1}/${delays.length}: no fragments');
-        }
-        continue;
-      }
-
-      if (groups.length > 1) {
-        _log.info('Registry recovery: ${groups.length} generations found, selected newest (updated_at=$bestUpdatedAt)');
-      }
-
-      final identities = IdentityDhtRegistry.extractIdentities(bestPayload);
-      final nextIndex = IdentityDhtRegistry.extractNextIndex(bestPayload);
-
-      _log.info('Registry recovery: found ${identities.length} identities, next_index=$nextIndex');
-      return (identities: identities, nextIndex: nextIndex);
-    }
-
-    _log.info('Registry recovery: no registry found after ${delays.length} attempts');
-    return null;
-  }
-
-  /// §6.4.3: Recover multi-identity list from DHT after seed-phrase restore.
-  /// Polls DHT for the erasure-coded registry, then creates identities for
-  /// each active HD index that doesn't already exist locally.
-  /// Returns the list of newly created identities (empty if none found or
-  /// all already existed). The caller (daemon or in-process) is responsible
-  /// for starting services for the returned identities.
-  Future<List<Identity>> recoverIdentitiesFromRegistry() async {
-    final masterSeed = identity.masterSeed;
-    if (masterSeed == null) {
-      _log.debug('Registry recovery skipped: no master seed');
-      return [];
-    }
-
-    final result = await pollRegistryFromDht(masterSeed);
-
-    if (result == null) {
-      // §6.4.3 step 5: no registry found — fall back to AuthManifest probing
-      // to detect pre-fix off-by-one (ID-01).
-      return _probeRestoreIndex(masterSeed);
-    }
-
-    final mgr = IdentityManager();
-    final existing = mgr.loadIdentities();
-    final existingIndices = existing
-        .where((i) => i.hdIndex != null)
-        .map((i) => i.hdIndex!)
-        .toSet();
-
-    final created = <Identity>[];
-    for (final entry in result.identities) {
-      final idx = entry['index'] as int;
-      if (existingIndices.contains(idx)) continue;
-      final name = entry['name'] as String? ?? 'Identity ${idx + 1}';
-      try {
-        // §7.1.3 (P2): every identity recovered in this run describes the
-        // same physical device the user just answered the restore question
-        // for — forward the same "additional device vs. lost device" choice
-        // so a secondary identity doesn't race its own original device for
-        // the auth-key slot while the primary identity correctly waits.
-        final id = await mgr.createIdentityAtIndex(idx, name,
-            restoreAwaitingPairing: identity.restoreAwaitingPairing);
-        created.add(id);
-        _log.info('Registry recovery: created identity "$name" at hdIndex=$idx');
-      } catch (e) {
-        _log.warn('Registry recovery: failed to create identity at hdIndex=$idx: $e');
-      }
-    }
-
-    if (created.isNotEmpty) {
-      _log.info('Registry recovery: ${created.length} identities restored from DHT');
-    }
-    return created;
-  }
-
-  /// §6.4.3 Restore-Index-Probing (ID-01):
-  /// After the _maxHdIndex fix, seed restore creates the primary identity at
-  /// index 0. Users who created their first identity before the fix have it
-  /// at index 1 (off-by-one). When no registry exists (single-identity users),
-  /// probe DHT AuthManifest at index 1's userId to detect the old-bug case.
-  /// If found, create the correct identity at index 1 so the caller can start
-  /// its service and trigger a Restore Broadcast with the right keys.
-  Future<List<Identity>> _probeRestoreIndex(Uint8List masterSeed) async {
-    final mgr = IdentityManager();
-    final existing = mgr.loadIdentities();
-
-    if (existing.length != 1 || existing.first.hdIndex != 0) return [];
-
-    final kp1 = HdWallet.deriveEd25519(masterSeed, 1);
-    final identitySecret = NetworkSecret.identitySecret;
-    final userId1 = HdWallet.computeUserId(kp1.publicKey, identitySecret);
-
-    _log.info('Restore-Index-Probing: checking AuthManifest at HD index 1 '
-        '(userId=${bytesToHex(userId1).substring(0, 16)}...)');
-
-    final devices = await node.identityResolver.resolve(userId1);
-    if (devices.isEmpty) {
-      _log.info('Restore-Index-Probing: no AuthManifest at index 1, '
-          'primary at index 0 is correct');
-      return [];
-    }
-
-    _log.info('Restore-Index-Probing: AuthManifest found at index 1, '
-        'creating correct primary identity');
-    try {
-      // §7.1.3 (P2): same restore run, same physical device — forward the
-      // user's "additional device vs. lost device" choice (see the sibling
-      // call in `recoverIdentitiesFromRegistry` for the full rationale).
-      final id = await mgr.createIdentityAtIndex(
-          1, existing.first.displayName,
-          restoreAwaitingPairing: identity.restoreAwaitingPairing);
-      return [id];
-    } catch (e) {
-      _log.warn('Restore-Index-Probing: failed to create at index 1: $e');
-      return [];
-    }
-  }
-
-  /// Store the current identity registry in the DHT with ACK-verified placement.
-  /// Called after identity creation/deletion to keep the registry up-to-date.
-  Future<bool> storeRegistryInDht(Uint8List masterSeed, List<({int? hdIndex, String name})> identities, int nextIndex) async {
-    final registry = IdentityDhtRegistry(masterSeed: masterSeed, profileDir: profileDir);
-    final entries = IdentityDhtRegistry.buildIdentityEntries(identities);
-    final prepared = registry.prepareForDht(entries, nextIndex);
-
-    final initialPeers = node.routingTable.findClosestPeers(prepared.mailboxId,
-        count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-    if (initialPeers.isEmpty) {
-      _log.debug('Registry DHT store skipped: no replicators known');
-      return false;
-    }
-
-    final msgIdHex = bytesToHex(prepared.messageId);
-
-    Future<bool> sendAndWait(int fragmentIndex, PeerInfo peer) async {
-      final frag = prepared.fragments[fragmentIndex];
-      final store = proto.FragmentStore()
-        ..mailboxId = prepared.mailboxId
-        ..messageId = prepared.messageId
-        ..fragmentIndex = frag.index
-        ..totalFragments = prepared.fragments.length
-        ..requiredFragments = ReedSolomon.defaultK
-        ..fragmentData = frag.data
-        ..originalSize = prepared.payloadSize;
-      final key = '$msgIdHex:$fragmentIndex';
-      final completer =
-          _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-        innerPayload: Uint8List.fromList(store.writeToBuffer()),
-        recipientDeviceId: Uint8List.fromList(peer.nodeId),
-      ));
-      try {
-        await completer.future.timeout(_peerStoreAckTimeout);
-        return true;
-      } on TimeoutException {
-        return false;
-      }
-    }
-
-    final coordinator = ErasurePlacementCoordinator<PeerInfo>(
-      totalFragments: prepared.fragments.length,
-      requiredFragments: ReedSolomon.defaultK,
-      peerId: (p) => p.nodeIdHex,
-      isPeerConfirmed: (p) => node.isPeerConfirmed(p.nodeIdHex),
-    );
-    final result = await coordinator.run(
-      initialPool: initialPeers,
-      deeperPool: () => node.routingTable.findClosestPeers(prepared.mailboxId,
-          count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup),
-      sendAndWait: sendAndWait,
-    );
-
-    for (var i = 0; i < prepared.fragments.length; i++) {
-      _pendingFragmentStoreAcks.remove('$msgIdHex:$i');
-    }
-
-    if (result.success) {
-      _log.info('Registry DHT store: ${result.confirmedCount}/${result.totalFragments} indices confirmed');
-    } else {
-      _log.warn('Registry DHT store FAILED: ${result.confirmedCount}/${result.totalFragments} indices confirmed');
-    }
-    return result.success;
-  }
-
-  /// Fire-and-forget: publish identity registry to DHT after rename.
-  void _publishIdentityRegistryIfPossible() {
-    final masterSeed = identity.masterSeed;
-    if (masterSeed == null) return;
-    final mgr = IdentityManager();
-    final identities = mgr.loadIdentities();
-    final entries = identities
-        .map((i) => (hdIndex: i.hdIndex, name: i.displayName))
-        .toList();
-    final nextIndex = mgr.nextHdIndex();
-    unawaited(storeRegistryInDht(masterSeed, entries, nextIndex).catchError((e) {
-      _log.debug('Identity registry DHT publish error: $e');
-      return false;
-    }));
-  }
-
-  /// Single-source-of-truth log message for KEM version rejections (Sec H-5
-  /// silent-drop contract). Use from [PerMessageKem.decrypt] catch sites.
-  void _warnKemVersionRejected(String context, KemVersionRejectedException e) {
-    _log.warn('KEM version rejected for $context (version=${e.receivedVersion}, drop)');
-  }
-
   // ──────────────────────────── V3 Send/Receive (§2.6 + §5) ────────────────────────────
   //
   // V3.0 layered-frames pipeline entry points.
 
-  /// High-level V3 send API (Architecture v3.0 §2.6, sender steps 1-12):
-  ///   resolve user → fan-out to devices → build inner → user-sign → zstd →
-  ///   KEM-encrypt → wrap KEM → build outer → device-sign → PoW → tag → wire
+  // `_isCallSignalingV3(...)` stood here: the distinction of whether a
+  // frame is call signalling and may therefore go out UNPACED. Its only
+  // reader was `node.sendToDeviceTracked(..., paced:)` in the V3 fan-out
+  // of [sendToUser]. V4.1 paces differently (cover stream, §5) and knows
+  // no paced switch per frame.
+
+
+  /// The V4.1 delivery (IP-2). If it is `null`, the switch changes nothing.
+  V41Delivery? v41Delivery;
+
+  /// The cold-start gate before the routine rotation (§4.5.4, S363).
   ///
-  /// Returns true iff at least one device-leg of the recipient fan-out was
-  /// dispatched successfully via the node. The codec produces the inner KEM
-  /// bytes here; the outer wrap (Device-Sig + PoW + network_tag + send) lives
-  /// in [CleonaNode.sendToDevice].
+  /// See `cold_start_rotation_gate.dart` — the finding, the order and the
+  /// calculated price are there.
+  final ColdStartRotationsTor _coldStartRotationsTor = ColdStartRotationsTor();
+
+  /// Only for the guard and the status output: whether a cold-start
+  /// rotation is currently waiting for the first harvest run.
+  bool get coldStartRotationDeferred => _coldStartRotationsTor.sharp;
+
+  /// A harvest run has taken place.
   ///
-  /// Offline fallback (S&F + Mailbox) is a TODO — `false` is returned so
-  /// callers can decide their queue-vs-drop policy explicitly.
-  /// Sends a message to a recipient user.
+  /// Called by the seam `mycelium_seam.dart` (`hostStart`, parameter
+  /// `Host.start(onFirstCollection:)`) after the first COMPLETED
+  /// collection run with at least one neighbour — to EVERY service
+  /// attached to the host. Until S392 the call came solely from
+  /// `attachV41` (`V41Node` distributor), and `attachV41` has had no
+  /// caller since the replacement: in the meantime the gate always opened
+  /// only via the fallback period.
   ///
-  /// Returns true when at least one device received the direct UDP dispatch.
-  /// Returns false in two distinct situations (callers that need to
-  /// distinguish them can pass [l3Result]):
-  ///   • No direct route — L3 placement attempted (Erasure + S&F).
-  ///     [l3Result] is set to true if any L3 peer was reachable.
-  ///   • No connectivity at all — L3 placement failed.
-  ///     [l3Result] is set to false; caller should park the message in the
-  ///     one-shot outbox ([_addToOutbox]) with status [MessageStatus.failed].
-  ///
-  /// [l3Result] is a single-element list used as an optional output parameter
-  /// (Dart has no ref/out params).  Pass `[false]` and read index 0 after the
-  /// call.  Existing callers that ignore L3 outcome can omit this parameter.
-  /// Call setup/teardown signaling (§10.1). These frames are latency-critical
-  /// — a delayed CALL_INVITE is a call that never rings — and they are few
-  /// (one per state transition, plus the §10.1 retry schedule). They are
-  /// therefore exempt from the §4.6 per-hop pacing budget, which exists to
-  /// bound *mesh-maintenance* bursts.
-  static bool _isCallSignalingV3(proto.MessageTypeV3 type) {
-    switch (type) {
-      case proto.MessageTypeV3.MTV3_CALL_INVITE:
-      case proto.MessageTypeV3.MTV3_CALL_ANSWER:
-      case proto.MessageTypeV3.MTV3_CALL_REJECT:
-      case proto.MessageTypeV3.MTV3_CALL_HANGUP:
-      case proto.MessageTypeV3.MTV3_CALL_REJOIN:
-        return true;
-      default:
-        return false;
-    }
+  /// NO OWN CLOCK: the node reports the collection run that §8.2 runs at
+  /// its edges anyway (formerly `V41Node.harvestRuns`, today
+  /// `NodePostBox.collect`). Without this call the gate would stay closed
+  /// until the fallback period, and the reversal would be built and never
+  /// entered.
+  void reportHarvestRun() {
+    if (_coldStartRotationsTor.harvestRun() == null) return;
+    _log.info('First harvest run reported — deferred rotation runs '
+        'now (§4.5.4/S363).');
+    _performKeyRotation();
   }
+
+  /// The fallback period of the cold-start gate, checked on the existing
+  /// 30 s clock. See [ColdStartRotationsTor.fallbackPeriod].
+  void _checkRotationsTorDeadline() {
+    if (_coldStartRotationsTor.deadlineCheck(DateTime.now()) == null) return;
+    _log.warn('Cold-start rotation: in '
+        '${_coldStartRotationsTor.fallbackPeriod.inMinutes} min not a '
+        'single harvest run — there is no reachable responsible '
+        'relay. The rotation runs anyway so that the 7-day cycle from '
+        '§4.5.4 does not drop out; the announcement is then, however, '
+        'probably not deliverable.');
+    _performKeyRotation();
+  }
+
+  /// How often this service has sealed against a PROVABLY stale KEM copy
+  /// (§4.5.4, S363).
+  ///
+  /// The counterpart counter on the receiver side is
+  /// `MessageOpener.sealedForMeButUnopened`. Both together are the
+  /// measure of the error that §4.5.4 itself names as silent ("the
+  /// loss is silent"): the one counts who causes it, the other whom it
+  /// hits.
+  int staleKemSeals = 0;
+
+  /// The bundle line of the rescue bundle (§13.3), set by `attachV41`.
+  /// `null` in every process without a V4.1 node.
+  RecoveryBundleLine? v41RecoveryBundle;
+
+  /// §22.7 at the service boundary — the readiness state as a string.
+  ///
+  /// **Without V4.1 delivery `searching`, not `ready`.** That is the
+  /// cautious direction and the only defensible one: `readinessState`
+  /// means "it can be placed with redundancy". Where the delivery layer
+  /// does not run at all (`CLEONA_V41=0`, or a process without a node),
+  /// that is demonstrably not the case. The reverse fallback would
+  /// silently open every gate that depends on it.
+  ///
+  /// Deliberately NO recourse to `peerCount` as a substitute quantity:
+  /// exactly this stand-in is forbidden by §22.7 ("evidence, not
+  /// acquaintance").
+  ///
+  /// S387: if a mycelium mailbox is attached, the source is the host
+  /// (`Host.readiness`, V4.2 §22.7.1 — answering neighbours, live, no
+  /// flag). The names are the same that IPC and `waitForReady` carry.
+  @override
+  String get readinessState =>
+      _myceliumReadiness ??
+      (v41Delivery?.readinessState ?? Readiness.searching).name;
+
+  /// §25.4 at the service boundary — the partner counts SEPARATED by
+  /// direction.
+  ///
+  /// **Why they must not come from `peerCount`.** The three V3 counters
+  /// (`peerCount`, `confirmedPeerCount`, `reachablePeerCount`) count
+  /// Kademlia peers of the 3.x line. A sync partner of the V4.1 delivery
+  /// layer is something else: an open link session over which cells run.
+  /// Putting the one number in place of the other would be exactly the
+  /// surrogate that §22.7 and the guard
+  /// `smoke_ipc_interface_completeness.dart` rule out.
+  ///
+  /// Without V4.1 delivery the answer is `0` and not a V3 substitute
+  /// value: zero sessions IS the truth of this layer when it is not
+  /// running.
+  @override
+  int get syncPartnersOutbound => v41Delivery?.syncPartnersOutbound ?? 0;
+
+  @override
+  int get syncPartnersInbound => v41Delivery?.syncPartnersInbound ?? 0;
+
+  @override
+  int get independentSyncPartners => v41Delivery?.independentSyncPartners ?? 0;
+
+  /// §9.2 — the MEASURED responsibility set from which the consent dialog
+  /// computes its time span.
+  ///
+  /// `0` means "delivery layer not attached or no relay known". Both are
+  /// the same state for the display: there is nothing to deposit, so
+  /// there is nothing to estimate.
+  @override
+  int get reachableResponsibleRelays =>
+      v41Delivery?.reachableResponsibleRelays ?? 0;
+
+  // ── DATA SAVER MODE (§24.4.2, §23.1 point 5, §23.7 RL-8, §31.3 Tier 4) ─
+  //
+  // The state itself lives in `CoverSaver.instance` (lib/core/sync/
+  // cover_stream.dart), because the slot clock is decided there and a
+  // latch only holds at the place of the action. Here stands only what
+  // the service contributes: the PROBE that says whether this identity
+  // is currently running a secure chat.
+
+  // NO SECURE PROBE ANY MORE (S389). Here stood `hasSecureChat` and
+  // `_ensureCoverSaverProbe`: the probe with which the data saver mode
+  // was locked as long as any chat of this identity was set to
+  // high-secure. It read `Contact.secureMode`/`Group.secureMode`,
+  // and those no longer exist (§12.1 — no switch, no setting
+  // per chat).
+  //
+  // CONSEQUENCE, named instead of concealed: `CoverSaver.lockedBySecure`
+  // answers `false` without a registered probe (cover_stream.dart: the
+  // loop over an empty set falls through), so the latch never takes hold
+  // any more. That is the direction §3.1 leads — "The cover
+  // stream … can be switched off without affecting delivery": a latch
+  // that prevents switching off the cover presupposes that a delivery
+  // hangs on it. The chain below (`lockedBySecure`,
+  // `dataSaverLockedBySecure`, `kDataSaverLockedBySecure` and four
+  // display places) is thus unreachable and belongs in its own
+  // package — finding B-M3 in `mycelium/berichte/S389-BAU-MODUS.md`.
+
+  /// §24.4.2 — whether the saver mode TAKES EFFECT.
+  @override
+  bool get dataSaverActive {
+    return CoverSaver.instance.active;
+  }
+
+  /// §24.4.2 — whether the switch is locked because secure is running.
+  @override
+  bool get dataSaverLockedBySecure {
+    return CoverSaver.instance.lockedBySecure;
+  }
+
+  /// §24.4.2 — the setter. Only the user calls it.
+  ///
+  /// Returns [kDataSaverLockedBySecure] if the latch takes hold; the wish
+  /// is then NOT remembered (a remembered wish that later strikes by
+  /// itself would be the automatic activation that §24.4.2 forbids).
+  @override
+  String setDataSaver(bool on) {
+    final result = CoverSaver.instance.request(on);
+    onStateChanged?.call();
+    return switch (result) {
+      CoverSaverOutcome.refusedSecureActive => kDataSaverLockedBySecure,
+      _ => kDataSaverOk,
+    };
+  }
+
+  // ── SOURCE 4: EXTERNAL ADDRESS ENTRIES (V4.2 §11.9, S388) ────────────
+  //
+  // A device value: the switch lives in the memory of the ONE host
+  // (`wirt.enc`), not per identity — every service of the process reads
+  // the same one. Without an attached mailbox there is no host: then the
+  // host's default (on) applies, and the setter reports `false` instead
+  // of silently doing nothing.
+
+  @override
+  bool get externalRecordsEnabled =>
+      myceliumMailbox?.host.outsideSourceOn ?? true;
+
+  @override
+  bool setExternalRecordsEnabled(bool on) {
+    final p = myceliumMailbox;
+    if (p == null) return false;
+    p.host.outsideSourceOn = on;
+    _log.info('Source 4 (external address entries) ${on ? 'an' : 'aus'} — '
+        'by the user (§11.9)');
+    onStateChanged?.call();
+    return true;
+  }
+
+  // ── COVER IN THE OWN NETWORK (S373, §5.1 exception) ───────────────────
+  //
+  // The state is split in two and that is intended: the CONSENT in the
+  // node (`V41Node.lanConsent`, because only it knows where its partners
+  // sit), the EFFECT in `CoverSaver` (because the slot clock is decided
+  // there). Here stands the bridge to the UI and the storage.
+
+  static const String _areaLanConsent = 'lan_consent';
+  static const String _keyLanConsent = 'segments';
+  bool _lanConsentLoaded = false;
+
+  /// Loads the consents into the node — once, as soon as there is a
+  /// node.
+  ///
+  /// LAZY AND NOT IN THE CONSTRUCTOR: `v41Delivery` is filled in later by
+  /// `attachV41` and is `null` when the service is created. A load attempt
+  /// there would run into nothing, and the consent would be gone after
+  /// every restart — without it being noticed, because the result (full
+  /// cover) looks like the normal case.
+  void _ensureLanConsentLoaded() {
+    if (_lanConsentLoaded) return;
+    final n = v41Delivery;
+    if (n == null) return;
+    _lanConsentLoaded = true;
+    try {
+      n.lanConsentLoadJson(
+          store.loadArea(_areaLanConsent)[_keyLanConsent]);
+    } catch (e) {
+      // An unreadable consent is NO consent. Do not guess, do not
+      // repair — the user is asked again, and that is the only
+      // defensible direction.
+      _log.warn('lan consent unreadable: $e');
+    }
+    n.onLanConsentChanged = () {
+      try {
+        store.replaceArea(
+            _areaLanConsent, {_keyLanConsent: n.lanConsentToJson()});
+      } catch (e) {
+        _log.warn('lan consent not saved: $e');
+      }
+    };
+  }
+
+  @override
+  bool get lanShapingActive {
+    _ensureLanConsentLoaded();
+    return CoverSaver.instance.lanShapingActive;
+  }
+
+  @override
+  List<String> get lanSegmentIds {
+    _ensureLanConsentLoaded();
+    return v41Delivery?.lanSegmentIds ?? const <String>[];
+  }
+
+  @override
+  List<String> get lanSegmentsGrantable {
+    _ensureLanConsentLoaded();
+    return v41Delivery?.lanSegmentsGrantable ?? const <String>[];
+  }
+
+  @override
+  bool lanSegmentConsented(String segmentId) {
+    _ensureLanConsentLoaded();
+    return v41Delivery?.lanSegmentConsented(segmentId) ?? false;
+  }
+
+  @override
+  bool grantLanShaping(String segmentId) {
+    _ensureLanConsentLoaded();
+    final ok = v41Delivery?.grantLanShaping(segmentId) ?? false;
+    if (ok) onStateChanged?.call();
+    return ok;
+  }
+
+  @override
+  bool revokeLanShaping(String segmentId) {
+    _ensureLanConsentLoaded();
+    final ok = v41Delivery?.revokeLanShaping(segmentId) ?? false;
+    if (ok) onStateChanged?.call();
+    return ok;
+  }
+
+  /// The V4.1 host (§4.6) — the sealing TOGETHER with the prekey pool.
+  ///
+  /// FORMERLY ONLY THE SEALING STOOD HERE (`MessageSealer? v41Sealer`),
+  /// and the body called `seal()` directly. That skipped `advance()`, i.e.
+  /// exactly the step that DRAWS the one-time prekey — §4.6: "The sender
+  /// seals every cell against exactly one unused prekey." Without it
+  /// `_current[peer]` stayed empty, `x25519PublicFor` threw `StateError`,
+  /// and because the send path hangs on an unhandled async error, the
+  /// error took the whole daemon with it. Measured on 25.08. on node 2:
+  /// the first arriving contact request wanted to send back a
+  /// DELIVERY_RECEIPT and killed the process.
+  ///
+  /// Second, silent damage from the same shortcut: `seal()` alone omitted
+  /// the frame kind that `V41Host.accept()` reads on the other side —
+  /// a frame sealed like that could not have been assigned there.
+  ///
+  /// That is why the service now holds the HOST and calls `sendFrame()`.
+  /// The order draw-seal-send thus lives in ONE place, not in two that
+  /// can drift apart.
+  V41Host? v41Host;
+
+  /// The mycelium mailbox of this identity (V4.2, S387) — set by
+  /// `myceliumAttach` (`cleona_service_mycelium.dart`) as soon as the
+  /// host of the process is up. If it is set, it carries `sendToUser`.
+  mycelium.Mailbox? myceliumMailbox;
+
+  /// app `messageId` (hex) -> mycelium outbound: the source of the display
+  /// status for messages sent via mycelium. Capped, see
+  /// `_kMyceliumOutboundsMax`.
+  final Map<String, mycelium.Outbound> _myceliumOutbounds = {};
+
+  /// Identifiers for which a proven delivery receipt of the application came.
+  final Set<String> _myceliumAcknowledged = {};
+
+  /// The bulk lane of this identity (§9.3).
+  ///
+  /// NOT NULLABLE: it costs nothing as long as no transfer runs (two
+  /// empty maps), and a nullable field would have forced a branch at every
+  /// read site that is never checked. What CAN be missing is its
+  /// transport — and that is a separate field.
+  final MediaBulkLane mediaBulkLane = MediaBulkLane();
+
+  /// The seam of the media bulk lane to the network (§9.3).
+  ///
+  /// **Set since 02.09.2026** — `attachV41` attaches a
+  /// `V41MediaBulkTransport` here (`media_bulk_transport_v41.dart`) and at
+  /// the same time its back side to `DeliveryNode.onBulkScanned`. Before,
+  /// the field was `null` because the HOLDER SIDE was missing: no wire
+  /// format for a bulk deposit, no constructor for `BulkCache`, and
+  /// frame type `0x05` was discarded on assignment.
+  ///
+  /// `null` REMAINS ADMISSIBLE and still means the same: no V4.1 node at
+  /// this identity (tests, `CLEONA_V41=0`). Then a large media send is
+  /// REJECTED instead of silently going via V3.
+  MediaBulkTransport? mediaBulkTransport;
+
+  /// The delivery status of the messages sent via V4.1 (§9.2, D2).
+  ///
+  /// NOT NULLABLE and without a switch: the register costs nothing as long
+  /// as nothing is put into it, and it is filled exclusively by the
+  /// V4.1 send path. A `null` would have forced a second branch at every
+  /// read side — and a branch that only the absence of the register
+  /// enters is exactly the place where the rule from §9.2 would get lost
+  /// again.
+  ///
+  /// The read sides live in `cleona_service_msgstate.dart` and
+  /// `cleona_service_receive.dart`; it also says there why they ASK the
+  /// register and do not judge themselves.
+  final V41DeliveryRegister v41Deliveries = V41DeliveryRegister();
+
+  /// The LOCAL OUTBOX (§21.2) — the ledger of own, not yet substantiated
+  /// messages. **Gap G-4, closed in S360.**
+  ///
+  /// ── WHAT DISTINGUISHES IT FROM THE REGISTER NEXT TO IT ────────────────────
+  ///
+  /// [v41Deliveries] keeps the STATE of a delivery (how many independent
+  /// relays, which attempt, which piece). It lives only in memory, and
+  /// that is right: a proof from an attempt whose cells no longer exist
+  /// after a restart would be worthless.
+  ///
+  /// The outbox, by contrast, keeps what MUST SURVIVE a restart: the
+  /// plaintext frame from which a resubmission can seal FRESHLY
+  /// (§22.5.1 refinement 3). §21.8 lists it explicitly as an item on
+  /// disk — "Own, not-yet-placed cells (outbox) | own messages including
+  /// recipient | **under the DB key**".
+  ///
+  /// Without it every message sent via V4.1 stood permanently on
+  /// `placing` after a restart: the display value is written to
+  /// `conversations.json` and read back unchanged by
+  /// `MessageStatus.fromWire`, but neither the register nor the control
+  /// queue survive the process. `service_types.dart` describes exactly
+  /// this state as inadmissible: "Behind a record loaded from disk there
+  /// is no outbox line and therefore nothing that would ever move it on;
+  /// it would stand on a promise that cannot come true."
+  ///
+  /// NOT the V3 `_outbox` next to it: that carries serialised
+  /// `NetworkPacketV3` bytes and since the CUT is only read and written
+  /// so that an old profile is not silently overwritten.
+  final V41Outbox v41Outbox = V41Outbox();
+
+  /// From the WIRE identifier of a leg to the message it displays.
+  ///
+  /// ── WHY THIS INDEX EXISTS (S376, P5 finding 2) ────────────────
+  ///
+  /// A placement receipt (`PlacementAck`) only knows the identifier of
+  /// the leg. The DISPLAY hangs on a `UiMessage` in a conversation, and
+  /// with a group fan-out the display identifier is NOT the wire
+  /// identifier (every leg has its own, `UiMessage.fanoutLegs`). Without
+  /// a mapping only the full pass over all conversations and all messages
+  /// would remain — that is how `_applyFanoutReceipt` does it for the
+  /// delivery receipt, and there one receipt comes per MESSAGE. Here up
+  /// to `m x R` = 60 receipts come per message (§9.2); the same pass
+  /// would be 60 times as expensive.
+  ///
+  /// ONLY IN MEMORY, and that is not a backlog but the counterpart of
+  /// [v41Deliveries]: the register does not survive the process either,
+  /// a receipt for a message from before the restart finds no record
+  /// there anyway and returns at once. An index that lived longer than
+  /// the register would be a reference to a question nobody asks any more.
+  ///
+  /// CAPPED like the register: [_v41LegIndexMax]. If it overflows, the
+  /// oldest entry is discarded (insertion order — `Map` in Dart keeps
+  /// it). The loss costs the display of an update, not a delivery.
+  final Map<String, ({String convId, String msgId})> _v41LegIndex = {};
+
+  /// How many legs the index keeps at most.
+  ///
+  /// THE SAME ORDER OF MAGNITUDE AS THE REGISTER it is fed from: an entry
+  /// without a record in the register can no longer have any effect. The
+  /// number is deliberately generous — an entry is two short strings.
+  static const int _v41LegIndexMax = 4096;
+
+  /// How many frames a secure resubmission costs — `m x R` (§9.2).
+  ///
+  /// It stands here as a calculation from two constants and not as a
+  /// number, so that it grows along when [kResponsibleRelays] changes. The
+  /// egress cap of the drain hangs on it; a frozen 60 would be the kind of
+  /// silent deviation at which `kMaxControlBacklog` could once already
+  /// have broken.
+  static const int _v41SecureFramesPerOffer =
+      kDeliveryFamilies * kResponsibleRelays;
+
+  static const int _kV41FrameOverhead = 160;
+
+  // `_receiptReturnsOverV41` stood here: the question whether the
+  // delivery confirmation travels back in the cover stream instead of on
+  // the same path as the message. It answered EXCLUSIVELY the deadline
+  // calculation of the `AckTracker` (`returnLegOverCoverStream`) — and in
+  // V4.1 there is no deadline on the delivery path any more. The
+  // statement itself has become trivially true: there IS only the one way.
+
+
+  /// A detached send attempt — the result does not matter, but the
+  /// ERROR must not escape into the zone.
+  ///
+  /// ── WHY THIS FUNCTION MUST EXIST ──────────────────────────────
+  ///
+  /// `sendToUser` has TWO error channels: it returns `false` (no
+  /// recipient key, too large, nothing placeable) AND it can throw.
+  /// 22 call sites throw away the `Future` because they only send on the
+  /// side. They STRUCTURALLY cannot see the second channel:
+  ///
+  ///   * An `async` function NEVER throws synchronously. Even a throw in
+  ///     the first line of its body lands in the returned `Future`.
+  ///     A `try { sendToUser(…); } catch (e) { … }` around the call
+  ///     therefore catches NOTHING — measured in
+  ///     `test/smoke/smoke_self_send_v41_guard.dart`: "call site: try/catch
+  ///     hat NICHTS gefangen". `_sendTwinSync` had exactly this
+  ///     `try/catch` and thus considered itself safeguarded.
+  ///   * A `Future` with an unobserved error goes into the zone handler of
+  ///     `service_daemon.dart` (~L424). Its survival list knows
+  ///     `TimeoutException`, `SocketException`, `IOException` and one
+  ///     named `StateError` — everything else is `exit(99)`.
+  ///
+  /// So EVERY unexpected exception in `sendToUser` kills the whole
+  /// daemon: all identities, all chats, all calls — because ONE side
+  /// send could not form a key. The proportion is not right.
+  ///
+  /// WHAT THIS FUNCTION DOES NOT DO: it does not turn the error into
+  /// "successful". It logs at `error` WITH stack — the same level at which
+  /// the zone handler would have written. A defect stays visible, it just
+  /// no longer takes the daemon with it.
+  ///
+  /// WHY NO CATCH-ALL `catch` IN THE BODY of `sendToUser`: there it would
+  /// also hit the AWAITING callers and sell them a real defect as a plain
+  /// `false` — "crashed" would become "silently not sent". The latch
+  /// belongs at the place where the result is actually thrown away.
+  void _detachedSend(String what, Future<bool> dispatch) {
+    dispatch.catchError((Object e, StackTrace s) {
+      _log.error('detached send „$what" threw and would have killed '
+          'the daemon: $e\n$s');
+      return false;
+    });
+  }
+
+  static String _hexOf(Uint8List b) =>
+      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+
+  /// The identifier of a PAIR for the delivery layer (B-31, S349).
+  ///
+  /// ── WHY THE OWN IDENTITY MUST BE INCLUDED ─────────────────────
+  ///
+  /// `K_AB` is pairwise: it hangs on BOTH founding keys (§15.2). The
+  /// `PairRegistry`, by contrast, sits in the `V41Node`, and that is
+  /// **node-wide** — `L_node` belongs to the node, not to the identity.
+  /// Whoever keys there only by the recipient UserID lets two identities
+  /// of the same node overwrite the same entry.
+  ///
+  /// Measured in the field on 28.08.: on a node with the identities
+  /// "Bob" and "Charly", which BOTH keep the same contact, the log showed
+  /// two different keys for the same counterpart —
+  ///
+  ///     "Ernte fuer 2708863c: K_AB 1dc44f54, Richtung 1"
+  ///     "Ernte fuer 2708863c: K_AB 93b5535e, Richtung 0"
+  ///
+  /// — and depending on who last called `rememberPeer`, the node
+  /// harvested under the wrong mark **and in the wrong direction**.
+  /// The other side deposited correctly; nothing was found nonetheless.
+  ///
+  /// `v41_attach.dart` already describes exactly this trap — for the
+  /// prekey pool, which is therefore kept per identity ("`peer` … does not
+  /// carry the sender identity"). For the pair registry it was not
+  /// applied.
+  String _v41PeerKey(Uint8List recipientUserId) =>
+      '${identity.userIdHex}/${_hexOf(recipientUserId)}';
+
+  /// The V4.1 application frame — ONE construction for both outputs.
+  ///
+  /// ── WHY THIS IS A SEPARATE METHOD (S363) ──────────────────────
+  ///
+  /// It is needed in two places: in the host branch of [sendToUser],
+  /// which hands it out sealed, and in the no-host branch at the end of
+  /// the same method, which puts it into the outbound compartment. Two
+  /// constructions would be two opportunities to forget a field — and
+  /// the resubmission would then seal something other than the first attempt.
+  proto.ApplicationFrameV3 _v41InnerFrame({
+    required Uint8List recipientUserId,
+    required Uint8List senderUserId,
+    required Uint8List messageId,
+    required proto.MessageTypeV3 messageType,
+    required Uint8List payload,
+    Uint8List? groupId,
+    proto.ContentMetadata? contentMetadata,
+    proto.EditMetadata? editMetadata,
+    proto.ExpiryMetadata? expiryMetadata,
+    int? groupMembershipEpoch,
+    Uint8List? groupMembershipHash,
+  }) {
+    final inner = proto.ApplicationFrameV3()
+      ..recipientUserId = recipientUserId
+      ..senderUserId = senderUserId
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..messageId = messageId
+      ..messageType = messageType
+      ..payload = payload;
+    if (groupId != null && groupId.isNotEmpty) inner.groupId = groupId;
+    if (contentMetadata != null) inner.contentMetadata = contentMetadata;
+    if (editMetadata != null) inner.editMetadata = editMetadata;
+    if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
+    if (groupMembershipEpoch != null && groupMembershipEpoch > 0) {
+      inner.groupMembershipEpoch = Int64(groupMembershipEpoch);
+    }
+    if (groupMembershipHash != null) {
+      inner.groupMembershipHash = groupMembershipHash;
+    }
+    return inner;
+  }
+
+  /// Message kinds whose loss is without consequence — they are NOT
+  /// parked (§21.2).
+  ///
+  /// A typing indicator that is resubmitted an hour later claims that
+  /// someone is typing right now; it would then not be late, but wrong.
+  /// Until S363 it stood as `const vergaenglich` INSIDE the host branch
+  /// and was thus invisible to the no-host branch.
+  static const kV41Ephemeral = <proto.MessageTypeV3>{
+    proto.MessageTypeV3.MTV3_TYPING_INDICATOR,
+  };
 
   @override
   Future<bool> sendToUser({
     required Uint8List recipientUserId,
     required proto.MessageTypeV3 messageType,
     required Uint8List payload,
-    Uint8List? senderUserId,
     Uint8List? groupId,
     Uint8List? messageId,
     proto.ContentMetadata? contentMetadata,
@@ -13892,22 +11838,34 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     Uint8List? groupMembershipHash,
     Uint8List? targetDeviceId,
     bool skipL3 = false,
+    // The 31-day retention class (§21.1). Justification and delimitation
+    // are at the seam (`service_context.dart`) and at the setting site
+    // (`V41Node.placeSecure`).
+    bool management = false,
     List<SendLeg>? outLegs,
     Uint8List? recipientX25519PkOverride,
     Uint8List? recipientMlKemPkOverride,
     Uint8List? recipientEd25519PkOverride,
+    // NO `speedForThisFrame` ANY MORE (S389). The parameter carried the
+    // one-time downgrade to speed from the consent dialog. There is no
+    // second send path any more to downgrade to (§3.3, §12.1), and the
+    // dialog that produced it has lost its trigger.
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
     //    routing). Cross-identity sends therefore go through the matching
-    //    service instance, not via a `senderUserId` override on a foreign
-    //    service. The legacy override parameter is kept for callers that
-    //    still pass it explicitly, but it MUST equal `identity.userId` —
-    //    a mismatch indicates a router-bug at the call-site.
-    final effectiveSenderUserId = senderUserId ?? identity.userId;
-    assert(constantTimeEquals(effectiveSenderUserId, identity.userId),
-        'sendToUser: senderUserId mismatch for service-bound identity '
-        '${identity.userIdHex.substring(0, 8)} — fix the call-site');
+    //    service instance.
+    //
+    //    S368: here stood an override parameter `Uint8List? senderUserId`
+    //    ("The legacy override parameter is kept for callers that still pass
+    //    it explicitly"). MEASURED with a bracket-balancing counter over
+    //    `lib/`, `bin/` and `test/`: **zero** `sendToUser(...)` calls pass
+    //    it — the 20 `senderUserId:` hits in the tree belong to
+    //    `HarvestEvent`, `_v41InnerFrame` and `SenderIdentitySnapshot`, not
+    //    here. The callers it was kept for no longer existed, and with it
+    //    falls the `assert` line that was meant to catch an error at a
+    //    call site that does not exist.
+    final effectiveSenderUserId = identity.userId;
 
     // 2. Resolve KEM-pubkeys for the recipient user.
     //    The Inner ApplicationFrame is KEM-encrypted under the recipient User
@@ -13931,24 +11889,62 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final recipientHex = bytesToHex(recipientUserId);
     final isSelfSend = constantTimeEquals(recipientUserId, identity.userId);
     final ContactInfo? contact = isSelfSend ? null : _contacts[recipientHex];
+    // `recipientEd25519Pk` went away with the V3 path: it was the anchor
+    // of the mailbox identifier for the layer-3 deposit
+    // (SHA-256("mailbox" + ed25519Pk)). V4.1 deposits by the tagline,
+    // not by a mailbox identifier.
     final Uint8List recipientX25519Pk;
     final Uint8List recipientMlKemPk;
-    final Uint8List? recipientEd25519Pk;
     if (isSelfSend) {
       recipientX25519Pk = identity.x25519PublicKey;
       recipientMlKemPk = identity.mlKemPublicKey;
-      recipientEd25519Pk = identity.ed25519PublicKey;
     } else {
       if (recipientX25519PkOverride != null && recipientMlKemPkOverride != null) {
         // Caller-supplied keys (e.g. from _resolveMemberKeys for non-contact
         // group/channel members whose KEM keys arrived via GROUP_INVITE).
         recipientX25519Pk = recipientX25519PkOverride;
         recipientMlKemPk = recipientMlKemPkOverride;
-        recipientEd25519Pk = recipientEd25519PkOverride;
       } else if (contact != null && contact.x25519Pk != null && contact.mlKemPk != null) {
         recipientX25519Pk = contact.x25519Pk!;
         recipientMlKemPk = contact.mlKemPk!;
-        recipientEd25519Pk = contact.ed25519Pk;
+        // ── THE FRESHNESS CHECK (§4.5.4, S363) ────────────────────────
+        //
+        // Until S363 ONLY the null check above stood here. So this place
+        // sealed against a generation of which it did not know whether the
+        // counterpart still holds it — and §4.5.4 keeps exactly ONE
+        // previous one ("Exactly **one** previous generation is
+        // retained"). Two rotation intervals old is provably too old.
+        //
+        // ── WHY IT IS SENT ANYWAY ──────────────────────────────
+        //
+        // Not sending would be a second silent loss and wrong on top: the
+        // copy CAN still be valid (a counterpart that was off longer has
+        // not rotated — `needsRotation` only runs while the process runs).
+        // §14.5 names the visibility principle for exactly this situation.
+        // What was missing was not the lock but the INFORMATION: the
+        // failure was mute on both sides (§4.5.4: "the loss is silent —
+        // the receiver counts `unopened` and reports nothing"). Hence log
+        // and counter, no lock.
+        //
+        // NO USER CONTENT: eight hex digits of the UserID, an age in
+        // days. No display name, no text.
+        final fresh = kemCopyFreshness(
+          seenAt: contact.kemSeenAt,
+          now: DateTime.now(),
+        );
+        if (isProvablyUnusable(fresh)) {
+          staleKemSeals++;
+          final days = DateTime.now().difference(contact.kemSeenAt!).inDays;
+          _log.warn('sendToUser: ${messageType.name} to '
+              '${_hexShort(recipientUserId)} is sealed against a $days days '
+              'old KEM copy. §4.5.4 keeps exactly ONE previous '
+              'generation (rotation interval '
+              '${kKemRotationInterval.inDays} d) — the counterpart can '
+              'provably no longer open this cell if it '
+              'rotated as scheduled. It is sent anyway '
+              '(visibility principle §14.5); from here on the loss is '
+              'no longer silent. Counter: $staleKemSeals');
+        }
       } else {
         _log.warn('sendToUser: no KEM pubkeys for ${recipientHex.length >= 8 ? recipientHex.substring(0, 8) : recipientHex} '
             '(contact=${contact != null}, x25519=${contact?.x25519Pk != null}, mlKem=${contact?.mlKemPk != null})');
@@ -13956,881 +11952,724 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    // 3. Resolve recipient → list of authorized device-IDs (§2.6.2).
-    //    Fast path: use locally-cached device IDs from received packets /
-    //    CR handshake. These are always fresh (populated on every incoming
-    //    ApplicationFrame at handleApplicationFrame:10335) and avoid the
-    //    2s+ DHT timeout on cold networks where auth-manifests haven't
-    //    been published yet. DHT resolution runs in the background to warm
-    //    the cache for future sends and to discover additional devices.
-    List<Uint8List> deviceIds;
-    if (targetDeviceId != null && targetDeviceId.isNotEmpty) {
-      // Caller already knows the exact device this frame must reach (e.g. a
-      // DELIVERY_RECEIPT addressed back to the device that sent the original
-      // message) — skip the multi-device cache/DHT resolution below, which
-      // may hold a *different*, stale device of the same recipient user.
-      deviceIds = [targetDeviceId];
-      _log.debug('sendToUser: targeted send to device '
-          '${_hexShort(targetDeviceId)} for ${_hexShort(recipientUserId)}');
-    } else if (isSelfSend) {
-      // §7.2 self fan-out: the own twin devices are tracked in `_devices`
-      // (keyed by the device's UUID, routing target is `deviceNodeIdHex`),
-      // not in the contact registry. `resolveUserToDevices` is deliberately
-      // NOT used here — it resolves via the DHT auth-manifest and would
-      // return this very node among the results.
-      //
-      // The local device is excluded: a node must never send its own
-      // Twin-Syncs back to itself (infinite echo + dedup churn).
-      final selfDevices = <Uint8List>[];
-      for (final entry in _devices.entries) {
-        if (entry.key == _localDeviceId) continue;
-        if (entry.value.isThisDevice) continue;
-        final devNodeHex = entry.value.deviceNodeIdHex;
-        if (devNodeHex == null || devNodeHex.isEmpty) continue;
-        // Defence-in-depth: a twin record that (through a stale devices.json
-        // migration) carries our own routing id is not a twin.
-        if (devNodeHex == identity.deviceNodeIdHex) continue;
-        selfDevices.add(hexToBytes(devNodeHex));
-      }
-      if (selfDevices.isEmpty &&
-          messageType != proto.MessageTypeV3.MTV3_DEVICE_PAIR_REQUEST) {
-        // Single-device normal state — NOT an error. No warn log here: a
-        // warn would fire on every Twin-Sync attempt of every single-device
-        // installation. Callers read `false` as "no twin to sync to".
-        //
-        // §7.1 LD-11 bootstrap exception (DEVICE_PAIR_REQUEST): the very
-        // first pairing message is the one self-send that MUST survive an
-        // empty `_devices`. `_devices` only ever grows by *receiving* a
-        // TWIN_ANNOUNCE / pair frame from a twin, and `_sendTwinAnnounce`
-        // itself bails on `_devices.length <= 1` — so on a freshly
-        // seed-restored device neither side can ever announce first and the
-        // twin set stays at 1 forever. Returning `false` here closed that
-        // loop permanently.
-        //
-        // Falling through with an empty `deviceIds` hands the frame to the
-        // existing §5.1 Layer-3 cascade below — deliberately NOT a second
-        // send path, and deliberately NOT a DHT auth-manifest lookup:
-        //   * the L3 anchor is the *user* mailbox
-        //     SHA-256("mailbox" + identity.ed25519PublicKey), and seed twins
-        //     derive byte-identical User keys from the shared master seed,
-        //     so the Primary polls exactly this mailbox (`_activeMailboxIds`)
-        //     and decapsulates with the shared User-KEM-SK;
-        //   * `identityResolver.resolve(identity.userId)` would NOT be
-        //     reliable here: the Auth-Manifest lives in a single DHT slot
-        //     (SHA-256("auth" + userId)) that every device of the user
-        //     competes for with a hardcoded one-element device list
-        //     (`identity_publisher.dart` AuthManifest.sign(... [deviceNodeId])),
-        //     and the winner is decided purely by sequence number
-        //     (`identity_dht_handler` incoming.seq <= stored.seq -> drop).
-        //     A lookup could therefore return this very device.
-        // Scope is limited to the pairing request so routine Twin-Syncs keep
-        // returning `false` instead of placing an S&F copy each time
-        // (Arbeitsregel #5 — no unnecessary network traffic).
-        return false;
-      }
-      deviceIds = selfDevices;
-      if (deviceIds.isEmpty) {
-        _log.info('sendToUser: §7.1 LD-11 pairing bootstrap — no twin known '
-            'yet, routing DEVICE_PAIR_REQUEST via the shared user mailbox');
-      } else {
-        _log.debug('sendToUser: §7.2 self fan-out to ${deviceIds.length} twin '
-            'device(s)');
-      }
-    } else if (contact != null && contact.deviceNodeIds.isNotEmpty) {
-      deviceIds = contact.deviceNodeIds.map(hexToBytes).toList(growable: false);
-      _log.debug('sendToUser: fast-path ${deviceIds.length} cached deviceNodeIds '
-          'for ${_hexShort(recipientUserId)}');
-      unawaited(node.resolveUserToDevices(recipientUserId).catchError((_) => <Uint8List>[]));
-    } else {
-      // `contact` is legitimately null here for group/channel members the
-      // sender never paired with: contacts are unilateral, but a fan-out
-      // reaches every member. Those callers supply the KEM material through
-      // `recipient*PkOverride` (see the override branch in step 2), so the
-      // send is fully specified without a contact record — only the device
-      // list still has to be resolved, which is exactly what this branch
-      // does. The device-cache branch above therefore must test `contact`
-      // for null instead of asserting it: a `contact!` here threw on every
-      // group/channel send to a non-contact member, and on the unawaited
-      // fan-out call sites that throw escaped as an unhandled async error
-      // and killed the daemon (gui-40 40.21 / 40b.08→40b.09).
-      try {
-        deviceIds = await node.resolveUserToDevices(recipientUserId);
-      } catch (e) {
-        _log.warn('sendToUser: resolveUserToDevices threw $e — drop');
-        return false;
-      }
+    // ── V4.2: THE BODY LIES ON THE MAILBOX (S387) ────────────────
+    //
+    // If a mycelium mailbox is attached, IT carries the message — the
+    // switch below (V4.1) is no longer entered. Without a mailbox
+    // everything stays as it was: the no-carrier branch at the end parks,
+    // and `myceliumAnschliessen` hands over what is parked on attach.
+    if (myceliumMailbox != null) {
+      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+      return _myceliumSendToUser(
+        recipientUserId: recipientUserId,
+        isSelfSend: isSelfSend,
+        contact: contact,
+        messageType: messageType,
+        payload: payload,
+        groupId: groupId,
+        messageId: messageId,
+        contentMetadata: contentMetadata,
+        editMetadata: editMetadata,
+        expiryMetadata: expiryMetadata,
+        groupMembershipEpoch: groupMembershipEpoch,
+        groupMembershipHash: groupMembershipHash,
+      );
     }
-    if (deviceIds.isEmpty) {
-      if (skipL3) {
-        _log.info('sendToUser: no devices for ${_hexShort(recipientUserId)}'
-            ' — skipL3=true, not placing offline delivery');
+
+    // ── 2b. THE SWITCH (IP-3) ─────────────────────────────────────────
+    //
+    // It is ONLY active if a V4.1 delivery has been attached. Without it
+    // everything falls through unchanged — that is the point: the seam is
+    // laid before it is switched over.
+    //
+    // NO FALLBACK. If the V4.1 layer rejects a small message, it does NOT
+    // go via V3 as a substitute. A fallback would be exactly the dual
+    // stack that §7 rules out — and it would be invisible, because both
+    // "work".
+    // ── SELF-SEND DOES NOT BELONG ON THIS PATH ────────────────
+    //
+    // §14.2 is unambiguous here: "One delivery serves all devices. The
+    // delivery path has **no device level**: no resolver, no iteration
+    // over devices, no per-device delivery states." A twin fan-out over
+    // the delivery layer would be exactly this iteration over devices
+    // — just built in one level deeper.
+    //
+    // Nor is it merely "not wired yet"; with today's mechanism it is
+    // NOT BUILDABLE, for two independent reasons:
+    //
+    //   1. `K_AB` is pairwise and comes from the FOUNDING KEYS of BOTH
+    //      sides (§15.2). For self-send there is no second side:
+    //      `contact` is `null` by construction (the own identity never
+    //      stands in `_contacts`, see step 2), and `v41PairKeyFor` then
+    //      throws — rightly — `StateError('K_AB nicht bildbar')`, because
+    //      a silent substitute key would let both sides talk under
+    //      different marks.
+    //
+    //   2. Even with a key the DIRECTION would not hold.
+    //      `outboundDirection` compares two FOUNDING KEYS (S353); with
+    //      self-send it is the same one twice, the loop runs through and
+    //      yields 0 — on BOTH twins. Both therefore deposit under
+    //      direction 0 and harvest per `inDirectionFor` (`1 - 0 = 1`)
+    //      under direction 1. No twin would ever find the other's
+    //      deposit. That is B-22 in pure form, except that the
+    //      lexicographic order CANNOT order a self-relation at all.
+    //
+    // The V4.1-conformant path for own devices is a different one and is
+    // in §14.1: `sendToDevice()` seals under the DEVICE mark
+    // `HKDF(K_own, "device" ‖ deviceId ‖ n)` — an OWN mark from `K_own`,
+    // not a pair mark from `K_AB`. Since S361 it lives in
+    // `lib/core/tagline/device_line.dart`; the sentence "this path has yet
+    // to be created" stood here until then and is corrected.
+    //
+    // NO CONTRADICTION TO "NO FALLBACK". The sentence below forbids sending
+    // a message REJECTED by V4.1 via V3 as a substitute. Here nobody
+    // rejects: self-send is not a V4.1 delivery class at all — the same
+    // category as `kBootstrapTypes` and `kBulkTypes` in `routeFor`, only
+    // recognisable by the identifier instead of by the type. It is a
+    // route classification, not a fallback.
+    //
+    // WHAT HAPPENED WITHOUT THIS LINE (measured, see
+    // `test/smoke/smoke_self_send_v41_guard.dart`): `_sendTwinSync`
+    // runs on EVERY sent message (`MESSAGE_SENT`) and calls
+    // `sendToUser(recipientUserId: identity.nodeId, …)`. The throw from
+    // `v41PairKeyFor` escaped as an unhandled future error into the zone
+    // of `service_daemon.dart` (~L424), and `StateError` is not in its
+    // survival allowlist: `exit(99)`. On Android/iOS the same error as a
+    // visible crash dialog. It stayed invisible only because
+    // `_sendTwinSync` exits earlier at `_devices.length <= 1` — all test
+    // identities have one device. From the SECOND device per identity on,
+    // the daemon dies on every message.
+    final v41 = v41Delivery;
+    final v41HostRef = v41Host;
+    // ── `!isSelfSend` IS GONE HERE (S360, gap G-14 closed) ────
+    //
+    // The long comment above describes the state up to here and stays as
+    // a correction — it was right on the substance: with `K_AB` and the
+    // lexicographic direction a self-send cannot be built. §14.7 does not
+    // solve this with a better direction, but with an OWN line under
+    // `K_own`, onto which all twins deposit and from which all harvest.
+    // It lives in `own_line.dart`; it is registered by `attachV41` via
+    // [v41ArmOwnLine].
+    if (v41 != null && v41HostRef != null) {
+      // The whole FRAME counts, not the payload: MEDIA_ANNOUNCE has an
+      // empty payload and carries a preview image of up to 100 KB in
+      // contentMetadata.
+      final frameBytes = payload.length +
+          (contentMetadata?.writeToBuffer().length ?? 0) +
+          (editMetadata?.writeToBuffer().length ?? 0) +
+          (expiryMetadata?.writeToBuffer().length ?? 0) +
+          _kV41FrameOverhead;
+      final route = routeFor(
+        type: messageType,
+        // The full overhead that the delivery layer adds: kind byte
+        // (`V41Kind.wrap`), sender MAC, seal including the day capsule.
+        // The capsule is the big item and only occurs on the FIRST message
+        // of a day — here it is nevertheless always counted: a limit that
+        // depended on the time of day would behave one way one time and
+        // another way the next.
+        //
+        // S368: here stood `V41Kind.signatureBytes`. The name had been wrong
+        // since S352 — there is no signature any more (§4.4.3) —, the
+        // number was right because the constant pointed to `senderMacBytes`.
+        // Now the right name stands here; the number is unchanged.
+        frameBytes: frameBytes +
+            1 +
+            V41Kind.senderMacBytes +
+            MessageSealer.firstOfDayOverheadBytes,
+        // NO LONGER the cell limit — the delivery layer now splits
+        // (§15.4 "~11-14 cells", `frame_split.dart`). What breaks here
+        // really belongs on the two-stage path.
+        cellLimit: kMaxSplitPayloadBytes,
+      );
+      if (route == DeliveryRoute.refuseTooLarge) {
+        _log.warn('sendToUser: $messageType measures ~$frameBytes B and '
+            'exceeds even the split limit '
+            '($kMaxSplitPayloadBytes B) — no silent detour via V3');
         return false;
       }
-      // §5.1 Layer 1 empty → skip Layer 2, go directly to Layer 3.
-      _log.info('sendToUser: no devices for ${_hexShort(recipientUserId)}'
-          ' — triggering offline cascade (S&F + Erasure)');
-      final effectiveMessageId = (messageId != null && messageId.isNotEmpty)
-          ? messageId
-          : SodiumFFI().randomBytes(16);
-      final inner = proto.ApplicationFrameV3()
-        ..recipientUserId = recipientUserId
-        ..senderUserId = effectiveSenderUserId
-        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-        ..messageId = effectiveMessageId
-        ..messageType = messageType
-        ..payload = payload;
-      if (groupId != null && groupId.isNotEmpty) inner.groupId = groupId;
-      if (contentMetadata != null) inner.contentMetadata = contentMetadata;
-      if (editMetadata != null) inner.editMetadata = editMetadata;
-      if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
-      if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
-      if (groupMembershipEpoch != null && groupMembershipEpoch > 0) {
-        inner.groupMembershipEpoch = Int64(groupMembershipEpoch);
+      // ── STEP 1 OF THE CUT: LARGE MEDIA GO ON THE BULK LANE ────
+      //
+      // §9.3: the blocks are "placed once each on always-on bulk
+      // holders and harvested by the recipient on its own cadence".
+      // `lib/core/bulk/` computes this completely; what is missing are the
+      // two actions from [MediaBulkTransport].
+      //
+      // WHY REJECTED HERE AND NOT FALLEN BACK TO V3. The same reason for
+      // which `refuseTooLarge` above rejects: a silent V3 path would be
+      // the dual stack from §7, and it would be invisible because both
+      // "work". The user sees the message on `failed`, not on a secret
+      // second network.
+      //
+      // WHY IT IS ALWAYS REJECTED HERE, EVEN WITH A SEAM. `sendToUser` is
+      // the MESSAGE path; a bulk object is not a message but a transfer
+      // with mark, blocks and its own clock. It is submitted in
+      // [sendMediaMessage], where the OBJECT size is known — here only
+      // the frame is known. A second entry at this place would be a second
+      // way to the same thing, and those drift apart (the same reason for
+      // which `V41Host.sendFrame` keeps draw-seal-send in ONE place).
+      if (route == DeliveryRoute.bulkLane) {
+        _log.warn('sendToUser: $messageType measures ~$frameBytes B and '
+            'belongs on the bulk lane (§9.3, lower limit '
+            '$kFountainWorthwhileBytes B) — the message path does not carry '
+            'it. To be submitted via sendMediaMessage. No fallback '
+            'to V3.');
+        return false;
       }
-      if (groupMembershipHash != null) {
-        inner.groupMembershipHash = groupMembershipHash;
+      // ── THE INVITATION LINE HAS ITS OWN ENTRY ────────────────
+      //
+      // Until S388 it was submitted in `sendContactRequest` (removed,
+      // S388-BAU-KONTAKT: on V4.2 the request is package (2) of first
+      // contact in mycelium, §15.5), and for the same reason for which the
+      // bulk lane has its own entry: what is missing here is known there.
+      // `sendToUser` knows the RECIPIENT; the invitation line, however,
+      // hangs on the INVITATION KEY `K_inv(i)` from the read ContactSeed
+      // (§15.3.2), and that stands at the contact record, not at the
+      // frame. A second entry at this place would be a second way to the
+      // same thing — and those drift apart.
+      //
+      // NO SILENT DETOUR: there is no second way for a contact request,
+      // and inventing one would be the dual stack from §7.
+      if (route == DeliveryRoute.inviteLine) {
+        _log.warn('sendToUser: ${messageType.name} to '
+            '${_hexShort(recipientUserId)} belongs on the invitation line '
+            '(§15.3.2); this path has had no entry since S388 (the '
+            'request is packet 2 of the first contact in mycelium) — the '
+            'message path does not know `K_inv(i)`. Not sent.');
+        if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+        return false;
       }
-      final l3PowStart = DateTime.now();
-      final (kemBytes, l3Pow) =
-          await V3FrameCodec.buildAndEncryptInnerWithPowAsync(
-        innerFrameBytes: inner.writeToBuffer(),
-        senderUserEd25519Sk: identity.signingEd25519Sk,
-        senderUserMlDsaSk: identity.signingMlDsaSk,
-        recipientUserX25519Pk: recipientX25519Pk,
-        recipientUserMlKemPk: recipientMlKemPk,
-      );
-      final l3PowMs = DateTime.now().difference(l3PowStart).inMilliseconds;
-      _log.info('offlineDelivery: PoW done kemSize=${kemBytes.length} powMs=$l3PowMs');
-      final outer = V3FrameCodec.buildOuter(
-        nextHopDeviceId: recipientUserId,
-        senderDeviceId: node.primaryIdentity.deviceNodeId,
-        deviceKeys: node.deviceKeyPair,
-        innerPayload: kemBytes,
-        payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
-        applicationFlavor: true,
-        precomputedPow: l3Pow,
-      );
-      final canonicalBytes = node.serializePacketForOfflineDelivery(outer);
-      final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
-      bool l3Placed;
-      if (useErasure) {
-        final fragmentBundleId =
-            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-        l3Placed = await _distributeErasureFragments(
-          packetBytes: canonicalBytes,
-          messageId: fragmentBundleId,
-          recipientUserEd25519Pk: recipientEd25519Pk,
-          recipientUserNodeId: recipientUserId,
-        );
-      } else {
-        l3Placed = await _storeSafOnNetworkPeers(
+      if (route == DeliveryRoute.v41) {
+        // ── ADDRESSING A DEVICE SPECIFICALLY WORKS NOW (§14.1, §14.7) ─
+        //
+        // Until S361 a rejection stood here: "the DEVICE mark from §14.1 is
+        // not built". It is built (`device_line.dart`), and so the
+        // rejection falls — not the reason it was right. That stays
+        // literally: the shared twin line does NOT carry a device-bound
+        // payload, it reaches all devices equally. What has changed is
+        // that there is now a line that exactly ONE device harvests.
+        //
+        // Two real paths were affected, and both ended silently:
+        // `approvePairRequest` (DEVICE_PAIR_APPROVE — that is §14.6.2,
+        // "the delivery of delegated keys" from §14.7) and `rejectRotation`
+        // (ROTATION_APPROVAL_RESPONSE, §14.5). Both called `sendToUser`
+        // with `targetDeviceId` and got `false`.
+        final isDeviceLine =
+            isSelfSend && targetDeviceId != null && targetDeviceId.isNotEmpty;
+        Uint8List? kDevice;
+        if (isDeviceLine) {
+          // DERIVED, NOT LOOKED UP (§14.1: "derivable without any
+          // lookup"). `K_own` derives from the user KEM secrets of this
+          // identity (`own_line.dart`), the device root from `K_own` and
+          // the device identifier. If it throws — say because a secret is
+          // missing —, the shared line is NOT taken as a substitute: that
+          // would be exactly the propagation this line stands against.
+          try {
+            kDevice = deriveKDevice(
+              kOwn: deriveKOwn(
+                userX25519Secret: identity.x25519SecretKey,
+                userMlKemSecret: identity.mlKemSecretKey,
+              ),
+              deviceNodeId: targetDeviceId,
+            );
+          } catch (e) {
+            _log.error('sendToUser: ${messageType.name} to the own device '
+                '${_hexShort(targetDeviceId)} — device line cannot be built '
+                '($e). No fallback to the common line: it reaches '
+                'ALL devices. Not sent.');
+            if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+            return false;
+          }
+          // §14.7 gives the device line three uses, and all three ride
+          // Secure. An ephemeral indicator or a call signalling is not
+          // among them; there is also no caller for that today. Instead
+          // of silently raising it to another mode, it is rejected by name
+          // — a silent mode switch is exactly what must not happen here.
+          if (skipL3) {
+            _log.warn('sendToUser: ${messageType.name} to the own device '
+                '${_hexShort(targetDeviceId)} requires the signal line '
+                '(§17.2). The device line (§14.7) does not carry it — all '
+                'three uses there ride Secure. Not sent.');
+            if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+            return false;
+          }
+        }
+        // The identifier of the own line carries NO counterpart — there is
+        // none. Justification in the header of `own_line.dart`. The
+        // identifier of the DEVICE line additionally carries the device
+        // identifier, and the identity in it is mandatory (B-31): the
+        // registry sits node-wide, the device node ID is daemon-global.
+        final peer = isDeviceLine
+            ? deviceLineKey(identity.userId, targetDeviceId)
+            : isSelfSend
+                ? ownPeerKey(identity.userId)
+                : _v41PeerKey(recipientUserId);
+        final v41MessageId = (messageId != null && messageId.isNotEmpty)
+            ? messageId
+            : SodiumFFI().randomBytes(16);
+        // NOT on self-send: the own line is already registered
+        // (`v41ArmOwnLine`, from `primeV41Pairs`), and with the same
+        // inbound and outbound direction. A `rememberPeer` here would
+        // overwrite it with the default `1 - out` — the twins would then
+        // deposit on the one line and harvest from the other. Besides,
+        // `v41PairKeyFor` throws for the own identifier, because it needs
+        // two founding keys.
+        if (isDeviceLine) {
+          // ── ONLY SUPPLY, NEVER HARVEST ───────────────────────────────
+          //
+          // That is the whole effect of the device line. If this device
+          // harvested the sibling's line along, it would get material the
+          // sibling is meant for — and it could even open it (§14.2: all
+          // own devices share the user KEM key, the sealing does not
+          // separate here). On top, every foreign line would draw six real
+          // marks per harvest run from a budget of six
+          // (`kMaxRealHarvestTags`).
+          v41.rememberPeer(peer, kDevice!,
+              outDirection: kDeviceLineDirection, harvest: false);
+        } else if (!isSelfSend) {
+          v41.rememberPeer(peer, v41PairKeyFor(recipientUserId, contact),
+              outDirection: v41OutDirectionFor(recipientUserId, contact));
+        }
+        // AGAINST WHOM IT IS SEALED. Until S349 the fallback in
+        // `attachV41` took the OWN node key, independent of the recipient
+        // (B-19) — the sender sealed to itself, and the other side could
+        // never open it. The keys have long been resolved here (step 2,
+        // including the overrides for group members without a contact
+        // record); looking them up again would mean building a second
+        // resolution that can deviate.
+        v41HostRef.rememberPeerKeys(peer,
+            x25519: recipientX25519Pk, mlKem: recipientMlKemPk);
+
+        // ONE construction of the application frame, not two. The no-host
+        // branch at the end of this method parks the same frame; if it had
+        // its own construction, the two would drift apart (the same reason
+        // for which `V41Host.sendFrame` keeps draw-seal-send in ONE place).
+        final inner = _v41InnerFrame(
           recipientUserId: recipientUserId,
-          wrappedEnvelope: canonicalBytes,
+          senderUserId: effectiveSenderUserId,
+          messageId: v41MessageId,
+          messageType: messageType,
+          payload: payload,
+          groupId: groupId,
+          contentMetadata: contentMetadata,
+          editMetadata: editMetadata,
+          expiryMetadata: expiryMetadata,
+          groupMembershipEpoch: groupMembershipEpoch,
+          groupMembershipHash: groupMembershipHash,
         );
-      }
-      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = l3Placed;
-      if (!l3Placed) {
-        // §5.8: 0 connectivity — park canonical bytes in outbox so the next
-        // onNetworkChanged edge can retry placement exactly once.
-        _addToOutbox(
-          messageIdHex: bytesToHex(effectiveMessageId),
-          recipientUserIdHex: bytesToHex(recipientUserId),
-          recipientEd25519PkHex:
-              recipientEd25519Pk != null ? bytesToHex(recipientEd25519Pk) : null,
-          canonicalPacket: canonicalBytes,
-          messageType: messageType.name,
+
+        // The mode hangs on the conversation switch (§12): one-sided,
+        // local, sender-side — like `withholdDeliveryStatus`, and therefore
+        // NOT in `ChatConfig` and without a consent flow. It is written in
+        // [setSecureMode] — NO LONGER by `chat_screen.dart` directly on the
+        // object (30.08.: on desktop the GUI thus mutated its own snapshot,
+        // the daemon never saw the choice). Here is its read side.
+        //
+        // `skipL3` keeps precedence: ephemeral signalling belongs on the
+        // fast path, not in a deposit that lies for an hour. The default is
+        // speed — secure costs ~1 h and is a deliberate choice of the
+        // user, not a standard path.
+        final groupsIdHex = (groupId != null && groupId.isNotEmpty)
+            ? _hexOf(groupId)
+            : null;
+        // NOT `_contacts[peer]` — `peer` is the PAIR identifier from
+        // `_v41PeerKey` (`<own64>/<foreign64>`, 129 characters), `_contacts`
+        // is indexed at all 40 other access sites by the bare 64-digit
+        // identifier. The lookup thus ALWAYS ran into nothing from S349 to
+        // S351, `secureDesired` was ALWAYS `false` — secure mode was
+        // unreachable for 1:1 chats, regardless of what the user had set.
+        // The group branch next to it was never affected, because
+        // `groupsIdHex` already is the bare identifier. The same error
+        // class as with the capsule proof (64 versus 129), both from B-31:
+        // `_v41PeerKey` had to include the own identity, and the read
+        // sides were not pulled along.
+        // ── WHAT EXPIRES WITHOUT VALUE IS NOT DEPOSITED (30.08.) ────
+        //
+        // A typing indicator only makes sense NOW. Via the secure deposit
+        // it costs `m x R` control frames — 18 in the field, just as much
+        // as a text — and possibly arrives an hour later; then it claims
+        // someone is typing right now, and is not late but wrong.
+        //
+        // `skipL3` alone does NOT suffice for this: it does choose speed,
+        // and `V41Node.send` switches to secure when there is no route
+        // (v41_node.dart, branch `SendMode.speed`). In the field it said
+        // `Speed-Routen 0` — so the indicator was deposited anyway.
+        // `speedOnly` is the mode that discards in this case.
+        //
+        // ONLY TYPING INDICATORS. Receipts and read confirmations must
+        // arrive: the one flips the delivery status and the capsule proof,
+        // the other is a promise to the user. Whoever extends this set must
+        // justify for each kind individually that its loss is without
+        // consequence.
+        const ephemeral = kV41Ephemeral;
+        // THE DEVICE LINE IS ALWAYS SECURE (§14.7). Not as caution, but
+        // because the document lists its three uses there — key packages
+        // "ride Secure with the 31-day management TTL", the initial sync is
+        // the manifest-and-fetch machinery from §13.5.2, and the delivery
+        // of delegated keys belongs to the admission of a device. The path
+        // speed -> secure is moreover the only direction the mode invariant
+        // allows at all; a lookup in `_contacts` would be pointless here
+        // anyway, the own identity never stands there.
+        // NO MODE INPUT ANY MORE (S389). Up to here this branch read
+        // `Contact.secureMode`/`Group.secureMode`. The switch is gone
+        // (§12.1), and with it the V4.1 layer has no mode input from the
+        // application any more.
+        //
+        // WHY `true` AND NOT `false`, although this branch is no longer
+        // entered in operation (the mailbox switch further up returns
+        // before, and `attachV41` has no caller in `lib/`): of the two
+        // possible constants only one is allowed. The hard rule (owner,
+        // 30.08.) permits the path speed -> secure and forbids the opposite
+        // direction without the user's knowledge. `false` would be exactly
+        // that opposite direction, compiled in as a constant.
+        const secureDesired = true;
+        // THE DELIVERY LAYER NEEDS THIS SETTING OUTSIDE OF SENDING TOO. It
+        // decides for whom the node publishes its own return path (§6: the
+        // liveness costs are tied to the mode choice per chat,
+        // `1.15 + 0.23*S`, S = speed-capable contacts). [setSecureMode]
+        // therefore reports it already when the switch is flipped — but
+        // only for 1:1, because `setChatMode` is indexed by the PAIR and a
+        // group choice would otherwise overwrite the DM choice of the same
+        // member. This line here stays: it is the only one that also covers
+        // the GROUP case, and it corrects the pair collision per leg
+        // immediately before sending.
+        // ── A SECURE CHAT IS NEVER SILENTLY DOWNGRADED TO SPEED ────
+        //
+        // INVARIANT (owner, 30.08.): a fallback from speed to secure is
+        // defensible — it costs latency, not anonymity. The reverse
+        // direction is NOT: speed is linkable (§7), secure is the user's
+        // explicit choice against exactly that. It may only be broken if
+        // the user NOTICES it.
+        //
+        // That is why an ephemeral indicator in a secure chat does NOT go
+        // out AT ALL, instead of silently taking the fast path. Sending it
+        // via the deposit would be the alternative — `m x R` control frames
+        // for an indicator that is lying an hour later anyway. Not sending
+        // is the only choice that violates neither anonymity nor the
+        // egress budget.
+        //
+        // NEAR-MISS, recorded so that it does not come back: the first
+        // version of this branch chose `speedOnly` for ephemeral kinds
+        // REGARDLESS of the mode — in a secure chat the typing indicator
+        // would thus have gone via the linkable path without anyone
+        // seeing it.
+        final chosenMode = sendMode(
+          secureDesired: secureDesired,
+          skipL3: skipL3,
+          ephemeral: ephemeral.contains(messageType),
         );
-        _log.info('sendToUser: 0 peers — message ${bytesToHex(effectiveMessageId).substring(0, 8)} parked in outbox');
+        if (chosenMode == null) {
+          // Ephemeral in a secure chat: do not send. See the invariant
+          // at `sendMode`.
+          return false;
+        }
+        v41.setChatMode(peer, secure: secureDesired);
+        // SERIALISE ONCE, USE TWICE: the delivery layer seals these bytes,
+        // and EXACTLY THESE bytes are put back by the outbox (§21.2). A
+        // second call of `writeToBuffer` would be a second serialisation of
+        // the same message — protobuf does not guarantee byte equality for
+        // that, and the resubmission would then seal something other than
+        // the first attempt.
+        final frameBytes41 = Uint8List.fromList(inner.writeToBuffer());
+        // ONE call, not three steps by hand: `sendFrame` draws the one-time
+        // prekey (§4.6), seals against it and hands over to delivery.
+        // Whoever called `seal()` directly here again would have skipped
+        // the draw — exactly the error that killed the daemon.
+        final outcome = v41HostRef.sendFrame(
+          peer: peer,
+          frame: frameBytes41,
+          mode: chosenMode,
+          now: DateTime.now().toUtc(),
+          // THE IDENTIFIER GOES DOWN ALONG, so that it comes back with the
+          // placement receipt. The delivery layer does not read it and does
+          // not put it on the wire — it passes it through. Without that
+          // `placed` would have no producer: the receipt names a leg, and
+          // which message this leg carried is known only to this place.
+          messageId: v41MessageId,
+          // AND THE RETENTION CLASS. It takes the same path as the
+          // identifier — passed through, decided nowhere along the way.
+          management: management,
+        );
+        // THE DELIVERY RECORD OF THIS MESSAGE (§9.2). It is created here
+        // because the identifier is created here — `v41MessageId` is the
+        // identifier under which the other side later acknowledges.
+        // Everything else is in `_v41NoteSend`.
+        _v41NoteSend(v41MessageId, outcome);
+        // ── AND INTO THE LEDGER (§21.2, gap G-4) ───────────────────────────
+        //
+        // "A node's own cells stay local until their placement is
+        // substantiated." The entry stays until the delivery register
+        // proves `placed` (>= 2 independent relays over EVERY piece from
+        // ONE attempt), until an E2E receipt flips `delivered`, or until
+        // the 14-day deadline carries it to `expired`.
+        //
+        // WHICH REJECTIONS DO NOT BELONG IN THE LEDGER, and why separately:
+        //
+        //   * `noPairKey` and `tooLarge` do NOT change by waiting
+        //     (`V41Node.send` orders the checks itself by this criterion).
+        //     Parking them would mean promising a resubmission that would
+        //     always have the same result.
+        //   * `notReady` does change — it means "no confirmed relay", and
+        //     exactly that flips the readiness edge. That is the V4.1
+        //     counterpart of the V3 edge `onNetworkChanged`, and
+        //     `MessageStatusGuard` already counts on it above: "failed is
+        //     deliberately NOT terminal … the one-shot outbox re-offers the
+        //     cell on the next connectivity edge".
+        //
+        // AND NO EPHEMERAL INDICATOR. A typing indicator that is resubmitted
+        // an hour later claims someone is typing right now — it would then
+        // not be late but wrong. The same justification for which
+        // `sendMode` does not deposit it in the first place.
+        final parkable = !ephemeral.contains(messageType) &&
+            (outcome.accepted || outcome.refusal == SendRefusal.notReady);
+        if (parkable) {
+          v41Outbox.add(V41OutboxEntry(
+            messageId: v41MessageId,
+            recipientUserId: recipientUserId,
+            frame: frameBytes41,
+            messageType: messageType.name,
+            createdAtMs: DateTime.now().millisecondsSinceEpoch,
+            groupIdHex: groupsIdHex,
+            // THE OVERRIDES MUST COME ALONG. For a group or channel member
+            // without its own contact record the KEM keys came via
+            // `GROUP_INVITE` and are ONLY in the caller — which is long gone
+            // at resubmission time. Without them, precisely these
+            // recipients could never be resubmitted.
+            x25519Pk: recipientX25519PkOverride,
+            mlKemPk: recipientMlKemPkOverride,
+            // ── THE CLASS IS STORED, THE MODE IS NOT ──────────
+            //
+            // The difference is not an oversight. The mode (§12) is an
+            // ongoing choice of the user and is read AGAIN at
+            // resubmission — a stored speed decision in a chat that has
+            // meanwhile been set to secure would be the silent mode
+            // switch that the invariant (owner, 30.08.) forbids.
+            //
+            // The retention class is the opposite: a property of THIS
+            // message that no longer changes. And it cannot be
+            // reconstructed from the entry — that only keeps
+            // `messageType`, and `MTV3_KEY_ROTATION_BROADCAST` carries both
+            // the routine and the emergency rotation. If it were dropped
+            // here, a resubmitted emergency rotation would silently lie 3
+            // instead of 31 days — the promised value would vanish at the
+            // first network change.
+            management: management,
+          ));
+          saveV41Outbox();
+        }
+        if (l3Result != null && l3Result.isNotEmpty) {
+          // "Queued" is not "placed" — only the placement confirmation
+          // flips that (§22.7). Here it only says that it was accepted.
+          l3Result[0] = false;
+        }
+        // VISIBLE, not on debug. Reception logs every cell
+        // ("V4.1 EMPFANG"); without the counterpart on the sending side it
+        // is impossible to tell in the field whether a message never went
+        // out or got lost on the way. Exactly this question was open on
+        // 28.08. and cost a whole measurement run.
+        // `shortPairLabel`, NOT `substring(0, 8)`: the identifier is
+        // `own/counterpart`, and its first eight digits are always the
+        // OWN identity (S350, point 10).
+        _log.event('V4.1 SEND ${messageType.name} to '
+            '${shortPairLabel(peer)} '
+            '(${frameBytes41.length} B, '
+            '${chosenMode.name}) — $outcome');
+        return outcome.accepted;
       }
+      // ── THE PATH ENDS HERE (CUT, 31.08.2026) ────────────────────────
+      //
+      // `DeliveryRoute.twoStage` "fell through unchanged" — namely into
+      // the V3 cascade below. That no longer exists. The rest of this
+      // method (around 390 lines) was: device resolution via
+      // `node.resolveUserToDevices`, inner KEM + PoW via
+      // `V3FrameCodec`, fan-out per device with
+      // `node.sendToDeviceTracked`, `AckTracker.trackSend`,
+      // Reed-Solomon distribution, store-and-forward on network peers and
+      // the §5.8 outbox. Every single one of these pieces lived in
+      // `lib/core/network/` or `lib/core/node/`.
+      //
+      // WHO LANDS HERE (re-measured 2026-09-01, S361) ────────────────
+      //
+      // Only [kV3InfraTypes] any more, and within it only the erasure
+      // fragments (`MTV3_FRAGMENT_*`) and the DHT traffic (`MTV3_DHT_*`).
+      // Both die with the V3 line and are (T): they have no subject in
+      // V4.1, not merely no carrier. `routeFor` gives them `twoStage`
+      // (`v41_routing.dart:234`), and that is the only branch that still
+      // falls through to here.
+      //
+      // UNTIL S361 TWO THINGS STOOD HERE, AND BOTH WERE WRONG.
+      //
+      //   * "[kBootstrapTypes] … `routeFor` sends them DELIBERATELY to
+      //     `twoStage` … That is **gap G-1**." — Measured false:
+      //     `v41_routing.dart:200` returns `DeliveryRoute.inviteLine` for
+      //     `kBootstrapTypes`, and BEFORE the `twoStage` branch in line 234.
+      //     The switch above already catches `inviteLine` (same method,
+      //     line 10288) and returns there. First contact therefore cannot
+      //     reach this place at all. G-1 has moreover been closed since
+      //     S360 — the `sendContactRequest` of that time delivered via the
+      //     invitation line. The log line thus named to the reader a cause
+      //     that no longer exists. S389: `sendContactRequest` itself has not
+      //     existed since S388-BAU-KONTAKT; on V4.2 the request comes from
+      //     an invitation card (§15.5) and goes via `sendToUser` like every
+      //     send (§22.5).
+      //
+      //   * "the call frames … are **gap G-13** (`CallTransport` has had no
+      //     implementation since the CUT)." — Measured false in two points.
+      //     First, there is an implementation:
+      //     `call_transport_v41.dart:83` `class CallTransportV41
+      //     implements CallTransport`, constructed in production in
+      //     `call_service.dart:192`, supplied with the D socket by
+      //     `v41_attach.dart:851` (`service.attachCallDSocket`).
+      //     Second, live call frames do not run through `sendToUser` at
+      //     all: `call_service.dart:915` sends them via
+      //     `callTransport.sendMedia(...)` directly on level D. The
+      //     `MTV3_CALL_*` entries in [kV3InfraTypes] therefore have no
+      //     caller in this path — they stand there as a block, not as a
+      //     path. What is really still open at level D belongs under G-13,
+      //     but not at THIS line.
+      //
+      // No silent detour: there is no second way that could be redirected
+      // to here, and inventing one would be the dual stack from §7.
+      _log.error('sendToUser: ${messageType.name} to '
+          '${_hexShort(recipientUserId)} is V3 infrastructure '
+          '(erasure fragment or DHT frame) and belongs on the '
+          'two-stage path that fell with the CUT. V4.1 has no '
+          'object for it (T) — no carrier is missing. Not sent.');
+      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
       return false;
     }
 
-    // 4. Per-device fan-out. The Inner ApplicationFrameV3 is identical for
-    //    every device of a given recipient user (recipient pubkeys are the
-    //    User-Keypair, not the Device-Keypair). The Outer NetworkPacketV3
-    //    differs per device (nextHopDeviceId + Device-Sig binding to that
-    //    routing target). Re-encrypt the Inner per device because the codec
-    //    mutates sig fields and KEM nonces, then re-build+sign the Outer.
+    // ── WITHOUT AN ATTACHED V4.1 DELIVERY NOTHING GOES OUT ───────────
     //
-    //    The first successfully built outer is captured as the canonical
-    //    erasure-source for §5.4 Reed-Solomon offline-delivery: AppFrame
-    //    KEM is User-PK-keyed, so any per-device packet decapsulates with
-    //    the same User-KEM-SK — one fragment-bundle suffices for all of
-    //    the recipient's devices polling the same user-mailbox.
-    int dispatched = 0;
-    final senderDeviceId = node.deviceKeyPair.ed25519PublicKey;
-    // Note: senderDeviceId on the wire is sha256(secret + ed25519_pk). For now
-    // the routing layer keys peers by deviceNodeId from primaryIdentity, so
-    // reuse that — multi-tab unification is a Welle-3 follow-up.
-    final myDeviceNodeId = node.primaryIdentity.deviceNodeId;
-    // Inner messageId (16-byte UUID v4): identifies the logical message
-    // end-to-end, identical across all devices of the same recipient (the
-    // KEM-ciphertext varies per device, the inner frame including this ID
-    // does not). Receiver-side dedup, DELIVERY_RECEIPT correlation and
-    // edit/delete-by-ID all key on this. Caller may pre-supply for UI-id
-    // alignment (e.g. sender's optimistic msg.id == wire messageId hex).
-    final effectiveMessageId = (messageId != null && messageId.isNotEmpty)
-        ? messageId
-        : SodiumFFI().randomBytes(16);
-    proto.NetworkPacketV3? canonicalPacket;
-    // Befund 1+2: hop + destination device of the FIRST successful fan-out
-    // leg — the fan-out registers a single AckTracker entry, so that entry
-    // tracks the route of the first leg that actually left the machine.
-    String? firstOkViaHopHex;
-    String? firstOkDestDevHex;
-    // Befund 5 (§5.8): the addresses that first leg was written to. Tracked
-    // together with the hop for the same reason — the single AckTracker entry
-    // belongs to that leg, so its address scoring must use that leg's
-    // addresses, not the union of every address of the recipient.
-    List<PeerAddress> firstOkUsedAddresses = const <PeerAddress>[];
-    for (final deviceId in deviceIds) {
-      try {
-        final inner = proto.ApplicationFrameV3()
-          ..recipientUserId = recipientUserId
-          ..senderUserId = effectiveSenderUserId
-          ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-          ..messageId = effectiveMessageId
-          ..messageType = messageType
-          ..payload = payload;
-        if (groupId != null && groupId.isNotEmpty) inner.groupId = groupId;
-        if (contentMetadata != null) inner.contentMetadata = contentMetadata;
-        if (editMetadata != null) inner.editMetadata = editMetadata;
-        if (expiryMetadata != null) inner.expiryMetadata = expiryMetadata;
-        if (erasureMetadata != null) inner.erasureMetadata = erasureMetadata;
-        if (groupMembershipEpoch != null && groupMembershipEpoch > 0) {
-          inner.groupMembershipEpoch = Int64(groupMembershipEpoch);
-        }
-        if (groupMembershipHash != null) {
-          inner.groupMembershipHash = groupMembershipHash;
-        }
-
-        // Inner crypto + PoW in one background isolate (main isolate free).
-        final powStart = DateTime.now();
-        final (kemBytes, pow) =
-            await V3FrameCodec.buildAndEncryptInnerWithPowAsync(
-          innerFrameBytes: inner.writeToBuffer(),
-          senderUserEd25519Sk: identity.signingEd25519Sk,
-          senderUserMlDsaSk: identity.signingMlDsaSk,
-          recipientUserX25519Pk: recipientX25519Pk,
-          recipientUserMlKemPk: recipientMlKemPk,
-        );
-        final powMs = DateTime.now().difference(powStart).inMilliseconds;
-        _log.info('sendToUser: PoW done for ${_hexShort(deviceId)} '
-            'kemSize=${kemBytes.length} powMs=$powMs nonce=${pow.nonce}');
-        final outer = V3FrameCodec.buildOuter(
-          nextHopDeviceId: deviceId,
-          senderDeviceId: myDeviceNodeId,
-          deviceKeys: node.deviceKeyPair,
-          innerPayload: kemBytes,
-          payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
-          applicationFlavor: true,
-          precomputedPow: pow,
-        );
-
-        canonicalPacket ??= outer;
-        outLegs?.add(SendLeg(deviceId, outer));
-
-        final res = await node.sendToDeviceTracked(outer, deviceId,
-            paced: !_isCallSignalingV3(messageType));
-        if (res.ok) {
-          dispatched++;
-          if (firstOkDestDevHex == null) {
-            firstOkViaHopHex = res.viaHopHex;
-            firstOkDestDevHex = bytesToHex(deviceId);
-            firstOkUsedAddresses = res.usedAddresses;
-          }
-        }
-      } catch (e) {
-        _log.warn('sendToUser: per-device fan-out failed for '
-            '${_hexShort(deviceId)}: $e (continuing)');
-      }
-    }
-    // Suppress the unused-warning when senderDeviceId becomes load-bearing
-    // post-Welle-3; leaving the binding so Welle-3 wiring is a one-line edit.
-    // ignore: unnecessary_statements
-    senderDeviceId;
-
-    // RUDP-Light (Architecture §2.4.5): register the pending ACK with the
-    // tracker once at least one device-leg of the fan-out was dispatched.
-    // The tracker keys on `(messageIdHex, recipientUserHex)` and times out
-    // after `computeTimeout(baseRtt)` — on receipt it fires `onAckReceived`
-    // (DV-bridge → confirmRoute), on 3× consecutive timeout per route it
-    // fires `onRouteDown` (markRouteDown + Poison Reverse). `wasDirect` is
-    // computed at receipt time from the source address.
-    if (dispatched > 0 &&
-        AckTracker.isAckWorthyV3(messageType) &&
-        !constantTimeEquals(recipientUserId, identity.userId)) {
-      final messageIdHex = bytesToHex(effectiveMessageId);
-      final recipientHex = bytesToHex(recipientUserId);
-      final baseRtt = node.dhtRpc.getRtt(recipientUserId);
-      // Befund 2: relay sends (hop != destination device) need the 8s
-      // relay floor from computeTimeout(hopCount: 2).
-      final wasRelay =
-          firstOkViaHopHex != null && firstOkViaHopHex != firstOkDestDevHex;
-      final timeout =
-          AckTracker.computeTimeout(baseRtt, hopCount: wasRelay ? 2 : 1);
-      final canonicalBytes = canonicalPacket != null
-          ? node.serializePacketForOfflineDelivery(canonicalPacket)
-          : null;
-      unawaited(node.ackTracker.trackSend(
-        messageIdHex,
-        recipientHex,
-        // Befund 5 (§5.8): real address list of the first successful leg.
-        firstOkUsedAddresses,
-        timeout,
-        viaNextHopHex: firstOkViaHopHex,
-        // S281: direct/relay discriminator for address scoring in
-        // _handleTimeout — same value the timeout above already uses.
-        estimatedHops: wasRelay ? 2 : 1,
-        serializedPacket: canonicalBytes,
+    // Only those get this far who (a) have not attached a V4.1 delivery
+    // (`CLEONA_V41=0`, or a process that never calls `attachV41`) or
+    // (b) send to the OWN identifier.
+    //
+    // (a) used to be the normal case — the body then fell into the V3
+    // cascade. Now it is the state "no network attached".
+    //
+    // (b) is NO LONGER the twin sync. Until S360 this said:
+    // "§14.1 names the right way — an OWN mark
+    // `HKDF(K_own, "device" ‖ deviceId ‖ n)` —, and it has yet to be
+    // created in `lib/core/tagline/`. **Gap G-14.**" That was true and
+    // stays as a correction; the line is built now (`own_line.dart`), and
+    // self-send goes through the switch above like any other delivery.
+    // What remains at this place is only (a) — no node attached —, and
+    // then it is not down to a mark, but to this process having no network.
+    //
+    // Since S361 that also holds for a send SPECIFICALLY aimed at a single
+    // own device: the second line from §14.1 is built (`device_line.dart`)
+    // and is entered in the switch above. Until then this said "that
+    // still does not work".
+    // ── WITHOUT A HOST IT IS PARKED, NOT DISCARDED (§21.2, S363) ───────
+    //
+    // ── THE FINDING ─────────────────────────────────────────────────
+    //
+    // Up to here EVERYTHING fell through that could not enter the host
+    // branch — including messages that merely lacked the CARRIER because
+    // it was not attached yet. That is not an edge case but the cold
+    // start: `service_daemon.dart` calls `await
+    // service.startService()` and only AFTERWARDS `attachV41(...)` (line 779
+    // -> 790; `main.dart` line 2268 -> 2279 likewise). Everything that
+    // `startService` itself still sends — the due key rotation to all
+    // contacts was the most expensive case — reached this place with
+    // `v41Delivery == null`, ran into the two `_log.error` lines below and
+    // ended with `return false` — DISCARDED. Until S363 the outbound
+    // compartment was only filled INSIDE the host branch (the only
+    // `v41Outbox.add` site in all of `lib/` stood there), so there was no
+    // resubmission either: the announcement was gone until the next
+    // rotation in SEVEN DAYS (`needsRotation`, `kKemRotationInterval`).
+    //
+    // ── WHY PARK AND NOT SWAP THE ORDER ──────────────
+    //
+    // Swapping the order covers exactly one send site. §21.2 already
+    // describes the right thing for this situation — "a node's own
+    // cells stay local until their placement is substantiated" —, and
+    // the compartment already has its drain with `flushV41Outbox`
+    // (readiness edge). Parking therefore happens here, where EVERY
+    // sender passes by.
+    //
+    // NO TIMER RETRY (working rule 5): the drain hangs on the readiness
+    // edge, not on a clock.
+    //
+    // WHAT IS NOT PARKED, and why separately:
+    //   * [kV41Ephemeral] — their loss is without consequence, their
+    //     resubmission would be a lie (see there).
+    //   * SELF-SEND — `v41PairKeyFor` cannot be formed for the own
+    //     identity, the own line only exists after `v41ArmOwnLine`. An
+    //     entry that the resubmission cannot seal would be a compartment
+    //     that never drains.
+    //   * V3 infrastructure — it has no SUBJECT in V4.1, not merely no
+    //     carrier. Waiting changes nothing about that; that is the case
+    //     the line below reports.
+    final withoutCarrier = v41Delivery == null || v41Host == null;
+    if (withoutCarrier &&
+        !isSelfSend &&
+        !kV41Ephemeral.contains(messageType) &&
+        !kV3InfraTypes.contains(messageType)) {
+      final parkedId = (messageId != null && messageId.isNotEmpty)
+          ? messageId
+          : SodiumFFI().randomBytes(16);
+      final parked = _v41InnerFrame(
         recipientUserId: recipientUserId,
+        senderUserId: effectiveSenderUserId,
+        messageId: parkedId,
+        messageType: messageType,
+        payload: payload,
+        groupId: groupId,
+        contentMetadata: contentMetadata,
+        editMetadata: editMetadata,
+        expiryMetadata: expiryMetadata,
+        groupMembershipEpoch: groupMembershipEpoch,
+        groupMembershipHash: groupMembershipHash,
+      );
+      v41Outbox.add(V41OutboxEntry(
+        messageId: parkedId,
+        recipientUserId: recipientUserId,
+        frame: Uint8List.fromList(parked.writeToBuffer()),
+        messageType: messageType.name,
+        createdAtMs: DateTime.now().millisecondsSinceEpoch,
+        groupIdHex: (groupId != null && groupId.isNotEmpty)
+            ? _hexOf(groupId)
+            : null,
+        x25519Pk: recipientX25519PkOverride,
+        mlKemPk: recipientMlKemPkOverride,
+        // The same justification as in the host branch: the class is a
+        // property of THIS message and cannot be reconstructed from the
+        // entry.
+        management: management,
       ));
-
-      // §5.8 Crash-safety: park sent-but-unACK'd messages in outbox so an
-      // app kill between send and DELIVERY_RECEIPT does not lose the message.
-      // The entry is removed on ACK receipt (_handleDeliveryReceiptV3) or
-      // flushed with full L1→L2→L3 cascade on next restart.
-      if (canonicalBytes != null) {
-        _addToOutbox(
-          messageIdHex: messageIdHex,
-          recipientUserIdHex: recipientHex,
-          recipientEd25519PkHex:
-              recipientEd25519Pk != null ? bytesToHex(recipientEd25519Pk) : null,
-          canonicalPacket: canonicalBytes,
-          messageType: messageType.name,
-        );
-      }
+      saveV41Outbox();
+      _log.warn('sendToUser: ${messageType.name} to '
+          '${_hexShort(recipientUserId)} — NO V4.1 carrier yet '
+          '(v41Delivery=${v41Delivery != null}, v41Host=${v41Host != null}). '
+          'Put into the outbox (§21.2), drained at the '
+          'readiness edge. Until S363 it was discarded here; a '
+          'cold-start rotation was thus gone for seven days.');
+      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+      return false;
     }
 
-    // §5.4 Erasure-coded offline-delivery: the sender places fragments
-    // push-based on send-failure, not on every send (storage efficiency
-    // stays bounded). When at least one device accepted the direct send,
-    // the message is considered delivered and erasure-distribution is
-    // skipped — the recipient will receive the inner ApplicationFrame
-    // through the standard receive pipeline.
-    if (dispatched == 0 && canonicalPacket != null && !skipL3) {
-      final canonicalBytes =
-          node.serializePacketForOfflineDelivery(canonicalPacket);
-      final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
-      bool l3Placed;
-      if (useErasure) {
-        final fragmentBundleId =
-            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-        l3Placed = await _distributeErasureFragments(
-          packetBytes: canonicalBytes,
-          messageId: Uint8List.fromList(fragmentBundleId),
-          recipientUserEd25519Pk: recipientEd25519Pk,
-          recipientUserNodeId: recipientUserId,
-        );
-      } else {
-        l3Placed = await _storeSafOnNetworkPeers(
-          recipientUserId: recipientUserId,
-          wrappedEnvelope: canonicalBytes,
-        );
-      }
-      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = l3Placed;
-      if (!l3Placed) {
-        final msgIdHex = bytesToHex(effectiveMessageId);
-        _addToOutbox(
-          messageIdHex: msgIdHex,
-          recipientUserIdHex: bytesToHex(recipientUserId),
-          recipientEd25519PkHex:
-              recipientEd25519Pk != null ? bytesToHex(recipientEd25519Pk) : null,
-          canonicalPacket: canonicalBytes,
-          messageType: messageType.name,
-        );
-        _log.warn('sendToUser: Path 2 L3 ${useErasure ? "erasure" : "S&F"} '
-            'failed — $msgIdHex parked in outbox');
-      }
+    if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = false;
+    if (isSelfSend) {
+      _log.error('sendToUser: self-send ${messageType.name} — no '
+          'V4.1 delivery attached (v41Delivery=${v41Delivery != null}, '
+          'v41Host=${v41Host != null}). The own line (§14.7) needs '
+          'a running node like any other delivery.');
+    } else {
+      _log.error('sendToUser: ${messageType.name} to '
+          '${_hexShort(recipientUserId)} — no V4.1 delivery '
+          'attached (v41Delivery=${v41Delivery != null}, '
+          'v41Host=${v41Host != null}). There is no second path any more.');
     }
-
-    return dispatched > 0;
+    return false;
   }
 
-  /// Welle 5 Teil 4 §8.1.1 First-CR-Bootstrap receive-side. Called by the
-  /// daemon when an `InfrastructureFrameV3` with `messageType=
-  /// MTV3_CONTACT_REQUEST` was decapped against this device's
-  /// Device-KEM-SK and routed (by recipientDeviceId) to the identity that
-  /// owns this device-id. The InfrastructureFrame's payload is a
-  /// User-signed `ApplicationFrameV3` whose `senderUserId` corresponds to
-  /// pubkeys carried *in plaintext inside the CR payload* — that is the
-  /// §8.1.1 trust-bootstrap (the recipient cannot do contact-registry
-  /// lookup because the CR is what creates the contact).
-
-  /// Verify path: parse inner ApplicationFrameV3, parse its
-  /// ContactRequestMsg payload, extract `(ed25519_pk, ml_dsa_pk)`, run the
-  /// User-Sig verify against those — then dispatch through the normal
-  /// [handleApplicationFrame] flow (identity-resolution + state mutation
-  /// downstream are unchanged).
-  Future<void> handleIncomingFirstContactRequest(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    proto.ApplicationFrameV3 inner;
-    try {
-      inner = proto.ApplicationFrameV3.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.debug('First-CR drop: ApplicationFrameV3 parse failed: $e');
-      return;
-    }
-    if (inner.messageType != proto.MessageTypeV3.MTV3_CONTACT_REQUEST) {
-      _log.debug('First-CR drop: inner messageType is ${inner.messageType.name}, '
-          'expected MTV3_CONTACT_REQUEST');
-      return;
-    }
-    if (Uint8List.fromList(inner.recipientUserId).length != identity.userId.length ||
-        !constantTimeEquals(Uint8List.fromList(inner.recipientUserId), identity.userId)) {
-      _log.debug('First-CR drop: recipientUserId mismatch '
-          '(packet=${inner.recipientUserId.hex.substring(0, 8)}, '
-          'us=${identity.userIdHex.substring(0, 8)})');
-      return;
-    }
-    proto.ContactRequestMsg cr;
-    try {
-      cr = proto.ContactRequestMsg.fromBuffer(inner.payload);
-    } catch (e) {
-      _log.debug('First-CR drop: ContactRequestMsg parse failed: $e');
-      return;
-    }
-    if (cr.ed25519PublicKey.isEmpty || cr.mlDsaPublicKey.isEmpty) {
-      _log.debug('First-CR drop: CR payload missing sender pubkeys');
-      return;
-    }
-
-    // User-Sig-verify against the pubkeys carried in the CR (§8.1.1
-    // trust-bootstrap). Mirrors V3FrameCodec.decryptAndVerifyInner step 5.
-    final edSig = Uint8List.fromList(inner.userEd25519Sig);
-    final mlSig = Uint8List.fromList(inner.userMlDsaSig);
-    inner.clearUserEd25519Sig();
-    inner.clearUserMlDsaSig();
-    final signedBytes = inner.writeToBuffer();
-    inner.userEd25519Sig = edSig;
-    inner.userMlDsaSig = mlSig;
-    if (!SodiumFFI().verifyEd25519(
-        signedBytes, edSig, Uint8List.fromList(cr.ed25519PublicKey))) {
-      _log.debug('First-CR drop: Ed25519 user-sig invalid');
-      return;
-    }
-    if (!OqsFFI().mlDsaVerify(
-        signedBytes, mlSig, Uint8List.fromList(cr.mlDsaPublicKey))) {
-      _log.debug('First-CR drop: ML-DSA user-sig invalid');
-      return;
-    }
-
-    await handleApplicationFrame(
-      frame: inner,
-      senderDeviceId: senderDeviceId,
-      sourceAddr: sourceAddr,
-      sourcePort: sourcePort,
-      // §2.4.0: attach the inner-claimed senderUserId to the snapshot so
-      // bridge-layer F4-Gate (§8.1) can compare against the contact-store
-      // entry. Outer-Sig in First-CR is verified-or-bootstrap depending on
-      // whether we have prior infra exchange with the sender device.
-      snapshot: snapshot.withSenderUserId(
-          Uint8List.fromList(inner.senderUserId)),
-    );
-  }
-
-  /// Welle 6 §6.3 receive-side. Called by the daemon when an
-  /// `InfrastructureFrameV3` with `messageType=MTV3_RESTORE_BROADCAST` was
-  /// decapped against this device's Device-KEM-SK and routed (by
-  /// recipientDeviceId) to the identity that owns this device-id.
-  ///
-  /// The InfrastructureFrame's payload is a plain `RestoreBroadcast` proto
-  /// (NOT an ApplicationFrame wrap) carrying an old-Ed25519 inner signature
-  /// over the body — that is the §6.3 trust-bootstrap (the recipient cannot
-  /// run the standard User-Sig path because the recovering peer's user-keys
-  /// just changed). Forwards the raw body bytes to `_handleRestoreBroadcast`
-  /// which keys off `rb.oldNodeId` for the contact lookup and verifies the
-  /// inner old-Ed25519 sig against the contact's stored pubkey.
-  Future<void> handleIncomingRestoreBroadcastInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    // §2.4.0 / §8.1 — log the outer-sig status so live-debug can correlate
-    // bootstrap-pass cases. Restore is a special case: the inner old-Ed25519
-    // sig (verified in `_handleRestoreBroadcast` against the OLD
-    // contact.ed25519Pk) is the canonical authenticity check, so a
-    // bootstrap-skipped Outer-Sig is plausible (the recovering peer is on a
-    // fresh device). Don't drop on `skippedBootstrap`.
-    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
-      _log.warn('RESTORE_BROADCAST V3 Infra: outerSig='
-          '${snapshot.outerSigStatus.name} from device='
-          '${bytesToHex(senderDeviceId).substring(0, 8)} — '
-          'inner old-Ed25519 sig is the trust anchor (§6.3)');
-    }
-    _handleRestoreBroadcast(Uint8List.fromList(frame.payload));
-  }
-
-  /// Welle 6 §7.4 receive-side. Called by the daemon when an
-  /// `InfrastructureFrameV3` with `messageType=MTV3_KEY_ROTATION_BROADCAST`
-  /// was decapped against this device's Device-KEM-SK.
-  ///
-  /// The InfrastructureFrame path is reserved for the **Emergency variant**
-  /// (dual-sig in body — `oldSignatureEd25519` AND `newSignatureEd25519`).
-  /// Periodic KEM-only rotation continues on the ApplicationFrame path
-  /// because no signature key changes there.
-  ///
-  /// Receiver enforces the Emergency-discriminator by parsing the inner
-  /// `KeyRotationBroadcast` body and asserting both sig fields are
-  /// populated. Frames missing either sig are dropped — they belong on the
-  /// ApplicationFrame path, not here.
-  ///
-  /// Body filled in Welle 6 (Subagent C).
-  ///
-  /// Wire-layer: parses [frame.payload] as a `KeyRotationBroadcast` proto
-  /// (NOT an ApplicationFrame wrap — the InfrastructureFrame.payload IS the
-  /// signed broadcast body, per §2.3.5 + §7.4). Enforces the
-  /// Emergency-discriminator: both `oldSignatureEd25519` AND
-  /// `newSignatureEd25519` must be populated. Single-sig (Periodic) rotations
-  /// belong on the ApplicationFrame path and are dropped here as a
-  /// cross-layer-abuse defence.
-  ///
-  /// Inner-auth is the dual-sig itself. Outer-Sig status (`verified` vs.
-  /// `skippedBootstrap`) is informational only — the receiver MUST NOT
-  /// accept a rotation without dual-sig verification regardless of the
-  /// outer status, and the inner dual-sig dispatcher below enforces that.
-  /// We therefore proceed even on `skippedBootstrap`, matching the spec
-  /// note in §2.4.0 + §7.4.
-  Future<void> handleIncomingKeyRotationBroadcastInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    proto.KeyRotationBroadcast broadcast;
-    try {
-      broadcast = proto.KeyRotationBroadcast.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.debug('handleIncomingKeyRotationBroadcastInfra drop: '
-          'KeyRotationBroadcast parse failed: $e '
-          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
-      return;
-    }
-
-    // Discriminator: InfrastructureFrame path is reserved for the
-    // Emergency variant. A frame missing either sig was either a Periodic
-    // rotation that picked the wrong wire path (sender bug), or an
-    // attacker trying to launder a single-sig past the dual-sig gate.
-    if (broadcast.oldSignatureEd25519.isEmpty ||
-        broadcast.newSignatureEd25519.isEmpty) {
-      _log.warn('handleIncomingKeyRotationBroadcastInfra drop: missing '
-          'dual-sig (oldSig=${broadcast.oldSignatureEd25519.length}b '
-          'newSig=${broadcast.newSignatureEd25519.length}b) — the '
-          'InfrastructureFrame path is reserved for the Emergency variant; '
-          'periodic single-sig rotation belongs on the ApplicationFrame '
-          'path '
-          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
-      return;
-    }
-
-    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
-      // Inform-and-proceed: the dual-sig in the body is cryptographically
-      // sufficient. The dispatcher below will refuse if either sig fails
-      // to verify — that is the only authentication subject for this
-      // messageType (§7.4 Variant b).
-      _log.info('handleIncomingKeyRotationBroadcastInfra: outer-sig '
-          '${snapshot.outerSigStatus.name} (proceeding — dual-sig in body '
-          'is the authoritative inner-auth per §7.4)');
-    }
-
-    // §2.3.5 InfrastructureFrame has no senderUserId field — the handler
-    // keys `_contacts` by senderHex. Locate the matching contact by
-    // scanning whose stored ed25519Pk verifies the inner old-sig in the
-    // broadcast body.
-    final inferredSenderUserId = _findSenderUserIdForKeyRotation(broadcast);
-    if (inferredSenderUserId.isEmpty) {
-      _log.warn('handleIncomingKeyRotationBroadcastInfra drop: cannot '
-          'locate matching contact via old-sig verification '
-          '(sender=${bytesToHex(senderDeviceId).substring(0, 8)})');
-      return;
-    }
-    _handleKeyRotationBroadcast(
-        Uint8List.fromList(frame.payload), inferredSenderUserId);
-  }
-
-  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
-  /// with `messageType=MTV3_GUARDIAN_SHARE_STORE` was decapped against this
-  /// device's Device-KEM-SK and routed to the identity owning this device.
-  ///
-  /// The InfrastructureFrame's payload is the plain `GuardianShareStore`
-  /// proto (no inner KEM wrap — the frame-level Device-KEM encap is the
-  /// only confidentiality layer). Forward the raw body bytes directly to
-  /// `guardianService.handleShareStore`.
-  Future<void> handleIncomingGuardianShareStoreInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
-      _log.info('GUARDIAN_SHARE_STORE V3 Infra: outer-sig '
-          '${snapshot.outerSigStatus.name} from device='
-          '${bytesToHex(senderDeviceId).substring(0, 8)} — proceeding '
-          '(payload is the §6.2 share, recipient validates by storing)');
-    }
-    guardianService.handleShareStore(Uint8List.fromList(frame.payload));
-  }
-
-  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
-  /// with `messageType=MTV3_GUARDIAN_RESTORE_REQUEST` was decapped.
-  /// `guardianService.handleRestoreRequest` silently ignores the request if
-  /// we don't hold a share for the named owner — so a broadcast fan-out
-  /// from a triggering guardian arriving at non-guardian contacts is
-  /// correctly absorbed.
-  Future<void> handleIncomingGuardianRestoreRequestInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    if (snapshot.outerSigStatus != OuterSigStatus.verified) {
-      _log.info('GUARDIAN_RESTORE_REQUEST V3 Infra: outer-sig '
-          '${snapshot.outerSigStatus.name} from device='
-          '${bytesToHex(senderDeviceId).substring(0, 8)} — proceeding '
-          '(non-share holders ignore in handleRestoreRequest)');
-    }
-    guardianService.handleRestoreRequest(Uint8List.fromList(frame.payload));
-  }
-
-  /// §6.2 receive-side. Called by the daemon when an `InfrastructureFrameV3`
-  /// with `messageType=MTV3_GUARDIAN_RESTORE_RESPONSE` arrives directly
-  /// (NOT via DHT-fragment-retrieve — that path stores raw
-  /// GuardianRestoreResponse bytes inside FragmentStore.fragmentData and is
-  /// fetched separately). This direct path covers the future case where a
-  /// confirming guardian sends the response point-to-point to the
-  /// recovering owner once they come online.
-  Future<void> handleIncomingGuardianRestoreResponseInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    guardianService.handleRestoreResponse(Uint8List.fromList(frame.payload));
-  }
-
-  /// V3 InfraFrame route for FRAGMENT_STORE — Reed-Solomon erasure-coded
-  /// fragment delivery + S&F mailbox push (Architecture §5.4 + §23.3).
-  void handleIncomingFragmentStoreInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    _handleFragmentStore(Uint8List.fromList(frame.payload), senderDeviceId);
-  }
-
-  /// V3 InfraFrame route for FRAGMENT_RETRIEVE — request a mailbox dump
-  /// from a peer holding our fragments. The peer responds with a series
-  /// of FRAGMENT_STORE InfraFrames targeted at [senderDeviceId].
-  void handleIncomingFragmentRetrieveInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    _handleFragmentRetrieve(Uint8List.fromList(frame.payload), senderDeviceId);
-  }
-
-  /// V3 InfraFrame route for FRAGMENT_DELETE — explicit fragment-eviction
-  /// signal from the mailbox owner once they've pulled and reassembled.
-  void handleIncomingFragmentDeleteInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    _handleFragmentDelete(Uint8List.fromList(frame.payload));
-  }
-
-  // ── §5.5 Store-and-Forward InfraFrame Handlers ──────────────────────
-
-  bool _checkSenderStoreRateLimit(String senderHex) {
-    final now = DateTime.now();
-    final cutoff = now.subtract(const Duration(hours: 1));
-    final log = _peerStoreRateLog.putIfAbsent(senderHex, () => []);
-    log.removeWhere((ts) => ts.isBefore(cutoff));
-    if (log.length >= 10) return false;
-    log.add(now);
-    return true;
-  }
-
-  void handleIncomingPeerStoreInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    try {
-      final store = proto.PeerStore.fromBuffer(frame.payload);
-      final recipientUserId = Uint8List.fromList(store.recipientNodeId);
-
-      // §5.5 receiver-side: accept stores for any recipient within budgets.
-      // The Closed-Network HMAC is the trust boundary — no contact check.
-      final recipientHex = bytesToHex(recipientUserId);
-      final senderHex = bytesToHex(senderDeviceId);
-      if (!_checkSenderStoreRateLimit(senderHex)) {
-        final ack = proto.PeerStoreAck()
-          ..storeId = store.storeId
-          ..accepted = false;
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_PEER_STORE_ACK,
-          innerPayload: Uint8List.fromList(ack.writeToBuffer()),
-          recipientDeviceId: senderDeviceId,
-        );
-        return;
-      }
-
-      final storeIdHex = store.storeId.hex;
-      final ttlMs = store.ttlMs.toInt();
-      final stored = node.peerMessageStore.storeMessage(
-        recipientUserId: recipientUserId,
-        wrappedEnvelope: Uint8List.fromList(store.wrappedEnvelope),
-        storeIdHex: storeIdHex,
-        ttlMs: ttlMs > 0 ? ttlMs : PeerMessageStore.defaultTtlMs,
-      );
-      final ack = proto.PeerStoreAck()
-        ..storeId = store.storeId
-        ..accepted = stored;
-      node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_PEER_STORE_ACK,
-        innerPayload: Uint8List.fromList(ack.writeToBuffer()),
-        recipientDeviceId: senderDeviceId,
-      );
-
-      // §7.1 P3: a PEER_STORE addressed to OUR OWN userId can never be
-      // handed back to us through the normal PEER_RETRIEVE path — the own
-      // identity is by construction never present in `_contacts` (see
-      // `sendToUser` §7.2), so no peer ever polls this store on our behalf,
-      // and our own general S&F poll now explicitly excludes self-authored
-      // envelopes too (`peekRetrievable excludeSenderDeviceId`, §7.1 P3).
-      // Without this branch a store placed for our own userId — e.g. the
-      // LD-11 pairing bootstrap picking THIS device among the K storage
-      // peers chosen for its own future twin's request — sits in our local
-      // `peerMessageStore` forever, undelivered. Analogous to
-      // `_isOurMailbox` for fragment stores (`_handleFragmentStore` ->
-      // `_tryReassemble`): dispatch immediately instead of only archiving.
-      // Runs regardless of `stored` (dedup/budget outcome) — the bytes are
-      // already in hand, and `dispatchReassembledPacket` has its own
-      // inner-messageId dedup, so a repeat store is a harmless no-op.
-      if (constantTimeEquals(recipientUserId, identity.userId)) {
-        _log.info('PEER_STORE: addressed to our own userId — dispatching '
-            'locally instead of archiving-only ($storeIdHex)');
-        node.dispatchReassembledPacket(Uint8List.fromList(store.wrappedEnvelope));
-      }
-
-      // Push-on-store: if the recipient is currently confirmed, push
-      // immediately rather than waiting for retrieve-poll.
-      if (stored) {
-        final recipientPeer = node.routingTable.getPeerByUserId(recipientUserId);
-        if (recipientPeer != null) {
-          final devHex = recipientPeer.nodeIdHex;
-          if (node.isPeerConfirmed(devHex)) {
-            _pushStoredMessagesTo(devHex);
-          }
-        }
-        final contact = _contacts[recipientHex];
-        if (contact != null) {
-          for (final devHex in contact.deviceNodeIds) {
-            if (node.isPeerConfirmed(devHex)) {
-              _pushStoredMessagesTo(devHex);
-              break;
-            }
-          }
-        }
-      }
-    } catch (e) {
-      _log.debug('PEER_STORE error: $e');
-    }
-  }
-
-  Future<void> handleIncomingPeerRetrieveInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    try {
-      final retrieve = proto.PeerRetrieve.fromBuffer(frame.payload);
-      final requesterUserId = Uint8List.fromList(retrieve.requesterNodeId);
-      // S300: peek and mark are correlated by this timestamp. A PEER_STORE that
-      // arrives while `sendInfraTo` below is awaited lands in the store without
-      // the stamp and is therefore NOT marked as retrieved — it was never part
-      // of this response and must survive for the next retrieve.
-      final attemptAt = DateTime.now();
-      // §7.1 P3: `senderDeviceId` here is the outer packet's verified
-      // sender of THIS PEER_RETRIEVE — i.e. the requesting device itself.
-      // Excluding it stops a device from consuming (markRetrieved + 60s
-      // grace + pruneExpired) a copy it authored itself, which otherwise
-      // races the intended recipient's own retrieval of the same store
-      // (see `peekRetrievable` doc).
-      final envelopes = node.peerMessageStore.peekRetrievable(
-          requesterUserId,
-          attemptAt: attemptAt,
-          excludeSenderDeviceId: senderDeviceId);
-      if (envelopes.isEmpty) return;
-      final response = proto.PeerRetrieveResponse()
-        ..storedEnvelopes.addAll(envelopes)
-        ..remaining = 0;
-      final sent = await node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE,
-        innerPayload: Uint8List.fromList(response.writeToBuffer()),
-        recipientDeviceId: senderDeviceId,
-      );
-      if (sent) {
-        node.peerMessageStore.markRetrieved(requesterUserId, attemptAt);
-        _log.info('PEER_RETRIEVE: sent ${envelopes.length} stored messages '
-            'to ${bytesToHex(senderDeviceId).substring(0, 8)}');
-      } else {
-        _log.info('PEER_RETRIEVE: send failed for ${envelopes.length} messages '
-            'to ${bytesToHex(senderDeviceId).substring(0, 8)} — kept in store');
-      }
-    } catch (e) {
-      _log.debug('PEER_RETRIEVE error: $e');
-    }
-  }
-
-  void handleIncomingPeerRetrieveResponseInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    try {
-      final response = proto.PeerRetrieveResponse.fromBuffer(frame.payload);
-      var injected = 0;
-      for (final envelope in response.storedEnvelopes) {
-        try {
-          node.dispatchReassembledPacket(Uint8List.fromList(envelope));
-          injected++;
-        } catch (e) {
-          _log.debug('S&F re-inject failed: $e');
-        }
-      }
-      if (injected > 0) {
-        _log.info('S&F pull: re-injected $injected messages from '
-            '${bytesToHex(senderDeviceId).substring(0, 8)}');
-      }
-    } catch (e) {
-      _log.debug('PEER_RETRIEVE_RESPONSE error: $e');
-    }
-  }
+  // ── §5.5 store-and-forward: remaining static member ──
+  // The rest of the section lives in `cleona_service_v3_sf.dart`.
+  // A `static` cannot move into an extension (§4c.5 limit 3):
+  // it would then belong to the extension, and `CleonaService.isEmergency…`
+  // would no longer resolve — smoke_emergency_rotation_v3_infra
+  // calls exactly like that.
 
   /// Welle 6 §7.4 path-discriminator. Returns true iff [broadcast] carries
   /// the Emergency-variant dual-sig (both `oldSignatureEd25519` and
@@ -14844,946 +12683,31 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         broadcast.newSignatureEd25519.isNotEmpty;
   }
 
-  /// Welle 6 §7.4: locate the contact whose stored `ed25519Pk` verifies the
-  /// `oldSignatureEd25519` field on a KeyRotationBroadcast. The
-  /// InfrastructureFrame carries no senderUserId, so we cannot trust any
-  /// claimed identity — the only sound lookup is "which of my known
-  /// contacts could have signed this?". Returns the contact's userId
-  /// (= nodeId) on hit, or empty bytes on miss.
-  Uint8List _findSenderUserIdForKeyRotation(
-      proto.KeyRotationBroadcast broadcast) {
-    final dataToVerify = (proto.KeyRotationBroadcast()
-          ..newEd25519Pk = broadcast.newEd25519Pk
-          ..newMlDsaPk = broadcast.newMlDsaPk
-          ..newX25519Pk = broadcast.newX25519Pk
-          ..newMlKemPk = broadcast.newMlKemPk)
-        .writeToBuffer();
-    final oldSig = Uint8List.fromList(broadcast.oldSignatureEd25519);
-    final sodium = SodiumFFI();
-    for (final contact in _contacts.values) {
-      if (contact.status != 'accepted') continue;
-      final pk = contact.ed25519Pk;
-      if (pk == null) continue;
-      try {
-        if (sodium.verifyEd25519(dataToVerify, oldSig, pk)) {
-          return Uint8List.fromList(contact.nodeId);
-        }
-      } catch (_) {/* keep scanning */}
-    }
-    return Uint8List(0);
-  }
-
-  /// Welle 5 Teil 4 (§2.4 receiver): entry point for raw V3 application
-  /// packets routed to *this* identity by the daemon dispatcher
-  /// (`service_daemon._onAppPacketDispatch`). Performs inner KEM-decap with
-  /// this identity's User-KEM-private-keys, User-Sig-verify against the
-  /// sender's contact-registry pubkeys, and forwards to
-  /// [handleApplicationFrame] on success.
-  ///
-  /// Drop policy follows §2.4 [9-13]: silent drop on every Inner-verify
-  /// failure. Sender-pubkey-miss = "unknown contact" → KEX-Gate (§8.2).
-  /// Logged at debug; no error response on the wire.
-  ///
-  /// Returns an [AppFrameDispatchOutcome] so the multi-identity dispatcher
-  /// (§2.4 step [9] try-loop, §3.1 daemon-global deviceID) can decide
-  /// whether to try the next hosted identity. KEM-decap-failure means the
-  /// frame was not addressed to this identity's User-KEM keypair — the
-  /// caller MUST try other hosted identities. Any failure after a successful
-  /// KEM-decap is final (the frame WAS for this identity but failed verify).
-  Future<AppFrameDispatchOutcome> handleIncomingApplicationPacket(
-    proto.NetworkPacketV3 packet,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) async {
-    // Live-media receive fast path (Architecture §10.3 / Appendix B.2,
-    // F-C amendment): CALL_AUDIO/VIDEO/GROUP_AUDIO/GROUP_VIDEO frames sent
-    // by a device this identity already trusts as an active call's peer
-    // (or a group-call participant) carry a PLAIN inner — no per-recipient
-    // KEM, no user-sig — because the payload is already AES-GCM-
-    // authenticated under the call/send key. Try that cheap path first;
-    // ANY parse/validation failure falls through silently to the normal
-    // KEM-decap path below (rolling-upgrade compat: older builds still
-    // send KEM-wrapped live-media frames, and this identity may simply
-    // not be the one hosting the call).
-    final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
-    if (_calls.isLiveMediaSender(senderDeviceId)) {
-      final fastOutcome = await _tryLiveMediaFastPath(
-        packet: packet,
-        senderDeviceId: senderDeviceId,
-        sourceAddr: sourceAddr,
-        sourcePort: sourcePort,
-        snapshot: snapshot,
-      );
-      if (fastOutcome != null) return fastOutcome;
-    }
-
-    final innerPayload = Uint8List.fromList(packet.payload);
-    // §8.3 — a quarantined anchor must never be used for verification. It is
-    // by definition wrong, so verifying against it can only produce false
-    // negatives (every frame from that contact silently dropped) or, worse,
-    // a false positive against a key that is not theirs.
-    // B1 (§7.2): Twin-Frames tragen die EIGENE userId als Absender — die
-    // steht per Konstruktion nie in `_contacts` (man ist nicht sein eigener
-    // Kontakt, die PeerList-Import-Stelle ueberspringt Self explizit). Ohne
-    // diesen Zweig lieferte der Lookup einen leeren Pubkey, der Inner-Verify
-    // scheiterte mit `userPubkeysMissing` und JEDES Twin-Frame wurde still
-    // verworfen — das Gegenstueck zum Self-Pfad in `sendToUser` (§7.2, A-1),
-    // ohne das die Sendeseite ins Leere lief.
-    //
-    // Hier wird ausschliesslich der EIGENE OEFFENTLICHE Schluessel gelesen,
-    // der auf jedem Geraet dieser Identitaet ohnehin lokal vorliegt. Es wird
-    // nichts uebertragen, nichts publiziert und kein Secret Key beruehrt.
-    //
-    // Vertrauensmodell: eine gueltige Signatur unter dem User-Ed25519-Key
-    // beweist Besitz des User-SK, und den haelt laut §7.1.1 nur das Primary
-    // (Linked Devices signieren mit HKDF-abgeleiteten Sub-Keys plus
-    // DeviceDelegationCert und laufen ueber `lookupDelegated`). Der Zweig
-    // traegt also die Richtung Primary -> Linked. Er weitet das Vertrauen
-    // nicht aus: wer den Seed hat, IST die Identitaet — systemweit.
-    bool isSelfSender(Uint8List sid) =>
-        constantTimeEquals(sid, identity.userId);
-
-    Uint8List lookupEd25519(Uint8List sid) {
-      if (isSelfSender(sid)) return identity.ed25519PublicKey;
-      final c = _contacts[bytesToHex(sid)];
-      if (c == null || c.trustAnchorQuarantined) return Uint8List(0);
-      return c.ed25519Pk ?? Uint8List(0);
-    }
-    Uint8List lookupMlDsa(Uint8List sid) {
-      if (isSelfSender(sid)) return identity.mlDsaPublicKey;
-      final c = _contacts[bytesToHex(sid)];
-      if (c == null || c.trustAnchorQuarantined) return Uint8List(0);
-      return c.mlDsaPk ?? Uint8List(0);
-    }
-    ({Uint8List edPk, Uint8List mlDsaPk})? trustBootstrap(
-        proto.ApplicationFrameV3 f) {
-      try {
-        if (f.messageType == proto.MessageTypeV3.MTV3_CONTACT_REQUEST) {
-          final cr = proto.ContactRequestMsg.fromBuffer(f.payload);
-          if (cr.ed25519PublicKey.isNotEmpty && cr.mlDsaPublicKey.isNotEmpty) {
-            return (
-              edPk: Uint8List.fromList(cr.ed25519PublicKey),
-              mlDsaPk: Uint8List.fromList(cr.mlDsaPublicKey),
-            );
-          }
-        } else if (f.messageType ==
-            proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE) {
-          final crr = proto.ContactRequestResponse.fromBuffer(f.payload);
-          if (crr.ed25519PublicKey.isNotEmpty && crr.mlDsaPublicKey.isNotEmpty) {
-            return (
-              edPk: Uint8List.fromList(crr.ed25519PublicKey),
-              mlDsaPk: Uint8List.fromList(crr.mlDsaPublicKey),
-            );
-          }
-        }
-      } catch (_) {/* malformed body — keep silent drop */}
-      return null;
-    }
-    List<({Uint8List edPk, Uint8List mlDsaPk})> lookupDelegated(
-        Uint8List sid) =>
-      node.identityDhtHandler.getDelegatedKeys(sid);
-
-    var result = V3FrameCodec.decryptAndVerifyInner(
-      innerPayload: innerPayload,
-      ourUserX25519Sk: identity.x25519SecretKey,
-      ourUserMlKemSk: identity.mlKemSecretKey,
-      lookupUserEd25519Pk: lookupEd25519,
-      lookupUserMlDsaPk: lookupMlDsa,
-      trustBootstrapPubkeys: trustBootstrap,
-      lookupDelegatedKeys: lookupDelegated,
-    );
-
-    // Previous-key fallback: after KEM rotation the old keys are retained
-    // for 7 days. Senders who haven't received the KEY_ROTATION_BROADCAST
-    // yet still encrypt with the old public keys — try decap with previous
-    // private keys before giving up.
-    if (result.frame == null &&
-        result.error == InnerVerifyError.kemDecapFailed &&
-        identity.previousX25519Sk != null &&
-        identity.previousMlKemSk != null) {
-      result = V3FrameCodec.decryptAndVerifyInner(
-        innerPayload: innerPayload,
-        ourUserX25519Sk: identity.previousX25519Sk!,
-        ourUserMlKemSk: identity.previousMlKemSk!,
-        lookupUserEd25519Pk: lookupEd25519,
-        lookupUserMlDsaPk: lookupMlDsa,
-        trustBootstrapPubkeys: trustBootstrap,
-        lookupDelegatedKeys: lookupDelegated,
-      );
-      if (result.frame != null) {
-        _log.info('KEM decap succeeded with PREVIOUS keys — sender '
-            '${packet.senderDeviceId.hex.substring(0, 8)} '
-            'has not yet received our key rotation');
-      }
-    }
-
-    final frame = result.frame;
-    if (frame == null) {
-      final isKemMiss = result.error == InnerVerifyError.kemDecapFailed ||
-          result.error == InnerVerifyError.kemVersionRejected;
-      if (isKemMiss) {
-        return AppFrameDispatchOutcome.notForThisIdentity;
-      }
-      _log.debug('V3 APP drop: ${result.error?.name ?? "unknown"} '
-          'from device=${packet.senderDeviceId.hex.substring(0, 8)}');
-      return AppFrameDispatchOutcome.droppedAfterDecap;
-    }
-
-    // §2.4 step [14] (Edit 3): cross-validate Inner.recipientUserId against
-    // the identity that successfully decapped. Defence-in-depth — should
-    // never trigger for legitimate frames since both PKs derive from the
-    // same User-Master-Seed.
-    final inboundRecipient = Uint8List.fromList(frame.recipientUserId);
-    if (!constantTimeEquals(inboundRecipient, identity.userId)) {
-      _log.warn('V3 APP drop: KEM-decap succeeded under '
-          '${identity.userIdHex.substring(0, 8)} but Inner.recipientUserId '
-          '= ${bytesToHex(inboundRecipient).substring(0, 8)} (identity mismatch)');
-      return AppFrameDispatchOutcome.droppedAfterDecap;
-    }
-
-    await handleApplicationFrame(
-      frame: frame,
-      senderDeviceId: senderDeviceId,
-      sourceAddr: sourceAddr,
-      sourcePort: sourcePort,
-      snapshot: snapshot.withSenderUserId(
-          Uint8List.fromList(frame.senderUserId)),
-      // Befund 14: direct = arrived with hopCount==0 AND a real UDP source
-      // address. Relayed packets (hopCount>0) must NOT count as direct even
-      // though the relay's source address is known — otherwise relayed
-      // DELIVERY_RECEIPTs confirm a non-existent direct route.
-      wasDirect: packet.hopCount == 0 && sourceAddr.address != '0.0.0.0',
-    );
-    return AppFrameDispatchOutcome.delivered;
-  }
-
-  /// Live-media fast-path admission check (Architecture §10.3 / Appendix
-  /// B.2, F-C amendment). Called from [handleIncomingApplicationPacket]
-  /// only after [CallService.isLiveMediaSender] has cheaply confirmed
-  /// `senderDeviceId` belongs to an active call's peer / participant.
-  ///
-  /// Tries to parse [packet]'s payload directly as a PLAIN
-  /// [proto.ApplicationFrameV3] (no KEM, no zstd — the live-media sender
-  /// side skips both, see [CallService.sendLiveMediaFrame]). Returns the
-  /// dispatch outcome on acceptance, or `null` on ANY validation failure
-  /// so the caller falls through to the normal KEM-decap path unchanged
-  /// (rolling-upgrade compatibility with builds that still send
-  /// KEM-wrapped live-media frames).
-  Future<AppFrameDispatchOutcome?> _tryLiveMediaFastPath({
-    required proto.NetworkPacketV3 packet,
-    required Uint8List senderDeviceId,
-    required InternetAddress sourceAddr,
-    required int sourcePort,
-    required SenderIdentitySnapshot snapshot,
-  }) async {
-    final proto.ApplicationFrameV3 frame;
-    try {
-      frame = proto.ApplicationFrameV3.fromBuffer(packet.payload);
-    } catch (_) {
-      return null;
-    }
-
-    if (!_liveMediaFastPathTypes.contains(frame.messageType)) return null;
-
-    final recipient = Uint8List.fromList(frame.recipientUserId);
-    if (!constantTimeEquals(recipient, identity.userId)) return null;
-
-    final senderUserId = Uint8List.fromList(frame.senderUserId);
-    if (!_calls.isKnownCallPeerUserId(senderUserId)) return null;
-
-    _calls.logLiveMediaFastPathOnce(senderDeviceId);
-    await handleApplicationFrame(
-      frame: frame,
-      senderDeviceId: senderDeviceId,
-      sourceAddr: sourceAddr,
-      sourcePort: sourcePort,
-      snapshot: snapshot.withSenderUserId(senderUserId),
-      // Befund 14: same direct-derivation as the KEM path.
-      wasDirect: packet.hopCount == 0 && sourceAddr.address != '0.0.0.0',
-    );
-    return AppFrameDispatchOutcome.delivered;
-  }
-
-  /// V3 receive-side dispatcher (Architecture v3.0 §2.6, receiver step 13).
-  /// Called by the node after the outer Device-Sig has been verified, the
-  /// inner KEM has been decrypted, and the User-Sig has been verified. The
-  /// frame is trusted at this point — this method only routes to subsystem-
-  /// specific handlers.
-  ///
-  /// Each handler dispatches to the subsystem-specific business logic.
-  Future<void> handleApplicationFrame({
-    required proto.ApplicationFrameV3 frame,
-    required Uint8List senderDeviceId,
-    required InternetAddress sourceAddr,
-    required int sourcePort,
-    required SenderIdentitySnapshot snapshot,
-    // Befund 14: true only when the OUTER packet arrived with hopCount==0
-    // from a real UDP source address (computed at packet level in
-    // handleIncomingApplicationPacket). Callers without packet context
-    // (First-CR infra path, S&F/erasure re-injection) keep the safe
-    // default false — a receipt then never confirms a direct route.
-    bool wasDirect = false,
-  }) async {
-    _suppressReceiptForCurrentFrame = false;
-
-    // Receive-side dedup (Architecture §5.8 RUDP-Light): suppress the PAYLOAD
-    // of duplicate frames. The same logical message can arrive via Direct +
-    // Reed-Solomon reassembly + S&F mutual peer; without dedup the user sees
-    // the message thrice.
-    //
-    // The DELIVERY_RECEIPT is NOT suppressed. The architecture's canonical
-    // receiver pipeline (§ "service.handleApplicationFrame", step [b]) reads:
-    //
-    //     ├─ [b] Dedup: messageId already seen?
-    //     │      → if yes: send DELIVERY_RECEIPT (idempotent), then drop
-    //
-    // Returning early here — as this code did until 2026-07-28 — skipped the
-    // receipt in step [d] and made every RUDP-Light retry structurally
-    // unacknowledgeable: a lost receipt causes a retry, the retry is seen as a
-    // duplicate, the duplicate is dropped without a receipt, and the sender
-    // escalates to 3x timeout → Route DOWN → exponential address backoff up to
-    // 5 minutes on addresses that were working the whole time. Measured on
-    // node202: 346 ACK timeouts, all for a single peer, while direct UDP
-    // between the two flowed in the same second.
-    //
-    // A duplicate is the strongest available proof that the message arrived,
-    // so re-acking is both correct and cheaper than what it replaces: one
-    // ~200-byte receipt instead of an unbounded retry cycle (working rule 5).
-    // Deliberately NOT rate-limited — a time window would leave retries inside
-    // it unacknowledged and would recreate exactly this bug.
-    //
-    // Inner.messageId is set by `sendToUser` (16-byte UUID v4); empty
-    // messageIds fall through (transitional path until all senders are
-    // wired — receipt-emit just won't happen for those).
-    if (frame.messageId.isNotEmpty) {
-      final msgIdHex = frame.messageId.hex;
-      if (_processedMessageIds.contains(msgIdHex)) {
-        _log.debug('handleApplicationFrame: duplicate ${frame.messageType.name} '
-            'msgId=${msgIdHex.substring(0, 8)} — re-acking, payload dropped');
-        // Befund 1 (§8.1): a messageId whose receipt was suppressed on first
-        // sight must stay unacknowledged on every replay. Without this check
-        // the re-ack above silently undoes the silent-CR-drop suppression,
-        // because the L1 retry carries the identical inner messageId.
-        if (_suppressedReceiptMsgIds.contains(msgIdHex)) {
-          _log.debug('handleApplicationFrame: duplicate of a receipt-suppressed '
-              'frame msgId=${msgIdHex.substring(0, 8)} — NOT re-acking');
-          return;
-        }
-        if (AckTracker.isAckWorthyV3(frame.messageType) &&
-            frame.senderUserId.isNotEmpty) {
-          final senderUserId = Uint8List.fromList(frame.senderUserId);
-          if (!constantTimeEquals(senderUserId, identity.userId)) {
-            _sendDeliveryReceiptV3(
-              recipientUserId: senderUserId,
-              messageId: Uint8List.fromList(frame.messageId),
-              senderDeviceId: senderDeviceId,
-              groupId: frame.groupId,
-            );
-          }
-        }
-        return;
-      }
-      _processedMessageIds.add(msgIdHex);
-      while (_processedMessageIds.length > _processedMessageIdsCap) {
-        _processedMessageIds.remove(_processedMessageIds.first);
-      }
-    }
-
-    // §3.1 A-2: refresh sender's known deviceNodeId on every incoming
-    // ApplicationFrame so sendToUser's contact.deviceNodeIds fallback
-    // stays warm without relying on DHT resolution.
-    final senderUserHex = frame.senderUserId.hex;
-    final senderContact = _contacts[senderUserHex];
-    if (senderContact != null) {
-      final senderDeviceHex = bytesToHex(senderDeviceId);
-      if (!senderContact.deviceNodeIds.contains(senderDeviceHex)) {
-        senderContact.deviceNodeIds.add(senderDeviceHex);
-        _saveContacts();
-      }
-    }
-
-    // §5.1 F3′ (fourth outbox edge): this frame is fully verified, so the
-    // sender is provably back online. If we hold parked outbox entries FOR
-    // this user, flush them user-scoped now — the recipient reappearing is
-    // the one case the sender-side edges (network-change, first-peer,
-    // endpoint-confirmed) cannot see.
-    _maybeFlushOutboxForSender(senderUserHex);
-    // §5.1 F3' — dieselbe Kante fuer die First-CR, aber SEPARAT aufgerufen:
-    // _maybeFlushOutboxForSender steigt frueh aus, wenn keine Outbox-Eintraege
-    // fuer diesen Sender geparkt sind (:7595) — und fuer eine First-CR gibt es
-    // per Konstruktion keine. Ein Hook innerhalb der Funktion waere deshalb
-    // genau im relevanten Fall unerreichbar.
-    shortenCrBackoffOnEdge('verified-inbound', onlyUserHex: senderUserHex);
-
-    // A5: any verified ApplicationFrame proves contact liveness
-    if (senderContact != null && senderContact.status == 'accepted') {
-      senderContact.lastAckedAt = DateTime.now();
-      _staleWarningWrittenFor.remove(senderUserHex);
-      if (senderContact.autoRepairAttempted) {
-        senderContact.autoRepairAttempted = false;
-      }
-    }
-
-    switch (frame.messageType) {
-      // Messaging — Cluster C2
-      case proto.MessageTypeV3.MTV3_TEXT:
-        _handleTextV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_INLINE:
-        _handleMediaInlineV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_ANNOUNCE:
-        _handleMediaAnnounceV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_REQUEST:
-        // Fire-and-forget: chunk-stream may take a while; the dispatch loop
-        // mustn't block on it.
-        unawaited(_handleMediaRequestV3(frame, senderDeviceId, snapshot));
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_CHUNK:
-        _handleMediaChunkV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_COMPLETE:
-        _handleMediaCompleteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_MEDIA_REJECT:
-        _handleMediaRejectV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_REACTION:
-        _handleReactionV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_REPLY:
-        _handleReplyV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_EDIT:
-        _handleEditV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_DELETE:
-        _handleDeleteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_VOICE_MESSAGE:
-        _handleVoiceMessageV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Layer-Replies (ephemeral, ACK) — Cluster C1
-      case proto.MessageTypeV3.MTV3_TYPING_INDICATOR:
-        _handleTypingIndicatorV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_READ_RECEIPT:
-        _handleReadReceiptV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT:
-        _handleDeliveryReceiptV3(frame, senderDeviceId, snapshot,
-            wasDirect: wasDirect);
-        break;
-
-      // Recovery / Identity / Profile — Cluster C4
-      case proto.MessageTypeV3.MTV3_RESTORE_BROADCAST:
-        _handleRestoreBroadcastV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_RESTORE_RESPONSE:
-        _handleRestoreResponseV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_DELETED:
-        _handleIdentityDeletedV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_PROFILE_UPDATE:
-        _handleProfileUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_KEY_ROTATION_BROADCAST:
-        _handleKeyRotationBroadcastV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_KEY_ROTATION_ACK:
-        _handleKeyRotationAckV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_ROTATION_REJECTION_ALERT:
-        _handleRotationRejectionAlertV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Contact-Request — Cluster C4
-      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST:
-        _handleContactRequestV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CONTACT_REQUEST_RESPONSE:
-        _handleContactRequestResponseV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Groups — Cluster C4
-      case proto.MessageTypeV3.MTV3_GROUP_CREATE:
-        _handleGroupCreateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_GROUP_INVITE:
-        _handleGroupInviteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_GROUP_LEAVE:
-        _handleGroupLeaveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_GROUP_KEY_UPDATE:
-        _handleGroupKeyUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST:
-        _handleGroupMembershipResyncRequest(frame, senderDeviceId, snapshot);
-        break;
-
-      // Channels — Cluster C4
-      case proto.MessageTypeV3.MTV3_CHANNEL_CREATE:
-        _handleChannelCreateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_POST:
-        _handleChannelPostV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_INVITE:
-        _handleChannelInviteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_LEAVE:
-        _handleChannelLeaveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_ROLE_UPDATE:
-        _handleChannelRoleUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_BAD_BADGE_REPORT:
-        _moderation.handleChannelBadBadgeReportV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE:
-        _moderation.handleChannelJuryVoteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION:
-        _moderation.handleChannelModDecisionV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_SUBSCRIBE_PROBE:
-        _moderation.handleChannelSubscribeProbeV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST:
-        _moderation.handleChannelJoinRequestV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHANNEL_REPORT:
-        _moderation.handleChannelReportV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Calls — Cluster C3 (delegated to CallService)
-      case proto.MessageTypeV3.MTV3_CALL_INVITE:
-        _calls.handleCallInviteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_ANSWER:
-        _calls.handleCallAnswerV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_REJECT:
-        _calls.handleCallRejectV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_HANGUP:
-        _calls.handleCallHangupV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_ICE_CANDIDATE:
-        _calls.handleIceCandidateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_REJOIN:
-        _calls.handleCallRejoinV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_AUDIO:
-        _calls.handleCallAudioV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_VIDEO:
-        _calls.handleCallVideoV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
-        _calls.onKeyframeRequested?.call();
-        break;
-      // §10.6 / V1.12 — handled here, not in CallService: the state is a
-      // protocol fact about the peer, and CallService (V2.1) is not touched
-      // during wave 1 of the audio/video rebuild.
-      case proto.MessageTypeV3.MTV3_CALL_MEDIA_STATE:
-        handleCallMediaStateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO:
-        _calls.handleCallGroupAudioV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO:
-        _calls.handleCallGroupVideoV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_LEAVE:
-        _calls.handleCallGroupLeaveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE:
-        _calls.handleCallGroupKeyRotateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY:
-        _calls.groupCallManager.handleGroupCallSenderKeyV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_RTT_PING:
-        _calls.handleCallRttPingV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_RTT_PONG:
-        _calls.handleCallRttPongV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_TREE_UPDATE:
-        _calls.handleCallTreeUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Wave 2B.3: PEER_LIST_*, DHT_*, ROUTE_UPDATE, REACHABILITY_*, HOLE_PUNCH_*
-      // are §2.3.5 InfrastructureFrames handled in cleona_node.dart's
-      // `_dispatchInfrastructureFrameLocal`. They never arrive as
-      // ApplicationFrames on the wire — the V3 hard-cut routes them as
-      // InfrastructureFrames — so cases here would be unreachable.
-      //
-      // FRAGMENT_* and PEER_STORE_* carry encrypted user-content and are
-      // handled by service-layer Infra-hooks in service_daemon.dart
-      // (handleIncomingFragmentStoreInfra etc.). They are not dispatched
-      // through this ApplicationFrame switch either.
-
-      // Chat-Config — Cluster C4
-      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_UPDATE:
-        _handleChatConfigUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CHAT_CONFIG_RESPONSE:
-        _handleChatConfigResponseV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // (ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_* — see comment
-      //  on Wave 2B.3 above; all dispatched in cleona_node.dart.)
-
-      // Identity-Resolution (§2.2.4) — Cluster C4
-      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_PUBLISH:
-        _handleIdentityAuthPublishV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RETRIEVE:
-        _handleIdentityAuthRetrieveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE:
-        _handleIdentityAuthResponseV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_PUBLISH:
-        _handleIdentityLivePublishV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RETRIEVE:
-        _handleIdentityLiveRetrieveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
-        _handleIdentityLiveResponseV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Multi-Device — Cluster C4
-      case proto.MessageTypeV3.MTV3_TWIN_SYNC:
-        _handleTwinSyncV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_REQUEST:
-        _handleDevicePairRequestV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_DEVICE_PAIR_APPROVE:
-        _handleDevicePairApproveV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_DEVICE_REVOCATION:
-        _handleDeviceRevocationV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Calendar — Cluster C4
-      case proto.MessageTypeV3.MTV3_CALENDAR_INVITE:
-        _calendarProto.handleCalendarInviteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_RSVP:
-        _calendarProto.handleCalendarRsvpV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_UPDATE:
-        _calendarProto.handleCalendarUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALENDAR_DELETE:
-        _calendarProto.handleCalendarDeleteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST:
-        _calendarProto.handleFreeBusyRequestV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE:
-        _calendarProto.handleFreeBusyResponseV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // Polls — Cluster C4
-      case proto.MessageTypeV3.MTV3_POLL_CREATE:
-        _polls.handlePollCreateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_POLL_VOTE:
-        _polls.handlePollVoteV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS:
-        _polls.handlePollVoteAnonymousV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_POLL_UPDATE:
-        _polls.handlePollUpdateV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_POLL_SNAPSHOT:
-        _polls.handlePollSnapshotV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_POLL_REVOKE:
-        _polls.handlePollRevokeV3(frame, senderDeviceId, snapshot);
-        break;
-
-      // In-Call Collaboration (§25, geplant) — Cluster C3 (delegated to CallService)
-      case proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE:
-        _calls.handleWhiteboardStrokeV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE:
-        _calls.handleWhiteboardPageV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_FILE_EXCHANGE:
-        _calls.handleFileExchangeV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CLIPBOARD_EXCHANGE:
-        _calls.handleClipboardExchangeV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME:
-        _calls.handleScreenShareFrameV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_CALL_CHAT:
-        _calls.handleCallChatV3(frame, senderDeviceId, snapshot);
-        break;
-      case proto.MessageTypeV3.MTV3_REMOTE_CONTROL_INPUT:
-        _calls.handleRemoteControlInputV3(frame, senderDeviceId, snapshot);
-        break;
-
-      default:
-        _log.warn('handleApplicationFrame: unhandled type ${frame.messageType}');
-    }
-
-    if (_isUserMessage(frame.messageType)) {
-      node.statsCollector.addMessageReceived();
-    }
-
-    // Auto-DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light): for ack-worthy
-    // ApplicationFrame types, emit a receipt back to the sender's UserID
-    // with the inner messageId. The sender's `_handleDeliveryReceiptV3`
-    // upgrades the matching outgoing UiMessage from `sent` to `delivered`.
-    // Skipped when:
-    //   - messageId empty (sender hasn't been migrated to set inner.messageId),
-    //   - senderUserId empty,
-    //   - sender is ourselves (loopback / self-send won't have a contact).
-    if (!_suppressReceiptForCurrentFrame &&
-        AckTracker.isAckWorthyV3(frame.messageType) &&
-        frame.messageId.isNotEmpty &&
-        frame.senderUserId.isNotEmpty) {
-      final senderUserId = Uint8List.fromList(frame.senderUserId);
-      if (!constantTimeEquals(senderUserId, identity.userId)) {
-        _sendDeliveryReceiptV3(
-          recipientUserId: senderUserId,
-          messageId: Uint8List.fromList(frame.messageId),
-          senderDeviceId: senderDeviceId,
-          groupId: frame.groupId,
-        );
-      }
-    }
-  }
-
-  /// Befund 1 (§8.1): mark an inner messageId as permanently receipt-suppressed.
-  /// Handlers that drop a frame silently call this in addition to setting
-  /// `_suppressReceiptForCurrentFrame`; the flag covers the current delivery,
-  /// the set covers every later duplicate of the same messageId.
-  void _markReceiptSuppressed(List<int> messageId) {
-    if (messageId.isEmpty) return;
-    final hex = messageId.hex;
-    _suppressedReceiptMsgIds.add(hex);
-    while (_suppressedReceiptMsgIds.length > _suppressedReceiptMsgIdsCap) {
-      _suppressedReceiptMsgIds.remove(_suppressedReceiptMsgIds.first);
-    }
-  }
-
-  /// Emit a V3 DELIVERY_RECEIPT (Architecture §5.8 RUDP-Light) for a
-  /// successfully received ApplicationFrame. Fire-and-forget — receipt
-  /// loss is tolerable (sender's AckTracker times out and triggers its
-  /// own retry / route-down logic).
-  ///
-  /// [senderDeviceId] is the concrete device that sent the frame being
-  /// acknowledged (from `handleApplicationFrame`'s outer packet). On a
-  /// multi-device account, `sendToUser`'s user-level fan-out may otherwise
-  /// pick a *different*, stale cached device of the same user — the receipt
-  /// would then never reach the device whose AckTracker is actually waiting.
-  /// Targeting the exact device closes that gap without any extra traffic
-  /// (still exactly one receipt).
-  /// §14.7.4 fan-out receipt attribution: credit one member's leg of a group
-  /// message and re-evaluate the aggregate status.
-  ///
-  /// A group message reaches a visible `delivered` only when EVERY leg is
-  /// confirmed AND every member discloses. A member who withholds keeps the
-  /// message at `sent` — counting their leg would leak exactly what they
-  /// chose to withhold, which is why `withheldBy` blocks the aggregate rather
-  /// than merely being skipped.
-  void _applyFanoutReceipt(String memberUserHex, String legIdHex,
-      {required bool withheld}) {
-    for (final conv in conversations.values) {
-      for (final msg in conv.messages) {
-        if (!msg.isOutgoing) continue;
-        if (msg.fanoutLegs[memberUserHex] != legIdHex) continue;
-        msg.deliveredBy.add(memberUserHex);
-        if (withheld) {
-          msg.withheldBy.add(memberUserHex);
-        } else {
-          msg.withheldBy.remove(memberUserHex);
-        }
-        if (msg.isFullyDelivered &&
-            msg.status.canTransitionTo(MessageStatus.delivered)) {
-          msg.status = MessageStatus.delivered;
-        }
-        _saveConversations();
-        onStateChanged?.call();
-        return;
-      }
-    }
-  }
-
-  /// §14.7.4: does this node withhold its delivery status from [senderUserId]?
-  ///
-  /// A group message is governed by the group's own setting; everything else
-  /// by the contact's. Channels are deliberately absent: `CHANNEL_POST` is not
-  /// ack-worthy, so no receipt is ever emitted for one and there is nothing to
-  /// withhold. Unknown group / unknown contact both fall back to `false`
-  /// (disclose) — the behaviour that predates the flag.
-  bool _withholdsDeliveryStatusTo(Uint8List senderUserId, List<int> groupId) {
-    if (groupId.isNotEmpty) {
-      final group = _groups[bytesToHex(Uint8List.fromList(groupId))];
-      if (group != null) return group.withholdDeliveryStatus;
-    }
-    return _contacts[bytesToHex(senderUserId)]?.withholdDeliveryStatus ?? false;
-  }
-
-  void _sendDeliveryReceiptV3({
-    required Uint8List recipientUserId,
-    required Uint8List messageId,
-    Uint8List? senderDeviceId,
-    List<int> groupId = const <int>[],
-  }) {
-    final receipt = proto.DeliveryReceipt()
-      ..messageId = messageId
-      ..deliveredAt = Int64(DateTime.now().millisecondsSinceEpoch)
-      // §14.7.4: the receipt is emitted unconditionally — it is a transport
-      // primitive of RUDP Light (its absence tears the route down). Only the
-      // sender's *display* is governed, via this bit.
-      ..withholdDeliveryStatus =
-          _withholdsDeliveryStatusTo(recipientUserId, groupId);
-    sendToUser(
-      recipientUserId: recipientUserId,
-      messageType: proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
-      payload: receipt.writeToBuffer(),
-      targetDeviceId:
-          (senderDeviceId != null && senderDeviceId.isNotEmpty)
-              ? senderDeviceId
-              : null,
-    );
-  }
-
-  // ──────────────────────────── V3 Handler Stubs ────────────────────────────
-  // Planned/deferred message types with empty handlers (silent no-op).
-  // Categories: §10.5 (in-call collaboration), moderation Phase 2,
-  // infra-dispatched types (switch exhaustiveness only), dead proto types.
-
-  // C1 — Layer-Replies (V3 migration of _handleDeliveryReceipt /
-  // _handleReadReceipt / _handleEphemeral-typing). The V3 frame has no
-  // groupId field — group fan-out for these ephemeral types lands with
-  // C4-Groups; here the conversation lookup is DM-style on
-  // bytesToHex(senderUserId), with the TypingIndicator carrying a
-  // conversationId field for forward-compat.
-  //
-  // The V3-Neuerung: senderDeviceId is now available for per-device ACK
-  // bookkeeping. The C1 cluster does not yet track per-device ACKs
-  // (AckTracker is keyed by recipient nodeId / route, not by device); the
-  // parameter is accepted and logged for traceability so future Welle-3
-  // wiring is a one-line edit.
-
-  /// V3 DELIVERY_RECEIPT: sender side marks the outgoing message as
-  /// `delivered`. Conversation lookup is on senderUserId-hex (DM); group
-  /// receipts are deferred to C4-Groups.
-  void _handleDeliveryReceiptV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot,
-      {bool wasDirect = false}) {
-    try {
-      final receipt = proto.DeliveryReceipt.fromBuffer(frame.payload);
-      if (receipt.messageId.isEmpty) return;
-      final msgIdHex = receipt.messageId.hex;
-      final conversationId =
-          frame.senderUserId.hex;
-
-      // Bridge to AckTracker (RUDP-Light §2.4.5): consume the pending entry
-      // registered by `sendToUser` so the route-failure / route-down logic
-      // (3× consecutive timeout → markRouteDown + Poison Reverse) and the
-      // address-success bookkeeping can fire. Befund 14: `wasDirect` is
-      // derived at packet level (hopCount==0 + real UDP source address) —
-      // the old source-address-only heuristic wrongly classified single-hop
-      // relayed receipts as direct. Relayed receipts now run the
-      // onRelayRouteConfirmed path instead of confirmRoute.
-      // §3.1 B-1: pass senderDeviceId (deviceId) so the ACK→DV bridge
-      // operates on routing-layer IDs, not identity-layer IDs.
-      node.ackTracker.handleAck(
-          msgIdHex, bytesToHex(senderDeviceId), wasDirect: wasDirect);
-
-      // A5: DELIVERY_RECEIPT proves end-to-end contact liveness
-      final senderUserHex = frame.senderUserId.hex;
-      final senderContact = _contacts[senderUserHex];
-      if (senderContact != null) {
-        senderContact.lastAckedAt = DateTime.now();
-        _staleWarningWrittenFor.remove(senderUserHex);
-        if (senderContact.autoRepairAttempted) {
-          senderContact.autoRepairAttempted = false;
-        }
-        _saveContacts();
-      }
-
-      // §5.5b: cancel pending FIRST_CR_STORE timer for First-CRs
-      _firstCrAckGates.remove(msgIdHex)?.cancel();
-
-      // §5.8 Crash-safety: remove outbox entry for delivered message.
-      if (_outbox.containsKey(msgIdHex)) {
-        _outbox.remove(msgIdHex);
-        _saveOutbox();
-      }
-
-      // §14.7.4: the receipt above was consumed by the transport layer
-      // unconditionally — route health and outbox cleanup must never depend
-      // on the receiver's display preference. Only the UI upgrade below is
-      // governed by it.
-      final withheld = receipt.withholdDeliveryStatus;
-
-      // 1:1 path — the sender reused the UiMessage id as the wire messageId.
-      final conv = conversations[conversationId];
-      if (conv != null) {
-        for (final msg in conv.messages) {
-          if (msg.id == msgIdHex && msg.isOutgoing) {
-            if (!withheld && msg.status.canTransitionTo(MessageStatus.delivered)) {
-              msg.status = MessageStatus.delivered;
-              _saveConversations();
-              onStateChanged?.call();
-            }
-            return;
-          }
-        }
-      }
-
-      // Fan-out path (groups) — the wire messageId is a per-member leg id, so
-      // the lookup is by (recipient, leg) instead of by UiMessage id. This is
-      // what "group receipts are deferred to C4-Groups" left open: without it
-      // a group message could never leave `sent`.
-      _applyFanoutReceipt(senderUserHex, msgIdHex, withheld: withheld);
-    } catch (e) {
-      _logHandlerError('handleDeliveryReceiptV3', e, frame, senderDeviceId: senderDeviceId);
-    }
-  }
-
   /// V3 READ_RECEIPT: mark outgoing as `read` and stamp readAt for expiry.
   /// Conversation lookup is DM-style (senderUserId-hex). Backward-compat
   /// with raw-message-ID payloads is dropped in V3 — V3 senders always
   /// emit a structured ReadReceipt protobuf.
-  void _handleReadReceiptV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleReadReceiptV3(HarvestEvent event) {
     try {
-      final receipt = proto.ReadReceipt.fromBuffer(frame.payload);
+      final receipt = proto.ReadReceipt.fromBuffer(event.payload);
       if (receipt.messageId.isEmpty) return;
       final msgIdHex = receipt.messageId.hex;
       final readAt = receipt.readAt > 0
           ? DateTime.fromMillisecondsSinceEpoch(receipt.readAt.toInt())
           : DateTime.now();
       final conversationId =
-          frame.senderUserId.hex;
+          event.senderUserId.hex;
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       for (final msg in conv.messages) {
-        if (msg.id == msgIdHex && msg.isOutgoing &&
-            msg.status.canTransitionTo(MessageStatus.read)) {
-          msg.status = MessageStatus.read;
+        // S390: the read marker colours the two ticks and does not touch
+        // the delivery state. As `MessageStatus.read` it overwrote
+        // `delivered` — and because it was terminal, the proof of §9.2
+        // got lost in the process.
+        if (msg.id == msgIdHex && msg.isOutgoing && !msg.readByRecipient) {
+          msg.readByRecipient = true;
+          persistMessage(conversationId, msg);
           msg.readAt ??= readAt;
           _saveConversations();
           onReadReceiptReceived?.call(conversationId, msgIdHex);
@@ -15792,7 +12716,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       onStateChanged?.call();
     } catch (e) {
-      _logHandlerError('handleReadReceiptV3', e, frame, senderDeviceId: senderDeviceId);
+      _logHandlerErrorEvent('handleReadReceiptV3', e, event);
     }
   }
 
@@ -15800,16 +12724,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// (`typingIndicators`) gates the indicator on the receiver side.
   /// V3-Neuerung: empty/unparseable payload no longer treated as
   /// is_typing=true — V3 senders always send a structured TypingIndicator.
-  void _handleTypingIndicatorV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleTypingIndicatorV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
+      final senderHex = event.senderUserId.hex;
       // Parse first so that the convId-from-payload (group support) lands
       // even when the per-DM conversation hasn't materialised yet.
       bool isTyping = true;
       String convIdFromPayload = '';
-      if (frame.payload.isNotEmpty) {
-        final indicator = proto.TypingIndicator.fromBuffer(frame.payload);
+      if (event.payload.isNotEmpty) {
+        final indicator = proto.TypingIndicator.fromBuffer(event.payload);
         isTyping = indicator.isTyping;
         convIdFromPayload = indicator.conversationId;
       }
@@ -15826,28 +12749,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       onStateChanged?.call();
     } catch (e) {
-      _logHandlerError('handleTypingIndicatorV3', e, frame, senderDeviceId: senderDeviceId);
+      _logHandlerErrorEvent('handleTypingIndicatorV3', e, event);
     }
   }
 
   // C2 — Messaging
   //
-  // Pattern (parallel zur C1-Migration in _handleDeliveryReceiptV3 etc.):
-  //   - Inner-KEM-Decrypt + User-Sig-Verify hat das Frame VOR Aufruf bereits
-  //     bestanden (cleona_node.dart). Hier nur frame.payload parsen +
-  //     UI-State updaten + Notifications.
-  //   - Multi-Identity / Group-Fanout: ApplicationFrameV3.group_id (Field 17)
-  //     trägt die Group/Channel-Conversation-ID für Pairwise-Fan-out (jeder
-  //     Member kriegt seinen eigenen sendToUser-Call mit identischem
-  //     group_id). Receiver liest frame.groupId und dispatcht in den passenden
-  //     Group/Channel-Tab; leer = DM auf Sender-Hex.
+  // Pattern (parallel to the C1 migration in _handleDeliveryReceiptV3 etc.):
+  //   - Inner KEM decrypt + user sig verify have already been passed by the
+  //     frame BEFORE the call (cleona_node.dart). Here only parse
+  //     frame.payload + update UI state + notifications.
+  //   - Multi-identity / group fan-out: ApplicationFrameV3.group_id (field 17)
+  //     carries the group/channel conversation ID for pairwise fan-out (every
+  //     member gets its own sendToUser call with identical group_id).
+  //     Receiver reads frame.groupId and dispatches into the matching
+  //     group/channel tab; empty = DM on sender hex.
 
   /// GM-2 (§9.1.4): centralized group-post gatekeeper. Returns null if the
   /// post should be dropped (non-member). Returns true if a split-view
   /// anomaly was detected (same/lower epoch, different hash).
-  bool? _checkGroupPostMembership(proto.ApplicationFrameV3 frame, String senderHex) {
-    if (frame.groupId.isEmpty) return false;
-    final groupIdHex = frame.groupId.hex;
+  bool? _checkGroupPostMembership(HarvestEvent event, String senderHex) {
+    final groupId = event.groupId;
+    if (groupId == null) return false;
+    final groupIdHex = groupId.hex;
     final group = _groups[groupIdHex];
     if (group == null) return false;
 
@@ -15857,11 +12781,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return null;
     }
 
-    final wireEpoch = frame.groupMembershipEpoch.toInt();
-    if (wireEpoch <= 0) return false; // legacy sender, no tag
-
-    final wireHash = frame.groupMembershipHash;
-    if (wireHash.isEmpty) return false;
+    // `rosterVersion == null` covers BOTH previous exits: the factory
+    // sets null exactly when the epoch is <= 0 (legacy sender without tag)
+    // OR the hash is empty. Both led to `return false` here.
+    final roster = event.rosterVersion;
+    if (roster == null) return false;
+    final wireEpoch = roster.epoch;
+    final wireHash = roster.hash;
 
     final localEpoch = group.membershipEpoch;
     final localHash = _computeMembershipHash(localEpoch, groupIdHex, group.members);
@@ -15894,12 +12820,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final req = proto.GroupMembershipResyncRequest()
       ..groupId = hexToBytes(group.groupIdHex)
       ..localEpoch = Int64(group.membershipEpoch);
-    sendToUser(
+    _detachedSend('MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST', sendToUser(
       recipientUserId: hexToBytes(ownerHex),
       messageType: proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
       payload: req.writeToBuffer(),
       groupId: hexToBytes(group.groupIdHex),
-    );
+    ));
     _log.info('GM-2: RESYNC_REQUEST sent to owner ${ownerHex.substring(0, 8)} '
         'for group "${group.name}" (local epoch=${group.membershipEpoch})');
   }
@@ -15910,22 +12836,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final req = proto.GroupMembershipResyncRequest()
       ..groupId = hexToBytes(channel.channelIdHex)
       ..localEpoch = Int64(channel.membershipEpoch);
-    sendToUser(
+    _detachedSend('MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST', sendToUser(
       recipientUserId: hexToBytes(ownerHex),
       messageType: proto.MessageTypeV3.MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST,
       payload: req.writeToBuffer(),
       groupId: hexToBytes(channel.channelIdHex),
-    );
+    ));
     _log.info('GM-4: RESYNC_REQUEST sent to channel owner ${ownerHex.substring(0, 8)} '
         'for "${channel.name}" (local epoch=${channel.membershipEpoch})');
   }
 
-  void _handleGroupMembershipResyncRequest(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleGroupMembershipResyncRequest(HarvestEvent event) {
     try {
-      final req = proto.GroupMembershipResyncRequest.fromBuffer(frame.payload);
+      final req = proto.GroupMembershipResyncRequest.fromBuffer(event.payload);
       final entityIdHex = req.groupId.hex;
-      final senderHex = frame.senderUserId.hex;
+      final senderHex = event.senderUserId.hex;
 
       // GM-4: dual-mode — handle both groups and channels
       final group = _groups[entityIdHex];
@@ -15978,20 +12903,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// replyToSnippet) live on the proto sub-message. Link-Preview travels
   /// in `tm.linkPreview` (sender-side only — the receiver renders the card
   /// from the embedded data and MUST NOT issue a network request).
-  void _handleTextV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleTextV3(HarvestEvent event) {
     try {
-      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
-      final senderHex = frame.senderUserId.hex;
-      final msgId = frame.messageId.hex;
-      // V3: ApplicationFrameV3.group_id (Field 17) trägt die Group/Channel-
-      // Conversation-ID für Pairwise-Fan-out. Leer = DM auf Sender-Hex.
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final tm = proto.TextMessageV3.fromBuffer(event.payload);
+      final senderHex = event.senderUserId.hex;
+      final msgId = event.messageId.hex;
+      // V3: ApplicationFrameV3.group_id (field 17) carries the group/channel
+      // conversation ID for pairwise fan-out. Empty = DM on sender hex.
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
 
       // GM-2 (§9.1.4): centralized membership gatekeeper
-      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      final mismatchResult = _checkGroupPostMembership(event, senderHex);
       if (mismatchResult == null) return; // non-member, dropped
       final isMembershipMismatch = mismatchResult;
 
@@ -16027,7 +12951,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         conversationId: conversationId,
         senderNodeIdHex: senderHex,
         text: tm.text,
-        timestamp: DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+        timestamp: (event.claimedSentAt ?? DateTime.fromMillisecondsSinceEpoch(0)),
         type: UiMessageType.text,
         status: MessageStatus.delivered,
         isOutgoing: false,
@@ -16070,38 +12994,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             conversationId);
         _lastNotifiedAt[conversationId] = DateTime.now();
       }
+      // ── MESSAGE TEXT BELONGS IN NO LOG LINE (S363) ──────────
+      //
+      // Here stood the first 50 characters of EVERY received text message.
+      // The log file lies unencrypted (`clogger.dart`, `writeAsString`) and
+      // is the first thing an error report passes on — the bug log channel
+      // (§9.5) and the manual log report send it to third parties. The
+      // storage encryption from S362 thus missed exactly the information
+      // it is meant to protect.
+      //
+      // NOT downgraded to `debug`, but CONTENT REMOVED: `debug` is the
+      // normal case on the beta channel with seven days of retention
+      // (`clogger.dart`), and this is message text, not a name. The owner
+      // decision of 02.09.2026 allows "only on debug" for DISPLAY NAMES,
+      // not for content.
+      //
+      // The LENGTH stays: it answers "did something arrive and how big was
+      // it" without revealing anything — the same form to which S362
+      // switched the three places found at the time.
       _log.info(
-          'TEXT-V3 from ${senderHex.substring(0, 8)} (device=${_hexShort(senderDeviceId)}): '
-          '${tm.text.length > 50 ? tm.text.substring(0, 50) : tm.text}');
+          'TEXT-V3 from ${senderHex.substring(0, 8)} (device=${_hexShort(event.senderDeviceId)}): '
+          '${tm.text.length} characters');
     } catch (e) {
-      _logHandlerError('handleTextV3', e, frame);
+      _logHandlerErrorEvent('handleTextV3', e, event);
     }
   }
 
-  /// V3 MEDIA_INLINE: ≤256KB inline payload (raw bytes oder VoicePayload-
-  /// proto je nach MIME). frame.contentMetadata trägt MIME, filename, size.
-  void _handleMediaInlineV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  /// V3 MEDIA_INLINE: ≤256KB inline payload (raw bytes or VoicePayload
+  /// proto depending on MIME). frame.contentMetadata carries MIME, filename, size.
+  void _handleMediaInlineV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      final senderHex = event.senderUserId.hex;
+      final mismatchResult = _checkGroupPostMembership(event, senderHex);
       if (mismatchResult == null) return;
       final isMembershipMismatch = mismatchResult;
-      final msgId = frame.messageId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final msgId = event.messageId.hex;
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
-      final metadata = frame.contentMetadata;
+      final metadata = event.contentMetadata ?? proto.ContentMetadata();
 
       // Voice: VoicePayload-Wrapper.
-      Uint8List actualFileData = Uint8List.fromList(frame.payload);
+      Uint8List actualFileData = Uint8List.fromList(event.payload);
       String? transcriptText;
       String? transcriptLanguage;
       double? transcriptConfidence;
       final isVoice = metadata.mimeType.startsWith('audio/');
       if (isVoice) {
         try {
-          final voicePayload = proto.VoicePayload.fromBuffer(frame.payload);
+          final voicePayload = proto.VoicePayload.fromBuffer(event.payload);
           if (voicePayload.audioData.isNotEmpty) {
             actualFileData = Uint8List.fromList(voicePayload.audioData);
             if (voicePayload.transcriptText.isNotEmpty) {
@@ -16111,9 +13052,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             }
           }
         } catch (_) {/* raw audio bytes */}
-        // Fallback: Transkript aus der Metadata. Aktuelle Sender fuellen beide
-        // Traeger; ein Sender der nur die Metadata fuellt, wird hier ebenfalls
-        // korrekt verstanden.
+        // Fallback: transcript from the metadata. Current senders fill both
+        // carriers; a sender that only fills the metadata is also
+        // understood correctly here.
         if (transcriptText == null && metadata.transcriptText.isNotEmpty) {
           transcriptText = metadata.transcriptText;
           transcriptLanguage = metadata.transcriptLanguage;
@@ -16126,7 +13067,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final filename =
           metadata.filename.isNotEmpty ? metadata.filename : 'file_$msgId';
       final savePath = _uniqueMediaPath(mediaDir.path, filename);
-      File(savePath).writeAsBytesSync(actualFileData);
+      // S362: encrypted. Up to here this line wrote the attachment in
+      // plaintext next to the encrypted message.
+      MediaStore.instance.writeBytes(savePath, actualFileData);
 
       final thumbnailB64 =
           metadata.thumbnail.isNotEmpty ? base64Encode(metadata.thumbnail) : null;
@@ -16142,7 +13085,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         senderNodeIdHex: senderHex,
         text: filename,
         timestamp:
-            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+            (event.claimedSentAt ?? DateTime.fromMillisecondsSinceEpoch(0)),
         type: _msgTypeFromMime(metadata.mimeType),
         status: MessageStatus.delivered,
         isOutgoing: false,
@@ -16168,18 +13111,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final senderName =
             _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
         final label = metadata.mimeType.startsWith('image/')
-            ? '📷 Bild'
+            ? '📷 Image'
             : metadata.mimeType.startsWith('video/')
                 ? '🎬 Video'
                 : metadata.mimeType.startsWith('audio/')
                     ? '🎵 Audio'
-                    : '📎 Datei';
+                    : '📎 File';
         _postAndroidNotification(senderName, label, conversationId);
         _lastNotifiedAt[conversationId] = DateTime.now();
       }
       _log.info(
           '[E2E media-inline-v3-recv] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} msgId=${msgId.substring(0, 8)} '
+          'device=${_hexShort(event.senderDeviceId)} msgId=${msgId.substring(0, 8)} '
           'filename=$filename size=${actualFileData.length} mime=${metadata.mimeType}');
 
       // Local transcription fallback for voice without source-side transcript.
@@ -16190,78 +13133,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         );
       }
     } catch (e) {
-      _logHandlerError('handleMediaInlineV3', e, frame, messageType: 'failed');
-    }
-  }
-
-  /// V3 MEDIA_ANNOUNCE: Stage-1 announcement of >256KB media. Receiver
-  /// either auto-accepts (size+mime policy) or shows a placeholder for
-  /// manual click. payload is empty (metadata lives in frame.contentMetadata).
-  void _handleMediaAnnounceV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final senderHex = frame.senderUserId.hex;
-      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
-      if (mismatchResult == null) return;
-      final isMembershipMismatch = mismatchResult;
-      final msgId = frame.messageId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
-          : senderHex;
-      final metadata = frame.contentMetadata;
-
-      final thumbnailB64 = metadata.thumbnail.isNotEmpty
-          ? base64Encode(metadata.thumbnail)
-          : null;
-
-      final msg = UiMessage(
-        id: msgId,
-        conversationId: conversationId,
-        senderNodeIdHex: senderHex,
-        text: metadata.filename,
-        timestamp:
-            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
-        type: _msgTypeFromMime(metadata.mimeType),
-        status: MessageStatus.delivered,
-        isOutgoing: false,
-        mimeType: metadata.mimeType,
-        fileSize: metadata.fileSize.toInt(),
-        filename: metadata.filename,
-        thumbnailBase64: thumbnailB64,
-        mediaState: MediaDownloadState.announced,
-        membershipMismatch: isMembershipMismatch,
-        // Source-Side-Transkript reist in der Metadata mit — sichtbar bevor
-        // das Audio ueberhaupt heruntergeladen ist.
-        transcriptText:
-            metadata.transcriptText.isNotEmpty ? metadata.transcriptText : null,
-        transcriptLanguage: metadata.transcriptText.isNotEmpty
-            ? metadata.transcriptLanguage
-            : null,
-        transcriptConfidence: metadata.transcriptText.isNotEmpty
-            ? metadata.transcriptConfidence.toDouble()
-            : null,
-      );
-
-      final isGroup = _groups.containsKey(conversationId);
-      _addMessageToConversation(conversationId, msg, isGroup: isGroup);
-      _log.info(
-          '[E2E media-announce-v3-recv] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} msgId=${msgId.substring(0, 8)} '
-          'filename=${metadata.filename} size=${metadata.fileSize} '
-          'mime=${metadata.mimeType}');
-
-      // Auto-accept policy per Architecture §3.4.3. Fires the same V3
-      // MEDIA_REQUEST path the manual UI click uses.
-      final autoOk = _mediaSettings.shouldAutoDownload(
-          metadata.mimeType, metadata.fileSize.toInt());
-      if (autoOk) {
-        _log.info(
-            'media-announce-v3 auto-accept: triggering MEDIA_REQUEST for '
-            'msgId=${msgId.substring(0, 8)}');
-        unawaited(acceptMediaDownload(conversationId, msgId));
-      }
-    } catch (e) {
-      _logHandlerError('handleMediaAnnounceV3', e, frame, messageType: 'failed');
+      _logHandlerErrorEvent('handleMediaInlineV3', e, event, messageType: 'failed');
     }
   }
 
@@ -16270,17 +13142,35 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// the requester wants. Sender looks up the pending file and emits a
   /// MediaChunkV3 stream (≤32KB per chunk) + a final MediaCompleteV3 with
   /// SHA-256 of the assembled bytes.
-  Future<void> _handleMediaRequestV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) async {
+  Future<void> _handleMediaRequestV3(HarvestEvent event) async {
     try {
-      final senderHex = frame.senderUserId.hex;
+      // ── THE REFILL REQUEST OF THE BULK LANE (§9.3 "refill", S363) ───────
+      //
+      // Since the CUT MEDIA_REQUEST carries TWO roles: the V3 request
+      // (payload = 16 B message identifier) and the V4.1 refill request
+      // (payload = 14 B, marker byte `0xB3`). `v41_routing.dart` has said
+      // so since S349 ("§9.3 'request' + 'refill'"), only there was no
+      // receive branch for the second role.
+      //
+      // The distinction is not guessed but enforced:
+      // `BulkRefillRequest.decode` requires exactly 14 B, the marker byte
+      // and the format version. A 16 B V3 payload already fails on the
+      // length. The same pattern stands in `_handleMediaCompleteV3` for
+      // the DECODED receipt.
+      final missingRequest =
+          BulkRefillRequest.decode(Uint8List.fromList(event.payload));
+      if (missingRequest != null) {
+        _handleBulkRefill(event, missingRequest);
+        return;
+      }
+      final senderHex = event.senderUserId.hex;
       // V3-payload: opaque bytes = original message_id we should ship.
-      final originalMsgIdBytes = Uint8List.fromList(frame.payload);
+      final originalMsgIdBytes = Uint8List.fromList(event.payload);
       final originalMsgId = bytesToHex(originalMsgIdBytes);
       final filePath = _pendingMediaSends[originalMsgId];
       _log.info(
           '[E2E media-request-v3-recv] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} '
+          'device=${_hexShort(event.senderDeviceId)} '
           'wantsMsgId=${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId} '
           'pending=${filePath != null}');
       if (filePath == null) {
@@ -16310,7 +13200,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // shipped via sendToUser → per-chunk KEM-encrypted (Spec §5.7 Stage 2).
       const chunkSize = 32 * 1024;
       final totalChunks = (fileBytes.length + chunkSize - 1) ~/ chunkSize;
-      final recipientUserId = Uint8List.fromList(frame.senderUserId);
+      final recipientUserId = Uint8List.fromList(event.senderUserId);
 
       _log.info(
           '[E2E media-stage2-send-v3] msgId=${originalMsgId.substring(0, 8)} '
@@ -16361,151 +13251,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     } catch (e, st) {
       _log.warn('handleMediaRequestV3: failed: $e\n$st '
-          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
-    }
-  }
-
-  /// V3 MEDIA_CHUNK: receiver buffers the chunk in `_mediaChunkBuffers`
-  /// keyed by mediaIdHex. Reassembly + file-write happens in the matching
-  /// MEDIA_COMPLETE handler.
-  void _handleMediaChunkV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final chunk = proto.MediaChunkV3.fromBuffer(frame.payload);
-      final mediaIdHex = chunk.mediaId.hex;
-      final senderHex = frame.senderUserId.hex;
-
-      final buf = _mediaChunkBuffers.putIfAbsent(
-          mediaIdHex, () => _MediaChunkBuffer(chunk.totalChunks));
-      if (buf.totalChunks != chunk.totalChunks) {
-        _log.warn(
-            'media-chunk-v3: totalChunks mismatch for $mediaIdHex '
-            '(buf=${buf.totalChunks} chunk=${chunk.totalChunks}) — '
-            'dropping chunk');
-        return;
-      }
-      if (chunk.chunkIndex >= buf.totalChunks) {
-        _log.warn(
-            'media-chunk-v3: out-of-bounds index ${chunk.chunkIndex}/${buf.totalChunks} '
-            'for $mediaIdHex — drop');
-        return;
-      }
-      buf.chunks[chunk.chunkIndex] = Uint8List.fromList(chunk.data);
-      _log.debug(
-          '[E2E media-chunk-v3-recv] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} mediaId=${mediaIdHex.substring(0, 8)} '
-          'idx=${chunk.chunkIndex}/${buf.totalChunks} bytes=${chunk.data.length}');
-    } catch (e) {
-      _logHandlerError('handleMediaChunkV3', e, frame);
-    }
-  }
-
-  /// V3 MEDIA_COMPLETE: assemble buffered chunks, hash-check, write file,
-  /// bump the matching UiMessage to MediaDownloadState.completed.
-  void _handleMediaCompleteV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final complete = proto.MediaCompleteV3.fromBuffer(frame.payload);
-      final mediaIdHex = complete.mediaId.hex;
-      final senderHex = frame.senderUserId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
-          : senderHex;
-
-      final buf = _mediaChunkBuffers.remove(mediaIdHex);
-      if (buf == null) {
-        _log.warn(
-            'media-complete-v3: no chunk-buffer for ${mediaIdHex.substring(0, 8)} — drop');
-        return;
-      }
-      if (!buf.isComplete) {
-        final missing = <int>[];
-        for (var i = 0; i < buf.chunks.length; i++) {
-          if (buf.chunks[i] == null) missing.add(i);
-        }
-        _log.warn(
-            'media-complete-v3: incomplete buffer for ${mediaIdHex.substring(0, 8)} '
-            '— missing=${missing.length}/${buf.totalChunks}');
-        return;
-      }
-      final assembled = buf.assemble();
-      if (complete.totalSize.toInt() != 0 &&
-          complete.totalSize.toInt() != assembled.length) {
-        _log.warn(
-            'media-complete-v3: size mismatch for ${mediaIdHex.substring(0, 8)} '
-            '(expected=${complete.totalSize} got=${assembled.length})');
-        return;
-      }
-      final localHash = SodiumFFI().sha256(assembled);
-      final wantHash = Uint8List.fromList(complete.contentHash);
-      if (wantHash.isNotEmpty && !constantTimeEquals(localHash, wantHash)) {
-        _log.warn(
-            'media-complete-v3: hash mismatch for ${mediaIdHex.substring(0, 8)}'
-            ' — drop reassembled bytes');
-        return;
-      }
-
-      // Locate the announced UiMessage so we can read filename/mime and bump
-      // the mediaState. The MEDIA_ANNOUNCE handler stored the bubble keyed
-      // by msgId (= mediaId) in the same conversation.
-      final conv = conversations[conversationId];
-      UiMessage? msg;
-      if (conv != null) {
-        final idx = conv.messages.indexWhere((m) => m.id == mediaIdHex);
-        if (idx >= 0) msg = conv.messages[idx];
-      }
-      final filename =
-          msg?.filename ?? 'file_$mediaIdHex';
-      final mediaDir = Directory('$profileDir/media');
-      if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
-      final savePath = _uniqueMediaPath(mediaDir.path, filename);
-      File(savePath).writeAsBytesSync(assembled);
-
-      if (msg != null) {
-        msg.filePath = savePath;
-        msg.fileSize = assembled.length;
-        msg.mediaState = MediaDownloadState.completed;
-        if (msg.mimeType?.startsWith('image/') == true &&
-            msg.thumbnailBase64 == null &&
-            assembled.length <= 100 * 1024) {
-          msg.thumbnailBase64 = base64Encode(assembled);
-        }
-        onStateChanged?.call();
-        _saveConversations();
-
-        // Lokaler Transkriptions-Fallback fuer Voice ohne Sender-Transkript —
-        // Gegenstueck zu _handleMediaInlineV3. Greift, wenn der Sender eine
-        // aeltere Version faehrt (Metadata ohne Transkript-Felder) oder auf
-        // Sender-Seite kein Whisper-Modell vorhanden war.
-        if (msg.mimeType?.startsWith('audio/') == true &&
-            (msg.transcriptText == null || msg.transcriptText!.isEmpty)) {
-          _voiceTranscription?.enqueueTranscription(
-            messageId: mediaIdHex,
-            audioFilePath: savePath,
-          );
-        }
-      }
-
-      _log.info(
-          '[E2E media-stage2-recv-done-v3] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} mediaId=${mediaIdHex.substring(0, 8)} '
-          'bytes=${assembled.length} path=$savePath');
-    } catch (e, st) {
-      _log.warn('handleMediaCompleteV3: failed: $e\n$st '
-          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
+          '(sender=${_hexShort(Uint8List.fromList(event.senderUserId))})');
     }
   }
 
   /// V3 MEDIA_REJECT: receiver declined the announce; sender clears pending.
-  void _handleMediaRejectV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleMediaRejectV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      final originalMsgId = frame.payload.hex;
+      final senderHex = event.senderUserId.hex;
+      final originalMsgId = event.payload.hex;
       final removed = _pendingMediaSends.remove(originalMsgId) != null;
       _log.info(
           '[E2E media-reject-v3-recv] from=${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)} '
+          'device=${_hexShort(event.senderDeviceId)} '
           'msgId=${originalMsgId.length >= 8 ? originalMsgId.substring(0, 8) : originalMsgId} '
           'pending-cleared=$removed');
     } catch (e) {
@@ -16514,25 +13272,26 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   /// V3 REACTION: EmojiReaction proto in frame.payload. Add/remove emoji
-  /// on the target message. Conversation-Lookup ist DM-style auf Sender-Hex
-  /// (Group-Fanout siehe Klassen-Header-TODO).
-  void _handleReactionV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  /// on the target message. Conversation lookup is DM-style on sender hex
+  /// (group fan-out see class header TODO).
+  void _handleReactionV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      if (_checkGroupPostMembership(frame, senderHex) == null) return;
-      final reaction = proto.EmojiReaction.fromBuffer(frame.payload);
+      final senderHex = event.senderUserId.hex;
+      if (_checkGroupPostMembership(event, senderHex) == null) return;
+      final reaction = proto.EmojiReaction.fromBuffer(event.payload);
       final targetMsgId =
           reaction.messageId.hex;
       final emoji = reaction.emoji;
       if (emoji.isEmpty) return;
 
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       _log.debug('_handleReactionV3: emoji=$emoji targetMsgId=${targetMsgId.substring(0, 8)} conv.messages.length=${conv.messages.length}');
+      ensureLoaded(conversationId);
       final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
       if (msgIndex < 0) return;
       final msg = conv.messages[msgIndex];
@@ -16546,44 +13305,47 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         msg.reactions.putIfAbsent(emoji, () => {});
         msg.reactions[emoji]!.add(senderHex);
       }
+      // Behind both branches — the same justification as for the own
+      // reaction path: the call used to stand in the INNER `if` and thus
+      // only covered the case in which the emoji set became empty.
+      persistMessage(conversationId, msg);
       onStateChanged?.call();
       _saveConversations();
       _log.debug(
           'REACTION-V3 ${reaction.remove ? "removed" : "added"}: $emoji on '
           '${targetMsgId.substring(0, 8)} by ${senderHex.substring(0, 8)} '
-          'device=${_hexShort(senderDeviceId)}');
+          'device=${_hexShort(event.senderDeviceId)}');
     } catch (e) {
       _log.warn('handleReactionV3: parse fail: $e');
     }
   }
 
-  /// V3 REPLY: bisher gibt es kein eigenes ReplyMessageV3-Sub-Schema. Reply
-  /// reist als TEXT mit reply_to_* in ContentMetadata. Bis Spec §5 ein
-  /// ReplyMessageV3 definiert ist behandeln wir REPLY identisch zu TEXT —
-  /// die reply-Felder werden aus ContentMetadata herausgezogen wenn vorhanden.
-  void _handleReplyV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  /// V3 REPLY: so far there is no dedicated ReplyMessageV3 sub-schema. Reply
+  /// travels as TEXT with reply_to_* in ContentMetadata. Until spec §5
+  /// defines a ReplyMessageV3 we treat REPLY identically to TEXT —
+  /// the reply fields are extracted from ContentMetadata if present.
+  void _handleReplyV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      final mismatchResult = _checkGroupPostMembership(frame, senderHex);
+      final senderHex = event.senderUserId.hex;
+      final mismatchResult = _checkGroupPostMembership(event, senderHex);
       if (mismatchResult == null) return;
       final isMembershipMismatch = mismatchResult;
-      final tm = proto.TextMessageV3.fromBuffer(frame.payload);
-      final msgId = frame.messageId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final tm = proto.TextMessageV3.fromBuffer(event.payload);
+      final msgId = event.messageId.hex;
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
 
       // TODO C4: reply_to_message_id / reply_to_text / reply_to_sender
-      // brauchen ein ReplyMetadataV3-Feld. ContentMetadata hat heute keinen
-      // Reply-Slot — bis die Spec klärt landet REPLY ohne Reply-Banner.
+      // need a ReplyMetadataV3 field. ContentMetadata has no reply slot
+      // today — until the spec clarifies, REPLY lands without a reply banner.
       final msg = UiMessage(
         id: msgId,
         conversationId: conversationId,
         senderNodeIdHex: senderHex,
         text: tm.text,
         timestamp:
-            DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+            (event.claimedSentAt ?? DateTime.fromMillisecondsSinceEpoch(0)),
         type: UiMessageType.text,
         status: MessageStatus.delivered,
         isOutgoing: false,
@@ -16596,7 +13358,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           isGroup: isGroup, isChannel: isChannel);
       _log.info(
           'REPLY-V3 (treated as TEXT — Reply-Schema TODO C4) '
-          'from ${senderHex.substring(0, 8)} device=${_hexShort(senderDeviceId)}');
+          'from ${senderHex.substring(0, 8)} device=${_hexShort(event.senderDeviceId)}');
     } catch (e) {
       _log.warn('handleReplyV3: parse fail: $e');
     }
@@ -16604,19 +13366,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// V3 EDIT: MessageEdit proto in payload + EditMetadata as standard frame
   /// field. Dual-Enforcement (sender == author + edit-window).
-  void _handleEditV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleEditV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      if (_checkGroupPostMembership(frame, senderHex) == null) return;
-      final editMsg = proto.MessageEdit.fromBuffer(frame.payload);
+      final senderHex = event.senderUserId.hex;
+      if (_checkGroupPostMembership(event, senderHex) == null) return;
+      final editMsg = proto.MessageEdit.fromBuffer(event.payload);
       final originalMsgId =
           editMsg.originalMessageId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       final msgIndex =
           conv.messages.indexWhere((m) => m.id == originalMsgId);
       if (msgIndex < 0) return;
@@ -16626,7 +13388,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (original.senderNodeIdHex != senderHex) {
         _log.warn(
             'EDIT-V3 rejected: sender ${senderHex.substring(0, 8)} != author '
-            '(device=${_hexShort(senderDeviceId)})');
+            '(device=${_hexShort(event.senderDeviceId)})');
         return;
       }
 
@@ -16650,6 +13412,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       original.text = editMsg.newText;
       original.editedAt = DateTime.fromMillisecondsSinceEpoch(
           editMsg.editTimestamp.toInt());
+          persistMessage(conversationId, original);
       onStateChanged?.call();
       _saveConversations();
       _log.info(
@@ -16661,19 +13424,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// V3 DELETE: MessageDelete proto in payload. Soft-delete (clear text +
   /// mark isDeleted).
-  void _handleDeleteV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleDeleteV3(HarvestEvent event) {
     try {
-      final senderHex = frame.senderUserId.hex;
-      if (_checkGroupPostMembership(frame, senderHex) == null) return;
-      final deleteMsg = proto.MessageDelete.fromBuffer(frame.payload);
+      final senderHex = event.senderUserId.hex;
+      if (_checkGroupPostMembership(event, senderHex) == null) return;
+      final deleteMsg = proto.MessageDelete.fromBuffer(event.payload);
       final targetMsgId =
           deleteMsg.messageId.hex;
-      final conversationId = frame.groupId.isNotEmpty
-          ? frame.groupId.hex
+      final conversationId = event.groupId != null
+          ? event.groupId!.hex
           : senderHex;
       final conv = conversations[conversationId];
       if (conv == null) return;
+      ensureLoaded(conversationId);
       final msgIndex = conv.messages.indexWhere((m) => m.id == targetMsgId);
       if (msgIndex < 0) return;
       final original = conv.messages[msgIndex];
@@ -16681,11 +13444,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (original.senderNodeIdHex != senderHex) {
         _log.warn(
             'DELETE-V3 rejected: sender ${senderHex.substring(0, 8)} != author '
-            '(device=${_hexShort(senderDeviceId)})');
+            '(device=${_hexShort(event.senderDeviceId)})');
         return;
       }
       original.text = '';
       original.isDeleted = true;
+      persistMessage(conversationId, original);
       onStateChanged?.call();
       _saveConversations();
       _log.info('DELETE-V3 by ${senderHex.substring(0, 8)} on $targetMsgId');
@@ -16697,43 +13461,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// V3 VOICE_MESSAGE: alias for MEDIA_INLINE with audio MIME — share the
   /// same code path. The dedicated message type exists so receivers can
   /// route voice through transcription pipelines without sniffing MIME.
-  void _handleVoiceMessageV3(
-      proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    // Sender muss sicherstellen dass contentMetadata.mimeType audio/* ist.
-    // Falls leer: Default audio/aac (Architecture §5).
-    if (frame.contentMetadata.mimeType.isEmpty) {
-      frame.contentMetadata.mimeType = 'audio/aac';
+  void _handleVoiceMessageV3(HarvestEvent event) {
+    // Sender must ensure that contentMetadata.mimeType is audio/*.
+    // If empty: default audio/aac (Architecture §5).
+    //
+    // The default runs via a COPY, not via the received frame.
+    // Reason (measured, not derived): if one reads an unset protobuf
+    // message field, dart-protobuf returns the READ-ONLY default instance.
+    // The old version wrote directly onto it and threw in exactly the case
+    // the default was meant for:
+    //   UnsupportedError: Attempted to change a read-only message
+    //                     (cleona.ContentMetadata)
+    // No try/catch on the whole way up to the UDP receive loop catches
+    // that (three callers of handleApplicationFrame, plus
+    // cleona_node.dart::CleonaNode.onApplicationFramePayload).
+    final md = event.contentMetadata;
+    if (md == null || md.mimeType.isEmpty) {
+      final patched = (md ?? proto.ContentMetadata()).clone()
+        ..mimeType = 'audio/aac';
+      _handleMediaInlineV3(event.withContentMetadata(patched));
+      return;
     }
-    _handleMediaInlineV3(frame, senderDeviceId, snapshot);
+    _handleMediaInlineV3(event);
   }
-
-
-  // C4 — Recovery / Identity / Profile / CR / Groups / Channels / DHT /
-  //       Fragments / Peer-Store / Chat-Config / Routing / Hole-Punch /
-  //       Identity-Resolution / Multi-Device / Calendar / Polls
-  void _handleRestoreBroadcastV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      // V3.0 Welle 6: RESTORE_BROADCAST migrated to InfrastructureFrame
-      // (§2.3.5 selector + §6.3). An inbound ApplicationFrame with this
-      // messageType is a protocol violation — drop.
-      _log.warn('RESTORE_BROADCAST on ApplicationFrame path is invalid '
-          'since V3.0 Welle 6 (§2.3.5) — dropping. sender='
-          '${bytesToHex(sd).substring(0, 8)}');
-  void _handleRestoreResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    _handleRestoreResponse(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
-      senderDeviceId,
-    );
-  }
-  void _handleIdentityDeletedV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleIdentityDeletedV3(HarvestEvent event) {
     // The inner payload is the IdentityDeletedNotification protobuf,
     // already decrypted + authenticated by the V3 pipeline (outer-sig +
     // inner user-sig + KEM-decap).
-    final senderHex = frame.senderUserId.hex;
+    final senderHex = event.senderUserId.hex;
 
     proto.IdentityDeletedNotification notification;
     try {
-      notification = proto.IdentityDeletedNotification.fromBuffer(frame.payload);
+      notification = proto.IdentityDeletedNotification.fromBuffer(event.payload);
     } catch (e) {
       _log.error('IDENTITY_DELETED parse failed: $e');
       return;
@@ -16748,14 +13507,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final displayName = notification.displayName.isNotEmpty
         ? notification.displayName
         : contact.displayName;
-    _log.info('Identity deleted: "$displayName" (${senderHex.substring(0, 8)})');
+    // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+    _log.debug('Identity deleted: "$displayName" (${senderHex.substring(0, 8)})');
 
     // Add system message to conversation. Routed through
     // _addMessageToConversation so the badge counter and the system Launcher-
     // Badge stay in sync (#U15 — direct conv.messages.add bypassed both).
     if (conversations.containsKey(senderHex)) {
       final systemMsg = UiMessage(
-        id: frame.messageId.hex,
+        id: event.messageId.hex,
         conversationId: senderHex,
         senderNodeIdHex: '',
         text: '$displayName has deleted their identity.',
@@ -16778,21 +13538,40 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       channel.members.remove(senderHex);
     }
 
-    // Remove contact
-    _contacts.remove(senderHex);
+    // ── THE CONTACT STAYS (§15.7) ──────────────────────────────────────
+    //
+    // Here stood `_contacts.remove(senderHex)`. §15.7 says the opposite,
+    // literally: "The recipient **does not remove the contact**, but marks
+    // it 'deleted,' archives the conversation read-only, and continues to
+    // show name and picture with a '(deleted)' suffix."
+    //
+    // WHY THIS IS NOT COSMETIC. With the contact vanished the only place
+    // where display name and picture of the counterpart stood. The
+    // conversation history stayed (`conversations` is not touched) — but
+    // without a contact the UI shows only a hex identifier for every line
+    // in it. The user thus lost the attribution of their own past, without
+    // anybody having decided that. And the system line directly above
+    // ("X has deleted their identity") then stood in a conversation whose
+    // counterpart the app could no longer name.
+    //
+    // `_deletedContacts` prevents re-reading; the contact itself now carries
+    // the state in its own `status`, like every other state (§15.9 lists
+    // `deleted` and `blocked` as contact states, not as the absence of a
+    // contact).
+    contact.status = 'deleted';
     _saveContacts();
     _saveGroups();
     _saveChannels();
 
     onStateChanged?.call();
   }
-  void _handleProfileUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleProfileUpdateV3(HarvestEvent event) {
     // Inner payload is the ProfileData protobuf, already decrypted +
     // authenticated by the V3 pipeline.
-    final senderHex = frame.senderUserId.hex;
+    final senderHex = event.senderUserId.hex;
 
     try {
-      final profile = proto.ProfileData.fromBuffer(frame.payload);
+      final profile = proto.ProfileData.fromBuffer(event.payload);
       final contact = _contacts[senderHex];
       if (contact == null) return;
 
@@ -16814,7 +13593,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (contact.localAlias != null) {
           // User has a local alias → store as pending, don't auto-override
           contact.pendingNameChange = profile.displayName;
-          _log.info('Contact ${contact.effectiveName} changed name to "${profile.displayName}" (pending, local alias active)');
+          // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+          _log.debug('Contact ${contact.effectiveName} changed name to "${profile.displayName}" (pending, local alias active)');
         } else {
           // No local alias → update directly
           final oldName = contact.displayName;
@@ -16824,7 +13604,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           if (conv != null) {
             conv.displayName = profile.displayName;
           }
-          _log.info('Contact renamed: "$oldName" → "${profile.displayName}"');
+          // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+          _log.debug('Contact renamed: "$oldName" → "${profile.displayName}"');
         }
       }
 
@@ -16841,21 +13622,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.error('PROFILE_UPDATE parse error: $e');
     }
   }
-  void _handleKeyRotationBroadcastV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleKeyRotationBroadcastV3(HarvestEvent event) {
     // V3-direct: inner payload is the KeyRotationBroadcast (Periodic
     // variant) protobuf, already decrypted + authenticated by the V3
     // pipeline.
     //
-    // Welle 6 §7.4 path-discriminator: the ApplicationFrame path is
-    // reserved for the **Periodic** flavor (KEM-only, single sig in body
-    // — Ed25519/ML-DSA do not change). The **Emergency** flavor (dual-sig
-    // in body) belongs on the InfrastructureFrame path. Early-detect
-    // dual-sig here and drop — emitting a warn so a sender bug becomes
-    // observable rather than silently bypassing the §7.4 wire-path
-    // constraint.
+    // IN V4.1 THE PATH IS NO LONGER A DISTINGUISHING FEATURE.
+    //
+    // Here stood the wave-6 switch from v3_0 §7.4: the emergency variant
+    // (double signature in the body) belonged on the InfrastructureFrame
+    // path, on the application path it was DISCARDED. V4.1 does not have
+    // this path: `InfrastructureFrameV3` came about in `CleonaNode`, and the
+    // node fell with the CUT;
+    // `handleIncomingKeyRotationBroadcastInfra`
+    // (`cleona_service_identity.dart:236`) has ZERO callers. The switch
+    // thus discarded every emergency rotation without there being a second
+    // way on which it could have arrived — a receiver that throws away a
+    // message with a pointer to a channel that does not exist.
+    //
+    // §14.4 PRESCRIBES the pairwise way for V4.1: "How contacts learn
+    // of the rotation. Only **pairwise** … A public object is out."
+    // The frame arrives here on exactly this way.
+    //
+    // THE SECURITY CHECK IS NOT LOST THEREBY — it never sat in the path,
+    // but in the body: `_handleEmergencyKeyRotation` checks the OLD
+    // signature against the contact's stored Ed25519 key and the NEW one
+    // against the new key sent along; whoever does not have both gets not
+    // one step further. The periodic/emergency distinction is still made
+    // by `_handleKeyRotationBroadcast` (`cleona_service_identity.dart`) by
+    // the presence of the double signature.
     proto.KeyRotationBroadcast? earlyParse;
     try {
-      earlyParse = proto.KeyRotationBroadcast.fromBuffer(frame.payload);
+      earlyParse = proto.KeyRotationBroadcast.fromBuffer(event.payload);
     } catch (_) {
       // If the body does not parse the downstream handler will fail in
       // the same way — let it produce its own error log.
@@ -16863,534 +13661,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (earlyParse != null &&
         earlyParse.oldSignatureEd25519.isNotEmpty &&
         earlyParse.newSignatureEd25519.isNotEmpty) {
-      _log.warn('_handleKeyRotationBroadcastV3 drop: dual-sig present on '
-          'ApplicationFrame path — Emergency variant must arrive via '
-          'InfrastructureFrame (§7.4 / Welle 6) '
-          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} '
-          'device=${_hexShort(senderDeviceId)})');
-      return;
+      _log.info('KEY_ROTATION_BROADCAST: emergency variant received '
+          'pairwise (§14.4) '
+          '(sender=${_hexShort(Uint8List.fromList(event.senderUserId))} '
+          'device=${_hexShort(event.senderDeviceId)})');
     }
     _handleKeyRotationBroadcast(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
+      Uint8List.fromList(event.payload),
+      Uint8List.fromList(event.senderUserId),
     );
   }
-  /// §8.1 per-sender CR rate limit: max 5 CRs per hour.
-  bool _isCrRateLimited(String senderHex) {
-    final now = DateTime.now();
-    final cutoff = now.subtract(const Duration(hours: 1));
-    final timestamps = _crRateTracker[senderHex];
-    if (timestamps == null) {
-      _crRateTracker[senderHex] = [now];
-      return false;
-    }
-    timestamps.removeWhere((t) => t.isBefore(cutoff));
-    if (timestamps.length >= 5) {
-      _log.warn('CR rate limit: sender ${senderHex.substring(0, 8)} exceeded 5 CRs/hour');
-      return true;
-    }
-    timestamps.add(now);
-    return false;
-  }
-
-  void _handleContactRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    _log.debug('_handleContactRequestV3 from device ${bytesToHex(senderDeviceId).substring(0, 8)}');
-    _log.info('_handleContactRequestV3 ENTER for ${identity.userIdHex.substring(0, 8)}');
-    try {
-      final cr = proto.ContactRequestMsg.fromBuffer(frame.payload);
-      final senderHex = frame.senderUserId.hex;
-
-      // §8.1 per-sender CR rate limit (5/hour).
-      if (_isCrRateLimited(senderHex)) return;
-
-      // §4.11.10 owner-side session end: an inbound First-CR from a scanner
-      // device we resolved via the First-Contact rendezvous completes the
-      // owner session (stop polling/publishing). No-op without sessions.
-      _fcRendezvous?.onFirstCrReceived(bytesToHex(senderDeviceId));
-
-      // Multi-Identity guard: only process CRs addressed to THIS identity.
-      // Without this, a CR to identity B could be processed by identity A's
-      // service on the same node, resulting in A responding instead of B.
-      // Accept both userId and deviceNodeId: senders with pre-V3.1.44 contacts
-      // may have stored our deviceNodeId instead of userId.
-      if (frame.recipientUserId.isNotEmpty) {
-        final recipientHex = frame.recipientUserId.hex;
-        if (recipientHex != identity.userIdHex &&
-            recipientHex != identity.nodeIdHex) {
-          return; // Not for this identity
-        }
-      }
-
-      // Previously deleted contact sends new CR: allow re-contact (delete ≠ block).
-      bool wasPreviouslyDeleted = false;
-      if (_deletedContacts.contains(senderHex)) {
-        _deletedContacts.remove(senderHex);
-        wasPreviouslyDeleted = true;
-        _saveContacts();
-        _log.event('CR RECV from previously-deleted ${senderHex.substring(0, 8)} — cleared deleted marker');
-      }
-
-      // Already accepted contact sends new CR: update keys and re-send acceptance.
-      // This handles the case where the remote side deleted us and re-added.
-      //
-      // F4-Gate (§8.1, V3.0 Welle 6): the auto-overwrite of stored pubkeys
-      // requires a verified outer Device-Sig (`snapshot.isOuterVerified`).
-      // On V3 paths where the snapshot reports `skippedBootstrap`, we DO NOT
-      // auto-replace keys — the CR falls through to the standard inbound CR
-      // path (Inbox tab) so the user explicitly confirms the new keys.
-      final existing = _contacts[senderHex];
-      final allowAutoOverwrite = snapshot.isOuterVerified;
-      if (existing != null && existing.status == 'accepted' && allowAutoOverwrite) {
-        // RC-1 (§8.1+§8.3): detect identity key change before overwrite
-        final storedEd25519 = existing.ed25519Pk;
-        final incomingEd25519 = Uint8List.fromList(cr.ed25519PublicKey);
-
-        // Restlücke A: accepted contact with empty stored key — fill keys
-        // silently instead of downgrading to pending (never overwrite accepted→pending)
-        //
-        // §8.3 hardening: NOT for a quarantined record. The outer device
-        // signature gating this branch is the sender's own — it proves who
-        // sent the CR, not that they are the contact we think they are. For
-        // a record whose anchor we already know to be broken, a silent refill
-        // would hand the next CR a free overwrite of the trust anchor.
-        // Such a contact must go through the explicit inbox confirmation.
-        if (existing.trustAnchorQuarantined) {
-          _log.warn('§8.3: CR from ${senderHex.substring(0, 8)} hits a '
-              'QUARANTINED contact — no silent key fill, user confirmation '
-              'required (${existing.trustAnchorQuarantineReason})');
-          return;
-        }
-        if (storedEd25519 == null || storedEd25519.isEmpty) {
-          existing.displayName = cr.displayName;
-          if (!_setContactTrustAnchor(
-              existing,
-              senderHex,
-              incomingEd25519,
-              Uint8List.fromList(cr.mlDsaPublicKey),
-              source: 'CR/Restluecke-A')) {
-            return;
-          }
-          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-          if (cr.profilePicture.isNotEmpty) {
-            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-          }
-          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-          }
-          _saveContacts();
-          _log.warn('RC-1: accepted contact ${senderHex.substring(0, 8)} had no stored ed25519Pk — keys filled from CR');
-          acceptContactRequest(senderHex);
-          return;
-        }
-        // Same-Seed-Reinstall: keys unchanged — silent refresh
-        else if (constantTimeEquals(storedEd25519, incomingEd25519)) {
-          // §8.3 (Befund 11): anchor first. On refusal the frame is dropped
-          // instead of writing name/KEM keys and then handing the contact to
-          // acceptContactRequest() as if nothing had happened.
-          if (!_setContactTrustAnchor(existing, senderHex, incomingEd25519,
-              Uint8List.fromList(cr.mlDsaPublicKey),
-              source: 'CR/same-seed-refill')) {
-            _log.warn('§8.3: CR from ${senderHex.substring(0, 8)} — anchor '
-                'write REFUSED, frame dropped, contact left unchanged');
-            return;
-          }
-          existing.displayName = cr.displayName;
-          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-          if (cr.profilePicture.isNotEmpty) {
-            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-          }
-          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-          }
-          _saveContacts();
-          _log.info('Re-contact from accepted ${cr.displayName} (same keys) — sending acceptance');
-          acceptContactRequest(senderHex);
-          return;
-        }
-        // Key changed — fire §8.3 Key-Change-Detection, overwrite with verification reset
-        else {
-          // §8.3 (Befund 11): anchor first. This is the branch that
-          // overwrites a DIFFERING anchor — if the setter will not allow the
-          // write, no KEM key may be stored and acceptContactRequest() must
-          // not fire.
-          if (!_setContactTrustAnchor(existing, senderHex, incomingEd25519,
-              Uint8List.fromList(cr.mlDsaPublicKey),
-              source: 'CR/same-key-refresh')) {
-            _log.warn('§8.3: CR from ${senderHex.substring(0, 8)} with changed '
-                'keys — anchor write REFUSED, frame dropped, contact left '
-                'unchanged');
-            return;
-          }
-          final prevLevel = existing.verificationLevel;
-          final keyChange = onIdentityRotation(prevLevel);
-          existing.displayName = cr.displayName;
-          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-          if (cr.profilePicture.isNotEmpty) {
-            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-          }
-          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-          }
-          existing.verificationLevel = keyChange.newLevel;
-          _saveContacts();
-          _log.info('RC-1: Re-contact from ${cr.displayName} with CHANGED keys — '
-              'overwrite + §8.3 reset $prevLevel→${keyChange.newLevel}');
-          try {
-            onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
-          } catch (e) {
-            _log.warn('onContactIdentityRotated listener threw: $e');
-          }
-          acceptContactRequest(senderHex);
-          onStateChanged?.call();
-          return;
-        }
-      }
-      if (existing != null && existing.status == 'accepted' && !allowAutoOverwrite) {
-        final storedEd25519 = existing.ed25519Pk;
-        final incomingEd25519 = Uint8List.fromList(cr.ed25519PublicKey);
-        // Befund 6 (§8.1/§8.3): the shortcut must compare BOTH anchors, not
-        // just Ed25519. §8.1 says "User-Keys ... verified via constantTimeEquals"
-        // (plural). On the First-CR path the inner sig is verified against the
-        // keys CARRIED IN the CR, so the ML-DSA key is attacker-chosen; if
-        // Ed25519 falls — the very case the hybrid scheme exists for — a
-        // single-key check would let an accepted contact's PQ trust anchor be
-        // overwritten below without §8.3 and without user confirmation.
-        // Legacy records with no stored ML-DSA key must still pass (null/empty).
-        // A contact that rotated ONLY ML-DSA deliberately falls through to the
-        // silent-drop branch, consistent with §8.3.
-        final storedMlDsa = existing.mlDsaPk;
-        if (storedEd25519 != null &&
-            constantTimeEquals(storedEd25519, incomingEd25519) &&
-            (storedMlDsa == null ||
-                storedMlDsa.isEmpty ||
-                constantTimeEquals(
-                    storedMlDsa, Uint8List.fromList(cr.mlDsaPublicKey)))) {
-          // §8.3 (Befund 11): anchor first — otherwise the shortcut runs all
-          // the way through to acceptContactRequest() even though the setter
-          // refused the write and quarantined the record.
-          if (!_setContactTrustAnchor(existing, senderHex, incomingEd25519,
-              Uint8List.fromList(cr.mlDsaPublicKey),
-              source: 'CR/same-keys-relay')) {
-            _log.warn('§8.3: Same-Keys shortcut for ${senderHex.substring(0, 8)} '
-                '— anchor write REFUSED, frame dropped, contact left unchanged');
-            return;
-          }
-          existing.displayName = cr.displayName;
-          existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-          existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-          if (cr.profilePicture.isNotEmpty) {
-            existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-          }
-          if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-            existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-          }
-          _saveContacts();
-          _log.info('V3.2 Same-Keys shortcut: re-contact from accepted '
-              '${cr.displayName} via ${snapshot.outerSigStatus.name} — accepting');
-          acceptContactRequest(senderHex);
-          return;
-        }
-        _log.event('CR DROPPED from accepted ${cr.displayName} '
-            '(${senderHex.substring(0, 8)}) — outerSigStatus='
-            '${snapshot.outerSigStatus.name}, changed keys, no auto-overwrite');
-        _suppressReceiptForCurrentFrame = true;
-        // Befund 1 (§8.1): the frame-local flag only covers THIS delivery.
-        // Remember the inner messageId so the dedup re-ack in
-        // `handleApplicationFrame` stays silent for every AckTracker L1 retry
-        // of the same CR — otherwise the suppression is undone one retry later.
-        _markReceiptSuppressed(frame.messageId);
-        return;
-      }
-      if (existing != null && existing.status == 'pending_outgoing') {
-        // Bidirectional CR: we sent them a CR AND they sent us one.
-        // Auto-accept: both sides want to connect.
-        // §8.3 (Befund 11): anchor first — no auto-accept on refusal.
-        if (!_setContactTrustAnchor(
-            existing,
-            senderHex,
-            Uint8List.fromList(cr.ed25519PublicKey),
-            Uint8List.fromList(cr.mlDsaPublicKey),
-            source: 'CR/key-change')) {
-          _log.warn('§8.3: bidirectional CR from ${senderHex.substring(0, 8)} '
-              '— anchor write REFUSED, no auto-accept, contact left unchanged');
-          return;
-        }
-        existing.displayName = cr.displayName;
-        existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-        if (cr.profilePicture.isNotEmpty) {
-          existing.profilePictureBase64 = base64Encode(cr.profilePicture);
-        }
-        // Store device ID so sendToUser → deviceNodeIds fallback works on accept.
-        if (!existing.deviceNodeIds.contains(bytesToHex(senderDeviceId))) {
-          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-        }
-        _saveContacts();
-        _log.event('CR RECV bidirectional from ${cr.displayName} (${senderHex.substring(0, 8)}) — auto-accepting');
-        acceptContactRequest(senderHex);
-        return;
-      }
-
-      final contact = ContactInfo(
-        nodeId: Uint8List.fromList(frame.senderUserId),
-        displayName: cr.displayName,
-        ed25519Pk: Uint8List.fromList(cr.ed25519PublicKey),
-        x25519Pk: Uint8List.fromList(cr.x25519PublicKey),
-        mlKemPk: Uint8List.fromList(cr.mlKemPublicKey),
-        mlDsaPk: Uint8List.fromList(cr.mlDsaPublicKey),
-        status: 'pending',
-        message: cr.message,
-        profilePictureBase64: cr.profilePicture.isNotEmpty
-            ? base64Encode(cr.profilePicture)
-            : null,
-      );
-
-      // Detect stale contact: if an existing accepted contact has the same
-      // display name but different nodeId, the sender likely reinstalled.
-      // Mark the old conversation with a system message so the user knows
-      // to use the new contact (old ID is unreachable).
-      for (final entry in _contacts.entries) {
-        if (entry.key == senderHex) continue; // Same contact — skip
-        final old = entry.value;
-        if (old.status != 'accepted') continue;
-        if (old.displayName != cr.displayName) continue;
-        // Same name, different identity → probable reinstall
-        final oldConv = conversations[entry.key];
-        if (oldConv != null) {
-          final systemMsg = UiMessage(
-            id: bytesToHex(SodiumFFI().randomBytes(16)),
-            conversationId: entry.key,
-            senderNodeIdHex: '',
-            text: '${cr.displayName} appears to have a new identity. '
-                'Messages in this conversation may not be delivered. '
-                'Please use the new contact request instead.',
-            isOutgoing: false,
-            timestamp: DateTime.now(),
-            type: UiMessageType.identityDeleted,
-            status: MessageStatus.delivered,
-          );
-          oldConv.messages.add(systemMsg);
-          _log.warn('DUPLICATE-CONTACT-DIAG: "${cr.displayName}" CR from new userId=${senderHex.substring(0, 16)} '
-              'but accepted contact with SAME displayName exists at old userId=${entry.key.substring(0, 16)} '
-              '— probable reinstall with different seed');
-        }
-      }
-
-      // Store sender's device ID so acceptContactRequest → sendToUser can reach
-      // them immediately even before the DHT auth-manifest is warm (§2.6.2).
-      contact.deviceNodeIds.add(bytesToHex(senderDeviceId));
-      _contacts[senderHex] = contact;
-      _saveContacts();
-      _saveConversations();
-      _log.event('CR RECV from ${cr.displayName} (${senderHex.substring(0, 8)}) → pending');
-
-      if (wasPreviouslyDeleted) {
-        _log.event('CR AUTO-ACCEPT (previously deleted) ${cr.displayName} (${senderHex.substring(0, 8)})');
-        acceptContactRequest(senderHex);
-        return;
-      }
-
-      onContactRequestReceived?.call(senderHex, cr.displayName);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.error('Contact request parse error: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-  void _handleContactRequestResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final resp = proto.ContactRequestResponse.fromBuffer(frame.payload);
-      final senderHex = frame.senderUserId.hex;
-
-      // Multi-Identity guard: only accept responses addressed to THIS identity.
-      // Accept both userId and deviceNodeId (backward compat with pre-V3.1.44 contacts).
-      if (frame.recipientUserId.isNotEmpty) {
-        final recipientHex = frame.recipientUserId.hex;
-        if (recipientHex != identity.userIdHex &&
-            recipientHex != identity.nodeIdHex) {
-          return; // Not for this identity
-        }
-      }
-
-      // Previously deleted contact responds: allow re-contact (delete ≠ block).
-      if (_deletedContacts.contains(senderHex)) {
-        _deletedContacts.remove(senderHex);
-        _saveContacts();
-        _log.info('Previously deleted contact ${senderHex.substring(0, 8)} responding — allowed');
-      }
-
-      if (resp.accepted) {
-        // Validate: we must have a pending outgoing CR to this sender.
-        // Without this check, a response from a wrong identity (e.g. identity A
-        // responding to a CR addressed to identity B) would create a ghost contact.
-        final existing = _contacts[senderHex];
-        if (existing == null || (existing.status != 'pending_outgoing' && existing.status != 'accepted' && existing.status != 'storedForDelivery')) {
-          _log.warn('CR-Response from ${senderHex.substring(0, 8)} but no pending CR — ignoring');
-          return;
-        }
-
-        // Dedup on status transition: if the contact was already 'accepted',
-        // this is a sender-side retry (e.g. sender restarted, lost in-memory
-        // ACK-state, retried CR-Response). Don't flood the chat with duplicate
-        // "accepted your CR" system messages or re-fire the onContactAccepted
-        // callback — just refresh the keys in case they changed.
-        final wasAlreadyAccepted = existing.status == 'accepted';
-
-        // §4.11.10 scanner-side session end: the contact accepted our CR —
-        // the First-Contact rendezvous session for this target is complete.
-        _fcRendezvous?.onCrConfirmed(senderHex);
-
-        // RC-1 (§8.1+§8.3): snapshot old key before overwrite
-        final oldEd25519 = existing.ed25519Pk;
-
-        // §8.3 (Befund 11): the trust anchor is written BEFORE any mutation.
-        // Both CRR branches below (already-accepted / first-accept) write the
-        // very same anchor out of `resp`, so one guard covers both. If the
-        // setter refuses (own hosted key -> quarantine, or an incomplete
-        // hybrid pair) the frame is dropped while status, seed bundle, KEM
-        // keys and displayName are still untouched — aborting further down
-        // would leave a record marked 'accepted' carrying a foreign KEM key
-        // on top of the old signing anchor.
-        if (!_setContactTrustAnchor(
-            existing,
-            senderHex,
-            Uint8List.fromList(resp.ed25519PublicKey),
-            Uint8List.fromList(resp.mlDsaPublicKey),
-            source: wasAlreadyAccepted
-                ? 'CRR/already-accepted'
-                : 'CRR/first-accept')) {
-          _log.warn('§8.3: CR-Response from ${senderHex.substring(0, 8)} — '
-              'anchor write REFUSED, frame dropped, contact left unchanged');
-          return;
-        }
-
-        final picBase64 = resp.profilePicture.isNotEmpty
-            ? base64Encode(resp.profilePicture)
-            : null;
-        existing.status = 'accepted';
-        existing.acceptedAt ??= DateTime.now();
-        existing.lastAckedAt = DateTime.now();
-        _crRetryCountPerContact.remove(senderHex);
-        _staleWarningWrittenFor.remove(senderHex);
-        // First-CR ContactSeed bootstrap is over once we have the recipient's
-        // User-KEM pubkeys (filled below). Clear the seed bundle so re-contact
-        // uses the User-KEM pair directly and stale Device-KEM pubkeys don't
-        // outlive their TTL on disk.
-        existing.seedDeviceIdHex = null;
-        existing.seedDxkB64 = null;
-        existing.seedDmkB64 = null;
-        existing.seedEpB64 = null;
-
-        // RC-1 (§8.1+§8.3): if already accepted AND keys changed, fire §8.3
-        if (wasAlreadyAccepted) {
-          final incomingEd25519 = Uint8List.fromList(resp.ed25519PublicKey);
-          final identityKeyChanged = oldEd25519 == null || oldEd25519.isEmpty ||
-              !constantTimeEquals(oldEd25519, incomingEd25519);
-
-          // §8.3: the anchor (ed25519Pk + mlDsaPk) was already written by the
-          // central setter above — only the KEM keys, which are not part of
-          // the trust anchor, are set here.
-          existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
-          existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
-          existing.displayName = resp.displayName;
-          if (picBase64 != null) existing.profilePictureBase64 = picBase64;
-          existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-
-          final conv = conversations[senderHex];
-          if (conv != null && resp.displayName.isNotEmpty) {
-            conv.displayName = resp.displayName;
-            if (picBase64 != null) conv.profilePictureBase64 = picBase64;
-          }
-
-          if (identityKeyChanged) {
-            final prevLevel = existing.verificationLevel;
-            final keyChange = onIdentityRotation(prevLevel);
-            existing.verificationLevel = keyChange.newLevel;
-            _saveContacts();
-            _saveConversations();
-            _log.info('RC-1: CRR retry from ${senderHex.substring(0, 8)} with CHANGED keys — '
-                '§8.3 reset $prevLevel→${keyChange.newLevel}');
-            try {
-              onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
-            } catch (e) {
-              _log.warn('onContactIdentityRotated listener threw: $e');
-            }
-            onStateChanged?.call();
-            return;
-          }
-
-          _saveContacts();
-          _saveConversations();
-          _log.debug('CR-Response retry from ${senderHex.substring(0, 8)} — keys refreshed, no system msg');
-          onStateChanged?.call();
-          return;
-        }
-
-        // First acceptance path
-        // §8.3: the anchor (ed25519Pk + mlDsaPk) was already written by the
-        // central setter above — only the KEM keys are set here.
-        existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
-        existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
-        existing.displayName = resp.displayName;
-        if (picBase64 != null) existing.profilePictureBase64 = picBase64;
-        // Store sender's device ID so sendToUser can reach them immediately
-        // even before the DHT auth-manifest is warm (§2.6.2 bootstrapping).
-        existing.deviceNodeIds.add(bytesToHex(senderDeviceId));
-
-        // RC-1: first CRR acceptance — check if keys differ from pending_outgoing entry
-        final identityKeyChanged = oldEd25519 != null && oldEd25519.isNotEmpty &&
-            !constantTimeEquals(oldEd25519, Uint8List.fromList(resp.ed25519PublicKey));
-        if (identityKeyChanged) {
-          final keyChange = onIdentityRotation(existing.verificationLevel);
-          existing.verificationLevel = keyChange.newLevel;
-          _log.info('RC-1: CRR first-accept from ${senderHex.substring(0, 8)} with '
-              'changed keys — §8.3 reset');
-          try {
-            onContactIdentityRotated?.call(senderHex, existing.displayName, keyChange.wasVerified);
-          } catch (e) {
-            _log.warn('onContactIdentityRotated listener threw: $e');
-          }
-        }
-
-        _saveContacts();
-
-        // Sync conversation displayName — the conversation may already exist
-        // (e.g. text arrived before CRR) with a truncated-hash placeholder.
-        final conv = conversations[senderHex];
-        if (conv != null && resp.displayName.isNotEmpty) {
-          conv.displayName = resp.displayName;
-          if (picBase64 != null) conv.profilePictureBase64 = picBase64;
-        }
-
-        // Create conversation with system message so the contact appears
-        // immediately in the "Aktuell" tab (not only in "Kontakte" tab).
-        _addSystemMessage(senderHex, '${resp.displayName} accepted your contact request.',
-            type: UiMessageType.identityDeleted); // system message type
-        _saveConversations();
-
-        onContactAccepted?.call(senderHex);
-        _log.info('Contact accepted by ${resp.displayName}');
-      } else {
-        _log.info('Contact rejected by ${senderHex.substring(0, 8)}: ${resp.rejectionReason}');
-      }
-      onStateChanged?.call();
-    } catch (e) {
-      _log.error('Contact response parse error: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-  void _handleGroupCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleGroupCreateV3(HarvestEvent event) {
     // GROUP_CREATE shares the GROUP_INVITE payload schema and processing path.
-    _handleGroupInviteV3(frame, senderDeviceId, snapshot);
+    _handleGroupInviteV3(event);
   }
-  void _handleGroupInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleGroupInviteV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
     proto.GroupInviteV3 invite;
     try {
-      invite = proto.GroupInviteV3.fromBuffer(frame.payload);
+      invite = proto.GroupInviteV3.fromBuffer(event.payload);
     } catch (e) {
       _log.error('GROUP_INVITE parse failed: $e');
       return;
@@ -17523,13 +13814,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     onStateChanged?.call();
   }
 
-  void _handleGroupLeaveV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleGroupLeaveV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
     proto.GroupLeave leaveMsg;
     try {
-      leaveMsg = proto.GroupLeave.fromBuffer(frame.payload);
+      leaveMsg = proto.GroupLeave.fromBuffer(event.payload);
     } catch (e) {
       _log.error('GROUP_LEAVE parse failed: $e');
       return;
@@ -17549,27 +13840,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           ?? group.members.values.first;
       newOwner.role = 'owner';
       group.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Owner left, transferred to ${newOwner.displayName}');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Owner left, transferred to ${newOwner.displayName}');
     }
     _saveGroups();
 
     // Add system message
-    _addSystemMessage(groupIdHex, '$memberName hat die Gruppe verlassen',
+    _addSystemMessage(groupIdHex, '$memberName left the group',
         type: UiMessageType.groupLeave, isGroup: true);
     _log.info('$memberName left group "${group.name}"');
   }
   // GROUP_KEY_UPDATE: no shared group key in pairwise-KEM model (§9.1).
-  void _handleGroupKeyUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleChannelCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleGroupKeyUpdateV3(HarvestEvent event) {}
+  void _handleChannelCreateV3(HarvestEvent event) {
     // CHANNEL_CREATE shares the CHANNEL_INVITE payload schema and processing path.
-    _handleChannelInviteV3(frame, senderDeviceId, snapshot);
+    _handleChannelInviteV3(event);
   }
-  void _handleChannelPostV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleChannelPostV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // Route to channel via groupId field
-    final channelIdHex = frame.groupId.isNotEmpty
-        ? frame.groupId.hex
+    final channelIdHex = event.groupId != null
+        ? event.groupId!.hex
         : '';
     if (channelIdHex.isEmpty) return;
 
@@ -17588,9 +13880,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // GM-4 (§9.1.4): split-view detection on channel posts
     bool isMembershipMismatch = false;
-    final wireEpoch = frame.groupMembershipEpoch.toInt();
-    if (wireEpoch > 0 && frame.groupMembershipHash.isNotEmpty) {
-      final wireHash = Uint8List.fromList(frame.groupMembershipHash);
+    // `rosterVersion != null` is exactly the previous condition
+    // (epoch > 0 AND hash not empty) — the factory sets a value under no
+    // other. Both variables live only in this block.
+    final roster = event.rosterVersion;
+    if (roster != null) {
+      final wireEpoch = roster.epoch;
+      final wireHash = roster.hash;
       final localEpoch = channel.membershipEpoch;
       final localHash = _computeChannelMembershipHash(
           localEpoch, channelIdHex, channel.members);
@@ -17616,9 +13912,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // V3 wraps every payload type in its own proto message — CHANNEL_POST is
     // built as a TextMessageV3 by the sender (see _sendChannelPost). This used
-    // to be `utf8.decode(frame.payload)`, which is the V2 assumption
-    // ("V2 packte Text als raw UTF-8 in encrypted_payload", proto/cleona.proto
-    // at TextMessageV3). The old comment said "already plaintext" — true for
+    // to be `utf8.decode(event.payload)`, which is the V2 assumption
+    // ("V2 packed text as raw UTF-8 in encrypted_payload",
+    // proto/app_payloads.proto::TextMessageV3). The old comment said "already
+    // plaintext" — true for
     // *decrypted*, false for *unwrapped*. The result was that every channel
     // post rendered as its own protobuf encoding: text="test",
     // format_hint="plain" serialises to 0A 04 t e s t 12 05 p l a i n, which
@@ -17627,21 +13924,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // that silently instead of throwing.
     final proto.TextMessageV3 tm;
     try {
-      tm = proto.TextMessageV3.fromBuffer(frame.payload);
+      tm = proto.TextMessageV3.fromBuffer(event.payload);
     } catch (e) {
       _log.warn('CHANNEL_POST from $senderHex: payload is not a TextMessageV3 '
           '($e) — dropped');
       return;
     }
     final text = tm.text;
-    final msgId = frame.messageId.hex;
+    final msgId = event.messageId.hex;
 
     final msg = UiMessage(
       id: msgId,
       conversationId: channelIdHex,
       senderNodeIdHex: senderHex,
       text: text,
-      timestamp: DateTime.fromMillisecondsSinceEpoch(frame.timestampMs.toInt()),
+      timestamp: (event.claimedSentAt ?? DateTime.fromMillisecondsSinceEpoch(0)),
       type: UiMessageType.channelPost,
       status: MessageStatus.delivered,
       isOutgoing: false,
@@ -17652,13 +13949,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _log.debug('Channel post received in "${channel.name}" from ${senderMember.displayName}');
   }
 
-  void _handleChannelInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleChannelInviteV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
     proto.ChannelInvite invite;
     try {
-      invite = proto.ChannelInvite.fromBuffer(frame.payload);
+      invite = proto.ChannelInvite.fromBuffer(event.payload);
     } catch (e) {
       _log.error('CHANNEL_INVITE parse failed: $e');
       return;
@@ -17795,13 +14092,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     onStateChanged?.call();
   }
 
-  void _handleChannelLeaveV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleChannelLeaveV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
     proto.ChannelLeave leaveMsg;
     try {
-      leaveMsg = proto.ChannelLeave.fromBuffer(frame.payload);
+      leaveMsg = proto.ChannelLeave.fromBuffer(event.payload);
     } catch (e) {
       _log.error('CHANNEL_LEAVE parse failed: $e');
       return;
@@ -17821,12 +14118,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           ?? channel.members.values.first;
       newOwner.role = 'owner';
       channel.ownerNodeIdHex = newOwner.nodeIdHex;
-      _log.info('Channel owner left, transferred to ${newOwner.displayName}');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Channel owner left, transferred to ${newOwner.displayName}');
     }
     _saveChannels();
 
     // Add system message
-    _addSystemMessage(channelIdHex, '$memberName hat den Channel verlassen',
+    _addSystemMessage(channelIdHex, '$memberName left the channel',
         type: UiMessageType.channelLeave, isChannel: true);
     _log.info('$memberName left channel "${channel.name}"');
   }
@@ -17834,13 +14132,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Handle CHANNEL_ROLE_UPDATE (type 73): update member role in channel or group.
   /// Architecture v3.0 Section 10.2: sent to ALL members, handler checks both
   /// channelManager and groupManager. Only owner/admin may change roles.
-  void _handleChannelRoleUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    final senderHex = frame.senderUserId.hex;
+  void _handleChannelRoleUpdateV3(HarvestEvent event) {
+    final senderHex = event.senderUserId.hex;
 
     // V3 payload is already plaintext (decrypted+authenticated by pipeline).
     proto.ChannelRoleUpdate roleMsg;
     try {
-      roleMsg = proto.ChannelRoleUpdate.fromBuffer(frame.payload);
+      roleMsg = proto.ChannelRoleUpdate.fromBuffer(event.payload);
     } catch (e) {
       _log.error('CHANNEL_ROLE_UPDATE parse failed: $e');
       return;
@@ -17884,7 +14182,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       _addSystemMessage(entityIdHex, '${target.displayName}: $oldRole → $newRole',
           type: UiMessageType.channelRoleUpdate, isChannel: true);
-      _log.info('Channel role update: ${target.displayName} $oldRole → $newRole in "${channel.name}"');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Channel role update: ${target.displayName} $oldRole → $newRole in "${channel.name}"');
 
     } else if (group != null) {
       // Verify sender is owner — only Owner can change roles (Architecture §10.2).
@@ -17914,7 +14213,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       _addSystemMessage(entityIdHex, '${target.displayName}: $oldRole → $newRole',
           type: UiMessageType.channelRoleUpdate);
-      _log.info('Group role update: ${target.displayName} $oldRole → $newRole in "${group.name}"');
+      // Display name: only `debug` (owner decision 02.09.2026, S363/F-2).
+      _log.debug('Group role update: ${target.displayName} $oldRole → $newRole in "${group.name}"');
 
     } else {
       _log.debug('CHANNEL_ROLE_UPDATE: entity $entityIdHex not found (not a member)');
@@ -17922,28 +14222,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     onStateChanged?.call();
   }
-  // Moderation V3 handlers — delegated to ChannelModerationService.
-  void handleIncomingChannelIndexExchangeInfra(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress sourceAddr,
-    int sourcePort,
-    SenderIdentitySnapshot snapshot,
-  ) => _moderation.handleChannelIndexExchangeInfra(frame, senderDeviceId, sourceAddr, sourcePort, snapshot);
   // Wave 2B.3: PEER_LIST_*, DHT_*, FRAGMENT_*, PEER_STORE_* dead-stub
   // declarations removed. PEER_LIST_*/DHT_* are §2.3.5 Infrastructure types
   // dispatched in cleona_node.dart's `_dispatchInfrastructureFrameLocal`.
   // FRAGMENT_*/PEER_STORE_* are dispatched via the service-layer Infra hook
   // (service_daemon.dart `node.onInfrastructureFramePayload`) into
   // `handleIncomingFragmentStoreInfra` etc.
-  void _handleChatConfigUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleChatConfigUpdateV3(HarvestEvent event) {
     // V3 direct: the inner payload is the ChatConfigUpdate protobuf,
     // already decrypted + authenticated by the V3 pipeline.
-    final senderHex = frame.senderUserId.hex;
+    final senderHex = event.senderUserId.hex;
 
     proto.ChatConfigUpdate configMsg;
     try {
-      configMsg = proto.ChatConfigUpdate.fromBuffer(frame.payload);
+      configMsg = proto.ChatConfigUpdate.fromBuffer(event.payload);
     } catch (e) {
       _log.error('CHAT_CONFIG_UPDATE parse failed: $e');
       return;
@@ -17959,9 +14251,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
 
     // Check if this is a group config update
-    final groupIdHex = frame.groupId.isNotEmpty
-        ? frame.groupId.hex
-        : null;
+    final groupIdHex = event.groupId?.hex;
 
     if (groupIdHex != null) {
       // Group or channel config: apply directly (sender must be owner or admin)
@@ -17980,7 +14270,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           _saveConversations();
         }
         onStateChanged?.call();
-        _log.info('Group config updated by ${senderMember.displayName} for "${group.name}"');
+        _log.debug('Group config — displayName="${senderMember.displayName}"');
+        _log.info('Group config updated for "${group.name}"');
         return;
       }
       if (channel != null) {
@@ -17996,7 +14287,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           _saveConversations();
         }
         onStateChanged?.call();
-        _log.info('Channel config updated by ${senderMember.displayName} for "${channel.name}"');
+        _log.debug('Channel config — '
+            'displayName="${senderMember.displayName}"');
+        _log.info('Channel config updated for "${channel.name}"');
         return;
       }
       // Unknown group/channel — buffer config for when GROUP_INVITE arrives
@@ -18018,7 +14311,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _updateBadgeCount();
       _saveConversations();
       onStateChanged?.call();
-      _log.info('DM config proposal received from ${_contacts[senderHex]?.displayName ?? senderHex.substring(0, 8)} — awaiting accept/reject');
+      _log.debug('DM config received — '
+          'displayName="${_contacts[senderHex]?.displayName}"');
+      _log.info('DM config proposal received from '
+          '${senderHex.substring(0, 8)} — awaiting accept/reject');
     } else if (configMsg.accepted) {
       // Peer accepted our proposal — NOW apply the config on our side
       final conv = conversations[senderHex];
@@ -18045,28 +14341,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // CHAT_CONFIG_RESPONSE (type 141): dead code — the protocol uses
   // CHAT_CONFIG_UPDATE (type 140) with `accepted` flag for both request
   // and response directions. Type 141 is never sent.
-  void _handleChatConfigResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleChatConfigResponseV3(HarvestEvent event) {}
 
   // Wave 2B.3: ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_*
   // dead-stub declarations removed — all dispatched in cleona_node.dart
   // (`_dispatchInfrastructureFrameLocal`, see Wave 2B.3 section). RELAY_*
   // remains on the KEM-path with §5.5 logic (out of Wave 2B.3 scope).
 
-  // IDENTITY_AUTH/LIVE_* (types 170-175): dispatched as InfrastructureFrames
-  // in cleona_node.dart (lines 1722-1850). These ApplicationFrame stubs are
-  // unreachable — kept only for switch-case exhaustiveness.
-  void _handleIdentityAuthPublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleIdentityAuthRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleIdentityAuthResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleIdentityLivePublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleIdentityLiveRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleIdentityLiveResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleTwinSyncV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  // IDENTITY_AUTH/LIVE_* (types 170-175): here stood six empty handlers
+  // ("kept only for switch-case exhaustiveness"; the reference to
+  // `cleona_node.dart` pointed to a file that does not exist on this
+  // line). Removed for lack of a sender (S388-BAU-KONTAKT); the switch has
+  // a `default`.
+  void _handleTwinSyncV3(HarvestEvent event) {
     // The inner payload is the TwinSyncEnvelope protobuf, already
     // decrypted + authenticated by the V3 pipeline. Sub-handlers operate
     // on raw payload bytes.
     try {
-      final sync = proto.TwinSyncEnvelope.fromBuffer(frame.payload);
+      final sync = proto.TwinSyncEnvelope.fromBuffer(event.payload);
       final syncIdHex = sync.syncId.hex;
       final deviceIdHex = sync.deviceId.hex;
 
@@ -18077,6 +14369,39 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Update device lastSeen
       if (_devices.containsKey(deviceIdHex)) {
         _devices[deviceIdHex]!.lastSeen = DateTime.now();
+      }
+
+      // ── AN UNKNOWN TYPE IS SKIPPED, NOT REINTERPRETED ──────
+      //
+      // MEASURED, not assumed (2026-08-30, probe against protobuf 4.2.0,
+      // `lib/src/protobuf/coded_buffer.dart:74-83`): an enum value that this
+      // version does not know lands in `unknownFields` — and the FIELD
+      // STAYS UNSET. The generated getter then returns the zero value of
+      // the enum, and here that is called `CONTACT_ADDED`:
+      //
+      //     syncType (getter)        = CONTACT_ADDED
+      //     syncType.value           = 0
+      //     unknownFields[4] varints = [17]
+      //     DISPATCH -> case CONTACT_ADDED (i.e. NOT skipped)
+      //
+      // Without this gate EVERY future wire extension of the enum would
+      // thus be interpreted as CONTACT_ADDED on an older version and its
+      // payload read as contact JSON. That does not crash
+      // (`_handleTwinContactAdded` catches itself), but "not crashing" is
+      // not the same as "skipping": the frame is executed, just with the
+      // wrong handler.
+      //
+      // `hasSyncType()` is NOT suitable as a distinction: proto3 does not
+      // serialise the zero value at all, so a real `CONTACT_ADDED` also
+      // arrives with `hasSyncType() == false` (measured). The only place
+      // where the unknown value still stands at all is `unknownFields`
+      // under the field number of `sync_type`.
+      if (twinSyncTypeIsUnknown(sync)) {
+        final raw = rawUnknownTwinSyncType(sync);
+        _log.debug('TWIN_SYNC: unknown type (roh=$raw) from device '
+            '${deviceIdHex.substring(0, 8)} — skipped');
+        _saveDevices(); // keep the dedup identifier anyway
+        return;
       }
 
       _log.debug('TWIN_SYNC(${sync.syncType}) from device ${deviceIdHex.substring(0, 8)}');
@@ -18181,11 +14506,48 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             _log.error('DEVICE_ANNOUNCE processing failed: $e');
           }
           break;
+        // §7.5 co-authorization is a DEVICE procedure, not an identity
+        // procedure — unlike the rest of §14 the device identifier is not
+        // an accessory here, but the subject:
+        //   * the request is parked under `requestingDeviceId` and the
+        //     approval is later sent back with `targetDeviceId: pending
+        //     .requestingDeviceId` EXACTLY to this device
+        //     (`approveRotation`, :11290),
+        //   * the answer counts against the quorum `max(2, ceil(N/2))` over
+        //     the set of known devices.
+        // Without an identifier there is neither a target for the answer
+        // nor a subject for the count. NOTHING is therefore invented and
+        // nothing half executed: the frame is discarded and the reason
+        // logged. Until §7 has been brought over to the V4.1 line,
+        // co-authorization only runs via V3 frames — that is a known,
+        // named backlog, not a silent failure.
         case proto.TwinSyncType.ROTATION_APPROVAL_REQUEST:
-          _handleRotationApprovalRequest(sync.payload, senderDeviceId);
+          {
+            final requestingDevice = event.senderDeviceId;
+            if (requestingDevice == null) {
+              _log.warn('§7.5 ROTATION_APPROVAL_REQUEST without device identifier '
+                  '(delivery without device layer, §14.2) — discarded: the '
+                  'approval would not be addressable to any device');
+              break;
+            }
+            _handleRotationApprovalRequest(sync.payload, requestingDevice);
+          }
           break;
         case proto.TwinSyncType.ROTATION_APPROVAL_RESPONSE:
-          _handleRotationApprovalResponse(sync.payload, senderDeviceId);
+          {
+            final respondingDevice = event.senderDeviceId;
+            if (respondingDevice == null) {
+              _log.warn('§7.5 ROTATION_APPROVAL_RESPONSE without device identifier '
+                  '(delivery without device layer, §14.2) — discarded: an '
+                  'approval without a nameable device counts toward no '
+                  'quorum');
+              break;
+            }
+            _handleRotationApprovalResponse(sync.payload, respondingDevice);
+          }
+          break;
+        case proto.TwinSyncType.TWIN_IDENTITY_DELETED:
+          _handleTwinIdentityDeleted(sync.payload);
           break;
         default:
           _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
@@ -18365,38 +14727,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return false;
     }
     pending.expiryTimer.cancel();
-    try {
-      final deviceKp = node.deviceKeyPair;
-      final ed25519Sig =
-          SodiumFFI().signEd25519(pending.rotationHash, deviceKp.ed25519PrivateKey);
-      final mlDsaSig =
-          OqsFFI().mlDsaSign(pending.rotationHash, deviceKp.mlDsaPrivateKey);
-
-      final token = proto.RotationApprovalToken()
-        ..deviceNodeId = identity.deviceNodeId
-        ..rotationHash = pending.rotationHash
-        ..deviceEd25519Sig = ed25519Sig
-        ..deviceMlDsaSig = mlDsaSig;
-      final response = proto.RotationApprovalResponsePayload()
-        ..token = token
-        ..rejected = false;
-
-      // Addressed at the Primary that asked, not fanned out: only that device
-      // holds `_pendingRotationHash` and can consume the token. Every other
-      // twin would take the "no rotation pending" branch in
-      // `_handleRotationApprovalResponse` — pure traffic and a misleading
-      // warn log on devices that did nothing wrong (Arbeitsregel #5).
-      _sendTwinSync(proto.TwinSyncType.ROTATION_APPROVAL_RESPONSE,
-          Uint8List.fromList(response.writeToBuffer()),
-          targetDeviceId: pending.requestingDeviceId);
-      _log.info('§7.5 ROTATION_APPROVAL_RESPONSE sent (approved by user) for '
-          '${rotationHashHex.substring(0, 8)} → device '
-          '${_hexShort(pending.requestingDeviceId)}');
-      return true;
-    } catch (e) {
-      _log.error('§7.5 approveRotation failed: $e');
-      return false;
-    }
+    // Gap G-9: the co-signature is made with the DEVICE key, and that has
+    // no holder any more (see [deviceX25519Pk]). Without it this device
+    // cannot approve — and an approval with the identity key would not be
+    // one: §7.5 rests precisely on the device key NOT being derived from
+    // the seed. Whoever stole the seed could otherwise co-sign.
+    _log.error('§7.5 approveRotation: not possible — the '
+        'device key has no holder in V4.1 (gap G-9). '
+        'The request $rotationHashHex stays unanswered.');
+    return false;
   }
 
   /// §7.5 point 5: the user explicitly rejected the rotation on this Linked
@@ -18559,8 +14898,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.info('§7.5 Collected approval ${_collectedApprovalTokens.length} '
           'from ${senderHex.substring(0, 8)}');
 
-      final pub = _identityPublisher;
-      final totalDevices = (pub?.delegations.length ?? 0) + 1;
+      // FORMERLY the device count came from `_identityPublisher.delegations`.
+      // Without a publisher `_devices` is the only set this device keeps
+      // about its twins — it is not the same (it also counts legacy twins
+      // without delegation), but it is the only measured number instead of
+      // a guessed one. Gap G-9.
+      final totalDevices = _devices.isEmpty ? 1 : _devices.length;
       final required = rotationQuorum(totalDevices);
       if (_collectedApprovalTokens.length + 1 >= required) {
         _rotationApprovalCompleter?.complete();
@@ -18577,29 +14920,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// started the rotation.
   void _sendRotationRejectionAlert(Uint8List rejectingDeviceId,
       {Uint8List? rotationHash}) {
-    final rotHash = rotationHash ?? _pendingRotationHash ?? Uint8List(0);
-    final deviceKp = node.deviceKeyPair;
-    final alert = proto.RotationRejectionAlertPayload()
-      ..userId = identity.userId
-      ..deviceNodeId = rejectingDeviceId
-      ..rotationHash = rotHash
-      ..deviceEd25519Sig = SodiumFFI().signEd25519(rotHash, deviceKp.ed25519PrivateKey)
-      ..deviceMlDsaSig = OqsFFI().mlDsaSign(rotHash, deviceKp.mlDsaPrivateKey);
-
-    final payloadBytes = Uint8List.fromList(alert.writeToBuffer());
-    for (final contact in _contacts.values) {
-      if (contact.status != 'accepted') continue;
-      try {
-        sendToUser(
-          recipientUserId: contact.nodeId,
-          messageType: proto.MessageTypeV3.MTV3_ROTATION_REJECTION_ALERT,
-          payload: payloadBytes,
-        );
-      } catch (e) {
-        _log.warn('§7.5 Failed to send ROTATION_REJECTION_ALERT to '
-            '${contact.displayName}: $e');
-      }
-    }
+    // Gap G-9 — the same cause as in [approveRotation]: the rejection is a
+    // SIGNED statement of the device, and the key for it has no holder.
+    // An unsigned rejection would be worthless (the receiver discards it,
+    // see `_handleRotationRejectionAlertV3`).
+    _log.error('§7.5: rejection of the rotation cannot be issued '
+        '— no holder for the device key (gap G-9). The '
+        'contacts learn NOTHING of the rejection.');
+    return;
   }
 
   // §7.1 LD-2: Pending pair requests awaiting user approval on this (Primary) device.
@@ -18619,10 +14947,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// that §7.1 step 2's plain-text device-ID comparison exists to prevent.
   static const Duration _pairRequestDisplayTtl = Duration(hours: 24);
 
-  void _handleDevicePairRequestV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+  void _handleDevicePairRequestV3(HarvestEvent event) {
     try {
-      final request = proto.DevicePairRequestV3.fromBuffer(f.payload);
-      final deviceIdHex = bytesToHex(sd);
+      final request = proto.DevicePairRequestV3.fromBuffer(event.payload);
+      // §7.1 is, like §7.5, a DEVICE procedure: the identifier here is not
+      // a note of origin, but the applicant itself. It becomes the key of
+      // `_pendingPairRequests`, from which `approvePairRequest` fetches it
+      // back via `hexToBytes` and SIGNS it as `newDeviceId` into the
+      // delegation certificate (:11802-11806). An invented value would thus
+      // not merely be a wrong log entry, but a power of attorney for a
+      // device that does not exist.
+      //
+      // If the identifier is missing, the request is discarded — not parked
+      // with a placeholder. Unlike with the branches further below, there is
+      // no partial benefit here that could be rescued: without an applicant
+      // there is nothing to approve (§14.1: "subject, not a signpost").
+      final requestingDevice = event.senderDeviceId;
+      if (requestingDevice == null) {
+        _log.warn('DEVICE_PAIR_REQUEST without device identifier (delivery without '
+            'device layer, §14.2) — discarded: the delegation certificate '
+            'needs the requesting device as subject');
+        return;
+      }
+      final deviceIdHex = bytesToHex(requestingDevice);
 
       // §7.1 LD-11: drop our OWN pairing request when it comes back to us.
       //
@@ -18641,12 +14988,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // device id under multi-identity. `deviceEd25519Pk` is written from
       // `node.deviceKeyPair.ed25519PublicKey` in `sendDevicePairRequest` and
       // is per-node, so the comparison is exact on every identity.
-      if (constantTimeEquals(Uint8List.fromList(request.deviceEd25519Pk),
-          node.deviceKeyPair.ed25519PublicKey)) {
-        _log.debug('Ignoring own DEVICE_PAIR_REQUEST echoed back from the '
-            'shared user mailbox');
-        return;
-      }
+      // FORMERLY the echo of the OWN pairing request was recognised here by
+      // comparing the device signing key sent along against the own one.
+      // Without a holder for the device key (gap G-9) the comparison cannot
+      // be carried out.
+      //
+      // The echo case cannot occur at present anyway: it arose because the
+      // request ran via the shared user mailbox, and that fell with the V3
+      // store-and-forward. The gap stays noted so that it is closed
+      // together with G-9.
 
       _log.info('DEVICE_PAIR_REQUEST from device $deviceIdHex');
 
@@ -18655,22 +15005,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         return;
       }
 
-      // §7.1 LD-9: auto-approve renewal from known linked devices
-      final pub = _identityPublisher;
-      if (pub != null) {
-        final isKnownLinked = pub.delegations
-            .any((d) => bytesToHex(d.deviceId) == deviceIdHex);
-        if (isKnownLinked) {
-          _log.info('LD-9: auto-approving renewal for known linked device '
-              '${deviceIdHex.substring(0, 8)}');
-          _pendingPairRequests[deviceIdHex] = _PendingPairRequest(
-            request: request,
-            receivedAtMs: DateTime.now().millisecondsSinceEpoch,
-          );
-          approvePairRequest(deviceIdHex);
-          return;
-        }
-      }
+      // §7.1 LD-9 AUTO-APPROVAL: DROPPED (gap G-9).
+      //
+      // It recognised an already known linked device by
+      // `_identityPublisher.delegations` and approved the renewal without
+      // asking. Without this list "already known" cannot be established.
+      //
+      // THE FAILURE GOES IN THE SAFE DIRECTION and is therefore NOT
+      // replaced: the request falls into the ordinary path below and waits
+      // for the user's explicit approval. Recognising it via `_devices`
+      // instead would be a different yardstick (every device stands there,
+      // including one without a valid delegation) — an auto-approval on a
+      // weaker basis is not a restoration but a lowering.
+      _log.info('LD-9: no auto-approval possible (gap G-9) — '
+          'renewal of ${deviceIdHex.substring(0, 8)} goes to '
+          'manual approval.');
 
       _pendingPairRequests[deviceIdHex] = _PendingPairRequest(
         request: request,
@@ -18700,44 +15049,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// carries the DEVICE_PAIR_APPROVE direction back.
   @override
   Future<bool> sendDevicePairRequest() async {
+    // Gap G-9: the pairing request CARRIES the device signing keys of this
+    // device — they are its content, not its envelope. Without a holder
+    // there is nothing to send, and a request with empty key fields would
+    // be admitted by the primary as a half-registered device (§7.5
+    // "half-registered").
+    _log.error('sendDevicePairRequest: not possible — the '
+        'device signature keys have no holder in V4.1 '
+        '(gap G-9).');
+    return false;
+    // ignore: dead_code
     final request = proto.DevicePairRequestV3()
-      ..deviceEd25519Pk = node.deviceKeyPair.ed25519PublicKey
-      ..deviceMlDsaPk = node.deviceKeyPair.mlDsaPublicKey
       ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
 
-    // Gate the DHT lookup to the first-contact case: LD-9 renewals already
-    // have the Primary registered as a twin in `_devices`, so `sendToUser`'s
-    // self-fanout reaches it directly with no lookup needed — firing the
-    // resolve there too would be a network round-trip on every renewal for
-    // no benefit (Arbeitsregel #5).
-    Uint8List? targetDeviceId;
-    if (!identity.isLinkedDevice) {
-      try {
-        final resolved = await node.resolveUserToDevices(identity.userId);
-        // Known caveat (documented at the `sendToUser` §7.2 self-fanout,
-        // which deliberately avoids this same lookup for that reason): the
-        // AuthManifest lives in a single DHT slot that both devices —
-        // sharing the same User-Sig-Key before pairing — can publish to,
-        // and the highest-sequence writer wins regardless of which device
-        // it is. The resolve can therefore return THIS device. Filter
-        // strictly to foreign device-ids; if nothing remains, treat the
-        // resolution as failed and fall through to the mailbox path.
-        final foreign = resolved
-            .where((d) => !constantTimeEquals(d, identity.deviceNodeId))
-            .toList();
-        if (foreign.isNotEmpty) {
-          targetDeviceId = foreign.first;
-          _log.info('sendDevicePairRequest: resolved Primary device '
-              '${_hexShort(targetDeviceId)} via AuthManifest — targeted send');
-        } else {
-          _log.debug('sendDevicePairRequest: AuthManifest resolution '
-              'returned no foreign device — falling back to shared mailbox');
-        }
-      } catch (e) {
-        _log.debug('sendDevicePairRequest: AuthManifest resolution failed '
-            '($e) — falling back to shared mailbox');
-      }
-    }
+    // FORMERLY the primary was resolved here via the AuthManifest in the
+    // 2D DHT (`node.resolveUserToDevices`), in order to address the pairing
+    // request specifically to it. §4.3 is replaced; the resolution no
+    // longer exists. Unreachable anyway, because the method above already
+    // exits because of gap G-9.
+    const Uint8List? targetDeviceId = null;
 
     // §7.1 P3: `sendToUser` returns `false` by documented contract whenever
     // the frame only reached L3 offline placement (S&F/mailbox) instead of
@@ -18768,11 +15098,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return sent;
   }
 
-  void _handleDevicePairApproveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
+  void _handleDevicePairApproveV3(HarvestEvent event) {
     try {
-      final approve = proto.DevicePairApproveV3.fromBuffer(f.payload);
-      final senderHex = bytesToHex(sd);
-      _log.info('DEVICE_PAIR_APPROVE from $senderHex — storing linked-device keys');
+      final approve = proto.DevicePairApproveV3.fromBuffer(event.payload);
+      // Two halves with different needs, hence NOT discarded wholesale
+      // here:
+      //   [a] check the certificate, store and apply keys — needs no
+      //       device. The proof for that is the certificate itself: it
+      //       verifies under our OWN user key, which only the seed-holding
+      //       primary can form.
+      //   [b] register the primary as a twin in `_devices` — that is pure
+      //       device bookkeeping and needs the identifier as key, name and
+      //       `deviceNodeIdHex`.
+      // If it is missing, [a] runs and [b] is skipped — exactly the split
+      // that the `senderTrust` branch a few lines further down already
+      // makes ("keys applied, but NOT registering ... as Primary twin"). No
+      // substitute value: an invented `deviceNodeIdHex` would be a twin
+      // entry to which every later `_sendTwinSync` sends.
+      final senderDevice = event.senderDeviceId;
+      final senderHex =
+          senderDevice == null ? null : bytesToHex(senderDevice);
+      _log.info('DEVICE_PAIR_APPROVE from '
+          '${CleonaService._hexShort(senderDevice)} — storing '
+          'linked-device keys');
 
       final parsed = DevicePairingService().parseApproval(approve);
 
@@ -18784,7 +15132,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       LinkedDeviceKeysStore.save(
         profileDir: profileDir,
-        fileEnc: _fileEnc,
+        store: store,
         keys: parsed,
       );
       applyLinkedDeviceKeys(parsed);
@@ -18800,12 +15148,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // both bail out on `_devices.length <= 1` and nothing can ever be sent
       // back to the Primary.
       //
-      // Source of the Primary's device id: the outer `senderDeviceId` (`sd`).
+      // Source of the Primary's device id: the outer `event.senderDeviceId`.
       // Deliberate, not a shortcut — `DevicePairApproveV3` carries no device id
       // of its own, and `DeviceDelegationCertProto.device_id` names *this*
-      // device (the delegate), not the issuer. `sd` is the only available
+      // device (the delegate), not the issuer. `event.senderDeviceId` is the only available
       // source, and it is gated three ways:
-      //   [1] the outer packet signature must have verified, which binds `sd`
+      //   [1] the outer packet signature must have verified, which binds `event.senderDeviceId`
       //       to a device that proved possession of the matching device
       //       keypair for this very packet;
       //   [2] the inner frame's `senderUserId` must be our own user id — the
@@ -18815,17 +15163,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       //       only the seed-holding Primary can produce.
       // Residual gap, documented rather than closed here: a captured approval
       // could be re-wrapped in a fresh outer packet signed with an attacker's
-      // device key, passing [1] while carrying a foreign `sd`. The inner
+      // device key, passing [1] while carrying a foreign `event.senderDeviceId`. The inner
       // messageId dedup in `handleApplicationFrame` blocks the straightforward
       // replay. Closing it properly needs an authenticated primary-device-id
       // field in `DevicePairApproveV3` — a proto change, out of scope here.
-      if (s.outerSigStatus != OuterSigStatus.verified) {
-        _log.warn('DEVICE_PAIR_APPROVE: outerSig=${s.outerSigStatus.name} — '
+      if (senderHex == null) {
+        _log.warn('DEVICE_PAIR_APPROVE: delivery without device layer '
+            '(§14.2) — keys applied, but NO twin entry '
+            'for the primary. Twin sync stays one-sided until the first '
+            'TWIN_ANNOUNCE via a V3 frame.');
+        return;
+      }
+      if (event.senderTrust != SenderTrust.verified) {
+        _log.warn('DEVICE_PAIR_APPROVE: outerSig=${event.senderTrust.name} — '
             'keys applied, but NOT registering $senderHex as Primary twin');
         return;
       }
       if (!constantTimeEquals(
-          Uint8List.fromList(f.senderUserId), identity.userId)) {
+          Uint8List.fromList(event.senderUserId), identity.userId)) {
         _log.warn('DEVICE_PAIR_APPROVE: senderUserId is not our own user id — '
             'NOT registering $senderHex as Primary twin');
         return;
@@ -18890,8 +15245,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.warn('approvePairRequest: no pending request for $requestingDeviceIdHex');
       return false;
     }
-    final request = pending.request;
-
+    // `pending.request` was unpacked here to register the device signing
+    // keys of the new device. This registration has no holder any more
+    // (gap G-9, noted further below); the certificate itself does not
+    // need it.
     final newDeviceId = hexToBytes(requestingDeviceIdHex);
     final result = DevicePairingService().buildApproval(
       identity: identity,
@@ -18923,12 +15280,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Kept immediately adjacent to `_addDeviceDelegation` — a device present in
     // `_devices` but missing from the Co-Auth sig-key set is half-registered
     // and would make the §7.5 rotation quorum under-count.
-    _identityPublisher?.addLinkedDeviceSigKeys(DeviceSigInfo(
-      deviceNodeId: newDeviceId,
-      deviceEd25519Pk: Uint8List.fromList(request.deviceEd25519Pk),
-      deviceMlDsaPk: Uint8List.fromList(request.deviceMlDsaPk),
-      isPrimary: false,
-    ));
+    // FORMERLY: `_identityPublisher.addLinkedDeviceSigKeys(...)`. Without a
+    // holder for the device signing keys the device stays half-registered
+    // per §7.5 — it stands in `_devices`, but counts in no quorum. The
+    // comment above names exactly this state ("half-registered"); it is
+    // now the normal case until gap G-9 is closed.
+    _log.warn('§7.5: device signature keys of '
+        '${bytesToHex(newDeviceId).substring(0, 8)} have no holder '
+        '(gap G-9) — the device does not count in the rotation quorum.');
 
     // Send the approval (KEM-encrypted, addressed AT the requesting device).
     //
@@ -18982,37 +15341,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return out;
   }
 
-  void _addDeviceDelegation(Uint8List deviceId, DeviceDelegation cert) {
-    // Register the device locally. `deviceId` IS the device node id here (the
-    // pair request is keyed by it), hence deviceNodeIdHex == the map key.
-    final deviceIdHex = bytesToHex(deviceId);
-    if (!_devices.containsKey(deviceIdHex)) {
-      final now = DateTime.now();
-      _devices[deviceIdHex] = DeviceRecord(
-        deviceId: deviceIdHex,
-        deviceName: 'Linked-${deviceIdHex.substring(0, 6)}',
-        platform: 'unknown',
-        firstSeen: now,
-        lastSeen: now,
-        deviceNodeIdHex: deviceIdHex,
-      );
-      _saveDevices();
-    }
-
-    // §7 (Einleitung): approving the delegation is what authorises the device,
-    // so the published device list has to grow with it. Unconditional (not
-    // inside the `containsKey` guard above): on an LD-9 renewal the record
-    // already exists, yet the publisher may still be missing the entry — e.g.
-    // after a restart in which the manifest was published before this device
-    // registry entry was reachable.
-    _syncAuthorizedDevicesToPublisher();
-
-    // Republish AuthManifest with the new delegation cert
-    _identityPublisher?.addDelegation(cert);
-    _log.info('Added device delegation for ${deviceIdHex.substring(0, 8)}, '
-        'republishing AuthManifest');
-  }
-
   /// §7.1 LD-7: Soft migration — apply LinkedDeviceKeys received via pairing
   /// to this IdentityContext. Called when the user opts to convert a legacy
   /// twin-device (seed-on-every-device) to the delegation model.
@@ -19047,57 +15375,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
-  /// §7.1 LD-8: Send per-device delegation rotation to a Linked Device.
-  /// Called from rotateIdentityKeys() BEFORE applying new keys locally,
-  /// so the TWIN_SYNC envelope is signed with the OLD User-Keys.
-  void _sendDelegationRotation({
-    required Uint8List targetDeviceId,
-    required int capabilities,
-    required int maxValidUntilMs,
-    required Uint8List newMasterSeed,
-    required Uint8List newEd25519Pk,
-    required Uint8List newMlDsaPk,
-    required Uint8List newX25519Pk,
-    required Uint8List newMlKemPk,
-    required Uint8List newX25519Sk,
-    required Uint8List newMlKemSk,
-  }) {
-    final delegEd = HdWallet.deriveDelegatedEd25519(newMasterSeed, targetDeviceId);
-    final mlDsaSeed = HdWallet.deriveDelegatedMlDsaSeed(newMasterSeed, targetDeviceId);
-    final delegMlDsa = OqsFFI().mlDsaKeypairDerand(mlDsaSeed);
-
-    // Cert signed with OLD User-Keys (Linked Device can verify)
-    final cert = DeviceDelegation.sign(
-      deviceId: targetDeviceId,
-      delegatedEd25519Pk: delegEd.publicKey,
-      delegatedMlDsaPk: delegMlDsa.publicKey,
-      capabilities: capabilities,
-      maxValidUntilMs: maxValidUntilMs,
-      userEd25519Sk: identity.ed25519SecretKey,
-      userMlDsaSk: identity.mlDsaSecretKey,
-    );
-
-    final payload = utf8.encode(jsonEncode({
-      'delegationRotation': true,
-      'targetDeviceId': bytesToHex(targetDeviceId),
-      'delegatedEd25519Pk': bytesToHex(delegEd.publicKey),
-      'delegatedEd25519Sk': bytesToHex(delegEd.secretKey),
-      'delegatedMlDsaPk': bytesToHex(delegMlDsa.publicKey),
-      'delegatedMlDsaSk': bytesToHex(delegMlDsa.secretKey),
-      'newUserEd25519Pk': bytesToHex(newEd25519Pk),
-      'newUserMlDsaPk': bytesToHex(newMlDsaPk),
-      'newUserX25519Pk': bytesToHex(newX25519Pk),
-      'newUserMlKemPk': bytesToHex(newMlKemPk),
-      'newUserX25519Sk': bytesToHex(newX25519Sk),
-      'newUserMlKemSk': bytesToHex(newMlKemSk),
-      'delegationCertProto': bytesToHex(cert.toProtoBytes()),
-    }));
-
-    _sendTwinSync(
-        proto.TwinSyncType.SETTINGS_CHANGED, Uint8List.fromList(payload));
-    _log.info('LD-8: delegation rotation sent to '
-        '${bytesToHex(targetDeviceId).substring(0, 8)}');
-  }
+  // `_sendDelegationRotation(...)` stood here: §7.1 LD-8 — after an
+  // emergency rotation every linked device gets its own freshly derived
+  // delegation material. Both callers are gone: [rotateIdentityKeys]
+  // aborts today before the first step (gaps G-3/G-9), and the list of
+  // devices to serve came from `_identityPublisher.delegations`, which no
+  // longer exists.
+  //
+  // ── READ THIS BEFORE REBUILDING THE SENDER (S392) ───────────────────
+  //
+  // The sender arms a second finding that sleeps today, and it is a
+  // silent one: after the first LD-8 rotation a Linked Device derives its
+  // `K_AB` from the WRONG key.
+  //
+  // §4.3 is normative and unambiguous:
+  //     dh_AB = X25519(founding_sk_A, founding_pk_B)
+  // Two further places say it again: "`K_AB` survives every rotation (it
+  // is derived from the **founding** keys, §4.3, §15.2)" and "The
+  // founding keys are stable across every rotation — they are the anchor
+  // `K_AB` falls out of".
+  //
+  // [IdentityContext.foundingEd25519SecretKey] recomputes the founding
+  // key from the HD wallet — and without a seed it falls back to the
+  // CURRENT one. A Linked Device has no seed (§14.6.2). Until S392 that
+  // was harmless because `rotateDelegation` never replaced
+  // `ed25519SecretKey`: the "current" key still WAS the founding key.
+  // Since the §14.4 co-rotation the two drift apart.
+  //
+  // THE PEER CARRIES THE CONSEQUENCE: it derives `dh_AB` from the
+  // founding pubkey off the card. Both sides then compute a different
+  // `K_AB` — no pair code matches any more, ladder step 3 fails, the post
+  // box day values do not line up, and none of it reports an error.
+  //
+  // The fix is NOT obvious, which is why it is not built: handing the
+  // founding SK to every device would undercut §14.4 (a locked-out device
+  // could keep signing in the identity's name), and storing `K_AB` per
+  // contact and syncing it would leave a locked-out device with every
+  // pair code. Three options with computed cost: `BUGFIX_CURRENT.md`,
+  // S392-17.
 
   /// §7.1 LD-8: Handle delegation rotation on a Linked Device.
   Future<void> _handleDelegationRotation(Map<String, dynamic> json) async {
@@ -19123,6 +15438,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final newUserMlKemPk = hexToBytes(json['newUserMlKemPk'] as String);
     final newUserX25519Sk = hexToBytes(json['newUserX25519Sk'] as String);
     final newUserMlKemSk = hexToBytes(json['newUserMlKemSk'] as String);
+    // §14.4: the identity signature keys rotate along at lock-out and "sit
+    // under the shared key on every device". They travel in this very
+    // message — same channel, same sealing as the two KEM SKs above. Before
+    // S392 they were absent and `rotateDelegation` set only the public
+    // halves, which locked the device out of its own system channels from
+    // the first rotation on (report `mycelium/berichte/S392-FIX-LD8.md`).
+    //
+    // Checked BEFORE anything is mutated, and rejected as a whole: a
+    // rotation that sets the public keys but not the secret ones is exactly
+    // the broken state S392 removed. Half a rotation is worse than none —
+    // none keeps the device working, half locks it out silently.
+    final newUserEd25519SkHex = json['newUserEd25519Sk'];
+    final newUserMlDsaSkHex = json['newUserMlDsaSk'];
+    if (newUserEd25519SkHex is! String || newUserMlDsaSkHex is! String) {
+      _log.error('LD-8: rotation message carries no user signature SKs '
+          '(§14.4 co-rotation) — rejecting the whole rotation; applying only '
+          'the public halves would lock this device out of its own records');
+      return;
+    }
+    final newUserEd25519Sk = hexToBytes(newUserEd25519SkHex);
+    final newUserMlDsaSk = hexToBytes(newUserMlDsaSkHex);
 
     final newLinkedKeys = LinkedDeviceKeys(
       delegatedEd25519Pk: hexToBytes(json['delegatedEd25519Pk'] as String),
@@ -19138,13 +15474,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     LinkedDeviceKeysStore.save(
       profileDir: profileDir,
-      fileEnc: _fileEnc,
+      store: store,
       keys: newLinkedKeys,
     );
 
     identity.rotateDelegation(
       newUserEd25519Pk: newUserEd25519Pk,
       newUserMlDsaPk: newUserMlDsaPk,
+      newUserEd25519Sk: newUserEd25519Sk,
+      newUserMlDsaSk: newUserMlDsaSk,
       newUserX25519Pk: newUserX25519Pk,
       newUserMlKemPk: newUserMlKemPk,
       newUserX25519Sk: newUserX25519Sk,
@@ -19152,39 +15490,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       newLinkedKeys: newLinkedKeys,
     );
 
-    node.broadcastAddressUpdate();
-    final pub = _identityPublisher;
-    if (pub != null) {
-      pub.stop();
-      unawaited(pub.start());
-    }
+    // `node.broadcastAddressUpdate()` + manifest republish stood here
+    // (§4.3/§5.11, fallen with the CUT — T).
     onStateChanged?.call();
     _log.info('LD-8: delegation rotation applied from Primary — '
         'chain length ${identity.rotationChain.length}');
   }
 
-  void _handleDeviceRevocationV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void _handleDeviceRevocationV3(HarvestEvent event) {
     // V3 direct: inner payload is the DeviceRecord protobuf, already
     // decrypted + authenticated by the V3 pipeline. §26 authorization check
     // preserved: only accepted contacts may revoke their own devices for us.
-    final senderHex = frame.senderUserId.hex;
+    final senderHex = event.senderUserId.hex;
     final contact = _contacts[senderHex];
     if (contact == null || contact.status != 'accepted') return;
 
     try {
-      final revokedDevice = proto.DeviceRecord.fromBuffer(frame.payload);
+      final revokedDevice = proto.DeviceRecord.fromBuffer(event.payload);
       final deviceIdShort = revokedDevice.deviceId.hex.substring(0, 8);
 
       // §26 Phase 4: remove by deviceNodeId (preferred, precise)
       if (revokedDevice.deviceNodeId.isNotEmpty) {
         final revokedNodeId = Uint8List.fromList(revokedDevice.deviceNodeId);
         final revokedNodeIdHex = bytesToHex(revokedNodeId);
-        final removed = node.routingTable.removePeerByNodeId(revokedNodeId);
+        // The entry in the routing table fell with it (T). What remains
+        // and what counts is the device list at the contact record.
         contact.deviceNodeIds.remove(revokedNodeIdHex);
         _saveContacts();
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
-            'device $deviceIdShort, routing entry ${removed ? "removed" : "not found"} '
-            '(deviceNodeId ${revokedNodeIdHex.substring(0, 8)})');
+        _log.debug('DEVICE_REVOKED — displayName="${contact.displayName}"');
+        _log.info('DEVICE_REVOKED: '
+            'device $deviceIdShort, deviceNodeId '
+            '${revokedNodeIdHex.substring(0, 8)} removed from the contact '
+            'record');
         return;
       }
 
@@ -19194,23 +15531,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           .toSet();
 
       if (revokedAddresses.isEmpty) {
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
+        _log.debug('DEVICE_REVOKED — displayName="${contact.displayName}"');
+        _log.info('DEVICE_REVOKED: '
             'device $deviceIdShort revoked (no deviceNodeId or addresses to prune)');
         return;
       }
 
-      final peer = node.routingTable.getPeerByUserId(contact.nodeId);
-      if (peer != null) {
-        final beforeCount = peer.addresses.length;
-        peer.addresses.removeWhere(
-            (a) => revokedAddresses.contains('${a.ip}:${a.port}'));
-        final removed = beforeCount - peer.addresses.length;
-        _log.info('DEVICE_REVOKED from ${contact.displayName}: '
-            'removed $removed/${revokedAddresses.length} addresses (fallback)');
-      } else {
-        _log.debug('DEVICE_REVOKED from ${contact.displayName}: '
-            'no PeerInfo in routing table');
-      }
+      // FORMERLY: remove the revoked addresses from the contact's
+      // `PeerInfo`. There is no address list per contact any more
+      // (see [peerSummaries], gap G-11) — and thus nothing to trim either.
+      // The revocation takes effect via the device list above.
+      _log.debug('DEVICE_REVOKED — displayName="${contact.displayName}"');
+      _log.info('DEVICE_REVOKED: '
+          'device $deviceIdShort, ${revokedAddresses.length} address(es) '
+          'named — V4.1 keeps no peer address list, nothing to '
+          'trim (gap G-11)');
     } catch (e) {
       _log.error('DEVICE_REVOKED processing failed: $e');
     }
@@ -19221,7 +15556,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // peer's, keep the latest per (call, peer), and hand it out. It renders
   // nothing and it starts and stops no camera. The display belongs to V1.6
   // (`call_screen.dart`) and V2.3 (`video_engine.dart`), the send call site to
-  // V2.1 (`call_service.dart`) — see `BUILD_REQUEST_V1.12.md`.
+  // V2.1 (`call_service.dart`) — see `BUGFIX_CURRENT.md AV-V1.12`.
   //
   // Invariante I12 runs through the whole block: a received state is a report
   // about the far side. Nothing here may act on the local capture session, and
@@ -19327,11 +15662,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// network: a reordered older frame would otherwise reinstate "video off"
   /// while frames are arriving, which is the very picture V1.12 exists to
   /// prevent.
-  void handleCallMediaStateV3(proto.ApplicationFrameV3 frame,
-      Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
+  void handleCallMediaStateV3(HarvestEvent event) {
     proto.CallMediaState msg;
     try {
-      msg = proto.CallMediaState.fromBuffer(frame.payload);
+      msg = proto.CallMediaState.fromBuffer(event.payload);
     } catch (e) {
       _log.error('CALL_MEDIA_STATE parse failed: $e');
       return;
@@ -19344,7 +15678,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     final callIdHex = msg.callId.hex;
-    final peerHex = frame.senderUserId.hex;
+    final peerHex = event.senderUserId.hex;
     final key = _mediaStateKey(callIdHex, peerHex);
     final seq = msg.stateSeq.toInt();
 
@@ -19367,7 +15701,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       sendingVideo: msg.sendingVideo,
       videoOffReason: reason,
       stateSeq: seq,
-      receivedAt: snapshot.receivedAt,
+      receivedAt: event.harvestedAt,
     );
     _peerCallMediaStates[key] = state;
 
@@ -19392,7 +15726,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // ──────────────────────────── V3 Helpers ────────────────────────────
 
   /// Short hex prefix for log lines (8 chars / 4 bytes).
-  static String _hexShort(Uint8List bytes) {
+  /// Short form for log lines. Tolerates `null` since the device identifier
+  /// is optional (§14.1: the V4.1 path knows no device) — a log line is
+  /// no reason to insert an untruth.
+  static String _hexShort(Uint8List? bytes) {
+    if (bytes == null) return 'kein-Geraet';
     final n = bytes.length < 4 ? bytes.length : 4;
     final sb = StringBuffer();
     for (var i = 0; i < n; i++) {
@@ -19402,26 +15740,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 }
 
-/// §2.2.4: V3-direct adapter (Welle 2A). IdentityPublisher hands us a
-/// `(MessageTypeV3, payload, peer)` triple; we forward straight to
-/// `CleonaNode.sendInfraTo`, which wraps in InfrastructureFrameV3 with the
-/// proper Outer Device-Sig + KEM-AEAD per §2.3.5. Fire-and-forget — the
-/// publisher broadcasts to K closest replicators and tolerates per-peer
-/// failure (replication factor covers it).
-class _IdentityPublisherSender implements IdentityPublisherSender {
-  final CleonaNode _node;
-  _IdentityPublisherSender(this._node);
-
-  @override
-  Future<void> send(proto.MessageTypeV3 messageType, Uint8List payload,
-      PeerInfo peer) async {
-    await _node.sendInfraTo(
-      messageType: messageType,
-      innerPayload: payload,
-      recipientDeviceId: Uint8List.fromList(peer.nodeId),
-    );
-  }
-}
+// `_IdentityPublisherSender` stood here — the adapter that took a
+// `(MessageTypeV3, payload, peer)` triple off the `IdentityPublisher` and
+// passed it on to `CleonaNode.sendInfraTo`. Publisher and node are both
+// gone (see the field `_identityPublisher` above, T).
 
 /// Stage-2 reassembly buffer for incoming MEDIA_CHUNK frames.
 /// Holds chunks indexed by chunk_index until MEDIA_COMPLETE arrives,
@@ -19458,47 +15780,9 @@ class _MediaChunkBuffer {
 /// This is NOT a retry queue — the entry is flushed exactly once per
 /// onNetworkChanged edge-trigger and then either removed (L3 placed) or kept
 /// for the next edge (still 0 peers).
-class _OutboxEntry {
-  /// Wire message ID (hex string), correlates to UiMessage.id.
-  final String messageIdHex;
-  /// Recipient user ID (hex string) for erasure distribution routing.
-  final String recipientUserIdHex;
-  /// Ed25519 pubkey of the recipient (hex) — used for mailbox-id derivation.
-  final String? recipientEd25519PkHex;
-  /// Serialized NetworkPacketV3 bytes (base64-encoded for JSON storage).
-  final String canonicalPacketB64;
-  /// When the original send was attempted (for TTL / expired-status check).
-  final int sentAtMs;
-  /// A7 Latest-Wins: message type name for system-message dedup.
-  final String? messageType;
-
-  _OutboxEntry({
-    required this.messageIdHex,
-    required this.recipientUserIdHex,
-    this.recipientEd25519PkHex,
-    required this.canonicalPacketB64,
-    required this.sentAtMs,
-    this.messageType,
-  });
-
-  Map<String, dynamic> toJson() => {
-        'messageIdHex': messageIdHex,
-        'recipientUserIdHex': recipientUserIdHex,
-        if (recipientEd25519PkHex != null) 'recipientEd25519PkHex': recipientEd25519PkHex,
-        'canonicalPacketB64': canonicalPacketB64,
-        'sentAtMs': sentAtMs,
-        if (messageType != null) 'messageType': messageType,
-      };
-
-  static _OutboxEntry fromJson(Map<String, dynamic> json) => _OutboxEntry(
-        messageIdHex: json['messageIdHex'] as String,
-        recipientUserIdHex: json['recipientUserIdHex'] as String,
-        recipientEd25519PkHex: json['recipientEd25519PkHex'] as String?,
-        canonicalPacketB64: json['canonicalPacketB64'] as String,
-        sentAtMs: json['sentAtMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
-        messageType: json['messageType'] as String?,
-      );
-}
+// S368: here stood `class _OutboxEntry` — the record of the V3 outbox with
+// `canonicalPacketB64` (serialised `NetworkPacketV3` bytes). In the whole
+// tree it was only created by its own `fromJson`.
 
 /// Top-level entry point for [Isolate.run]: reads the binary, RS-encodes it,
 /// and stores fragments to disk — entirely off the main thread.

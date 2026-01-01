@@ -1,7 +1,8 @@
 import 'dart:math';
-import 'package:cleona/core/crypto/file_encryption.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/storage/message_store.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/util/hex.dart';
 
 /// PollManager — local poll CRUD, vote aggregation, persistence (§24).
 ///
@@ -11,7 +12,7 @@ import 'package:cleona/core/service/service_types.dart';
 class PollManager {
   final String profileDir;
   final String identityId;
-  final FileEncryption? _fileEnc;
+  final MessageStore? _store;
   final CLogger _log;
 
   /// All polls owned or known by this identity, keyed by pollId.
@@ -22,30 +23,28 @@ class PollManager {
   PollManager({
     required this.profileDir,
     required this.identityId,
-    FileEncryption? fileEnc,
-  })  : _fileEnc = fileEnc,
-        _log = CLogger.get('polls[$identityId]');
+    this._store,
+  })  : // profileDir is a constructor parameter (per identity) -> directly usable.
+        _log = CLogger.get('polls[${shortHex(identityId)}]',
+            profileDir: profileDir);
 
   // ── Persistence ────────────────────────────────────────────────────────
 
   void load() {
-    if (_fileEnc == null) {
+    if (_store == null) {
       _loaded = true;
       return; // Proxy mode (IPC client)
     }
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/polls.json');
-      if (json != null) {
-        for (final entry in json.entries) {
-          try {
-            polls[entry.key] =
-                Poll.fromJson(entry.value as Map<String, dynamic>);
-          } catch (e) {
-            _log.warn('Skipping corrupt poll ${entry.key}: $e');
-          }
+      // S366: from the storage (area `polls`) instead of from `polls.json`.
+      for (final entry in _store.loadArea('polls').entries) {
+        try {
+          polls[entry.key] = Poll.fromJson(entry.value);
+        } catch (e) {
+          _log.warn('Skipping corrupt poll ${entry.key}: $e');
         }
-        _log.info('Loaded ${polls.length} polls');
       }
+      _log.info('Loaded ${polls.length} polls');
       _loaded = true;
     } catch (e) {
       _log.warn('Failed to load polls: $e');
@@ -53,19 +52,37 @@ class PollManager {
   }
 
   void save() {
-    if (_fileEnc == null) return;
+    if (_store == null) return;
     if (!_loaded && polls.isEmpty) {
       _log.warn('REFUSED to save empty poll store — load may have failed');
       return;
     }
     try {
-      final json = <String, dynamic>{};
-      for (final entry in polls.entries) {
-        json[entry.key] = entry.value.toJson();
-      }
-      _fileEnc.writeJsonFile('$profileDir/polls.json', json);
+      _store.replaceArea('polls', {
+        for (final e in polls.entries) e.key: e.value.toJson(),
+      });
     } catch (e) {
       _log.warn('Failed to save polls: $e');
+    }
+  }
+
+  /// Writes ONE poll. §21.4.1: `polls.json` was rewritten entirely
+  /// on every vote — 11 triggers, no cap, no deadline. That
+  /// is the same pattern that led to the quadratic curve for the messages,
+  /// only on a small scale. Whoever changes a single poll
+  /// calls this instead of [save].
+  void persistPoll(String pollId) {
+    final s = _store;
+    if (s == null) return;
+    final poll = polls[pollId];
+    if (poll == null) {
+      s.removeEntry('polls', pollId);
+      return;
+    }
+    try {
+      s.putEntry('polls', pollId, poll.toJson());
+    } catch (e) {
+      _log.warn('Failed to persist poll $pollId: $e');
     }
   }
 
@@ -73,7 +90,7 @@ class PollManager {
 
   String createPoll(Poll poll) {
     polls[poll.pollId] = poll;
-    save();
+    persistPoll(poll.pollId);
     _log.info('Created poll ${poll.pollId}: ${poll.question}');
     return poll.pollId;
   }
@@ -81,7 +98,7 @@ class PollManager {
   bool deletePoll(String pollId) {
     final removed = polls.remove(pollId);
     if (removed != null) {
-      save();
+      persistPoll(pollId);
       _log.info('Deleted poll $pollId');
       return true;
     }
@@ -94,7 +111,7 @@ class PollManager {
     if (poll == null || poll.closed) return false;
     poll.closed = true;
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    persistPoll(pollId);
     return true;
   }
 
@@ -103,7 +120,7 @@ class PollManager {
     if (poll == null || !poll.closed) return false;
     poll.closed = false;
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    persistPoll(pollId);
     return true;
   }
 
@@ -123,7 +140,7 @@ class PollManager {
       ));
     }
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    persistPoll(pollId);
     return true;
   }
 
@@ -139,7 +156,7 @@ class PollManager {
       }
     }
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    persistPoll(pollId);
     return true;
   }
 
@@ -148,7 +165,7 @@ class PollManager {
     if (poll == null) return false;
     poll.settings.deadline = newDeadline;
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    persistPoll(pollId);
     return true;
   }
 
@@ -180,7 +197,9 @@ class PollManager {
     }
     poll.votes[key] = vote;
     poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    // The most frequent change of all — and the one that formerly
+    // rewrote all polls on EVERY vote.
+    persistPoll(vote.pollId);
     return true;
   }
 

@@ -40,8 +40,10 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:meta/meta.dart';
 
 import 'package:cleona/core/calls/voice_report.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 
 export 'package:cleona/core/calls/voice_report.dart';
 
@@ -359,18 +361,21 @@ class VoiceNativeLibrary {
       // Statically linked via CleonaNative.podspec, same as the other native
       // libraries. The symbols must be listed in
       // ios/CleonaNative/cleona_exported_symbols.txt or the linker dead-strips
-      // them and the lookup below throws at runtime — see BUILD_REQUEST.md.
+      // them and the lookup below throws at runtime (`_cleona_voice_*`
+      // wildcard, BUGFIX_CURRENT.md AV-V0.2 §1).
       final lib = VoiceNativeLibrary._(DynamicLibrary.process(), baseName);
       _cache[baseName] = lib;
       return lib;
     }
 
+    // `AppPaths.bundleDir` instead of `File(exe).parent.path` (S367) — the
+    // daemon lies in `<bundleDir>/bin/`, its own directory is no longer
+    // the bundle root. For the GUI both are the same.
     final candidates = <String>[];
     if (Platform.isLinux) {
       candidates.add('lib$baseName.so');
       try {
-        final exeDir = File(Platform.resolvedExecutable).parent.path;
-        candidates.add('$exeDir/lib/lib$baseName.so');
+        candidates.add('${AppPaths.bundleDir}/lib/lib$baseName.so');
       } catch (_) {/* resolvedExecutable can throw in odd environments */}
       final home = Platform.environment['HOME'] ?? '';
       if (home.isNotEmpty) {
@@ -385,11 +390,13 @@ class VoiceNativeLibrary {
     } else if (Platform.isWindows) {
       candidates.add('$baseName.dll');
       try {
-        final exeDir = File(Platform.resolvedExecutable).parent.path;
-        candidates.add('$exeDir\\$baseName.dll');
+        candidates.add('${AppPaths.bundleDir}\\$baseName.dll');
       } catch (_) {/* see above */}
     } else if (Platform.isMacOS) {
       candidates.add('$baseName.dylib');
+      try {
+        candidates.add('${AppPaths.macFrameworksDir}/$baseName.dylib');
+      } catch (_) {/* see above */}
       candidates.add('@executable_path/../Frameworks/$baseName.dylib');
     }
 
@@ -451,6 +458,23 @@ class VoiceSession {
   /// Which native library backs this session — `cleona_voice` on a device,
   /// `cleona_voice_mock` in tests.
   String get backendLibrary => _lib.baseName;
+
+  /// Test-only escape hatch: the native session pointer, opaque.
+  ///
+  /// `test/smoke/*.dart` suites that drive a REAL [VoiceSession] through the
+  /// production wiring (`voice_event_dispatch.dart`, V1.5/V1.10) still need
+  /// `native/cleona_voice/mock/cleona_voice_mock.h`'s test-only control
+  /// functions (`cleona_voice_mock_set_routes`, `cleona_voice_mock_push_event`
+  /// — not part of the ABI production code calls) to simulate a route change
+  /// or an interruption. Those take the exact `cleona_voice_session_t*` this
+  /// object wraps, which this class otherwise keeps private on purpose (I2:
+  /// nothing outside this file gets to poke at a live native session). This
+  /// getter is the one, explicit, `@visibleForTesting`-gated exception —
+  /// never referenced from `lib/` itself:
+  /// `grep -rn debugNativeSessionPointer lib --include=*.dart` must show only
+  /// this declaration.
+  @visibleForTesting
+  Pointer<Void> get debugNativeSessionPointer => _session.cast<Void>();
 
   /// Opens one OS duplex voice session.
   ///

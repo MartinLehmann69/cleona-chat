@@ -1,17 +1,36 @@
+import 'dart:async';
 import 'dart:typed_data';
-import 'package:flutter/material.dart';
-import 'package:cleona/core/identity/identity_manager.dart';
-import 'package:cleona/core/network/nfc_contact_exchange.dart';
-import 'package:cleona/core/network/nfc_platform_bridge.dart';
-import 'package:cleona/core/service/service_interface.dart';
 
-/// NFC Contact Exchange Screen.
+import 'package:flutter/material.dart';
+import 'package:cleona/core/contact/invitation_card_reader.dart'
+    show InvitationReading;
+import 'package:cleona/core/contact/nfc_platform_bridge.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/invitation_messages.dart';
+import 'package:cleona/ui/components/invitation_redeem.dart';
+
+/// NFC contact exchange (V4.2 §15.5, §15.10 "NFC exchange").
 ///
-/// Flow:
-///   1. Shows current identity name + "Hold phones together"
-///   2. Waits for NFC tap
-///   3. Shows received contact info + Confirm/Cancel
-///   4. On confirm: creates contact with Verification Level 3
+/// ── THE PATH (S388-BAU-KONTAKT) ─────────────────────────────────────────
+///
+///   1. On opening, the screen issues a card "One person" for the
+///      IN-PERSON hand-over (`issueInvitationCard(faceToFace: true)`)
+///      — without a text line. An NFC session begins only here; both devices
+///      must have opened this screen (owner decision 15.09.2026:
+///      automatic ONLY if both are actively in the contact function).
+///   2. The touch exchanges the packed cards of both sides.
+///   3. The received card is read like a QR code; "Accept" redeems
+///      it. The other side accepts the request without a second question, because
+///      ITS card was issued in person. If both do it, these are two
+///      mutual requests, and each is answered automatically.
+///
+/// Until S388 the V3 exchange with `addNfcContact` stood here: a tap created
+/// an `accepted` contact immediately, without request and without answer.
+///
+/// If the screen is left before any touch, it revokes its card
+/// again — otherwise after ten visits the cap would be reached (§15.3).
 class NfcExchangeScreen extends StatefulWidget {
   final ICleonaService service;
   const NfcExchangeScreen({super.key, required this.service});
@@ -23,9 +42,15 @@ class NfcExchangeScreen extends StatefulWidget {
 class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   NfcSessionManager? _session;
   NfcSessionState _state = NfcSessionState.idle;
-  NfcContactPayload? _receivedPayload;
+  InvitationReading? _reading;
   String? _error;
+  String? _result;
   bool _starting = true;
+  bool _sending = false;
+
+  /// The card issued for this session (identifier for the revocation).
+  String? _ownCard;
+  bool _touched = false;
 
   @override
   void initState() {
@@ -34,88 +59,48 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   }
 
   Future<void> _initSession() async {
-    final service = widget.service;
-
-    // Get active identity info (same as QR screen)
-    final activeIdentity = IdentityManager().getActiveIdentity();
-    final nodeIdHex = activeIdentity?.nodeIdHex ?? service.nodeIdHex;
-    final displayName = activeIdentity?.displayName ?? service.displayName;
-
-    // Get crypto keys from the service
-    final ed25519Pk = service.ed25519PublicKey;
-    final mlDsaPk = service.mlDsaPublicKey;
-    final x25519Pk = service.x25519PublicKey;
-    final mlKemPk = service.mlKemPublicKey;
-
-    if (ed25519Pk == null || mlDsaPk == null || x25519Pk == null || mlKemPk == null) {
+    final locale = AppLocale.read(context);
+    final r = await widget.service.issueInvitationCard(faceToFace: true);
+    if (!mounted) return;
+    final card = r.card;
+    if (card == null) {
       setState(() {
         _state = NfcSessionState.failed;
-        _error = 'Crypto-Schlüssel nicht verfügbar';
+        _error = invitationIssueRefusalText(
+            locale, r.refusal ?? InvitationIssueRefusal.failed);
         _starting = false;
       });
       return;
     }
-
-    // Build address list (same as QR screen) — incl. IPv6 global (§27)
-    final ipv4Ips = service.localIps.where((ip) => !ip.contains(':')).take(2);
-    final ipv6Ips = service.localIps.where((ip) => ip.contains(':') && !ip.toLowerCase().startsWith('fe80:')).take(1);
-    final ownAddrs = [...ipv4Ips, ...ipv6Ips]
-        .map((ip) => ip.contains(':') ? '[$ip]:${service.port}' : '$ip:${service.port}')
-        .toList();
-    if (service.publicIp != null && service.publicPort != null) {
-      ownAddrs.add('${service.publicIp}:${service.publicPort}');
-    }
-
-    // Build seed peers — include allAddresses for IPv4+IPv6 bridging (§27)
-    final validPeers = service.peerSummaries
-        .where((p) => p.address.isNotEmpty && p.port > 0)
-        .take(5)
-        .toList();
-    final seedPeers = validPeers
-        .map((p) => NfcPeerEntry(
-              nodeId: _hexToBytes(p.nodeIdHex),
-              addresses: p.allAddresses.isNotEmpty
-                  ? p.allAddresses.take(2).toList()
-                  : [p.address.contains(':') ? '[${p.address}]:${p.port}' : '${p.address}:${p.port}'],
-            ))
-        .toList();
-
-    // Create NfcContactExchange with real crypto
-    final exchange = NfcContactExchange(
-      ownNodeId: _hexToBytes(nodeIdHex),
-      sign: (msg) => service.signEd25519(msg),
-      verify: (msg, sig, pk) => service.verifyEd25519(msg, sig, pk),
-    );
+    _ownCard = card.id;
 
     _session = NfcSessionManager(
-      exchange: exchange,
       onSessionUpdate: (state, payload, error) {
         if (!mounted) return;
         setState(() {
           _state = state;
-          _receivedPayload = payload;
           _error = error;
+          if (payload != null) {
+            _touched = true;
+            final reading = InvitationRedeem.readBytes(payload);
+            _reading = reading;
+            if (state == NfcSessionState.pendingConfirmation &&
+                !InvitationRedeem.isCard(reading)) {
+              _state = NfcSessionState.failed;
+              _error = InvitationRedeem.errorOf(locale, reading);
+            }
+          }
         });
       },
     );
 
-    final started = await _session!.startSession(
-      displayName: displayName,
-      ed25519PublicKey: ed25519Pk,
-      mlDsaPublicKey: mlDsaPk,
-      x25519PublicKey: x25519Pk,
-      mlKemPublicKey: mlKemPk,
-      profilePicture: service.profilePicture,
-      description: service.profileDescription,
-      addresses: ownAddrs,
-      seedPeers: seedPeers,
-    );
-
+    final started = await _session!.startSession(card.packed);
+    if (!mounted) return;
     setState(() {
       _starting = false;
       if (!started) {
         _state = NfcSessionState.failed;
-        _error ??= 'NFC konnte nicht gestartet werden';
+        _error ??= locale.get('nfc_start_failed');
       }
     });
   }
@@ -123,18 +108,23 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   @override
   void dispose() {
     _session?.cancelSession();
+    final id = _ownCard;
+    if (id != null && !_touched) {
+      unawaited(widget.service.revokeInvitationCard(id));
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final locale = AppLocale.of(context);
     final activeIdentity = IdentityManager().getActiveIdentity();
     final myName = activeIdentity?.displayName ?? widget.service.displayName;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('NFC Kontakttausch'),
+        title: Text(locale.get('nfc_contact_exchange')),
         leading: IconButton(
           icon: const Icon(Icons.close),
           onPressed: () {
@@ -143,23 +133,27 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
           },
         ),
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: _buildContent(context, colorScheme, myName),
+      body: SafeArea(
+        top: false,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(32),
+            child: _buildContent(context, colorScheme, myName),
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildContent(BuildContext context, ColorScheme colorScheme, String myName) {
+  Widget _buildContent(
+      BuildContext context, ColorScheme colorScheme, String myName) {
     if (_starting) {
-      return const Column(
+      return Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('NFC wird vorbereitet...'),
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(AppLocale.of(context).get('nfc_preparing')),
         ],
       );
     }
@@ -181,13 +175,14 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   }
 
   Widget _buildWaitingState(ColorScheme colorScheme, String myName) {
+    final locale = AppLocale.of(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(Icons.nfc, size: 80, color: colorScheme.primary),
         const SizedBox(height: 24),
         Text(
-          'Kontakttausch als',
+          locale.get('nfc_exchange_as'),
           style: TextStyle(fontSize: 16, color: colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: 8),
@@ -211,7 +206,7 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
               Icon(Icons.phonelink_ring, size: 48, color: colorScheme.primary),
               const SizedBox(height: 12),
               Text(
-                'Halte dein Phone an das andere',
+                locale.get('nfc_hold_phones'),
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w500,
@@ -221,7 +216,7 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Beide Phones müssen diese App geöffnet haben',
+                locale.get('nfc_both_apps_open'),
                 style: TextStyle(
                   fontSize: 13,
                   color: colorScheme.onPrimaryContainer.withAlpha(180),
@@ -240,8 +235,12 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
     );
   }
 
-  Widget _buildConfirmationState(BuildContext context, ColorScheme colorScheme) {
-    final payload = _receivedPayload!;
+  Widget _buildConfirmationState(
+      BuildContext context, ColorScheme colorScheme) {
+    final locale = AppLocale.of(context);
+    final reading = _reading;
+    final card = reading?.card;
+    final lock = reading == null ? null : InvitationRedeem.errorOf(locale, reading);
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -249,76 +248,33 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
         Icon(Icons.person_add, size: 64, color: colorScheme.primary),
         const SizedBox(height: 16),
         Text(
-          'Kontakt gefunden!',
+          locale.get('nfc_contact_found'),
           style: TextStyle(
             fontSize: 20,
             fontWeight: FontWeight.bold,
             color: colorScheme.primary,
           ),
         ),
-        const SizedBox(height: 24),
-        // Contact card
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Column(
-            children: [
-              CircleAvatar(
-                radius: 32,
-                backgroundColor: colorScheme.primaryContainer,
-                child: Text(
-                  payload.displayName.isNotEmpty
-                      ? payload.displayName[0].toUpperCase()
-                      : '?',
-                  style: TextStyle(
-                      fontSize: 28, color: colorScheme.onPrimaryContainer),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                payload.displayName,
-                style: const TextStyle(
-                    fontSize: 20, fontWeight: FontWeight.w600),
-              ),
-              if (payload.description != null &&
-                  payload.description!.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    payload.description!,
-                    style: TextStyle(
-                        fontSize: 14, color: colorScheme.onSurfaceVariant),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.verified_user, size: 16, color: colorScheme.primary),
-                  const SizedBox(width: 4),
-                  Text(
-                    'Verifiziert (NFC)',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: colorScheme.primary,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+        if (card != null) ...[
+          const SizedBox(height: 12),
+          Text(invitationFingerprintText(locale, card.fingerprint),
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 13)),
+        ],
+        if (lock != null) ...[
+          const SizedBox(height: 8),
+          Text(lock,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: colorScheme.error)),
+        ] else if (reading != null && reading.expiresSoon) ...[
+          const SizedBox(height: 8),
+          Text(invitationExpiryWarning(locale, reading.daysLeft!),
+              textAlign: TextAlign.center),
+        ],
         const SizedBox(height: 24),
         Text(
-          'Als Kontakt hinzufügen?',
-          style: TextStyle(
-              fontSize: 16, color: colorScheme.onSurfaceVariant),
+          locale.get('nfc_add_as_contact_question'),
+          style: TextStyle(fontSize: 16, color: colorScheme.onSurfaceVariant),
         ),
         const SizedBox(height: 16),
         Row(
@@ -329,13 +285,18 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
                 _session?.cancelSession();
                 Navigator.pop(context);
               },
-              child: const Text('Ablehnen'),
+              child: Text(locale.get('reject')),
             ),
             const SizedBox(width: 16),
             FilledButton.icon(
-              icon: const Icon(Icons.check),
-              label: const Text('Annehmen'),
-              onPressed: () => _confirmContact(context),
+              icon: _sending
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.check),
+              label: Text(locale.get('accept')),
+              onPressed: (_sending || lock != null) ? null : _confirm,
             ),
           ],
         ),
@@ -343,44 +304,40 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
     );
   }
 
-  void _confirmContact(BuildContext context) {
-    final contact = _session?.confirmContact();
-    if (contact == null) return;
-
-    // Add contact to the service
-    final service = widget.service;
-    service.addNfcContact(contact);
-
-    // Show success briefly, then pop
-    setState(() => _state = NfcSessionState.completed);
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) Navigator.pop(context); // ignore: use_build_context_synchronously
+  /// Redeems the received card — the same service function as the
+  /// QR scanner. The acceptance follows at the issuer without a second question.
+  Future<void> _confirm() async {
+    final locale = AppLocale.read(context);
+    final bytes = _session?.confirm();
+    if (bytes == null) return;
+    setState(() => _sending = true);
+    final r = await widget.service.redeemInvitationCardBytes(Uint8List.fromList(bytes));
+    if (!mounted) return;
+    final ok = r.outcome == InvitationRedeemOutcome.requestSent;
+    setState(() {
+      _sending = false;
+      _result = invitationRedeemText(locale, r);
+      _state = ok ? NfcSessionState.completed : NfcSessionState.failed;
+      if (!ok) _error = _result;
     });
+    if (ok) {
+      Future.delayed(const Duration(seconds: 2), () {
+        if (mounted) Navigator.pop(context); // ignore: use_build_context_synchronously
+      });
+    }
   }
 
   Widget _buildCompletedState(ColorScheme colorScheme) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Icon(Icons.check_circle, size: 80, color: Colors.green),
-        const SizedBox(height: 16),
-        Text(
-          'Kontakt hinzugefügt!',
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
-            color: Colors.green,
-          ),
-        ),
-        if (_receivedPayload != null) ...[
-          const SizedBox(height: 8),
+        const Icon(Icons.check_circle, size: 80, color: Colors.green),
+        if (_result != null) ...[
+          const SizedBox(height: 16),
           Text(
-            _receivedPayload!.displayName,
+            _result!,
+            textAlign: TextAlign.center,
             style: TextStyle(fontSize: 18, color: colorScheme.onSurface),
-          ),
-          Text(
-            'Verifiziert (Level 3)',
-            style: TextStyle(fontSize: 14, color: colorScheme.primary),
           ),
         ],
       ],
@@ -388,13 +345,14 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
   }
 
   Widget _buildFailedState(ColorScheme colorScheme) {
+    final locale = AppLocale.of(context);
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Icon(Icons.error_outline, size: 64, color: colorScheme.error),
         const SizedBox(height: 16),
         Text(
-          'NFC-Austausch fehlgeschlagen',
+          locale.get('nfc_exchange_failed'),
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.bold,
@@ -412,24 +370,23 @@ class _NfcExchangeScreenState extends State<NfcExchangeScreen> {
         const SizedBox(height: 24),
         OutlinedButton(
           onPressed: () {
+            final old = _ownCard;
+            if (old != null && !_touched) {
+              unawaited(widget.service.revokeInvitationCard(old));
+            }
             setState(() {
               _state = NfcSessionState.idle;
               _error = null;
+              _reading = null;
+              _ownCard = null;
+              _touched = false;
               _starting = true;
             });
             _initSession();
           },
-          child: const Text('Erneut versuchen'),
+          child: Text(locale.get('retry')),
         ),
       ],
     );
   }
-}
-
-Uint8List _hexToBytes(String hex) {
-  final bytes = <int>[];
-  for (var i = 0; i < hex.length; i += 2) {
-    bytes.add(int.parse(hex.substring(i, i + 2), radix: 16));
-  }
-  return Uint8List.fromList(bytes);
 }

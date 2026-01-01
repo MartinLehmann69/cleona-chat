@@ -20,7 +20,11 @@ Future<ContactIssueDialogResult> showContactIssueDialog({
   required String contactNodeIdHex,
 }) async {
   final locale = AppLocale.of(context);
-  final canPost = service.peerCount > 0;
+  // §22.7.2: the same predicate as in
+  // `contact_issue_reporter.dart` (`canPostToBugLog`) — one definition,
+  // two callers. Before, the condition stood here a second time, and
+  // it stood on a peer COUNT instead of on storage evidence.
+  final canPost = service.isReady;
 
   final result = await showDialog<String>(
     context: context,

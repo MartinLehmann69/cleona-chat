@@ -1253,15 +1253,15 @@ int main(int argc, char** argv) {
              r_after_stop == CLEONA_VIDEO_READ_CLOSED &&
              r_kf_stop == CLEONA_VIDEO_ERR_STATE &&
              r_sub_stop == CLEONA_VIDEO_ERR_STATE &&
-             /* ">=", nicht "==": die Zusage heisst "stop() setzt die Zaehler
-              * nicht zurueck". Gleichheit waere gegen einen laufenden Encoder
-              * gar nicht zusicherbar -- zwischen dem Lesen des Ankers und dem
-              * Lock in stop() liegt immer ein Fenster, in dem der Encode-Thread
-              * noch einen Frame abliefern darf. Gemessen auf emulator-5554:
-              * dieselbe Pruefung fiel in einem Lauf mit kept=58 durch und ging
-              * im naechsten mit before=56 kept=56 durch, ohne Codeaenderung
-              * dazwischen. Ein Backend, das die Zaehler wirklich verliert,
-              * faellt weiterhin durch (0 >= 56 ist falsch). */
+             /* ">=", not "==": the promise is "stop() does not reset the counters".
+              * Equality could not be guaranteed at all against a running encoder
+              * -- between reading the anchor and the
+              * lock in stop() there is always a window in which the encode thread
+              * may still deliver a frame. Measured on emulator-5554:
+              * the same check failed in one run with kept=58 and passed
+              * in the next with before=56 kept=56, without a code change
+              * in between. A backend that really loses the counters
+              * still fails (0 >= 56 is false). */
              rstop.frames_encoded >= rbefore_stop.frames_encoded &&
              r_restart == CLEONA_VIDEO_OK,
              "read=%d keyframe=%d submit=%d encoded before=%lld kept=%lld "

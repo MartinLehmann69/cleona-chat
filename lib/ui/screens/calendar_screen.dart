@@ -896,7 +896,7 @@ class _EventBlock extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              event.title.isEmpty ? '(Kein Titel)' : event.title,
+              event.title.isEmpty ? AppLocale.of(context).get('untitled') : event.title,
               style: TextStyle(
                 fontWeight: FontWeight.w600,
                 fontSize: 13,
@@ -935,7 +935,7 @@ class _AllDayChip extends StatelessWidget {
     final color = event.color != null ? Color(event.color!) : colorScheme.primary;
     return ActionChip(
       label: Text(
-        event.title.isEmpty ? '(Kein Titel)' : event.title,
+        event.title.isEmpty ? AppLocale.of(context).get('untitled') : event.title,
         style: TextStyle(
           fontSize: 12,
           color: Colors.white,

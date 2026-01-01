@@ -12,13 +12,17 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
-import '../network/clogger.dart';
+import '../log/clogger.dart';
+import '../platform/app_paths.dart';
 import 'call_integration.dart';
 
 class MethodChannelCallIntegration implements CallIntegration {
+  // The fallback uses AppPaths.dataDir instead of a CLogger without profileDir,
+  // otherwise this path (CallKit/ConnectionService callbacks)
+  // is invisible in the field (see A-5/A-6, architecture §10.4).
   MethodChannelCallIntegration({MethodChannel? channel, CLogger? log})
       : _channel = channel ?? const MethodChannel(kCallIntegrationChannel),
-        _log = log ?? CLogger('CallIntegration') {
+        _log = log ?? CLogger.get('CallIntegration', profileDir: AppPaths.dataDir) {
     if (isSupportedPlatform) {
       _channel.setMethodCallHandler(_onPlatformCall);
     }

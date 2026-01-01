@@ -7,12 +7,18 @@ import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
-import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceManager;
-import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
-import 'package:cleona/core/network/peer_reputation.dart' show PeerReputation;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/link/data_port.dart';
+import 'package:cleona/core/service/multi_interface_mode.dart';
+import 'package:cleona/core/util/hex.dart' show hexToBytes, bytesToHex;
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/service/service_interface.dart'
+    show kDataSaverOk;
+// The refusal identifier travels as a value across the process boundary
+// (S381). The getter `wireCode` lies in an extension — that does not come
+// in via the `show` list above, hence a separate import here.
+import 'package:cleona/core/contact/invite_issue_refusal.dart';
+import 'package:cleona/core/service/invitation_card_types.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
@@ -20,7 +26,8 @@ import 'package:cleona/core/calendar/sync/sync_types.dart';
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
 import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
-import 'package:cleona/core/network/peer_rescue_bundle.dart';
+import 'package:cleona/core/rendezvous/peer_rescue_bundle.dart';
+import 'package:cleona/core/tray/tray_status.dart' show isTrayLanguage;
 
 /// Per-client state tracking active identity.
 class _ClientState {
@@ -32,6 +39,35 @@ class _ClientState {
   bool authenticated;
 
   _ClientState({required this.socket, required this.activeIdentityId, this.authenticated = true});
+}
+
+/// The directory in which the IPC endpoint lies.
+///
+/// ── THE FINDING (13a, S370) ───────────────────────────────────────────
+///
+/// Here stood
+///
+///     socketPath.substring(0, socketPath.lastIndexOf(
+///         Platform.isWindows ? '\\' : '/'))
+///
+/// — ONE separator, depending on the platform. The real Windows path,
+/// however, is MIXED: `main.dart` forms `_baseDir` as `'$home/.cleona'`
+/// with a SLASH and passes it via `--base-dir`, `service_daemon.dart`
+/// appends `/cleona.sock`. What comes out is
+///
+///     C:\Users\Cleona/.cleona/cleona.sock
+///
+/// and `lastIndexOf('\\')` hit the backslash before `Cleona` — the parent
+/// directory was `C:\Users`, i.e. the GRANDPARENT directory.
+/// Without consequence, because `service_daemon.dart` creates the base
+/// directory beforehand; but the line did not do what it was supposed to,
+/// and the only reason why this never stood out was a different code path.
+String ipcParentDir(String socketPath) {
+  final a = socketPath.lastIndexOf('/');
+  final b = socketPath.lastIndexOf('\\');
+  final i = a > b ? a : b;
+  if (i <= 0) return socketPath;
+  return socketPath.substring(0, i);
 }
 
 /// IPC server: listens on a Unix Domain Socket (Linux) or TCP loopback
@@ -53,6 +89,18 @@ class IpcServer {
 
   /// Debug callback: fires for every dispatched command so the daemon logger can trace IPC.
   void Function(String command)? onCommandDispatched;
+
+  /// The GUI has reported its language (owner decision V-10-a = b,
+  /// 09.09.2026). The daemon hangs `NativeTray.setLocale` on it.
+  ///
+  /// There is NO command for this and no round trip of its own — the code
+  /// travels as the field `uiLocale` along with a request the client makes
+  /// anyway (`ipc_messages.dart`, `ipc_client.dart:_sendRequest`).
+  void Function(String localeCode)? onUiLocale;
+
+  /// What was passed on last — so that a field that COULD hang on every
+  /// request does not trigger a menu rebuild on every request.
+  String? _lastUiLocale;
 
   /// Callback to create a new identity at runtime (returns nodeIdHex or null).
   Future<String?> Function(String displayName)? onCreateIdentity;
@@ -84,15 +132,14 @@ class IpcServer {
   IpcServer({
     required Map<String, CleonaService> services,
     required this.socketPath,
-    required String defaultIdentityId,
+    required this._defaultIdentityId,
     String? profileDir,
   })  : _services = Map.of(services),
-        _defaultIdentityId = defaultIdentityId,
         _log = CLogger.get('ipc-server', profileDir: profileDir);
 
   Future<void> start() async {
     // Ensure parent directory exists with owner-only permissions.
-    final parentDir = socketPath.substring(0, socketPath.lastIndexOf(Platform.isWindows ? '\\' : '/'));
+    final parentDir = ipcParentDir(socketPath);
     Directory(parentDir).createSync(recursive: true);
     if (!Platform.isWindows) {
       Process.runSync('chmod', ['700', parentDir]);
@@ -179,12 +226,58 @@ class IpcServer {
         data: {
           'nodeIdHex': service.nodeIdHex,
           'displayName': service.displayName,
+          // §22.7.2: the transition searching/connecting -> ready is what
+          // the GUI MUST see. If it only came in the next full snapshot, it
+          // would be lost in exactly the layer that is meant to make it
+          // visible.
+          'readiness': service.readinessState,
+          // §25.4: together with the state, not only in the next full
+          // snapshot — the display shows both side by side (readiness as a
+          // statement, partner numbers as progress), and two different ages
+          // side by side read as an error.
+          'syncPartnersOutbound': service.syncPartnersOutbound,
+          'syncPartnersInbound': service.syncPartnersInbound,
+          'independentSyncPartners': service.independentSyncPartners,
+          // §24.4.2: a switch changes AT RUNTIME. If it only came in the
+          // next full snapshot, the UI would keep showing the old state
+          // after flipping it — and "a visible state" would be a delayed
+          // one.
+          'dataSaverActive': service.dataSaverActive,
+          'dataSaverLockedBySecure': service.dataSaverLockedBySecure,
+          // S388, §11.9: the switch of source 4 — the same reasoning.
+          'externalRecordsEnabled': service.externalRecordsEnabled,
+          // S373: the same reasoning as one line above — the consent and
+          // its EFFECT change at runtime (a partner is added, a Secure chat
+          // arises), and a UI that only learns of it in the next full
+          // snapshot shows a state that no longer exists.
+          'lanShapingActive': service.lanShapingActive,
+          'lanSegmentIds': service.lanSegmentIds,
+          'lanSegmentsGrantable': service.lanSegmentsGrantable,
+          'lanSegmentsConsented': <String>[
+            for (final id in service.lanSegmentIds)
+              if (service.lanSegmentConsented(id)) id
+          ],
           'peerCount': service.peerCount,
           'confirmedPeerCount': service.confirmedPeerCount,
           'reachablePeerCount': service.reachablePeerCount,
           'hasPortMapping': service.hasPortMapping,
+          // AP-5a: the latch must reach the GUI while the session runs,
+          // not only on the next full snapshot — it is what PEER-GATE G-3
+          // keys off. NOT the gap G-3 (§13 recovery): that is a different
+          // number range (gate inventory in
+          // `docs/MIGRATION_V3_TO_V4_0_MYZEL.md:8639`). See the detailed
+          // note at `ipc_client.dart:hasSessionConfirmedPeers`.
+          'hasSessionConfirmedPeers': service.hasSessionConfirmedPeers,
           'isRunning': service.isRunning,
-          'mobileFallbackActive': service.node.transport.isMobileFallbackActive,
+          // `mobileFallbackActive` IS DROPPED (2026-08-31, CUT). The value
+          // came from `node.transport.isMobileFallbackActive` — the
+          // substitute socket that V3 opened when the Wi-Fi was connected
+          // but dead. V4.1 does not have this transport, and no component
+          // in the tree can answer the question.
+          // The key is therefore OMITTED instead of set to `false`:
+          // `ipc_client.dart:421` reads it as
+          // `as bool? ?? _mobileFallbackActive` and keeps its state when it
+          // is absent — an invented number would be worse than none here.
         },
         identityId: identityId,
       ));
@@ -193,6 +286,13 @@ class IpcServer {
     final originalOnNewMessage = service.onNewMessage;
     service.onNewMessage = (conversationId, message) {
       originalOnNewMessage?.call(conversationId, message);
+      // §21.6/S392-B3: a freshly arrived message normally has no archive
+      // entry — the stamp then sets `null` and costs one map lookup. It
+      // stands here nevertheless, because the same feedback also carries a
+      // RESTORED or subsequently delivered message, and because a path to
+      // the UI without the stamp produces exactly the silent deviation the
+      // projection is built against.
+      service.archiveManager?.applyArchiveView([message]);
       _broadcastEvent(IpcEvent(
         event: 'new_message',
         data: {
@@ -250,6 +350,21 @@ class IpcServer {
       _broadcastEvent(IpcEvent(
         event: 'channel_invite',
         data: {'channelIdHex': channelIdHex, 'channelName': channelName},
+        identityId: identityId,
+      ));
+    };
+
+    // AP-5a: without this hook the daemon never told the GUI about a jury
+    // request. `IpcClient.onJuryRequestReceived` was declared and assigned
+    // (main.dart) but could not fire, so the jury banner only appeared on the
+    // next coalesced `refreshState()`. Same shape as `incoming_call`: one
+    // domain object, serialised via its own toJson().
+    final originalOnJuryRequest = service.onJuryRequestReceived;
+    service.onJuryRequestReceived = (request) {
+      originalOnJuryRequest?.call(request);
+      _broadcastEvent(IpcEvent(
+        event: 'jury_request',
+        data: request.toJson(),
         identityId: identityId,
       ));
     };
@@ -422,7 +537,7 @@ class IpcServer {
       ));
     };
 
-    // §26.6.2 Paket C: dedicated event when an emergency-key-rotation retry
+    // §26.6.2 package C: dedicated event when an emergency-key-rotation retry
     // gives up on a contact. GUI can warn the user that re-verification is
     // required (contact was unreachable for 90d or 3 attempts).
     final originalOnKeyRotationExpired = service.onKeyRotationPendingExpired;
@@ -705,6 +820,18 @@ class IpcServer {
     try {
       final msg = parseIpcMessage(line);
       if (msg is IpcRequest) {
+        // ── GUI LANGUAGE (V-10-a = b) ───────────────────────────────────
+        //
+        // Before execution, because the field can be carried by EVERY
+        // command and does not hang on a particular one. It is checked
+        // here: the value comes from a foreign message, and what the tray
+        // does not know is not set — otherwise the state text would stand
+        // on a key name after a mangled line.
+        final loc = msg.uiLocale;
+        if (loc != null && loc != _lastUiLocale && isTrayLanguage(loc)) {
+          _lastUiLocale = loc;
+          onUiLocale?.call(loc);
+        }
         // _dispatchCommand is async — attach error handler to prevent
         // unhandled Future errors that can crash the isolate.
         _dispatchCommand(client, msg).catchError((e, st) {
@@ -777,8 +904,8 @@ class IpcServer {
           if (_services.containsKey(identityId)) {
             client.activeIdentityId = identityId;
             final service = _services[identityId]!;
-            _log.info('switch_active OK: ${identityId.substring(0, 8)} '
-                '(${service.displayName})');
+            _log.debug('switch_active displayName="${service.displayName}"');
+            _log.info('switch_active OK: ${identityId.substring(0, 8)}');
             _sendResponse(client, IpcResponse(
               id: req.id,
               success: true,
@@ -845,7 +972,7 @@ class IpcServer {
           break;
 
         case 'set_reduced_mode_session':
-          // sec-h5 §8.2 / Folge-Task 2026-04-26: GUI splash on Desktop
+          // sec-h5 §8.2 / follow-up task 2026-04-26: GUI splash on Desktop
           // sets reducedMode here; we propagate to every per-identity
           // CleonaService so user-message Send/Receive is gated daemon-side
           // until restart. Per-session, not persisted.
@@ -923,6 +1050,23 @@ class IpcServer {
             state['deviceNodeIdHex'] = service.deviceNodeIdHex;
             state['deviceX25519PkB64'] = base64Encode(service.deviceX25519Pk);
             state['deviceMlKemPkB64'] = base64Encode(service.deviceMlKemPk);
+            // S368: the trust anchor belongs in here, otherwise a caller
+            // cannot build a VALID ContactSeed from this information.
+            // `scripts/ci-export-seeds.py` did exactly that until today — it
+            // assembled the URI from the fields here and left out `ep`. The
+            // seed built that way cannot be recomputed by the other side
+            // (§8.1.1) and has been rejected since S368; the contact request
+            // on it never went out anyway (the then `sendContactRequest`
+            // aborted without `ep`), it just was not visible. S389: that
+            // path no longer exists — the request arises when redeeming an
+            // invitation card (§15.5) and leaves the device via `sendToUser`
+            // (§22.5).
+            //
+            // Both are PUBLIC keys: they stand as `ep` and `fp` in every
+            // ContactSeed this node issues.
+            state['userEd25519PkB64'] = base64Encode(service.userEd25519Pk);
+            state['foundingEd25519PkB64'] =
+                base64Encode(service.foundingEd25519Pk);
             _sendResponse(client, IpcResponse(
               id: req.id,
               success: true,
@@ -993,7 +1137,8 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId or filePath'));
             break;
           }
-          final mediaResult = await service.sendMediaMessage(mediaConvId, mediaFilePath);
+          final mediaResult =
+              await service.sendMediaMessage(mediaConvId, mediaFilePath);
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: mediaResult != null,
@@ -1104,6 +1249,39 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
+        // S366, stage B: deliver the history of a conversation afterwards.
+        //
+        // The state that the service sends of its own accord now carries
+        // only the MOST RECENT message per conversation — otherwise the
+        // serialisation hangs on the whole inventory again, and exactly
+        // that is what the switch is meant to get away from. Whoever opens
+        // a chat fetches the history here.
+        case 'load_history':
+          final service = _resolveService(client, req);
+          if (service == null) break;
+          final histConvId = req.params['conversationId'] as String?;
+          if (histConvId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Missing param: conversationId'));
+            break;
+          }
+          service.ensureLoaded(histConvId);
+          final histConv = service.conversations[histConvId];
+          // §21.6/S392-B3: the history comes fresh from the storage, and
+          // the storage explicitly does NOT carry the archive state (it is a
+          // projection, `messageExtraForStore`). Without this stamp an
+          // opened chat would show archived media differently from the same
+          // chat in the snapshot.
+          if (histConv != null) {
+            service.archiveManager?.applyArchiveView(histConv.messages);
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'conversationId': histConvId,
+            'messages':
+                histConv?.messages.map((m) => m.toJson()).toList() ?? const [],
+          }));
+          break;
+
         case 'forward_message':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1206,30 +1384,9 @@ class IpcServer {
           ));
           break;
 
-        case 'send_contact_request':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final recipientId = req.params['recipientId'] as String?;
-          if (recipientId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recipientId'));
-            break;
-          }
-          final success = await service.sendContactRequest(
-            recipientId,
-            message: (req.params['message'] as String?) ?? '',
-            seedDeviceIdHex: req.params['seedDeviceIdHex'] as String?,
-            seedDxkB64: req.params['seedDxkB64'] as String?,
-            seedDmkB64: req.params['seedDmkB64'] as String?,
-            seedEpB64: req.params['seedEpB64'] as String?,
-          );
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: success,
-          ));
-          break;
+        // `send_contact_request` has been dropped (S388-BAU-KONTAKT): no
+        // caller in the UI, and on V4.2 the request arises when redeeming a
+        // card (`invitation_card_redeem_*`, §15.5).
 
         case 'add_seed_peers':
           final service = _resolveService(client, req);
@@ -1342,7 +1499,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final logReport = service.buildLogReport();
+          final logReport = await service.buildLogReport();
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: true,
@@ -1381,6 +1538,27 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
+        // §15.10 (D2 = a): "never use as a fixed neighbour" — a local mark
+        // on the contact; the service hands it to the delivery layer.
+        case 'contact_set_never_fixed_neighbour':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final neverContactHex = req.params['nodeIdHex'] as String?;
+          final neverValue = req.params['never'] as bool?;
+          if (neverContactHex == null || neverValue == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Missing param: nodeIdHex or never'));
+            break;
+          }
+          final neverOk =
+              service.setContactNeverFixedNeighbour(neverContactHex, neverValue);
+          _sendResponse(client, IpcResponse(id: req.id, success: neverOk,
+              error: neverOk ? null : 'Contact not found'));
+          break;
+
         // §14.7.4: unilateral, receiver-side. Deliberately NOT routed through
         // the CHAT_CONFIG_UPDATE consent flow (§14.7.1) — a partner must not
         // be able to veto this node's own visibility.
@@ -1401,6 +1579,89 @@ class IpcServer {
           final withholdOk =
               service.setWithholdDeliveryStatus(withholdEntityId, withholdValue);
           _sendResponse(client, IpcResponse(id: req.id, success: withholdOk));
+          break;
+
+        // NO VERB FOR A SEND MODE (S389). Here stood `set_secure_mode`.
+        // §12.1 allows no per-chat setting of the send path, so the UI
+        // does not pass one over the socket either.
+        // §24.4.2 — data saver mode. The daemon keeps the state, because
+        // the cover stream runs there; the GUI is only the trigger.
+        //
+        // The answer carries the REASON (`reason`), not merely
+        // success/failure: the latch ("a chat is set to High-Secure") must
+        // reach the user, otherwise he sees a switch that snaps back
+        // without saying why.
+        case 'set_data_saver':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final saverOn = req.params['on'] as bool?;
+          if (saverOn == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false, error: 'Missing param: on'));
+            break;
+          }
+          final saverReason = service.setDataSaver(saverOn);
+          _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: saverReason == kDataSaverOk,
+              data: {
+                'reason': saverReason,
+                'active': service.dataSaverActive,
+                'lockedBySecure': service.dataSaverLockedBySecure,
+              }));
+          break;
+
+        case 'set_external_records':
+          // S388, V4.2 §11.9 — source 4 on/off, ONLY by the user. A device
+          // value (the host is one per daemon); every service sets the
+          // same switch.
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final externalOn = req.params['on'] as bool?;
+          if (externalOn == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false, error: 'Missing param: on'));
+            break;
+          }
+          final externalOk = service.setExternalRecordsEnabled(externalOn);
+          _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: externalOk,
+              data: {'enabled': service.externalRecordsEnabled}));
+          break;
+
+        case 'set_lan_shaping':
+          // S373 — the consent to suspend the cover in the own network.
+          // AUTHORITATIVE HERE: the daemon knows its partners and their
+          // endpoints, the UI does not.
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final lanSegment = req.params['segment'] as String?;
+          final lanGrant = req.params['grant'] as bool?;
+          if (lanSegment == null || lanGrant == null) {
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: false, error: 'Missing param: segment/grant'));
+            break;
+          }
+          final lanOk = lanGrant
+              ? service.grantLanShaping(lanSegment)
+              : service.revokeLanShaping(lanSegment);
+          _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: lanOk,
+              data: {
+                'granted': service.lanSegmentConsented(lanSegment),
+                'active': service.lanShapingActive,
+              }));
           break;
 
         case 'accept_name_change':
@@ -1946,30 +2207,60 @@ class IpcServer {
             break;
           }
           // §4.5.2 invariant `nodePort != discoveryPort`: binding the data
-          // port on the fixed LAN-discovery port makes Transport and the
-          // discovery sockets share it. All of them set SO_REUSEADDR, so the
-          // bind succeeds without an error and the kernel then splits inbound
+          // port on a fixed LAN port makes the data socket and the LAN
+          // sockets share it. All of them set SO_REUSEADDR, so the bind
+          // succeeds without an error and the kernel then splits inbound
           // datagrams between them — a share of all traffic is dropped
           // silently while sending keeps working, which makes the node look
           // healthy to its peers.
-          if (newPort == LocalDiscovery.discoveryPort) {
+          //
+          // S376: BOTH fixed LAN ports are checked via the one place of
+          // definition. Until then `== lanDiscoveryPort` stood here, i.e.
+          // only the V3 port 41338; 41340, which the V4.1 call sequence
+          // really binds, got through.
+          if (DataPort.isReservedLanPort(newPort)) {
             _sendResponse(client, IpcResponse(id: req.id, success: false,
-                error: 'Port $newPort is reserved for LAN discovery'));
+                error: 'Port $newPort is reserved for the LAN sockets'));
             break;
           }
-          try {
-            await portService.node.changePort(newPort);
-            // Persist in identities.json so daemon uses new port on restart
-            final mgr = IdentityManager();
-            mgr.updatePort(newPort);
-            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {'port': newPort}));
-          } on SocketException catch (e) {
-            // English like every other IPC error string — these are protocol
-            // diagnostics, not user-facing text. The GUI never displays them
-            // (setPort discards the message and returns a bare bool); the
-            // translated user message lives in the port dialog.
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Port $newPort unavailable: $e'));
+          // Browsers refuse this port, so every invitation link built on it
+          // would be dead at the recipient — locally, before a request ever
+          // reaches this node. English like every other IPC error string:
+          // these are protocol diagnostics. The user-facing reason lives in
+          // the port dialog (`port_browser_blocked`), because setPort only
+          // returns a bare bool and this text never reaches the GUI.
+          if (IdentityManager.isBrowserBlockedPort(newPort)) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Port $newPort is refused by browsers — invitation '
+                    'links would be dead for every recipient'));
+            break;
           }
+          // ── RE-HUNG ONTO THE SERVICE ON 2026-08-31 (CUT) ───────────
+          //
+          // Here stood `portService.node.changePort(newPort)` plus its own
+          // persistence (`IdentityManager().updatePort`). The IPC server
+          // thereby reached directly into the node BYPASSING THE SERVICE —
+          // exactly the seam that AP-1 step 7 closed, and
+          // `CleonaService.node` has not existed since the V3 cut.
+          //
+          // `ServiceInterface.setPort` does the same and more: it checks
+          // both port rules once more (§4.5.2 LAN discovery,
+          // browser-blocked ports), updates `identities.json` and reports
+          // the state change. The in-process path of Android and iOS
+          // already takes it anyway (`cleona_service.dart:5342`).
+          //
+          // THE GAP DOES NOT THEREBY GO AWAY, IT MOVES TO ITS PLACE:
+          // `setPort` internally calls `node.changePort` and thus remains
+          // open in `cleona_service.dart`. The V4.1 delivery layer knows no
+          // port change at runtime — `V41Node.start` takes the port once.
+          // The information about that belongs in ONE place, not in two.
+          final ok = await portService.setPort(newPort);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: ok,
+            data: ok ? {'port': newPort} : const <String, dynamic>{},
+            error: ok ? null : 'Port $newPort unavailable',
+          ));
           break;
 
         case 'update_media_settings':
@@ -1988,7 +2279,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final mode = MultiInterfaceManager.modeFromString(req.params['mode'] as String?);
+          final mode = MultiInterfaceMode.modeFromString(req.params['mode'] as String?);
           await miService.setMultiInterfaceMode(mode);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
@@ -2144,7 +2435,7 @@ class IpcServer {
             }
             _lastManualReconnect = now;
             // Trigger the full §12.3 recovery sequence via onNetworkChanged(force:true).
-            unawaited(service.node.onNetworkChanged(force: true));
+            unawaited(service.onNetworkChanged(force: true));
             final peerCount = service.peerCount;
             _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
               'debounced': false,
@@ -2248,7 +2539,7 @@ class IpcServer {
               final last = _lastManualReconnect;
               if (last == null || now.difference(last) >= _manualReconnectCooldown) {
                 _lastManualReconnect = now;
-                unawaited(service.node.onNetworkChanged(force: true));
+                unawaited(service.onNetworkChanged(force: true));
               }
 
               _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
@@ -2310,62 +2601,26 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
-        case 'get_reputation':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final repNodeIdHex = req.params['nodeIdHex'] as String?;
-          if (repNodeIdHex == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
-            break;
-          }
-          // V3.1.65 Multi-Device (§26): reputation is recorded per
-          // device-node-id (cleona_node.dart `recordGood(senderHex)` uses
-          // `senderDeviceId`), but callers usually pass a *user* nodeId
-          // (e.g. `state.nodeIdHex == identity.userIdHex`). Resolve to the
-          // contact's known devices and aggregate. Direct device-id lookups
-          // (no contact match) still work via the `directHit` fall-through.
-          // Fix B-10 (gui-36 36.05).
-          final repMgr = service.node.reputationManager;
-          final directHit = repMgr.getReputation(repNodeIdHex);
-          final contactByUserId = service.getContact(repNodeIdHex);
-          final repsToAggregate = <PeerReputation>[];
-          if (directHit != null) repsToAggregate.add(directHit);
-          if (contactByUserId != null) {
-            for (final devHex in contactByUserId.deviceNodeIds) {
-              final r = repMgr.getReputation(devHex);
-              if (r != null && !identical(r, directHit)) repsToAggregate.add(r);
-            }
-          }
-          if (repsToAggregate.isEmpty) {
-            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-              'score': 0.5,
-              'goodActions': 0,
-              'badActions': 0,
-              'isBanned': false,
-            }));
-            break;
-          }
-          var aggGood = 0;
-          var aggBad = 0;
-          var aggBanned = false;
-          for (final r in repsToAggregate) {
-            aggGood += r.goodActions;
-            aggBad += r.badActions;
-            aggBanned = aggBanned || r.isBanned;
-          }
-          final aggTotal = aggGood + aggBad;
-          final aggScore = aggTotal == 0 ? 0.5 : aggGood / aggTotal;
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'score': aggScore,
-            'goodActions': aggGood,
-            'badActions': aggBad,
-            'isBanned': aggBanned,
-          }));
-          break;
-
+        // ── `get_reputation` IS GONE (2026-08-31, CUT) ──────────────
+        //
+        // The command read `CleonaService.reputationOf(nodeIdHex)` and
+        // returned score, good/bad counters and ban state of a node. The
+        // carrier lay in `cleona_service_v3_retire.dart:79` and was deleted
+        // with the V3 cut; it counted events that exist only in V3
+        // (packet violations on the UDP wire, relay abuse, network ban
+        // list, DoS layer 3 of 5).
+        //
+        // NO REPLACEMENT, AND THAT IS INTENDED: v4_1 §10 relies against
+        // Sybil on redundancy m=3 and the KEX gate, not on a reputation
+        // number per foreign node — "the leverage against Sybil is
+        // redundancy m=3 and the KEX gate, not PoW" (§10). §10 names a
+        // weighted relay reputation as a draft, it is not built, and the
+        // OLD counter would be no replacement for it.
+        //
+        // THE COMMAND IS NOT REPLACED BY A DUMMY: it drops out entirely and
+        // thus runs into the `default` branch -> "Unknown command".
+        // Callers, measured 2026-08-31: `test/e2e/lib/ipc-client.ts:1312`.
+        // The test then fails loudly, and that is the right message.
         case 'get_rate_limiter_stats':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -2373,7 +2628,7 @@ class IpcServer {
             break;
           }
           _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'droppedPackets': service.node.rateLimiter.droppedPackets,
+            'droppedPackets': service.droppedPackets,
           }));
           break;
 
@@ -2383,12 +2638,30 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
             break;
           }
-          final mgr = service.archiveManager;
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'active': mgr != null,
-            'entriesCount': mgr?.entries.length ?? 0,
-            'pendingCount': mgr?.pendingEntries.length ?? 0,
-          }));
+          // S394: plus share identity and narrowing (§21.6) — the path on
+          // which a mismatch reaches the surface. No password, no full pin.
+          _sendResponse(client, IpcResponse(id: req.id, success: true,
+              data: service.archiveShareStatus()));
+          break;
+
+        case 'archive_rebind_share':
+        case 'archive_capture_network':
+        case 'archive_clear_networks':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          if (req.command == 'archive_capture_network') {
+            final n = await service.captureArchiveNetwork();
+            _sendResponse(client, IpcResponse(id: req.id, success: n != null,
+                data: n ?? const {}, error: n == null ? 'No IPv4 network' : null));
+          } else {
+            final ok = req.command == 'archive_rebind_share'
+                ? await service.rebindArchiveShare()
+                : await service.clearArchiveNetworks();
+            _sendResponse(client, IpcResponse(id: req.id, success: ok));
+          }
           break;
 
         case 'archive_test_connection':
@@ -2398,29 +2671,32 @@ class IpcServer {
             break;
           }
           try {
-            final configFile = File('${service.profileDir}/archive_config.json');
-            if (!configFile.existsSync()) {
+            // S366: from the area `archive_config` of the storage instead of
+            // from `archive_config.json`. The call runs in the DAEMON, i.e.
+            // where the storage and its key lie.
+            //
+            // THE PASSWORD STAYS HERE. It goes into `transport.connect` and
+            // from there into an environment variable of the helper process;
+            // the answer below carries `reachable`, `protocol` and `host`
+            // — not a word of it. That is intent and not carelessness: the
+            // archive password does not cross the IPC boundary.
+            final config = ArchiveConfig.readFrom(service.store);
+            if (config == null) {
               _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No archive config'));
               break;
             }
-            final config = ArchiveConfig.fromJson(
-                json.decode(configFile.readAsStringSync()) as Map<String, dynamic>);
             if (config.archiveHost.isEmpty) {
               _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No host configured'));
               break;
             }
-            final transport = ArchiveTransport.forProtocol(config.defaultProtocol);
-            await transport.connect(
-              host: config.archiveHost,
-              path: config.archivePath,
-              username: config.archiveUsername,
-              password: config.archivePassword,
-              port: config.archivePort,
-            );
-            final ok = await transport.testConnectivity(timeout: const Duration(seconds: 5));
-            await transport.disconnect();
+            // S394: a pinned share is identified before it is tested
+            // (§21.6) — see `testArchiveConnection`.
+            final r = await testArchiveConnection(config,
+                profileDir: service.profileDir);
+            final ok = r.reachable;
             _sendResponse(client, IpcResponse(id: req.id, success: ok, data: {
               'reachable': ok,
+              'identity': r.identity?.name,
               'protocol': config.defaultProtocol.name,
               'host': config.archiveHost,
             }));
@@ -2440,6 +2716,12 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Archive not active'));
             break;
           }
+          // The archive run looks for archivable media by AGE — it needs
+          // every message, not the most recent one (S366, stage B). Without
+          // this call it would find practically nothing any more, and
+          // silently: "no archivable media" looks exactly like "found
+          // nothing, because nothing was loaded".
+          service.ensureAllLoaded();
           final result = await mgr.runArchiveCheck(conversations: service.conversations);
           _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
             'archived': result.archived,
@@ -2447,6 +2729,110 @@ class IpcServer {
             'tierChecked': result.tierChecked,
             'evicted': result.evicted,
             'skippedReason': result.skippedReason,
+          }));
+          break;
+
+        // ── Retrieval of an archived attachment (§21.6) ────────────
+        //
+        // FROM THE SHARE, NEVER VIA THE NETWORK. §21.6, touch point 3:
+        // "archive placeholders fetch from the **share**, never from the
+        // network." The only way out is the manager's `ArchiveTransport`
+        // — SMB/SFTP/FTPS/HTTP to the NAS in the home network. This branch
+        // calls neither `sendToUser()` (the seam, §22.5) nor anything from
+        // `mycelium/`; a retrieval produces no packet, no receipt and no post
+        // box entry.
+        //
+        // THE ANSWER IS NOT THE RESULT. Over SMB a large file can take
+        // minutes (`ArchiveTransport.downloadTimeout` stands at ~34 min).
+        // If this waited for the end, the answer would block the command
+        // stream of EXACTLY THIS client until the download is through —
+        // the UI would be frozen. The answer therefore only says whether a
+        // fetch IS RUNNING; the progress comes as the event
+        // `archive_retrieve_progress`, the end as `archive_retrieve_done`.
+        //
+        // TAPPED TWICE = ONE FETCH. The binding latch sits in the manager
+        // (`retrieveToMediaStore`, one entry per message in `_retrievals`);
+        // `isRetrieving` here only colours the answer and decides nothing.
+        case 'archive_retrieve':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final mgr = service.archiveManager;
+          if (mgr == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Archive not active'));
+            break;
+          }
+          final retrieveId = req.params['messageId'] as String?;
+          if (retrieveId == null || retrieveId.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: messageId'));
+            break;
+          }
+          // The target is the path the MESSAGE points to. It stays when the
+          // archive removes the original — `filePath` is the identifier of
+          // the attachment, not the statement "lies here"
+          // (`media_store.dart`, S362). A second path from the archive entry
+          // would be a second truth about the same attachment; there is
+          // exactly one.
+          //
+          // `ensureAllLoaded` for the same reason as with
+          // `archive_trigger_check`: what is sought is an OLD message, and
+          // without loading the loop would silently find nothing.
+          service.ensureAllLoaded();
+          String? retrievePath;
+          for (final conv in service.conversations.values) {
+            for (final m in conv.messages) {
+              if (m.id == retrieveId) {
+                retrievePath = m.filePath;
+                break;
+              }
+            }
+            if (retrievePath != null) break;
+          }
+          if (retrievePath == null || retrievePath.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No local path for message $retrieveId'));
+            break;
+          }
+          final retrieveIdentity = service.nodeIdHex;
+          // The question is asked BEFORE the call, and only to colour the
+          // answer. The call itself ALWAYS goes out — otherwise
+          // `isRetrieving` would be the actual latch and the one in the
+          // manager mere decoration. A mutation test showed exactly that:
+          // with the latch in the manager taken out the suite stayed green,
+          // because here there was no second call in the first place.
+          final retrieveRunning = mgr.isRetrieving(retrieveId);
+          final retrieveRun = mgr.retrieveToMediaStore(
+            retrieveId,
+            retrievePath,
+            onProgress: (mid, sent, total) {
+              _broadcastEvent(IpcEvent(
+                event: 'archive_retrieve_progress',
+                identityId: retrieveIdentity,
+                data: {
+                  'messageId': mid,
+                  'bytesTransferred': sent,
+                  'totalBytes': total,
+                },
+              ));
+            },
+          );
+          // The completion event hangs only on the FIRST requester. Both
+          // get the same future; attached twice would mean reported twice,
+          // and the UI would count one operation double.
+          if (!retrieveRunning) {
+            unawaited(retrieveRun.then((r) {
+              _broadcastEvent(IpcEvent(
+                event: 'archive_retrieve_done',
+                identityId: retrieveIdentity,
+                data: r.toJson(),
+              ));
+            }));
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'messageId': retrieveId,
+            'started': !retrieveRunning,
+            'alreadyRunning': retrieveRunning,
           }));
           break;
 
@@ -2695,7 +3081,18 @@ class IpcServer {
           }
           _lastSeedPhraseAccess = now;
           _log.warn('get_seed_phrase accessed');
-          final cleonaDir = socketPath.substring(0, socketPath.lastIndexOf(Platform.isWindows ? '\\' : '/'));
+          // `ipcParentDir`, NOT `lastIndexOf(isWindows ? '\\' : '/')`
+          // (13a, S370). The Windows socket path is MIXED — measured on
+          // 06.09.2026 in the production log of the build VM:
+          //   `[daemon] Dienst gestartet. Socket: C:\Users\Cleona/.cleona/cleona.sock`
+          // The old computation hit the backslash before `Cleona` and gave
+          // `C:\Users`. `IdentityManager` then looked for the 24 words in
+          // `C:\Users\seed_phrase.json` — i.e. nowhere, while
+          // `C:\Users\Cleona\.cleona\seed_phrase.json.enc` lay right next to
+          // it. The keyring path above (`loadSeedPhrase`, first half) stayed
+          // intact; what was broken was the FILE FALLBACK, and that exists
+          // precisely for the case that DPAPI does not open.
+          final cleonaDir = ipcParentDir(socketPath);
           final identityMgr = IdentityManager(baseDir: cleonaDir);
           final words = identityMgr.loadSeedPhrase();
           if (words == null) {
@@ -2756,12 +3153,80 @@ class IpcServer {
           break;
 
         // ── §19.6 In-network update ─────────────────────────
+        //
+        // ── `seed_binary` IS BACK (02.09.2026) ────────────────
+        //
+        // Since the CUT (2026-08-31) here stood the reasoning why the
+        // command had been dropped without replacement: its body had lain
+        // in `cleona_service_v3_binary.dart`, the successor was the unbuilt
+        // fountain content layer (AP-7), "WITHOUT REPLACEMENT UNTIL AP-7".
+        //
+        // RE-MEASURED ON 02.09.2026 — THE PREMISE WAS NOT RIGHT.
+        // The file fell, but its local halves did NOT disappear with the
+        // CUT: they lie in `cleona_service_pure.dart` ("§19.6 binary
+        // distribution: the local halves", explicitly rescued as a CUT
+        // addendum). The encoding path `_runSeedIsolate` ->
+        // `_selfSeedInIsolate` stands in `cleona_service.dart`, the
+        // fragment store is built on every start
+        // (`cleona_service_update.dart:485`), and `_selfSeedCurrentBinary`
+        // takes exactly this path at start. So only the public entry with a
+        // freely named file was missing — that has been restored.
+        //
+        // THE WAY OUT IS ALIVE TOO. The announcement runs via
+        // `BinaryRendezvousManager` (`cleona_service_update.dart:562`) and
+        // thus via Nostr, the explicit exception of the CUT decision. What
+        // AP-7 will replace in future is the fountain path for the contents
+        // themselves, not this command.
+        //
+        // `export_binary` stands next to it and was NEVER a CUT decision: it
+        // disappeared on 08.07.2026 in `1d8e29de` during the move of this
+        // whole block, while the same diff took `seed_binary` along —
+        // collateral damage of a relocation, without a word in the commit
+        // message, while its carrier `PhysicalTransferHelper.exportBinary`
+        // stayed untouched.
+
         case 'seed_binary':
+        case 'export_binary':
         case 'get_seeded_platforms':
         case 'reload_manifest':
         case 'get_update_status':
         case 'start_in_network_update':
         case 'apply_update':
+        // AP-5a: the invite link embeds the signed binary hashes from the
+        // update manifest, so it belongs to the §19.6 group.
+        case 'generate_invite_link_url':
+        case 'issue_invitation':
+        // ── THE INVITATION CARD (§15.2/§15.3) — ADDED S391 ──────
+        //
+        // These six were fully IMPLEMENTED in `_handlePolls` and never
+        // ROUTED here. The dispatcher did not know them and answered with
+        // "Unknown command"; `ipc_client.dart:2199-2201` maps every
+        // `success: false` to `notConnected`, and the UI showed
+        // "Einladungen sind in dieser Version noch nicht angeschlossen"
+        // (`card_not_connected`).
+        //
+        // Thus on EVERY daemon platform — Linux, Windows, macOS — no
+        // invitation could be issued since the card has existed (S387).
+        // Android and iOS were never affected: there the service runs in
+        // the same process, the UI calls `CleonaService` directly and does
+        // not pass this dispatcher at all.
+        //
+        // Measured on 17.09.2026 on Node2 against the current build
+        // (SHA f2bc46f4, identical to the local one):
+        //   {"success": false, "error": "Unknown command: invitation_card_issue"}
+        case 'invitation_card_issue':
+        case 'invitation_card_redeem_text':
+        case 'invitation_card_redeem_bytes':
+        case 'invitation_card_standing':
+        case 'invitation_card_revoke':
+        case 'invitation_card_revoke_all':
+        // The same gap, two commands older: `ipc_client.dart:2157` and
+        // `:2176` both send, `_handlePolls` implements both
+        // (`:4491`, `:4517`), neither was routed. Found by
+        // `scripts/check_ipc_dispatch_reachable.dart`, not by hand —
+        // the gate found it in the same run in which it was built.
+        case 'list_open_invitations':
+        case 'revoke_invitation':
           await _handlePolls(client, req);
           break;
 
@@ -2919,7 +3384,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelIdHex'));
             break;
           }
-          final modInfo = service.getChannelModerationInfo(modChId);
+          final modInfo = await service.getChannelModerationInfo(modChId);
           _sendResponse(client, IpcResponse(id: req.id, success: true, data: modInfo));
           break;
 
@@ -3959,6 +4424,16 @@ class IpcServer {
         // Binary-update subsystem lives on the primary identity's service
         // only (first service to start gets node.binaryRendezvousManager).
         // Always resolve to primary, never to the client's active identity.
+        //
+        // `seed_binary` and `export_binary` are back since 02.09.2026.
+        // Both carriers lie in this tree and run exclusively locally — the
+        // reasoning stands at `CleonaService.seedBinaryFromFile`
+        // (`cleona_service_pure.dart`). In short: the CUT comment that stood
+        // here justified the deletion with an unbuilt successor
+        // (fountain/AP-7), but the deleted body touches nothing the CUT
+        // removed, and `_selfSeedCurrentBinary` uses the same apparatus on
+        // EVERY start.
+
         case 'seed_binary':
           {
             final service = _services[_defaultIdentityId];
@@ -3970,15 +4445,74 @@ class IpcServer {
             final version = req.params['version'] as String?;
             final filePath = req.params['filePath'] as String?;
             if (platform == null || version == null || filePath == null) {
-              _sendResponse(client, IpcResponse(id: req.id, success: false,
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false,
                   error: 'Missing platform/version/filePath'));
               break;
             }
-            final result = await service.seedBinaryFromFile(platform, version, filePath);
+            // `maxFragments` is optional; if it is missing, the service's
+            // default applies (50, §19.6.2 "bootstrap=all"). An unusable
+            // value (<= 0) is NOT passed through as 0 — that would silently
+            // have stored nothing and still reported success.
+            final rawMax = req.params['maxFragments'];
+            final maxFragments = rawMax is int && rawMax > 0 ? rawMax : null;
+            final result = maxFragments == null
+                ? await service.seedBinaryFromFile(platform, version, filePath)
+                : await service.seedBinaryFromFile(platform, version, filePath,
+                    maxFragments: maxFragments);
             final hasError = result.containsKey('error');
             _sendResponse(client, IpcResponse(
                 id: req.id, success: !hasError, data: result,
                 error: hasError ? result['error'] as String : null));
+          }
+          break;
+
+        // `export_binary` writes a binary that is COMPLETELY present in the
+        // fragment store onto the disk (§19.6.7, physical transfer via
+        // USB/NFC). The carrier is `PhysicalTransferHelper.exportBinary`
+        // (`lib/core/update/physical_transfer_helper.dart:32`) and is built
+        // continuously (`cleona_service_update.dart:498`) — since the
+        // command disappeared it simply had no caller.
+        //
+        // Resolution via the PRIMARY identity, like the neighbouring
+        // commands. The original resolved via `_resolveService`, i.e. via
+        // the client's active identity; thus `seed_binary` would have
+        // written into one fragment store and `export_binary` read from
+        // another (the store hangs on the profile directory,
+        // `cleona_service_update.dart:485`). One resolution rule per group,
+        // not per command.
+        case 'export_binary':
+          {
+            final service = _services[_defaultIdentityId];
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No primary service'));
+              break;
+            }
+            final helper = service.physicalTransferHelper;
+            if (helper == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false,
+                  error: 'Binary-update subsystem not initialized'));
+              break;
+            }
+            final platform = req.params['platform'] as String?;
+            final version = req.params['version'] as String?;
+            final outputPath = req.params['outputPath'] as String?;
+            if (platform == null || version == null || outputPath == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false,
+                  error: 'Missing param: platform, version or outputPath'));
+              break;
+            }
+            final exportedHash = await helper.exportBinary(
+                platform: platform, version: version, outputPath: outputPath);
+            _sendResponse(client, IpcResponse(
+                id: req.id,
+                success: exportedHash != null,
+                data: exportedHash != null ? {'hash': exportedHash} : {},
+                error: exportedHash == null
+                    ? 'Export failed — no complete binary stored for $platform/$version'
+                    : null));
           }
           break;
 
@@ -4006,6 +4540,263 @@ class IpcServer {
             _sendResponse(client, IpcResponse(
                 id: req.id, success: !hasError, data: result,
                 error: hasError ? result['error'] as String : null));
+          }
+          break;
+
+        case 'generate_invite_link_url':
+          {
+            // Resolved against the ACTIVE identity, not the primary: the link
+            // carries that identity's contact seed. The update manifest it
+            // also needs is bootstrapped per service from the shared on-disk
+            // cache (cleona_service.dart `_initUpdateChecking`), so the
+            // active service has it too.
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final url = await service.generateInviteLinkUrl();
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: {'url': url}));
+          }
+          break;
+
+        case 'issue_invitation':
+          {
+            // ── THE ISSUER IS THIS PROCESS (§15.3) ─────────────
+            //
+            // "Invitations can only be issued by the device that holds the
+            // identity." The daemon holds the master seed, keeps the ledger
+            // and harvests the invitation line (§15.3.2) — the UI can do
+            // none of the three. Until S380 this path did not exist, and on
+            // every daemon platform the ContactSeed therefore never carried
+            // `ki`; every first request was rejected at the sender. Resolved
+            // against the ACTIVE identity, like `generate_invite_link_url`
+            // next to it: the invitation belongs to the identity whose seed
+            // is being shown right now.
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final code = req.params['class'] as String?;
+            if (code == null || code.isEmpty) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'class missing'));
+              break;
+            }
+            final ms = req.params['validityMs'] as int?;
+            final invite = await service.issueInviteForSharing(
+              inviteClassCode: code,
+              validity: ms == null ? null : Duration(milliseconds: ms),
+              singleUse: req.params['singleUse'] as bool? ?? false,
+              label: req.params['label'] as String? ?? 'qr-card',
+            );
+            final issued = invite.invite;
+            if (issued == null) {
+              // ── THE REASON TRAVELS ALONG (S381, 11.09.2026) ──────────────
+              //
+              // Here stood: "The REASON stands in the issuer's log (cap,
+              // ledger, seed). Repeating it here would mean maintaining it in
+              // two places; the UI only needs 'not issued'."
+              //
+              // The UI does need it: it cannot read the daemon's log and
+              // therefore GUESSED the most frequent one
+              // (`invite_cap_reached`). A guessed reason sends the user down
+              // the wrong path — whoever reads "cap reached" revokes
+              // invitations, although in truth the master seed was missing.
+              // §15.3.1: "the UI must name the consequence".
+              //
+              // This is NOT a second maintenance place: the reason is
+              // maintained exactly once, in `invite_issue_refusal.dart`; here
+              // only its stable identifier travels.
+              _sendResponse(client, IpcResponse(
+                  id: req.id,
+                  success: false,
+                  error: 'not issued',
+                  data: {
+                    kInviteRefusalField:
+                        (invite.refusal ?? InviteIssueRefusal.unknownReason)
+                            .wireCode
+                  }));
+              break;
+            }
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'class': issued.inviteClassCode,
+              'index': issued.index,
+              'expiresAtMs': issued.expiresAtMs,
+              'kiB64': base64.encode(issued.inviteKey),
+            }));
+          }
+          break;
+
+        // §15.3.2 / §15.3.3 — list and revoke (S381). Both lie with the
+        // ONE writer: the ledger stands in the daemon.
+        case 'list_open_invitations':
+          {
+            final service = _services[_defaultIdentityId];
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            try {
+              final open = await service.listOpenInvitations();
+              _sendResponse(client, IpcResponse(
+                  id: req.id,
+                  success: true,
+                  data: {
+                    'invitations': open.map((i) => i.toJson()).toList()
+                  }));
+            } on StateError catch (e) {
+              // §21.4: unreadable is not empty — that goes out as an ERROR,
+              // so that the UI does not claim "no open invitations".
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'ledger unreadable: $e'));
+            }
+          }
+          break;
+
+        case 'revoke_invitation':
+          {
+            final service = _services[_defaultIdentityId];
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final idx = req.params['index'] as int?;
+            if (idx == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'index missing'));
+              break;
+            }
+            final route = await service.revokeInvitation(idx);
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: {'revoked': route}));
+          }
+          break;
+
+        // ── V4.2 invitation card (S387, `mycelium/berichte/S387-API-KARTE.md`) ──
+        //
+        // Resolved against the active identity of the CALLING client: the
+        // UI is a client of its own, and the card belongs to the identity
+        // it is showing there right now (§15.3). Domain outcomes travel as a
+        // value with `success: true`.
+        case 'invitation_card_issue':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final kind = InvitationKind.byName(req.params['kind'] as String?);
+            if (kind == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'kind missing'));
+              break;
+            }
+            final outcome = await service.issueInvitationCard(
+              kind: kind,
+              validity:
+                  InvitationValidity.byName(req.params['validity'] as String?),
+              label: req.params['label'] as String? ?? '',
+              faceToFace: req.params['faceToFace'] == true,
+            );
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: outcome.toJson()));
+          }
+          break;
+
+        case 'invitation_card_redeem_text':
+          {
+            final service = _resolveService(client, req);
+            final text = req.params['text'] as String?;
+            if (service == null || text == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id,
+                  success: false,
+                  error: service == null ? 'No active service' : 'text missing'));
+              break;
+            }
+            final outcome = await service.redeemInvitationText(text);
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: outcome.toJson()));
+          }
+          break;
+
+        case 'invitation_card_redeem_bytes':
+          {
+            final service = _resolveService(client, req);
+            final b64 = req.params['packedB64'] as String?;
+            if (service == null || b64 == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id,
+                  success: false,
+                  error: service == null
+                      ? 'No active service'
+                      : 'packedB64 missing'));
+              break;
+            }
+            final Uint8List packed;
+            try {
+              packed = Uint8List.fromList(base64.decode(b64));
+            } on FormatException catch (e) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'packedB64: $e'));
+              break;
+            }
+            final outcome = await service.redeemInvitationCardBytes(packed);
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: outcome.toJson()));
+          }
+          break;
+
+        case 'invitation_card_standing':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final outcome = await service.standingInvitations();
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: outcome.toJson()));
+          }
+          break;
+
+        case 'invitation_card_revoke':
+          {
+            final service = _resolveService(client, req);
+            final id = req.params['id'] as String?;
+            if (service == null || id == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id,
+                  success: false,
+                  error: service == null ? 'No active service' : 'id missing'));
+              break;
+            }
+            final outbound = await service.revokeInvitationCard(id);
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: {'outcome': outbound.name}));
+          }
+          break;
+
+        case 'invitation_card_revoke_all':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(
+                  id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final outcome = await service.revokeAllInvitationCards();
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: outcome.toJson()));
           }
           break;
 

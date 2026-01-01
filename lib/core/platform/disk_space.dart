@@ -1,6 +1,7 @@
 import 'dart:io';
 
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 
 /// Platform-aware free disk space detection.
 ///
@@ -8,7 +9,9 @@ import 'package:cleona/core/network/clogger.dart';
 /// Android/iOS: uses a callback set by the Flutter app (Platform Channel to StatFs/NSFileManager).
 /// Fallback: returns 0 (caller uses minBudget).
 class DiskSpace {
-  static final _log = CLogger.get('disk-space');
+  // Purely static utility without identity reference (takes only a path,
+  // no constructor) -> AppPaths.dataDir.
+  static final _log = CLogger.get('disk-space', profileDir: AppPaths.dataDir);
 
   /// Optional platform query function set by Flutter GUI on Android/iOS.
   /// Signature: `Future<int> queryFn(String path)` returning free bytes.

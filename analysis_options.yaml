@@ -26,3 +26,15 @@ linter:
 
 # Additional information about this file can be found at
 # https://dart.dev/guides/language/analysis-options
+
+analyzer:
+  exclude:
+    # Retired V4.0 field simulation: imports modules that no longer exist,
+    # deliberately not ported (see scripts/sim/attic/README.md).
+    - scripts/sim/attic/**
+    # One-off calculation scripts of the V4.1 redesign measurements (M1..M10). They
+    # are evidence, not production code: constants in UPPER CASE as in
+    # the formulas of the proposals, output via `print`. Added in S378 —
+    # they were on no branch of the V4 line, although the redesign rests on
+    # them.
+    - scripts/v4-redesign/**

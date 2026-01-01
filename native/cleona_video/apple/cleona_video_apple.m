@@ -754,9 +754,9 @@ static int32_t negotiate(const cleona_video_config_t *cfg,
         return CLEONA_VIDEO_ERR_INVALID;
     if (cfg->keyframe_interval_frames < 0)
         return CLEONA_VIDEO_ERR_INVALID;
-    /* Erratum 7: eine unbekannte Richtung ist ein Aufruferfehler und wird hier
-     * zusammen mit den uebrigen Feldpruefungen entschieden, damit sie nie als
-     * ERR_RATE_UNACHIEVABLE erscheint (Erratum 6b Fall 1). */
+    /* Erratum 7: an unknown direction is a caller error and is decided here
+     * together with the remaining field checks, so that it never appears as
+     * ERR_RATE_UNACHIEVABLE (erratum 6b case 1). */
     if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
         cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY)
         return CLEONA_VIDEO_ERR_INVALID;
@@ -805,11 +805,11 @@ static int32_t negotiate(const cleona_video_config_t *cfg,
     out->max_frame_bytes          = cfg->max_frame_bytes;  /* never raised */
     out->keyframe_interval_frames = cfg->keyframe_interval_frames > 0
         ? cfg->keyframe_interval_frames : fps * 2;
-    /* Erratum 7: durchgereicht, nie ausgehandelt. Ohne diese Zeile stuende in
-     * out->direction der uninitialisierte Wert des Aufrufer-Structs -- und
-     * anders als auf Linux bliebe der Muell hier dauerhaft stehen, weil open()
-     * und reconfigure() `accepted` direkt nach s->cfg uebernehmen. Damit liefe
-     * jeder spaetere Richtungsvergleich gegen Zufall. */
+    /* Erratum 7: passed through, never negotiated. Without this line
+     * out->direction would hold the uninitialised value of the caller struct -- and
+     * unlike on Linux the garbage would stay here permanently, because open()
+     * and reconfigure() take `accepted` directly into s->cfg. Thus
+     * every later direction comparison would run against chance. */
     out->direction                = cfg->direction;
 
     return CLEONA_VIDEO_OK;
@@ -954,16 +954,16 @@ CLEONA_VIDEO_API cleona_video_session_t *cleona_video_open(
 
     s->state = ST_OPEN;
     s->cfg = accepted;
-    /* Erratum 7: diese Session hat nie eine Kamera gehabt. Das ist ihr Zustand,
-     * keine Nutzer-Stummschaltung -- set_capture_enabled kann ihn nicht
-     * aufheben. Anders als Linux und Windows baut dieses Backend Kamera und
-     * Encoder erst in start(); open() kann hier also gar nicht an einer
-     * fehlenden Kamera scheitern, und Erratum 7 ist an dieser Stelle bereits
-     * erfuellt. Die Arbeit liegt in start(). */
+    /* Erratum 7: this session has never had a camera. That is its state,
+     * not a user mute -- set_capture_enabled cannot
+     * lift it. Unlike Linux and Windows this backend builds camera and
+     * encoder only in start(); open() therefore cannot fail here at all on a
+     * missing camera, and erratum 7 is already
+     * fulfilled at this place. The work lies in start(). */
     s->decode_only = (accepted.direction == CLEONA_VIDEO_DIR_DECODE_ONLY);
     s->capture_enabled = s->decode_only ? 0 : 1;
     s->awaiting_keyframe = 1;
-    /* Das Fehlen des Encoders ist BEKANNT, nicht unbestimmt (Erratum 7). */
+    /* The absence of the encoder is KNOWN, not undetermined (erratum 7). */
     s->hw_encode_verified = s->decode_only ? CLEONA_VIDEO_HW_NO
                                            : CLEONA_VIDEO_HW_NOT_DETERMINABLE;
     s->hw_decode_verified = CLEONA_VIDEO_HW_NOT_DETERMINABLE;
@@ -984,10 +984,10 @@ CLEONA_VIDEO_API int32_t cleona_video_reconfigure(cleona_video_session_t *s,
         pthread_mutex_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_STATE;
     }
-    /* Erratum 7: die Richtung steht bei open() fest -- eine Session, die zum
-     * Dekodieren geoeffnet wurde, waechst keine Kamera. Vor negotiate(), damit
-     * die Session wie bei jedem anderen gescheiterten reconfigure unberuehrt
-     * bleibt (Erratum 1, Seiteneffektfreiheit). */
+    /* Erratum 7: the direction is fixed at open() -- a session that was opened for
+     * decoding grows no camera. Before negotiate(), so that
+     * the session stays untouched as with every other failed reconfigure
+     * (erratum 1, freedom from side effects). */
     if (cfg->direction != s->cfg.direction) {
         pthread_mutex_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_INVALID;
@@ -1076,15 +1076,15 @@ CLEONA_VIDEO_API int32_t cleona_video_start(cleona_video_session_t *s) {
         return CLEONA_VIDEO_ERR_STATE;
     }
 
-    /* Erratum 7: eine Decode-only-Session baut weder Kamera noch Encoder.
-     * Ohne diesen Zweig scheitert start() auf einem Geraet ohne Kamera in
-     * setup_capture_session() mit ERR_BACKEND -- und genau daran soll eine
-     * Decode-only-Session nicht mehr scheitern. Der Decoder entsteht ohnehin
-     * erst spaet in submit_encoded(), sobald SPS/PPS vorliegen; der Decode-Pfad
-     * ist von Kamera und Encoder vollstaendig entkoppelt.
-     * hw_encode_verified bleibt auf dem in open() gesetzten HW_NO --
-     * query_hw_encode() gaebe hier HW_NOT_DETERMINABLE zurueck, was Erratum 7
-     * ausdruecklich als falsch benennt. */
+    /* Erratum 7: a decode-only session builds neither camera nor encoder.
+     * Without this branch start() fails on a device without camera in
+     * setup_capture_session() with ERR_BACKEND -- and exactly on that a
+     * decode-only session is no longer supposed to fail. The decoder arises anyway
+     * only late in submit_encoded(), as soon as SPS/PPS are present; the decode path
+     * is completely decoupled from camera and encoder.
+     * hw_encode_verified stays at the HW_NO set in open() --
+     * query_hw_encode() would return HW_NOT_DETERMINABLE here, which erratum 7
+     * explicitly names as wrong. */
     if (!s->decode_only) {
         /* Set up AVCaptureSession. */
         @autoreleasepool {
@@ -1115,8 +1115,8 @@ CLEONA_VIDEO_API int32_t cleona_video_start(cleona_video_session_t *s) {
 
     s->state = ST_RUNNING;
 
-    /* Start capture. Bei decode-only gibt es keine -- der Aufruf waere zwar ein
-     * nil-No-op, aber die Absicht gehoert in den Code, nicht in ObjC-Semantik. */
+    /* Start capture. With decode-only there is none -- the call would be a
+     * nil no-op, but the intent belongs in the code, not in ObjC semantics. */
     if (!s->decode_only) {
         @autoreleasepool {
             [s->captureSession startRunning];
@@ -1234,12 +1234,12 @@ CLEONA_VIDEO_API int32_t cleona_video_read_encoded(cleona_video_session_t *s,
             pthread_mutex_unlock(&s->lock);
             return CLEONA_VIDEO_READ_CLOSED;
         }
-        /* Erratum 7: kein Encoder, also kann nie ein Frame kommen -- aber die
-         * Session laeuft, deshalb TIMEOUT und nicht READ_CLOSED. Vor der
-         * Warteschleife, weil ein blockierender Read (timeout_ms < 0) sonst in
-         * pthread_cond_wait auf etwas wartet, das nicht eintreten kann.
-         * Nach dem Zustandscheck, damit eine gestoppte Session weiterhin
-         * READ_CLOSED liefert. */
+        /* Erratum 7: no encoder, so no frame can ever come -- but the
+         * session is running, therefore TIMEOUT and not READ_CLOSED. Before the
+         * wait loop, because a blocking read (timeout_ms < 0) would otherwise wait in
+         * pthread_cond_wait for something that cannot occur.
+         * After the state check, so that a stopped session still
+         * delivers READ_CLOSED. */
         if (s->decode_only) {
             pthread_mutex_unlock(&s->lock);
             return CLEONA_VIDEO_READ_TIMEOUT;
@@ -1530,8 +1530,8 @@ CLEONA_VIDEO_API int32_t cleona_video_request_keyframe(cleona_video_session_t *s
         pthread_mutex_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_STATE;
     }
-    /* Erratum 7: fragt UNSEREN Encoder, den eine Decode-only-Session nicht hat.
-     * Den Peer um ein Keyframe zu bitten ist Signalisierung, nicht diese ABI. */
+    /* Erratum 7: asks OUR encoder, which a decode-only session does not have.
+     * Asking the peer for a keyframe is signalling, not this ABI. */
     if (s->decode_only) {
         pthread_mutex_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_UNSUPPORTED;
@@ -1546,8 +1546,8 @@ CLEONA_VIDEO_API void cleona_video_set_capture_enabled(cleona_video_session_t *s
     if (!s) return;
 
     pthread_mutex_lock(&s->lock);
-    /* Erratum 7: angenommen und ignoriert. Ein Aufrufer, der N Sessions gleich
-     * behandelt, darf diese eine nicht gesondert behandeln muessen. */
+    /* Erratum 7: accepted and ignored. A caller that treats N sessions alike
+     * must not have to treat this one separately. */
     if (s->decode_only) {
         pthread_mutex_unlock(&s->lock);
         return;
@@ -1577,9 +1577,9 @@ CLEONA_VIDEO_API int32_t cleona_video_switch_camera(cleona_video_session_t *s) {
         return CLEONA_VIDEO_ERR_STATE;
     }
 
-    /* Erratum 7: eine Decode-only-Session hat ueberhaupt keine Kamera. Explizit
-     * und nicht bloss ueber `!s->cameras`, damit die Absicht im Code steht und
-     * nicht davon abhaengt, dass setup_capture_session() nie lief. */
+    /* Erratum 7: a decode-only session has no camera at all. Explicitly
+     * and not merely via `!s->cameras`, so that the intent stands in the code and
+     * does not depend on setup_capture_session() never having run. */
     if (s->decode_only || !s->cameras || s->cameras.count < 2) {
         pthread_mutex_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_UNSUPPORTED;
@@ -1656,9 +1656,9 @@ CLEONA_VIDEO_API void cleona_video_get_report(cleona_video_session_t *s,
     out->negotiated_width        = s->cfg.width;
     out->negotiated_height       = s->cfg.height;
     out->negotiated_fps          = s->cfg.fps;
-    /* Erratum 7: ohne Kamera und ohne Encoder gibt es kein Backend zu nennen.
-     * hardware_encode steht bereits seit open() auf HW_NO -- bekannt, nicht
-     * unbestimmt. */
+    /* Erratum 7: without camera and without encoder there is no backend to name.
+     * hardware_encode has already been at HW_NO since open() -- known, not
+     * undetermined. */
     out->capture_backend         = s->decode_only
         ? CLEONA_VIDEO_BACKEND_NONE : CLEONA_VIDEO_BACKEND_APPLE_AVCAPTURE;
     out->encode_backend          = s->decode_only

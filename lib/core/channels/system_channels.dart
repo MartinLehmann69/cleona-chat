@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import '../crypto/sodium_ffi.dart';
-import '../network/peer_info.dart' show bytesToHex;
+import '../util/hex.dart' show bytesToHex;
 
 /// Deterministic channel IDs and constants for the two system channels (§9.5).
 class SystemChannels {
@@ -132,15 +132,15 @@ class CrashReport {
     final buf = StringBuffer()
       ..writeln('Version: $appVersion')
       ..writeln('Plattform: $platform')
-      ..writeln('Fehler: $exceptionType — $exceptionMsg')
+      ..writeln('Error: $exceptionType — $exceptionMsg')
       ..writeln('Stack:');
     for (final line in stackLines.take(5)) {
       buf.writeln('  $line');
     }
     if (stackLines.length > 5) {
-      buf.writeln('  ... (${stackLines.length - 5} weitere)');
+      buf.writeln('  ... (${stackLines.length - 5} more)');
     }
-    buf.writeln('Logs: [letzte ${logTail.split('\n').length} Zeilen]');
+    buf.writeln('Logs: [last ${logTail.split('\n').length} lines]');
     return buf.toString();
   }
 }
@@ -248,7 +248,15 @@ class ContactIssueReport {
         contactIdShort: json['contactIdShort'] as String,
         contactName: json['contactName'] as String,
         seedAgeSeconds: json['seedAgeSeconds'] as int,
-        natType: json['natType'] as String,
+        // S368: here stood `as String` — without a default value. A report
+        // WITHOUT the field thus made the whole post throw on reading.
+        // `natType` has had no producer since S360 (V4.1 determines
+        // no NAT type); the sender only fills `'unknown'`. For the field
+        // to be able to fall at all, the read side must first be able to
+        // do without it — otherwise a 4.1.0 node would break on a post
+        // of a 4.1.1 node. The line next to it (`LogReport`, l. 368) was
+        // always built that way.
+        natType: json['natType'] as String? ?? 'unknown',
         peerCount: json['peerCount'] as int,
         confirmedPeerCount: json['confirmedPeerCount'] as int,
         hasPortMapping: json['hasPortMapping'] as bool,
@@ -267,33 +275,33 @@ class ContactIssueReport {
     final buf = StringBuffer()
       ..writeln('Version: $appVersion')
       ..writeln('Plattform: $platform')
-      ..writeln('Kontakt: $contactName ($contactIdShort)')
+      ..writeln('Contact: $contactName ($contactIdShort)')
       ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
       ..writeln('NAT-Typ: $natType')
-      ..writeln('Peers: $peerCount ($confirmedPeerCount bestätigt)')
+      ..writeln('Peers: $peerCount ($confirmedPeerCount confirmed)')
       ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
       ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
-      ..writeln('Logs: [letzte ${logTail.split('\n').length} Zeilen]');
+      ..writeln('Logs: [last ${logTail.split('\n').length} lines]');
     return buf.toString();
   }
 
   String toExportText() {
     final buf = StringBuffer()
-      ..writeln('=== Cleona Kontaktproblem-Bericht ===')
+      ..writeln('=== Cleona contact problem report ===')
       ..writeln('Erstellt: ${DateTime.fromMillisecondsSinceEpoch(timestampMs).toIso8601String()}')
       ..writeln('')
       ..writeln('Version: $appVersion')
       ..writeln('Plattform: $platform')
-      ..writeln('Kontakt: $contactName ($contactIdShort)')
+      ..writeln('Contact: $contactName ($contactIdShort)')
       ..writeln('Seed-Alter: ${formatDuration(seedAgeSeconds)}')
       ..writeln('NAT-Typ: $natType')
-      ..writeln('Peers: $peerCount ($confirmedPeerCount bestätigt)')
+      ..writeln('Peers: $peerCount ($confirmedPeerCount confirmed)')
       ..writeln('Port-Mapping: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('Peer im DHT: ${peerSeenInDht ? "ja" : "nein"}')
       ..writeln('Uptime: ${formatDuration(uptimeSeconds)}')
       ..writeln('')
-      ..writeln('--- Letzte Log-Einträge ---')
+      ..writeln('--- Last log entries ---')
       ..writeln(logTail);
     return buf.toString();
   }
@@ -384,7 +392,7 @@ class LogReport {
       ..writeln('Version: $appVersion')
       ..writeln('Plattform: $platform')
       ..writeln('Uptime: ${ContactIssueReport.formatDuration(uptimeSeconds)}')
-      ..writeln('Peers: $peerCount, Routen: $routeCount')
+      ..writeln('Peers: $peerCount, routes: $routeCount')
       ..writeln('NAT: $natType, UPnP: ${hasPortMapping ? "ja" : "nein"}')
       ..writeln('RAM: ${(memoryBytes / 1024 / 1024).toStringAsFixed(1)} MB');
     if (contactSummary != null && contactSummary!.isNotEmpty) {
@@ -401,7 +409,7 @@ class LogReport {
     }
     buf
       ..writeln('')
-      ..writeln('--- Log (${logLines.length} Zeilen, gefiltert) ---');
+      ..writeln('--- Log (${logLines.length} lines, filtered) ---');
     for (final line in logLines) {
       buf.writeln(line);
     }

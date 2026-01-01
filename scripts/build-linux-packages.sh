@@ -1,15 +1,34 @@
 #!/bin/bash
-# build-linux-packages.sh — Baut AppImage, .deb und .rpm aus dem Flutter-Linux-Bundle
+# build-linux-packages.sh — builds AppImage, .deb and .rpm from the Flutter Linux bundle
 #
-# Voraussetzungen:
-#   - Flutter-Build bereits erstellt: flutter build linux --release
+# Prerequisites:
+#   - Flutter build already created: flutter build linux --release
 #   - appimagetool: https://github.com/AppImage/appimagetool
 #   - dpkg-deb (apt install dpkg)
 #   - rpmbuild (apt install rpm)
 #
-# Nutzung:
+# Usage:
 #   ./scripts/build-linux-packages.sh [VERSION]
-#   Beispiel: ./scripts/build-linux-packages.sh 3.2.0
+#   Example: ./scripts/build-linux-packages.sh 3.2.0
+#
+# ── RE-CHECKED FOR THE BUNDLE REWORK (S367) ──────────────────────────
+#
+# Since S367 the daemon lives in `bundle/bin/`, its store library in
+# `bundle/lib/`. This script needs to know NOTHING of that, and that
+# is measured, not assumed:
+#
+#   * All three formats copy the bundle with `cp -r "$BUNDLE_DIR"/*`
+#     — `bin/` and `lib/` come along as subdirectories.
+#   * The three wrappers below set `LD_LIBRARY_PATH` to `<app>/lib`
+#     and start the GUI (`<app>/cleona`). Both remain correct: the
+#     bundle root is unchanged the directory of the GUI, and
+#     `<app>/bin/../lib` is exactly the same `lib`.
+#   * There is no daemon call here (checked: `grep -n daemon`
+#     finds no line in this file). The GUI starts the daemon
+#     via `_findDaemonBinary()`, and that looks in `bin/` first.
+#
+# Whoever adds an autostart here in the future uses
+# `<app>/bin/cleona-daemon` — not `<app>/cleona-daemon`.
 
 set -euo pipefail
 
@@ -25,10 +44,10 @@ BUNDLE_DIR="$SRC_DIR/build/linux/x64/release/bundle"
 OUTPUT_DIR="$SRC_DIR/build/packages"
 ICON_PATH="$SRC_DIR/assets/app_icon.png"
 
-# Pruefen ob Flutter-Bundle existiert
+# Check whether the Flutter bundle exists
 if [ ! -d "$BUNDLE_DIR" ]; then
-  echo "FEHLER: Flutter-Bundle nicht gefunden: $BUNDLE_DIR"
-  echo "Zuerst ausfuehren: flutter build linux --release"
+  echo "ERROR: Flutter bundle not found: $BUNDLE_DIR"
+  echo "Run first: flutter build linux --release"
   exit 1
 fi
 
@@ -40,7 +59,7 @@ echo "Bundle:  $BUNDLE_DIR"
 echo "Output:  $OUTPUT_DIR"
 echo ""
 
-# --- Desktop-Entry (gemeinsam genutzt) ---
+# --- Desktop entry (shared) ---
 create_desktop_entry() {
   local target="$1"
   cat > "$target" << EOF
@@ -95,27 +114,27 @@ exec "$SELF_DIR/usr/lib/cleona/cleona" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
 
-# Desktop + Icon im Root (AppImage-Konvention)
+# Desktop + icon in the root (AppImage convention)
 cp "$APPDIR/usr/share/applications/cleona-chat.desktop" "$APPDIR/"
 if [ -f "$ICON_PATH" ]; then
   cp "$ICON_PATH" "$APPDIR/cleona-chat.png"
 fi
 
-# AppImage bauen
+# Build AppImage
 APPIMAGE_OUTPUT="$OUTPUT_DIR/${APP_NAME}-${VERSION}-x86_64.AppImage"
 if command -v appimagetool &> /dev/null; then
   ARCH=x86_64 appimagetool "$APPDIR" "$APPIMAGE_OUTPUT" 2>/dev/null
   echo "  OK: $APPIMAGE_OUTPUT"
 else
-  echo "  WARNUNG: appimagetool nicht installiert — AppDir vorbereitet aber nicht gepackt"
-  echo "  Installieren: https://github.com/AppImage/appimagetool/releases"
+  echo "  WARNING: appimagetool not installed — AppDir prepared but not packed"
+  echo "  Install: https://github.com/AppImage/appimagetool/releases"
 fi
 
 # ============================================================
-# 2. Debian-Paket (.deb)
+# 2. Debian package (.deb)
 # ============================================================
 echo ""
-echo "[2/3] Debian-Paket (.deb) erstellen..."
+echo "[2/3] Creating Debian package (.deb)..."
 
 DEB_DIR="$OUTPUT_DIR/deb-build"
 rm -rf "$DEB_DIR"
@@ -144,7 +163,7 @@ if [ -f "$ICON_PATH" ]; then
   cp "$ICON_PATH" "$DEB_DIR/usr/share/icons/hicolor/256x256/apps/cleona-chat.png"
 fi
 
-# Control-Datei
+# Control file
 INSTALLED_SIZE=$(du -sk "$DEB_DIR/opt/cleona" | cut -f1)
 cat > "$DEB_DIR/DEBIAN/control" << EOF
 Package: $APP_NAME
@@ -170,26 +189,26 @@ gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 POSTINST
 chmod +x "$DEB_DIR/DEBIAN/postinst"
 
-# Bauen
+# Build
 DEB_OUTPUT="$OUTPUT_DIR/${APP_NAME}_${VERSION}_amd64.deb"
 dpkg-deb --build "$DEB_DIR" "$DEB_OUTPUT" 2>/dev/null
 if [ $? -eq 0 ]; then
   echo "  OK: $DEB_OUTPUT"
 else
-  echo "  WARNUNG: dpkg-deb nicht verfuegbar oder Fehler beim Bauen"
+  echo "  WARNING: dpkg-deb not available or error while building"
 fi
 
 # ============================================================
-# 3. RPM-Paket (.rpm)
+# 3. RPM package (.rpm)
 # ============================================================
 echo ""
-echo "[3/3] RPM-Paket (.rpm) erstellen..."
+echo "[3/3] Creating RPM package (.rpm)..."
 
 RPM_BUILD="$OUTPUT_DIR/rpmbuild"
 rm -rf "$RPM_BUILD"
 mkdir -p "$RPM_BUILD"/{SPECS,BUILD,RPMS,SOURCES,SRPMS}
 
-# Tarball fuer rpmbuild
+# Tarball for rpmbuild
 TAR_NAME="${APP_NAME}-${VERSION}"
 TAR_DIR="$RPM_BUILD/SOURCES/$TAR_NAME"
 mkdir -p "$TAR_DIR/opt/cleona"
@@ -213,7 +232,7 @@ fi
 
 (cd "$RPM_BUILD/SOURCES" && tar czf "${TAR_NAME}.tar.gz" "$TAR_NAME")
 
-# Spec-Datei
+# Spec file
 cat > "$RPM_BUILD/SPECS/${APP_NAME}.spec" << EOF
 Name:           $APP_NAME
 Version:        $VERSION
@@ -257,7 +276,7 @@ gtk-update-icon-cache /usr/share/icons/hicolor 2>/dev/null || true
 %changelog
 EOF
 
-# Bauen
+# Build
 if command -v rpmbuild &> /dev/null; then
   rpmbuild --define "_topdir $RPM_BUILD" -bb "$RPM_BUILD/SPECS/${APP_NAME}.spec" 2>/dev/null
   RPM_FILE=$(find "$RPM_BUILD/RPMS" -name "*.rpm" | head -1)
@@ -266,19 +285,19 @@ if command -v rpmbuild &> /dev/null; then
     echo "  OK: $OUTPUT_DIR/$(basename "$RPM_FILE")"
   fi
 else
-  echo "  WARNUNG: rpmbuild nicht installiert — Spec-Datei vorbereitet"
-  echo "  Installieren: sudo apt install rpm"
+  echo "  WARNING: rpmbuild not installed — spec file prepared"
+  echo "  Install: sudo apt install rpm"
 fi
 
 # ============================================================
 # Zusammenfassung
 # ============================================================
 echo ""
-echo "=== Fertig ==="
-echo "Pakete in: $OUTPUT_DIR/"
-ls -lh "$OUTPUT_DIR"/*.{AppImage,deb,rpm} 2>/dev/null || echo "(Einige Formate konnten nicht gebaut werden — siehe Warnungen oben)"
+echo "=== Done ==="
+echo "Packages in: $OUTPUT_DIR/"
+ls -lh "$OUTPUT_DIR"/*.{AppImage,deb,rpm} 2>/dev/null || echo "(Some formats could not be built — see warnings above)"
 echo ""
-echo "Naechste Schritte:"
-echo "  1. Pakete testen (auf sauberer VM installieren)"
+echo "Next steps:"
+echo "  1. Test packages (install on a clean VM)"
 echo "  2. Signieren: echo -n 'SHA256HASH' | openssl pkeyutl -sign -inkey /home/claude/CleonaPrivat/keys/cleona_maintainer_private.pem -rawin -out sig.bin"
 echo "  3. GitHub Release: gh release create v$VERSION --title 'Cleona Chat v$VERSION' $OUTPUT_DIR/*"

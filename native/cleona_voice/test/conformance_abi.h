@@ -36,7 +36,7 @@
  * ----------
  * Exactly the twelve entry points of cleona_voice.h, no more. A backend that
  * exports fewer cannot be tested and cannot ship — the same twelve are the ones
- * the Dart binding looks up (see native/cleona_voice/BUILD_REQUEST.md §1).
+ * the Dart binding looks up (see BUGFIX_CURRENT.md AV-V0.2 §1).
  */
 
 #ifndef CLEONA_VOICE_CONFORMANCE_ABI_H

@@ -7,15 +7,22 @@
 /// - Sample rate and frame size come from the caller (VoiceSession.format)
 ///   to respect invariant I3 ("no assumed sample rate").
 /// - Mono, 20 ms frame duration.
-/// - DTX enabled, Inband-FEC enabled, target bitrate 28 kbps.
+/// - DTX enabled, Inband-FEC enabled, bitrate 28 kbps.
+/// - **CBR since 2026-09-06 (owner's decision, variant C).** The bitrate is
+///   a *ceiling*, not a target: every packet is exactly
+///   [opusCbrFrameBytes] = 70 B. See [OpusFFI._configureEncoder] for the
+///   measurement that forced this and for what it costs.
 ///
-/// The legacy no-arg constructor [OpusFFI()] remains for backward
-/// compatibility (16 kHz, 320 samples) but new callers must use
-/// [OpusFFI.withFormat].
+/// S368: the parameterless `OpusFFI()` and the two constants
+/// `opusSampleRate` / `opusFrameSamples` have fallen. They all carried
+/// the same rationale ("for backward compatibility") and had
+/// zero users in `lib/`/`bin/`. [OpusFFI.withFormat] is the only way —
+/// the format comes from the platform, never from a constant.
 library;
 
 import 'dart:ffi';
 import 'dart:io';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
@@ -31,16 +38,15 @@ const int opusOk = 0;
 /// Maximum packet size for an Opus frame.
 const int opusMaxPacketSize = 4000;
 
-/// Legacy sample rate for backward compatibility.
-/// New code must NOT use this — sample rate comes from VoiceSession.format.
-const int opusSampleRate = 16000;
+// S368: here stood `opusSampleRate = 16000` and
+// `opusFrameSamples = 320`, both with the addition "Legacy … for backward
+// compatibility. New code must NOT use this". Their only user was the
+// parameterless constructor, which falls with them; outside this file
+// there was not a single one in `lib/` and `bin/`. A constant that nobody
+// may use and nobody uses is an invitation to do it anyway.
 
 /// Mono.
 const int opusChannels = 1;
-
-/// Legacy frame duration in samples (20ms at 16kHz = 320 samples).
-/// New code must NOT use this — frame size comes from VoiceSession.format.
-const int opusFrameSamples = opusSampleRate * 20 ~/ 1000; // 320
 
 // ── Opus CTL Constants ──────────────────────────────────────────────────
 
@@ -56,9 +62,44 @@ const int _opusSetPacketLossPerc = 4014;
 /// `OPUS_SET_DTX` — enables (1) or disables (0) discontinuous transmission.
 const int _opusSetDtx = 4016;
 
-/// Target bitrate (bits/second). 28000 is the midpoint of the spec range
+/// `OPUS_SET_VBR` — 1 selects variable, 0 selects constant bitrate.
+///
+/// Not to be confused with `OPUS_SET_VBR_CONSTRAINT` (4020). That one is
+/// **already 1 out of the factory** — measured on 2026-09-06 against
+/// libopus.so.0.9.0 with `OPUS_GET_VBR_CONSTRAINT` on a fresh
+/// `opus_encoder_create(rate, 1, OPUS_APPLICATION_VOIP)`, at 48 kHz and at
+/// 16 kHz — so setting it changes nothing. Only this one does.
+const int _opusSetVbr = 4006;
+
+/// Bitrate (bits/second). 28000 is the midpoint of the spec range
 /// (24-32 kbps).
+///
+/// Under CBR (see [OpusFFI._configureEncoder]) this is not a target but the
+/// exact rate — the encoder emits [opusCbrFrameBytes] every frame.
 const int _opusTargetBitrate = 28000;
+
+/// Frames per second at the 20 ms frame duration [OpusFFI.withFormat]
+/// enforces for every sample rate.
+const int _opusFramesPerSecond = 50;
+
+/// **The size of every Opus packet this class produces: 70 B.**
+///
+/// 28,000 bit/s ÷ 50 frames/s ÷ 8 = 70 B. Derived, not written down, so it
+/// follows [_opusTargetBitrate] if that ever moves.
+///
+/// This is a **bound**, not a percentile: under CBR libopus emits exactly
+/// this many bytes for every frame it is given. Measured 2026-09-06 over
+/// 4,000 frames of four signal shapes at 48 kHz and 16 kHz (min = max = 70)
+/// and over 500 adversarial frames at each of the five rates
+/// `OpusFFI.withFormat` admits — 8/12/16/24/48 kHz — where the set of
+/// observed packet lengths had exactly one element at every rate.
+///
+/// `DFrameClass.voice` carries 133 B. A 1:1 voice body is the Opus packet
+/// itself (70 B, 63 B spare); a group body is `index(1) ‖ seq(4) ‖
+/// nonce(12) ‖ AES-GCM(Opus)+tag(16)` = Opus + 33 B (103 B, 30 B spare).
+/// Both fit with room, and now they fit *by construction*.
+const int opusCbrFrameBytes =
+    _opusTargetBitrate ~/ _opusFramesPerSecond ~/ 8;
 
 /// Expected packet loss percentage for FEC tuning. 10% is typical for
 /// VoIP over UDP with relay hops.
@@ -145,17 +186,13 @@ class OpusFFI {
   _OpusDecodeDart? _decode;
   _OpusEncoderCtlIntDart? _encoderCtl;
 
-  /// Legacy constructor. Uses hardcoded 16 kHz / 320 samples.
-  ///
-  /// Exists for backward compatibility with existing callers. New code must
-  /// use [OpusFFI.withFormat].
-  OpusFFI()
-      : sampleRate = opusSampleRate,
-        frameSamples = opusFrameSamples {
-    _loadLibrary();
-    _createEncoder();
-    _createDecoder();
-  }
+  // S368: here stood the parameterless `OpusFFI()` with hard-wired
+  // 16 kHz / 320 samples — "Exists for backward compatibility with
+  // existing callers". Measured: **zero** callers in `lib/` and `bin/`,
+  // only two in `test/`; both have been switched to `OpusFFI.withFormat`.
+  // The fixed rate was moreover exactly what §10.4 forbids: the
+  // format comes from the platform (`VoiceSession.format`), never from a
+  // constant (I3, I4).
 
   /// Creates an Opus encoder/decoder pair at the given [sampleRate] and
   /// [frameSamples].
@@ -234,11 +271,19 @@ class OpusFFI {
             'opus_encoder_ctl');
   }
 
+  /// Bundle paths since S367 — rationale in `sodium_ffi.dart`
+  /// (`_openLibsodium`): the daemon lies in `<bundleDir>/bin/`, its
+  /// own directory no longer carries the libraries.
+  ///
+  /// Under Linux the bundle carries `libopus.so` itself (built by
+  /// `linux/CMakeLists.txt`, installed to `bundle/lib/`) — there
+  /// the bundle path is thus not an addition but the normal case.
   static List<String> _libSearchPaths() {
     if (Platform.isMacOS) {
-      return const [
+      return [
         'libopus.dylib',
         'libopus.0.dylib',
+        '${AppPaths.macFrameworksDir}/libopus.dylib',
         '@executable_path/../Frameworks/libopus.dylib',
         '/opt/homebrew/lib/libopus.dylib',
         '/opt/homebrew/lib/libopus.0.dylib',
@@ -247,11 +292,17 @@ class OpusFFI {
       ];
     }
     if (Platform.isWindows) {
-      return const ['libopus.dll', 'opus.dll'];
+      return [
+        'libopus.dll',
+        'opus.dll',
+        '${AppPaths.bundleDir}\\libopus.dll',
+        '${AppPaths.bundleDir}\\opus.dll',
+      ];
     }
-    return const [
+    return [
       'libopus.so.0',
       'libopus.so',
+      '${AppPaths.bundleLibDir}/libopus.so',
       '/usr/lib/libopus.so.0',
       '/usr/local/lib/libopus.so.0',
     ];
@@ -271,10 +322,73 @@ class OpusFFI {
     }
   }
 
-  /// Configures encoder with DTX, FEC, bitrate and packet loss percentage.
+  /// Configures encoder with CBR, DTX, FEC, bitrate and packet loss
+  /// percentage.
   ///
   /// Called only from [OpusFFI.withFormat] — the legacy constructor does not
   /// configure these so that smoke_calls.dart keeps passing unchanged.
+  ///
+  /// ## Why CBR (owner's decision 2026-09-06, variant C)
+  ///
+  /// `DFrameClass.voice` is a **fixed** 176 B size class: a body that does
+  /// not fit is refused at the sender, never promoted to the next class,
+  /// because a size difference on the wire is the fingerprint the classes
+  /// exist to remove. So the class only holds if the codec has an upper
+  /// bound per frame. Until today it had none, and the class size was twice
+  /// derived from a statistic that was mistaken for one:
+  ///
+  /// * "60-80 B" produced the 128 B class. That range is the codec's
+  ///   **mean**, and 100 % of group frames overflowed the class.
+  /// * "95 B" produced the 176 B class. That is the **maximum of one
+  ///   sample**, and 0.3-0.9 % of group frames still overflowed.
+  ///
+  /// Both times the fix bought a probability, not a promise. The reason is
+  /// [_opusSetBitrate]: it sets a *target*. A VBR frame may exceed it, and
+  /// the only hard ceiling in the encoder is [opusMaxPacketSize] = 4000 B.
+  ///
+  /// **`OPUS_SET_VBR_CONSTRAINT(1)` does not help, and this is measured,
+  /// not read.** It is already 1 out of the factory (verified with
+  /// `OPUS_GET_VBR_CONSTRAINT` on a fresh encoder at 48 kHz and 16 kHz).
+  /// Setting it explicitly and re-running the whole population produced a
+  /// frame-length sequence identical to the unset run in **4,000 of 4,000
+  /// frames** at both rates — same p50, same maximum of 110 B. Constrained
+  /// VBR bounds a short-window *average*, not a frame.
+  ///
+  /// [_opusSetVbr] `= 0` does help, and it is the only setting that does:
+  /// every packet then measures exactly [opusCbrFrameBytes] = 70 B.
+  /// 70 + 33 B of group overhead = 103 B against the 133 B the class
+  /// carries. **The residual is not small any more, it is structurally
+  /// zero** — the encoder cannot produce a frame that overflows.
+  ///
+  /// ## What it costs, measured on the same four signal shapes
+  ///
+  /// Band-energy log-spectral distance against the input, 20 log-spaced
+  /// bands, bands more than 40 dB below the frame's strongest band
+  /// excluded, run offset determined per shape and mode by
+  /// cross-correlation (lower is better, dB):
+  ///
+  /// | shape | 48 kHz VBR → CBR | 16 kHz VBR → CBR |
+  /// |---|---|---|
+  /// | speech-like | 3.4 → 7.5 | 6.0 → 10.5 |
+  /// | white noise | 43.1 → 46.6 | 3.9 → 6.8 |
+  /// | sweep | 47.4 → 59.6 | 0.6 → 2.0 |
+  /// | DTX bursts | 0.3 → 1.8 | 0.2 → 0.5 |
+  ///
+  /// The price lands where the VBR peaks were: transients and sweeps, i.e.
+  /// exactly the frames CBR is no longer allowed to spend extra bits on.
+  /// **None of this is a listening test, and synthetic tones are not
+  /// speech** — what is established is the direction and rough size of the
+  /// loss, not its perceptual weight.
+  ///
+  /// ## What it does NOT cost
+  ///
+  /// Nothing on the wire. A D-frame is padded to its class either way, so
+  /// the 61.5 → 70.0 B mean packet is invisible outside the AEAD; the wire
+  /// stays at 176 B × 50 = 8.8 kB/s per direction. DTX keeps its CTL but
+  /// stops shrinking pauses (measured minimum rises from 8-9 B to 70 B),
+  /// which likewise costs no wire bytes for the same reason — every
+  /// captured frame is sent regardless (`audio_mixer.dart`, no silence
+  /// suppression) and padded regardless.
   void _configureEncoder() {
     void ctl(int request, int value, String name) {
       final rc = _encoderCtl!(_encoder!, request, value);
@@ -285,6 +399,9 @@ class OpusFFI {
     }
 
     ctl(_opusSetBitrate, _opusTargetBitrate, 'OPUS_SET_BITRATE');
+    // Must come after the bitrate: CBR pins the frame to whatever rate is
+    // set at encode time, so the order is what makes 70 B the number.
+    ctl(_opusSetVbr, 0, 'OPUS_SET_VBR');
     ctl(_opusSetDtx, 1, 'OPUS_SET_DTX');
     ctl(_opusSetInbandFec, 1, 'OPUS_SET_INBAND_FEC');
     ctl(_opusSetPacketLossPerc, _opusExpectedLossPerc,
@@ -438,18 +555,23 @@ class OpusFFI {
   }
 
   /// Whether libopus is available on the system.
+  ///
+  /// Queries the same list that [_loadLibrary] uses (S367). Before,
+  /// this function only tried `libopus.so.0` and `libopus.so` — it
+  /// would always have reported `false` on Windows and macOS and on Linux
+  /// overlooked the shipped `bundle/lib/libopus.so`. Two
+  /// procedures for the same question are a source of error without
+  /// benefit.
   static bool isAvailable() {
-    try {
-      DynamicLibrary.open('libopus.so.0');
-      return true;
-    } catch (_) {
+    for (final name in _libSearchPaths()) {
       try {
-        DynamicLibrary.open('libopus.so');
+        DynamicLibrary.open(name);
         return true;
       } catch (_) {
-        return false;
+        continue;
       }
     }
+    return false;
   }
 }
 

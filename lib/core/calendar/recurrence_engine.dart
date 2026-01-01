@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'package:cleona/core/i18n/translations.dart';
 
 /// RFC 5545 RRULE parser and occurrence expander.
 ///
@@ -220,8 +221,15 @@ class RecurrenceEngine {
     return results;
   }
 
-  /// Format an RRULE for display. Returns human-readable German string.
-  static String formatRrule(String rrule) {
+  /// Format an RRULE for display in [language] (a locale code of
+  /// `translations.dart`; a missing key falls back to English).
+  static String formatRrule(String rrule, String language) {
+    String tr(String key, [int? count]) {
+      final entry = translations[key];
+      final text = entry?[language] ?? entry?['en'] ?? key;
+      return count == null ? text : text.replaceAll('{count}', '$count');
+    }
+
     final parts = parseRrule(rrule);
     final freq = parts['FREQ']?.toUpperCase() ?? '';
     final interval = int.tryParse(parts['INTERVAL'] ?? '1') ?? 1;
@@ -229,17 +237,25 @@ class RecurrenceEngine {
 
     switch (freq) {
       case 'DAILY':
-        return interval == 1 ? 'Täglich' : 'Alle $interval Tage';
+        return interval == 1
+            ? tr('calendar_recur_daily')
+            : tr('calendar_recur_every_days', interval);
       case 'WEEKLY':
         final days = byDay.isNotEmpty
-            ? byDay.split(',').map(_dayAbbrevToGerman).join(', ')
+            ? byDay.split(',').map((d) => _dayShort(d, tr)).join(', ')
             : '';
-        final prefix = interval == 1 ? 'Wöchentlich' : 'Alle $interval Wochen';
+        final prefix = interval == 1
+            ? tr('calendar_recur_weekly')
+            : tr('calendar_recur_every_weeks', interval);
         return days.isNotEmpty ? '$prefix ($days)' : prefix;
       case 'MONTHLY':
-        return interval == 1 ? 'Monatlich' : 'Alle $interval Monate';
+        return interval == 1
+            ? tr('calendar_recur_monthly')
+            : tr('calendar_recur_every_months', interval);
       case 'YEARLY':
-        return interval == 1 ? 'Jährlich' : 'Alle $interval Jahre';
+        return interval == 1
+            ? tr('calendar_recur_yearly')
+            : tr('calendar_recur_every_years', interval);
       default:
         return rrule;
     }
@@ -345,12 +361,12 @@ class RecurrenceEngine {
     }
   }
 
-  static String _dayAbbrevToGerman(String s) {
+  static String _dayShort(String s, String Function(String) tr) {
     final day = s.replaceAll(RegExp(r'^-?\d+'), '').toUpperCase();
-    const map = {
-      'MO': 'Mo', 'TU': 'Di', 'WE': 'Mi', 'TH': 'Do',
-      'FR': 'Fr', 'SA': 'Sa', 'SU': 'So',
+    const number = {
+      'MO': 1, 'TU': 2, 'WE': 3, 'TH': 4, 'FR': 5, 'SA': 6, 'SU': 7,
     };
-    return map[day] ?? s;
+    final n = number[day];
+    return n == null ? s : tr('weekday_short_$n');
   }
 }

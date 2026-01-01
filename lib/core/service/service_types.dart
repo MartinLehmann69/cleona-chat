@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:typed_data';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/log/log_redaction.dart';
 import 'package:cleona/core/moderation/moderation_config.dart' show ReportCategory;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 /// One built fan-out leg of a [ServiceContext.sendToUser] call: the outer
 /// packet as it was signed for exactly one recipient device.
@@ -73,55 +75,247 @@ enum UiMessageType {
   }
 }
 
-/// Message delivery status.
+/// Message delivery status — **the four states of §9.1, and no fifth.**
 ///
-/// State machine (§5.8):
-///   sending → sent (direct dispatch OK) → delivered (DELIVERY_RECEIPT) → read
-///   sending → queuedOffline (no direct route, but L3 artefacts placed)
-///           → delivered once recipient pulls from S&F/Erasure
-///   sending → failed (no connectivity at all — sender has 0 peers, L3
-///           placement impossible); entry kept in One-Shot-Outbox until the
-///           next onNetworkChanged edge-trigger retries placement.
-///   queuedOffline → expired (local check: 7-day TTL elapsed, no DELIVERY_RECEIPT)
-///           → UI offers Resend
-///   sending → queued (short-lived intermediate: in-flight but not yet
-///           dispatched; also used by ACK-timeout downgrade)
+/// ── THE SET IS THE STATEMENT ────────────────────────────────────────
+///
+/// v4_2 §9.1 lists exactly four states and says about them: "That is the
+/// complete set, and an implementation must not extend it. Every
+/// additional state is a transition that can be wrong, and a state with
+/// no consumer is a defect waiting to happen."
+///
+///   `resting`    created, not yet gone out        — waiting mark
+///   `inTransit`  gone out, no receipt             — ONE tick
+///   `delivered`  the recipient has acknowledged (§9.2) — TWO ticks
+///   `failed`     given up; no rung has carried    — warning mark
+///
+/// §12.2 maps them one to one onto the four marks, and only
+/// `failed` carries a user action ("retry").
+///
+/// **`inTransit` also covers "resting in the post box"** (§9.1). The
+/// sender does not learn which rung of the ladder carried, and
+/// does not need to learn it — therefore there is no further step between "gone out"
+/// and "acknowledged".
+///
+/// **A recipient who is offline is NOT an error** (§9.1). The
+/// message stays `inTransit` as long as it rests in the post box;
+/// `failed` is reserved for the case that no rung has carried it.
+///
+/// ── WHAT FELL ON 16.09.2026, AND WHY (S390, finding B-4) ────────────
+///
+/// Until here SIX values stood here, and the reasoning in the header
+/// cited the V4.1 line. Since 15.09.2026 `CLAUDE.md` names
+/// `Cleona_Chat_Architecture_v4_2.md` as the spec, and §9.1 lists four.
+///
+///   `placed`    was the placement proof of the V4.1 layer (">= 2
+///               placement acknowledgments from independent relays").
+///               §9.1 does not know it: it tells the sender which
+///               rung has carried. It falls into `inTransit`.
+///               **The one tick hung on it** — and because mycelium never
+///               produced it, `in transit` could not be displayed in the UI
+///               at all (finding B-4).
+///   `expired`   was a fifth, TERMINAL state that a clock set after
+///               14 days. §9.3 forbids it literally: "There is
+///               no timer that expires messages and no background retry
+///               loop." It falls WITHOUT REPLACEMENT (owner decision
+///               16.09.2026). The action "retry" now hangs where
+///               §12.2 lists it: on `failed`.
+///   `read`      is not a DELIVERY state. A read mark is a
+///               mark — it does not disappear, it changes its
+///               carrier: [UiMessage.readByRecipient] (outgoing, from
+///               the recipient's read receipt) and
+///               [UiMessage.readReceiptSent] (incoming, the flag that
+///               the own read receipt has already gone out).
+///
+/// The words are those of §9.1 and no longer those of the seam: the
+/// delivery layer `mycelium/lib/message.dart` keeps the same four under
+/// `resting`/`inTransit`/`delivered`/`failed`, and
+/// `cleona_service_mycelium.dart::_myceliumStatusFor` maps them one to one.
+/// Two vocabularies for four states are enough; a third
+/// (`SendOutcome`) no longer exists.
 enum MessageStatus {
-  sending,
-  queued,
-  sent,
-  storedInNetwork,
-  delivered,
-  read,
-  /// L3 artefact placed (S&F or Erasure, §5.1 size rule) — waiting for recipient pull.
-  queuedOffline,
-  /// No connectivity at send time — L3 placement impossible; message is
-  /// parked in the local one-shot outbox.
-  failed,
-  /// queuedOffline TTL (7 days) elapsed without DELIVERY_RECEIPT — local
-  /// timestamp check only, zero network traffic.
-  expired,
+  /// §9.1: created, not yet gone out. Waiting mark (§12.2).
+  ///
+  /// The only INITIAL state — a message comes here when it is
+  /// created, and never back again (see [MessageStatusGuard]).
+  resting('resting'),
+
+  /// §9.1: gone out, no receipt yet. ONE tick (§12.2).
+  ///
+  /// **Post box INCLUDED.** A message that rests with three neighbours
+  /// and waits for a recipient who is away for a week stays on this value
+  /// for a week — that is §9.1 and not an error.
+  inTransit('inTransit'),
+
+  /// §9.1/§9.2: the recipient has acknowledged — sealed and signed in the
+  /// seal. TWO ticks (§12.2).
+  delivered('delivered'),
+
+  /// §9.1: given up, no rung has carried. Warning mark (§12.2),
+  /// and the ONLY state with a user action ("retry").
+  ///
+  /// **Never for a recipient who is merely offline.**
+  failed('failed');
+
+  const MessageStatus(this.wireName);
+
+  /// Stable identifier on the IPC boundary AND inside `conversations.json(.enc)`.
+  ///
+  /// Deliberately a string and not the enum index: both payloads are JSON, and
+  /// the member set has changed twice (nine V3 values -> six V4.1 values ->
+  /// four V4.2 values). Without a stable name the meaning of every
+  /// transmitted and every persisted status value would have shifted silently
+  /// at exactly those moments. Mirrors [RotationApprovalKind.wireName].
+  final String wireName;
+
+  /// Decode from a wire or persistence value.
+  ///
+  /// Accepts a [wireName] string. **Only that.**
+  ///
+  /// ── THE FALLBACK DEPENDS ON THE SIDE, AND MUST (§9.1) ───────────────
+  ///
+  /// A status name that THIS version does not know — a state that still
+  /// carries `placing`/`placed`/`read`/`expired`, a corrupted store,
+  /// a hand-edited record — may neither throw nor
+  /// silently claim a delivery. A profile that no longer loads after
+  /// an update is a total loss; therefore nothing throws
+  /// here.
+  ///
+  /// **Outgoing -> [failed].** That is the only one of the four values that
+  /// can be right for a record read from disk:
+  ///
+  ///   * [resting] and [inTransit] are LIVE states. They are
+  ///     updated by `_myceliumStatusFor` or `_v41StatusFor` from an outgoing entry,
+  ///     and that outgoing entry lives in working memory
+  ///     (`_myceliumOutbounds`, capped). Behind a loaded record
+  ///     there is none — the message would rest on a promise that
+  ///     nobody can redeem anymore.
+  ///   * [delivered] would be a claim about the recipient that no
+  ///     proof covers (§9.2: only the sealed receipt leads there).
+  ///   * [failed] claims nothing about the network, is the honest
+  ///     statement ("nobody carries this anymore") and carries, per §12.2, the
+  ///     gesture the user needs here: "retry".
+  ///
+  /// **Incoming -> [delivered].** For a record on the own
+  /// disk this is an observation, not a claim: it is there.
+  ///
+  /// An `int` takes the same path. The frozen V3.2 index table
+  /// fell with S368 and does not return — there are no old profiles on
+  /// this line (`FirstStartWipe`, owner 05.09.2026).
+  static MessageStatus fromWire(Object? value, {required bool isOutgoing}) {
+    final fallback =
+        isOutgoing ? MessageStatus.failed : MessageStatus.delivered;
+    if (value is String) {
+      return _byWireName(value) ?? fallback;
+    }
+    return fallback;
+  }
+
+  static MessageStatus? _byWireName(String name) {
+    for (final s in MessageStatus.values) {
+      if (s.wireName == name) return s;
+    }
+    return null;
+  }
 }
 
 extension MessageStatusGuard on MessageStatus {
-  bool get _isTerminal =>
-      this == MessageStatus.delivered || this == MessageStatus.read;
-
-  /// Forward-only state-machine guard: returns true only if [next] is a valid
-  /// forward transition.  Terminal states (delivered, read) block all
-  /// non-terminal writes; delivered may advance to read.
+  /// The transition gate of the four states (§9.1, §9.2, §9.3).
+  ///
+  /// Four rules carry it, and each one is in the spec:
+  ///
+  /// 1. **A state never goes to itself.** That is no transition,
+  ///    and the caller depends on whether `onStateChanged` fires.
+  /// 2. **[MessageStatus.resting] is a pure START.** "created, not
+  ///    yet sent" (§9.1) — what has gone out cannot become
+  ///    unsent again. Nothing leads back.
+  /// 3. **[MessageStatus.delivered] is TERMINAL.** The receipt of §9.2
+  ///    is sealed and signed in the seal; it is a proof, and a
+  ///    proof is not overtaken. A duplicate receipt is ignored per §9.2
+  ///    anyway.
+  /// 4. **[MessageStatus.failed] is NOT terminal.** §9.2 lists "an
+  ///    acknowledgement for an unknown identifier is the expected
+  ///    consequence of a retry crossing a late answer": a receipt
+  ///    can arrive after giving up, and it is the same proof as
+  ///    before. Pinning a message that the recipient demonstrably has to
+  ///    a warning mark would be the untruth. And the
+  ///    caller may put it out again at an edge
+  ///    (`failed -> inTransit`).
+  ///
+  /// **`expired` no longer exists, and with it no terminal
+  /// state that a clock produces** (§9.3: "There is no timer that
+  /// expires messages and no background retry loop.").
   bool canTransitionTo(MessageStatus next) {
     if (this == next) return false;
-    if (this == MessageStatus.read) return false;
-    if (this == MessageStatus.delivered) return next == MessageStatus.read;
-    if (this == MessageStatus.expired) return false;
-    if (next._isTerminal) return true;
-    return !_isTerminal;
+    // (3) Proof beats everything, and nothing beats the proof.
+    if (this == MessageStatus.delivered) return false;
+    // (2) No path leads back to the start.
+    if (next == MessageStatus.resting) return false;
+    // resting, inTransit and failed may do everything that (2) and (3) allow.
+    return true;
   }
 }
 
 /// Media download state for two-stage media delivery.
-enum MediaDownloadState { none, announced, downloading, completed, failed }
+enum MediaDownloadState {
+  none('none', 0),
+  announced('announced', 1),
+  downloading('downloading', 2),
+  completed('completed', 3),
+  failed('failed', 4);
+
+  const MediaDownloadState(this.wireName, this.mergeRank);
+
+  /// Stable identifier on the IPC boundary AND inside `conversations.json(.enc)`.
+  ///
+  /// Same reasoning as [MessageStatus.wireName] (MIGRATION §5.1, package
+  /// AP-4a): both payloads are JSON, and V4 replaces two-stage media delivery
+  /// with the four stages of V4 §5.5 — the members of this enum, and hence
+  /// their index order, change for certain. AP-4b (MIGRATION §5.1d) pulls this
+  /// sibling of the AP-4a trap forward, because it rides in the very same
+  /// `UiMessage.toJson`.
+  final String wireName;
+
+  /// Merge order for the deduplication path in
+  /// `cleona_service.dart::_addMessageToConversation` ("prefer the newer/stronger
+  /// state" when Store-and-Forward replays an envelope).
+  ///
+  /// Frozen as an explicit literal because it used to be `index`: the merge
+  /// rule silently depended on the declaration order, and that order is about
+  /// to change. The values reproduce the V3.2 order exactly — including
+  /// `failed` outranking `completed`, which is the behaviour as measured, not
+  /// a judgement about it (MIGRATION §5.1d).
+  final int mergeRank;
+
+  /// Decode from a wire or persistence value.
+  ///
+  /// Accepts a [wireName] string. Absent, unknown or wrongly typed values map
+  /// to [none] — the value an absent field already produced, and never a
+  /// throw: `MediaDownloadState.values[...]` used to raise a RangeError,
+  /// which aborted the whole conversation load.
+  ///
+  /// ── S368: THE INDEX PATH IS GONE ────────────────────────────────────
+  ///
+  /// As in [MessageStatus.fromWire] an `int` branch with a
+  /// frozen V3.2 order for "profiles written before AP-4b" stood here.
+  /// Such profiles do not exist on this line (owner, 05.09.2026:
+  /// "There are no old profiles!!"), and `FirstStartWipe` lets none
+  /// through to here. An `int` is thus an unreadable value like any
+  /// other and lands on [none].
+  static MediaDownloadState fromWire(Object? value) {
+    if (value is String) {
+      return _byWireName(value) ?? MediaDownloadState.none;
+    }
+    return MediaDownloadState.none;
+  }
+
+  static MediaDownloadState? _byWireName(String name) {
+    for (final s in MediaDownloadState.values) {
+      if (s.wireName == name) return s;
+    }
+    return null;
+  }
+}
 
 /// Call state visible to UI.
 enum CallState { idle, ringing, inCall, ended }
@@ -304,8 +498,84 @@ class UiMessage {
   String? filename;
   String? thumbnailBase64;
   MediaDownloadState mediaState;
-  /// Timestamp when the message was read (for expiry timer).
+  /// When this message was taken note of LOCALLY — the
+  /// anchor of the per-chat expiry deadline (§21.5.3), not the read mark.
+  ///
+  /// Set when inserting into the conversation, for incoming
+  /// AND outgoing (`cleona_service.dart::addMessage`). It therefore says
+  /// NOTHING about whether the other side has read — for that there is
+  /// [readByRecipient].
   DateTime? readAt;
+
+  /// OUTGOING: the recipient's read receipt has arrived
+  /// (`_handleReadReceiptV3`). Colours the two ticks, does not change the
+  /// delivery state.
+  ///
+  /// **Why a field and not a state (S390, finding B-4).** §9.1 lists
+  /// four DELIVERY states; a read mark is a different fact
+  /// (§21.5.4, switchable per chat) and does not belong in the same
+  /// enumeration. As a fifth enum value it was moreover TERMINAL and
+  /// overwrote `delivered` — the proof of §9.2 was lost in the
+  /// process.
+  bool readByRecipient;
+
+  /// INCOMING: the own read receipt for this message has already
+  /// gone out (`markConversationRead`).
+  ///
+  /// Pure flag against double sending — it spares exactly what §1.2
+  /// forbids: the same packet a second time without cause. Until S390
+  /// it stood as `MessageStatus.read` in the state scale of an
+  /// INCOMING message whose state is never displayed
+  /// (`chat_screen.dart`: marks only for `isOutgoing`).
+  bool readReceiptSent;
+  // ── Archive state (§21.6) ───────────────────────────────────────────
+  //
+  // S392/B3. Four fields, and they are a PROJECTION, not a state: the
+  // leading stock is the archive index in `ArchiveManager`
+  // (`archive_manager.dart`, area `archive_entries` of the store). They are
+  // filled immediately before the message reaches the UI process
+  // (`ArchiveManager.applyArchiveView`), and `messageExtraForStore`
+  // strips them out again — a second, ageing copy of the same
+  // fact in the message store would be exactly the contradiction that a
+  // user experienced as "placeholder for a file that is still there".
+  //
+  // Why they have to cross the boundary at all: on Linux, Windows and
+  // macOS service and UI run in two processes (§22.6). The
+  // drawing path in the conversation cannot ask `ArchiveManager`; without
+  // these four fields it sees only a message whose file is missing, and
+  // shows "not yet downloaded" — a false statement.
+
+  /// The tier as wire value: `original` · `thumbnail` · `mini` ·
+  /// `metadataOnly` (the names of `ArchiveTier`, to be read back with
+  /// `archiveTierFromWire` in `archive_config.dart`).
+  ///
+  /// `null` means "there is no archive entry for this message" and
+  /// is NOT the same as `original`: `original` means offloaded and
+  /// still on the device (pinned, or the first deadline has not yet
+  /// expired).
+  ///
+  /// A `String` and not an enum, so that `service_types.dart` need not point to
+  /// `archive_config.dart` — that already points here
+  /// (`show Conversation`), and an import cycle would be the price for nothing.
+  String? archiveTier;
+
+  /// Where the original lies on the share (`smb:///Chat/2026-09/<hash>.jpg`).
+  /// Carries the retrieval path for B4 and the hint text "is in the archive".
+  String? archiveShareUrl;
+
+  /// When it was offloaded. §21.6 explicitly names the date as part
+  /// of what tier 4 still shows ("a metadata reference (date, size,
+  /// type icon)").
+  DateTime? archivedAt;
+
+  /// The mini image of tier 3 (~2–5 KB, 64 px) as base64.
+  ///
+  /// **May stay empty and today always does.** The downscaler is built by
+  /// S392/B1 (`lib/core/archive/archive_thumbnail.dart`); until it exists,
+  /// `applyArchiveView` does not fill this field. No consumer may conclude
+  /// "no archive" from `null` — that is what [archiveTier] is for.
+  String? archiveMiniBase64;
+
   /// Display name of original sender if this message was forwarded.
   String? forwardedFrom;
   // Voice transcription (source-side or local fallback)
@@ -324,6 +594,9 @@ class UiMessage {
   String? linkPreviewThumbnailBase64; // JPEG base64, max 64KB
   // Poll (§24): pollId set on chat cards rendered from POLL_CREATE.
   String? pollId;
+  // Calendar (§18.1/§18.2, S367 3.6): eventId set on chat cards rendered
+  // from CALENDAR_INVITE/CALENDAR_UPDATE, mirroring pollId above.
+  String? calendarEventId;
   // GM-2 (§9.1.4): true when sender's membership hash differs at same/lower epoch
   bool membershipMismatch;
 
@@ -366,7 +639,7 @@ class UiMessage {
     required this.text,
     required this.timestamp,
     required this.type,
-    this.status = MessageStatus.queued,
+    this.status = MessageStatus.resting,
     required this.isOutgoing,
     this.filePath,
     this.editedAt,
@@ -377,6 +650,12 @@ class UiMessage {
     this.thumbnailBase64,
     this.mediaState = MediaDownloadState.none,
     this.readAt,
+    this.readByRecipient = false,
+    this.readReceiptSent = false,
+    this.archiveTier,
+    this.archiveShareUrl,
+    this.archivedAt,
+    this.archiveMiniBase64,
     this.forwardedFrom,
     this.transcriptText,
     this.transcriptLanguage,
@@ -390,6 +669,7 @@ class UiMessage {
     this.linkPreviewSiteName,
     this.linkPreviewThumbnailBase64,
     this.pollId,
+    this.calendarEventId,
     this.membershipMismatch = false,
     Map<String, Set<String>>? reactions,
     Map<String, String>? fanoutLegs,
@@ -416,17 +696,26 @@ class UiMessage {
         'text': text,
         'timestamp': timestamp.millisecondsSinceEpoch,
         'type': type.wireValue,
-        'status': status.index,
+        'status': status.wireName,
         'isOutgoing': isOutgoing,
         'filePath': filePath,
         if (editedAt != null) 'editedAt': editedAt!.millisecondsSinceEpoch,
         if (readAt != null) 'readAt': readAt!.millisecondsSinceEpoch,
+        if (readByRecipient) 'readByRecipient': true,
+        if (readReceiptSent) 'readReceiptSent': true,
         if (isDeleted) 'isDeleted': true,
         if (mimeType != null) 'mimeType': mimeType,
         if (fileSize != null) 'fileSize': fileSize,
         if (filename != null) 'filename': filename,
         if (thumbnailBase64 != null) 'thumbnailBase64': thumbnailBase64,
-        if (mediaState != MediaDownloadState.none) 'mediaState': mediaState.index,
+        if (mediaState != MediaDownloadState.none) 'mediaState': mediaState.wireName,
+        // §21.6/S392-B3 — projection, see field comment. It travels over
+        // IPC and is stripped again by `messageExtraForStore` before
+        // the message goes into the store.
+        if (archiveTier != null) 'archiveTier': archiveTier,
+        if (archiveShareUrl != null) 'archiveShareUrl': archiveShareUrl,
+        if (archivedAt != null) 'archivedAt': archivedAt!.millisecondsSinceEpoch,
+        if (archiveMiniBase64 != null) 'archiveMiniBase64': archiveMiniBase64,
         if (forwardedFrom != null) 'forwardedFrom': forwardedFrom,
         if (transcriptText != null) 'transcriptText': transcriptText,
         if (transcriptLanguage != null) 'transcriptLanguage': transcriptLanguage,
@@ -440,8 +729,16 @@ class UiMessage {
         if (linkPreviewSiteName != null) 'linkPreviewSiteName': linkPreviewSiteName,
         if (linkPreviewThumbnailBase64 != null) 'linkPreviewThumbnailBase64': linkPreviewThumbnailBase64,
         if (pollId != null) 'pollId': pollId,
+        if (calendarEventId != null) 'calendarEventId': calendarEventId,
         if (reactions.isNotEmpty)
           'reactions': reactions.map((emoji, senders) => MapEntry(emoji, senders.toList())),
+        // GM-2 (§9.1.4). Missing here AND in `fromJson` since the field
+        // exists — the warning on a group message with a
+        // deviating membership hash silently vanished on every restart,
+        // and the message afterwards looked unsuspicious.
+        // The loss is OLDER than the store (the JSON form used
+        // the same method); it was noticed during the round-trip comparison for S366.
+        if (membershipMismatch) 'membershipMismatch': true,
         if (fanoutLegs.isNotEmpty) 'fanoutLegs': fanoutLegs,
         if (deliveredBy.isNotEmpty) 'deliveredBy': deliveredBy.toList(),
         if (withheldBy.isNotEmpty) 'withheldBy': withheldBy.toList(),
@@ -454,8 +751,13 @@ class UiMessage {
         text: json['text'] as String? ?? '',
         timestamp: DateTime.fromMillisecondsSinceEpoch(json['timestamp'] as int),
         type: UiMessageType.fromInt(json['type'] as int),
-        status: MessageStatus.values[json['status'] as int? ?? 3],
+        // AP-4: the fallback depends on the side (§5.1b point 1). `isOutgoing`
+        // is available right next to it and is therefore read here
+        // instead of being pulled from the map twice.
+        status: MessageStatus.fromWire(json['status'],
+            isOutgoing: json['isOutgoing'] as bool),
         isOutgoing: json['isOutgoing'] as bool,
+        membershipMismatch: json['membershipMismatch'] as bool? ?? false,
         filePath: json['filePath'] as String?,
         editedAt: json['editedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['editedAt'] as int)
@@ -463,14 +765,30 @@ class UiMessage {
         readAt: json['readAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['readAt'] as int)
             : null,
+        // S390: the read mark has changed its carrier (finding B-4).
+        // A record that THIS store formerly wrote with `status: 'read'`
+        // still carries it there — and it is read,
+        // otherwise it costs network traffic: `markConversationRead` sends
+        // a read receipt for every incoming message without the flag,
+        // i.e. on the next opening again for the WHOLE history
+        // (work rule #5, §1.2). Side-dependent, because the same value
+        // denoted two different facts on the two sides.
+        readByRecipient: json['readByRecipient'] as bool? ??
+            ((json['isOutgoing'] as bool) && json['status'] == 'read'),
+        readReceiptSent: json['readReceiptSent'] as bool? ??
+            (!(json['isOutgoing'] as bool) && json['status'] == 'read'),
         isDeleted: json['isDeleted'] as bool? ?? false,
         mimeType: json['mimeType'] as String?,
         fileSize: json['fileSize'] as int?,
         filename: json['filename'] as String?,
         thumbnailBase64: json['thumbnailBase64'] as String?,
-        mediaState: json['mediaState'] != null
-            ? MediaDownloadState.values[json['mediaState'] as int]
-            : MediaDownloadState.none,
+        mediaState: MediaDownloadState.fromWire(json['mediaState']),
+        archiveTier: json['archiveTier'] as String?,
+        archiveShareUrl: json['archiveShareUrl'] as String?,
+        archivedAt: json['archivedAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['archivedAt'] as int)
+            : null,
+        archiveMiniBase64: json['archiveMiniBase64'] as String?,
         forwardedFrom: json['forwardedFrom'] as String?,
         transcriptText: json['transcriptText'] as String?,
         transcriptLanguage: json['transcriptLanguage'] as String?,
@@ -484,6 +802,7 @@ class UiMessage {
         linkPreviewSiteName: json['linkPreviewSiteName'] as String?,
         linkPreviewThumbnailBase64: json['linkPreviewThumbnailBase64'] as String?,
         pollId: json['pollId'] as String?,
+        calendarEventId: json['calendarEventId'] as String?,
         reactions: _parseReactions(json['reactions']),
         fanoutLegs: (json['fanoutLegs'] as Map<String, dynamic>?)
             ?.map((k, v) => MapEntry(k, v as String)),
@@ -593,13 +912,74 @@ class ChatConfig {
         readReceipts: json['readReceipts'] as bool? ?? true,
         typingIndicators: json['typingIndicators'] as bool? ?? true,
       );
+
+  /// Value equality — so that "has something changed?" can be answered.
+  ///
+  /// WHY IT WAS MISSING AND WHAT IT COST (30.08.). For direct chats
+  /// a configuration change is a PROPOSAL to the other side
+  /// (`CleonaService.updateChatConfig`) that appears there as a banner with
+  /// "Accept / Reject". The settings dialog called it on
+  /// save UNCONDITIONALLY. Without value equality one could not even
+  /// check whether something had changed — `!=` would have compared identity
+  /// and always delivered `true`.
+  ///
+  /// Consequence in the field: the Secure/Speed switch lies in the same dialog, but is
+  /// a ONE-SIDED, LOCAL choice of the sender (§12) and is not
+  /// in this class at all. Whoever flipped it nevertheless sent the other side
+  /// a negotiation proposal — the owner repeatedly received
+  /// requests for changes he had never made. Each also cost
+  /// a full Secure placement (`m x R`, in the field 18
+  /// control frames).
+  @override
+  bool operator ==(Object other) =>
+      other is ChatConfig &&
+      other.allowDownloads == allowDownloads &&
+      other.allowForwarding == allowForwarding &&
+      other.expiryDurationMs == expiryDurationMs &&
+      other.editWindowMs == editWindowMs &&
+      other.readReceipts == readReceipts &&
+      other.typingIndicators == typingIndicators;
+
+  @override
+  int get hashCode => Object.hash(allowDownloads, allowForwarding,
+      expiryDurationMs, editWindowMs, readReceipts, typingIndicators);
 }
 
 /// Conversation state.
 class Conversation {
   final String id; // nodeIdHex for DMs, groupIdHex for groups, channelIdHex for channels
   String displayName;
+
+  /// The messages of this conversation — **complete only after `ensureLoaded`**
+  /// (S366, stage B).
+  ///
+  /// At start the service loads only the conversation data and the YOUNGEST
+  /// message (for the preview in the list). The history comes from
+  /// the store as soon as somebody needs it. The reason was measured: with
+  /// the full stock the start cost 3 497 ms at 150 000 messages
+  /// and a **1 005 MB** memory peak, and the app does not use
+  /// `largeHeap` — at around 50 000 messages the profile no longer loads.
+  ///
+  /// **Whoever looks in here without `ensureLoaded` possibly sees only
+  /// the last message** and takes it for the whole history. Exactly
+  /// against that `test/smoke/smoke_lazy_load_deckung.dart` holds.
   final List<UiMessage> messages;
+
+  /// `true` as soon as [messages] carries the complete history.
+  /// A freshly created conversation is complete by construction —
+  /// it has nothing yet that could be missing.
+  bool messagesLoaded = true;
+
+  /// How many messages this conversation has in total — **including the
+  /// ones not loaded**.
+  ///
+  /// Without this field every count would have to load the whole history and
+  /// would thereby bring back exactly the memory peak against which stage B
+  /// is built. The value comes from the store at start
+  /// (`countMessagesOf`) and is updated on every insertion;
+  /// `ensureLoaded` sets it to `messages.length` and thereby heals any
+  /// deviation.
+  int totalMessages = 0;
   int unreadCount;
   DateTime lastActivity;
   String? profilePictureBase64;
@@ -722,7 +1102,21 @@ class GroupMemberInfo {
 /// Group info.
 class GroupInfo {
   final String groupIdHex;
-  String name;
+
+  /// The group name is USER CONTENT — on 06.09.2026 it stood in plain text at 20
+  /// log sites (`channel_moderation_service.dart`,
+  /// `cleona_service_pure.dart:676`, `group_call_manager.dart:165`).
+  /// Every set registers it with [LogRedaction]; the replacement
+  /// then happens at the sink point in `CLogger`, not at the
+  /// log sites. Constructor AND setter, because a field that is registered only in the
+  /// constructor would be in plain text again after a rename.
+  String _name;
+  String get name => _name;
+  set name(String v) {
+    _name = v;
+    LogRedaction.registerName(v, kind: 'group');
+  }
+
   String? description;
   String? pictureBase64;
   final Map<String, GroupMemberInfo> members; // nodeIdHex -> member
@@ -738,7 +1132,7 @@ class GroupInfo {
 
   GroupInfo({
     required this.groupIdHex,
-    required this.name,
+    required String name,
     this.description,
     this.pictureBase64,
     Map<String, GroupMemberInfo>? members,
@@ -746,8 +1140,11 @@ class GroupInfo {
     DateTime? createdAt,
     this.membershipEpoch = 0,
     this.withholdDeliveryStatus = false,
-  })  : members = members ?? {},
-        createdAt = createdAt ?? DateTime.now();
+  })  : _name = name,
+        members = members ?? {},
+        createdAt = createdAt ?? DateTime.now() {
+    LogRedaction.registerName(name, kind: 'group');
+  }
 
   Map<String, dynamic> toJson() => {
         'groupIdHex': groupIdHex,
@@ -823,7 +1220,20 @@ class ChannelMemberInfo {
 /// Channel info.
 class ChannelInfo {
   final String channelIdHex;
-  String name;
+
+  /// Like [GroupInfo.name]. A PUBLIC channel carries its name
+  /// in the DHT index anyway — but `isPublic` is switchable, and a
+  /// private channel name is user content like any other. An exception
+  /// "only if public" would thus have queried a state that
+  /// changes, and diagnosis loses nothing: the log lines that
+  /// carry the name almost all additionally carry `channelIdHex`.
+  String _name;
+  String get name => _name;
+  set name(String v) {
+    _name = v;
+    LogRedaction.registerName(v, kind: 'channel');
+  }
+
   String? description;
   String? pictureBase64;
   final Map<String, ChannelMemberInfo> members; // nodeIdHex -> member
@@ -861,7 +1271,7 @@ class ChannelInfo {
 
   ChannelInfo({
     required this.channelIdHex,
-    required this.name,
+    required String name,
     this.description,
     this.pictureBase64,
     Map<String, ChannelMemberInfo>? members,
@@ -873,7 +1283,7 @@ class ChannelInfo {
     // The default of true was not merely a trap — it fired: the Restore
     // Broadcast channel restore (cleona_service.dart:11221) omits the argument,
     // because RestoreChannelInfo carries no is_adult field at all
-    // (proto/cleona.proto:418). Every channel recovered through the canonical
+    // (proto/app_payloads.proto::RestoreChannelInfo). Every channel recovered through the canonical
     // recovery path was therefore flagged 18+, persisted that way by
     // _saveChannels(), shown with the red 18+ badge (chat_screen.dart:1777),
     // filtered out of every default channel search for all other users
@@ -895,8 +1305,11 @@ class ChannelInfo {
     this.csamObjectionJuryId,
     this.tombstoned = false,
     this.membershipEpoch = 0,
-  })  : members = members ?? {},
-        createdAt = createdAt ?? DateTime.now();
+  })  : _name = name,
+        members = members ?? {},
+        createdAt = createdAt ?? DateTime.now() {
+    LogRedaction.registerName(name, kind: 'channel');
+  }
 
   Map<String, dynamic> toJson() => {
         'channelIdHex': channelIdHex,
@@ -1034,7 +1447,7 @@ class ChannelIndexEntry {
       );
 }
 
-/// A content report (Meldung) for moderation.
+/// A content report for moderation.
 class ChannelReport {
   final String reportId;
   final String channelIdHex;
@@ -1085,7 +1498,7 @@ class ChannelReport {
 /// Report state.
 enum ReportState { pending, juryActive, resolved, dismissed }
 
-/// A single-post report (Einzelbeitrag-Meldung).
+/// A single-post report.
 class PostReport {
   final String reportId;
   final String channelIdHex;
@@ -1180,6 +1593,13 @@ class JuryRequest {
         'sentAt': sentAt.millisecondsSinceEpoch,
         'epochDay': epochDay,
         'juryRound': juryRound,
+        // Wire field consumed by `JuryRequest.hasVoted` in
+        // test/e2e/lib/ipc-client.ts (moderation.spec.ts,
+        // moderation-lab.ts) — derived, not stored separately, so it can
+        // never drift from `vote`. Always present (not `if`-guarded like
+        // `vote`/`votedAt` above) because readers filter on the boolean
+        // itself, not on its absence.
+        'hasVoted': vote != null,
         if (vote != null) 'vote': vote!.index,
         if (votedAt != null) 'votedAt': votedAt!.millisecondsSinceEpoch,
       };
@@ -1259,6 +1679,51 @@ class PeerSummary {
 }
 
 /// Contact information (public, used across IPC boundary).
+/// One authorized device of a CONTACT, as carried by the §14.5 path-2
+/// device-set announcement.
+///
+/// Deliberately a plain storage record rather than
+/// `DeviceSigInfo` (`lib/core/identity/rotation_co_auth.dart`): that type is
+/// the crypto layer's view and lives on `Uint8List`, while everything in
+/// this file round-trips through hex JSON. `toSigInfo()` bridges the two at
+/// the one place the quorum check needs it, so neither layer has to know the
+/// other's encoding.
+class ContactDeviceSigKey {
+  final String deviceNodeIdHex;
+  final String ed25519PkHex;
+  final String mlDsaPkHex;
+  final bool isPrimary;
+
+  const ContactDeviceSigKey({
+    required this.deviceNodeIdHex,
+    required this.ed25519PkHex,
+    required this.mlDsaPkHex,
+    this.isPrimary = false,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'deviceNodeId': deviceNodeIdHex,
+        'ed25519Pk': ed25519PkHex,
+        'mlDsaPk': mlDsaPkHex,
+        if (isPrimary) 'isPrimary': true,
+      };
+
+  static ContactDeviceSigKey fromJson(Map<String, dynamic> json) =>
+      ContactDeviceSigKey(
+        deviceNodeIdHex: json['deviceNodeId'] as String? ?? '',
+        ed25519PkHex: json['ed25519Pk'] as String? ?? '',
+        mlDsaPkHex: json['mlDsaPk'] as String? ?? '',
+        isPrimary: json['isPrimary'] as bool? ?? false,
+      );
+}
+
+/// The name a contact carries until its own introduction arrives (S394-11).
+///
+/// A MARK in the data, not a text for the screen: the data model knows no
+/// language. The surface translates it (`contact_name_pending`) through
+/// `shownContactName` in `lib/ui/components/contact_name.dart` (S395).
+const String kPendingContactName = 'Pending...';
+
 class ContactInfo {
   Uint8List nodeId;
   String displayName;
@@ -1277,11 +1742,78 @@ class ContactInfo {
   String verificationLevel;
   /// §26 Multi-Device: known device-node-IDs for this contact (learned from senderDeviceNodeId).
   Set<String> deviceNodeIds;
+
+  /// §14.5 path 2 — the contact's DEVICE SET as last announced pairwise.
+  ///
+  /// This is the store §7.5 always needed and never had. Until S360 the
+  /// receiver fed `verifyRotationCoAuth` a compile-time
+  /// `const cachedDeviceSigKeys = <DeviceSigInfo>[]`, so every incoming
+  /// emergency rotation came out as `RotationCoAuthResult.legacy` and was
+  /// applied unchecked. §14.5 does prescribe that branch — but as the
+  /// exception for a brand-new or long-absent contact ("A brand-new contact
+  /// does not know `N`, a long-absent one has a stale state"), not as the
+  /// rule for everyone forever.
+  ///
+  /// Held per contact and NEVER derivable from anything public: §14.5
+  /// rejected the public durable object because it "would make the device
+  /// set of every identity enumerable network-wide".
+  ///
+  /// Serialised as hex triples so the record survives a restart — a device
+  /// set that lived only in RAM would be empty again after every daemon
+  /// start, i.e. the same universal `legacy` as before, just later.
+  List<ContactDeviceSigKey> deviceSigKeys;
+
+  /// Highest `seq` accepted from this contact's device-set announcements.
+  ///
+  /// Replay defence, and it is load-bearing rather than hygiene: a captured
+  /// OLDER announcement carries a LARGER device set, and replaying it would
+  /// reinstate a locked-out device as a valid countersigner — which is
+  /// exactly the quorum §14.4 is meant to protect. `-1` = never received
+  /// one (distinct from seq 0, which is a real first announcement).
+  int deviceSetSeq;
   /// Birthday month (1-12), day (1-31), optional year. Feeds the calendar
   /// birthday auto-sync (§23.4). Purely local — never broadcast to other contacts.
   int? birthdayMonth;
   int? birthdayDay;
   int? birthdayYear;
+
+  /// §4.5.4 — when the KEM copy stored here DEMONSTRABLY applied.
+  ///
+  /// ── WHY THE FIELD WAS MISSING AND WHAT IT COST (S363) ──────────────
+  ///
+  /// [x25519Pk] and [mlKemPk] had no age. The sealing
+  /// (`CleonaService.sendToUser`, step 2) therefore only checks them for
+  /// `null` — a sender seals against a generation of which it does
+  /// not know whether the other side still holds it at all. §4.5.4
+  /// keeps EXACTLY ONE previous generation ("Exactly **one** previous
+  /// generation is retained"); two rotation steps old is provably
+  /// too old, and the failure is silent on both sides.
+  ///
+  /// It is filled from the `rotationTimestamp` of the ANNOUNCEMENT
+  /// (`proto.KeyRotation.rotationTimestamp`) — i.e. from the time of the
+  /// other side, not from the own one. Until S363 this value only went
+  /// into the signature buffer and was discarded afterwards.
+  ///
+  /// ── AND IT IS AT THE SAME TIME THE ORDER ───────────────────────────
+  ///
+  /// Since S361 this node harvests up to 30 epochs back
+  /// (`harvestEpochsPlan`, `depth = kManagementKeepEpochs`). Thus
+  /// an OLD announcement can arrive after a newer one. Without a
+  /// comparison it would overwrite the fresher keys — a
+  /// reset to a generation that the other side no longer
+  /// keeps, and at the same time a replay path. `_handleKeyRotation`
+  /// therefore compares against this field and discards what is not newer.
+  ///
+  /// `null` = never applied an announcement. Then [acceptedAt] counts as the
+  /// lower bound — the keys were at least that fresh when the contact
+  /// was accepted.
+  DateTime? kemRotationAt;
+
+  /// The point in time against which the freshness of the KEM copy is measured.
+  ///
+  /// [kemRotationAt], else [acceptedAt], else `null` (= no measurement
+  /// possible, `KemCopyFreshness.unknown`).
+  DateTime? get kemSeenAt => kemRotationAt ?? acceptedAt;
 
   /// A5/A6: Last verified liveness proof from this contact (DELIVERY_RECEIPT
   /// or ApplicationFrame). Device-local — excluded from twin-sync.
@@ -1302,6 +1834,151 @@ class ContactInfo {
   String? seedDmkB64;
   /// rev3: userEd25519Pk trust-anchor from v2 ContactSeed (base64url, no padding).
   String? seedEpB64;
+
+  /// §15.2 — the FOUNDING pubkey of the OTHER SIDE. Set ONCE, NEVER
+  /// changed again.
+  ///
+  /// ── WHY THIS FIELD IS NEEDED ALTHOUGH [ed25519Pk] IS THERE ──────────
+  ///
+  /// [ed25519Pk] carries the CURRENT signing key of the
+  /// other side at any time: every accepted `KEY_ROTATION_BROADCAST` overwrites
+  /// it (`CleonaService._setContactTrustAnchor`). For a contact that
+  /// has rotated once, the value there is therefore NO LONGER the
+  /// founding key — it is the latest one. Whoever forms `K_AB` or the
+  /// outbound direction from it computes, after the other side's rotation,
+  /// under a different tag than the other side, and the delivery
+  /// fails silently (§15.2: "K_AB has exactly one source: the founding
+  /// keys of both sides").
+  ///
+  /// The founding value itself is lost without replacement — there is
+  /// no second source from which it could be retrieved. Therefore
+  /// it is recorded here BEFORE the first overwriter runs.
+  ///
+  /// ── ONCE, AND THAT IS ENFORCED HERE, NOT AT THE CALLER ──────────────
+  ///
+  /// The field is private and has NO setter; the only way in is
+  /// [rememberFoundingAnchor], which does not touch an anchor already
+  /// set. A caller who forgets the rule thus cannot break it at all
+  /// — were it a public field, the seven
+  /// callers of `_setContactTrustAnchor` would each have their own chance to.
+  Uint8List? _peerFoundingEd25519Pk;
+
+  /// The founding pubkey of the other side, or `null` as long as none
+  /// has been recorded. See [rememberFoundingAnchor].
+  Uint8List? get peerFoundingEd25519Pk => _peerFoundingEd25519Pk;
+
+  /// Records the founding pubkey of the other side ONCE.
+  ///
+  /// Return: whether THIS call set it. `false` means either
+  /// "already set" (the normal case on every later call) or "no
+  /// usable value" — neither is an error, but the reason why
+  /// the method exists.
+  bool rememberFoundingAnchor(Uint8List? pk) {
+    if (_peerFoundingEd25519Pk != null) return false;
+    if (pk == null || pk.length != 32) return false;
+    _peerFoundingEd25519Pk = Uint8List.fromList(pk);
+    return true;
+  }
+
+  /// [seedEpB64] as bytes, or `null` if the field is empty or not
+  /// decodable.
+  ///
+  /// ONE decoder for this field, not several: all three writers
+  /// (`qr_contact_screen.dart`, `deep_link_receiver.dart`,
+  /// `home_screen.dart`) store URL-safe base64 WITHOUT padding.
+  /// Raw `base64Decode` throws on it `Invalid length, must be multiple of
+  /// four` — that was until S360 the silent total failure of first contact.
+  /// `base64.normalize` pads and translates `-_` to `+/`.
+  Uint8List? get seedEpBytes {
+    final ep = seedEpB64;
+    if (ep == null || ep.isEmpty) return null;
+    try {
+      final b = base64Decode(base64.normalize(ep));
+      return b.length == 32 ? b : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// §15.5 field `ki` — `K_inv(i)` from the read-in ContactSeed
+  /// (base64url without padding, 32 B).
+  ///
+  /// ── WHY IT HANGS ON THE CONTACT AND NOT ONLY IN THE CALL ────────────
+  ///
+  /// Without it there is no invitation line and thus no carrier for
+  /// the contact request (§15.3.2). If it is only in the call, it is gone after
+  /// a restart — and a `pending_outgoing` contact whose
+  /// request never arrived could never be retried. The same
+  /// reasoning as for [seedEpB64] next to it, out of the same necessity.
+  ///
+  /// `null` means "the seed carried no invitation": every seed of the
+  /// 3.x line is like that, and the then `sendContactRequest` refused
+  /// with a named reason instead of putting a request into the void. S389:
+  /// the path no longer exists (S388-BAU-KONTAKT); on V4.2 the
+  /// invitation card carries the code itself (§15.2, field `code`), and a record
+  /// without it does not come about at all.
+  String? seedKiB64;
+
+  /// [seedKiB64] as bytes, or `null` if the field is empty, not
+  /// decodable or not 32 B long.
+  ///
+  /// The same reasoning as for [seedEpBytes] next to it, and for the same
+  /// reason in ONE place: the writers store URL-safe base64 WITHOUT
+  /// padding, on which raw `base64Decode` throws with `Invalid length`.
+  /// The length check is not cosmetic — §15.5: a
+  /// `K_inv(i)` of wrong length would yield a different tag line than
+  /// the issuer's, and the request would lie under a tag that nobody
+  /// listens to.
+  Uint8List? get seedKiBytes {
+    final ki = seedKiB64;
+    if (ki == null || ki.isEmpty) return null;
+    try {
+      final b = base64Decode(base64.normalize(ki));
+      return b.length == 32 ? Uint8List.fromList(b) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// §15.3.3 — under WHICH own invitation this request arrived.
+  ///
+  /// ── WHY THIS ATTRIBUTION EXISTS AT ALL ──────────────────────────────
+  ///
+  /// §15.3.3 demands it literally: "Every incoming request is shown
+  /// attributed to the invitation (‚via invitation ‚conference' from
+  /// Aug 3') — the tag family delivers the attribution for free. If a URI
+  /// leaks, the issuer sees *which* invitation is flooding, and revokes
+  /// exactly that one."
+  ///
+  /// ── AND WHY IT MUST BE PERSISTENT ───────────────────────────────────
+  ///
+  /// §15.4 lets the single-use invitation be revoked "after the first acceptance".
+  /// Acceptance and arrival are, on the non-self-accepting
+  /// paths, TWO points in time between which a restart may lie. An
+  /// attribution kept only in memory would be gone afterwards, and the
+  /// invitation would stay live although it was redeemed.
+  ///
+  /// ── WHAT IT EXPLICITLY IS NOT ───────────────────────────────────────
+  ///
+  /// **No proof of sender.** The tag derives from `K_inv(i)`, and in the
+  /// class "published" everybody holds it (§15.3.1). It says "someone with
+  /// this invitation", not "this person". Therefore it is never used in a
+  /// trust decision; the pair designator stays empty on the
+  /// invitation path (`v41_attach.dart`), and the verdict on the
+  /// sender stays `skippedBootstrap`.
+  ///
+  /// `null` = the request did not come via an own invitation line
+  /// (Speed receive, V3 legacy path, twin-sync takeover).
+  int? viaInviteIndex;
+
+  /// The generation `g_inv` for [viaInviteIndex] (§15.3.1).
+  ///
+  /// Without it the index is ambiguous after a bulk revocation: the
+  /// counter keeps running across generations, but the harvest window
+  /// keeps old generations open for the maximum TTL
+  /// (`kInviteGenerationRetention`). A request from the previous
+  /// generation must hit exactly ITS record on acceptance.
+  int? viaInviteGeneration;
 
   /// §5.5b: node-IDs (hex, lowercase) of the seed peers imported from THIS
   /// contact's scanned ContactSeed. The First-CR-Mailbox fanout must deposit
@@ -1342,8 +2019,30 @@ class ContactInfo {
   /// each outgoing DELIVERY_RECEIPT. Default false = disclose.
   bool withholdDeliveryStatus;
 
+  /// §15.10 (proposal "contacts as fixed neighbours", D2 = a): this contact
+  /// never takes a fixed neighbour seat (§5.2) — it forwards nothing for
+  /// this node and does not learn when it sends or receives. A property of
+  /// the contact, not a send mode (§3.3). Purely local: the mark travels
+  /// nowhere; the service hands it to the delivery layer
+  /// (`Contact.neverFixedNeighbour` in `mycelium/lib/memory_contact.dart`).
+  /// Default false.
+  bool neverFixedNeighbour;
+
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
+
+  /// §15.7: this contact deleted their OWN identity — an `IDENTITY_DELETED`
+  /// notice arrived under their key. The contact record is kept on purpose
+  /// (name, picture, `effectiveName` all stay valid) so the conversation can
+  /// keep showing who it was with; the UI layer is the one that must turn
+  /// the conversation read-only and append the "(deleted)" suffix wherever
+  /// this name or picture is rendered — this getter only names the state.
+  ///
+  /// Not to be confused with the user's OWN "delete contact" action
+  /// (§15.9): that path removes the `ContactInfo` from the map entirely
+  /// (`CleonaService.deleteContact`), so a record with `isDeleted == true`
+  /// can only ever originate from the counterpart's own identity deletion.
+  bool get isDeleted => status == 'deleted';
 
   ContactInfo({
     required this.nodeId,
@@ -1360,20 +2059,37 @@ class ContactInfo {
     this.acceptedAt,
     this.verificationLevel = 'unverified',
     Set<String>? deviceNodeIds,
+    List<ContactDeviceSigKey>? deviceSigKeys,
+    this.deviceSetSeq = -1,
     this.birthdayMonth,
     this.birthdayDay,
     this.birthdayYear,
+    this.kemRotationAt,
     this.lastAckedAt,
     this.autoRepairAttempted = false,
     this.seedDeviceIdHex,
     this.seedDxkB64,
     this.seedDmkB64,
     this.seedEpB64,
+    Uint8List? peerFoundingEd25519Pk,
+    this.seedKiB64,
+    this.viaInviteIndex,
+    this.viaInviteGeneration,
     List<String>? seedPeerIdsHex,
     this.trustAnchorQuarantined = false,
     this.trustAnchorQuarantineReason,
     this.withholdDeliveryStatus = false,
+    this.neverFixedNeighbour = false,
   })  : deviceNodeIds = deviceNodeIds ?? {},
+        deviceSigKeys = deviceSigKeys ?? [],
+        // §15.2: the anchor comes in only via this one path and
+        // is afterwards touched exclusively by [rememberFoundingAnchor]
+        // — therefore directly onto the private field here, instead of making it
+        // public.
+        _peerFoundingEd25519Pk = (peerFoundingEd25519Pk != null &&
+                peerFoundingEd25519Pk.length == 32)
+            ? Uint8List.fromList(peerFoundingEd25519Pk)
+            : null,
         seedPeerIdsHex = seedPeerIdsHex ?? [];
 
   String get nodeIdHex => bytesToHex(nodeId);
@@ -1393,20 +2109,36 @@ class ContactInfo {
         if (acceptedAt != null) 'acceptedAt': acceptedAt!.millisecondsSinceEpoch,
         'verificationLevel': verificationLevel,
         if (deviceNodeIds.isNotEmpty) 'deviceNodeIds': deviceNodeIds.toList(),
+        if (deviceSigKeys.isNotEmpty)
+          'deviceSigKeys': deviceSigKeys.map((d) => d.toJson()).toList(),
+        if (deviceSetSeq >= 0) 'deviceSetSeq': deviceSetSeq,
         if (birthdayMonth != null) 'birthdayMonth': birthdayMonth,
         if (birthdayDay != null) 'birthdayDay': birthdayDay,
         if (birthdayYear != null) 'birthdayYear': birthdayYear,
+        if (kemRotationAt != null)
+          'kemRotationAt': kemRotationAt!.millisecondsSinceEpoch,
         if (lastAckedAt != null) 'lastAckedAt': lastAckedAt!.millisecondsSinceEpoch,
         if (autoRepairAttempted) 'autoRepairAttempted': autoRepairAttempted,
         if (seedDeviceIdHex != null) 'seedDeviceIdHex': seedDeviceIdHex,
         if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
         if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
         if (seedEpB64 != null) 'seedEpB64': seedEpB64,
+        // §15.2: the founding anchor MUST survive the restart. Kept only in
+        // memory it would have to be guessed again after every start from
+        // `ed25519Pk` — i.e. from the field that rotation
+        // overwrites, and thus exactly the error it fixes.
+        if (_peerFoundingEd25519Pk != null)
+          'peerFoundingEd25519Pk': bytesToHex(_peerFoundingEd25519Pk!),
+        if (seedKiB64 != null) 'seedKiB64': seedKiB64,
+        if (viaInviteIndex != null) 'viaInviteIndex': viaInviteIndex,
+        if (viaInviteGeneration != null)
+          'viaInviteGeneration': viaInviteGeneration,
         if (seedPeerIdsHex.isNotEmpty) 'seedPeerIdsHex': seedPeerIdsHex,
         if (trustAnchorQuarantined) 'trustAnchorQuarantined': true,
         if (trustAnchorQuarantineReason != null)
           'trustAnchorQuarantineReason': trustAnchorQuarantineReason,
         if (withholdDeliveryStatus) 'withholdDeliveryStatus': true,
+        if (neverFixedNeighbour) 'neverFixedNeighbour': true,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -1436,9 +2168,19 @@ class ContactInfo {
         deviceNodeIds: json['deviceNodeIds'] != null
             ? (json['deviceNodeIds'] as List).cast<String>().toSet()
             : null,
+        deviceSigKeys: json['deviceSigKeys'] != null
+            ? (json['deviceSigKeys'] as List)
+                .map((e) =>
+                    ContactDeviceSigKey.fromJson(e as Map<String, dynamic>))
+                .toList()
+            : null,
+        deviceSetSeq: json['deviceSetSeq'] as int? ?? -1,
         birthdayMonth: json['birthdayMonth'] as int?,
         birthdayDay: json['birthdayDay'] as int?,
         birthdayYear: json['birthdayYear'] as int?,
+        kemRotationAt: json['kemRotationAt'] != null
+            ? DateTime.fromMillisecondsSinceEpoch(json['kemRotationAt'] as int)
+            : null,
         lastAckedAt: json['lastAckedAt'] != null
             ? DateTime.fromMillisecondsSinceEpoch(json['lastAckedAt'] as int)
             : null,
@@ -1447,6 +2189,12 @@ class ContactInfo {
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,
         seedEpB64: json['seedEpB64'] as String?,
+        peerFoundingEd25519Pk: json['peerFoundingEd25519Pk'] != null
+            ? hexToBytes(json['peerFoundingEd25519Pk'] as String)
+            : null,
+        seedKiB64: json['seedKiB64'] as String?,
+        viaInviteIndex: json['viaInviteIndex'] as int?,
+        viaInviteGeneration: json['viaInviteGeneration'] as int?,
         seedPeerIdsHex: json['seedPeerIdsHex'] != null
             ? (json['seedPeerIdsHex'] as List).cast<String>().toList()
             : null,
@@ -1456,6 +2204,7 @@ class ContactInfo {
             json['trustAnchorQuarantineReason'] as String?,
         withholdDeliveryStatus:
             json['withholdDeliveryStatus'] as bool? ?? false,
+        neverFixedNeighbour: json['neverFixedNeighbour'] as bool? ?? false,
       );
 }
 

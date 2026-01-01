@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
 import 'package:image/image.dart' as img;
 
@@ -15,7 +15,8 @@ import 'package:image/image.dart' as img;
 // The RECIPIENT never makes any network request.
 // ---------------------------------------------------------------------------
 
-/// Logger interface — injected to avoid hard dependency on CleonaNode.
+/// Logger interface — injected to avoid a hard dependency on the node
+/// (until the CUT of 2026-08-31 `CleonaNode`, since then the V4.1 node).
 typedef LogFn = void Function(String msg);
 
 /// Result of a link preview fetch.
@@ -359,7 +360,31 @@ class LinkPreviewFetcher {
   HttpClient _createClient(Duration timeout) {
     final client = HttpClient();
     client.connectionTimeout = timeout;
-    client.userAgent = 'Cleona/1.0';
+    // ── S368: HERE STOOD `'Cleona/1.0'` ─────────────────────────────────
+    //
+    // A handwritten version number, two major lines off — and
+    // the only place in the whole tree where the application introduces itself
+    // to FOREIGN servers with a version (measured:
+    // `userAgent` has exactly two occurrences in `lib/`/`bin/`, the other one
+    // READS the browser UA in `bootstrap_web_app.dart:694`).
+    //
+    // It has NOT been raised to `kAppVersion`, and that is intentional.
+    // The purpose of this request is a link preview that the SENDER
+    // fetches; the foreign server learns the IP anyway. Additionally telling it
+    // the exact version sharpens the fingerprint without anything
+    // depending on it — no server in the world answers a
+    // GET differently because it says 4.1.0 instead of 1.0.
+    //
+    // WHAT REMAINS OPEN, namely as a decision of the owner, not as an
+    // oversight: whether "Cleona" should stand here at all. The name alone
+    // tells every visited server that the visitor comes from this messenger.
+    // Leaving it out is however not free — Dart then sets
+    // its own default value (`Dart/<version> (dart:io)`), which is just as
+    // recognisable, only as a Dart program. A browser UA would be a
+    // false statement. The price is thus: name Cleona, name Dart,
+    // or lie — there is no fourth possibility, and the choice
+    // between the first two does not belong in this teardown.
+    client.userAgent = 'Cleona';
     return client;
   }
 

@@ -1,13 +1,13 @@
 import 'dart:async';
 import 'package:cleona/core/calendar/calendar_manager.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 
 /// Daemon-driven reminder service.
 ///
 /// Periodically checks for upcoming reminders across all identity calendars
 /// and fires notifications. Works even when the GUI is not running.
 class ReminderService {
-  final CLogger _log = CLogger.get('reminder');
   Timer? _timer;
 
   /// Callback fired when a reminder is due.
@@ -52,7 +52,9 @@ class ReminderService {
     });
     // Also check immediately
     _checkReminders(calendarGetter?.call() ?? identityCalendars);
-    _log.info('Reminder service started (check every ${checkInterval.inSeconds}s)');
+    // Process log: the service starts once, no identity in scope.
+    CLogger.get('reminder', profileDir: AppPaths.dataDir)
+        .info('Reminder service started (check every ${checkInterval.inSeconds}s)');
   }
 
   /// Stop the reminder timer.
@@ -80,7 +82,9 @@ class ReminderService {
     for (final key in _firedReminders.where((k) => k.startsWith('$eventId:'))) {
       _snoozeUntil[key] = untilMs;
     }
-    _log.info('Snoozed reminder for $eventId by $snoozeMinutes minutes '
+    // Identity log: `calendar` belongs to exactly one identity.
+    CLogger.get('reminder', profileDir: calendar.profileDir).info(
+        'Snoozed reminder for $eventId by $snoozeMinutes minutes '
         '(until ${DateTime.fromMillisecondsSinceEpoch(untilMs).toIso8601String()})');
   }
 
@@ -98,7 +102,9 @@ class ReminderService {
     for (final key in expiredSnoozes) {
       _snoozeUntil.remove(key);
       _firedReminders.remove(key); // allow re-fire on next qualifying cycle
-      _log.info('Snooze expired, re-arming reminder: $key');
+      // Process log: the snooze key alone carries no identity.
+      CLogger.get('reminder', profileDir: AppPaths.dataDir)
+          .info('Snooze expired, re-arming reminder: $key');
     }
 
     // --- Check each identity calendar for upcoming reminders --------------
@@ -113,7 +119,10 @@ class ReminderService {
         if (_firedReminders.contains(key)) continue;
 
         _firedReminders.add(key);
-        _log.info('Firing reminder: ${reminder.title} '
+        // Identity log: the ONLY confirmation in the system that
+        // this reminder was triggered.
+        CLogger.get('reminder', profileDir: calendar.profileDir).info(
+            'Firing reminder: ${reminder.title} '
             '(${reminder.minutesBefore}min before event)');
         onReminderDue?.call(identityId, reminder);
       }

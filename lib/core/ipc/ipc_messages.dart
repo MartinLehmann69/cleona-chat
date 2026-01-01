@@ -7,11 +7,32 @@ class IpcRequest {
   final Map<String, dynamic> params;
   final String? identityId; // Which identity this command targets
 
+  /// The language CHOSEN in the GUI — owner decision V-10-a = b
+  /// (09.09.2026).
+  ///
+  /// ── WHY AS A FIELD AND NOT AS A COMMAND ──────────────────────────
+  ///
+  /// The daemon shows the tray state text (§22.9). Until S377 it took
+  /// `Platform.localeName` for this, i.e. the language of the OPERATING
+  /// SYSTEM — whoever switched in the GUI kept reading the tray in
+  /// English. The alternative, reading the GUI's `shared_preferences` file
+  /// in the daemon, is explicitly rejected (workaround, work rule 1:
+  /// platform-dependent path, implementation detail of a plugin).
+  ///
+  /// This field therefore travels along in the EXISTING traffic. NO new
+  /// round trip and no new message arises: `IpcClient` attaches the code
+  /// to the next request it makes anyway, and only as long as it has not
+  /// yet reported it (`ipc_client.dart:_sendRequest`).
+  ///
+  /// `null` means "unchanged", not "unknown".
+  final String? uiLocale;
+
   IpcRequest({
     required this.id,
     required this.command,
     this.params = const {},
     this.identityId,
+    this.uiLocale,
   });
 
   String toJsonLine() => '${jsonEncode(toJson())}\n';
@@ -22,6 +43,7 @@ class IpcRequest {
         'command': command,
         'params': params,
         if (identityId != null) 'identityId': identityId,
+        if (uiLocale != null) 'uiLocale': uiLocale,
       };
 
   static IpcRequest fromJson(Map<String, dynamic> json) => IpcRequest(
@@ -29,6 +51,7 @@ class IpcRequest {
         command: json['command'] as String,
         params: (json['params'] as Map<String, dynamic>?) ?? {},
         identityId: json['identityId'] as String?,
+        uiLocale: json['uiLocale'] as String?,
       );
 }
 

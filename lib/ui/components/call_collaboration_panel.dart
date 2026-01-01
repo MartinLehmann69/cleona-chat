@@ -1,3 +1,21 @@
+// NOT CONNECTED (S367, `docs/v4-redesign/S367-unerreichbare-dateien.md`
+// §3.5) — and that is explicitly recorded here, not merely
+// omitted. No screen imports this widget: it is a pure
+// display widget for §10.5 collaboration (whiteboard, files, chat,
+// participants), and what it would display does not arrive at the other side.
+// `_sendCollaborationToAll` (group_call_manager.dart) runs via
+// `CallTransport.sendSecuredToParticipant`; its only real
+// implementation is a no-op that returns for EVERY call
+// `MediaSendFailure.noCarrier` — reasoning in the code itself
+// (`lib/core/calls/call_transport_v41.dart:451-468`): "NO CARRIER, AND
+// NO INVENTED ONE … §17.5 explicitly lists the group topology as
+// open (C-9/C-10/C-11, K31-3)". A screen that opens this widget
+// would be the promise that strokes/messages/files arrive at the other
+// side — that is true today for none of the four managers. The
+// RECEIVE PATH (`handleWhiteboardStrokeV3` & siblings,
+// group_call_manager.dart:1531-1619) is independently real and only waits
+// for the carrier. The translation layer for it is already finished
+// in `lib/ui/components/call_collaboration_bridge.dart`.
 import 'package:flutter/material.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/components/whiteboard_canvas.dart';

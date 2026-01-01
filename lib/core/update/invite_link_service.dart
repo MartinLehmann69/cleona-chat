@@ -11,9 +11,9 @@
 library;
 
 
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show PeerAddress;
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/ip_address_class.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart';
 import 'package:cleona/core/update/invite_link.dart';
 
 /// Higher-level service for creating invite links (§19.6.4).
@@ -75,7 +75,7 @@ class InviteLinkService {
     EndpointAddress? bestV6;
 
     for (final addr in addresses) {
-      if (PeerAddress.isPrivateIp(addr.ip)) continue;
+      if (IpAddressClass.isPrivate(addr.ip)) continue;
       if (addr.ip.contains(':')) {
         bestV6 ??= addr;
       } else {

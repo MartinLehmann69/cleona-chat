@@ -221,16 +221,14 @@ jobs:
       - name: Verify FFI symbols in iOS export list
         run: bash scripts/check_ios_exports.sh --ci
 
-      # cleona_voice / cleona_video are not built for iOS yet (V1.3 / V1.15,
-      # docs/SPEC_VOICE_VIDEO_REWORK.md V0.5 + native/cleona_voice/BUILD_REQUEST.md §5,
-      # native/cleona_video/BUILD_REQUEST.md §5): scripts/build-ios-libs.sh does
-      # not build either target (see the comment there), so libcleona_all.a
-      # cannot contain cleona_voice_mock/cleona_video_mock symbols today, and
-      # scripts/preflight.sh Check 15 keeps that file from ever wiring the mock
-      # in. When V1.3/V1.15 land, extend "Verify native archives" below with an
-      # `nm -g ios/CleonaNative/libcleona_all_device.a | grep cleona_voice_mock_`
-      # (resp. cleona_video_mock_) assertion that fails the job if either
-      # matches — the mock must never enter a signed IPA.
+      # cleona_voice / cleona_video ARE built and merged for iOS
+      # (scripts/build-ios-libs.sh ALL_LIBS + merge list), and
+      # scripts/preflight.sh Check 15 keeps the build files from wiring the
+      # mock target in. Still missing is the artifact-level check: an
+      # `nm -g ios/CleonaNative/libcleona_all_device.a | grep -E 'cleona_(voice|video)_mock_'`
+      # assertion in "Verify native archives" below that fails the job if it
+      # matches — the mock must never enter a signed IPA. Open:
+      # BUGFIX_CURRENT.md AV-V0.3 §5 / AV-V1.3 §1.
 
       - name: Install distribution certificate
         # VERIFY runs build unsigned — see "Build IPA" below.
@@ -522,8 +520,16 @@ jobs:
           flutter build macos $BUILD_MODE --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
           echo "::endgroup::"
 
-          echo "::group::Compile daemon"
-          dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+          # S367 — `dart build cli`, NOT `dart compile exe`. The latter
+          # runs NO build hooks and silently produces a
+          # binary WITHOUT `libsqlite3`; the daemon then exits when
+          # opening the store (§21.4.1) with EXIT 0 — for the
+          # UI indistinguishable from "running". `dart build cli`
+          # only builds targets under `bin/`, hence the entry point
+          # `bin/cleona_daemon.dart`.
+          echo "::group::Build daemon"
+          rm -rf build/.daemon-cli
+          dart build cli --target bin/cleona_daemon.dart --output build/.daemon-cli
           echo "::endgroup::"
 
           # ── Wait for native libs ──
@@ -552,15 +558,15 @@ jobs:
             cp "$f" "$FRAMEWORKS/"
           done
 
-          # Namen NICHT vereinheitlichen: massgeblich ist, was Dart zur Laufzeit
-          # oeffnet, und die beiden Bindings sind sich uneins.
-          #   voice: voice_session.dart:345 laedt baseName "cleona_voice",
-          #          :392 haengt ".dylib" an  -> cleona_voice.dylib (ohne lib)
-          #   video: video_pipeline.dart:691  -> libcleona_video.dylib (mit lib)
-          # c6c55a6a hatte hier auf "libcleona_voice.dylib" umgestellt, einen
-          # Namen, den build-macos-libs.sh:293 nie erzeugt -- der Schritt konnte
-          # danach nur noch fehlschlagen. Aufgefallen ist es erst, als S295/S296
-          # gepusht wurden, weil vorher der alte cleona_audio-Guard lief.
+          # Do NOT unify the names: what counts is what Dart opens at runtime,
+          # and the two bindings disagree.
+          #   voice: voice_session.dart:345 loads baseName "cleona_voice",
+          #          :392 appends ".dylib"  -> cleona_voice.dylib (without lib)
+          #   video: video_pipeline.dart:691  -> libcleona_video.dylib (with lib)
+          # c6c55a6a had switched this to "libcleona_voice.dylib", a
+          # name that build-macos-libs.sh:293 never produces -- after that the step
+          # could only fail. It was only noticed when S295/S296
+          # were pushed, because before that the old cleona_audio guard ran.
           if [ ! -f "$FRAMEWORKS/cleona_voice.dylib" ]; then
             echo "::error::cleona_voice.dylib missing from Contents/Frameworks — calls would have no audio"
             exit 1
@@ -569,7 +575,7 @@ jobs:
             echo "::error::libcleona_video.dylib missing from Contents/Frameworks — video calls would have no picture"
             exit 1
           fi
-          # Die dylib muss die ABI auch wirklich exportieren, nicht bloss da sein.
+          # The dylib must actually export the ABI, not merely be present.
           for _sym in cleona_voice_open cleona_video_open; do
             if ! nm -gU "$FRAMEWORKS"/*.dylib 2>/dev/null | grep -q "_$_sym\$"; then
               echo "::error::$_sym not exported by any dylib in Contents/Frameworks"
@@ -577,8 +583,23 @@ jobs:
             fi
           done
 
-          cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
-          chmod +x "$MACOS_BIN/cleona-daemon"
+          # S367: the daemon lives in `Contents/MacOS/bin/`, its
+          # store library in `Contents/MacOS/lib/`. `dart build cli`
+          # embeds the path as `../lib/libsqlite3.dylib` RELATIVE TO THE
+          # BINARY — from `Contents/MacOS/` that pointed to
+          # `Contents/lib/`, which does not exist, and the daemon exited
+          # with EXIT 0 when opening the store.
+          mkdir -p "$MACOS_BIN/bin" "$MACOS_BIN/lib"
+          cp build/.daemon-cli/bundle/bin/cleona_daemon "$MACOS_BIN/bin/cleona-daemon"
+          chmod +x "$MACOS_BIN/bin/cleona-daemon"
+          cp build/.daemon-cli/bundle/lib/*.dylib "$MACOS_BIN/lib/" 2>/dev/null || true
+          rm -f "$MACOS_BIN/cleona-daemon"
+          # Resolvability probe: exactly the path the binary
+          # uses — not mere presence somewhere.
+          ./scripts/check-daemon-lib-resolvable.sh "$MACOS_BIN/bin/cleona-daemon" || {
+            echo "::error::cleona-daemon findet seine Ablage-Bibliothek nicht — der Daemon endete im Feld mit Exit 0"
+            exit 1
+          }
 
       # ── RELEASE-only tail ────────────────────────────────────────────
       # A VERIFY run stops after "Assemble app bundle". Everything it needed to
@@ -613,7 +634,10 @@ jobs:
           if [ "$BUILD_CHANNEL" = "live" ]; then BUILD_CONFIG="Release"; fi
           APP_PATH="build/macos/Build/Products/$BUILD_CONFIG/Cleona.app"
 
-          for f in "$APP_PATH/Contents/Frameworks"/*.dylib "$APP_PATH/Contents/MacOS/cleona-daemon"; do
+          for f in "$APP_PATH/Contents/Frameworks"/*.dylib \
+                   "$APP_PATH/Contents/MacOS/lib"/*.dylib \
+                   "$APP_PATH/Contents/MacOS/bin/cleona-daemon"; do
+            [ -e "$f" ] || continue
             codesign --force --sign - "$f" || true
           done
           codesign --force --deep --sign - "$APP_PATH"

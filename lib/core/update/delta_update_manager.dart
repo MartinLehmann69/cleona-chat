@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
-import 'package:cleona/core/erasure/reed_solomon.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
+import 'package:cleona/core/codec/reed_solomon.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/rendezvous/rendezvous_provider.dart'
     show EndpointAddress;
 import 'package:cleona/core/update/binary_fragment_store.dart';
 import 'package:cleona/core/update/binary_update_manager.dart'
@@ -34,10 +34,9 @@ class DeltaUpdateManager {
   bool _cancelled = false;
 
   DeltaUpdateManager({
-    required BinaryFragmentStore store,
-    required CLogger log,
-  })  : _store = store,
-        _log = log;
+    required this._store,
+    required this._log,
+  });
 
   BinaryUpdateState get state => _state;
   double get progress => _progress;
@@ -72,7 +71,7 @@ class DeltaUpdateManager {
     return currentVersion;
   }
 
-  /// Download delta-patch fragments from the DHT. Mirrors
+  /// Download delta-patch fragments from other nodes (§26.6.2). Mirrors
   /// [BinaryUpdateManager.startDownload], but writes into the synthetic
   /// delta version directory instead of a real binary version directory.
   Future<void> downloadDelta({

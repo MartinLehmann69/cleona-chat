@@ -7,18 +7,18 @@
 # force-loaded so that dart:ffi can find symbols via
 # DynamicLibrary.process().
 #
-# WARUM DIE FRAMEWORK-LISTE UNTEN VOLLSTAENDIG SEIN MUSS
-# ------------------------------------------------------
-# Eine statische Bibliothek traegt ihre Link-Abhaengigkeiten NICHT weiter.
-# native/cleona_video/apple/CMakeLists.txt sagt zwar
-# target_link_libraries(... VideoToolbox CoreMedia CoreVideo ...), aber das
-# gilt nur beim Bauen der .a -- beim Linken der App ist davon nichts mehr
-# bekannt. Fehlt ein Framework hier, scheitert erst der Xcode-Link-Schritt auf
-# dem macOS-Runner, mit undefinierten Symbolen statt einer Aussage darueber,
-# was fehlt. Gemessen: ohne VideoToolbox meldete der Runner elf undefinierte
-# Symbole (_kVTCompressionPropertyKey_*, _kVTProfileLevel_*,
-# _kVTVideoEncoderSpecification_*). macOS blieb davon unberuehrt, weil dort
-# eine dylib gebaut wird, die ihre Abhaengigkeiten selbst mitbringt.
+# WHY THE FRAMEWORK LIST BELOW MUST BE COMPLETE
+# ----------------------------------------------
+# A static library does NOT pass on its link dependencies.
+# native/cleona_video/apple/CMakeLists.txt does say
+# target_link_libraries(... VideoToolbox CoreMedia CoreVideo ...), but that
+# holds only while building the .a -- when the app is linked, nothing of it
+# is known any more. If a framework is missing here, only the Xcode link step
+# on the macOS runner fails, with undefined symbols instead of a statement
+# of what is missing. Measured: without VideoToolbox the runner reported
+# eleven undefined symbols (_kVTCompressionPropertyKey_*, _kVTProfileLevel_*,
+# _kVTVideoEncoderSpecification_*). macOS stayed unaffected, because a dylib
+# is built there, which brings its dependencies itself.
 #
 Pod::Spec.new do |s|
   s.name         = 'CleonaNative'
@@ -35,10 +35,10 @@ Pod::Spec.new do |s|
 
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation',
                  'Accelerate', 'Metal', 'MetalKit',
-                 # libcleona_video (§10.6): Encoder/Decoder, Sample-Buffer und
-                 # Pixel-Buffer. Keines der drei verlangt einen Privacy-Key --
-                 # die Kamera-/Mikrofon-Keys haengen an AVFoundation, das hier
-                 # ohnehin schon steht.
+                 # libcleona_video (§10.6): encoder/decoder, sample buffer and
+                 # pixel buffer. None of the three needs a privacy key -- the
+                 # camera/microphone keys hang on AVFoundation, which is
+                 # listed here anyway.
                  'VideoToolbox', 'CoreMedia', 'CoreVideo'
 
   s.libraries = 'c++', 'z'

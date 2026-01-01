@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/cleona_service.dart'
@@ -49,8 +50,8 @@ class _CallScreenState extends State<CallScreen> {
   // forward `CALL_MEDIA_STATE` yet. Gating on the concrete type (same
   // pattern as `main.dart:544`'s `_service is CleonaService` check) keeps
   // this correct rather than reaching for `dynamic`, which would throw on
-  // `IpcClient` at runtime instead of doing nothing. See
-  // BUILD_REQUEST_V1.6.md for what closes this gap.
+  // `IpcClient` at runtime instead of doing nothing. The IPC gap is open:
+  // BUGFIX_CURRENT.md AV-V1.12 §2.
   CleonaService? _voiceCapableService;
   PeerCallMediaState? _peerVideoState;
 
@@ -185,6 +186,7 @@ class _CallScreenState extends State<CallScreen> {
 
   Widget _buildVideoCallLayout(BuildContext context, CleonaAppState appState,
       CallInfo? currentCall, bool isRinging, bool isIncoming) {
+    final locale = AppLocale.of(context);
     return Scaffold(
       backgroundColor: Colors.black,
       body: Stack(
@@ -295,7 +297,7 @@ class _CallScreenState extends State<CallScreen> {
                   children: [
                     _VideoCallButton(
                       icon: _muted ? Icons.mic_off : Icons.mic,
-                      label: _muted ? 'Stumm' : 'Mikrofon',
+                      label: _muted ? locale.get('call_muted') : locale.get('call_microphone'),
                       active: _muted,
                       onPressed: () {
                         setState(() => _muted = !_muted);
@@ -304,18 +306,18 @@ class _CallScreenState extends State<CallScreen> {
                     ),
                     _VideoCallButton(
                       icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
-                      label: _videoEnabled ? 'Video' : 'Video aus',
+                      label: _videoEnabled ? locale.get('call_video') : locale.get('call_video_off_by_user'),
                       active: !_videoEnabled,
                       onPressed: _toggleVideo,
                     ),
                     _VideoCallButton(
                       icon: Icons.cameraswitch,
-                      label: 'Kamera',
+                      label: locale.get('call_switch_camera'),
                       onPressed: _toggleCamera,
                     ),
                     _VideoCallButton(
                       icon: _speaker ? Icons.volume_up : Icons.volume_down,
-                      label: 'Lautsprecher',
+                      label: locale.get('call_speaker'),
                       active: _speaker,
                       onPressed: () {
                         setState(() => _speaker = !_speaker);
@@ -324,7 +326,7 @@ class _CallScreenState extends State<CallScreen> {
                     ),
                     _VideoCallButton(
                       icon: Icons.call_end,
-                      label: 'Auflegen',
+                      label: locale.get('call_hangup'),
                       color: Colors.red,
                       onPressed: () async {
                         _userInitiatedPop = true;
@@ -345,6 +347,7 @@ class _CallScreenState extends State<CallScreen> {
 
   Widget _buildAudioCallLayout(BuildContext context, CleonaAppState appState,
       bool isRinging, bool isIncoming) {
+    final locale = AppLocale.of(context);
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       body: SafeArea(
@@ -378,7 +381,7 @@ class _CallScreenState extends State<CallScreen> {
             // Status text
             Text(
               isRinging
-                  ? (isIncoming ? 'Eingehender Anruf...' : 'Klingelt...')
+                  ? (isIncoming ? locale.get('call_incoming') : locale.get('call_ringing'))
                   : _formatDuration(_duration),
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                     color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -394,7 +397,7 @@ class _CallScreenState extends State<CallScreen> {
                     color: Theme.of(context).colorScheme.primary),
                 const SizedBox(width: 4),
                 Text(
-                  'Ende-zu-Ende verschluesselt',
+                  locale.get('call_e2e_encrypted'),
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: Theme.of(context).colorScheme.primary,
                       ),
@@ -411,7 +414,7 @@ class _CallScreenState extends State<CallScreen> {
                 children: [
                   _CallButton(
                     icon: _muted ? Icons.mic_off : Icons.mic,
-                    label: _muted ? 'Stumm' : 'Mikrofon',
+                    label: _muted ? locale.get('call_muted') : locale.get('call_microphone'),
                     active: _muted,
                     onPressed: () {
                       setState(() => _muted = !_muted);
@@ -420,7 +423,7 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                   _CallButton(
                     icon: _speaker ? Icons.volume_up : Icons.volume_down,
-                    label: 'Lautsprecher',
+                    label: locale.get('call_speaker'),
                     active: _speaker,
                     onPressed: () {
                       setState(() => _speaker = !_speaker);
@@ -439,7 +442,7 @@ class _CallScreenState extends State<CallScreen> {
                 children: [
                   _CallButton(
                     icon: Icons.call_end,
-                    label: 'Ablehnen',
+                    label: locale.get('reject'),
                     color: Colors.red,
                     onPressed: () {
                       appState.service?.rejectCall();
@@ -448,7 +451,7 @@ class _CallScreenState extends State<CallScreen> {
                   ),
                   _CallButton(
                     icon: Icons.call,
-                    label: 'Annehmen',
+                    label: locale.get('accept'),
                     color: Colors.green,
                     onPressed: () {
                       appState.service?.acceptCall();
@@ -459,7 +462,7 @@ class _CallScreenState extends State<CallScreen> {
             ] else ...[
               _CallButton(
                 icon: Icons.call_end,
-                label: 'Auflegen',
+                label: locale.get('call_hangup'),
                 color: Colors.red,
                 size: 72,
                 onPressed: () async {

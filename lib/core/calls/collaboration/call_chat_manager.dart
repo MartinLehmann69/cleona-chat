@@ -3,9 +3,10 @@ import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
+import 'package:cleona/generated/proto/transport_v3.pb.dart' as proto;
 
 /// A single ephemeral in-call chat message.
 class CallChatEntry {
@@ -89,7 +90,10 @@ class CallChatManager {
     );
 
     onMessageReceived?.call(entry);
-    _log.debug('Chat sent: ${text.substring(0, text.length.clamp(0, 40))}');
+    // S362: THE MESSAGE TEXT STOOD HERE. `debug` is the normal case on the
+    // beta channel (seven days of DEBUG logs), so the excerpt
+    // regularly lay in plaintext on disk.
+    _log.debug('Chat sent: ${text.length} chars');
   }
 
   /// Handle incoming chat message from a remote participant.

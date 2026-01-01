@@ -23,7 +23,25 @@ class CalendarEventCard extends StatelessWidget {
   final CardDensity density;
 
   /// When true, renders a 4 px colour stripe at the left edge keyed to
-  /// [event.category]. Defaults to false for backward compatibility.
+  /// [event.category].
+  ///
+  /// S368: here stood "Defaults to false for backward compatibility".
+  /// This reasoning is wrong — there is no "backward" against which
+  /// a default would have to protect.
+  ///
+  /// ── AND HERE STOOD A SECOND FALSE CLAIM, MINE ────────────
+  ///
+  /// First I wrote at this place "this component has ZERO users
+  /// in `lib/`". That was measured against the branch point of this branch
+  /// and is wrong against the TARGET STATE `v4/knoten-host`: commit
+  /// `b1926e45` (S367 3.6) hangs the card on the chat history, and
+  /// `chat_screen.dart:4548` calls it with `showCategory: true` — so the
+  /// only production caller flips the default anyway.
+  ///
+  /// The default stays `false`, but now for a load-bearing reason:
+  /// whoever uses the card elsewhere gets the narrow form, and the
+  /// one place that wants the colour stripe says so. That is a
+  /// design default, not consideration for legacy data.
   final bool showCategory;
 
   const CalendarEventCard({
@@ -132,7 +150,8 @@ class CalendarEventCard extends StatelessWidget {
               ),
               if (event.recurrenceRule != null)
                 Text(
-                  RecurrenceEngine.formatRrule(event.recurrenceRule!),
+                  RecurrenceEngine.formatRrule(event.recurrenceRule!,
+                      AppLocale.of(context).currentLocale),
                   style: TextStyle(fontSize: 12, color: colorScheme.onSurface.withValues(alpha: 0.5)),
                 ),
               if (event.location != null && event.location!.isNotEmpty)

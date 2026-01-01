@@ -1357,8 +1357,8 @@ class VideoSession private constructor(
          * [registry] is nullable so this class also runs, texture-less-Flutter,
          * inside the on-device conformance harness (a plain `android.app.Activity`
          * with no Flutter engine) — see [acquireDecodeSurfaceLocked]'s headless
-         * fallback. `MainActivity.kt` (V1.10) is expected to pass a real one —
-         * see BUILD_REQUEST_V1.14.md §2 for the exact adapter.
+         * fallback. `MainActivity.kt` passes a real one — the adapter
+         * `FlutterVideoTextureProvider` in that file.
          */
         @JvmStatic
         fun install(context: Context, registry: VideoTextureProvider?) {
@@ -1376,7 +1376,7 @@ class VideoSession private constructor(
                 libraryLoaded = true
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "libcleona_video.so not in this build -- video calls " +
-                    "will fail with ERR_BACKEND (BUILD_REQUEST_V1.14.md §1)", e)
+                    "will fail with ERR_BACKEND (BUGFIX_CURRENT.md AV-V1.14 §1)", e)
             }
             return libraryLoaded
         }
@@ -1638,8 +1638,8 @@ internal object VAbi {
  * `native/cleona_video/android/conformance/run_conformance.sh`) — do not
  * require the Flutter embedding jar to build. `MainActivity.kt` (V1.10) is
  * expected to satisfy this with a thin adapter around
- * `io.flutter.view.TextureRegistry.SurfaceTextureEntry` — see
- * BUILD_REQUEST_V1.14.md §2 for the exact adapter code.
+ * `io.flutter.view.TextureRegistry.SurfaceTextureEntry` —
+ * `FlutterVideoTextureProvider` in `MainActivity.kt` is that adapter.
  */
 interface VideoTextureProvider {
     fun createSurfaceTexture(): VideoTextureEntry

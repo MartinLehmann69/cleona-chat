@@ -1,6 +1,6 @@
 /* cleona_video_mock.c — hardware-free reference implementation of
- * cleona_video.h. SPEC §5 ("Mock-Backends — der eigentliche
- * Parallelisierungs-Hebel").
+ * cleona_video.h. SPEC §5 ("mock backends — the actual
+ * parallelisation lever").
  *
  * What it is for: every consumer of the video ABI — the Dart pipeline, the
  * conformance harness (V0.4), the transport exemption (V1.11),

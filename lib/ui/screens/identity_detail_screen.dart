@@ -7,7 +7,7 @@ import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:cleona/main.dart';
-import 'package:cleona/ui/components/contact_share_card.dart';
+import 'package:cleona/ui/components/invitation_card_view.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/platform/app_paths.dart';
@@ -76,9 +76,11 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
           children: [
             // ── 1. QR Code ─────────────────────────────────────────
             _SectionHeader(locale.get('section_qr_code')),
-            ContactShareCard(
+            // V4.2 §12.4: card as QR and as text line, without a network condition.
+            // The card belongs to the active identity — this screen
+            // opens only for it (tap on the already active chip).
+            InvitationCardView(
               service: widget.service,
-              identity: widget.identity,
               showShareCleonaButton: true,
             ),
 
@@ -114,7 +116,7 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
 
             const Divider(height: 32),
 
-            // ── 7. "Ich bin über 18" Toggle (ganz unten) ──────────
+            // ── 7. "I am over 18" toggle (at the very bottom) ──────────
             _SectionHeader(locale.get('section_age_declaration')),
             _buildAdultToggle(context),
 
@@ -284,29 +286,13 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
   Widget _buildSkinSection(BuildContext context, CleonaAppState appState) {
     final locale = AppLocale.read(context);
     final currentSkinId = _identity.skinId ?? 'teal';
-    final showCrimsonBanner = IdentityManager().crimsonMigrationShouldShow;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (showCrimsonBanner)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-            child: MaterialBanner(
-              padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
-              content: Text(locale.get('crimson_migrated_to_fire')),
-              backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    IdentityManager().dismissCrimsonBanner();
-                    setState(() {});
-                  },
-                  child: Text(locale.get('got_it')),
-                ),
-              ],
-            ),
-          ),
+        // S368: here stood a `MaterialBanner` "crimson_migrated_to_fire"
+        // for profiles with the old appearance `crimson`. Such
+        // profiles do not exist on this line.
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16),
           child: Wrap(

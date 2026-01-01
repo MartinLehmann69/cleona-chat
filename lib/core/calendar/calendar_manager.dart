@@ -1,8 +1,9 @@
 import 'dart:math';
 import 'package:cleona/core/calendar/recurrence_engine.dart';
-import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/storage/message_store.dart';
 import 'package:cleona/core/service/service_types.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/util/hex.dart';
 
 /// CalendarManager — local calendar CRUD, multi-identity merge, persistence.
 ///
@@ -11,11 +12,25 @@ import 'package:cleona/core/network/clogger.dart';
 ///
 /// The comparison used to name ContactManager. That was wrong twice over: the
 /// class was removed in S290, and it wrote PLAINTEXT — it was never an example
-/// of encrypted persistence. PollManager is (`FileEncryption`, poll_manager.dart).
+/// of encrypted persistence. PollManager is — today via [MessageStore].
+///
+/// S366: the store is the encrypted SQLite store per identity
+/// (areas `calendar_events` and `calendar_settings`), no longer
+/// `calendar_events.json` / `calendar_settings.json`.
+///
+/// WHY. `calendar_events` grows without bound — no cap, no deadline —
+/// and was rewritten in full on EVERY change. A single
+/// RSVP answer cost the entire stock of events. That is the same
+/// pattern that led to the quadratic curve for messages.
+/// Therefore the methods that change exactly ONE event write
+/// one row via [persistEvent]; [save] stays for the paths that really
+/// set the whole state (full sync with an external calendar,
+/// birthday sync) — there deletion also occurs, which a
+/// single write would not see.
 class CalendarManager {
   final String profileDir;
   final String identityId;
-  final FileEncryption? _fileEnc;
+  final MessageStore? _store;
   final CLogger _log;
 
   /// All events owned by this identity, keyed by eventId.
@@ -29,34 +44,44 @@ class CalendarManager {
   CalendarManager({
     required this.profileDir,
     required this.identityId,
-    FileEncryption? fileEnc,
-  })  : _fileEnc = fileEnc,
-        _log = CLogger.get('calendar[$identityId]');
+    this._store,
+  })  : // profileDir is a constructor parameter (per identity) -> directly usable.
+        _log = CLogger.get('calendar[${shortHex(identityId)}]',
+            profileDir: profileDir);
 
   // ── Persistence ─��──────────────────────────────────────────────────────
 
+  /// Area of the events in the store.
+  static const String kEventsArea = 'calendar_events';
+
+  /// Area of the free/busy settings. A single entry — the
+  /// settings are one object, not a collection.
+  static const String kSettingsArea = 'calendar_settings';
+  static const String _settingsKey = 'settings';
+
   void load() {
-    if (_fileEnc == null) { _loaded = true; return; } // Proxy mode
+    final store = _store;
+    if (store == null) { _loaded = true; return; } // Proxy mode
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/calendar_events.json');
-      if (json != null) {
-        for (final entry in json.entries) {
-          try {
-            events[entry.key] =
-                CalendarEvent.fromJson(entry.value as Map<String, dynamic>);
-          } catch (e) {
-            _log.warn('Skipping corrupt calendar event ${entry.key}: $e');
-          }
+      // S366: from the store (area `calendar_events`) instead of from
+      // `calendar_events.json`.
+      for (final entry in store.loadArea(kEventsArea).entries) {
+        try {
+          events[entry.key] = CalendarEvent.fromJson(entry.value);
+        } catch (e) {
+          _log.warn('Skipping corrupt calendar event ${entry.key}: $e');
         }
-        _log.info('Loaded ${events.length} calendar events');
       }
+      _log.info('Loaded ${events.length} calendar events');
       _loaded = true;
     } catch (e) {
+      // Do NOT mark as loaded: otherwise empty counts as the stock, and the
+      // latch in [save] would let a full overwrite through.
       _log.warn('Failed to load calendar events: $e');
     }
 
     try {
-      final json = _fileEnc.readJsonFile('$profileDir/calendar_settings.json');
+      final json = store.loadArea(kSettingsArea)[_settingsKey];
       if (json != null) {
         freeBusySettings = FreeBusySettings.fromJson(json);
       }
@@ -65,28 +90,78 @@ class CalendarManager {
     }
   }
 
+  /// Writes the ENTIRE stock of events.
+  ///
+  /// Only for the paths that really set the whole state: the
+  /// full sync with an external calendar and the
+  /// birthday sync also remove events, and a single write does not
+  /// see a deletion. Whoever changes exactly ONE event calls
+  /// [persistEvent].
   void save() {
-    if (_fileEnc == null) return; // Proxy mode
+    final store = _store;
+    if (store == null) return; // Proxy mode
+    // DATA-LOSS LATCH (S366): it now asks the STORE, no longer
+    // just the loaded flag.
+    //
+    // Until now only `!_loaded && events.isEmpty` stood here. After the
+    // switchover `calendar_events.json` is never written again; a
+    // latch that checks a file would be silently dead. This one checks the
+    // place where the events really lie now — and fails
+    // closed if the store cannot be read: not
+    // saving is always right when we do not know what is on the
+    // disk.
     if (!_loaded && events.isEmpty) {
-      _log.warn('REFUSED to save empty calendar — load may have failed');
-      return;
+      var present = false;
+      try {
+        present = store.countArea(kEventsArea) > 0;
+      } catch (e) {
+        _log.warn('REFUSED to save calendar — store unreadable: $e');
+        return;
+      }
+      if (present) {
+        _log.warn('REFUSED to save empty calendar — load failed but the '
+            'store still holds events. Would cause data loss!');
+        return;
+      }
     }
     try {
-      final json = <String, dynamic>{};
-      for (final entry in events.entries) {
-        json[entry.key] = entry.value.toJson();
-      }
-      _fileEnc.writeJsonFile('$profileDir/calendar_events.json', json);
+      store.replaceArea(kEventsArea, {
+        for (final e in events.entries) e.key: e.value.toJson(),
+      });
     } catch (e) {
       _log.warn('Failed to save calendar events: $e');
     }
   }
 
-  void saveSettings() {
-    if (_fileEnc == null) return; // Proxy mode
+  /// Writes EXACTLY ONE event — or removes it if it is no longer
+  /// in memory.
+  ///
+  /// §21.4.1: `calendar_events.json` was rewritten in full on every change
+  /// — 12 triggers, no cap, no deadline. The model is
+  /// `PollManager.persistPoll`.
+  void persistEvent(String eventId) {
+    final store = _store;
+    if (store == null) return; // Proxy mode
+    final event = events[eventId];
     try {
-      _fileEnc.writeJsonFile(
-          '$profileDir/calendar_settings.json', freeBusySettings.toJson());
+      if (event == null) {
+        store.removeEntry(kEventsArea, eventId);
+      } else {
+        store.putEntry(kEventsArea, eventId, event.toJson());
+      }
+    } catch (e) {
+      _log.warn('Failed to persist calendar event $eventId: $e');
+    }
+  }
+
+  void saveSettings() {
+    final store = _store;
+    if (store == null) return; // Proxy mode
+    try {
+      // One object, one entry — `replaceArea` thus keeps the area
+      // at exactly one row and clears out old stock along the way.
+      store.replaceArea(
+          kSettingsArea, {_settingsKey: freeBusySettings.toJson()});
     } catch (e) {
       _log.warn('Failed to save calendar settings: $e');
     }
@@ -97,7 +172,7 @@ class CalendarManager {
   /// Create a new calendar event. Returns the eventId.
   String createEvent(CalendarEvent event) {
     events[event.eventId] = event;
-    save();
+    persistEvent(event.eventId);
     _log.info('Created event ${event.eventId}: ${event.title}');
     return event.eventId;
   }
@@ -140,7 +215,7 @@ class CalendarManager {
     if (attendeeNodeIds != null) event.attendeeNodeIds = attendeeNodeIds;
     event.updatedAt = DateTime.now().millisecondsSinceEpoch;
 
-    save();
+    persistEvent(eventId);
     _log.info('Updated event $eventId');
     return true;
   }
@@ -149,7 +224,7 @@ class CalendarManager {
   bool deleteEvent(String eventId) {
     final removed = events.remove(eventId);
     if (removed != null) {
-      save();
+      persistEvent(eventId);
       _log.info('Deleted event $eventId');
       return true;
     }
@@ -162,7 +237,9 @@ class CalendarManager {
     if (event == null) return;
     event.rsvpResponses[responderNodeIdHex] = status;
     event.updatedAt = DateTime.now().millisecondsSinceEpoch;
-    save();
+    // An answer changes exactly one event. Until S366 it wrote the
+    // entire stock — the main reason for the switchover.
+    persistEvent(eventId);
   }
 
   // ── Queries ────────────────────────────────────────────────────────────
@@ -289,6 +366,13 @@ class CalendarManager {
   /// Create birthday events from contacts that have birthday info.
   /// [contacts] is a map of nodeIdHex → {displayName, birthdayYear, birthdayMonth, birthdayDay}.
   void syncBirthdaysFromContacts(Map<String, Map<String, dynamic>> contacts) {
+    // S366: this path creates and updates, it NEVER DELETES — so
+    // it does not write the whole state either, but exactly the
+    // events touched. It runs at every start and at every
+    // birthday change on a contact; with `save()` a
+    // single changed date of birth would have rewritten the complete stock
+    // of events.
+    final touched = <String>{};
     // Find existing birthday events by contactId
     final existing = <String, String>{}; // contactId → eventId
     for (final e in events.values) {
@@ -314,6 +398,7 @@ class CalendarManager {
           event.title = '$name Geburtstag';
           event.birthdayYear = year;
           event.updatedAt = DateTime.now().millisecondsSinceEpoch;
+          touched.add(event.eventId);
         }
       } else {
         // Create new birthday event
@@ -338,9 +423,12 @@ class CalendarManager {
           reminders: [1440], // 1 day before
           createdBy: identityId,
         );
+        touched.add(eventId);
       }
     }
-    save();
+    for (final id in touched) {
+      persistEvent(id);
+    }
   }
 
   // ── Upcoming Reminders ─────────────────────────────────────────────────

@@ -24,7 +24,20 @@ fi
 
 # Files that contain platform-specific FFI bindings NOT relevant for iOS.
 # These load Win32 APIs, Linux GTK/appindicator, V4L2, or Windows-only shims.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|android_udp_sender\.dart|dpapi_ffi\.dart"
+#
+# UPDATED 06.09.2026. The list named `native_udp_sender.dart` and
+# `android_udp_sender.dart` — NEITHER exists on this line any more,
+# they disappeared with the V3 teardown (`7f1b19b9`) together with `lib/core/network/`.
+# Two dead names in a hand-maintained exclusion list
+# are not harmless: they make the list look complete while
+# the successor is missing. The successor is `native_send_path.dart`, the
+# V4.1 carrier of `cleona_net` — WINDOWS-ONLY (v4_1 §27.3: the native
+# send path of the data port is only used there). `cleona_net` is not built
+# for iOS at all (`scripts/build-ios-libs.sh` does not know it), so its
+# symbols CANNOT exist in the iOS image — exactly the case
+# that EXCLUDE_PATTERN is there for, and not the case that
+# OPTIONAL_SYMBOLS below rightly refuses.
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_send_path\.dart|dpapi_ffi\.dart"
 
 # Symbols this gate deliberately does NOT require in the exports file.
 # Currently empty, and the bar for adding one is high.

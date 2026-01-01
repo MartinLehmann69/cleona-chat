@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:cleona/core/storage/atomic_replace.dart';
+
 /// Atomically writes/reads JSON files with crash-recovery from sidecars.
 ///
 /// Pattern mirrors [FileEncryption.writeJsonFile] but without the crypto
@@ -12,41 +14,40 @@ import 'dart:typed_data';
 /// Sidecar layout during write:
 ///   `<path>` — canonical (atomic destination)
 ///   `<path>.tmp` — staged write before rename
-///   `<path>.old` — Windows-only: previous canonical, briefly held during rename
+///   `<path>.old` — **is no longer created** (S371). A profile from an
+///     older version may carry one, therefore [readJsonFile] still reads
+///     it; see [writeJsonFile].
 ///
 /// On read, if canonical is missing or corrupt, .tmp and .old are tried in
 /// order; a recovered sidecar is promoted to canonical via writeJsonFile.
 class AtomicJsonWriter {
   /// Encode `json` to UTF-8 and atomically write to `path` via tmp+rename.
   ///
-  /// POSIX: `renameSync` is crash-atomic (old or new, never torn).
-  /// Windows: `renameSync` cannot overwrite, so we stage canonical→`.old`
-  /// first; readers recover from `.tmp`/`.old` if we crash between steps.
+  /// ── HERE STOOD THE SENTENCE THAT BRED FOUR DEFECTS (S371) ───────────
+  ///
+  /// Until S371 this said: "Windows: `renameSync` cannot overwrite, so we
+  /// stage canonical→`.old` first". **The claim is refuted by
+  /// measurement** — Dart maps `File.rename` there to `MoveFileExW` with
+  /// `MOVEFILE_REPLACE_EXISTING`, the replacement succeeds over an
+  /// existing file (Windows machine, 05.09.2026, 8 of 8 runs
+  /// complete and valid). The sentence was the justification for the
+  /// three-step here, for two more in `file_encryption.dart` and
+  /// for a two-step in `media_cipher.dart`; all four are
+  /// removed. What the three-step cost and why the retry
+  /// is no convenience is at [atomicReplace] — there with the
+  /// measurement table.
+  ///
+  /// POSIX as Windows: ONE `renameSync`, crash-atomic (old or new, never
+  /// torn). The canonical name exists throughout.
   static void writeJsonFile(String path, Map<String, dynamic> json) {
     final bytes = Uint8List.fromList(utf8.encode(jsonEncode(json)));
     final canonical = File(path);
     final tmp = File('$path.tmp');
-    final old = File('$path.old');
     canonical.parent.createSync(recursive: true);
 
     try {
       tmp.writeAsBytesSync(bytes, flush: true);
-      if (Platform.isWindows && canonical.existsSync()) {
-        if (old.existsSync()) old.deleteSync();
-        canonical.renameSync(old.path);
-        try {
-          tmp.renameSync(canonical.path);
-        } catch (e) {
-          // rollback: restore the old canonical so we don't lose state.
-          if (old.existsSync() && !canonical.existsSync()) {
-            old.renameSync(canonical.path);
-          }
-          rethrow;
-        }
-        if (old.existsSync()) old.deleteSync();
-      } else {
-        tmp.renameSync(canonical.path);
-      }
+      atomicReplace(tmp, canonical);
     } catch (e) {
       if (tmp.existsSync()) {
         try {

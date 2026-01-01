@@ -41,11 +41,10 @@
 #     cleona_video_add_conformance_test(cleona_video_conformance_apple
 #                                       cleona_video_apple)
 #
-# NOTE FOR V1.13-V1.16: native/cleona_video/CMakeLists.txt does not yet add
-# platform subdirectories at all (unlike the voice tree, which has a loop for
-# them). Adding that loop is a change to a file this package does not own; it is
-# requested in native/cleona_video/test/BUILD_REQUEST.md. Until it lands, use
-# route (A), which needs no build integration whatsoever.
+# NOTE FOR V1.13-V1.16: native/cleona_video/CMakeLists.txt adds the platform
+# subdirectories through its `foreach(_plat linux android apple windows)` loop
+# (option CLEONA_VIDEO_BUILD_PLATFORM, default ON), same as the voice tree.
+# Route (A) still works and needs no build integration whatsoever.
 #
 # Building outside CMake — these are the sources, and there is nothing else:
 #     native/cleona_video/test/conformance.c

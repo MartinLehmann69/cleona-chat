@@ -44,7 +44,8 @@ import 'dart:io';
 import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_types.dart';
 
 class CalDAVServerIdentity {
@@ -75,7 +76,12 @@ class CalDAVServer {
   static const int defaultPort = 19324;
   static const String _calendarPathSegment = 'default';
 
-  final CLogger _log = CLogger.get('caldav-server');
+  // Process log: the HTTP listener, lifecycle and dispatch errors run
+  // BEFORE any identity resolution from the URL path and therefore belong to
+  // no identity. The two places that actually have an identity
+  // in scope (register-/unregisterIdentity) fetch their own
+  // logger per call with `id.calendar.profileDir`.
+  final CLogger _log = CLogger.get('caldav-server', profileDir: AppPaths.dataDir);
   final InternetAddress _bindAddress;
   int _configuredPort;
 
@@ -145,16 +151,33 @@ class CalDAVServer {
 
   void registerIdentity(CalDAVServerIdentity id) {
     _byShortId[id.shortId] = id;
-    _log.info('Registered identity ${id.shortId} '
-        '(${id.displayName}, ${id.calendar.events.length} events)');
+    // Identity log: `id.calendar.profileDir` belongs to exactly this
+    // identity.
+    // S369: the display name moved from `info` to `debug`
+    // (owner decision 02.09.2026). The guard did not see this place,
+    // because its pattern required an IDENTIFIER before `.info(` and here
+    // `CLogger.get(...)` stands immediately before it — the same blind spot
+    // as in `service_daemon.dart`, only in the other direction.
+    final protocol =
+        CLogger.get('caldav-server', profileDir: id.calendar.profileDir);
+    protocol.info('Registered identity ${id.shortId} '
+        '(${id.calendar.events.length} events)');
+    protocol.debug('Registered identity ${id.shortId} — '
+        'displayName="${id.displayName}"');
   }
 
   void unregisterIdentity(String fullNodeId) {
     final short = fullNodeId.length <= 16
         ? fullNodeId
         : fullNodeId.substring(0, 16);
-    _byShortId.remove(short);
-    _log.info('Unregistered identity $short');
+    final removed = _byShortId.remove(short);
+    // Identity log if the identity was still known (common
+    // case), otherwise process log — an already removed/unknown
+    // identity no longer has a profileDir that we could fetch here.
+    final logger = removed != null
+        ? CLogger.get('caldav-server', profileDir: removed.calendar.profileDir)
+        : _log;
+    logger.info('Unregistered identity $short');
   }
 
   List<CalDAVServerIdentity> get identities =>
@@ -682,7 +705,10 @@ class CalDAVServer {
     json['eventId'] = eventId;
     final stored = CalendarEvent.fromJson(json);
     identity.calendar.events[eventId] = stored;
-    identity.calendar.save();
+    // S366: a PUT sets exactly one event — one row, not the
+    // whole stock. Thunderbird & co. send one PUT per event during a full sync;
+    // with `save()` that would be quadratic.
+    identity.calendar.persistEvent(eventId);
 
     req.response.statusCode = existing == null ? 201 : 204;
     req.response.headers.set('ETag', '"${_etagOf(stored)}"');

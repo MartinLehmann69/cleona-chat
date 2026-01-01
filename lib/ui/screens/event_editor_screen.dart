@@ -573,11 +573,18 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
   }
 
   String _formatReminderMinutes(int minutes) {
-    if (minutes == 0) return 'Zum Zeitpunkt';
-    if (minutes < 60) return '$minutes Min vorher';
-    if (minutes < 1440) return '${minutes ~/ 60} Std vorher';
-    if (minutes < 10080) return '${minutes ~/ 1440} Tag(e) vorher';
-    return '${minutes ~/ 10080} Woche(n) vorher';
+    final locale = AppLocale.read(context);
+    if (minutes == 0) return locale.get('reminder_at_time');
+    if (minutes < 60) {
+      return locale.tr('reminder_minutes_before', {'count': '$minutes'});
+    }
+    if (minutes < 1440) {
+      return locale.tr('reminder_hours_before', {'count': '${minutes ~/ 60}'});
+    }
+    if (minutes < 10080) {
+      return locale.tr('reminder_days_before', {'count': '${minutes ~/ 1440}'});
+    }
+    return locale.tr('reminder_weeks_before', {'count': '${minutes ~/ 10080}'});
   }
 
   IconData _categoryIcon(EventCategory c) => switch (c) {

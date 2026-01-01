@@ -52,8 +52,16 @@ jobs:
       - name: Build macOS app
         run: flutter build macos --debug
 
-      - name: Compile daemon
-        run: dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
+      # S367 — `dart build cli`, NOT `dart compile exe`: the latter
+      # runs no build hooks and silently produces a binary
+      # without `libsqlite3`; the daemon then exits when opening the store
+      # (§21.4.1) with EXIT 0. The daemon stays in `bundle/bin/` because
+      # it looks for `../lib/libsqlite3.dylib` relative to itself.
+      - name: Build daemon
+        run: |
+          rm -rf build/.daemon-cli
+          dart build cli --target bin/cleona_daemon.dart --output build/.daemon-cli
+          ./scripts/check-daemon-lib-resolvable.sh build/.daemon-cli/bundle/bin/cleona_daemon
 
       - name: Write init_profile helper
         run: |
@@ -91,9 +99,11 @@ jobs:
             }
             mgr.saveIdentities(ids);
             mgr.setActiveIdentity(identity);
-            File('$baseDir/last_profile.json').writeAsStringSync(
-              '{"identityId":"${ids.first.id}","profileDir":"${ids.first.profileDir}"}');
-            File('${ids.first.profileDir}/port').writeAsStringSync('8081');
+            // S368: hier stand ein zusaetzlicher ROHER Schrieb nach
+            // `last_profile.json`. Die Zeile darueber tut dasselbe
+            // vollstaendig und VERSCHLUESSELT; der rohe Schrieb legte
+            // daneben eine Klartextfassung mit einem anderen Format ab,
+            // die seither niemand mehr liest — also nur noch ein Leck.
             // Export seed+phrase as base64 for CI keychain injection
             File('$baseDir/.ci_seed_b64').writeAsStringSync(
               base64Encode(masterSeed!));
@@ -119,8 +129,16 @@ jobs:
             cp "$f" "$FRAMEWORKS/"
           done
 
-          cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
-          chmod +x "$MACOS_BIN/cleona-daemon"
+          # S367: daemon to `Contents/MacOS/bin/`, its
+          # store library to `Contents/MacOS/lib/` — exactly the
+          # path `../lib/libsqlite3.dylib` that `dart build cli` embeds
+          # relative to the binary.
+          mkdir -p "$MACOS_BIN/bin" "$MACOS_BIN/lib"
+          cp build/.daemon-cli/bundle/bin/cleona_daemon "$MACOS_BIN/bin/cleona-daemon"
+          chmod +x "$MACOS_BIN/bin/cleona-daemon"
+          cp build/.daemon-cli/bundle/lib/*.dylib "$MACOS_BIN/lib/" 2>/dev/null || true
+          rm -f "$MACOS_BIN/cleona-daemon"
+          ./scripts/check-daemon-lib-resolvable.sh "$MACOS_BIN/bin/cleona-daemon"
           codesign --force --deep --sign - "$APP_PATH"
 
       # ════════════════════════════════════════════════════════════════

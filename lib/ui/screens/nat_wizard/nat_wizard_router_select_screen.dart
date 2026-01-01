@@ -7,8 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/network/network_stats.dart' show UpnpRouterInfo;
-import 'package:cleona/core/network/router_db.dart';
+import 'package:cleona/core/platform/router_db.dart';
 
 class NatWizardRouterSelectScreen extends StatefulWidget {
   final RouterDb routerDb;

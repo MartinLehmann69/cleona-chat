@@ -1,7 +1,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
+import 'package:cleona/core/log/log_redaction.dart';
+import 'package:cleona/core/util/hex.dart' show bytesToHex, hexToBytes;
 
 // ---------------------------------------------------------------------------
 // Contact model + verification-level state machine (Architecture Section 5.5).
@@ -61,7 +62,21 @@ enum VerificationLevel {
 
 class Contact {
   final Uint8List nodeId;
-  String displayName;
+
+  /// The display name of a CONTACT — foreign user content, and thus
+  /// no less in need of protection than the own one. On
+  /// 06.09.2026 it stood in plain text at three log sites
+  /// (`cleona_service_restore.dart:102`, `:224`, `:399`), all three at
+  /// `debug` — which is no use: the level only filters the console,
+  /// file and ring take it anyway. Registration in the constructor AND in the
+  /// setter, replacement afterwards at the sink point in `CLogger`.
+  String _displayName;
+  String get displayName => _displayName;
+  set displayName(String v) {
+    _displayName = v;
+    LogRedaction.registerName(v);
+  }
+
   Uint8List? ed25519Pk;
   Uint8List? mlDsaPk;
   Uint8List? x25519Pk;
@@ -80,7 +95,7 @@ class Contact {
 
   Contact({
     required this.nodeId,
-    required this.displayName,
+    required String displayName,
     this.ed25519Pk,
     this.mlDsaPk,
     this.x25519Pk,
@@ -91,7 +106,10 @@ class Contact {
     this.verificationLevel = VerificationLevel.unverified,
     this.verifiedKeyFingerprint,
     DateTime? addedAt,
-  }) : addedAt = addedAt ?? DateTime.now();
+  })  : _displayName = displayName,
+        addedAt = addedAt ?? DateTime.now() {
+    LogRedaction.registerName(displayName);
+  }
 
   String get nodeIdHex => bytesToHex(nodeId);
 

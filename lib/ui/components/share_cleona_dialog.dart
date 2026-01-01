@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/core/util/host_interfaces.dart';
 
 class ShareCleonaDialog {
   static Future<void> show(BuildContext context, ICleonaService service) async {
-    final inviteUrl = service.generateInviteLinkUrl();
+    final inviteUrl = await service.generateInviteLinkUrl();
     final lanIp = await _getLanIp();
     final port = service.port;
     if (!context.mounted) return;
@@ -28,6 +30,10 @@ class ShareCleonaDialog {
         type: InternetAddressType.IPv4,
       );
       for (final iface in interfaces) {
+        // S376 (P2-4): otherwise on a machine with libvirt the share dialog
+        // shows `192.168.122.1` as "my LAN address" — the host's
+        // bridge. The user passes it on, and nobody arrives.
+        if (!interfaceLeadsAfterOutside(iface.name)) continue;
         for (final addr in iface.addresses) {
           final ip = addr.address;
           if (ip.startsWith('10.') ||
@@ -93,19 +99,30 @@ class _ShareCleonaDialogContent extends StatelessWidget {
                 ],
               ],
               if (lanIp != null) ...[
-                _buildExpansionSection(
-                  context: context,
-                  icon: Icons.android,
-                  title: locale.get('share_cleona_for_android'),
-                  children: [
-                    _CommandBlock(
-                      label: locale.get('share_cleona_http_hint'),
-                      command: 'http://$lanIp:$port/cleona/binary/android',
-                      copyLabel: locale.get('share_cleona_copy_link'),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
+                // The Android tile hands out a link the recipient opens in a
+                // BROWSER; the two desktop tiles below hand out `curl`
+                // commands, and curl does not know the browser port lists.
+                // So only this one tile is suppressed on a blocked port —
+                // dropping the curl blocks too would remove a working path
+                // for no reason. Same rule as `generateInviteLinkUrl`, and it
+                // catches the case that one cannot: `port` here is the LOCAL
+                // port, which reaches this dialog unchecked when the user
+                // typed it by hand in the settings.
+                if (!IdentityManager.isBrowserBlockedPort(port)) ...[
+                  _buildExpansionSection(
+                    context: context,
+                    icon: Icons.android,
+                    title: locale.get('share_cleona_for_android'),
+                    children: [
+                      _CommandBlock(
+                        label: locale.get('share_cleona_http_hint'),
+                        command: 'http://$lanIp:$port/cleona/binary/android',
+                        copyLabel: locale.get('share_cleona_copy_link'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                ],
                 _buildExpansionSection(
                   context: context,
                   icon: Icons.computer,

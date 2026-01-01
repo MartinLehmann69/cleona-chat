@@ -177,14 +177,14 @@ cp -a "$REPO_ROOT/native/cleona_voice" "$STAGE/cleona_voice"
 #     add_library cannot create target "cleona_voice" because another target
 #     with the same name already exists.
 #
-# That is a defect in V1.1's file, requested there in BUILD_REQUEST_V1.2.md §5 —
+# That is a defect in V1.1's file, requested there in BUGFIX_CURRENT.md AV-V1.2 §5 —
 # it breaks the build owner's Android path too, not just this script. Until it
 # is fixed, an Android build has no business compiling a PipeWire backend, so
 # the staged copy simply does not contain one.
 for _plat in linux apple windows; do
     if [ -d "$STAGE/cleona_voice/$_plat" ]; then
         rm -rf "$STAGE/cleona_voice/$_plat"
-        echo "staging  : dropped $_plat backend (BUILD_REQUEST_V1.2.md §5)"
+        echo "staging  : dropped $_plat backend (BUGFIX_CURRENT.md AV-V1.2 §5)"
     fi
 done
 cp "$REPO_ROOT/android/app/src/main/kotlin/chat/cleona/cleona/VoiceSession.kt" \

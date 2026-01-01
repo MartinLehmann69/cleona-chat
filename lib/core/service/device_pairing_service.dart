@@ -16,10 +16,10 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
-import 'package:cleona/core/identity_resolution/device_delegation.dart';
-import 'package:cleona/core/identity_resolution/linked_device_keys.dart';
-import 'package:cleona/core/node/identity_context.dart';
-import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
+import 'package:cleona/core/identity/device_delegation.dart';
+import 'package:cleona/core/identity/linked_device_keys.dart';
+import 'package:cleona/core/identity/identity_context.dart';
+import 'package:cleona/generated/proto/app_payloads.pb.dart' as proto;
 
 class DevicePairingResult {
   final DeviceDelegation delegationCert;

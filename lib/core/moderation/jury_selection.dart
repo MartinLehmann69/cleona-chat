@@ -8,7 +8,7 @@ library;
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
-import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
+import 'package:cleona/core/util/hex.dart' show bytesToHex;
 
 /// Computes the jury selection point H.
 ///

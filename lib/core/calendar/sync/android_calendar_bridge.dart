@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 import 'package:cleona/core/calendar/calendar_manager.dart';
-import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/service/service_types.dart';
 
 /// Mirrors a Cleona identity's calendar into the Android system calendar
@@ -19,7 +19,14 @@ class AndroidCalendarBridge {
   static const MethodChannel _channel =
       MethodChannel('chat.cleona/calendar_contract');
 
-  final CLogger _log = CLogger.get('android-cal');
+  // Identity log: the bridge itself knows no identity, it gets
+  // its `profileDir` from the caller (`ICleonaService.profileDir` — see
+  // calendar_sync_screen.dart, where the bridge is constructed for the
+  // active identity).
+  final CLogger _log;
+
+  AndroidCalendarBridge({required String profileDir})
+      : _log = CLogger.get('android-cal', profileDir: profileDir);
 
   /// Per-identity state: calendarId once the Android-side row exists.
   final Map<String, int> _calendarIds = {};
