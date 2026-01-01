@@ -376,6 +376,11 @@ class PeerAddress {
   /// Public access to private-IP check (needed by cleona_node for relay logic).
   static bool isPrivateIp(String ip) => _isPrivateIp(ip);
 
+  /// §4.7 Public accessor: true iff the local device currently has at least
+  /// one globally-routable IPv6 address bound. Used by [CleonaNode] to detect
+  /// the IPv4-only-sender cross-family relay scenario.
+  static bool hasGlobalIpv6() => _hasGlobalIpv6();
+
   /// True if the two IPs belong to the same RFC1918 class
   /// (10/8, 172.16-31/12, or 192.168/16). Returns false for IPv6 or
   /// non-private inputs. Used by NAT-egress detection: an observed-IP

@@ -43,7 +43,7 @@ struct cleona_udp_socket {
   cleona_native_socket_t fd;
 };
 
-#define CLEONA_NET_VERSION_STR "cleona_net 1.0.0 (phase-1 send-path)"
+#define CLEONA_NET_VERSION_STR "cleona_net 1.1.0 (non-blocking WSASendTo)"
 
 #if defined(_WIN32)
 /* WSAStartup / WSACleanup are global to the process; the first call to
@@ -143,6 +143,19 @@ CLEONA_NET_EXPORT cleona_udp_socket_t* cleona_udp_open(
     return NULL;
   }
   s->fd = fd;
+
+#if defined(_WIN32)
+  /* Non-blocking mode: WSASendTo returns WSAEWOULDBLOCK immediately instead
+   * of blocking the calling thread when the kernel send-buffer is full.
+   * Without this, a burst of 30+ FFI calls from the Dart main isolate during
+   * onNetworkChanged can block long enough to trip the Dart VM's stack-guard
+   * (GetStackPointerForStackBounds failed → VM crash). */
+  {
+    u_long nonblocking = 1;
+    ioctlsocket(fd, FIONBIO, &nonblocking);
+  }
+#endif
+
   return s;
 }
 
@@ -184,21 +197,38 @@ CLEONA_NET_EXPORT int cleona_udp_send(
   }
 
 #if defined(_WIN32)
-  /* WSASendTo is the synchronous send used by .NET UdpClient. We avoid the
-   * IOCP-based async pattern that Dart uses, because that is where the 89%
-   * drop pattern lives. Blocking semantics: when the kernel send-buffer is
-   * congested, WSASendTo will block until space frees up rather than queue
-   * via IOCP and return immediately. */
+  /* WSASendTo on a non-blocking socket (FIONBIO). Returns immediately with
+   * WSAEWOULDBLOCK when the kernel send-buffer is full instead of blocking
+   * the Dart main-isolate thread (which trips GetStackPointerForStackBounds
+   * on rapid FFI re-entry). Retry up to 3× with 1ms Sleep — caps worst-case
+   * FFI blocking at 3ms per datagram vs. unbounded on a blocking socket. */
   WSABUF buf;
   buf.buf = (CHAR*)data;
   buf.len = (ULONG)len;
   DWORD bytes_sent = 0;
   int rc = WSASendTo(s->fd, &buf, 1, &bytes_sent, 0,
                      (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
-  if (rc == CLEONA_SOCKET_ERROR) {
-    return -CLEONA_LAST_ERROR();
+  if (rc != CLEONA_SOCKET_ERROR) {
+    return (int)bytes_sent;
   }
-  return (int)bytes_sent;
+  int err = CLEONA_LAST_ERROR();
+  if (err != WSAEWOULDBLOCK) {
+    return -err;
+  }
+  for (int retry = 0; retry < 3; retry++) {
+    Sleep(1);
+    bytes_sent = 0;
+    rc = WSASendTo(s->fd, &buf, 1, &bytes_sent, 0,
+                   (struct sockaddr*)&dst, sizeof(dst), NULL, NULL);
+    if (rc != CLEONA_SOCKET_ERROR) {
+      return (int)bytes_sent;
+    }
+    err = CLEONA_LAST_ERROR();
+    if (err != WSAEWOULDBLOCK) {
+      return -err;
+    }
+  }
+  return -WSAEWOULDBLOCK;
 #else
   /* POSIX sendto. Linux returns the byte count, or -1 with errno on failure.
    * For UDP datagrams under SO_SNDBUF the kernel never returns partial; either

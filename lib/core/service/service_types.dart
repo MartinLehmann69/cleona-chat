@@ -47,7 +47,34 @@ enum UiMessageType {
 }
 
 /// Message delivery status.
-enum MessageStatus { sending, queued, sent, storedInNetwork, delivered, read }
+///
+/// State machine (§5.8):
+///   sending → sent (direct dispatch OK) → delivered (DELIVERY_RECEIPT) → read
+///   sending → queuedOffline (no direct route, but L3 artefacts placed)
+///           → delivered once recipient pulls from S&F/Erasure
+///   sending → failed (no connectivity at all — sender has 0 peers, L3
+///           placement impossible); entry kept in One-Shot-Outbox until the
+///           next onNetworkChanged edge-trigger retries placement.
+///   queuedOffline → expired (local check: 7-day TTL elapsed, no DELIVERY_RECEIPT)
+///           → UI offers Resend
+///   sending → queued (short-lived intermediate: in-flight but not yet
+///           dispatched; also used by ACK-timeout downgrade)
+enum MessageStatus {
+  sending,
+  queued,
+  sent,
+  storedInNetwork,
+  delivered,
+  read,
+  /// L3 artefacts placed (Erasure + S&F) — waiting for recipient pull.
+  queuedOffline,
+  /// No connectivity at send time — L3 placement impossible; message is
+  /// parked in the local one-shot outbox.
+  failed,
+  /// queuedOffline TTL (7 days) elapsed without DELIVERY_RECEIPT — local
+  /// timestamp check only, zero network traffic.
+  expired,
+}
 
 /// Media download state for two-stage media delivery.
 enum MediaDownloadState { none, announced, downloading, completed, failed }

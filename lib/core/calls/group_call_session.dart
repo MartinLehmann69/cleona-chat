@@ -35,9 +35,25 @@ class GroupCallSession {
   /// Participants: nodeIdHex -> GroupCallParticipant
   final Map<String, GroupCallParticipant> participants = {};
 
-  /// Shared encryption key (all participants use the same key).
+  /// Shared encryption key — DEPRECATED for media (Architecture §10.2.1).
+  /// Retained only for wire-compat bootstrap; group media now uses per-sender
+  /// secret keys below. A shared key cannot authenticate the sender in a group.
   Uint8List? callKey; // 32 bytes AES-256
   int callKeyVersion = 0;
+
+  /// §10.2.1 per-sender media keys. `ownSendKey` is this participant's secret
+  /// media key — known only to us, used to encrypt OUR outgoing audio/video.
+  /// `peerSendKeys` maps an authenticated participant userId-hex to the secret
+  /// key they announced (via dual-signed GroupCallSenderKey), used to decrypt
+  /// THEIR frames. Because each key is secret to its owner, a relaying
+  /// co-participant cannot forge frames as another sender.
+  Uint8List? ownSendKey; // 32 bytes AES-256, secret to us
+  int ownSendKeyVersion = 0;
+  final Map<String, ({Uint8List key, int version})> peerSendKeys = {};
+
+  /// Participants we have already announced our current ownSendKey to (by
+  /// userId-hex) — lets reciprocation avoid re-announcing on every inbound key.
+  final Set<String> announcedSendKeyTo = {};
 
   /// Overlay multicast tree for media relay.
   OverlayTree tree = OverlayTree(maxFanOut: 3);

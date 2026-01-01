@@ -402,6 +402,23 @@ class CleonaService implements ICleonaService {
   int _startupPollCount = 0;
   final Set<String> _startupPolledPeers = {};
 
+  // ── §5.8 One-Shot-Outbox ─────────────────────────────────────────────
+  // Messages that could NOT be placed into L3 (Erasure + S&F) because the
+  // sender had 0 connectivity at send time.  Each entry holds the serialized
+  // canonical NetworkPacketV3 bytes plus routing metadata so the edge-triggered
+  // flush (_flushOutbox) can retry the single L3 placement attempt exactly once.
+  //
+  // IMPORTANT: This is NOT a retry queue. There is NO timer, NO periodic flush.
+  // The flush fires exactly once, edge-triggered by onNetworkChanged (= the
+  // first time the sender gets a network interface back after being offline).
+  // If the flush itself still finds 0 DHT peers (which is possible in the
+  // split-second before Kademlia finds neighbours), the entry stays until the
+  // NEXT onNetworkChanged edge — guaranteeing liveness without polling.
+  //
+  // Structure: messageIdHex → _OutboxEntry
+  final Map<String, _OutboxEntry> _outbox = {};
+  bool _outboxLoaded = false;
+
   CleonaService({
     required this.identity,
     required this.node,
@@ -498,16 +515,16 @@ class CleonaService implements ICleonaService {
       }
       onStateChanged?.call();
     };
-    groupCallManager.onKeyRotated = (newKey, version) {
-      _audioMixer?.updateCallKey(newKey, version);
-      _groupVideoReceiver?.updateCallKey(newKey, version);
-      // VideoEngine capture key update: stop and restart with new key
-      // (capture isolate uses immutable key — simpler to restart)
-      if (_groupVideoEngine != null) {
-        try { (_groupVideoEngine as dynamic).stop(); } catch (_) {}
-        _groupVideoEngine = null;
-        _startGroupVideoCapture(groupCallManager.currentGroupCall!);
-      }
+    // §10.2.1 per-sender media keys. Our own rotated key → switch the encrypt
+    // side (capture isolate, video engine). A peer's announced key → register
+    // it on the decrypt side (mixer, video receiver).
+    groupCallManager.onOwnSendKeyChanged = (ownKey, version) {
+      _audioMixer?.updateOwnSendKey(ownKey, version);
+      try { (_groupVideoEngine as dynamic)?.updateKey(ownKey); } catch (_) {}
+    };
+    groupCallManager.onPeerSendKey = (senderUserHex, key, version) {
+      _audioMixer?.setPeerSendKey(senderUserHex, key);
+      _groupVideoReceiver?.setPeerSendKey(senderUserHex, key);
     };
 
     // Init guardian service
@@ -628,6 +645,11 @@ class CleonaService implements ICleonaService {
     // After load: surface the persisted unreadCount to the system badge so
     // the Launcher-Badge matches the on-disk truth right after daemon-start.
     _updateBadgeCount();
+
+    // §5.8: Load persisted outbox (messages that failed L3 placement when the
+    // sender had 0 connectivity). Flush is edge-triggered by onNetworkChanged —
+    // NOT by any startup timer.
+    _loadOutbox();
 
     // V3.1.44: Migrate self-entries from deviceNodeId to userIdHex in groups/channels/messages.
     // §26 Phase 2 temporarily stored deviceNodeId as member keys, but service-level
@@ -1914,15 +1936,24 @@ class CleonaService implements ICleonaService {
             : replyToText;
       }
     }
+    // §5.8: track L3 placement result via optional output parameter.
+    final l3Out = [false];
     final sent = await sendToUser(
       recipientUserId: contact.nodeId,
       messageType: proto.MessageTypeV3.MTV3_TEXT,
       payload: tm.writeToBuffer(),
       messageId: messageIdBytes,
+      l3Result: l3Out,
     );
     node.statsCollector.addMessageSent();
 
-    msg.status = sent ? MessageStatus.sent : MessageStatus.queued;
+    // §5.8 status assignment:
+    //   sent=true  → direct UDP dispatch succeeded → MessageStatus.sent
+    //   sent=false + l3Out[0]=true  → L3 artefacts placed → queuedOffline
+    //   sent=false + l3Out[0]=false → 0 connectivity, parked in outbox → failed
+    msg.status = sent
+        ? MessageStatus.sent
+        : (l3Out[0] ? MessageStatus.queuedOffline : MessageStatus.failed);
     onStateChanged?.call();
 
     // Twin-Sync: notify other devices about sent message (§26)
@@ -1937,6 +1968,48 @@ class CleonaService implements ICleonaService {
     }))));
 
     return msg;
+  }
+
+  /// §5.8: Check if any queuedOffline messages in [conversationId] have
+  /// exceeded the 7-day TTL and mark them [MessageStatus.expired].
+  /// Pure local timestamp comparison — zero network traffic.
+  @override
+  void checkExpiredMessages(String conversationId) {
+    _checkAndMarkExpired(conversationId);
+  }
+
+  /// §5.8: Re-send a message that has [MessageStatus.expired].
+  ///
+  /// Looks up the original message text, removes the old expired message,
+  /// and queues a fresh send through [sendTextMessage]. The old message is
+  /// replaced by the new one so the conversation stays coherent.
+  @override
+  Future<UiMessage?> resendExpiredMessage(
+      String conversationId, String messageId) async {
+    if (_reducedMode) {
+      _log.warn('resendExpiredMessage blocked: reducedMode active');
+      return null;
+    }
+    final conv = conversations[conversationId];
+    if (conv == null) return null;
+    final idx = conv.messages.indexWhere((m) => m.id == messageId);
+    if (idx < 0) return null;
+    final original = conv.messages[idx];
+    if (original.status != MessageStatus.expired) return null;
+    if (!original.isOutgoing) return null;
+    // Remove the expired entry from the outbox (if still there) and
+    // the conversation, then re-send via the normal path.
+    _outbox.remove(messageId);
+    _saveOutbox();
+    conv.messages.removeAt(idx);
+    _saveConversations();
+    return sendTextMessage(
+      conversationId,
+      original.text,
+      replyToMessageId: original.replyToMessageId,
+      replyToText: original.replyToText,
+      replyToSender: original.replyToSender,
+    );
   }
 
   /// Edit a previously sent message.
@@ -2354,7 +2427,9 @@ class CleonaService implements ICleonaService {
   /// Fire-and-forget: errors are logged at debug, callers don't await
   /// individual FRAGMENT_STORE ACKs (they will arrive asynchronously via
   /// the standard InfraFrame receive path).
-  Future<void> _distributeErasureFragments({
+  /// Returns true if at least one fragment was dispatched (≥1 DHT peer known).
+  /// Returns false when no DHT replicators are reachable (truly offline).
+  Future<bool> _distributeErasureFragments({
     required Uint8List packetBytes,
     required Uint8List messageId,
     Uint8List? recipientUserEd25519Pk,
@@ -2371,7 +2446,7 @@ class CleonaService implements ICleonaService {
             [...utf8.encode('mailbox-nid'), ...recipientUserNodeId]));
       } else {
         _log.debug('Erasure offline-delivery skipped: no recipient pk/node-id');
-        return;
+        return false;
       }
 
       final rs = ReedSolomon();
@@ -2379,7 +2454,7 @@ class CleonaService implements ICleonaService {
       final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
       if (peers.isEmpty) {
         _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
-        return;
+        return false;
       }
 
       for (var i = 0; i < fragments.length; i++) {
@@ -2398,8 +2473,10 @@ class CleonaService implements ICleonaService {
           recipientDeviceId: Uint8List.fromList(targetPeer.nodeId),
         );
       }
+      return true;
     } catch (e) {
       _log.debug('Erasure offline-delivery failed: $e');
+      return false;
     }
   }
 
@@ -2428,10 +2505,19 @@ class CleonaService implements ICleonaService {
       wrappedEnvelope: serializedPacket,
       storeId: SodiumFFI().randomBytes(16),
     );
+
+    // §5.8: Update message status to queuedOffline — L3 artefacts were placed
+    // by the retry-exhaustion path, so the message IS in the network waiting
+    // for the recipient to pull it.  No outbox entry needed here — the
+    // AckTracker already tracks the canonical packet; if the recipient
+    // eventually pulls from S&F/Erasure the DELIVERY_RECEIPT will arrive.
+    _updateMessageStatusById(
+        messageIdHex, recipientHex, MessageStatus.queuedOffline);
   }
 
   /// §5.5: Store a complete message copy on up to 3 mutual peers.
-  void _storeSafOnMutualPeers({
+  /// Returns true if at least one mutual peer was reachable.
+  bool _storeSafOnMutualPeers({
     required Uint8List recipientUserId,
     required Uint8List wrappedEnvelope,
     required Uint8List storeId,
@@ -2439,7 +2525,7 @@ class CleonaService implements ICleonaService {
     final mutuals = _findMutualPeerDeviceIds(recipientUserId, limit: 3);
     if (mutuals.isEmpty) {
       _log.debug('S&F: no mutual peers for ${_hexShort(recipientUserId)}');
-      return;
+      return false;
     }
     final peerStore = proto.PeerStore()
       ..recipientNodeId = recipientUserId
@@ -2456,6 +2542,7 @@ class CleonaService implements ICleonaService {
     }
     _log.info('S&F: stored on ${mutuals.length} mutual peers '
         'for ${_hexShort(recipientUserId)}');
+    return true;
   }
 
   /// §5.5: Find contacts that are likely mutual peers (both sender and
@@ -6062,13 +6149,15 @@ class CleonaService implements ICleonaService {
       await ForegroundServiceControl.promoteForCall();
     }
 
-    if (session.callKey == null) return;
+    if (session.ownSendKey == null) return;
     try {
       _audioMixer = AudioMixer(
-        callKey: session.callKey!,
+        ownSendKey: session.ownSendKey!,
         profileDir: profileDir,
-        callKeyVersion: session.callKeyVersion,
+        ownSendKeyVersion: session.ownSendKeyVersion,
       );
+      // Replay any peer send_keys learned before the mixer started (§10.2.1).
+      session.peerSendKeys.forEach((hex, k) => _audioMixer!.setPeerSendKey(hex, k.key));
       _audioMixer!.onAudioFrame = (encryptedFrame) {
         groupCallManager.sendGroupAudioFrame(encryptedFrame);
       };
@@ -6091,7 +6180,7 @@ class CleonaService implements ICleonaService {
     // Android-Group-Video braucht eigenen Codec-Pfad (geplant, separate Spec).
     // iOS analog (AVFoundation-Port pending).
     if (!(Platform.isLinux || Platform.isMacOS || Platform.isWindows) ||
-        session.callKey == null) {
+        session.ownSendKey == null) {
       return;
     }
     _startGroupVideoCapture(session);
@@ -6104,10 +6193,10 @@ class CleonaService implements ICleonaService {
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)? createVideoEngine;
 
   void _startGroupVideoCapture(GroupCallSession session) {
-    if (session.callKey == null || createVideoEngine == null) return;
+    if (session.ownSendKey == null || createVideoEngine == null) return;
     try {
       _groupVideoEngine = createVideoEngine!(
-        session.callKey!,
+        session.ownSendKey!,
         (serializedFrame) => groupCallManager.sendGroupVideoFrame(serializedFrame),
       );
     } catch (e) {
@@ -6117,12 +6206,12 @@ class CleonaService implements ICleonaService {
   }
 
   void _startGroupVideoReceiver(GroupCallSession session) {
-    if (session.callKey == null) return;
+    if (session.ownSendKey == null) return;
     _groupVideoReceiver = GroupVideoReceiver(
-      callKey: session.callKey!,
       profileDir: profileDir,
-      callKeyVersion: session.callKeyVersion,
     );
+    // Replay any peer send_keys learned before the receiver started (§10.2.1).
+    session.peerSendKeys.forEach((hex, k) => _groupVideoReceiver!.setPeerSendKey(hex, k.key));
     _groupVideoReceiver!.onDecodedI420 = (senderHex, i420, w, h) {
       onGroupVideoI420Frame?.call(senderHex, i420, w, h);
     };
@@ -6249,6 +6338,13 @@ class CleonaService implements ICleonaService {
     if (triggerNodeReset) await node.onNetworkChanged();
     // §2.2.4: Liveness-Republish bei Adress-Wechsel (debounced 5s im Publisher)
     _identityPublisher?.onAddressesChanged();
+    // §5.8: Edge-triggered one-shot outbox flush.
+    // Fire-and-forget — errors are logged inside _flushOutbox; the flush does
+    // not block the network-change recovery path.
+    // IMPORTANT: NO timer is involved here.  The flush happens exactly once per
+    // onNetworkChanged event (= a real network interface transition), NOT
+    // periodically.
+    unawaited(_flushOutbox());
   }
 
   // ── Persistence ────────────────────────────────────────────────────
@@ -6312,6 +6408,175 @@ class CleonaService implements ICleonaService {
     } catch (e) {
       _log.warn('Failed to save contacts: $e');
     }
+  }
+
+  // ── §5.8 Outbox persistence ─────────────────────────────────────────
+
+  void _loadOutbox() {
+    try {
+      final json = _fileEnc.readJsonFile('$profileDir/outbox.json');
+      if (json == null) {
+        _outboxLoaded = true;
+        return;
+      }
+      for (final entry in json.entries) {
+        try {
+          _outbox[entry.key] =
+              _OutboxEntry.fromJson(entry.value as Map<String, dynamic>);
+        } catch (e) {
+          _log.debug('Outbox: skipped corrupt entry ${entry.key}: $e');
+        }
+      }
+      _outboxLoaded = true;
+      if (_outbox.isNotEmpty) {
+        _log.info('Outbox: loaded ${_outbox.length} pending entries');
+      }
+    } catch (e) {
+      _log.warn('Outbox: load failed: $e');
+    }
+  }
+
+  void _saveOutbox() {
+    if (!_outboxLoaded && _outbox.isEmpty) return;
+    try {
+      if (_outbox.isEmpty) {
+        // Remove the file when the outbox is empty — no stale entry leak.
+        final f = File('$profileDir/outbox.json.enc');
+        if (f.existsSync()) f.deleteSync();
+        return;
+      }
+      _fileEnc.writeJsonFile('$profileDir/outbox.json',
+          {for (final e in _outbox.entries) e.key: e.value.toJson()});
+    } catch (e) {
+      _log.warn('Outbox: save failed: $e');
+    }
+  }
+
+  /// §5.8: Add a message to the one-shot outbox.
+  void _addToOutbox({
+    required String messageIdHex,
+    required String recipientUserIdHex,
+    String? recipientEd25519PkHex,
+    required Uint8List canonicalPacket,
+  }) {
+    _outbox[messageIdHex] = _OutboxEntry(
+      messageIdHex: messageIdHex,
+      recipientUserIdHex: recipientUserIdHex,
+      recipientEd25519PkHex: recipientEd25519PkHex,
+      canonicalPacketB64: base64Encode(canonicalPacket),
+      sentAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    _saveOutbox();
+    _log.info('Outbox: parked $messageIdHex → ${recipientUserIdHex.substring(0, 8)} '
+        '(total: ${_outbox.length})');
+  }
+
+  /// §5.8: Edge-triggered one-shot outbox flush.
+  ///
+  /// Called ONLY from onNetworkChanged — NOT from any timer.  For each parked
+  /// entry we attempt L3 placement (Erasure + S&F) exactly once.  If placement
+  /// succeeds the entry is removed and the message status is upgraded to
+  /// [MessageStatus.queuedOffline].  If it still fails (0 DHT peers — possible
+  /// in the split-second before Kademlia converges) the entry is retained for
+  /// the next network-change edge.
+  Future<void> _flushOutbox() async {
+    if (_outbox.isEmpty) return;
+    _log.info('Outbox flush: ${_outbox.length} entries on network-change edge');
+    final toRemove = <String>[];
+    for (final entry in _outbox.values) {
+      try {
+        final recipientUserId = hexToBytes(entry.recipientUserIdHex);
+        final canonicalBytes = base64Decode(entry.canonicalPacketB64);
+        final fragmentBundleId =
+            SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
+        final recipientEd25519Pk = entry.recipientEd25519PkHex != null
+            ? hexToBytes(entry.recipientEd25519PkHex!)
+            : null;
+
+        final erasureOk = await _distributeErasureFragments(
+          packetBytes: canonicalBytes,
+          messageId: Uint8List.fromList(fragmentBundleId),
+          recipientUserEd25519Pk: recipientEd25519Pk,
+          recipientUserNodeId: recipientUserId,
+        );
+        final safOk = _storeSafOnMutualPeers(
+          recipientUserId: recipientUserId,
+          wrappedEnvelope: canonicalBytes,
+          storeId: SodiumFFI().randomBytes(16),
+        );
+
+        if (erasureOk || safOk) {
+          toRemove.add(entry.messageIdHex);
+          _updateMessageStatusById(
+              entry.messageIdHex,
+              entry.recipientUserIdHex,
+              MessageStatus.queuedOffline);
+          _log.info('Outbox flush: placed ${entry.messageIdHex.substring(0, 8)}'
+              ' (erasure=$erasureOk, saf=$safOk) → queuedOffline');
+        } else {
+          _log.debug('Outbox flush: still no peers for '
+              '${entry.messageIdHex.substring(0, 8)} — retaining');
+        }
+      } catch (e) {
+        _log.warn('Outbox flush: error on ${entry.messageIdHex}: $e');
+      }
+    }
+    for (final id in toRemove) {
+      _outbox.remove(id);
+    }
+    if (toRemove.isNotEmpty) _saveOutbox();
+  }
+
+  /// §5.8: Update a message status by its wire message-ID hex.
+  ///
+  /// Scans all conversations — this is acceptable because outbox entries are
+  /// rare and the status update is triggered only by onNetworkChanged (not
+  /// per-message). Fires onStateChanged when a match is found.
+  void _updateMessageStatusById(
+      String messageIdHex, String recipientHex, MessageStatus newStatus) {
+    // Search own conversations first — recipient hex may be a userId or deviceId
+    for (final conv in conversations.values) {
+      for (final msg in conv.messages) {
+        if (msg.id == messageIdHex && msg.isOutgoing) {
+          if (msg.status == newStatus) return; // already correct
+          msg.status = newStatus;
+          _log.debug('Status update: $messageIdHex → $newStatus');
+          onStateChanged?.call();
+          _saveConversations();
+          return;
+        }
+      }
+    }
+  }
+
+  /// §5.8: Check all queuedOffline messages in a conversation for TTL expiry.
+  ///
+  /// Called lazily at conversation-open time (chat screen load).
+  /// Zero network traffic — purely local timestamp comparison.
+  ///
+  /// The 7-day TTL matches the S&F / Reed-Solomon fragment lifetime
+  /// (Architecture §5.4, §5.5).
+  static const int _offlineTtlMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  bool _checkAndMarkExpired(String conversationId) {
+    final conv = conversations[conversationId];
+    if (conv == null) return false;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var changed = false;
+    for (final msg in conv.messages) {
+      if (msg.status == MessageStatus.queuedOffline && msg.isOutgoing) {
+        final age = now - msg.timestamp.millisecondsSinceEpoch;
+        if (age > _offlineTtlMs) {
+          msg.status = MessageStatus.expired;
+          changed = true;
+        }
+      }
+    }
+    if (changed) {
+      _saveConversations();
+      onStateChanged?.call();
+    }
+    return changed;
   }
 
   /// Sync contact + channel member IDs to the DV routing table's tier registry.
@@ -9959,6 +10224,20 @@ class CleonaService implements ICleonaService {
   ///
   /// Offline fallback (S&F + Mailbox) is a TODO — `false` is returned so
   /// callers can decide their queue-vs-drop policy explicitly.
+  /// Sends a message to a recipient user.
+  ///
+  /// Returns true when at least one device received the direct UDP dispatch.
+  /// Returns false in two distinct situations (callers that need to
+  /// distinguish them can pass [l3Result]):
+  ///   • No direct route — L3 placement attempted (Erasure + S&F).
+  ///     [l3Result] is set to true if any L3 peer was reachable.
+  ///   • No connectivity at all — L3 placement failed.
+  ///     [l3Result] is set to false; caller should park the message in the
+  ///     one-shot outbox ([_addToOutbox]) with status [MessageStatus.failed].
+  ///
+  /// [l3Result] is a single-element list used as an optional output parameter
+  /// (Dart has no ref/out params).  Pass `[false]` and read index 0 after the
+  /// call.  Existing callers that ignore L3 outcome can omit this parameter.
   Future<bool> sendToUser({
     required Uint8List recipientUserId,
     required proto.MessageTypeV3 messageType,
@@ -9970,6 +10249,7 @@ class CleonaService implements ICleonaService {
     proto.EditMetadata? editMetadata,
     proto.ExpiryMetadata? expiryMetadata,
     proto.ErasureCodingMetadata? erasureMetadata,
+    List<bool>? l3Result,
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
@@ -10057,17 +10337,32 @@ class CleonaService implements ICleonaService {
       final canonicalBytes = node.serializePacketForOfflineDelivery(outer);
       final fragmentBundleId =
           SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
-      await _distributeErasureFragments(
+      final erasureOk = await _distributeErasureFragments(
         packetBytes: canonicalBytes,
         messageId: fragmentBundleId,
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
-      _storeSafOnMutualPeers(
+      final safOk = _storeSafOnMutualPeers(
         recipientUserId: recipientUserId,
         wrappedEnvelope: canonicalBytes,
         storeId: SodiumFFI().randomBytes(16),
       );
+      // §5.8: report L3 placement outcome to caller via optional output param.
+      final l3Placed = erasureOk || safOk;
+      if (l3Result != null && l3Result.isNotEmpty) l3Result[0] = l3Placed;
+      if (!l3Placed) {
+        // §5.8: 0 connectivity — park canonical bytes in outbox so the next
+        // onNetworkChanged edge can retry placement exactly once.
+        _addToOutbox(
+          messageIdHex: bytesToHex(effectiveMessageId),
+          recipientUserIdHex: bytesToHex(recipientUserId),
+          recipientEd25519PkHex:
+              contact.ed25519Pk != null ? bytesToHex(contact.ed25519Pk!) : null,
+          canonicalPacket: canonicalBytes,
+        );
+        _log.info('sendToUser: 0 peers — message ${bytesToHex(effectiveMessageId).substring(0, 8)} parked in outbox');
+      }
       return false;
     }
 
@@ -10973,6 +11268,9 @@ class CleonaService implements ICleonaService {
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE:
         _handleCallGroupKeyRotateV3(frame, senderDeviceId, snapshot);
+        break;
+      case proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY:
+        groupCallManager.handleGroupCallSenderKeyV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_RTT_PING:
         _handleCallRttPingV3(frame, senderDeviceId, snapshot);
@@ -13919,4 +14217,48 @@ class _MediaChunkBuffer {
     }
     return out;
   }
+}
+
+/// §5.8 One-Shot-Outbox entry.
+///
+/// Holds a canonical serialized [NetworkPacketV3] and the metadata required to
+/// retry the single L3 placement attempt once the sender regains connectivity.
+/// This is NOT a retry queue — the entry is flushed exactly once per
+/// onNetworkChanged edge-trigger and then either removed (L3 placed) or kept
+/// for the next edge (still 0 peers).
+class _OutboxEntry {
+  /// Wire message ID (hex string), correlates to UiMessage.id.
+  final String messageIdHex;
+  /// Recipient user ID (hex string) for erasure distribution routing.
+  final String recipientUserIdHex;
+  /// Ed25519 pubkey of the recipient (hex) — used for mailbox-id derivation.
+  final String? recipientEd25519PkHex;
+  /// Serialized NetworkPacketV3 bytes (base64-encoded for JSON storage).
+  final String canonicalPacketB64;
+  /// When the original send was attempted (for TTL / expired-status check).
+  final int sentAtMs;
+
+  _OutboxEntry({
+    required this.messageIdHex,
+    required this.recipientUserIdHex,
+    this.recipientEd25519PkHex,
+    required this.canonicalPacketB64,
+    required this.sentAtMs,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'messageIdHex': messageIdHex,
+        'recipientUserIdHex': recipientUserIdHex,
+        if (recipientEd25519PkHex != null) 'recipientEd25519PkHex': recipientEd25519PkHex,
+        'canonicalPacketB64': canonicalPacketB64,
+        'sentAtMs': sentAtMs,
+      };
+
+  static _OutboxEntry fromJson(Map<String, dynamic> json) => _OutboxEntry(
+        messageIdHex: json['messageIdHex'] as String,
+        recipientUserIdHex: json['recipientUserIdHex'] as String,
+        recipientEd25519PkHex: json['recipientEd25519PkHex'] as String?,
+        canonicalPacketB64: json['canonicalPacketB64'] as String,
+        sentAtMs: json['sentAtMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
+      );
 }

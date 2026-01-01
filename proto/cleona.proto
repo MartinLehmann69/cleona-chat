@@ -469,7 +469,7 @@ message CallInvite {
   bool is_video = 4;
   bool is_group_call = 5;
   bytes group_id = 6;
-  bytes group_call_key = 7;        // 32-Byte AES-256 shared key (KEM-encrypted per recipient)
+  bytes group_call_key = 7;        // DEPRECATED for group media (§10.2.1): media now uses per-sender GroupCallSenderKey. Retained for wire-compat.
 }
 
 message CallAnswer {
@@ -893,6 +893,21 @@ message GroupCallVideo {
   bytes video_frame_data = 3;     // Serialized VideoFrame proto (encrypted VP8)
 }
 
+// Per-sender media key announcement (Architecture §10.2.1). Each participant
+// generates a secret 256-bit send_key known only to itself and announces it,
+// dual-signed + KEM-encrypted (setup-class ApplicationFrame), to every other
+// participant. Receivers map sender_node_id -> send_key and decrypt that
+// sender's media frames with it. Because send_key is secret to its owner, a
+// relaying co-participant cannot forge frames as another sender. Replaces the
+// shared group_call_key media role (CallInvite.group_call_key, deprecated for
+// group media). key_version bumps on rotation (membership change / rejoin).
+message GroupCallSenderKey {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — owner of this send_key
+  bytes send_key = 3;             // 32-Byte AES-256 secret, sender-owned
+  uint32 key_version = 4;         // Monotonic per-sender version for rotation
+}
+
 // ── Voice Transcription (Source-Side) ────────────────────────────────
 
 message VoicePayload {
@@ -1174,6 +1189,16 @@ message PollVoteRevokeMsg {
 
 // ── 2D-DHT Identity Resolution (§2.2.4) ──────────────────────────────
 
+// D1 (§4.3 Trust anchor): one soft-re-key link old→new. Link shape mirrors
+// KeyRotationBroadcast — the OLD key signs the successor pubkeys, proving
+// continuity from the founding key (whose hash is the userId) to the
+// currently embedded manifest keys.
+message RotationChainLinkProto {
+  bytes new_ed25519_pk = 1;        // 32 bytes — successor user pubkey
+  bytes new_ml_dsa_pk = 2;         // ML-DSA-65 successor pubkey
+  bytes old_signature_ed25519 = 3; // OLD key's sig over (new_ed25519_pk || new_ml_dsa_pk)
+}
+
 message AuthManifestProto {
   bytes user_id = 1;
   repeated bytes authorized_device_node_ids = 2;
@@ -1182,6 +1207,14 @@ message AuthManifestProto {
   int64 published_at_ms = 5;
   bytes ed25519_sig = 6;
   bytes ml_dsa_sig = 7;
+  // D1 (§4.3 Trust anchor): self-certifying embedded user pubkeys, covered by
+  // the hybrid signature. Absent on legacy records (pre-D1 builds) — those are
+  // treated as legacy-unverified by the resolver.
+  bytes user_ed25519_pk = 8;
+  bytes user_ml_dsa_pk = 9;
+  // Founding-key → current-key continuity after soft re-key (§7.4b). Empty
+  // unless the identity has rotated.
+  repeated RotationChainLinkProto rotation_chain = 10;
 }
 
 message LivenessRecordProto {
@@ -1435,6 +1468,7 @@ enum MessageTypeV3 {
   MTV3_CALL_RTT_PONG              = 83;
   MTV3_CALL_TREE_UPDATE           = 84;
   MTV3_CALL_KEYFRAME_REQUEST      = 85;
+  MTV3_CALL_GROUP_SENDER_KEY      = 86; // Per-sender media key announce (§10.2.1)
 
   // ── Channel Gossip & Moderation Plumbing (§10.2) ────────────
   // Wave 2B.3: V3 carriers for the V2 CHANNEL_INDEX_EXCHANGE / JOIN_REQUEST /

@@ -10,9 +10,14 @@
 #   APP_STORE_CONNECT_KEY_ID — App Store Connect API Key ID
 #   APP_STORE_CONNECT_ISSUER — App Store Connect API Issuer UUID
 #   APP_STORE_CONNECT_KEY    — App Store Connect API Key (.p8 content, base64)
-#   CERT_P12_BASE64          — Distribution certificate .p12 (base64-encoded)
+#   CERT_P12_BASE64          — Apple DISTRIBUTION certificate .p12 (base64). Must be
+#                              an "Apple Distribution" cert, NOT a Development cert —
+#                              App Store / TestFlight rejects development-signed IPAs.
 #   CERT_P12_PASSWORD        — Password for the .p12 file
-#   PROVISIONING_PROFILE_B64 — Provisioning profile (base64-encoded)
+#   PROVISIONING_PROFILE_B64 — APP STORE provisioning profile (base64) for bundle id
+#                              chat.cleona.cleona, named "Cleona App Store" (the name
+#                              referenced in ios/ExportOptions.plist). A Development or
+#                              Ad-Hoc profile will NOT work for TestFlight upload.
 ###############################################################################
 name: Apple Build (iOS + macOS)
 
@@ -210,10 +215,21 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          BUILD_MODE="--debug"
-          if [ "$BUILD_CHANNEL" = "live" ]; then BUILD_MODE="--release"; fi
+          # iOS exception to the project-wide "Beta IMMER --debug" rule:
+          # TestFlight / App Store distribution requires an AOT --release build.
+          # A Flutter --debug IPA uses the Dart VM in JIT mode, which needs
+          # get-task-allow (development signing) and is rejected by App Store
+          # Connect. The beta vs. live distinction is preserved via the
+          # NETWORK_CHANNEL dart-define, NOT via the Dart build mode — so a
+          # beta TestFlight build is release-mode binary on the beta network.
+          # TestFlight rejects a CFBundleVersion that was already uploaded for
+          # the same marketing version. Use the monotonic workflow run number as
+          # the build number so every upload is unique without hand-bumping
+          # pubspec. The marketing version (CFBundleShortVersionString) still
+          # comes from pubspec's build-name.
           flutter build ipa \
-            $BUILD_MODE \
+            --release \
+            --build-number="${GITHUB_RUN_NUMBER}" \
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 

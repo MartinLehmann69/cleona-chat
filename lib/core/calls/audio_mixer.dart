@@ -119,8 +119,12 @@ void _mixerCaptureIsolateEntry(_MixerCaptureInit init) {
 /// Also owns a capture isolate for microphone input (same pattern as AudioEngine
 /// but encrypts with the shared group call key).
 class AudioMixer {
-  Uint8List _callKey; // Shared AES-256 key
-  int _callKeyVersion;
+  // §10.2.1 per-sender media keys. `_ownSendKey` (secret to us) encrypts our
+  // outgoing frames; `_peerSendKeys` maps an authenticated sender userId-hex to
+  // their announced key and decrypts THEIR frames.
+  Uint8List _ownSendKey;
+  int _ownSendKeyVersion;
+  final Map<String, Uint8List> _peerSendKeys = {};
   final CLogger _log;
   final SodiumFFI _sodium = SodiumFFI();
 
@@ -150,13 +154,18 @@ class AudioMixer {
   void Function(Uint8List encryptedFrame)? onAudioFrame;
 
   AudioMixer({
-    required Uint8List callKey,
+    required Uint8List ownSendKey,
     required String profileDir,
-    int callKeyVersion = 0,
-  })  : _callKey = callKey,
-        _callKeyVersion = callKeyVersion,
+    int ownSendKeyVersion = 1,
+  })  : _ownSendKey = ownSendKey,
+        _ownSendKeyVersion = ownSendKeyVersion,
         _log = CLogger.get('group-audio', profileDir: profileDir) {
     _shim = AudioEngineShim.load();
+  }
+
+  /// Register an authenticated peer's secret media key (decrypt side).
+  void setPeerSendKey(String senderUserHex, Uint8List key) {
+    _peerSendKeys[senderUserHex] = key;
   }
 
   /// Start capture isolate, playback, and mix timer.
@@ -204,7 +213,7 @@ class AudioMixer {
 
   Future<bool> _startCaptureIsolate() async {
     _frameReceivePort = ReceivePort();
-    final init = _MixerCaptureInit(_frameReceivePort!.sendPort, _callKey);
+    final init = _MixerCaptureInit(_frameReceivePort!.sendPort, _ownSendKey);
 
     // Two-stage handshake (see audio_engine.dart 2026-04-26 fix): SendPort,
     // then ready-flag, then audio frames.
@@ -268,7 +277,7 @@ class AudioMixer {
   void addFrame(String senderNodeIdHex, Uint8List encryptedAudio) {
     if (!_running) return;
 
-    final pcm = _decryptFrame(encryptedAudio);
+    final pcm = _decryptFrame(encryptedAudio, senderNodeIdHex);
     if (pcm == null) return;
 
     // Extract sequence number from the packet
@@ -284,14 +293,23 @@ class AudioMixer {
     buffer.push(AudioFrame(seqNum: seqNum, data: pcm));
   }
 
-  /// Decrypt an audio frame.
-  Uint8List? _decryptFrame(Uint8List packet) {
+  /// Decrypt an audio frame using the sender's own secret key (§10.2.1).
+  /// A frame whose sender key we have not yet learned is dropped (the signed
+  /// announcement lands sub-second at join). AES-GCM auth means a frame that
+  /// decrypts under sender X's key genuinely came from X — a co-participant
+  /// without X's secret key cannot forge it.
+  Uint8List? _decryptFrame(Uint8List packet, String senderUserHex) {
     if (packet.length < 16 + cryptoAeadAes256GcmABytes) return null;
 
+    final key = _peerSendKeys[senderUserHex];
+    if (key == null) {
+      _log.debug('Audio drop: no send_key yet for ${senderUserHex.substring(0, 8)}');
+      return null;
+    }
     try {
       final nonce = Uint8List.sublistView(packet, 4, 16);
       final ciphertext = Uint8List.sublistView(packet, 16);
-      return _sodium.aesGcmDecrypt(ciphertext, _callKey, nonce);
+      return _sodium.aesGcmDecrypt(ciphertext, key, nonce);
     } catch (e) {
       _log.debug('Audio decrypt failed: $e');
       return null;
@@ -348,14 +366,14 @@ class AudioMixer {
     return result;
   }
 
-  /// Update the call key after key rotation.
-  void updateCallKey(Uint8List newKey, int version) {
-    if (version <= _callKeyVersion) return; // Ignore old versions
-    _callKey = newKey;
-    _callKeyVersion = version;
-    // Update capture isolate's key
+  /// Update OUR own send key after rotation (§10.2.1). Switches the encrypt
+  /// side (capture isolate) to the new key.
+  void updateOwnSendKey(Uint8List newKey, int version) {
+    if (version <= _ownSendKeyVersion) return; // Ignore old versions
+    _ownSendKey = newKey;
+    _ownSendKeyVersion = version;
     _captureCommandPort?.send(Uint8List.fromList(newKey));
-    _log.info('Call key updated to version $version');
+    _log.info('Own send_key updated to version $version');
   }
 
   /// Remove a peer (left/crashed).

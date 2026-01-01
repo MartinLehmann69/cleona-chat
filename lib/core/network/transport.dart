@@ -118,6 +118,16 @@ class Transport {
   /// once `lastProbeAt` is older than `tlsCapabilityProbeCooldown`.
   final Map<String, _TlsCapabilityEntry> _tlsCapability = {};
 
+  // ── Send burst limiter (Ingo crash: GetStackPointerForStackBounds) ──
+  // Caps rapid-fire FFI calls from onNetworkChanged bursts. When more than
+  // [_burstLimit] sends fire within [_burstWindowMs], sendUdp yields to the
+  // event loop before continuing. This breaks up the synchronous FFI call
+  // chain that exhausts Dart's stack-guard pages on Windows.
+  static const int _burstLimit = 15;
+  static const int _burstWindowMs = 50;
+  int _burstWindowStart = 0;
+  int _burstCount = 0;
+
   /// Native UDP sender (libcleona_net) for platforms where Dart's
   /// RawDatagramSocket.send() is unreliable (Windows: returns 0 despite
   /// valid socket — see §4.5.2). Initialized in [start] on supported
@@ -658,6 +668,20 @@ class Transport {
       _log.info('sendUdp: no ${address.type == InternetAddressType.IPv6 ? "IPv6" : "IPv4"} socket for ${address.address}');
       return false;
     }
+
+    // Burst limiter: yield to event loop when sends pile up faster than the
+    // FFI boundary can safely handle (Windows: GetStackPointerForStackBounds).
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (nowMs - _burstWindowStart > _burstWindowMs) {
+      _burstWindowStart = nowMs;
+      _burstCount = 0;
+    }
+    if (++_burstCount > _burstLimit) {
+      await Future<void>.delayed(const Duration(milliseconds: 2));
+      _burstWindowStart = DateTime.now().millisecondsSinceEpoch;
+      _burstCount = 0;
+    }
+
     try {
       final data = serializeWithTag(packet);
 

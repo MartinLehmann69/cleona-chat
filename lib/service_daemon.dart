@@ -1260,6 +1260,8 @@ class _MultiServiceDaemon {
           log.info('Public IPv6 via ipify: $ipv6');
           node.natTraversal.setPublicIpv6(ipv6);
           node.broadcastAddressUpdate();
+          // §4.7: one-shot inbound probe per join to detect carrier IPv6 filter.
+          node.probeIpv6InboundIfNeeded();
         }
       } catch (e) {
         log.debug('ipify IPv6 query failed (expected if no IPv6): $e');

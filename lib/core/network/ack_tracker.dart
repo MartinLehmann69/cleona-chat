@@ -99,6 +99,15 @@ class AckTracker {
   /// (DV-1 §3.4: single source of truth for ACK→DV-success bridge.)
   void Function(String messageIdHex, String recipientUserIdHex, bool wasDirect)? onAckReceived;
 
+  /// Fired when an end-to-end DELIVERY_RECEIPT returns over a RELAY path
+  /// (`wasDirect=false`) for a message we sent via a known `nextHop`. The
+  /// receipt proves that the specific relay route we used actually delivers,
+  /// so the DV bridge marks *that* route `ackConfirmed` — the relay-side
+  /// counterpart to `confirmRoute` on direct receipts (Architecture §4.4
+  /// confirmed-beats-unconfirmed, review S-3). `destDeviceIdHex` is the ACK
+  /// sender (= the recipient); `viaNextHopHex` is the relay we sent through.
+  void Function(String destDeviceIdHex, String viaNextHopHex)? onRelayRouteConfirmed;
+
   AckTracker({required DhtRpc rttSource, String? profileDir})
       : _rttSource = rttSource,
         _log = CLogger.get('ack-tracker', profileDir: profileDir);
@@ -210,6 +219,12 @@ class AckTracker {
     // inbound DELIVERY_RECEIPT) so dvRouting.confirmRoute and
     // routingTable.getPeer operate on routing-layer IDs.
     onAckReceived?.call(messageIdHex, senderNodeIdHex, wasDirect);
+
+    // S-3: an E2E receipt that came back over a relay path proves the relay
+    // route we sent through delivers → let the DV bridge confirm that route.
+    if (!wasDirect && entry.viaNextHopHex != null) {
+      onRelayRouteConfirmed?.call(senderNodeIdHex, entry.viaNextHopHex!);
+    }
 
     final msgShort = messageIdHex.length > 8 ? messageIdHex.substring(0, 8) : messageIdHex;
     final senderShort = senderNodeIdHex.length > 8 ? senderNodeIdHex.substring(0, 8) : senderNodeIdHex;

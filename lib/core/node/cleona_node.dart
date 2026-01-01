@@ -207,8 +207,35 @@ class CleonaNode {
   Timer? _dvSafetyNetTimer;
   Timer? _dvPropagationDebounce;
   Timer? _networkStateSaveDebounce;
+
+  // ── §4.5 Isolated-Node Re-Discovery (Architecture §4.5) ──────────────
+  //
+  // Self-terminating retry with exponential backoff for the `peerCount == 0`
+  // pathological case. The normal "3-burst then silence" rule only applies
+  // when ≥1 peer exists to flood. Without peers the node is stuck: it never
+  // receives anything to trigger Stage-5 re-discovery, so we need an
+  // independent timer.
+  //
+  // Backoff schedule (Architecture §4.5):
+  //   step 0 → 1 min, step 1 → 5 min, step 2+ → 30 min, cap 60 min.
+  // The timer disarms immediately on the first confirmed peer (first direct
+  // hopCount==0 packet OR hole-punch success). It is NEVER armed while
+  // peerCount > 0, so it generates O(1) traffic in any populated mesh.
+  Timer? _isolatedNodeRetryTimer;
+  int _isolatedNodeRetryStep = 0;
+
+  /// Bootstrap addresses passed to [start]/[startQuick]. Stored so the
+  /// isolated-node retry tick can re-ping them without requiring the caller
+  /// to re-supply them. Cleared on [stop].
+  final List<String> _isolatedNodeBootstrapAddrs = [];
   final Set<String> _dvPendingChanges = {};
   final RelayDedupCache _relayDedup = RelayDedupCache();
+
+  /// §2.4 step [3b]: duplicate-frame cache (replay dedup). Keyed on the
+  /// networkTag HMAC, which covers the full packet incl. timestampMs — a
+  /// byte-identical replay maps to the identical tag, while relay re-wraps
+  /// and sender-rebuilt retransmits produce fresh tags (no false positives).
+  final FrameDedupCache _frameDedup = FrameDedupCache();
   DateTime? _lastBroadcastTime;
   bool _running = false;
   /// Count of authenticated packets received in this session.
@@ -628,6 +655,16 @@ class CleonaNode {
       }
     };
 
+    // S-3: an E2E DELIVERY_RECEIPT that returned over a relay path proves the
+    // relay route we sent through actually delivers → confirm that *specific*
+    // route (binds preference to demonstrated delivery, not the advertisement).
+    ackTracker.onRelayRouteConfirmed = (destHex, viaNextHopHex) {
+      dvRouting.confirmRoute(destHex, viaNextHopHex: viaNextHopHex);
+      if (!_isLocalIdentity(viaNextHopHex)) {
+        dvRouting.confirmRelayNeighbor(viaNextHopHex);
+      }
+    };
+
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
     final identityFileEnc = FileEncryption(baseDir: profileDir);
 
@@ -791,8 +828,12 @@ class CleonaNode {
     // but are reachable right now. The regular maintenance timer (60s, 4h threshold)
     // handles cleanup AFTER peers have had a chance to respond to PINGs.
 
-    // Bootstrap from known peers — send PING and wait for PONG
+    // Bootstrap from known peers — send PING and wait for PONG.
+    // Also cache the addresses for the isolated-node retry (§4.5).
     if (bootstrapPeers.isNotEmpty) {
+      _isolatedNodeBootstrapAddrs
+        ..clear()
+        ..addAll(bootstrapPeers);
       for (final bp in bootstrapPeers) {
         _addBootstrapPeer(bp);
       }
@@ -904,6 +945,15 @@ class CleonaNode {
       _tryMobileFallback();
     });
 
+    // §4.5 Isolated-Node Re-Discovery: arm the backoff timer when there are
+    // no confirmed peers at the end of startup. This covers both the fresh-
+    // install case (no routing_table.json) and the case where every persisted
+    // peer is unreachable in the current session. The timer is self-
+    // terminating — it cancels itself on the first confirmed peer.
+    if (routingTable.peerCount == 0) {
+      _armIsolatedNodeTimer();
+    }
+
     _running = true;
     nodeStartedAt = DateTime.now();
     _log.info('Node started. Peers: ${routingTable.peerCount}');
@@ -946,6 +996,15 @@ class CleonaNode {
     final tsDelta = (nowMs - packet.timestampMs.toInt()).abs();
     if (tsDelta > 60 * 1000) {
       _log.debug('V3 drop: timestamp window violation (${tsDelta}ms)');
+      return;
+    }
+
+    // [3b] Duplicate-frame check (Architecture §2.4 step 3b): silently drop
+    // byte-identical replays of HMAC-valid frames inside the 60s window
+    // (BOOT-RPCs, HOLE_PUNCH_*, DHT_PING/PONG, DELIVERY_RECEIPT, call frames).
+    if (packet.networkTag.isNotEmpty &&
+        _frameDedup.isDuplicate(bytesToHex(Uint8List.fromList(packet.networkTag)))) {
+      _log.debug('V3 drop: duplicate frame (replay dedup) type=${packet.payloadType.name}');
       return;
     }
 
@@ -1030,10 +1089,12 @@ class CleonaNode {
           outerStatus = OuterSigStatus.skippedBootstrap;
         } else {
           // No firstParty cache → unknown sender using a known device-id
-          // (or a thirdParty PK mismatch). Reputation hit + drop.
-          if (senderHex.isNotEmpty) {
-            reputationManager.recordBad(senderHex, 'device_sig_invalid');
-          }
+          // (or a thirdParty PK mismatch). Silent drop, NO reputation hit:
+          // a *failed* device-sig means `senderDeviceId` is exactly the
+          // unproven field — the HMAC proves only network membership. An
+          // insider could otherwise forge a frame with a victim's deviceId +
+          // valid HMAC + broken sig to frame the victim into a ban
+          // (Ban-DoS-by-framing). See §13.1.4 attribution precondition.
           _log.debug('V3 drop: device-sig invalid from '
               '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
           return;
@@ -1068,7 +1129,13 @@ class CleonaNode {
         _localIps.any((ip) => _samePrivateNetwork(from.address, ip));
     if (!isLanPeer && packet.hasPow()) {
       if (!ProofOfWork.verify(Uint8List.fromList(packet.payload), packet.pow)) {
-        if (senderHex.isNotEmpty) {
+        // §13.1.4 attribution precondition: PoW covers only the payload, not
+        // `senderDeviceId`. Attribute the bad PoW only when the outer
+        // device-sig verified for this packet — otherwise the sender is
+        // unproven (bootstrap/stale-PK lenient pass) and a `recordBad` would
+        // be framable. When verified, the senderDeviceId is proven and the
+        // penalty is sound.
+        if (senderHex.isNotEmpty && outerStatus == OuterSigStatus.verified) {
           reputationManager.recordBad(senderHex, 'pow_invalid');
         }
         _log.debug('V3 drop: PoW invalid from '
@@ -1092,6 +1159,8 @@ class CleonaNode {
         hasSessionConfirmedPeers = true;
         _log.info('First session-confirmed peer: ${senderHex.substring(0, 8)}');
       }
+      // §4.5: first confirmed peer → disarm isolated-node retry.
+      _disarmIsolatedNodeTimer();
 
       // DV-3 bias fix: receiving a direct packet (hopCount=0) proves
       // bidirectional reachability — same as DELIVERY_RECEIPT. Without
@@ -1385,9 +1454,10 @@ class CleonaNode {
         senderDeviceMlDsaPk: senderPeer?.deviceMlDsaPublicKey,
       );
       if (!ok) {
-        if (senderHex.isNotEmpty) {
-          reputationManager.recordBad(senderHex, 'reassembled_device_sig_invalid');
-        }
+        // §13.1.4 attribution precondition: a failed device-sig leaves
+        // `senderDeviceId` unproven, so silent drop WITHOUT reputation hit —
+        // otherwise an insider could frame a victim by injecting reassembled
+        // fragments carrying the victim's deviceId + broken sig.
         _log.debug('V3 reassembled drop: device-sig invalid from '
             '${senderHex.isNotEmpty ? senderHex.substring(0, 8) : "<unknown>"}');
         return;
@@ -2775,6 +2845,16 @@ class CleonaNode {
           'skipping neighbor spray for relayed packet');
       return false;
     }
+
+    // §4.7 Relay-Candidate Reachability Filter (Part 1):
+    // Determine whether we need a dual-stack relay (cross-family send).
+    // Cross-family: we are IPv4-only AND destination is IPv6-only →
+    // the relay hop must bridge the protocol boundary (have both IPv4 and IPv6).
+    final destPeer = routingTable.getPeer(deviceId);
+    final needsDualStack = destPeer != null &&
+        !PeerAddress.hasGlobalIpv6() &&   // we have no IPv6 ourselves
+        _destIsIpv6Only(destPeer);         // destination only has IPv6 addrs
+
     final gwHex = dvRouting.defaultGatewayHex;
     final triedNeighbors = <String>{};
     if (gwHex != null && gwHex != destHex && !_isLocalIdentity(gwHex) &&
@@ -2783,15 +2863,26 @@ class CleonaNode {
       final gwBytes = hexToBytes(gwHex);
       final gwPeer = routingTable.getPeer(gwBytes);
       if (gwPeer != null) {
-        _log.info('sendToDevice ${destHex.substring(0, 8)}: '
-            'fall through to default-GW ${gwHex.substring(0, 8)}');
-        final ok = await _sendV3ViaHop(packet, gwBytes);
-        if (ok) return true;
+        // §4.7 Relay-Candidate Reachability Filter: skip GW if unreachable from us.
+        if (!_isHopReachableFromHere(gwPeer)) {
+          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+              '${gwHex.substring(0, 8)} skipped — not reachable from current network');
+        } else if (needsDualStack && !_hopIsDualStack(gwPeer)) {
+          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+              '${gwHex.substring(0, 8)} skipped — cross-family send requires dual-stack hop');
+        } else {
+          _log.info('sendToDevice ${destHex.substring(0, 8)}: '
+              'fall through to default-GW ${gwHex.substring(0, 8)}');
+          final ok = await _sendV3ViaHop(packet, gwBytes);
+          if (ok) return true;
+        }
       }
     }
 
     // Try remaining neighbors (skip GW already tried, skip destination, skip self,
-    // skip excluded relay sender)
+    // skip excluded relay sender).
+    // §4.7 Relay-Candidate Reachability Filter: also skip neighbors that are
+    // not reachable from the current network or (for cross-family) lack dual-stack.
     for (final neighborHex in dvRouting.neighbors.keys) {
       if (triedNeighbors.contains(neighborHex)) continue;
       if (neighborHex == destHex) continue;
@@ -2801,6 +2892,18 @@ class CleonaNode {
       final nBytes = hexToBytes(neighborHex);
       final nPeer = routingTable.getPeer(nBytes);
       if (nPeer == null) continue;
+      // §4.7: skip neighbor if we cannot reach it from the current network.
+      if (!_isHopReachableFromHere(nPeer)) {
+        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
+            '${neighborHex.substring(0, 8)} skipped — not reachable from current network');
+        continue;
+      }
+      // §4.7: cross-family — skip neighbor if not dual-stack.
+      if (needsDualStack && !_hopIsDualStack(nPeer)) {
+        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
+            '${neighborHex.substring(0, 8)} skipped — cross-family send requires dual-stack hop');
+        continue;
+      }
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'trying neighbor ${neighborHex.substring(0, 8)} as relay');
       final ok = await _sendV3ViaHop(packet, nBytes);
@@ -3472,6 +3575,54 @@ class CleonaNode {
     }).toList();
   }
 
+  // ── §4.7 Relay-Candidate Reachability Filters ────────────────────────
+
+  /// §4.7 Part 1: True iff we (the sender) can actually reach [hopPeer].
+  ///
+  /// A relay hop we cannot reach is worthless: we would send the packet
+  /// into a black hole. This mirrors the `isReachableFromCurrentNetwork`
+  /// guard already applied per-address in `_sendV3ViaHop` — the difference
+  /// is that here we filter whole hops in the neighbor-spray before even
+  /// calling `_sendV3ViaHop`, avoiding the log spam and unnecessary TLS
+  /// attempts for entirely unreachable candidates.
+  ///
+  /// "Reachable" = at least one non-backoff address on [hopPeer] passes
+  /// `isReachableFromCurrentNetwork` (the same guard used in _sendV3ViaHop).
+  bool _isHopReachableFromHere(PeerInfo hopPeer) {
+    return hopPeer.allConnectionTargets().any(
+      (a) => !a.isInBackoff && a.isReachableFromCurrentNetwork,
+    );
+  }
+
+  /// §4.7 Part 1 — Cross-Family: true iff all of [destPeer]'s addresses are
+  /// IPv6 (the destination is IPv6-only from our perspective).
+  ///
+  /// Used to detect the IPv4-only-sender → IPv6-only-destination scenario
+  /// where a relay hop MUST be dual-stack (§4.7).
+  bool _destIsIpv6Only(PeerInfo destPeer) {
+    final addrs = destPeer.allConnectionTargets();
+    if (addrs.isEmpty) return false;
+    return addrs.every((a) => a.ip.contains(':'));
+  }
+
+  /// §4.7 Part 1 — Cross-Family: true iff [hopPeer] has at least one IPv4
+  /// address reachable from here AND at least one IPv6 address that is
+  /// reachable from the destination (i.e. is an IPv6 global address,
+  /// irrespective of whether WE have IPv6 ourselves — the hop bridges for us).
+  ///
+  /// We use a structural check (has both IPv4 and IPv6 addresses in its
+  /// address list) rather than a capabilities bitmask because:
+  ///   a) The capabilities field is not yet populated by older peers.
+  ///   b) A peer's address list IS the ground truth for what protocols it
+  ///      has bound and advertised.
+  bool _hopIsDualStack(PeerInfo hopPeer) {
+    final addrs = hopPeer.allConnectionTargets();
+    final hasIpv4 = addrs.any((a) => !a.ip.contains(':'));
+    final hasIpv6 = addrs.any((a) => a.ip.contains(':') &&
+        a.type == PeerAddressType.ipv6Global);
+    return hasIpv4 && hasIpv6;
+  }
+
   /// Public IP to advertise to peers: port-verified (UPnP/STUN) takes
   /// priority, then explicit manual override (DNAT on Bootstrap).
   /// `publicIpForNatContext` (ipify-only) is deliberately excluded —
@@ -3508,8 +3659,17 @@ class CleonaNode {
         ..port = pubPort
         ..addressType = proto.AddressType.IPV4_PUBLIC);
     }
+    // §4.7 IPv6 Inbound Probe: include the global IPv6 address only when:
+    //   • ipv6InboundVerified == true  → confirmed bidirectional → include
+    //   • ipv6InboundVerified == null  → probe pending (just set) → include
+    //     optimistically so peers learn the address while the probe is in flight
+    //   • ipv6InboundVerified == false → carrier likely blocks inbound → EXCLUDE
+    //     from Priority-3 Direct. The address is still advertised as a relay hint
+    //     by the Liveness Record builder (which calls this method with all
+    //     addresses) — the IPv6InboundVerified=false flag is checked there too.
     final pubV6 = natTraversal.publicIpv6;
-    if (pubV6 != null && pubV6.isNotEmpty) {
+    if (pubV6 != null && pubV6.isNotEmpty &&
+        natTraversal.ipv6InboundVerified != false) {
       list.add(proto.PeerAddressProto()
         ..ip = pubV6
         ..port = port
@@ -3630,6 +3790,13 @@ class CleonaNode {
     }
     if (staleAddrs > 0) {
       _log.info('Maintenance: removed $staleAddrs stale addresses');
+    }
+
+    // §4.5: if pruning/eviction dropped us to zero peers mid-session, (re-)arm
+    // the isolated-node retry — only when it is not already running, so the
+    // 15-min maintenance tick never resets an in-flight backoff.
+    if (routingTable.peerCount == 0 && _isolatedNodeRetryTimer == null) {
+      _armIsolatedNodeTimer();
     }
 
     // Cross-subnet discovery (§4.10): if no peer on a different /24 is known,
@@ -3846,6 +4013,18 @@ class CleonaNode {
     Future.delayed(const Duration(seconds: 8), () {
       if (!_running) return;
       _tryProactiveRendezvous();
+    });
+
+    // 10. §4.7 IPv6 Inbound Probe: if a global IPv6 is already known at the
+    // time of the network change (e.g. mobile interface with SLAAC), issue a
+    // fresh inbound probe. The probe is also triggered whenever
+    // natTraversal.setPublicIpv6 is called externally (headless / GUI path)
+    // via [probeIpv6InboundIfNeeded]. We fire here with a small delay so
+    // the NAT reset (step 1) and discovery burst (step 2) have settled and
+    // a confirmed peer is likely available.
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!_running) return;
+      _probeIpv6Inbound();
     });
   }
 
@@ -4477,6 +4656,8 @@ class CleonaNode {
       hasSessionConfirmedPeers = true;
       _log.info('First session-confirmed peer: ${peerHex.substring(0, 8)}');
     }
+    // §4.5: hole-punch success = first confirmed peer → disarm isolated-node retry.
+    _disarmIsolatedNodeTimer();
 
     // Add/update punched address in peer's address list
     final peer = routingTable.getPeer(peerNodeId);
@@ -4537,6 +4718,23 @@ class CleonaNode {
   final Map<String, String> _pendingPortProbes = {};
   Timer? _portProbeTimer;
 
+  // ── IPv6 Inbound Probe (§4.7) ────────────────────────────────────────
+  // A self-announced global IPv6 address is not guaranteed to be inbound-
+  // reachable: mobile carriers frequently block incoming IPv6 flows while
+  // allowing outbound. The probe issues ONE CPRB echo per network-join to
+  // verify bidirectional reachability. On timeout the address is kept as
+  // an advertise-only relay hint but excluded from Priority-3 Direct sends.
+  //
+  // Mechanics: identical to the existing IPv4 port probe — reuses
+  // PeerReachabilityQuery with probeIp = our IPv6, handled by the same
+  // _handleReachabilityQueryInfra path (which calls transport.sendPortProbe
+  // via the IPv6 socket). On CPRB receipt the probe ID is resolved here and
+  // natTraversal.confirmIpv6InboundReachable() is called.
+
+  /// Pending IPv6 inbound probe: probeIdHex → ipv6Address being probed
+  final Map<String, String> _pendingIpv6Probes = {};
+  Timer? _ipv6ProbeTimer;
+
   /// Initiate a port probe after discovering external IP without port mapping.
   void _initiatePortProbe(String externalIp) {
     // Find a confirmed peer with a public IP (Internet peer) to act as prober
@@ -4592,8 +4790,23 @@ class CleonaNode {
   }
 
   /// Handle incoming CPRB port probe packet.
+  /// Dispatches to either the IPv4 port-probe handler or the IPv6 inbound
+  /// probe handler depending on which pending-probe map owns the probeId.
   void _onPortProbeReceived(Uint8List probeId, InternetAddress from, int fromPort) {
     final probeIdHex = bytesToHex(probeId);
+
+    // ── IPv6 inbound probe (§4.7) ─────────────────────────────────────
+    final ipv6Addr = _pendingIpv6Probes.remove(probeIdHex);
+    if (ipv6Addr != null) {
+      _ipv6ProbeTimer?.cancel();
+      _log.info('IPv6 inbound probe SUCCESS — $ipv6Addr:$port is reachable from outside! '
+          '(probe from ${from.address}:$fromPort)');
+      natTraversal.confirmIpv6InboundReachable();
+      _broadcastAddressUpdate(force: true);
+      return;
+    }
+
+    // ── IPv4 port probe (V3.1.33) ─────────────────────────────────────
     final externalIp = _pendingPortProbes.remove(probeIdHex);
     if (externalIp == null) {
       _log.debug('Port probe received but no pending probe for ${probeIdHex.substring(0, 8)}');
@@ -4606,6 +4819,95 @@ class CleonaNode {
     natTraversal.confirmPublicAddress(externalIp, port);
     _broadcastAddressUpdate(force: true);
   }
+
+  /// §4.7 IPv6 Inbound Probe — verify that our self-announced global IPv6
+  /// address actually accepts inbound UDP.
+  ///
+  /// Issued ONCE per network-join (called from [onNetworkChanged] after
+  /// [natTraversal.publicIpv6] is set). If the CPRB echo arrives within
+  /// 8 s → [natTraversal.confirmIpv6InboundReachable].
+  /// On timeout → [natTraversal.markIpv6InboundUnreachable] so that
+  /// [currentSelfAddresses] drops the address from Priority-3 Direct.
+  ///
+  /// No-op when:
+  ///   • no global IPv6 is known (publicIpv6 == null)
+  ///   • probe already passed for this address (ipv6InboundVerified == true)
+  ///   • no confirmed peer available to act as echo agent
+  void _probeIpv6Inbound() {
+    final ipv6 = natTraversal.publicIpv6;
+    if (ipv6 == null || ipv6.isEmpty) return;
+    // Already confirmed for this address — no need to re-probe.
+    if (natTraversal.ipv6InboundVerified == true) return;
+
+    // Find a confirmed peer that can act as the echo agent. Prefer peers with
+    // a global IPv6 address themselves (can use the IPv6 socket for the probe),
+    // otherwise fall back to any confirmed peer (the peer uses whichever socket
+    // transport.sendPortProbe picks for the destination address).
+    final candidates = routingTable.allPeers
+        .where((p) => isPeerConfirmed(p.nodeIdHex))
+        .where((p) => !_isLocalIdentity(p.nodeIdHex))
+        .toList();
+
+    // Prefer peers that have a global IPv6 address themselves (more likely to
+    // route via IPv6 socket to our probe address).
+    final ipv6Peers = candidates
+        .where((p) => p.addresses.any((a) =>
+            a.type == PeerAddressType.ipv6Global &&
+            a.isReachableFromCurrentNetwork))
+        .toList();
+
+    final prober = ipv6Peers.isNotEmpty ? ipv6Peers.first :
+                   candidates.isNotEmpty ? candidates.first : null;
+    if (prober == null) {
+      _log.debug('IPv6 inbound probe: no confirmed peer available — deferring');
+      return;
+    }
+
+    final probeId = SodiumFFI().randomBytes(16);
+    final probeIdHex = bytesToHex(probeId);
+    _pendingIpv6Probes[probeIdHex] = ipv6;
+
+    // Ask the prober to send a CPRB to our IPv6 address. Reuses the existing
+    // PeerReachabilityQuery.probeIp / probePort fields — the responder's
+    // _handleReachabilityQueryInfra calls transport.sendPortProbe(ipv6, port)
+    // which routes via the IPv6 socket.
+    final query = proto.PeerReachabilityQuery(
+      targetNodeId: primaryIdentity.deviceNodeId,
+      queryId: probeId,
+      probeIp: ipv6,
+      probePort: port,
+    );
+    _sendInfra(
+      messageType: proto.MessageTypeV3.MTV3_REACHABILITY_QUERY,
+      innerPayload: query.writeToBuffer(),
+      recipientDeviceId: prober.nodeId,
+    );
+    _log.info('IPv6 inbound probe sent to ${prober.nodeIdHex.substring(0, 8)} '
+        'for $ipv6:$port');
+
+    // Timeout: 8 s (generous for cross-network relay paths; §4.7 spec: "one
+    // round-trip per join, no timer, no polling").
+    _ipv6ProbeTimer?.cancel();
+    _ipv6ProbeTimer = Timer(const Duration(seconds: 8), () {
+      if (_pendingIpv6Probes.remove(probeIdHex) != null) {
+        _log.info('IPv6 inbound probe TIMEOUT for $ipv6:$port');
+        natTraversal.markIpv6InboundUnreachable();
+        // No address-update broadcast needed: the address is still advertised
+        // (relay hint), the only change is suppression from Priority-3 Direct
+        // in currentSelfAddresses, which is evaluated lazily on each call.
+      }
+    });
+  }
+
+  /// §4.7 Public entry point: issue an IPv6 inbound probe if one has not yet
+  /// completed for the current address. Called by headless.dart / main.dart /
+  /// service_daemon.dart immediately after [natTraversal.setPublicIpv6].
+  ///
+  /// No-op when:
+  ///   • probe already passed (ipv6InboundVerified == true)
+  ///   • no IPv6 set yet
+  ///   • no confirmed peer available (fire-and-forget — caller need not wait)
+  void probeIpv6InboundIfNeeded() => _probeIpv6Inbound();
 
   /// Try to initiate a hole punch for a public-IP peer.
   /// Called when we learn about a peer with a public IP but can't reach them directly.
@@ -4664,6 +4966,118 @@ class CleonaNode {
   /// Get own PeerInfo for sharing (QR code, etc.).
   PeerInfo get ownPeerInfo => _ownPeerInfo();
 
+  // ── §4.5 Isolated-Node Re-Discovery ───────────────────────────────
+
+  /// Arm the isolated-node retry timer for the next backoff step.
+  ///
+  /// Only arms when [routingTable.peerCount] == 0. In a populated mesh
+  /// this is a no-op, so the timer is never live when peers exist.
+  ///
+  /// Backoff schedule: step 0 → 1 min, step 1 → 5 min, step 2+ → 30 min,
+  /// cap 60 min. The cap means steps ≥ 2 fire at 30 min until a peer is
+  /// found, never exceeding 60 min between attempts.
+  void _armIsolatedNodeTimer() {
+    if (!_running) return;
+    if (routingTable.peerCount > 0) return; // populated mesh — never arm
+    _isolatedNodeRetryTimer?.cancel();
+
+    // Backoff: 1 min → 5 min → 30 min (capped at 60 min).
+    const delaySchedule = [
+      Duration(minutes: 1),
+      Duration(minutes: 5),
+      Duration(minutes: 30),
+    ];
+    const cap = Duration(minutes: 60);
+    final rawDelay = _isolatedNodeRetryStep < delaySchedule.length
+        ? delaySchedule[_isolatedNodeRetryStep]
+        : delaySchedule.last;
+    final delay = rawDelay > cap ? cap : rawDelay;
+
+    _log.info('§4.5 Isolated-node retry: armed (step=$_isolatedNodeRetryStep, '
+        'delay=${delay.inMinutes}min)');
+    _isolatedNodeRetryTimer = Timer(delay, _isolatedNodeRetryTick);
+  }
+
+  /// Disarm the isolated-node retry timer. Called when the first peer is
+  /// confirmed. Safe to call repeatedly — cancels only when the timer is
+  /// still live.
+  void _disarmIsolatedNodeTimer() {
+    // Reset the backoff so a *future* isolation episode starts fresh at step 0,
+    // even if the timer was not currently running.
+    _isolatedNodeRetryStep = 0;
+    if (_isolatedNodeRetryTimer == null) return;
+    _isolatedNodeRetryTimer!.cancel();
+    _isolatedNodeRetryTimer = null;
+    _log.info('§4.5 Isolated-node retry: disarmed (first peer confirmed)');
+  }
+
+  /// Tick handler for the isolated-node re-discovery retry.
+  ///
+  /// Actions per tick (Architecture §4.5):
+  ///   (a) LAN-Discovery burst (multicast + broadcast, 3×2s).
+  ///   (b) Unicast re-probe of persisted WAN peer addresses from the
+  ///       routing-table snapshot (public, non-private IPs only).
+  ///   (c) Re-ping the cached Bootstrap addresses.
+  ///
+  /// After firing, the step counter advances and the timer re-arms for the
+  /// next step — unless a peer was confirmed in the meantime (checked at
+  /// tick entry).
+  void _isolatedNodeRetryTick() {
+    _isolatedNodeRetryTimer = null;
+    if (!_running) return;
+
+    // Disarm condition: a peer was confirmed while the timer was in flight.
+    if (_confirmedPeers.values
+        .any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) {
+      _log.info('§4.5 Isolated-node retry: tick skipped — peer confirmed '
+          'while timer was in flight');
+      return;
+    }
+
+    _log.info('§4.5 Isolated-node retry: tick step=$_isolatedNodeRetryStep');
+    _isolatedNodeRetryStep++;
+
+    // (a) LAN-Discovery burst (reuses existing fast-discovery primitives).
+    try {
+      localDiscovery.triggerFastDiscovery();
+    } catch (e) {
+      _log.debug('§4.5 localDiscovery burst error: $e');
+    }
+    try {
+      multicastDiscovery.triggerFastDiscovery();
+    } catch (e) {
+      _log.debug('§4.5 multicastDiscovery burst error: $e');
+    }
+
+    // (b) Unicast re-probe of persisted WAN addresses from routing table.
+    // Only public (non-private) IPs — private IPs are LAN-only and already
+    // covered by the broadcast/multicast burst above.
+    var wanProbes = 0;
+    for (final peer in routingTable.allPeers) {
+      if (_isLocalIdentity(peer.nodeIdHex)) continue;
+      for (final addr in peer.allConnectionTargets()) {
+        if (!_isPrivateIp(addr.ip) && addr.port > 0) {
+          _sendPing(addr.ip, addr.port);
+          wanProbes++;
+        }
+      }
+    }
+    if (wanProbes > 0) {
+      _log.debug('§4.5 WAN re-probe: sent $wanProbes ping(s) to persisted public addresses');
+    }
+
+    // (c) Re-ping cached Bootstrap addresses.
+    for (final bs in _isolatedNodeBootstrapAddrs) {
+      _addBootstrapPeer(bs);
+    }
+    if (_isolatedNodeBootstrapAddrs.isNotEmpty) {
+      _log.debug('§4.5 Bootstrap re-ping: ${_isolatedNodeBootstrapAddrs.length} address(es)');
+    }
+
+    // Re-arm for the next step (still no peer confirmed — we checked above).
+    _armIsolatedNodeTimer();
+  }
+
   // ── Shutdown ───────────────────────────────────────────────────────
 
   Future<void> stop() async {
@@ -4673,6 +5087,11 @@ class CleonaNode {
     _dvSafetyNetTimer?.cancel();
     _dvPropagationDebounce?.cancel();
     _networkStateSaveDebounce?.cancel();
+    _portProbeTimer?.cancel();
+    _ipv6ProbeTimer?.cancel();
+    _isolatedNodeRetryTimer?.cancel();
+    _isolatedNodeRetryTimer = null;
+    _isolatedNodeBootstrapAddrs.clear();
     localDiscovery.stop();
     multicastDiscovery.stop();
     ackTracker.dispose();
@@ -4759,6 +5178,39 @@ class RelayDedupCache {
     _cache.removeWhere((_, t) => t.isBefore(cutoff));
     if (_cache.containsKey(packetHash)) return true;
     _cache[packetHash] = DateTime.now();
+    if (_cache.length > maxSize) _cache.remove(_cache.keys.first);
+    return false;
+  }
+
+  int get length => _cache.length;
+}
+
+/// Duplicate-frame cache (§2.4 step [3b]): drops byte-identical replays of
+/// HMAC-valid NetworkPacketV3 frames. Keyed on the networkTag (the HMAC
+/// covers the full packet incl. timestampMs). TTL 120s = 2× the ±60s
+/// timestamp window — covers a frame first seen at ts-60s whose replay
+/// stays inside the window until ts+60s. Entries are never refreshed on
+/// hit, so insertion order == timestamp order and expiry eviction can pop
+/// from the front in amortized O(1) (this sits in the per-packet hot path).
+class FrameDedupCache {
+  final int maxSize;
+  final Duration ttl;
+  final LinkedHashMap<String, DateTime> _cache = LinkedHashMap();
+
+  FrameDedupCache({this.maxSize = 8192, this.ttl = const Duration(seconds: 120)});
+
+  /// Returns true (= drop) if [frameTag] was already seen within [ttl];
+  /// records it otherwise. LRU cap bounds memory under flood — eviction can
+  /// re-open the replay window for evicted frames, which is acceptable
+  /// because the flood itself is HMAC-gated, attributable and rate-limited.
+  bool isDuplicate(String frameTag) {
+    final now = DateTime.now();
+    final cutoff = now.subtract(ttl);
+    while (_cache.isNotEmpty && _cache.values.first.isBefore(cutoff)) {
+      _cache.remove(_cache.keys.first);
+    }
+    if (_cache.containsKey(frameTag)) return true;
+    _cache[frameTag] = now;
     if (_cache.length > maxSize) _cache.remove(_cache.keys.first);
     return false;
   }

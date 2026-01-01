@@ -2,11 +2,12 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/network/peer_info.dart' show hexToBytes;
+import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
 import 'package:cleona/core/network/peer_reputation.dart' show PeerReputation;
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
@@ -15,6 +16,7 @@ import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
+import 'package:cleona/core/network/peer_rescue_bundle.dart';
 
 /// Per-client state tracking active identity.
 class _ClientState {
@@ -48,6 +50,13 @@ class IpcServer {
   Future<String?> Function(String displayName)? onCreateIdentity;
   /// Callback to delete an identity at runtime.
   Future<bool> Function(String nodeIdHex)? onDeleteIdentity;
+
+  /// Debounce state for `manual_reconnect` IPC command (§12.3.1 tier 2).
+  /// Sits between the 10 s spec-minimum and the §5.10 Stage-4/5 cooldown so
+  /// consecutive taps cannot trigger a burst storm, while keeping the button
+  /// responsive enough for a user who suspects a connection loss.
+  DateTime? _lastManualReconnect;
+  static const Duration _manualReconnectCooldown = Duration(seconds: 30);
 
   /// Local CalDAV server control — wired by the daemon. All four are fired
   /// by the `caldav_server_*` IPC commands.
@@ -2212,6 +2221,151 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: peerResult));
           break;
 
+        // ── Feature ②: Manual Reconnect (§12.3.1) ────────────────────────────
+        case 'manual_reconnect':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            // Debounce: reuse §5.10.5 Re-Discovery cooldown (60 s ≥ spec minimum 10 s).
+            final now = DateTime.now();
+            final last = _lastManualReconnect;
+            if (last != null && now.difference(last) < _manualReconnectCooldown) {
+              final remaining = _manualReconnectCooldown.inSeconds - now.difference(last).inSeconds;
+              _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+                'debounced': true,
+                'remainingSeconds': remaining,
+                'peersFound': 0,
+              }));
+              break;
+            }
+            _lastManualReconnect = now;
+            // Trigger the full §12.3 recovery sequence via onNetworkChanged(force:true).
+            unawaited(service.node.onNetworkChanged(force: true));
+            final peerCount = service.peerCount;
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'debounced': false,
+              'peersFound': peerCount,
+            }));
+          }
+          break;
+
+        // ── Feature ③: Peer Rescue Bundle export (§8.1.2) ────────────────────
+        case 'export_peer_bundle':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            try {
+              final identity = service.identity;
+              final summaries = service.peerSummaries;
+
+              // Select peers: inbound-reachable (have public address) first,
+              // then the rest — up to PeerRescueBundle.maxPeers.
+              final inbound = summaries.where((p) => p.allAddresses.any(_isPublicAddress)).toList();
+              final others = summaries.where((p) => !p.allAddresses.any(_isPublicAddress)).toList();
+              final selected = <RescuePeer>[];
+              for (final p in [...inbound, ...others].take(PeerRescueBundle.maxPeers)) {
+                final nodeId = _hexToBytes32(p.nodeIdHex);
+                if (nodeId == null) continue;
+                selected.add(RescuePeer(nodeId: nodeId, addresses: p.allAddresses));
+              }
+
+              final bundle = PeerRescueBundle.build(
+                exporterDeviceId: identity.deviceNodeId,
+                exporterEd25519Sk: identity.ed25519SecretKey,
+                peers: selected,
+              );
+
+              final bytes = bundle.toBytes();
+              final uri = bundle.toUri();
+
+              _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+                'bundleBase64': base64.encode(bytes),
+                'uri': uri,
+                'peerCount': selected.length,
+                'createdAtMs': bundle.createdAt.millisecondsSinceEpoch,
+              }));
+            } catch (e) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'export_peer_bundle: $e'));
+            }
+          }
+          break;
+
+        // ── Feature ③: Peer Rescue Bundle import (§8.1.2) ────────────────────
+        case 'import_peer_bundle':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            try {
+              // Accept either raw Base64-encoded bytes or a URI string.
+              final uriParam = req.params['uri'] as String?;
+              final b64Param = req.params['bundleBase64'] as String?;
+
+              PeerRescueBundleParseResult result;
+              if (uriParam != null) {
+                result = PeerRescueBundle.parseUriAndValidate(uriParam);
+              } else if (b64Param != null) {
+                final bytes = base64.decode(b64Param);
+                result = PeerRescueBundle.parseAndValidate(bytes);
+              } else {
+                _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing uri or bundleBase64 param'));
+                break;
+              }
+
+              if (!result.networkTagValid) {
+                _sendResponse(client, IpcResponse(id: req.id, success: false, data: {
+                  'networkTagValid': false,
+                  'error': result.errorMessage ?? 'Network tag mismatch',
+                }));
+                break;
+              }
+
+              final bundle = result.bundle!;
+
+              // Contact peer addresses from the bundle and enter §12.3 recovery.
+              var contacted = 0;
+              for (final peer in bundle.peers) {
+                for (final addr in peer.addresses) {
+                  final parts = _splitHostPort(addr);
+                  if (parts != null) {
+                    service.addManualPeer(parts.$1, parts.$2);
+                    contacted++;
+                  }
+                }
+              }
+
+              // Trigger recovery sequence if we haven't done so too recently.
+              final now = DateTime.now();
+              final last = _lastManualReconnect;
+              if (last == null || now.difference(last) >= _manualReconnectCooldown) {
+                _lastManualReconnect = now;
+                unawaited(service.node.onNetworkChanged(force: true));
+              }
+
+              _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+                'networkTagValid': true,
+                'sigValid': result.sigValid,
+                'sigUnknownExporter': result.sigUnknownExporter,
+                'ageHours': result.ageHours,
+                'peerCount': bundle.peers.length,
+                'peersContacted': contacted,
+                'exporterDeviceIdHex': bytesToHex(bundle.exporterDeviceId),
+                'createdAtMs': bundle.createdAt.millisecondsSinceEpoch,
+              }));
+            } catch (e) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'import_peer_bundle: $e'));
+            }
+          }
+          break;
+
         case 'get_verification_level':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -3225,6 +3379,66 @@ class IpcServer {
         success: false,
         error: '$e',
       ));
+    }
+  }
+
+  // ── Rescue-bundle helpers ────────────────────────────────────────────────
+
+  /// Returns true if [addr] ("ip:port" or "[ipv6]:port") has a globally
+  /// routable / public address (not link-local, loopback, or RFC-1918).
+  static bool _isPublicAddress(String addr) {
+    final h = _splitHostPort(addr);
+    if (h == null) return false;
+    final ip = h.$1;
+    // Loopback / link-local / RFC-1918 / ULA → not public
+    if (ip == '127.0.0.1' || ip == '::1') return false;
+    if (ip.startsWith('10.')) return false;
+    if (ip.startsWith('192.168.')) return false;
+    final parts = ip.split('.');
+    if (parts.length == 4) {
+      final b1 = int.tryParse(parts[0]) ?? 0;
+      final b2 = int.tryParse(parts[1]) ?? 0;
+      if (b1 == 172 && b2 >= 16 && b2 <= 31) return false;
+      if (b1 == 169 && b2 == 254) return false;
+    }
+    if (ip.startsWith('fe80:') || ip.startsWith('fc') || ip.startsWith('fd')) return false;
+    return true;
+  }
+
+  /// Split "ip:port" or "[ipv6]:port" into (host, port). Returns null on failure.
+  static (String, int)? _splitHostPort(String addr) {
+    try {
+      if (addr.startsWith('[')) {
+        // IPv6: [ip]:port
+        final closeBracket = addr.indexOf(']');
+        if (closeBracket < 0) return null;
+        final ip = addr.substring(1, closeBracket);
+        final rest = addr.substring(closeBracket + 1);
+        if (!rest.startsWith(':')) return null;
+        final port = int.tryParse(rest.substring(1));
+        if (port == null || port <= 0 || port > 65535) return null;
+        return (ip, port);
+      } else {
+        final lastColon = addr.lastIndexOf(':');
+        if (lastColon < 0) return null;
+        final ip = addr.substring(0, lastColon);
+        final port = int.tryParse(addr.substring(lastColon + 1));
+        if (port == null || port <= 0 || port > 65535) return null;
+        return (ip, port);
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Convert a 64-char hex string to a 32-byte Uint8List.
+  /// Returns null if the string is malformed.
+  static Uint8List? _hexToBytes32(String hex) {
+    if (hex.length != 64) return null;
+    try {
+      return hexToBytes(hex);
+    } catch (_) {
+      return null;
     }
   }
 

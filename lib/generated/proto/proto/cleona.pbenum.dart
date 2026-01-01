@@ -358,6 +358,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
   static const MessageTypeV3 MTV3_CALL_RTT_PONG = MessageTypeV3._(83, _omitEnumNames ? '' : 'MTV3_CALL_RTT_PONG');
   static const MessageTypeV3 MTV3_CALL_TREE_UPDATE = MessageTypeV3._(84, _omitEnumNames ? '' : 'MTV3_CALL_TREE_UPDATE');
   static const MessageTypeV3 MTV3_CALL_KEYFRAME_REQUEST = MessageTypeV3._(85, _omitEnumNames ? '' : 'MTV3_CALL_KEYFRAME_REQUEST');
+  static const MessageTypeV3 MTV3_CALL_GROUP_SENDER_KEY = MessageTypeV3._(86, _omitEnumNames ? '' : 'MTV3_CALL_GROUP_SENDER_KEY');
   static const MessageTypeV3 MTV3_CHANNEL_INDEX_EXCHANGE = MessageTypeV3._(90, _omitEnumNames ? '' : 'MTV3_CHANNEL_INDEX_EXCHANGE');
   static const MessageTypeV3 MTV3_CHANNEL_JOIN_REQUEST = MessageTypeV3._(91, _omitEnumNames ? '' : 'MTV3_CHANNEL_JOIN_REQUEST');
   static const MessageTypeV3 MTV3_CHANNEL_REPORT = MessageTypeV3._(92, _omitEnumNames ? '' : 'MTV3_CHANNEL_REPORT');
@@ -488,6 +489,7 @@ class MessageTypeV3 extends $pb.ProtobufEnum {
     MTV3_CALL_RTT_PONG,
     MTV3_CALL_TREE_UPDATE,
     MTV3_CALL_KEYFRAME_REQUEST,
+    MTV3_CALL_GROUP_SENDER_KEY,
     MTV3_CHANNEL_INDEX_EXCHANGE,
     MTV3_CHANNEL_JOIN_REQUEST,
     MTV3_CHANNEL_REPORT,

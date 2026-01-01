@@ -126,6 +126,15 @@ abstract class ICleonaService {
   Future<bool> acceptMediaDownload(String conversationId, String messageId);
   Future<bool> editMessage(String conversationId, String messageId, String newText);
   Future<bool> deleteMessage(String conversationId, String messageId);
+
+  /// §5.8: Check if any queuedOffline messages in [conversationId] have
+  /// exceeded the 7-day TTL and mark them as [MessageStatus.expired].
+  /// Pure local operation — no network traffic.
+  void checkExpiredMessages(String conversationId);
+
+  /// §5.8: Re-send a message that has status [MessageStatus.expired].
+  /// Queues the message through the normal send path, resetting the TTL clock.
+  Future<UiMessage?> resendExpiredMessage(String conversationId, String messageId);
   Future<void> sendReaction({required String conversationId, required String messageId, required String emoji, required bool remove});
   Future<bool> updateChatConfig(String conversationId, ChatConfig config);
   Future<bool> acceptConfigProposal(String conversationId);

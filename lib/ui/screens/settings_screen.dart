@@ -22,6 +22,7 @@ import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/form_group.dart';
 import 'package:cleona/ui/components/section_card.dart';
+import 'package:cleona/ui/components/connection_sheet.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -141,6 +142,8 @@ class SettingsScreen extends StatelessWidget {
                 leading: const Icon(Icons.people),
                 title: Text(locale.get('connected_peers')),
                 subtitle: Text('${service.peerCount}'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => showConnectionSheet(context, service),
               ),
               ListTile(
                 leading: const Icon(Icons.storage),

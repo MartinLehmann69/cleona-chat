@@ -9588,6 +9588,106 @@ class GroupCallVideo extends $pb.GeneratedMessage {
   void clearVideoFrameData() => clearField(3);
 }
 
+/// Per-sender media key announcement (Architecture §10.2.1). Each participant
+/// generates a secret 256-bit send_key known only to itself and announces it,
+/// dual-signed + KEM-encrypted (setup-class ApplicationFrame), to every other
+/// participant. Receivers map sender_node_id -> send_key and decrypt that
+/// sender's media frames with it. Because send_key is secret to its owner, a
+/// relaying co-participant cannot forge frames as another sender. Replaces the
+/// shared group_call_key media role (CallInvite.group_call_key, deprecated for
+/// group media). key_version bumps on rotation (membership change / rejoin).
+class GroupCallSenderKey extends $pb.GeneratedMessage {
+  factory GroupCallSenderKey({
+    $core.List<$core.int>? callId,
+    $core.List<$core.int>? senderNodeId,
+    $core.List<$core.int>? sendKey,
+    $core.int? keyVersion,
+  }) {
+    final $result = create();
+    if (callId != null) {
+      $result.callId = callId;
+    }
+    if (senderNodeId != null) {
+      $result.senderNodeId = senderNodeId;
+    }
+    if (sendKey != null) {
+      $result.sendKey = sendKey;
+    }
+    if (keyVersion != null) {
+      $result.keyVersion = keyVersion;
+    }
+    return $result;
+  }
+  GroupCallSenderKey._() : super();
+  factory GroupCallSenderKey.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupCallSenderKey.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupCallSenderKey', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'callId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'senderNodeId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'sendKey', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'keyVersion', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupCallSenderKey clone() => GroupCallSenderKey()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupCallSenderKey copyWith(void Function(GroupCallSenderKey) updates) => super.copyWith((message) => updates(message as GroupCallSenderKey)) as GroupCallSenderKey;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupCallSenderKey create() => GroupCallSenderKey._();
+  GroupCallSenderKey createEmptyInstance() => create();
+  static $pb.PbList<GroupCallSenderKey> createRepeated() => $pb.PbList<GroupCallSenderKey>();
+  @$core.pragma('dart2js:noInline')
+  static GroupCallSenderKey getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupCallSenderKey>(create);
+  static GroupCallSenderKey? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get callId => $_getN(0);
+  @$pb.TagNumber(1)
+  set callId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get senderNodeId => $_getN(1);
+  @$pb.TagNumber(2)
+  set senderNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSenderNodeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSenderNodeId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get sendKey => $_getN(2);
+  @$pb.TagNumber(3)
+  set sendKey($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSendKey() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSendKey() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get keyVersion => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set keyVersion($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasKeyVersion() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearKeyVersion() => clearField(4);
+}
+
 class VoicePayload extends $pb.GeneratedMessage {
   factory VoicePayload({
     $core.List<$core.int>? audioData,
@@ -12163,6 +12263,88 @@ class PollVoteRevokeMsg extends $pb.GeneratedMessage {
   void clearRevokedAt() => clearField(5);
 }
 
+/// D1 (§4.3 Trust anchor): one soft-re-key link old→new. Link shape mirrors
+/// KeyRotationBroadcast — the OLD key signs the successor pubkeys, proving
+/// continuity from the founding key (whose hash is the userId) to the
+/// currently embedded manifest keys.
+class RotationChainLinkProto extends $pb.GeneratedMessage {
+  factory RotationChainLinkProto({
+    $core.List<$core.int>? newEd25519Pk,
+    $core.List<$core.int>? newMlDsaPk,
+    $core.List<$core.int>? oldSignatureEd25519,
+  }) {
+    final $result = create();
+    if (newEd25519Pk != null) {
+      $result.newEd25519Pk = newEd25519Pk;
+    }
+    if (newMlDsaPk != null) {
+      $result.newMlDsaPk = newMlDsaPk;
+    }
+    if (oldSignatureEd25519 != null) {
+      $result.oldSignatureEd25519 = oldSignatureEd25519;
+    }
+    return $result;
+  }
+  RotationChainLinkProto._() : super();
+  factory RotationChainLinkProto.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory RotationChainLinkProto.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'RotationChainLinkProto', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'newEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'newMlDsaPk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'oldSignatureEd25519', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  RotationChainLinkProto clone() => RotationChainLinkProto()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  RotationChainLinkProto copyWith(void Function(RotationChainLinkProto) updates) => super.copyWith((message) => updates(message as RotationChainLinkProto)) as RotationChainLinkProto;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static RotationChainLinkProto create() => RotationChainLinkProto._();
+  RotationChainLinkProto createEmptyInstance() => create();
+  static $pb.PbList<RotationChainLinkProto> createRepeated() => $pb.PbList<RotationChainLinkProto>();
+  @$core.pragma('dart2js:noInline')
+  static RotationChainLinkProto getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<RotationChainLinkProto>(create);
+  static RotationChainLinkProto? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get newEd25519Pk => $_getN(0);
+  @$pb.TagNumber(1)
+  set newEd25519Pk($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasNewEd25519Pk() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearNewEd25519Pk() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get newMlDsaPk => $_getN(1);
+  @$pb.TagNumber(2)
+  set newMlDsaPk($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasNewMlDsaPk() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearNewMlDsaPk() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get oldSignatureEd25519 => $_getN(2);
+  @$pb.TagNumber(3)
+  set oldSignatureEd25519($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasOldSignatureEd25519() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearOldSignatureEd25519() => clearField(3);
+}
+
 class AuthManifestProto extends $pb.GeneratedMessage {
   factory AuthManifestProto({
     $core.List<$core.int>? userId,
@@ -12172,6 +12354,9 @@ class AuthManifestProto extends $pb.GeneratedMessage {
     $fixnum.Int64? publishedAtMs,
     $core.List<$core.int>? ed25519Sig,
     $core.List<$core.int>? mlDsaSig,
+    $core.List<$core.int>? userEd25519Pk,
+    $core.List<$core.int>? userMlDsaPk,
+    $core.Iterable<RotationChainLinkProto>? rotationChain,
   }) {
     final $result = create();
     if (userId != null) {
@@ -12195,6 +12380,15 @@ class AuthManifestProto extends $pb.GeneratedMessage {
     if (mlDsaSig != null) {
       $result.mlDsaSig = mlDsaSig;
     }
+    if (userEd25519Pk != null) {
+      $result.userEd25519Pk = userEd25519Pk;
+    }
+    if (userMlDsaPk != null) {
+      $result.userMlDsaPk = userMlDsaPk;
+    }
+    if (rotationChain != null) {
+      $result.rotationChain.addAll(rotationChain);
+    }
     return $result;
   }
   AuthManifestProto._() : super();
@@ -12209,6 +12403,9 @@ class AuthManifestProto extends $pb.GeneratedMessage {
     ..aInt64(5, _omitFieldNames ? '' : 'publishedAtMs')
     ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'mlDsaSig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'userEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'userMlDsaPk', $pb.PbFieldType.OY)
+    ..pc<RotationChainLinkProto>(10, _omitFieldNames ? '' : 'rotationChain', $pb.PbFieldType.PM, subBuilder: RotationChainLinkProto.create)
     ..hasRequiredFields = false
   ;
 
@@ -12289,6 +12486,32 @@ class AuthManifestProto extends $pb.GeneratedMessage {
   $core.bool hasMlDsaSig() => $_has(6);
   @$pb.TagNumber(7)
   void clearMlDsaSig() => clearField(7);
+
+  /// D1 (§4.3 Trust anchor): self-certifying embedded user pubkeys, covered by
+  /// the hybrid signature. Absent on legacy records (pre-D1 builds) — those are
+  /// treated as legacy-unverified by the resolver.
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get userEd25519Pk => $_getN(7);
+  @$pb.TagNumber(8)
+  set userEd25519Pk($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasUserEd25519Pk() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearUserEd25519Pk() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get userMlDsaPk => $_getN(8);
+  @$pb.TagNumber(9)
+  set userMlDsaPk($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasUserMlDsaPk() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearUserMlDsaPk() => clearField(9);
+
+  /// Founding-key → current-key continuity after soft re-key (§7.4b). Empty
+  /// unless the identity has rotated.
+  @$pb.TagNumber(10)
+  $core.List<RotationChainLinkProto> get rotationChain => $_getList(9);
 }
 
 class LivenessRecordProto extends $pb.GeneratedMessage {

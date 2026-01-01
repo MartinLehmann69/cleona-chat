@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>method</key>
-	<string>development</string>
+	<string>app-store</string>
 	<key>teamID</key>
 	<string>3YQ8UFCFU7</string>
 	<key>signingStyle</key>
@@ -11,8 +11,10 @@
 	<key>provisioningProfiles</key>
 	<dict>
 		<key>chat.cleona.cleona</key>
-		<string>Cleona Development</string>
+		<string>Cleona Distribution</string>
 	</dict>
+	<key>uploadSymbols</key>
+	<true/>
 	<key>compileBitcode</key>
 	<false/>
 	<key>stripSwiftSymbols</key>

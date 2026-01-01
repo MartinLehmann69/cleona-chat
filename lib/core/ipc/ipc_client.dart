@@ -967,6 +967,50 @@ class IpcClient implements ICleonaService {
   }
 
   @override
+  void checkExpiredMessages(String conversationId) {
+    // Local operation: check timestamps on queuedOffline messages in the
+    // in-memory conversation snapshot and mark them expired.
+    final conv = conversations[conversationId];
+    if (conv == null) return;
+    const ttlMs = 7 * 24 * 60 * 60 * 1000;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    var changed = false;
+    for (final msg in conv.messages) {
+      if (msg.status == MessageStatus.queuedOffline && msg.isOutgoing) {
+        final age = now - msg.timestamp.millisecondsSinceEpoch;
+        if (age > ttlMs) {
+          msg.status = MessageStatus.expired;
+          changed = true;
+        }
+      }
+    }
+    if (changed) onStateChanged?.call();
+  }
+
+  @override
+  Future<UiMessage?> resendExpiredMessage(
+      String conversationId, String messageId) async {
+    // Find the original text, then re-send via sendTextMessage.
+    final conv = conversations[conversationId];
+    if (conv == null) return null;
+    final original =
+        conv.messages.where((m) => m.id == messageId).firstOrNull;
+    if (original == null || original.status != MessageStatus.expired) {
+      return null;
+    }
+    // Remove expired bubble locally so sendTextMessage creates a fresh one.
+    conv.messages.removeWhere((m) => m.id == messageId);
+    onStateChanged?.call();
+    return sendTextMessage(
+      conversationId,
+      original.text,
+      replyToMessageId: original.replyToMessageId,
+      replyToText: original.replyToText,
+      replyToSender: original.replyToSender,
+    );
+  }
+
+  @override
   Future<void> sendReaction({required String conversationId, required String messageId, required String emoji, required bool remove}) async {
     await _sendRequest('send_reaction', params: {
       'conversationId': conversationId,
@@ -2391,6 +2435,82 @@ class IpcClient implements ICleonaService {
       'keep': keep,
     });
     return resp.success;
+  }
+
+  // ── Feature ②: Manual Reconnect (§12.3.1) ───────────────────────────────
+
+  /// Trigger the full §12.3 recovery sequence on demand.
+  ///
+  /// The server enforces a 60-second debounce (mirrors Stage-5 cooldown).
+  /// Returns a map with:
+  ///   - `debounced` (bool): true if the call was suppressed by the cooldown
+  ///   - `remainingSeconds` (int): seconds until the next call is allowed
+  ///     (only meaningful when `debounced == true`)
+  ///   - `peersFound` (int): number of currently active peers at call time
+  Future<Map<String, dynamic>> manualReconnect() async {
+    final resp = await _sendRequest('manual_reconnect');
+    if (!resp.success) return {'debounced': false, 'peersFound': 0};
+    return {
+      'debounced': resp.data['debounced'] as bool? ?? false,
+      'remainingSeconds': resp.data['remainingSeconds'] as int? ?? 0,
+      'peersFound': resp.data['peersFound'] as int? ?? 0,
+    };
+  }
+
+  // ── Feature ③: Peer Rescue Bundle (§8.1.2) ──────────────────────────────
+
+  /// Export a Peer Rescue Bundle for the active identity.
+  ///
+  /// Returns a map with:
+  ///   - `bundleBase64` (String): raw bundle bytes encoded as Base64
+  ///   - `uri` (String): `cleona://reconnect?b=<base64url>` URI
+  ///   - `peerCount` (int): number of peers included in the bundle
+  ///   - `createdAtMs` (int): creation timestamp in milliseconds since epoch
+  Future<Map<String, dynamic>?> exportPeerBundle() async {
+    final resp = await _sendRequest('export_peer_bundle');
+    if (!resp.success) return null;
+    return {
+      'bundleBase64': resp.data['bundleBase64'] as String? ?? '',
+      'uri': resp.data['uri'] as String? ?? '',
+      'peerCount': resp.data['peerCount'] as int? ?? 0,
+      'createdAtMs': resp.data['createdAtMs'] as int? ?? 0,
+    };
+  }
+
+  /// Import and validate a Peer Rescue Bundle, then contact the listed peers
+  /// and trigger the §12.3 recovery sequence.
+  ///
+  /// [uri] — a `cleona://reconnect?b=...` URI string.
+  /// [bundleBase64] — alternatively, raw bundle bytes as Base64.
+  /// Exactly one of the two must be provided.
+  ///
+  /// Returns a map with:
+  ///   - `networkTagValid` (bool): true when the HMAC/network tag passed
+  ///   - `sigValid` (bool): true when the exporter's Ed25519 sig verified
+  ///   - `sigUnknownExporter` (bool): true when HMAC passed but no ed25519 pubkey was available
+  ///   - `ageHours` (double): bundle age in hours
+  ///   - `peerCount` (int): number of peers in the bundle
+  ///   - `peersContacted` (int): number of peer addresses contacted
+  Future<Map<String, dynamic>> importPeerBundle({
+    String? uri,
+    String? bundleBase64,
+  }) async {
+    assert(uri != null || bundleBase64 != null,
+        'importPeerBundle: provide either uri or bundleBase64');
+    final params = <String, dynamic>{};
+    if (uri != null) params['uri'] = uri;
+    if (bundleBase64 != null) params['bundleBase64'] = bundleBase64;
+
+    final resp = await _sendRequest('import_peer_bundle', params: params);
+    return {
+      'networkTagValid': resp.data['networkTagValid'] as bool? ?? false,
+      'sigValid': resp.data['sigValid'] as bool? ?? false,
+      'sigUnknownExporter': resp.data['sigUnknownExporter'] as bool? ?? false,
+      'ageHours': (resp.data['ageHours'] as num?)?.toDouble() ?? 0.0,
+      'peerCount': resp.data['peerCount'] as int? ?? 0,
+      'peersContacted': resp.data['peersContacted'] as int? ?? 0,
+      'error': resp.data['error'] as String?,
+    };
   }
 
   @override

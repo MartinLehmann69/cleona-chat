@@ -57,6 +57,11 @@ class DvRoutingTable {
   // Applied on-the-fly in _sortRoutes; the route's persisted `cost` is unchanged.
   static const int unconfirmedDirectBias = 10;
 
+  // S-3: minimum cost of a single link (LAN same-subnet). Used as the lower
+  // sanity bound on advertised route cost — a path of h hops cannot cost less
+  // than h * minLinkCost.
+  static const int minLinkCost = 1;
+
   // Callback: fired when a route changes (for propagation)
   void Function(String destHex, int cost)? onRouteChanged;
 
@@ -257,6 +262,14 @@ class DvRoutingTable {
         continue;
       }
 
+      // S-3 cost sanity: reject impossible advertised costs (under-bidding).
+      // cost is cumulative and every link costs >= minLinkCost, so a path of
+      // h hops cannot cost less than h. Drops gross under-bids; a plausible
+      // cost==hopCount claim still passes (see §4.4 threat model).
+      if (entry.cost <= 0 || entry.cost < entry.hopCount * minLinkCost) {
+        continue;
+      }
+
       // Bellman-Ford: calculate new cost
       var newCost = linkCost + entry.cost;
       if (newCost >= Route.infinity) newCost = Route.infinity;
@@ -359,6 +372,11 @@ class DvRoutingTable {
             updatedDests.add(destHex);
           }
         }
+        continue;
+      }
+
+      // S-3 cost sanity (see processRouteUpdate): drop impossible under-bids.
+      if (entry.cost <= 0 || entry.cost < entry.hopCount * minLinkCost) {
         continue;
       }
 
@@ -569,18 +587,34 @@ class DvRoutingTable {
   ///
   /// If no direct route exists, falls back to the primary route to keep
   /// pre-DV-3 behavior for callers that may target relay-only paths.
-  void confirmRoute(String destHex) {
+  ///
+  /// S-3: when [viaNextHopHex] is given (an E2E receipt that returned over a
+  /// relay path), confirm the **specific** relay route we sent through —
+  /// binding the route's preference to demonstrated delivery, not to the
+  /// advertisement. Falls back to the direct/primary route when null.
+  void confirmRoute(String destHex, {String? viaNextHopHex}) {
     final routes = _routes[destHex];
     if (routes == null || routes.isEmpty) return;
-    final target = routes.firstWhere(
-      (r) => r.isDirect,
-      orElse: () => routes.first,
-    );
+    final Route target;
+    if (viaNextHopHex != null) {
+      target = routes.firstWhere(
+        (r) => r.nextHopHex == viaNextHopHex,
+        orElse: () => routes.firstWhere(
+          (r) => r.isDirect,
+          orElse: () => routes.first,
+        ),
+      );
+    } else {
+      target = routes.firstWhere(
+        (r) => r.isDirect,
+        orElse: () => routes.first,
+      );
+    }
     target.consecutiveFailures = 0;
     target.lastConfirmed = DateTime.now();
     target.ackConfirmed = true;
-    // ackConfirmed flip lifts the DV-3 bias → re-sort so the direct
-    // route can take its rightful primary slot.
+    // ackConfirmed flip lifts the bias → re-sort so the proven route takes
+    // its rightful primary slot.
     _sortRoutes(destHex);
   }
 
@@ -987,11 +1021,21 @@ class DvRoutingTable {
     final routes = _routes[destHex];
     if (routes == null) return;
     routes.sort((a, b) {
+      // S-3: proven beats unproven for ALL route classes. A route whose
+      // end-to-end DELIVERY_RECEIPT has returned (ackConfirmed) outranks any
+      // merely-advertised route, regardless of advertised cost — a blackhole
+      // or under-bidder never earns the receipt, so it stays demoted. This is
+      // a lexicographic partition, NOT an additive bias: within the same
+      // confirmation class the existing DV-3 effective cost (incl. the
+      // unconfirmed-direct bias) and hopCount decide, so the direct-vs-relay
+      // balance for unproven routes is unchanged.
+      final ca = a.ackConfirmed ? 0 : 1;
+      final cb = b.ackConfirmed ? 0 : 1;
+      if (ca != cb) return ca - cb;
       final c = _effectiveCost(a).compareTo(_effectiveCost(b));
       if (c != 0) return c;
       // Tiebreaker: fewer hops wins. Direct routes (hopCount=1) thus beat
-      // relay routes (hopCount>=2) at equal effective cost — important when
-      // ackConfirmed direct ties with indirect on raw cost.
+      // relay routes (hopCount>=2) at equal effective cost.
       return a.hopCount.compareTo(b.hopCount);
     });
   }

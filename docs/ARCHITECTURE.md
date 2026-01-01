@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ad76625994d7, 2026-06-10). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:59c2c395d1c5, 2026-06-11). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -197,10 +197,14 @@ message NetworkPacket {
   bytes   payload          = 13;  // serialized ApplicationFrame or serialized NetworkPacket
 }
 
-enum PayloadType {
-  APPLICATION_FRAME = 0;          // payload = ApplicationFrame (Identity layer)
-  ONION_LAYER       = 1;          // payload = nested NetworkPacket (onion-routing layer)
+enum PayloadType {                  // proto: PayloadTypeV3, on-wire values PAYLOAD_*-prefixed
+  APPLICATION_FRAME              = 0; // payload = ApplicationFrame (Identity layer)
+  ONION_LAYER                    = 1; // payload = nested NetworkPacket (onion layer — V3.0 not active, §2.5)
+  INFRASTRUCTURE_FRAME           = 2; // device-targeted InfrastructureFrame, KEM-encrypted (§2.3.5)
+  BOOTSTRAP_INFRASTRUCTURE_FRAME = 3; // BOOT-path InfrastructureFrame (§2.3.5 / §2.4.1a)
 }
+// Unknown/future payloadType → silent drop (forward-only). This is the single
+// canonical numbering; it matches the proto enum and Appendix A.1.
 ```
 
 **Field explanation:**
@@ -209,7 +213,7 @@ enum PayloadType {
 - **`flags`**: Reserved for future extensions (e.g. EXPRESS for latency-critical frames, NEEDS_PADDING for anti-traffic-analysis padding). V3.0: typically `0`.
 - **`nextHopDeviceId`**: SHA-256(network_secret + device_pubkey_ed25519) — the canonical device ID. The receiver of this physical UDP packet checks: is `nextHopDeviceId == myDeviceId`? If yes → unwrap. If no → I am a relay → forward toward `nextHopDeviceId`.
 - **`senderDeviceId`**: For the reverse path (e.g. routing DELIVERY_RECEIPT back) and for sig-verify (relay fetches the sender device pubkey from DHT/RoutingTable).
-- **`timestampMs`**: Replay window. Frames older than 60s are discarded. Closed-network nodes keep their clocks synchronized via NTP/Bootstrap.
+- **`timestampMs`**: Replay window. Frames older than 60s are discarded. Within the window, byte-identical replays are caught by the duplicate-frame cache (§2.4 step [3b]). Closed-network nodes keep their clocks synchronized via NTP/Bootstrap.
 - **`ttl` / `hopCount`**: Multi-hop lifetime. Default ttl=64, each relay decrements. hopCount is incremented (max 3 for the Cleona mesh, dropped beyond that).
 - **`networkTag`**: HMAC-SHA256-128 with `network_secret` (16 byte, derived from Maintainer-Key + network_channel). Hardened closed-network filter — packets from non-Cleona software are discarded before any further processing.
 - **`pow`**: Proof-of-Work solution (Cleona difficulty). Anti-spam filter, verification in O(1).
@@ -394,6 +398,18 @@ UDP-Packet bytes
           ▼
   [3] Verify timestamp window (now - timestampMs < 60s)
           │   → if too old: drop (replay protection)
+          ▼
+  [3b] Duplicate-frame check (replay dedup)
+          │   → key: networkTag — the HMAC covers the full packet incl.
+          │     timestampMs, so a byte-identical replay maps to the identical tag
+          │   → LRU cache, TTL 120s (= 2× timestamp window), capacity-capped
+          │     (8192 entries); purely local, zero network traffic
+          │   → if seen: drop silently (replay of an HMAC-valid frame —
+          │     closes replay of BOOT-RPCs, HOLE_PUNCH_*, DHT_PING/PONG,
+          │     DELIVERY_RECEIPT and call frames inside the 60s window)
+          │   → no false positives: relay re-wraps (ttl-1) produce a new
+          │     networkTag (multi-path duplicates unaffected); sender-rebuilt
+          │     retransmits carry a fresh timestampMs → fresh tag
           ▼
   [4] Verify Device-Sig (deviceEd25519Sig + optional deviceMlDsaSig)
           │   → fetch senderDevicePubkeys from RoutingTable or 2D-DHT (DeviceKemRecord/AuthManifest)
@@ -633,7 +649,7 @@ service.sendInfrastructureFrame(deviceId, messageType ∈ §2.3.5, payload)
 |---|---|---|
 | KEM-decap with Device-PrivKey | Sender used wrong Device-KEM-PK (stale 2D-DHT record) | Silent drop |
 | AEAD-tag failure on Device-KEM | Wrong recipient device or forgery | Drop |
-| messageType outside §2.3.5 selector | Cross-layer abuse attempt | Drop, optionally reputation hit |
+| messageType outside §2.3.5 selector | Cross-layer abuse attempt | Drop; reputation hit only if the outer device-sig verified for this packet (§13.1.4 attribution precondition) |
 | recipientDeviceId not hosted | Misdelivery (routing bug or stale DeviceKemRecord pointing at a moved identity) | Drop |
 
 #### 2.4.1a Pipeline for BOOTSTRAP_INFRASTRUCTURE_FRAME
@@ -715,12 +731,12 @@ service.sendBootstrapInfrastructureFrame(deviceId, messageType ∈ §2.3.5 BOOT-
 
 | Step | Failure | Action |
 |---|---|---|
-| messageType outside BOOT-subset | Cross-layer abuse attempt (KEM-required type promoted to BOOT) | Drop, reputation hit |
+| messageType outside BOOT-subset | Cross-layer abuse attempt (KEM-required type promoted to BOOT) | Drop; reputation hit only if the outer device-sig verified for this packet (§13.1.4 attribution precondition) |
 | recipientDeviceId mismatch | Misdelivery | Drop |
-| Inner-record sig verify (PUBLISH) | Forged record under fake user identity | Drop, reputation hit |
+| Inner-record sig verify (PUBLISH) | Forged record under fake user identity | Drop, **no** reputation hit — a poisoned record's delivering device is usually an innocent DHT server, and the forged identity has no valid sig to attribute to (§13.1.4) |
 | Outer HMAC fails | Forged Closed-Network membership | Silent drop (already at §2.4 step 1) |
 
-**Wire-format change**: `NetworkPacket.payloadType` enum gains one value `BOOTSTRAP_INFRASTRUCTURE_FRAME = 3` (after `APPLICATION_FRAME = 1`, `INFRASTRUCTURE_FRAME = 2`, `ONION_LAYER = 4` reserved per §2.5). No existing fields move; older receivers drop the unknown enum value silently — forward-only behaviour.
+**Wire-format change**: `NetworkPacket.payloadType` carries `BOOTSTRAP_INFRASTRUCTURE_FRAME = 3`, completing the canonical enum `APPLICATION_FRAME = 0`, `ONION_LAYER = 1`, `INFRASTRUCTURE_FRAME = 2`, `BOOTSTRAP_INFRASTRUCTURE_FRAME = 3` (identical to the proto enum and §2.2 / Appendix A.1). No existing fields move; older receivers drop the unknown enum value silently — forward-only behaviour.
 
 **Why this is safe**: the only confidentiality property waived is **routing metadata** (who knows whom, which device hosts which user, which addresses a device announces). This information is leakable to Closed-Network insiders by design — DHT participants must answer FIND_NODE/RETRIEVE truthfully to function as a DHT. KEM-encryption of these RPCs in the original V3 design hid the metadata only from passive on-path observers, not from active DHT peers. Outsiders still see nothing (HMAC blocks). User-content confidentiality is unaffected — every MessageType that carries user-content remains on the KEM-path. See §4.10 threat-model addendum.
 
@@ -901,11 +917,13 @@ This separation is the cryptographic foundation of the 2-Layer wire format from 
 **UserID** (or "User Identity") represents a person, i.e. a logical identity that the UI maps to a contact. A UserID can be hosted on multiple devices (Multi-Device, §7), and a single daemon can host multiple UserIDs concurrently (Multi-Identity, §3.6).
 
 ```
-userId = SHA-256(network_secret || ed25519_user_pubkey)    // 32 bytes
+userId = SHA-256(network_secret || ed25519_user_pubkey)    // 32 bytes, founding derivation
 ```
 
+The formula above is the **founding** derivation, computed once at identity creation. The UserID is thereafter a **stable anchor**: it is pinned to the founding Ed25519 pubkey and does **not** change when the underlying user keys change. Emergency Key Rotation (§7.4b / §26.6.2) replaces all user keys but preserves the UserID by carrying a dual-signed old→new key-continuity proof that contacts follow — so after a rotation `userId` no longer equals `SHA-256(network_secret || current_pubkey)`. (Onboarding a *new* contact to a rotated identity via ContactSeed, whose integrity check assumes `userId == SHA-256(secret || ep)`, is an open consistency item — see the security review.)
+
 UserID properties:
-- **Stable**: persists across device changes, recovery, and Multi-Device additions
+- **Stable anchor**: persists across device changes, recovery, Multi-Device additions, **and Emergency Key Rotation** — the identifier outlives any individual key
 - **Network-scoped**: differs between Beta and Live (different `network_secret`)
 - **Identity-claims**: User-Sig-Keypair (see §3.4) signs ApplicationFrames in the Inner Layer
 - **Recoverable**: 24-word phrase or Restore-Broadcast (§6) regenerates the User-Keys
@@ -1028,6 +1046,16 @@ Plus User-Sig (in the Inner): 64 bytes Ed25519 + ~3300 bytes ML-DSA-65 = ~3364 b
 
 **PQ Key Recovery After Device Loss**: because User-Keys are recoverable via the Recovery-Phrase (§6.1), the recipient can replay the KEM decryption of older messages after device loss. Restore-Broadcast (§6.3) re-delivers the messages from contacts.
 
+#### 3.3.5 PQ Key Recovery — Security Analysis
+
+All four user-key pairs — Ed25519, ML-DSA-65, X25519, ML-KEM-768 — are deterministically derived from the master seed (§3.6). For the post-quantum pair this uses FIPS 203 (ML-KEM) and FIPS 204 (ML-DSA) deterministic key-generation: a per-key 32/64-byte seed obtained via HKDF from the master seed is fed to `OQS_KEM_keypair_derand` / `OQS_SIG_keypair_derand` (liboqs ≥ 0.15.0). The same master seed therefore always reproduces the identical PQ keypair.
+
+**Recovery property.** After device loss, the replacement device regenerates the exact same User-KEM keypair from the recovery phrase and can decrypt every previously received Per-Message-KEM ciphertext (the messages themselves are re-delivered by contacts via Restore Broadcast, §6.3). No PQ key material has to be backed up out of band, and a seed recovery requires no key re-publication.
+
+**No downgrade.** There is no X25519-only decryption mode. The hybrid combiner always requires both the X25519 and the ML-KEM shared secret (§3.3); a recipient never falls back to classical-only, so neither a sender nor an on-path attacker can force a PQ downgrade by feigning a recovery or a transition window.
+
+**Forward-secrecy trade-off (accepted).** The flip side of seed-derivable keys is that the master seed is a permanent root secret: anyone who obtains the 24-word phrase (or a 3-of-5 guardian quorum, §6.2) can regenerate all user keys and decrypt the entire recorded ciphertext history — there is no forward secrecy for either the classical or the PQ half. This is the deliberate consequence of choosing stateless Per-Message KEM over a Double Ratchet (§3.2): no session state to desync, at the cost of no post-compromise secrecy. The seed must be protected accordingly (offline backup, optional Shamir split, §6.2).
+
 ### 3.4 User Identity Sigs (Ed25519+ML-DSA-65 hybrid)
 
 Every user holds a **User-Sig-Keypair** that carries the authenticity of the User-Identity at the Inner-Frame layer. Hybrid: Ed25519 for performance and long-standing audit trust, ML-DSA-65 for PQ security.
@@ -1050,7 +1078,7 @@ Every user holds a **User-Sig-Keypair** that carries the authenticity of the Use
 
 **Key generation**: derived from the 24-word recovery seed via HD-Wallet-Derivation (§3.6).
 
-**Key rotation**: User-Keys explicitly do not rotate (it would break identity stability). On compromise: Identity-Deletion + create a new identity (§3.9 for retention of the verification level via trusted-contact re-verification).
+**Key rotation**: User-Keys do not rotate in normal operation. There are two explicit compromise responses: **(a) Hard re-identity** — new seed → new UserID, contacts re-verify (§7.4a); **(b) Emergency Key Rotation / Soft re-key** (§7.4b / §26.6.2) — new seed and new keys under the **same** UserID, authorized by a dual-signed old→new continuity proof, propagated to the user's own devices via Twin-Sync and to contacts via `KEY_ROTATION_BROADCAST`. The UserID is a stable anchor (§3.1); the dual-sig chain is the only sanctioned way to change user keys without abandoning the identity. Verification-level retention on re-verification: §3.9. (The rotation-authorization and ContactSeed-coherence weaknesses are tracked in the security review.)
 
 ### 3.5 Device Identity Sigs (Ed25519+ML-DSA-65 hybrid)
 
@@ -1141,7 +1169,7 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 
 ### 3.6 Multi-Identity HD-Wallet Derivation
 
-Every User-Identity is based on a 32-byte Master-Seed (derived from the 24-word Recovery-Phrase). **All** Cleona keys are deterministically derived from the Master-Seed — Multi-Identity, Multi-Device, all Sig-Keys, all KEM-Keys.
+Every User-Identity is based on a 32-byte Master-Seed (derived from the 24-word Recovery-Phrase). **All** Cleona keys are deterministically derived from the Master-Seed — Multi-Identity, all Sig-Keys, all KEM-Keys (Device-Keys are the documented exception: locally generated, see the schema below). The post-quantum keys (ML-DSA-65, ML-KEM-768) use FIPS 203/204 deterministic key-generation from a per-key HKDF seed (liboqs `_derand`), so they regenerate identically from the master seed just like the classical keys (§3.3.5).
 
 **HD-Wallet schema** (analogous to BIP-32, adapted to Cleona):
 
@@ -1325,9 +1353,13 @@ Identity resolution answers the question: *"which devices currently host this Us
 1. **Auth-Manifest lookup** (long-lived, 24h TTL):
    ```
    key = SHA-256("auth" || userId)
-   value = AuthManifest { userId, authorizedDeviceIds[], ttl=24h, seq, ed25519Sig, mlDsaSig }
+   value = AuthManifest { userId, authorizedDeviceIds[], ttl=24h, seq,
+                          userEd25519Pk, userMlDsaPk,    // D1: embedded trust anchor
+                          rotationChain[],               // D1: empty unless soft re-key (§7.4b)
+                          ed25519Sig, mlDsaSig }
    ```
    - hybrid-signed by the user's master keypair
+   - **self-certifying** — the embedded pubkeys are covered by the hybrid signature and anchored to the userId (see *Trust anchor & record verification* below); without them a resolver holding only the userId (a hash) has no key to verify against — the original v3.0 cascade silently presumed a `userMasterEd25519Pubkey` it never sourced
    - refreshed every 20h by the IdentityPublisher (see §3.4)
    - returns the list of `authorizedDeviceIds` for this user
 
@@ -1340,16 +1372,17 @@ Identity resolution answers the question: *"which devices currently host this Us
    - refreshed every 15 min (foreground) or 1 h (background)
    - returns the current addresses for this device
 
-3. **DeviceKem-record lookup per device** (long-lived, 24h TTL — NEW in V3.0 Welle 5):
+3. **DeviceKem-record lookup per device** (long-lived, 7-day TTL — NEW in V3.0 Welle 5):
    ```
    key = SHA-256("kem" || userId || deviceId)
    value = DeviceKemRecord { userId, deviceId, deviceX25519Pk, deviceMlKemPk,
-                             ttl=24h, seq, publishedAtMs, ed25519Sig, userEd25519Pk }
+                             ttl=7d, seq, publishedAtMs, ed25519Sig, userEd25519Pk }
    ```
    - signed by the user master Ed25519 key (same trust anchor as AuthManifest — the user vouches for the device's KEM-PK)
-   - refreshed every 20h by the IdentityPublisher (parallel to AuthManifest)
+   - refreshed every 3 days by the IdentityPublisher (well within the 7-day TTL)
    - returns the device's KEM pubkey set, sufficient for KEM-encap when sending an InfrastructureFrame to this device (§2.3.5)
    - **separated from LivenessRecord** because Device-KEM-PK changes only at device-key-reset (multi-year cadence) while Liveness must refresh every 15 min — different lifecycles. Co-locating them would re-publish the KEM-PK every 15 min for no semantic gain
+   - **TTL raised to 7 days** to match the Mailbox/S&F retention window: a contact that has been offline up to 7 days remains KEM-resolvable, so a Deferred-Key-Exchange First-CR (§8.1.1) can still be encrypted and the First-CR-Mailbox (§5.5b) filled. The longer TTL is also **traffic-negative** — fewer republishes for a key that only changes at multi-year cadence
 
 **Resolution cascade** (in IdentityResolver, `lib/core/identity_resolution/identity_resolver.dart`):
 
@@ -1372,7 +1405,9 @@ resolve(userId) → List<ResolvedDevice>:
      authKey = SHA-256("auth" + userId)
      replicators = kademlia.findClosestPeers(authKey, count=10)
      responses = parallel kademlia.retrieve(authKey) on each replicator
-     authManifest = highest-seq AuthManifest from responses
+     authManifest = highest-seq VERIFIED AuthManifest from responses
+                    (legacy-unverified only if no verified response exists —
+                     see "Trust anchor & record verification" below)
      if none found: return []  ← Empty result triggers offline-delivery (§5.5/§5.6)
 
      **Wire-path**: each `kademlia.retrieve` call sends an
@@ -1381,17 +1416,21 @@ resolve(userId) → List<ResolvedDevice>:
      so KEM-encryption is impossible. The Auth-Manifest reply carries its own
      hybrid Ed25519+ML-DSA signature (verified in step 3 below).
 
-  3. Sig-Verify Auth-Manifest:
-     ed25519.verify(authManifest, userMasterEd25519Pubkey)
-     mlDsa.verify(authManifest, userMasterMlDsaPubkey)
-     if either fails: skip this manifest
+  3. Verify Auth-Manifest (anchor + signature):
+     per "Trust anchor & record verification" below —
+     hybrid sig against the EMBEDDED pubkeys, identity binding
+     via founding-key hash / rotation chain / contact match.
+     The anchored userEd25519Pk of the winning manifest is the
+     trust anchor for steps 4 and 4b.
 
   4. Liveness lookup per authorized device (parallel):
      for each deviceId in authManifest.authorizedDeviceIds:
        liveKey = SHA-256("live" + userId + deviceId)
        replicators = kademlia.findClosestPeers(liveKey, count=10)
        responses = parallel retrieve
-       liveness = highest-seq LivenessRecord
+       liveness = highest-seq LivenessRecord whose ed25519Sig verifies
+                  against the ANCHORED user pubkey from step 3
+                  (legacy-unverified accepted per transition rules below)
        if no liveness: addresses=[], device returned with empty addresses
                       (sender will still attempt via DV routing)
 
@@ -1404,7 +1443,10 @@ resolve(userId) → List<ResolvedDevice>:
         replicators = kademlia.findClosestPeers(kemKey, count=10)
         responses = parallel retrieve
         deviceKem = highest-seq DeviceKemRecord
-        verify ed25519Sig with userEd25519Pk (must match userMasterEd25519Pubkey from step 3)
+        verify ed25519Sig against the ANCHORED user pubkey from step 3;
+        the record's embedded userEd25519Pk MUST equal the anchored key
+        (closes the self-referential check where a record was validated
+         against the pubkey it carried itself)
         if no kem record / verify-fail:
           deviceX25519Pk=null, deviceMlKemPk=null in result
           (InfrastructureFrame-send to this device is impossible until DeviceKemRecord
@@ -1427,6 +1469,22 @@ resolve(userId) → List<ResolvedDevice>:
 
   7. Return List<ResolvedDevice>
 ```
+
+**Trust anchor & record verification (D1 — insider-forgery exclusion):**
+
+A manifest is **verified** iff (a) its hybrid signature validates against the **embedded** pubkeys, and (b) the embedded identity is **bound to the userId** via one of three equivalent paths:
+
+1. **Founding key:** `SHA-256(network_secret || userEd25519Pk) == userId` — the same self-certification pattern as the ContactSeed integrity check (§8.1.1).
+2. **Rotation chain** (soft re-key, §7.4b): the chain starts at a founding pubkey whose hash equals the userId; each link carries the old key's Ed25519 signature over the successor pubkeys (reusing the `KeyRotationBroadcast` link shape, Appendix A); the final link's pubkeys equal the embedded ones.
+3. **Contact match:** the embedded pubkeys equal the stored contact pubkeys for this userId (contacts track rotations via KEY_ROTATION_BROADCAST, so their stored key is current).
+
+**Contact continuity (mandatory):** if the userId is a stored contact, path 3 MUST hold (or a valid rotation chain must bridge old→new); a mismatch rejects the record and raises the existing key-change-detection event (§8.3). **Resolver continuity (TOFU):** once a verified manifest is cached, later manifests must verify against the cached anchor or present a valid chain — a higher `seq` alone never replaces a verified anchor.
+
+**Selection rule:** verified beats legacy-unverified; highest `seq` within the class.
+
+**Liveness / DeviceKem:** both verify against the anchored user pubkey from the verified manifest of the same cascade. The DeviceKemRecord's embedded `userEd25519Pk` MUST equal the anchored key — this closes the self-referential check where a record was validated against the pubkey it carried itself, which any insider could satisfy with a self-made record.
+
+**Transition & compatibility:** Legacy records without embedded pubkeys are accepted as **legacy-unverified** (lower precedence, never override a cached verified anchor) until the Phase-2 enforcement gate (`minRequiredVersion`, §19.5.7). Old builds are unaffected — they never verified records and ignore the new fields. Old replicators that round-trip a new record through their typed decode/encode drop the new fields; the record then degrades to legacy-unverified at the resolver — correctness is unaffected, only the verification benefit is lost on that path. Size/traffic: the embedded ML-DSA-65 pubkey adds ~2.0 KB to a record republished once per 20 h to K=10 replicators (~20 KB/day/user) — negligible, carried by the existing app-level UDP fragmentation (§2.4).
 
 **Publisher cold-start semantics** (V3.0 Welle 5 — small-network correctness): the IdentityPublisher does NOT gate on a hard peer-count threshold. Instead:
 
@@ -1470,6 +1528,8 @@ class ResolvedDevice {
 
 **Threat model for Ed25519-only liveness**: the auth manifest carries identity authenticity (PQ-secure). Liveness is transient transport-only — a PQ forgery yields a wrong address, not an identity takeover. The sender detects forgery during the KEM-setup roundtrip with the user pubkey from the hybrid-signed auth manifest. The forgery window is bounded by the liveness TTL, at most 1 h.
 
+**Threat model for the trust anchor (D1):** Record forgery by replicators or any insider is excluded by the anchor — an eclipse of the K-closest set can now only **censor** (withhold records), not substitute identities (censorship resistance is addressed by replicator/lookup diversity, see the §13.1 insider addendum). Honest limitation: the userId anchors only the Ed25519 key; the ML-DSA pubkey is bound transitively through the hybrid-signed content. For **non-contact** resolution the anchor is therefore classical — a future quantum adversary could swap the ML-DSA key in a fresh manifest. Real first contact is unaffected (the ContactSeed carries both pubkeys out-of-band, §8.1.1; unknown senders are KEX-gated, §8.2). Hybrid-anchoring the userId itself is a §3.1 identity-format decision, out of scope here. The rotation-chain links are Ed25519-only today (`old_signature_ed25519`) — they inherit the SR-1/H-2 classical-link weakness tracked in the security review.
+
 **Storage**: replicator-side persistence in `~/.cleona/identity_dht_storage.json.enc` (FileEncryption, see §14.2). Crash recovery via `.tmp`/`.old` sidecars.
 
 ### 4.4 Routing (Distance-Vector V3, sendToDevice API)
@@ -1498,6 +1558,8 @@ Cleona's routing layer operates exclusively on **DeviceIDs**. The routing table 
 - **Receive-side `_touchPeer`**: every successfully verified incoming V3 packet calls `_touchPeer(senderDeviceId, from.address, fromPort)` immediately after `dvRouting.addDirectNeighbor`. This keeps `routingTable` (peer info + addresses) and `dvRouting._neighbors` in sync regardless of the discovery channel (LAN multicast, cross-subnet unicast scan, third-party `PEER_LIST_PUSH`) — without it, cross-subnet peers would land in `dvRouting` but never in `routingTable`, leaving the send cascade with `routes=0` despite a "DV: New neighbor" log line.
 - **Split Horizon**: routes are NOT advertised back to the neighbor they were learned from.
 - **Poison Reverse**: when a route fails, it is advertised with `cost=65535` (infinity) to all neighbors — accelerating loop detection.
+- **Cost sanity bounds**: an advertised route is rejected if its claimed `cost` is non-positive or below `hopCount × minLinkCost` (minLinkCost = 1) — a path of *h* hops cannot physically cost less than *h* (cost is cumulative and every link costs ≥ 1). This blocks gross under-bidding (a neighbor advertising `cost=1` for a 5-hop path to attract traffic). It does **not** catch a plausible-but-false `cost=hopCount` claim (see threat model below). The bound applies only to *advertised* entries on the wire, never to internally derived routes.
+- **Confirmed beats unconfirmed (all route classes)**: routes are sorted in two tiers — a route over which an end-to-end `DELIVERY_RECEIPT` has returned (`ackConfirmed=true`) outranks **any** route that has not, regardless of advertised cost; within a tier the existing cost ordering (incl. the direct-route DV-3 bias) and hopCount decide. This is a lexicographic partition, **not** an additive bias — so the direct-vs-relay balance among *unproven* routes is unchanged (an additive relay bias would distort it and was rejected during implementation). A receipt — even one that returns over a relay path (`wasDirect=false`) — marks the **specific route used** (via its `nextHop`) `ackConfirmed`, so a route earns its preference by demonstrated delivery, not by the advertisement alone; the default-gateway "relay-confirmed beats unconfirmed" rule (below) now holds *between competing relay routes* too. At first contact all routes to a destination share one tier → cost-only ordering until the first receipt proves one.
 
 **Route-down detection** (RUDP Light, §5.8):
 - After 3 consecutive `DELIVERY_RECEIPT` timeouts, a specific route is marked DOWN.
@@ -1549,6 +1611,11 @@ sendToDevice(packet, deviceId):
 3. **route count** — total alive destinations reachable via this neighbor.
 4. **average cost** — lower is better.
 5. **recency** — most recent `lastConfirmed` timestamp breaks ties.
+
+**Threat model — DV trusts insiders.** In the closed-network model every DV participant is an authenticated insider; advertisements are not cryptographically bound to a real path. The consequences and their mitigations:
+- **Under-bidding / unique-coverage (traffic attraction → blackhole):** mitigated. Cost-sanity bounds reject impossible costs, and the confirmed-beats-unconfirmed rule means an advertised route attracts no *sustained* traffic until it has actually delivered end-to-end — a blackhole never produces the receipt that would earn it preference, so it stays demoted behind any proven route.
+- **Wormhole (attacker faithfully forwards but observes/correlates):** **not prevented.** Detecting it would require signed path-vectors (S-BGP-style), disproportionate here — a wormhole sees only routing metadata (the same class of insider leakage discussed in §4.10), while message content stays KEM-encrypted and user-signed end-to-end.
+- **Reverse attack (on-path receipt-dropping forces a victim off a good direct route onto relay):** on-path dropping is not generically preventable; surgical route-down (§5.8) plus the multipath fallback bound the damage. This affects deliverability, not confidentiality.
 
 **Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: erasure-coded S&F on mutual peers (§5.5) plus a mailbox entry (§5.6) for receiver pull-up.
 
@@ -1606,6 +1673,8 @@ Cleona nodes find each other through several discovery channels running in paral
 | **ContactSeed URI** | `cleona://...` link, copy/paste | sharing via email or messenger |
 
 **Discovery burst**: 3× in parallel on all channels, then silence. No periodic repetition — Cleona is not a heartbeat system.
+
+**Isolated-node exception.** The "then silence" rule holds for any node that has ≥1 known peer. A node at **`peerCount == 0`** is a pathological case with no neighbours to flood, so it runs a self-terminating **re-discovery retry** with exponential backoff (1 min → 5 min → 30 min, capped at 60 min). Each tick re-fires the LAN burst, unicast-re-probes the persisted WAN peer addresses from the routing-table snapshot, and re-pings the cached bootstrap entry. The retry stops the instant the first peer is confirmed. Traffic cost is O(1) (an isolated node has no peers to storm) and the timer is never armed in a populated mesh — this is the recovery path for a node that boots into a new network, wakes from suspend with dead cached addresses, or otherwise loses all peers without sending anything. See §12.3 for the shared recovery sequence it feeds into.
 
 **Cold-start jitter**: when `_finishStart()` runs (after Kademlia bootstrap or quick-start), the node delays 0–3 s (uniform random) before firing its first peer-exchange and address-broadcast round. This staggers the O(N²) `PEER_LIST_PUSH` cascade that occurs when many nodes boot simultaneously (e.g. a mod-lab cluster or power-cycle event). Without jitter, 20 simultaneous nodes produce ~35,000 UDP packets in <10 s — enough to congest a consumer-grade router and trigger fragment-NACK retransmit spirals.
 
@@ -1741,6 +1810,8 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 - When sender (IPv4-only) and receiver (IPv6-only) share mutual peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
 - **Invariant:** A dual-stack relay node MUST forward incoming packets on IPv6 to recipients on IPv4 (and vice versa). The relay-forward logic (`_sendV3ViaHop`) selects the best address of the next hop independent of the IP version of the incoming packet — the bridge function follows implicitly from address selection.
 
+**Reachability precondition, relay selection & inbound probe.** Online delivery between two endpoints that have **no** common direct path — both behind DS-Lite/CGNAT, or one IPv4-only and the other IPv6-only — depends on at least one **inbound-reachable relay** being online (global-IPv6-inbound, public-IPv4-with-port-mapping, or shared LAN; for the IPv4↔IPv6 case that relay must additionally be **dual-stack**). This is a hard precondition, not an emergent property — the word "implicit" above refers only to the address-selection mechanism, not to the availability of such a node. Relay-candidate selection therefore filters on `isReachableFromCurrentNetwork` (and, for cross-family delivery, dual-stack capability); a relay that the sender cannot itself reach is never chosen. Because a node's *self-announced* global IPv6 is not necessarily **inbound-reachable** (many mobile carriers firewall incoming IPv6), each node runs a one-shot **IPv6 inbound probe** at every network-join: a peer/bootstrap echoes the self-announced global IPv6 back; if no PONG returns, the address is flagged advertise-but-not-inbound-reachable, dropped from priority-3 direct, and kept only as a relay hint. This is the IPv6 analogue of the existing IPv4 STUN ping-pong (§4.6) — one round-trip per join, no timer. Note that the TLS transport fallback (§4.1) and the mobile fallback socket address **DPI/censorship**, not NAT reachability — neither makes a CGNAT endpoint inbound-reachable; under mutual CGNAT, relay remains the only online path.
+
 **IPv6 Reception Bug (V3.1.x fix):** Investigation of the 2026-06-04 finding (Phone→Bootstrap IPv6 packet lost) revealed two root causes: (1) `MulticastDiscovery` bound a second IPv6 socket to `nodePort` with `SO_REUSEPORT` — on Linux the kernel distributed inbound IPv6 unicast packets between Transport and MulticastDiscovery; packets that landed on MulticastDiscovery were silently dropped (same class as the 2fbc879 IPv4 regression, §4.5.2). Fix: MulticastDiscovery now binds to `discoveryPort` (41338) like LocalDiscovery does for IPv4. The §4.5.2 invariant check was extended to also verify `/proc/net/udp6`. (2) `currentSelfAddresses()` classified all local IPv6 as `IPV6_GLOBAL` — ULA/link-local addresses were advertised as globally routable and tried by remote peers. Fix: uses `PeerAddress.classifyIp()` for correct classification.
 
 *A section is omitted from the public edition.*
@@ -1765,6 +1836,7 @@ Bootstrap nodes are **accelerators for initial mesh discovery**, not central ser
 
 **Decommission criteria**: bootstrap nodes will **no longer be used** once the network is self-sustaining:
 - ≥10 stable nodes per channel
+- **≥N independent inbound-reachable always-on nodes** (confirmed port-mapping or stable global-IPv6-inbound, measured via the same `hasPortMapping`/inbound-probe telemetry the seed-peer selection uses) — without this floor, a post-decommission mesh of CGNAT-only mobile/desktop nodes would have no relay entry point and CGNAT↔CGNAT pairs could not be served (§4.7)
 - ≥30 days of stability without bootstrap intervention
 - Mesh discovery operates self-organizing through peer lists
 
@@ -1891,10 +1963,10 @@ This places nodes with different `network_secret` values in entirely separate DH
 |---|---|---|
 | Closed-network filter | HMAC-SHA256-128(network_secret, ...) | NetworkPacket.networkTag |
 | Routing authenticity | hybrid device signature Ed25519+ML-DSA | NetworkPacket.deviceEd25519Sig + .deviceMlDsaSig |
-| Anti-replay | timestamp window 60s | NetworkPacket.timestampMs |
+| Anti-replay | timestamp window 60s + duplicate-frame cache (LRU, TTL 120s) | NetworkPacket.timestampMs + .networkTag |
 | Anti-spam | PoW (selective) | NetworkPacket.pow |
 
-**Defense in depth**: HMAC is the first filter stage (rejected without sig-verify, without KEM decap, cheap). Only after the HMAC passes are the device signature and the replay window checked. Only then comes the routing decision or KEM decap.
+**Defense in depth**: HMAC is the first filter stage (rejected without sig-verify, without KEM decap, cheap). Only after the HMAC passes are the replay window, the duplicate-frame cache and the device signature checked (cheap before expensive). Only then comes the routing decision or KEM decap.
 
 **Secret rotation**: see §13.2.
 
@@ -1960,6 +2032,8 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
 **Important**: in V3.0, Direct and Relay are both sub-strategies inside `sendToDevice` (§4.4) — the distinction is transparent to the service layer. The caller only sees "sendToDevice success" or "sendToDevice failed".
 
 **Sender-side retries no longer exist.** Once all Layer-2 routes are exhausted and Layer-3 (S&F + Mailbox) has been triggered, the sender has done its duty. The receiver will pull the message from its mailbox on next coming-online.
+
+**Zero-connectivity exception (one-shot outbox).** The above assumes the sender had mesh connectivity to *place* the Layer-3 artifacts. When the sender itself has **no** connectivity (airplane mode, dead network) or the daemon crashes between Layer-2 exhaustion and Layer-3 placement, the offline layers cannot be written at all and the message would be lost. For exactly this case — and **only** this case — the message is held in a minimal local **outbox** and re-attempts Layer-3 placement **once**, edge-triggered by the next `onNetworkChanged`/first-peer-confirmed event. This is **not** the v2.2 MessageQueue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message — it is a single deferred placement of artifacts that could never be written in the first place. After a successful placement (or a successful direct send), the outbox entry is cleared.
 
 ### 5.2 Direct Delivery (Single-Hop UDP)
 
@@ -2155,9 +2229,8 @@ The receiver polls **both** on every mailbox poll, so no send is lost.
 
 **Mailbox storage**:
 - Key: mailbox_id_*
-- Value: list of small notification records (NOT the entire message — that lives in S&F or erasure)
-- Notification: `{senderUserId, messageId, timestamp, hint}` — informs the receiver that a message exists for them
-- The receiver then fetches the full message via S&F pull or fragment reassembly
+- Value: small per-recipient records keyed by `mailboxId` — encrypted fragments (erasure path) or a wrapped envelope (S&F). The hosting node learns only the recipient `mailboxId` and a `messageId`; the **senderUserId, message type and content stay inside the KEM-encrypted payload** and are not visible to the host.
+- The receiver then fetches and decrypts the full message via S&F pull or fragment reassembly
 
 **Polling schedule**:
 - At daemon startup: aggressive polling, 10× every 3s (~30s total)
@@ -2231,7 +2304,9 @@ Cleona's "Reliable UDP Light" — minimal overhead for ACK tracking, without TCP
 - `pending` — created by the sender, not yet sent
 - `sent` — UDP send completed
 - `delivered` — DELIVERY_RECEIPT received (at least one)
-- `failed` — sender cascade exhausted, Layer-3 fallback triggered
+- `queued_offline` — Layer-3 artifacts placed (S&F/erasure/mailbox); awaiting receiver pull, clock running against the 7-day TTL
+- `failed` — Layer-3 placement could **not** be performed (zero sender connectivity); held in the one-shot outbox (§5.1) pending the next network event
+- `expired` — set **locally** by a timestamp comparison (no network traffic) when a `queued_offline` message reaches the 7-day TTL with no DELIVERY_RECEIPT; the UI offers a resend
 - `seen` (optional, opt-in) — READ_RECEIPT received
 
 ### 5.9 Compression
@@ -2409,7 +2484,7 @@ At initial setup, the app generates a 24-word recovery phrase. This phrase encod
 
 **Implementation:** The 24 words encode 264 bits (256 bits entropy + 8-bit SHA-256 checksum). The word list uses deterministic phonetic generation (consonant-vowel patterns: CV, CVC, CVCV, CVCCV, CVCVC) to create pronounceable, memorable words. Bidirectional conversion is supported: `seedToPhrase()` and `phraseToSeed()` with checksum validation. The scheme is BIP-39-style in spirit (24 words, single-shot decode, embedded checksum) but uses Cleona's own generated word list rather than the canonical BIP-39 dictionary.
 
-From the seed, key pairs are derived using SHA-256 with context strings: `SHA-256(seed + "cleona-ed25519")` for Ed25519, etc. Post-quantum keys (ML-KEM-768, ML-DSA-65) cannot be derived deterministically from a seed (liboqs limitation) and must be backed up separately or freshly generated and re-published as part of the Restore Broadcast (see §6.3.5).
+From the seed, key pairs are derived using SHA-256 with context strings: `SHA-256(seed + "cleona-ed25519")` for Ed25519, etc. Post-quantum keys (ML-KEM-768, ML-DSA-65) are **also** deterministically seed-derived: a per-key seed (HKDF from the master seed) feeds FIPS 203/204 deterministic key-generation (`OQS_KEM_keypair_derand` / `OQS_SIG_keypair_derand`, liboqs ≥ 0.15.0), so the same seed always regenerates the identical PQ keypair. No separate PQ backup and no key re-publication on recovery are required. Full security analysis: §3.3.5.
 
 The 24-word phrase recovers the **user identity** only. Per-device signing keys (§3.5) are generated fresh on each device after restore.
 
@@ -2492,7 +2567,7 @@ The Restore Broadcast mechanism serves as the bootstrap for multi-device support
 
 **Encrypted transfer:** All chat history sent in response to a Restore Broadcast is encrypted with Per-Message KEM (§3.3) using the recovering device's public key (the user-identity public key derived from the recovered seed). Exception: `RESTORE_BROADCAST` and `RESTORE_RESPONSE` themselves are signed only (not encrypted), since the recovering peer may not have the responding contact's current PQ public key.
 
-**Post-quantum key handling during restore:** The recovering device generates fresh ML-KEM-768 and ML-DSA-65 key pairs (since these cannot be derived deterministically from the seed). The Restore Broadcast includes these new PQ public keys. Contacts update their stored keys for the recovering identity upon receiving the broadcast. During the brief transition window before all contacts process the broadcast, any messages encrypted with the old PQ keys fall back to X25519-only decryption (see §3.3.5 for the full security analysis).
+**Post-quantum key handling during restore:** Because ML-KEM-768 and ML-DSA-65 are deterministically seed-derived (§3.6, FIPS 203/204 keygen), a seed recovery regenerates the **identical** PQ keypairs. The recovering device therefore does **not** create new PQ keys, the Restore Broadcast does **not** carry replacement PQ public keys, and contacts do **not** update stored keys — the keys are unchanged. There is no X25519-only fallback mode: the X25519 + ML-KEM hybrid is always enforced, so no transition window or forced classical-only decryption exists. (A genuine key *change* happens only on the compromise path — Identity-Deletion + new identity, §3.4 — which is a manual re-verification, not a seed recovery.) Full security analysis: §3.3.5.
 
 ### 6.4 DHT Identity Registry (Erasure-Coded)
 
@@ -2723,13 +2798,13 @@ Two format generations coexist (backward-compatible):
 **URI format** (compact, SMS-safe, base64url throughout):
 
 ```
-cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd25519Pk_base64url>&a=<addresses>&s=<seedPeers>
+cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd25519Pk_base64url>&t=<createdAtMs>&a=<addresses>&s=<seedPeers>
 ```
 
-**QR binary format** (format byte `0x03` = zstd-compressed, `0x04` = uncompressed):
+**QR binary format** (format byte `0x07` = zstd-compressed, `0x08` = uncompressed; legacy `0x03`/`0x04` without the timestamp are still parsed, age then reported as unknown):
 
 ```
-[32B userId] [32B deviceId] [32B userEd25519Pk]
+[32B userId] [32B deviceId] [32B userEd25519Pk] [8B createdAtMs]
 [1B channel] [1B nameLen] [nameUTF8]
 [1B addrCount] [{1B len, addrUTF8}...]
 [1B peerCount] [{32B peerNodeId, 1B addrCount, {1B len, addrUTF8}...}...]
@@ -2746,10 +2821,13 @@ cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd255
 | `c` | channel tag | `b` (beta) or `l` (live) | mismatched channels are rejected before any send |
 | `did` | DeviceID | 64 hex chars (32 bytes) | identifies the QR-emitting device of Bob |
 | `ep` (NEW rev3) | userEd25519Pk | 32 bytes, **base64url** (RFC 4648 §5, no `+`/`/`/`=`) | Trust-anchor for Deferred Key Exchange and DHT record verification |
+| `t` (NEW) | ContactSeed creation time | 8-byte ms epoch, base64url | Age hint — lets the scanner distinguish a stale seed from an offline target |
 | `a` | reachable addresses | `ip:port+ip:port+...` (`+` URL-encoded as `%2B`) | Bob's current addresses for direct send |
 | `s` | seed peers (≤5) | `nodeIdHex@ip:port+ip:port,...` | routing helpers (any node, not necessarily bootstrap) |
 
 **Integrity check**: the scanner verifies `SHA-256(networkSecret + ep) == userIdHex`. A manipulated QR fails this check.
+
+**Seed age**: the scanner surfaces the seed's age from `t` and distinguishes "code is stale — request a fresh one" from "target is offline", instead of silently retrying a seed whose addresses have long expired. The `t` field is outside the integrity-check input (it is not part of the `userId` derivation), so its presence is backward-compatible with legacy seeds.
 
 **Rationale for removing dxk/dmk from v2**: The 1184-byte ML-KEM-768-PK dominated the payload (75% of QR, 73% of URI). This caused two concrete problems: (1) QR Version 26-28 is too dense for reliable phone-to-phone camera scanning, especially in low light; (2) the 2163-char URI with standard base64 (`+`, `/`, `=` characters) was corrupted by messaging apps during copy-paste transfer (link-detection, URL-encoding normalization, line-wrapping). The 32-byte `userEd25519Pk` replaces 1216 bytes of key material with a trust-anchor that enables runtime key resolution via DHT or Deferred Key Exchange.
 
@@ -2777,6 +2855,27 @@ Legacy v1 ContactSeeds with `dxk`+`dmk` are still fully parsed and trigger the d
 3. **Fallback:** When no peer with confirmed port-mapping exists (e.g. all nodes behind CGNAT without UPnP), the 5 peers with the highest scores and greatest address diversity are chosen. The scanner will attempt to find a peer through discovery burst (LAN multicast/broadcast) + subnet scan.
 
 **Rationale:** Without a publicly reachable seed peer in the QR, a scanner in a different network segment (AP isolation, different subnet, mobile data) is permanently isolated — it cannot contact any of the seed peers and the relay cascade has no entry point. Guaranteeing a port-mapped peer as relay ensures at least one path into the mesh exists.
+
+#### 8.1.2 Peer-List Rescue Bundle (out-of-band re-entry)
+
+A rescue bundle re-admits an **existing** identity to the mesh when all automatic paths fail — distinct from the ContactSeed, which bootstraps a *first* contact. It carries a snapshot of currently reachable peers, signed by the exporter, and is transferred entirely out-of-band (file, email, messenger, USB, QR). There is **no network-side request for a peer list** — that would be a poll/flood and a storage/eclipse surface; the human in the loop is what keeps this both traffic-free and authenticated.
+
+**Binary format** (format byte `0x05` zstd-compressed, `0x06` uncompressed); URI scheme `cleona://reconnect?...`:
+
+```
+[1B version] [8B createdAtMs] [1B channel] [32B exporterDeviceId]
+[1B peerCount] [{32B peerNodeId, 1B addrCount, {1B len, addrUTF8}...}...]
+[64B exporterEd25519Sig  over all preceding bytes]
+[32B networkTag = HMAC(networkSecret, all preceding bytes)]
+```
+
+**Peer selection.** Up to ~10 peers, **inbound-reachable first** (`hasPortMapping == true`, all addresses each), then by freshness/score/address-diversity — the same reachability criterion as the relay-capable seed peer in §8.1.1, but a larger set, because a rescue bundle's value is precisely that at least one listed peer is reachable from a foreign network.
+
+**Import validation order:** (1) `networkTag` HMAC — rejects bundles from outside the Closed Network; (2) `exporterEd25519Sig` — if the exporter is a known contact, verify against the stored device key (full provenance; defends against an eclipse bundle injected via a hijacked mail account); otherwise accept HMAC-only at reduced trust; (3) surface the bundle **age** from `createdAtMs` ("list is 6 h old"); (4) contact the listed peers and enter the §12.3 recovery sequence.
+
+**Export privacy.** A peer list is IP↔DeviceID metadata leaving the device into an unencrypted channel; the export action requires a one-time confirmation ("contains your peers' network addresses — share only with someone you trust") and may optionally be passphrase-encrypted (the peer block under a key derived from the passphrase).
+
+**Boundaries:** no `MessageType`, no DHT publish, no auto-retry — a rescue bundle is a static, human-carried artifact only.
 
 **Mesh-convergence gate (cold-start protection):**
 
@@ -2902,7 +3001,7 @@ The **KEX Gate** (Key-Exchange Gate) is Cleona's primary protection against unso
 - `RESTORE_BROADCAST` (restore of a known contact with new keys)
 - `TWIN_SYNC` (intra-identity, from own UserID)
 
-**Channel/group messages**: not subject to the KEX Gate, because the sender is known via channel or group membership (even if not in the personal contact store).
+**Context-proof exception**: a frame from a sender who is **not** in the personal contact store is still admitted if it carries a verifiable **context proof** in place of a contact relationship — i.e. proven channel/group membership, or a moderation context (a valid channel subscription, or the verifiable juror-selection ticket; the exact moderation admission-ticket is defined with the jury-selection mechanism in §9.3). This is why channel/group messages, jury announcements, vote requests, report deliveries, and System-Channel posts (§9.5) pass the gate even though the sender is not a personal contact. It is a **narrow** exception: the proof is verified at the protocol entry point, and a sender presenting neither a valid context proof nor a contact entry is still silently dropped.
 
 **Anti-spam layers** (multi-stage, see also §13.1):
 - Layer 1: KEX Gate (no known sender → drop)
@@ -3154,7 +3253,7 @@ Open-source code enables bot software that creates fake identities with simulate
 
 **Critical: Network validation, not app validation.** All checks are performed by receiving nodes, not the reporter's app. A modified client (fork) can submit a report, but the network ignores it if criteria are not met.
 
-Reports from senders that are not yet whitelisted by the receiving node are silently dropped at the protocol entry point (KEX Gate, see §8.2). This means jury announcements, vote requests, and report deliveries all share the same anti-spam baseline as regular contact messages — there is no privileged moderation channel that bypasses the gate.
+Moderation messages (jury announcements, vote requests, report deliveries) come from nodes that are typically **not** personal contacts, so they are admitted via the §8.2 **context-proof exception** — each carries a verifiable moderation context (channel subscription / juror-selection ticket) that the gate checks at the protocol entry point. This is **not** a privileged bypass: a moderation frame without a valid, verifiable context proof is silently dropped exactly like an unsolicited message, sharing the same anti-spam baseline. (The verifiable juror-selection ticket itself is specified with the jury mechanism in §9.3 — see the security review.)
 
 #### 9.4.2 ModerationConfig: Configurable Thresholds & Test Presets
 
@@ -3412,7 +3511,7 @@ Both system channels are public channels and subject to the full moderation pipe
 - **Bad Badge** applies to both channels (§9.3.2).
 - **CSAM procedure** applies (§9.3.3) — though extremely unlikely given the channels' purpose.
 - **Anti-Sybil** (§9.4) protects against vote manipulation on feature requests and fake crash reports.
-- **KEX Gate** (§8.2) applies: posts from unknown senders are silently dropped.
+- **KEX Gate** (§8.2) applies via the **context-proof exception**: System-Channel posts are admitted on proof of channel membership (not personal-contact status); a post from a sender with neither channel membership nor a contact entry is silently dropped.
 
 No special moderation rules are needed. The existing infrastructure covers all abuse scenarios.
 
@@ -3465,26 +3564,24 @@ Alice                          Bob
 
 ### 10.2 Group Calls
 
-Group calls use a **shared symmetric call key** distributed to all participants and an **Overlay Multicast Tree** for efficient media distribution.
+Group calls use **per-sender media keys** — each participant encrypts its own stream under a secret key only it holds, authenticated to the others — together with an **Overlay Multicast Tree** for efficient media distribution. (A single shared key cannot provide sender authenticity in a group: every holder could forge frames as any other — see §10.3.)
 
 #### 10.2.1 Group Call Setup
 
-1. The call initiator generates a random 256-bit `call_key`.
-2. The `call_key` is encrypted individually to each participant using Per-Message KEM (§3.3) and distributed via `CALL_INVITE` as an `ApplicationFrame` per participant (`sendToUser(userId)` per recipient).
-3. All media packets are encrypted with `call_key` via AES-256-GCM (SRTP) and sent device-to-device via `sendToDevice(deviceId)` along the multicast tree.
+1. The initiator generates a 16-byte `call_id` and sends a `CALL_INVITE` `ApplicationFrame` (full Ed25519 + ML-DSA dual-sig, Per-Message KEM) to each invited participant carrying the participant set and `call_id`. It does **not** carry a shared media key.
+2. On joining (initiator at setup, invitees on accept), each participant generates a random 256-bit **`send_key`** known only to itself and announces it to every other joined participant via a `GroupCallSenderKey` `ApplicationFrame` (`sendToUser(userId)` per recipient, full dual-sig + KEM). The recipient's verification of that frame's inner user-signature binds `send_key` to its owner.
+3. Each participant encrypts **its own** audio/video frames with AES-256-GCM under **its own `send_key`** (fresh random nonce per frame; the per-sender keyspace removes any cross-sender nonce-reuse risk) and sends them device-to-device via `sendToDevice(deviceId)` along the multicast tree. A receiver decrypts an incoming frame with the `send_key` it learned for that frame's `sender_node_id`; a frame whose sender key is not yet known is dropped (it arrives once the signed announcement lands, sub-second at join). Because each `send_key` is secret to its owner, a relaying participant cannot forge frames as any other participant.
 
 **Key rotation during group calls:**
 
 | Event | Action |
 |-------|--------|
-| Participant leaves voluntarily | No key rotation (they already knew the key) |
-| Participant crashes + rejoins | No key rotation (they had the key before) |
-| Participant is **kicked** | Key rotation → new key distributed to all remaining participants |
-| New participant joins | Key rotation → new key distributed to all including new participant |
+| Participant leaves / is kicked / crashes out | **Forward secrecy:** every *remaining* participant generates a fresh `send_key` (version++) and re-announces it to the remaining set, so the departed node's cached peer keys go stale and cannot decrypt subsequent media. |
+| New participant joins | **Backward secrecy:** the newcomer announces its `send_key` to all and each existing participant announces its `send_key` to the newcomer; the newcomer never held the prior keys, so pre-join frames stay unreadable. |
 
-Key rotation is triggered only when the **authorized participant set** changes. A crash + rejoin does not change authorization.
+Rotation is edge-triggered by authorized-set changes only — O(N²) signed announcements per change, **zero** steady-state cost.
 
-**Rejoin after crash:** The rejoining participant sends a `CALL_REJOIN` `ApplicationFrame`. Any active participant responds with the current `call_key` encrypted via Per-Message KEM to the rejoining participant's public key.
+**Rejoin after crash:** The rejoining participant sends a `CALL_REJOIN` `ApplicationFrame` and re-announces its `send_key` (new version) to all active participants; each active participant re-announces its own `send_key` to the rejoiner. No global rotation — the authorized set did not change.
 
 #### 10.2.2 Overlay Multicast Tree
 
@@ -3532,16 +3629,16 @@ Each participant uploads at most **2–3 streams** regardless of total group siz
 
 ### 10.3 Live-Media Frame Authenticity
 
-> **Onion-Routing Tabu.** Live-media frames are explicitly **Onion-Tabu** — see §2.5 Onion-Routing Hook for the full tabu list. Live audio and video frames travel direct device-to-device (or through the call-specific Overlay Multicast Tree, §10.2.2), without any onion layers. Onion encryption would multiply per-frame CPU and bandwidth cost beyond what 20 ms-deadline media can absorb, and the call key already provides end-to-end confidentiality and authenticity for every frame.
+> **Onion-Routing Tabu.** Live-media frames are explicitly **Onion-Tabu** — see §2.5 Onion-Routing Hook for the full tabu list. Live audio and video frames travel direct device-to-device (or through the call-specific Overlay Multicast Tree, §10.2.2), without any onion layers. Onion encryption would multiply per-frame CPU and bandwidth cost beyond what 20 ms-deadline media can absorb, and per-frame authenticity is provided by the call key (1:1) or the sender's own `send_key` (group, §10.2.1).
 
 `CALL_AUDIO` and `CALL_VIDEO` `ApplicationFrame`s are classified as **ephemeral media** in the frame pipeline and **skip two of the standard ApplicationFrame steps**:
 
-1. **No ML-DSA signature on the inner frame.** Post-quantum authenticity is established at call setup: the `CALL_INVITE` and `CALL_ANSWER` `ApplicationFrame`s carry full Ed25519 + ML-DSA-65 dual signatures, and the resulting `call_key` is mixed from a hybrid X25519 + ML-KEM-768 KEM (§10.1.1). Once both sides hold the call key, every audio/video frame is authenticated by AES-256-GCM (16-byte tag, fresh random nonce) under that key — a quantum adversary cannot forge frames without first breaking the setup handshake. A per-frame ML-DSA signature would add ~3500 bytes wire and ~600 µs CPU per frame on top of authentication that is already post-quantum-secure.
+1. **No ML-DSA signature on the inner frame.** Post-quantum authenticity is established at call setup: the `CALL_INVITE` and `CALL_ANSWER` `ApplicationFrame`s carry full Ed25519 + ML-DSA-65 dual signatures, and the resulting `call_key` is mixed from a hybrid X25519 + ML-KEM-768 KEM (§10.1.1). Once both sides hold the call key, every audio/video frame is authenticated by AES-256-GCM (16-byte tag, fresh random nonce) under that key — a quantum adversary cannot forge frames without first breaking the setup handshake. A per-frame ML-DSA signature would add ~3500 bytes wire and ~600 µs CPU per frame on top of authentication that is already post-quantum-secure. In **1:1** calls the `call_key` is a two-party secret, so AES-GCM under it authenticates the peer. In **group** calls a shared key cannot — authenticity instead comes from each sender's secret `send_key`, whose ownership is established by the dual-signed `GroupCallSenderKey` announcement (§10.2.1); a relay or co-participant cannot forge frames it has no `send_key` for.
 2. **No zstd compression probe.** Frame payloads are already AES-256-GCM ciphertext (high entropy) — zstd cannot compress them, and running the probe just costs CPU.
 
 **What is still strict on every frame:**
 
-- **Inner ApplicationFrame:** AES-256-GCM under the negotiated `call_key` (instead of the per-message User-KEM that ordinary application traffic uses) — confidentiality and content authenticity.
+- **Inner ApplicationFrame:** AES-256-GCM under the negotiated `call_key` (1:1) or the sender's `send_key` (group) — instead of the per-message User-KEM that ordinary application traffic uses — confidentiality and content authenticity.
 - **Outer NetworkPacket:** Ed25519 device signature only (no hybrid Ed25519 + ML-DSA), since outer packet-level auth is a single-hop spoofing defence and the underlying call key already covers end-to-end authenticity. See §2.4 + §4.10 for the general packet-auth model.
 
 The optimisation only removes the redundant outer post-quantum signature on per-frame traffic; it does not weaken the cryptographic envelope around the call as a whole.
@@ -4762,10 +4859,11 @@ The 6-hour update-manifest poll keeps the cached manifest fresh; users with stal
 
 ### 12.3 Network Change Detection & Recovery
 
-Network changes (WiFi toggle, mobile data switch, roaming, IP change) are detected via two mechanisms:
+Network changes (WiFi toggle, mobile data switch, roaming, IP change) are detected via three mechanisms:
 
 1. **Platform events:** `connectivity_plus` on Flutter (GUI), periodic `NetworkInterface` polling on headless daemons.
 2. **Mass route-down inference:** When ≥3 distinct peer routes fail within 30 seconds, a network change is inferred even without OS notification. This catches silent IP changes that `connectivity_plus` misses.
+3. **Manual user trigger:** the user can invoke the recovery sequence on demand (see §12.3.1). This is the explicit escape hatch when a user suspects a connection loss that the automatic detectors have not yet caught.
 
 **Recovery sequence** (executed when a network change is detected):
 
@@ -4798,6 +4896,16 @@ Network changes (WiFi toggle, mobile data switch, roaming, IP change) are detect
 The reset is deliberately **soft, not aggressive**. Earlier versions cleared DV-routes and per-peer relay-hints outright; the rationale was that all cached state might be stale. In practice the pathology turned out to be: when several peers experience a near-simultaneous network event (ISP-wide DHCP renewal, or — more commonly — keepalive false-positives in topologies where direct LAN peers are L2-blocked while relay paths remain healthy), every node's recovery wipes the routes the others depend on, and re-establishing from scratch compounds to many minutes of message-delivery loss instead of the assumed ≤5 seconds.
 
 The current model preserves topology knowledge (DV cost/via mappings, K-buckets, IdentityPublisher caches, the secondary `_byUserIdHex` UserID index) and only invalidates state that is genuinely network-bound (NAT classification, public-IP observation, port mapping, per-address failure counters). Routes are revalidated, not rebuilt. A peer that was reachable before the event almost always still is; the cost penalty (+5) ensures fresh post-recovery routes are preferred while stale ones remain as a fallback during the revalidation window.
+
+#### 12.3.1 Recovery Triggers (automatic, manual, out-of-band)
+
+The recovery sequence above is reached through a three-tier escalation, designed so that none of the tiers introduces background traffic that scales with network size:
+
+1. **Automatic (isolated-node re-discovery).** While `peerCount == 0`, the backoff retry from §4.5 re-enters discovery on its own. Self-terminating, O(1) traffic, never armed in a populated mesh.
+2. **Manual reconnect.** A user-facing "Reconnect" action runs the full §12.3 recovery sequence on demand. It is **debounced** (minimum 10 s between invocations, reusing the Stage-4/5 cooldowns of §5.10) so repeated taps cannot produce a burst storm. The action reports its result to the UI ("N peers found" / "no peer reachable"), which routes a failed result toward tier 3.
+3. **Out-of-band peer-list import.** When tiers 1–2 find nothing (e.g. bootstrap down and no LAN peer), the user imports a peer-list rescue bundle received from a known contact via an external channel (§8.1.2). Zero background traffic — the data is human-carried.
+
+Tiers 2 and 3 are surfaced in one shared connection sheet (§18).
 
 ### 12.4 Push Wake-Up — Rejected (Architecture Decision 2026-04-26)
 
@@ -4966,7 +5074,9 @@ Ban Decay:
 
 **Score-gated banning:** A peer with good history (score >= 0.5) is NOT temporarily banned, even if it accumulates some bad actions. Only sustained misbehavior from low-reputation peers triggers bans.
 
-**`recordBad` sources (exhaustive):** Bad actions are recorded only for semantically invalid behavior — failed outer-device-signature verification, HMAC mismatch (non-network-member), malformed protobuf, unauthorized operations (e.g. non-owner DHT mutations). Rate-limit excess does NOT generate `recordBad` (see §13.1.3). This separation ensures that high-throughput legitimate nodes (Bootstrap, relay hubs) cannot be banned by serving the network.
+**`recordBad` sources (exhaustive):** Bad actions are recorded only for semantically invalid behavior whose origin Device-ID is **cryptographically proven in the same packet** — i.e. the outer device signature verified and a *subsequent* check failed (invalid PoW, malformed inner frame, unauthorized operation such as a non-owner DHT mutation). Rate-limit excess does NOT generate `recordBad` (see §13.1.3).
+
+**Attribution precondition (anti-framing) — global invariant.** This rule governs *every* reputation attribution in the system, wire-level and any future handler-level penalty alike: a penalty may be attributed to a `senderDeviceId` (or UserID) only after that identity's signature has verified **in the very packet/record that triggered the penalty**. A *failed* outer-device-signature verification must therefore NOT generate `recordBad` against the claimed `senderDeviceId`. The closed-network HMAC proves only network membership (a shared secret held by every insider), not sender authenticity; at the moment a device-sig fails, `senderDeviceId` is precisely the unproven field. Penalizing it would let any insider frame an arbitrary victim — forge a packet carrying the victim's `senderDeviceId`, a valid HMAC and a deliberately broken device-sig, then repeat to drive the victim past the ban threshold on the receiving node (Ban-DoS-by-framing). Sig-invalid packets are therefore dropped **silently, without reputation effect**. The same gate applies to checks that run *after* the device-sig step but are themselves independent of `senderDeviceId` (e.g. PoW, which only covers the payload): `pow_invalid` is recorded only when the outer device-sig verified (`outerStatus == verified`); under a bootstrap/stale-PK lenient pass the id is unproven and no penalty is attributed. This ensures both that high-throughput legitimate nodes (Bootstrap, relay hubs) cannot be banned by serving the network, and that no node can be banned by an attacker spoofing its Device-ID.
 
 #### 13.1.5 Layer 4: Fragment Budgets
 
@@ -4986,8 +5096,9 @@ Nodes can temporarily or permanently ban other nodes based on accumulated misbeh
 | Sybil (fake identities) | 5 + Anti-Sybil | New IDs start at 0.5 reputation; Social Graph Reachability (§9.4) blocks coordinated reports |
 | Fragment storage exhaustion | 4 | Per-source budget prevents monopolization |
 | Relay abuse (relay others' traffic) | 2+3 | Rate limiter per source; relay traffic counts against relay node's budget |
-| DHT poisoning (fake entries) | 1+3 | PoW on DHT operations; low-reputation entries deprioritized |
+| DHT poisoning (fake entries) | 3+4 | DHT/infrastructure ops are PoW-exempt (§13.1.2) — addressed instead by per-source storage quota + record-ownership proof on DHT-STORE; low-reputation entries deprioritized. (Storage-poisoning hardening tracked in the security review.) |
 | Startup burst (legitimate new peer) | 2+3 | Rate limiter generates `recordGood` for accepted packets; score-gate prevents banning peers with score >= 0.5 |
+| Ban-DoS by framing (forge victim's Device-ID) | 5 | `recordBad` requires a verified outer device-sig in the same packet; sig-invalid and unproven-sender frames drop silently without attribution (§13.1.4 attribution precondition) |
 
 ### 13.2 Secret Rotation
 
@@ -5715,7 +5826,11 @@ Cleona **never** requests:
 
 Beyond permissions, Cleona's architecture enforces privacy at the protocol level:
 
-- **No metadata on the wire:** Relay nodes see only encrypted fragments with mailbox IDs (§5.6.1). No sender identity, no timestamp, no message type.
+- **Metadata on the wire — by path:**
+  - *Fragment / erasure path (§5.6.1):* relay and storage nodes see only a recipient `mailboxId` and encrypted fragments — no sender, no recipient UserID, no timestamp, no message type.
+  - *Relay / infrastructure path (§2.2, §2.4.1a):* an on-path relay sees the outer `senderDeviceId`, `timestampMs` and `hopCount` (device-level routing topology and timing), but **not** the UserID, message type or payload — the inner frame is KEM-encrypted (§2.3). This is the deliberate cost of DeviceID-based routing; see the §4.10 routing-metadata threat-model addendum.
+  - *DHT identity resolution (§4.3):* a `LivenessRecord` (`userId → deviceId → addresses`) is signed but **not** encrypted in the DHT. An insider who knows a UserID can therefore poll that identity's online status, address changes and device count. This is a conscious trade-off — discovery needs reachable addresses, and in the closed-network insider model (§4.10) DHT records are inherently insider-visible. Encrypting the address set to authorized contacts is a possible future hardening step, weighed against the First-Contact discovery path (a brand-new ContactSeed peer must still resolve the identity) and the fact that the record's existence and refresh cadence would still leak online status.
+  - *Structurally protected on every path:* the UserID↔content binding, message type and payload — no relay ever sees "User A messages User B".
 - **No analytics:** No telemetry, no crash reporting, no usage tracking. Zero outbound connections except P2P communication.
 - **No cloud dependencies:** No Google Play Services required. No Apple iCloud integration. (Push wake-up was considered and rejected; see §12.4.)
 - **KEX Gate (§8.2):** Messages from unknown senders are silently dropped at the protocol level. No notification, no "message request" UI — invisible to the recipient.
@@ -5893,6 +6008,8 @@ Last seen:     3 s ago
 **Multi-Identity on the local node:** A device may host several local user identities (see §3.6). Connection statistics for the local node are reported once (one DeviceID, one routing table, one set of RTTs) and are independent of which local identity is currently active in the GUI. Identity-switching never restarts the transport layer, so all metrics persist across switches.
 
 **K-bucket visualization:** A bar chart where each bar represents one k-bucket in the Kademlia routing table. Bar height scales from 0 to capacity (20 devices). Tooltip shows bucket index and current fill ratio. This gives advanced users immediate insight into routing table balance — uneven fill indicates proximity clustering in the DHT address space.
+
+**Connection sheet (recovery actions).** Tapping **"Active Peers"** (this dashboard) or **"Connected Peers"** (Settings → Network) opens a shared connection sheet that keeps the dashboard itself read-only while giving recovery actions a home: (1) the live active-peer list, (2) a debounced **Reconnect** button (§12.3.1 tier 2), (3) **import / share peer-list rescue bundle** (§8.1.2 / §12.3.1 tier 3), co-located with manual peer entry.
 
 ### 18.6 Data Collection
 
@@ -6588,7 +6705,7 @@ The most restrictive platform for Cleona's use case. Apple does not offer a Fore
 
 *Send path failure.* `RawDatagramSocket.send()` silently returns 0 for all destinations (errno 64/65 from the kqueue I/O path). Cleona uses `IosUdpSender` to call native `sendto()` on the Dart socket's own file descriptor — see §4.5.2 for details.
 
-*Socket file-descriptor death.* iOS closes Dart's UDP socket file descriptors approximately 40–60 seconds after app start (EBADF, errno 9, on both IPv4 and IPv6). This appears related to iOS's network-route lifecycle: sockets opened before the WiFi route is fully established are invalidated when iOS finalizes the route. After socket death, both the Dart listen stream and `IosUdpSender`'s cached fd become stale. **Recovery:** Transport runs a 10-second diagnostic timer that calls `recvPeek()` on the native fd. When the return value is -9 (EBADF), it fires `onUdpSocketDead`, which triggers the full network-change recovery cycle: close dead sockets, bind fresh ones on the same port, rescan the new fd for `IosUdpSender`, re-PING all neighbors, re-publish identity. The gap between socket death and recovery is at most one timer tick (10 seconds); messages sent during the gap land in the persistent `SendQueue` and are delivered after reconnection. The socket `onError` stream handlers provide a faster parallel detection path for the same condition.
+*Socket file-descriptor death.* iOS closes Dart's UDP socket file descriptors approximately 40–60 seconds after app start (EBADF, errno 9, on both IPv4 and IPv6). This appears related to iOS's network-route lifecycle: sockets opened before the WiFi route is fully established are invalidated when iOS finalizes the route. After socket death, both the Dart listen stream and `IosUdpSender`'s cached fd become stale. **Recovery:** Transport runs a 10-second diagnostic timer that calls `recvPeek()` on the native fd. When the return value is -9 (EBADF), it fires `onUdpSocketDead`, which triggers the full network-change recovery cycle: close dead sockets, bind fresh ones on the same port, rescan the new fd for `IosUdpSender`, re-PING all neighbors, re-publish identity. The gap between socket death and recovery is at most one timer tick (10 seconds); a message whose Layer-3 placement could not complete during the gap is held in the one-shot outbox (§5.1) and re-attempts placement once on the recovery event — there is no persistent SendQueue (removed in V3.0). The socket `onError` stream handlers provide a faster parallel detection path for the same condition.
 
 *Async error propagation.* Fire-and-forget UDP sends (LAN discovery broadcasts, UPnP SSDP probes) throw `SocketException` asynchronously via the socket's error stream when iOS has no network route at startup — not synchronously from `send()`. Every `RawDatagramSocket.listen()` call in iOS-reachable code paths must include an `onError` handler; omitting it causes the exception to propagate as an unhandled zone error.
 
@@ -6633,11 +6750,13 @@ message NetworkPacket {
   bytes       payload          = 13;  // serialized ApplicationFrame, InfrastructureFrame, or nested NetworkPacket (onion)
 }
 
-enum PayloadType {
-  APPLICATION_FRAME    = 0;   // payload = KEM-encrypted ApplicationFrame (Identity layer)
-  ONION_LAYER          = 1;   // payload = KEM-encrypted nested NetworkPacket (V3.0 not active, §2.5)
-  INFRASTRUCTURE_FRAME = 2;   // payload = KEM-encrypted InfrastructureFrame (Device-targeted, §2.3.5, NEW Welle 5)
+enum PayloadType {                   // proto: PayloadTypeV3, on-wire values PAYLOAD_*-prefixed
+  APPLICATION_FRAME              = 0; // payload = KEM-encrypted ApplicationFrame (Identity layer)
+  ONION_LAYER                    = 1; // payload = KEM-encrypted nested NetworkPacket (V3.0 not active, §2.5)
+  INFRASTRUCTURE_FRAME           = 2; // payload = KEM-encrypted InfrastructureFrame (Device-targeted, §2.3.5)
+  BOOTSTRAP_INFRASTRUCTURE_FRAME = 3; // payload = BOOT-path InfrastructureFrame (§2.3.5 / §2.4.1a)
 }
+// Unknown/future payloadType → silent drop (forward-only). Canonical numbering, matches §2.2.
 ```
 
 ### A.2 ApplicationFrame (Inner Layer)
@@ -6830,6 +6949,9 @@ enum MessageType {
   IDENTITY_LIVE_PUBLISH      = 173;
   IDENTITY_LIVE_RETRIEVE     = 174;
   IDENTITY_LIVE_RESPONSE     = 175;
+  IDENTITY_KEM_PUBLISH       = 176;  // DeviceKemRecord publish (§4.3 / §2.3.5)
+  IDENTITY_KEM_RETRIEVE      = 177;
+  IDENTITY_KEM_RESPONSE      = 178;
 
   // ── Multi-Device (§7) ─────────────────────────────────────
   TWIN_SYNC                  = 180;   // 12 sub-types via TwinSyncType enum
@@ -6861,6 +6983,15 @@ enum MessageType {
   SCREEN_SHARE_FRAME         = 214;
   CALL_CHAT                  = 215;
   REMOTE_CONTROL_INPUT       = 216;
+
+  // ── Deferred Key Exchange (§8.1.1) ────────────────────────
+  DEVICE_KEM_REQUEST         = 220;  // request a device's KEM-PK set via SeedPeers
+  DEVICE_KEM_OFFER           = 221;  // signed response carrying deviceX25519Pk + deviceMlKemPk
+
+  // ── First-CR-Mailbox (§5.5b) ──────────────────────────────
+  FIRST_CR_STORE             = 222;  // store an encrypted First-CR blob on a SeedPeer
+  FIRST_CR_STORE_ACK         = 223;
+  FIRST_CR_DELIVER           = 224;  // SeedPeer delivers the stored blob to the recipient
 }
 ```
 
@@ -7088,7 +7219,7 @@ field 5 (messageId)        = 16 random bytes
 field 6 (messageType)      = TEXT (0)
 field 7 (payload)          = TextMessage { text="Hallo", formatHint="plain" }
                              ≈ 12 bytes after protobuf-encoding
-field 10 (userEd25519Sig)  = 64 bytes  (Alice User-Ed25519 sig over fields 1-7)
+field 10 (userEd25519Sig)  = 64 bytes  (Alice User-Ed25519 sig over the full serialized ApplicationFrame with the sig fields cleared — all content fields, not just 1-7; see signApplicationFrameInner)
 field 11 (userMlDsaSig)    = 3293 bytes (Alice User-ML-DSA-65 sig)
 ```
 
@@ -7179,10 +7310,10 @@ Total wire size for an audio frame ≈ **400-540 bytes** — on average ~470 byt
 
 **Context**: Alice publishes her auth manifest to one of the K=10 closest replicators (e.g. `0xc8b73e...`).
 
-**ApplicationFrame** (no KEM because records are self-validating):
+**InfrastructureFrame** (BOOT path, §2.3.5 — no KEM and no frame-level user sig; the record is self-validating via its own internal signatures):
 ```
-recipientUserId   = c8b73e... (replicator user ID — actually a replicator device, but the format reuses the user ID slot)
-senderUserId      = alice.userId
+recipientDeviceId = c8b73e... (replicator device)
+senderDeviceId    = alice.device
 messageType       = IDENTITY_AUTH_PUBLISH (170)
 payload           = AuthManifestProto {
                       userId = alice.userId,
@@ -7190,28 +7321,27 @@ payload           = AuthManifestProto {
                       ttlSeconds = 86400,
                       sequenceNumber = 17,
                       publishedAtMs = 1714555200000,
-                      ed25519Sig = 64 bytes,
+                      ed25519Sig = 64 bytes,      ← internal sigs validate the record
                       mlDsaSig = 3293 bytes,
                       userEd25519Pk = 32 bytes,
                       userMlDsaPk = 1952 bytes
                     }
                   ≈ 5400 bytes
-userEd25519Sig    = 64 bytes
-userMlDsaSig      = 3293 bytes
+(no frame-level userEd25519Sig / userMlDsaSig — BOOT InfrastructureFrames carry no user sig, §2.3.5)
 ```
 
-Serialized inner ≈ 8800 bytes. Because of DHT-infrastructure status: no KEM, the payload goes straight into the outer frame.
+Serialized inner ≈ 5450 bytes. BOOT path: no KEM, the InfrastructureFrame payload goes straight into the outer frame.
 
 **NetworkPacket (Outer)**:
 ```
 nextHopDeviceId   = c8b73e... (replicator device)
 deviceEd25519Sig  = 64 bytes
 deviceMlDsaSig    = 0 bytes (Infrastructure exempt)
-payloadType       = APPLICATION_FRAME
-payload           = 8800 bytes (serialized ApplicationFrame, no KEM wrap)
+payloadType       = BOOTSTRAP_INFRASTRUCTURE_FRAME
+payload           = 5450 bytes (serialized InfrastructureFrame, no KEM wrap)
 ```
 
-Total ≈ **9100 bytes**. Per auth-manifest refresh (every 20 h) × K=10 replicators = 91 KB per refresh cycle per user identity. Acceptable.
+Total ≈ **5750 bytes**. Per auth-manifest refresh (every 20 h) × K=10 replicators ≈ 57 KB per refresh cycle per user identity. Acceptable.
 
 ### B.4 RELAY_FORWARD (Multi-Hop Relay)
 
@@ -7222,12 +7352,11 @@ Total ≈ **9100 bytes**. Per auth-manifest refresh (every 20 h) × K=10 replica
 nextHopDeviceId   = 6c39f8... (Carol)
 senderDeviceId    = a5fa07... (Alice)
 deviceEd25519Sig  = 64 bytes
-deviceMlDsaSig    = 3293 bytes (Application-Frame style)
-payloadType       = APPLICATION_FRAME
-payload           = ApplicationFrame {
+deviceMlDsaSig    = 3293 bytes
+payloadType       = INFRASTRUCTURE_FRAME
+payload           = KEM-encap(Carol.deviceKemPk, InfrastructureFrame {
+                      recipientDeviceId = 6c39f8... (Carol — the decrypting hop)
                       messageType = RELAY_FORWARD (153)
-                      senderUserId = alice
-                      recipientUserId = bob
                       payload = RelayForward {
                                   relayId = 16 random,
                                   finalRecipientId = bob.deviceId (32 bytes),
@@ -7239,13 +7368,12 @@ payload           = ApplicationFrame {
                                   visited = [alice.device]
                                 }
                                 ≈ 8200 bytes
-                      userEd25519Sig = 64 bytes (Alice signs the relay-frame)
-                      userMlDsaSig = 3293 bytes
-                    }
-                  ≈ 11600 bytes after KEM encryption for Carol
+                      (no user sig — RELAY_FORWARD is KEM-Infrastructure, §2.3.5)
+                    })
+                  ≈ 9400 bytes after KEM encryption for Carol
 ```
 
-Total wire size for relay hop 1 ≈ **15 KB**. At 3 hops the total would be similar (each hop only unwraps and rewraps, adding its own outer sig, but the `wrappedPacket` stays the same).
+Total wire size for relay hop 1 ≈ **9.6 KB** (the inner carries no user sig — only the wrapped original packet plus Carol's KEM wrap). At 3 hops the total stays similar (each hop only unwraps and rewraps, adding its own outer sig, but the `wrappedPacket` stays the same).
 
 **Observation**: Relay frames are expensive because of the doubled signature layers (Alice user sig in the inner frame + Alice device sig in the outer frame + Carol device sig when she forwards). That is an architectural cost — the trade-off for a clean trust boundary.
 

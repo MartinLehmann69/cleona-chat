@@ -60,11 +60,14 @@ class IdentityPublisher {
   static const Duration authTtl = Duration(hours: 24);
   static const Duration authRefreshInterval = Duration(hours: 20);
 
-  // Device-KEM-Record (Welle 5, §3.5b + §4.3): selbe Cadence wie Auth
-  // (24h TTL, 20h Refresh). KEM-PK aendert sich nur bei Device-Key-Reset
-  // (Multi-Year), Republish dient nur DHT-Replikat-Refresh.
-  static const Duration deviceKemTtl = Duration(hours: 24);
-  static const Duration deviceKemRefreshInterval = Duration(hours: 20);
+  // Device-KEM-Record (Welle 5, §3.5b + §4.3): TTL auf 7 Tage angehoben, um
+  // das Mailbox/S&F-Retention-Fenster zu matchen — ein bis zu 7 Tage offline
+  // gegangener Kontakt bleibt KEM-aufloesbar, sodass ein Deferred-KEX-First-CR
+  // (§8.1.1) noch verschluesselt und die First-CR-Mailbox (§5.5b) befuellt
+  // werden kann. KEM-PK aendert sich nur bei Device-Key-Reset (Multi-Year),
+  // daher ist die laengere TTL + seltenerer Republish traffic-negativ.
+  static const Duration deviceKemTtl = Duration(days: 7);
+  static const Duration deviceKemRefreshInterval = Duration(days: 3);
 
   // K=10 closest. effectiveK = min(K, peerCount) at publish time.
   static const int targetK = 10;

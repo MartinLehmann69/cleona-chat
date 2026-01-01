@@ -159,6 +159,7 @@ class _QrShowScreenState extends State<QrShowScreen> {
       channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
       deviceIdHex: service.deviceNodeIdHex,
       userEd25519Pk: service.userEd25519Pk,
+      createdAtMs: DateTime.now().millisecondsSinceEpoch,
     );
     final qrBytes = seed.toQrBytes();
     final qrCode = qr_lib.QrCode.fromUint8List(

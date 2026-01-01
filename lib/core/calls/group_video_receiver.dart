@@ -27,8 +27,8 @@ class PeerVideoState {
 ///
 /// No dart:ui dependency — works in pure Dart context (Smoke Tests, Daemon).
 class GroupVideoReceiver {
-  Uint8List _callKey;
-  int _callKeyVersion;
+  // §10.2.1 per-sender media keys: senderUserId-hex -> their announced key.
+  final Map<String, Uint8List> _peerSendKeys = {};
   final CLogger _log;
   final SodiumFFI _sodium = SodiumFFI();
 
@@ -41,12 +41,13 @@ class GroupVideoReceiver {
   void Function(String senderHex, Uint8List i420, int width, int height)? onDecodedI420;
 
   GroupVideoReceiver({
-    required Uint8List callKey,
     required String profileDir,
-    int callKeyVersion = 0,
-  })  : _callKey = callKey,
-        _callKeyVersion = callKeyVersion,
-        _log = CLogger.get('group-video-rx', profileDir: profileDir);
+  }) : _log = CLogger.get('group-video-rx', profileDir: profileDir);
+
+  /// Register an authenticated peer's secret media key (decrypt side, §10.2.1).
+  void setPeerSendKey(String senderUserHex, Uint8List key) {
+    _peerSendKeys[senderUserHex] = key;
+  }
 
   /// Process an incoming video frame from a peer.
   ///
@@ -58,12 +59,19 @@ class GroupVideoReceiver {
     try {
       final videoFrame = proto.VideoFrame.fromBuffer(videoFrameData);
 
-      // Decrypt VP8 data
+      // Decrypt VP8 data with the sender's own secret key (§10.2.1). A frame
+      // whose sender key we have not yet learned is dropped; AES-GCM auth means
+      // a frame decrypting under sender X's key genuinely came from X.
+      final key = _peerSendKeys[senderHex];
+      if (key == null) {
+        _log.debug('Video drop: no send_key yet for ${senderHex.substring(0, 8)}');
+        return;
+      }
       final Uint8List decrypted;
       try {
         decrypted = _sodium.aesGcmDecrypt(
           Uint8List.fromList(videoFrame.encryptedData),
-          _callKey,
+          key,
           Uint8List.fromList(videoFrame.nonce),
         );
       } catch (_) {
@@ -105,18 +113,11 @@ class GroupVideoReceiver {
     }
   }
 
-  /// Update the call key after key rotation.
-  void updateCallKey(Uint8List newKey, int version) {
-    if (version <= _callKeyVersion) return;
-    _callKey = newKey;
-    _callKeyVersion = version;
-    _log.info('Video receiver key updated to version $version');
-  }
-
   /// Remove a peer (left/crashed).
   void removePeer(String nodeIdHex) {
     _peers[nodeIdHex]?.dispose();
     _peers.remove(nodeIdHex);
+    _peerSendKeys.remove(nodeIdHex);
   }
 
   /// Number of active video peers.

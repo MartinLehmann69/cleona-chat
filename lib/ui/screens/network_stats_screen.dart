@@ -4,6 +4,7 @@ import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/connection_sheet.dart';
 
 /// Network Statistics Dashboard — 4 sections:
 /// 1. Network Health & Active Nodes
@@ -64,6 +65,8 @@ class _NetworkStatsScreenState extends State<NetworkStatsScreen> {
           label: locale.get('stats_active_peers'),
           value: '${_stats.activePeerCount}',
           color: _healthColor(_stats.healthLevel, colorScheme),
+          trailing: const Icon(Icons.chevron_right, size: 18),
+          onTap: () => showConnectionSheet(context, widget.service),
         ),
         _StatTile(
           icon: Icons.hub,
@@ -308,22 +311,38 @@ class _StatTile extends StatelessWidget {
   final String label;
   final String value;
   final Color? color;
-  const _StatTile({required this.icon, required this.label, required this.value, this.color});
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  const _StatTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.color,
+    this.trailing,
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
+    final valueWidget = Text(
+      value,
+      style: TextStyle(
+        fontWeight: FontWeight.bold,
+        color: color,
+        fontFamily: 'monospace',
+      ),
+    );
     return ListTile(
       dense: true,
       leading: Icon(icon, size: 20, color: color),
       title: Text(label),
-      trailing: Text(
-        value,
-        style: TextStyle(
-          fontWeight: FontWeight.bold,
-          color: color,
-          fontFamily: 'monospace',
-        ),
-      ),
+      trailing: trailing != null
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [valueWidget, const SizedBox(width: 4), trailing!],
+            )
+          : valueWidget,
+      onTap: onTap,
     );
   }
 }

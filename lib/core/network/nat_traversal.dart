@@ -545,12 +545,50 @@ class NatTraversal {
   String? _publicIpv6;
   String? get publicIpv6 => _publicIpv6;
 
+  /// §4.7 IPv6 Inbound Probe: whether the self-announced global IPv6 address
+  /// has been confirmed inbound-reachable via a CPRB echo from a peer.
+  ///
+  /// Three-state:
+  ///   null  — no probe has been issued yet (address just set, probe pending)
+  ///   true  — CPRB probe arrived inbound → address is fully bidirectional
+  ///   false — probe timed out → carrier likely blocks inbound IPv6; address
+  ///           is kept as an advertise-only relay hint but excluded from
+  ///           Priority-3 Direct sends (see [currentSelfAddresses] in
+  ///           cleona_node.dart).
+  ///
+  /// Reset to null on every [reset] so that a network-change re-probes.
+  bool? _ipv6InboundVerified;
+
+  /// Whether the global IPv6 has been confirmed inbound-reachable.
+  /// Null = probe pending / not yet run. See [_ipv6InboundVerified].
+  bool? get ipv6InboundVerified => _ipv6InboundVerified;
+
+  /// Mark the IPv6 inbound probe as succeeded (CPRB arrived on IPv6 socket).
+  void confirmIpv6InboundReachable() {
+    if (_ipv6InboundVerified != true) {
+      _ipv6InboundVerified = true;
+      _log.info('IPv6 inbound confirmed: $_publicIpv6 is bidirectionally reachable');
+    }
+  }
+
+  /// Mark the IPv6 inbound probe as timed out (carrier likely blocks IPv6 in).
+  /// The address is kept for relay-hint advertising but removed from Direct.
+  void markIpv6InboundUnreachable() {
+    if (_ipv6InboundVerified != false) {
+      _ipv6InboundVerified = false;
+      _log.info('IPv6 inbound TIMEOUT: $_publicIpv6 may not be inbound-reachable '
+          '(carrier filter?) — keeping as relay hint only');
+    }
+  }
+
   /// Set public IPv6 address (from ipify or interface enumeration).
-  /// IPv6 global addresses are directly routable — no port probe needed.
+  /// Resets the inbound-verified flag so [CleonaNode._probeIpv6Inbound]
+  /// issues a fresh probe for the new address.
   void setPublicIpv6(String ip) {
     if (_publicIpv6 != ip) {
       _publicIpv6 = ip;
-      _log.info('Public IPv6 confirmed: $ip');
+      _ipv6InboundVerified = null; // arm a fresh probe
+      _log.info('Public IPv6 set: $ip — inbound probe pending');
     }
   }
 
@@ -688,6 +726,7 @@ class NatTraversal {
     _hasPortMapping = false;
     _externalIpOnly = null;
     _publicIpv6 = null;
+    _ipv6InboundVerified = null;
     natType = NatClassification.unknown;
 
     for (final timer in _keepaliveTimers.values) {

@@ -98,6 +98,9 @@ void _captureIsolateEntry(_CaptureInit init) {
   var muted = false;
   var forceNextKeyframe = false;
   var seqNum = 0;
+  // §10.2.1: our own secret media key. Mutable so a Uint8List command rotates
+  // it mid-call (forward secrecy on membership shrink).
+  var sharedSecret = init.sharedSecret;
 
   // Listen for commands
   commandPort.listen((msg) {
@@ -109,12 +112,13 @@ void _captureIsolateEntry(_CaptureInit init) {
       muted = true;
     } else if (msg == _CaptureCommand.unmute) {
       muted = false;
+    } else if (msg is Uint8List) {
+      sharedSecret = msg;
     }
   });
 
   // Capture loop
   final frameDurationUs = 1000000 ~/ init.fps;
-  final sharedSecret = init.sharedSecret;
 
   while (running) {
     final startUs = DateTime.now().microsecondsSinceEpoch;
@@ -440,6 +444,12 @@ class VideoEngine {
   /// Force next captured frame to be a keyframe.
   void forceKeyframe() {
     _captureCommandPort?.send(_CaptureCommand.forceKeyframe);
+  }
+
+  /// §10.2.1: switch the capture isolate to a rotated own send_key. Used by
+  /// group calls on forward-secrecy rotation (membership shrink).
+  void updateKey(Uint8List newKey) {
+    _captureCommandPort?.send(Uint8List.fromList(newKey));
   }
 
   /// Mute/unmute video capture (sends black frames when muted).

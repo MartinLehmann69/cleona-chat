@@ -9588,6 +9588,106 @@ class GroupCallVideo extends $pb.GeneratedMessage {
   void clearVideoFrameData() => clearField(3);
 }
 
+/// Per-sender media key announcement (Architecture §10.2.1). Each participant
+/// generates a secret 256-bit send_key known only to itself and announces it,
+/// dual-signed + KEM-encrypted (setup-class ApplicationFrame), to every other
+/// participant. Receivers map sender_node_id -> send_key and decrypt that
+/// sender's media frames with it. Because send_key is secret to its owner, a
+/// relaying co-participant cannot forge frames as another sender. Replaces the
+/// shared group_call_key media role (CallInvite.group_call_key, deprecated for
+/// group media). key_version bumps on rotation (membership change / rejoin).
+class GroupCallSenderKey extends $pb.GeneratedMessage {
+  factory GroupCallSenderKey({
+    $core.List<$core.int>? callId,
+    $core.List<$core.int>? senderNodeId,
+    $core.List<$core.int>? sendKey,
+    $core.int? keyVersion,
+  }) {
+    final $result = create();
+    if (callId != null) {
+      $result.callId = callId;
+    }
+    if (senderNodeId != null) {
+      $result.senderNodeId = senderNodeId;
+    }
+    if (sendKey != null) {
+      $result.sendKey = sendKey;
+    }
+    if (keyVersion != null) {
+      $result.keyVersion = keyVersion;
+    }
+    return $result;
+  }
+  GroupCallSenderKey._() : super();
+  factory GroupCallSenderKey.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory GroupCallSenderKey.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'GroupCallSenderKey', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'callId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'senderNodeId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'sendKey', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'keyVersion', $pb.PbFieldType.OU3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  GroupCallSenderKey clone() => GroupCallSenderKey()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  GroupCallSenderKey copyWith(void Function(GroupCallSenderKey) updates) => super.copyWith((message) => updates(message as GroupCallSenderKey)) as GroupCallSenderKey;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static GroupCallSenderKey create() => GroupCallSenderKey._();
+  GroupCallSenderKey createEmptyInstance() => create();
+  static $pb.PbList<GroupCallSenderKey> createRepeated() => $pb.PbList<GroupCallSenderKey>();
+  @$core.pragma('dart2js:noInline')
+  static GroupCallSenderKey getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<GroupCallSenderKey>(create);
+  static GroupCallSenderKey? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get callId => $_getN(0);
+  @$pb.TagNumber(1)
+  set callId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasCallId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearCallId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get senderNodeId => $_getN(1);
+  @$pb.TagNumber(2)
+  set senderNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSenderNodeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSenderNodeId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<$core.int> get sendKey => $_getN(2);
+  @$pb.TagNumber(3)
+  set sendKey($core.List<$core.int> v) { $_setBytes(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSendKey() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSendKey() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get keyVersion => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set keyVersion($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasKeyVersion() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearKeyVersion() => clearField(4);
+}
+
 class VoicePayload extends $pb.GeneratedMessage {
   factory VoicePayload({
     $core.List<$core.int>? audioData,

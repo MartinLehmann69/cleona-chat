@@ -59,7 +59,14 @@ class GroupCallManager {
   void Function(GroupCallInfo info)? onGroupCallStarted;
   void Function(GroupCallInfo info)? onGroupCallEnded;
   void Function(String nodeIdHex, ParticipantState state)? onParticipantChanged;
-  void Function(Uint8List newKey, int version)? onKeyRotated;
+
+  /// §10.2.1 per-sender media keys. `onOwnSendKeyChanged` fires when our own
+  /// secret media key is (re)generated → the encrypt side (capture isolate,
+  /// video engine) must switch to it. `onPeerSendKey` fires when we learn an
+  /// authenticated peer's send_key → the decrypt side (mixer, video receiver)
+  /// must register it for that sender.
+  void Function(Uint8List ownKey, int version)? onOwnSendKeyChanged;
+  void Function(String senderUserHex, Uint8List key, int version)? onPeerSendKey;
 
   // Per-participant cached PeerInfo for live-media sendToDevice path.
   // Mirror of [CallSession.cachedRoute] but multi-target. Keyed by
@@ -127,6 +134,7 @@ class GroupCallManager {
     }
 
     _currentGroupCall = session;
+    _ensureOwnSendKey(session); // §10.2.1 per-sender media key
 
     // Send CALL_INVITE to each member (KEM-encrypted individually, fan-out
     // to all of each member's authorized devices via sendToUser).
@@ -182,6 +190,9 @@ class GroupCallManager {
     );
 
     _setupRttAndHealth(session);
+    // §10.2.1: announce our send_key to everyone already joined (the
+    // initiator, plus any earlier joiners). They reciprocate via the handler.
+    await _announceSendKeyToAllJoined(session);
     onGroupCallStarted?.call(session.toGroupCallInfo());
     _log.info('Group call accepted: ${session.callIdHex.substring(0, 8)}');
   }
@@ -218,18 +229,22 @@ class GroupCallManager {
     _participantRouteCache.remove(nodeIdHex);
     _log.info('Participant left: ${nodeIdHex.substring(0, 8)}');
 
-    // Rebuild tree and rotate key (member left)
+    // Rebuild tree (member left) — initiator only.
     if (session.state == GroupCallState.inCall && session.isInitiator) {
       session.tree.removeParticipant(nodeIdHex);
       _broadcastTreeUpdate(session);
-      _rotateCallKey(session);
     }
 
-    // End call if less than 2 participants remain
+    // End call if less than 2 participants remain, else apply forward secrecy.
     final joinedCount = session.joinedParticipantIds.length;
     if (joinedCount < 2 && session.state == GroupCallState.inCall) {
       _log.info('Group call ended: not enough participants ($joinedCount)');
       _endCall(session);
+    } else if (session.state == GroupCallState.inCall) {
+      // §10.2.1 forward secrecy: every remaining participant rotates its own
+      // send_key so the departed node can no longer decrypt subsequent media.
+      session.peerSendKeys.remove(nodeIdHex);
+      rotateOwnSendKey(session);
     }
   }
 
@@ -488,52 +503,54 @@ class GroupCallManager {
     }
   }
 
-  // ── Key Rotation ────────────────────────────────────────────────────
+  // ── §10.2.1 Per-Sender Media Keys ───────────────────────────────────
 
-  Future<void> _rotateCallKey(GroupCallSession session) async {
-    if (!session.isInitiator) return;
-
-    final sodium = SodiumFFI();
-    final newKey = sodium.randomBytes(32);
-    session.callKeyVersion++;
-    session.callKey = newKey;
-
-    // Send new key to all joined participants (KEM-encrypted via setup-path
-    // sendToUser fan-out — multi-device delivery is required so every
-    // participant device picks up the rotation).
-    // TODO(v3-sub-message): swap to `GroupCallKeyRotateV3` once defined.
-    final rotation = proto.GroupCallKeyRotate()
-      ..callId = session.callId
-      ..newCallKey = newKey
-      ..keyVersion = session.callKeyVersion;
-
-    final payload = rotation.writeToBuffer();
-    for (final pId in session.joinedParticipantIds) {
-      if (pId == identity.userIdHex) continue;
-      await sendViaUser?.call(
-        hexToBytes(pId),
-        proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE,
-        payload,
-      );
-    }
-
-    onKeyRotated?.call(newKey, session.callKeyVersion);
-    _log.info('Key rotated to version ${session.callKeyVersion}');
+  /// Lazily generate our own secret media key (known only to us). Fires
+  /// onOwnSendKeyChanged so the encrypt side switches to it.
+  void _ensureOwnSendKey(GroupCallSession session) {
+    if (session.ownSendKey != null) return;
+    session.ownSendKey = SodiumFFI().randomBytes(32);
+    session.ownSendKeyVersion = 1;
+    onOwnSendKeyChanged?.call(session.ownSendKey!, session.ownSendKeyVersion);
   }
 
-  Future<void> _sendKeyToParticipant(GroupCallSession session, String nodeIdHex) async {
-    if (session.callKey == null) return;
-
-    final rotation = proto.GroupCallKeyRotate()
+  /// Announce our current ownSendKey to one participant (setup-class: full
+  /// Ed25519 + ML-DSA inner sig + KEM via sendViaUser). The recipient's
+  /// inner-sig verification binds the key to us, so no other participant can
+  /// register a key under our identity.
+  Future<void> _announceSendKeyTo(
+      GroupCallSession session, String participantUserHex) async {
+    if (participantUserHex == identity.userIdHex) return;
+    _ensureOwnSendKey(session);
+    final ann = proto.GroupCallSenderKey()
       ..callId = session.callId
-      ..newCallKey = session.callKey!
-      ..keyVersion = session.callKeyVersion;
-
-    await sendViaUser?.call(
-      hexToBytes(nodeIdHex),
-      proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE,
-      rotation.writeToBuffer(),
+      ..senderNodeId = identity.nodeId
+      ..sendKey = session.ownSendKey!
+      ..keyVersion = session.ownSendKeyVersion;
+    final ok = await sendViaUser?.call(
+      hexToBytes(participantUserHex),
+      proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY,
+      ann.writeToBuffer(),
     );
+    if (ok == true) session.announcedSendKeyTo.add(participantUserHex);
+  }
+
+  Future<void> _announceSendKeyToAllJoined(GroupCallSession session) async {
+    for (final pId in session.joinedParticipantIds) {
+      await _announceSendKeyTo(session, pId);
+    }
+  }
+
+  /// Forward secrecy on membership shrink (§10.2.1): regenerate our send_key
+  /// and re-announce to the remaining joined set. The departed node's cached
+  /// copy goes stale and cannot decrypt subsequent media.
+  Future<void> rotateOwnSendKey(GroupCallSession session) async {
+    session.ownSendKey = SodiumFFI().randomBytes(32);
+    session.ownSendKeyVersion++;
+    session.announcedSendKeyTo.clear();
+    onOwnSendKeyChanged?.call(session.ownSendKey!, session.ownSendKeyVersion);
+    await _announceSendKeyToAllJoined(session);
+    _log.info('Own send_key rotated to version ${session.ownSendKeyVersion}');
   }
 
   // ── V3 Handlers (Welle 2B — Calls Cluster C3) ──────────────────────
@@ -616,6 +633,7 @@ class GroupCallManager {
     }
 
     _currentGroupCall = session;
+    _ensureOwnSendKey(session); // §10.2.1 per-sender media key
     onIncomingGroupCall?.call(session.toGroupCallInfo());
     _log.info('Incoming group call V3 from ${senderHex.substring(0, 8)} '
         '(device=${bytesToHex(senderDeviceId).substring(0, 8)}) in "$groupName"');
@@ -659,8 +677,11 @@ class GroupCallManager {
       _log.info('Group call active with $joinedCount participants');
     } else if (session.state == GroupCallState.inCall) {
       _scheduleTreeRebuild(session);
-      _rotateCallKey(session);
     }
+    // §10.2.1: hand the newcomer our send_key (no global rotation on join —
+    // backward secrecy is natural, the newcomer never held prior keys). The
+    // newcomer reciprocates with its own key via handleGroupCallSenderKeyV3.
+    _announceSendKeyTo(session, senderHex);
   }
 
   /// V3 receive-handler for CALL_REJECT (group).
@@ -761,12 +782,15 @@ class GroupCallManager {
     participant.joinedAt = DateTime.now();
     onParticipantChanged?.call(senderHex, ParticipantState.joined);
     _log.info('Participant rejoined V3: ${senderHex.substring(0, 8)} '
-        '(device=${bytesToHex(senderDeviceId).substring(0, 8)}, no key rotation)');
+        '(device=${bytesToHex(senderDeviceId).substring(0, 8)}, no global rotation)');
 
     if (session.isInitiator) {
       _scheduleTreeRebuild(session);
-      _sendKeyToParticipant(session, senderHex);
     }
+    // §10.2.1: re-announce our send_key to the rejoiner (they re-announce
+    // theirs). No global rotation — the authorized set did not change.
+    session.announcedSendKeyTo.remove(senderHex);
+    _announceSendKeyTo(session, senderHex);
   }
 
   /// V3 receive-handler for CALL_TREE_UPDATE.
@@ -874,7 +898,27 @@ class GroupCallManager {
   ///
   /// Setup-class frame (multi-device fan-out via sendToUser); inner User-Sig
   /// already verified upstream. Only accepts rotations from the initiator.
+  /// DEPRECATED (§10.2.1): group media no longer uses a shared rotating key.
+  /// Retained as a wire-compat no-op — per-sender keys arrive via
+  /// GROUP_CALL_SENDER_KEY (handleGroupCallSenderKeyV3) instead.
   void handleGroupCallKeyRotateV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    _log.debug('GROUP_CALL_KEY_ROTATE V3 ignored — superseded by per-sender '
+        'keys (§10.2.1)');
+  }
+
+  /// V3 receive-handler for GROUP_CALL_SENDER_KEY (§10.2.1). Registers an
+  /// authenticated peer's secret media key.
+  ///
+  /// SECURITY: the announcement's inner ApplicationFrame is signed by
+  /// `frame.senderUserId` (verified upstream in the V3 receive pipeline). We
+  /// require the announced `sender_node_id` to equal that authenticated id —
+  /// so a participant can only register a key under its OWN identity and
+  /// cannot frame another by announcing a key for the victim's id.
+  void handleGroupCallSenderKeyV3(
     proto.ApplicationFrameV3 frame,
     Uint8List senderDeviceId,
     SenderIdentitySnapshot? snapshot,
@@ -882,26 +926,40 @@ class GroupCallManager {
     final session = _currentGroupCall;
     if (session == null) return;
 
-    final proto.GroupCallKeyRotate rotation;
+    final proto.GroupCallSenderKey ann;
     try {
-      rotation = proto.GroupCallKeyRotate.fromBuffer(frame.payload);
+      ann = proto.GroupCallSenderKey.fromBuffer(frame.payload);
     } catch (e) {
-      _log.warn('GROUP_CALL_KEY_ROTATE V3: parse failed: $e');
+      _log.warn('GROUP_CALL_SENDER_KEY V3: parse failed: $e');
       return;
     }
-    if (!_callIdMatches(session.callId, rotation.callId)) return;
+    if (!_callIdMatches(session.callId, ann.callId)) return;
 
-    final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-    if (senderHex != session.initiatorHex) return;
+    final authedHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+    final announcedHex = bytesToHex(Uint8List.fromList(ann.senderNodeId));
+    if (announcedHex != authedHex) {
+      _log.warn('GROUP_CALL_SENDER_KEY V3: id mismatch '
+          '(authed=${authedHex.substring(0, 8)} '
+          'announced=${announcedHex.substring(0, 8)}) — drop');
+      return;
+    }
+    if (!session.participants.containsKey(authedHex)) return;
+    if (ann.sendKey.length != 32) return;
 
-    if (rotation.keyVersion <= session.callKeyVersion) return;
+    final existing = session.peerSendKeys[authedHex];
+    if (existing != null && ann.keyVersion <= existing.version) return;
 
-    session.callKey = Uint8List.fromList(rotation.newCallKey);
-    session.callKeyVersion = rotation.keyVersion;
+    final key = Uint8List.fromList(ann.sendKey);
+    session.peerSendKeys[authedHex] = (key: key, version: ann.keyVersion);
+    onPeerSendKey?.call(authedHex, key, ann.keyVersion);
+    _log.info('Registered send_key v${ann.keyVersion} for '
+        '${authedHex.substring(0, 8)}');
 
-    onKeyRotated?.call(session.callKey!, rotation.keyVersion);
-    _log.info('Key rotated V3 to version ${rotation.keyVersion} '
-        '(initiator device=${bytesToHex(senderDeviceId).substring(0, 8)})');
+    // Reciprocate so the pairwise exchange converges even if our own announce
+    // raced or was lost (either side's inbound key triggers the response).
+    if (!session.announcedSendKeyTo.contains(authedHex)) {
+      _announceSendKeyTo(session, authedHex);
+    }
   }
 
   /// V3 receive-handler for CALL_GROUP_AUDIO (relay frame to children).

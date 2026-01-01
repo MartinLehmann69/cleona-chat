@@ -49,6 +49,12 @@ class ContactSeed {
   /// Device-ML-KEM-768 public key (v1 legacy). 1184 bytes.
   final Uint8List? deviceMlKemPk;
 
+  /// ContactSeed creation time (ms since epoch, §8.1.1 rev3 — URI `t`,
+  /// QR format 0x07/0x08). null = legacy seed without a timestamp (age
+  /// unknown). Lets the scanner distinguish a stale seed ("request a fresh
+  /// code") from an offline target. Outside the integrity-check input.
+  final int? createdAtMs;
+
   ContactSeed({
     required this.nodeIdHex,
     required this.displayName,
@@ -59,7 +65,12 @@ class ContactSeed {
     this.userEd25519Pk,
     this.deviceX25519Pk,
     this.deviceMlKemPk,
+    this.createdAtMs,
   });
+
+  /// Age of this seed if it carries a creation timestamp, else null.
+  Duration? ageFrom(DateTime now) =>
+      createdAtMs == null ? null : now.difference(DateTime.fromMillisecondsSinceEpoch(createdAtMs!));
 
   /// Build the URI string for QR code encoding.
   String toUri() {
@@ -80,6 +91,11 @@ class ContactSeed {
     final ep = userEd25519Pk;
     if (ep != null && ep.length == 32) {
       sb.write('&ep=${base64Url.encode(ep).replaceAll('=', '')}');
+    }
+
+    // Creation timestamp (rev3): lets the scanner judge seed freshness.
+    if (createdAtMs != null) {
+      sb.write('&t=$createdAtMs');
     }
 
     if (ownAddresses.isNotEmpty) {
@@ -181,6 +197,13 @@ class ContactSeed {
         } catch (_) {}
       }
 
+      // Creation timestamp (rev3, optional). Legacy URIs without `t` → null.
+      int? createdAt;
+      final tParam = params['t'];
+      if (tParam != null && tParam.isNotEmpty) {
+        createdAt = int.tryParse(tParam);
+      }
+
       return ContactSeed(
         nodeIdHex: nodeIdHex,
         displayName: name,
@@ -191,6 +214,7 @@ class ContactSeed {
         userEd25519Pk: ep,
         deviceX25519Pk: dxk,
         deviceMlKemPk: dmk,
+        createdAtMs: createdAt,
       );
     } catch (_) {
       return null;
@@ -242,8 +266,9 @@ class ContactSeed {
   //   format 0x01 = zstd-compressed v1 (legacy)
   //   format 0x02 = uncompressed v1 (legacy)
   //
-  // v2 binary payload:
+  // v2 binary payload (format 0x03/0x04 legacy; 0x07/0x08 add [8B createdAtMs]):
   //   [32B userId] [32B deviceId] [32B userEd25519Pk]
+  //   [8B createdAtMs]        ← only in format 0x07 (zstd) / 0x08 (uncompressed)
   //   [1B channel] [1B nameLen] [nameUTF8]
   //   [1B addrCount] [{1B len, addrUTF8}...]
   //   [1B peerCount] [{32B nodeId, 1B addrCount, {1B len, addrUTF8}...}...]
@@ -260,6 +285,15 @@ class ContactSeed {
     }
 
     bb.add(userEd25519Pk ?? Uint8List(32));
+
+    // rev3: 8-byte big-endian creation timestamp — only emitted in the new
+    // format bytes 0x07/0x08. Legacy 0x03/0x04 omit it (age then unknown).
+    final hasTs = createdAtMs != null;
+    if (hasTs) {
+      final tsBytes = Uint8List(8);
+      ByteData.view(tsBytes.buffer).setUint64(0, createdAtMs!, Endian.big);
+      bb.add(tsBytes);
+    }
 
     bb.addByte(channelTag == 'b' ? 0x62 : channelTag == 'l' ? 0x6C : 0x00);
 
@@ -292,18 +326,21 @@ class ContactSeed {
     }
 
     final raw = bb.toBytes();
+    // rev3 format bytes carry the timestamp; legacy bytes do not.
+    final fmtCompressed = hasTs ? 0x07 : 0x03;
+    final fmtUncompressed = hasTs ? 0x08 : 0x04;
     try {
       final compressed = ZstdCompression.instance.compress(
           Uint8List.fromList(raw), level: 3);
       if (compressed.length < raw.length) {
         final out = BytesBuilder(copy: false);
-        out.addByte(0x03); // v2 compressed
+        out.addByte(fmtCompressed);
         out.add(compressed);
         return out.toBytes();
       }
     } catch (_) {}
     final out = BytesBuilder(copy: false);
-    out.addByte(0x04); // v2 uncompressed
+    out.addByte(fmtUncompressed);
     out.add(raw);
     return out.toBytes();
   }
@@ -312,23 +349,28 @@ class ContactSeed {
     if (data.length < 2) return null;
     final format = data[0];
     Uint8List payload;
-    if (format == 0x01 || format == 0x03) {
+    // Compressed: 0x01 (v1), 0x03 (v2), 0x07 (v2+timestamp).
+    final isCompressed = format == 0x01 || format == 0x03 || format == 0x07;
+    // Uncompressed: 0x02 (v1), 0x04 (v2), 0x08 (v2+timestamp).
+    final isUncompressed = format == 0x02 || format == 0x04 || format == 0x08;
+    if (isCompressed) {
       try {
         payload = ZstdCompression.instance.decompress(
             Uint8List.sublistView(data, 1));
       } catch (_) { return null; }
-    } else if (format == 0x02 || format == 0x04) {
+    } else if (isUncompressed) {
       payload = Uint8List.sublistView(data, 1);
     } else {
       return null;
     }
-    final isV2 = format == 0x03 || format == 0x04;
-    return isV2 ? _parseBinaryPayloadV2(payload) : _parseBinaryPayload(payload);
+    final isV2 = format == 0x03 || format == 0x04 || format == 0x07 || format == 0x08;
+    final hasTs = format == 0x07 || format == 0x08;
+    return isV2 ? _parseBinaryPayloadV2(payload, hasTs) : _parseBinaryPayload(payload);
   }
 
-  static ContactSeed? _parseBinaryPayloadV2(Uint8List p) {
-    // v2: 32+32+32+1+1+1+1 = 100 bytes minimum
-    if (p.length < 100) return null;
+  static ContactSeed? _parseBinaryPayloadV2(Uint8List p, [bool hasTs = false]) {
+    // v2: 32+32+32+1+1+1+1 = 100 bytes minimum (+8 when a timestamp is present)
+    if (p.length < (hasTs ? 108 : 100)) return null;
     try {
       var off = 0;
 
@@ -342,6 +384,14 @@ class ContactSeed {
       final ep = Uint8List.fromList(p.sublist(off, off + 32));
       off += 32;
       final allZeroEp = ep.every((b) => b == 0);
+
+      // rev3: 8-byte big-endian creation timestamp (format 0x07/0x08 only).
+      int? createdAt;
+      if (hasTs) {
+        createdAt = ByteData.view(p.buffer, p.offsetInBytes + off, 8)
+            .getUint64(0, Endian.big);
+        off += 8;
+      }
 
       final chByte = p[off++];
       final channelTag = chByte == 0x62 ? 'b' : chByte == 0x6C ? 'l' : null;
@@ -390,6 +440,7 @@ class ContactSeed {
         channelTag: channelTag,
         deviceIdHex: hasDeviceId ? deviceId : null,
         userEd25519Pk: allZeroEp ? null : ep,
+        createdAtMs: createdAt,
       );
     } catch (_) {
       return null;

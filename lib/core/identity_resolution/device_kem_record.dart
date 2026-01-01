@@ -9,7 +9,8 @@ import 'package:fixnum/fixnum.dart';
 /// Traegt die Device-KEM-Pubkeys (X25519 + ML-KEM-768), die Sender brauchen
 /// um InfrastructureFrameV3 (und spaeter ONION_LAYER) gegen das Empfaenger-
 /// Geraet zu encappen. Lebenszyklus ist langsam (Multi-Year-Cadence,
-/// gleicher Trust-Anchor wie AuthManifestV3): Republish alle 20h, TTL 24h.
+/// gleicher Trust-Anchor wie AuthManifestV3): Republish alle 3 Tage, TTL 7 Tage
+/// (matcht das Mailbox/S&F-Retention-Fenster, §4.3 / §5.5b).
 ///
 /// **Wichtig**: Signatur kommt vom **User-Master-Ed25519-Key** (nicht vom
 /// Device-Key!). Damit teilt sich dieser Record dieselbe Trust-Chain wie

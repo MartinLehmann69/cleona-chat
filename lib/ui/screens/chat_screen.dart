@@ -126,6 +126,9 @@ class _ChatScreenState extends State<ChatScreen> {
       _cachedService = context.read<CleonaAppState>().service;
       _cachedService?.markConversationRead(widget.conversationId);
       _cachedService?.setActiveConversationId(widget.conversationId);
+      // §5.8: Lazily mark any queuedOffline messages that exceeded the 7-day
+      // TTL as expired.  Pure local timestamp check — zero network traffic.
+      _cachedService?.checkExpiredMessages(widget.conversationId);
     });
   }
 
@@ -521,6 +524,10 @@ class _ChatScreenState extends State<ChatScreen> {
         break;
       case 'react':
         _showReactionPicker(msg, service);
+        break;
+      case 'resend':
+        // §5.8: Re-send an expired message — clear the old bubble, start fresh.
+        service.resendExpiredMessage(widget.conversationId, msg.id);
         break;
     }
   }
@@ -2533,7 +2540,11 @@ class _MessageBubble extends StatelessWidget {
 
   bool get _canReact => !message.isDeleted;
 
-  bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact;
+  /// §5.8: Resend is available for outgoing messages whose 7-day S&F/Erasure
+  /// TTL elapsed without a DELIVERY_RECEIPT.
+  bool get _canResend => message.isOutgoing && message.status == MessageStatus.expired;
+
+  bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact || _canResend;
 
   /// Shows the full action menu (reply / react / copy / save / forward / edit / delete)
   /// as a modal bottom sheet. Called from long-press on the MessageBubble path so that
@@ -2595,6 +2606,13 @@ class _MessageBubble extends StatelessWidget {
                   leading: const Icon(Icons.delete),
                   title: Text(locale.get('delete')),
                   onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('delete', message); },
+                ),
+              // §5.8: Resend action for expired messages
+              if (_canResend)
+                ListTile(
+                  leading: const Icon(Icons.refresh),
+                  title: Text(locale.get('msg_resend')),
+                  onTap: () { Navigator.pop(sheetCtx); onMessageAction?.call('resend', message); },
                 ),
             ],
           ),
@@ -2931,6 +2949,9 @@ class _MessageBubble extends StatelessWidget {
                         PopupMenuItem(value: 'edit', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('edit'))])),
                       if (_canDelete)
                         PopupMenuItem(value: 'delete', child: Row(children: [const Icon(Icons.delete, size: 18), const SizedBox(width: 8), Text(locale.get('delete'))])),
+                      // §5.8
+                      if (_canResend)
+                        PopupMenuItem(value: 'resend', child: Row(children: [const Icon(Icons.refresh, size: 18), const SizedBox(width: 8), Text(locale.get('msg_resend'))])),
                     ],
                   ),
                 ),
@@ -3390,11 +3411,21 @@ class _MessageBubble extends StatelessWidget {
         return Icons.done_all;
       case MessageStatus.read:
         return Icons.done_all;
+      // §5.8 new statuses
+      case MessageStatus.queuedOffline:
+        return Icons.cloud_upload_outlined;
+      case MessageStatus.failed:
+        return Icons.error_outline;
+      case MessageStatus.expired:
+        return Icons.history_toggle_off_outlined;
     }
   }
 
   Color? _statusColor(MessageStatus status, ColorScheme colorScheme) {
     if (status == MessageStatus.read) return Colors.blue;
+    if (status == MessageStatus.failed || status == MessageStatus.expired) {
+      return colorScheme.error;
+    }
     return colorScheme.outline;
   }
 
@@ -3413,6 +3444,13 @@ class _MessageBubble extends StatelessWidget {
         return '✓✓';
       case MessageStatus.read:
         return '✓✓';
+      // §5.8 new statuses
+      case MessageStatus.queuedOffline:
+        return '☁';
+      case MessageStatus.failed:
+        return '✗';
+      case MessageStatus.expired:
+        return '⟳';
     }
   }
 }

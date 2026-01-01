@@ -990,4 +990,185 @@ const Map<String, Map<String, String>> translations = {
   'contact_issue_report_error': {'de': 'Bericht konnte nicht erstellt werden', 'en': 'Could not create report', 'es': 'No se pudo crear el informe', 'hu': 'Nem sikerült létrehozni a jelentést', 'sv': 'Kunde inte skapa rapport', 'ar': 'تعذر إنشاء التقرير', 'he': 'לא ניתן ליצור דוח', 'fa': 'ایجاد گزارش ممکن نیست', 'fr': 'Impossible de créer le rapport', 'it': 'Impossibile creare il rapporto', 'pt': 'Não foi possível criar o relatório', 'nl': 'Rapport kon niet worden aangemaakt', 'pl': 'Nie można utworzyć raportu', 'ro': 'Nu s-a putut crea raportul', 'cs': 'Nepodařilo se vytvořit zprávu', 'sk': 'Správu sa nepodarilo vytvoriť', 'hr': 'Nije moguće stvoriti izvještaj', 'bg': 'Докладът не може да бъде създаден', 'el': 'Δεν ήταν δυνατή η δημιουργία αναφοράς', 'da': 'Kunne ikke oprette rapport', 'fi': 'Raporttia ei voitu luoda', 'no': 'Kunne ikke opprette rapport', 'uk': 'Не вдалося створити звіт', 'ru': 'Не удалось создать отчёт', 'tr': 'Rapor oluşturulamadı', 'zh': '无法创建报告', 'ja': 'レポートを作成できませんでした', 'ko': '보고서를 생성할 수 없습니다', 'hi': 'रिपोर्ट नहीं बनाई जा सकी', 'th': 'ไม่สามารถสร้างรายงานได้', 'vi': 'Không thể tạo báo cáo', 'id': 'Tidak dapat membuat laporan', 'ms': 'Tidak dapat mencipta laporan'},
   'contact_issue_exported': {'de': 'Bericht exportiert', 'en': 'Report exported', 'es': 'Informe exportado', 'hu': 'Jelentés exportálva', 'sv': 'Rapport exporterad', 'ar': 'تم تصدير التقرير', 'he': 'הדוח יוצא', 'fa': 'گزارش صادر شد', 'fr': 'Rapport exporté', 'it': 'Rapporto esportato', 'pt': 'Relatório exportado', 'nl': 'Rapport geëxporteerd', 'pl': 'Raport wyeksportowany', 'ro': 'Raport exportat', 'cs': 'Zpráva exportována', 'sk': 'Správa exportovaná', 'hr': 'Izvještaj izvezen', 'bg': 'Докладът е експортиран', 'el': 'Η αναφορά εξάχθηκε', 'da': 'Rapport eksporteret', 'fi': 'Raportti viety', 'no': 'Rapport eksportert', 'uk': 'Звіт експортовано', 'ru': 'Отчёт экспортирован', 'tr': 'Rapor dışa aktarıldı', 'zh': '报告已导出', 'ja': 'レポートがエクスポートされました', 'ko': '보고서가 내보내졌습니다', 'hi': 'रिपोर्ट निर्यात की गई', 'th': 'ส่งออกรายงานแล้ว', 'vi': 'Đã xuất báo cáo', 'id': 'Laporan diekspor', 'ms': 'Laporan dieksport'},
   'contact_issue_posted': {'de': 'Bericht im BugLog veroeffentlicht', 'en': 'Report posted to BugLog', 'es': 'Informe publicado en BugLog', 'hu': 'Jelentés közzétéve a BugLogban', 'sv': 'Rapport publicerad i BugLog', 'ar': 'تم نشر التقرير في BugLog', 'he': 'הדוח פורסם ב-BugLog', 'fa': 'گزارش در BugLog منتشر شد', 'fr': 'Rapport publié dans BugLog', 'it': 'Rapporto pubblicato nel BugLog', 'pt': 'Relatório publicado no BugLog', 'nl': 'Rapport gepubliceerd in BugLog', 'pl': 'Raport opublikowany w BugLog', 'ro': 'Raport publicat în BugLog', 'cs': 'Zpráva publikována v BugLog', 'sk': 'Správa zverejnená v BugLog', 'hr': 'Izvještaj objavljen u BugLog', 'bg': 'Докладът е публикуван в BugLog', 'el': 'Η αναφορά δημοσιεύθηκε στο BugLog', 'da': 'Rapport offentliggjort i BugLog', 'fi': 'Raportti julkaistu BugLogissa', 'no': 'Rapport publisert i BugLog', 'uk': 'Звіт опубліковано в BugLog', 'ru': 'Отчёт опубликован в BugLog', 'tr': 'Rapor BugLog\'a gönderildi', 'zh': '报告已发布到 BugLog', 'ja': 'レポートが BugLog に投稿されました', 'ko': '보고서가 BugLog에 게시되었습니다', 'hi': 'रिपोर्ट BugLog में प्रकाशित', 'th': 'รายงานถูกโพสต์ใน BugLog แล้ว', 'vi': 'Báo cáo đã được đăng lên BugLog', 'id': 'Laporan diposting ke BugLog', 'ms': 'Laporan diterbitkan ke BugLog'},
+
+  // ── Connection Sheet (§18 / §12.3.1 / §8.1.2) ────────────────────────────
+  'connection_sheet_title': {'de': 'Verbindung', 'en': 'Connection', 'es': 'Conexión', 'hu': 'Kapcsolat', 'sv': 'Anslutning', 'ar': 'الاتصال', 'he': 'חיבור', 'fa': 'اتصال', 'fr': 'Connexion', 'it': 'Connessione', 'pt': 'Conexão', 'nl': 'Verbinding', 'pl': 'Połączenie', 'ro': 'Conexiune', 'cs': 'Připojení', 'sk': 'Pripojenie', 'hr': 'Veza', 'bg': 'Връзка', 'el': 'Σύνδεση', 'da': 'Forbindelse', 'fi': 'Yhteys', 'no': 'Tilkobling', 'uk': 'Підключення', 'ru': 'Подключение', 'tr': 'Bağlantı', 'zh': '连接', 'ja': '接続', 'ko': '연결', 'hi': 'कनेक्शन', 'th': 'การเชื่อมต่อ', 'vi': 'Kết nối', 'id': 'Koneksi', 'ms': 'Sambungan'},
+  'connection_sheet_active_peers': {'de': 'Aktive Peers', 'en': 'Active peers', 'es': 'Peers activos', 'hu': 'Aktív peerek', 'sv': 'Aktiva peers', 'ar': 'أقران نشطون', 'he': 'עמיתים פעילים', 'fa': 'همتایان فعال', 'fr': 'Pairs actifs', 'it': 'Peer attivi', 'pt': 'Peers ativos', 'nl': 'Actieve peers', 'pl': 'Aktywni peerzy', 'ro': 'Peers activi', 'cs': 'Aktivní peeři', 'sk': 'Aktívni peeri', 'hr': 'Aktivni peerovi', 'bg': 'Активни пиъри', 'el': 'Ενεργοί peers', 'da': 'Aktive peers', 'fi': 'Aktiiviset peerit', 'no': 'Aktive peers', 'uk': 'Активні піри', 'ru': 'Активные пиры', 'tr': 'Aktif peerler', 'zh': '活跃节点', 'ja': 'アクティブピア', 'ko': '활성 피어', 'hi': 'सक्रिय पीयर', 'th': 'เพียร์ที่ใช้งาน', 'vi': 'Peer hoạt động', 'id': 'Peer aktif', 'ms': 'Peer aktif'},
+  // uncertain: all non-de/en below for connection_sheet_no_peers
+  'connection_sheet_no_peers': {'de': 'Keine verbundenen Peers', 'en': 'No connected peers', 'es': 'Sin peers conectados', 'hu': 'Nincs csatlakoztatott peer', 'sv': 'Inga anslutna peers', 'ar': 'لا يوجد أقران متصلون', 'he': 'אין עמיתים מחוברים', 'fa': 'هیچ همتایی متصل نیست', 'fr': 'Aucun pair connecté', 'it': 'Nessun peer connesso', 'pt': 'Nenhum peer conectado', 'nl': 'Geen verbonden peers', 'pl': 'Brak połączonych peerów', 'ro': 'Niciun peer conectat', 'cs': 'Žádní připojení peeři', 'sk': 'Žiadni pripojení peeri', 'hr': 'Nema povezanih peerova', 'bg': 'Няма свързани пиъри', 'el': 'Δεν υπάρχουν συνδεδεμένοι peers', 'da': 'Ingen forbundne peers', 'fi': 'Ei yhdistettyjä peereitä', 'no': 'Ingen tilkoblede peers', 'uk': 'Немає підключених пірів', 'ru': 'Нет подключённых пиров', 'tr': 'Bağlı peer yok', 'zh': '没有已连接的节点', 'ja': '接続中のピアなし', 'ko': '연결된 피어 없음', 'hi': 'कोई जुड़ा हुआ पीयर नहीं', 'th': 'ไม่มีเพียร์ที่เชื่อมต่อ', 'vi': 'Không có peer nào kết nối', 'id': 'Tidak ada peer terhubung', 'ms': 'Tiada peer disambung'},
+  // uncertain: all non-de/en below for connection_sheet_reconnect
+  'connection_sheet_reconnect': {'de': 'Erneut verbinden', 'en': 'Reconnect', 'es': 'Reconectar', 'hu': 'Újracsatlakozás', 'sv': 'Återanslut', 'ar': 'إعادة الاتصال', 'he': 'התחבר מחדש', 'fa': 'اتصال مجدد', 'fr': 'Reconnecter', 'it': 'Riconnetti', 'pt': 'Reconectar', 'nl': 'Opnieuw verbinden', 'pl': 'Połącz ponownie', 'ro': 'Reconectare', 'cs': 'Znovu připojit', 'sk': 'Znovu pripojiť', 'hr': 'Povežite se ponovo', 'bg': 'Повторно свързване', 'el': 'Επανασύνδεση', 'da': 'Genopret forbindelse', 'fi': 'Yhdistä uudelleen', 'no': 'Koble til på nytt', 'uk': 'Перепідключитись', 'ru': 'Переподключиться', 'tr': 'Yeniden bağlan', 'zh': '重新连接', 'ja': '再接続', 'ko': '재연결', 'hi': 'पुनः कनेक्ट करें', 'th': 'เชื่อมต่อใหม่', 'vi': 'Kết nối lại', 'id': 'Hubungkan kembali', 'ms': 'Sambung semula'},
+  // uncertain: all non-de/en below for connection_sheet_reconnect_success
+  'connection_sheet_reconnect_success': {'de': '{n} Peers gefunden', 'en': '{n} peers found', 'es': '{n} peers encontrados', 'hu': '{n} peer találva', 'sv': '{n} peers hittades', 'ar': 'تم العثور على {n} أقران', 'he': 'נמצאו {n} עמיתים', 'fa': '{n} همتا یافت شد', 'fr': '{n} pairs trouvés', 'it': '{n} peer trovati', 'pt': '{n} peers encontrados', 'nl': '{n} peers gevonden', 'pl': 'Znaleziono {n} peerów', 'ro': '{n} peers găsiți', 'cs': 'Nalezeno {n} peerů', 'sk': 'Nájdených {n} peerov', 'hr': 'Pronađeno {n} peerova', 'bg': 'Намерени {n} пиъра', 'el': 'Βρέθηκαν {n} peers', 'da': '{n} peers fundet', 'fi': '{n} peeriä löydetty', 'no': '{n} peers funnet', 'uk': 'Знайдено {n} пірів', 'ru': 'Найдено {n} пиров', 'tr': '{n} peer bulundu', 'zh': '找到 {n} 个节点', 'ja': '{n} 件のピアが見つかりました', 'ko': '{n}개의 피어 발견', 'hi': '{n} पीयर मिले', 'th': 'พบ {n} เพียร์', 'vi': 'Tìm thấy {n} peer', 'id': '{n} peer ditemukan', 'ms': '{n} peer ditemui'},
+  // uncertain: all non-de/en below for connection_sheet_reconnect_none
+  'connection_sheet_reconnect_none': {'de': 'Kein Peer erreichbar', 'en': 'No peer reachable', 'es': 'Ningún peer alcanzable', 'hu': 'Nem érhető el peer', 'sv': 'Ingen peer nåbar', 'ar': 'لا يوجد قران يمكن الوصول إليه', 'he': 'לא ניתן להגיע לאף עמית', 'fa': 'هیچ همتایی قابل دسترس نیست', 'fr': 'Aucun pair joignable', 'it': 'Nessun peer raggiungibile', 'pt': 'Nenhum peer acessível', 'nl': 'Geen peer bereikbaar', 'pl': 'Żaden peer nieosiągalny', 'ro': 'Niciun peer accesibil', 'cs': 'Žádný peer nedostupný', 'sk': 'Žiadny peer nedostupný', 'hr': 'Nijedan peer nije dostupan', 'bg': 'Нито един пиър не е достъпен', 'el': 'Κανένας peer δεν είναι προσβάσιμος', 'da': 'Ingen peer tilgængelig', 'fi': 'Ei tavoitettavaa peeriä', 'no': 'Ingen peer tilgjengelig', 'uk': 'Жоден пір недоступний', 'ru': 'Нет доступных пиров', 'tr': 'Ulaşılabilir peer yok', 'zh': '没有可达节点', 'ja': '到達可能なピアなし', 'ko': '도달 가능한 피어 없음', 'hi': 'कोई पीयर उपलब्ध नहीं', 'th': 'ไม่มีเพียร์ที่เข้าถึงได้', 'vi': 'Không có peer nào tiếp cận được', 'id': 'Tidak ada peer yang terjangkau', 'ms': 'Tiada peer yang boleh dicapai'},
+  // uncertain: all non-de/en below for connection_sheet_reconnect_debounced
+  'connection_sheet_reconnect_debounced': {'de': 'Bitte warte noch {s} Sekunden', 'en': 'Please wait {s} more seconds', 'es': 'Espera {s} segundos más', 'hu': 'Várj még {s} másodpercet', 'sv': 'Vänta {s} sekunder till', 'ar': 'انتظر {s} ثانية أخرى', 'he': 'המתן עוד {s} שניות', 'fa': '{s} ثانیه دیگر صبر کنید', 'fr': 'Patientez encore {s} secondes', 'it': 'Attendi ancora {s} secondi', 'pt': 'Aguarda mais {s} segundos', 'nl': 'Wacht nog {s} seconden', 'pl': 'Poczekaj jeszcze {s} sekund', 'ro': 'Așteaptă încă {s} secunde', 'cs': 'Počkejte ještě {s} sekund', 'sk': 'Počkajte ešte {s} sekúnd', 'hr': 'Pričekajte još {s} sekundi', 'bg': 'Изчакайте още {s} секунди', 'el': 'Περιμένετε ακόμα {s} δευτερόλεπτα', 'da': 'Vent {s} sekunder mere', 'fi': 'Odota vielä {s} sekuntia', 'no': 'Vent {s} sekunder til', 'uk': 'Зачекайте ще {s} секунд', 'ru': 'Подождите ещё {s} секунд', 'tr': '{s} saniye daha bekleyin', 'zh': '请再等待 {s} 秒', 'ja': 'あと {s} 秒待ってください', 'ko': '{s}초 더 기다려 주세요', 'hi': 'कृपया {s} और सेकंड प्रतीक्षा करें', 'th': 'กรุณารออีก {s} วินาที', 'vi': 'Vui lòng chờ thêm {s} giây', 'id': 'Tunggu {s} detik lagi', 'ms': 'Sila tunggu {s} saat lagi'},
+  // uncertain: all non-de/en below for connection_sheet_rescue_bundle_section
+  'connection_sheet_rescue_bundle_section': {'de': 'Wiedereintrittshilfe', 'en': 'Re-entry assistance', 'es': 'Asistencia de reingreso', 'hu': 'Visszalépési segítség', 'sv': 'Återinträdeshjälp', 'ar': 'مساعدة إعادة الدخول', 'he': 'סיוע בכניסה מחדש', 'fa': 'کمک ورود مجدد', 'fr': 'Aide à la reconnexion', 'it': 'Assistenza per il rientro', 'pt': 'Assistência para reconexão', 'nl': 'Hulp bij herverbinding', 'pl': 'Pomoc w ponownym wejściu', 'ro': 'Asistență pentru reconectare', 'cs': 'Pomoc při opětovném připojení', 'sk': 'Pomoc pri opätovnom pripojení', 'hr': 'Pomoć za ponovni ulaz', 'bg': 'Помощ при повторно влизане', 'el': 'Βοήθεια επανεισόδου', 'da': 'Genindtrædelseassistance', 'fi': 'Uudelleenliittymisapu', 'no': 'Hjelp til gjenoppkobling', 'uk': 'Допомога з повторним входом', 'ru': 'Помощь при повторном подключении', 'tr': 'Yeniden giriş yardımı', 'zh': '重新接入协助', 'ja': '再参加サポート', 'ko': '재진입 지원', 'hi': 'पुनः प्रवेश सहायता', 'th': 'ความช่วยเหลือในการเชื่อมต่อใหม่', 'vi': 'Hỗ trợ kết nối lại', 'id': 'Bantuan masuk kembali', 'ms': 'Bantuan masuk semula'},
+  // uncertain: all non-de/en below for connection_sheet_share_bundle
+  'connection_sheet_share_bundle': {'de': 'Bundle teilen', 'en': 'Share bundle', 'es': 'Compartir paquete', 'hu': 'Csomag megosztása', 'sv': 'Dela paket', 'ar': 'مشاركة الحزمة', 'he': 'שתף חבילה', 'fa': 'اشتراک بسته', 'fr': 'Partager le paquet', 'it': 'Condividi il pacchetto', 'pt': 'Partilhar pacote', 'nl': 'Bundel delen', 'pl': 'Udostępnij pakiet', 'ro': 'Partajează pachetul', 'cs': 'Sdílet balíček', 'sk': 'Zdieľať balík', 'hr': 'Podijeli paket', 'bg': 'Споделяне на пакет', 'el': 'Κοινή χρήση πακέτου', 'da': 'Del pakke', 'fi': 'Jaa paketti', 'no': 'Del pakke', 'uk': 'Поділитись пакетом', 'ru': 'Поделиться пакетом', 'tr': 'Paketi paylaş', 'zh': '分享包', 'ja': 'バンドルを共有', 'ko': '번들 공유', 'hi': 'बंडल साझा करें', 'th': 'แชร์บันเดิล', 'vi': 'Chia sẻ gói', 'id': 'Bagikan bundel', 'ms': 'Kongsi berkas'},
+  // uncertain: all non-de/en below for connection_sheet_import_bundle
+  'connection_sheet_import_bundle': {'de': 'Bundle importieren', 'en': 'Import bundle', 'es': 'Importar paquete', 'hu': 'Csomag importálása', 'sv': 'Importera paket', 'ar': 'استيراد الحزمة', 'he': 'ייבא חבילה', 'fa': 'وارد کردن بسته', 'fr': 'Importer le paquet', 'it': 'Importa il pacchetto', 'pt': 'Importar pacote', 'nl': 'Bundel importeren', 'pl': 'Importuj pakiet', 'ro': 'Importă pachetul', 'cs': 'Importovat balíček', 'sk': 'Importovať balík', 'hr': 'Uvezi paket', 'bg': 'Импортиране на пакет', 'el': 'Εισαγωγή πακέτου', 'da': 'Importer pakke', 'fi': 'Tuo paketti', 'no': 'Importer pakke', 'uk': 'Імпортувати пакет', 'ru': 'Импортировать пакет', 'tr': 'Paketi içe aktar', 'zh': '导入包', 'ja': 'バンドルをインポート', 'ko': '번들 가져오기', 'hi': 'बंडल आयात करें', 'th': 'นำเข้าบันเดิล', 'vi': 'Nhập gói', 'id': 'Impor bundel', 'ms': 'Import berkas'},
+  // uncertain: all non-de/en below for connection_sheet_bundle_privacy_warning
+  'connection_sheet_bundle_privacy_warning': {'de': 'Dieses Bundle enthält Netzwerkadressen deiner Peers — gib es nur an Personen weiter, denen du vertraust.', 'en': 'This bundle contains network addresses of your peers — only share it with people you trust.', 'es': 'Este paquete contiene direcciones de red de tus peers — compártelo solo con personas de confianza.', 'hu': 'Ez a csomag tartalmazza a peerek hálózati címeit — csak megbízható személyeknek add.', 'sv': 'Det här paketet innehåller nätverksadresser för dina peers — dela det bara med betrodda personer.', 'ar': 'تحتوي هذه الحزمة على عناوين شبكة أقرانك — شاركها فقط مع من تثق بهم.', 'he': 'חבילה זו מכילה כתובות רשת של העמיתים שלך — שתף אותה רק עם אנשים שאתה סומך עליהם.', 'fa': 'این بسته حاوی آدرس‌های شبکه همتایان شماست — فقط با افراد مورد اعتماد به اشتراک بگذارید.', 'fr': 'Ce paquet contient les adresses réseau de vos pairs — ne le partagez qu\'avec des personnes de confiance.', 'it': 'Questo pacchetto contiene gli indirizzi di rete dei tuoi peer — condividilo solo con persone di fiducia.', 'pt': 'Este pacote contém endereços de rede dos teus peers — partilha apenas com pessoas em quem confias.', 'nl': 'Dit bundel bevat netwerkadressen van jouw peers — deel het alleen met mensen die je vertrouwt.', 'pl': 'Ten pakiet zawiera adresy sieciowe Twoich peerów — udostępniaj go tylko zaufanym osobom.', 'ro': 'Acest pachet conține adrese de rețea ale peerilor tăi — distribuie-l doar persoanelor de încredere.', 'cs': 'Tento balíček obsahuje síťové adresy vašich peerů — sdílejte jej pouze s důvěryhodnými osobami.', 'sk': 'Tento balík obsahuje sieťové adresy vašich peerov — zdieľajte ho len s dôveryhodnými osobami.', 'hr': 'Ovaj paket sadrži mrežne adrese vaših peerova — dijelite ga samo s osobama kojima vjerujete.', 'bg': 'Този пакет съдържа мрежови адреси на вашите пиъри — споделяйте го само с хора, на които имате доверие.', 'el': 'Αυτό το πακέτο περιέχει διευθύνσεις δικτύου των peers σας — μοιραστείτε το μόνο με άτομα που εμπιστεύεστε.', 'da': 'Denne pakke indeholder netværksadresser på dine peers — del den kun med personer du stoler på.', 'fi': 'Tämä paketti sisältää peeriesi verkko-osoitteet — jaa se vain luotettaville henkilöille.', 'no': 'Denne pakken inneholder nettverksadresser til dine peers — del den bare med folk du stoler på.', 'uk': 'Цей пакет містить мережеві адреси ваших пірів — діліться ним лише з людьми, яким ви довіряєте.', 'ru': 'Этот пакет содержит сетевые адреса ваших пиров — делитесь им только с доверенными людьми.', 'tr': 'Bu paket peer\'larınızın ağ adreslerini içerir — yalnızca güvendiğiniz kişilerle paylaşın.', 'zh': '此包包含您节点的网络地址 — 请仅与可信任的人分享。', 'ja': 'このバンドルにはピアのネットワークアドレスが含まれています — 信頼する相手にのみ共有してください。', 'ko': '이 번들에는 피어의 네트워크 주소가 포함되어 있습니다 — 신뢰하는 사람과만 공유하세요.', 'hi': 'इस बंडल में आपके पीयर के नेटवर्क पते हैं — केवल विश्वसनीय लोगों के साथ साझा करें।', 'th': 'บันเดิลนี้มีที่อยู่เครือข่ายของเพียร์คุณ — แชร์เฉพาะกับผู้ที่คุณไว้วางใจ', 'vi': 'Gói này chứa địa chỉ mạng của các peer của bạn — chỉ chia sẻ với những người bạn tin tưởng.', 'id': 'Bundel ini berisi alamat jaringan peer Anda — bagikan hanya kepada orang yang Anda percaya.', 'ms': 'Berkas ini mengandungi alamat rangkaian peer anda — kongsikan hanya dengan orang yang anda percaya.'},
+  // uncertain: all non-de/en below for connection_sheet_bundle_share_confirm
+  'connection_sheet_bundle_share_confirm': {'de': 'Bundle erstellen & teilen', 'en': 'Create & share bundle', 'es': 'Crear y compartir paquete', 'hu': 'Csomag létrehozása és megosztása', 'sv': 'Skapa och dela paket', 'ar': 'إنشاء ومشاركة الحزمة', 'he': 'צור ושתף חבילה', 'fa': 'ایجاد و اشتراک بسته', 'fr': 'Créer et partager le paquet', 'it': 'Crea e condividi il pacchetto', 'pt': 'Criar e partilhar pacote', 'nl': 'Bundel maken en delen', 'pl': 'Utwórz i udostępnij pakiet', 'ro': 'Creează și partajează pachetul', 'cs': 'Vytvořit a sdílet balíček', 'sk': 'Vytvoriť a zdieľať balík', 'hr': 'Stvori i podijeli paket', 'bg': 'Създаване и споделяне на пакет', 'el': 'Δημιουργία και κοινή χρήση πακέτου', 'da': 'Opret og del pakke', 'fi': 'Luo ja jaa paketti', 'no': 'Opprett og del pakke', 'uk': 'Створити та поділитись пакетом', 'ru': 'Создать и поделиться пакетом', 'tr': 'Paket oluştur ve paylaş', 'zh': '创建并分享包', 'ja': 'バンドルを作成して共有', 'ko': '번들 만들기 및 공유', 'hi': 'बंडल बनाएं और साझा करें', 'th': 'สร้างและแชร์บันเดิล', 'vi': 'Tạo và chia sẻ gói', 'id': 'Buat dan bagikan bundel', 'ms': 'Cipta dan kongsi berkas'},
+  // uncertain: all non-de/en below for connection_sheet_bundle_import_success
+  'connection_sheet_bundle_import_success': {'de': 'Bundle importiert — {n} Peers werden kontaktiert', 'en': 'Bundle imported — contacting {n} peers', 'es': 'Paquete importado — contactando {n} peers', 'hu': 'Csomag importálva — {n} peer kapcsolódik', 'sv': 'Paket importerat — kontaktar {n} peers', 'ar': 'تم استيراد الحزمة — جارٍ التواصل مع {n} أقران', 'he': 'החבילה יובאה — יוצר קשר עם {n} עמיתים', 'fa': 'بسته وارد شد — در حال تماس با {n} همتا', 'fr': 'Paquet importé — contact de {n} pairs en cours', 'it': 'Pacchetto importato — contatto con {n} peer', 'pt': 'Pacote importado — a contactar {n} peers', 'nl': 'Bundel geïmporteerd — {n} peers worden gecontacteerd', 'pl': 'Pakiet zaimportowany — kontaktuję z {n} peerami', 'ro': 'Pachet importat — contactez {n} peers', 'cs': 'Balíček importován — kontaktuji {n} peerů', 'sk': 'Balík importovaný — kontaktujem {n} peerov', 'hr': 'Paket uvezen — kontaktiranje {n} peerova', 'bg': 'Пакетът е импортиран — свързване с {n} пиъра', 'el': 'Εισήχθη πακέτο — επικοινωνία με {n} peers', 'da': 'Pakke importeret — kontakter {n} peers', 'fi': 'Paketti tuotu — otetaan yhteyttä {n} peeriin', 'no': 'Pakke importert — kontakter {n} peers', 'uk': 'Пакет імпортовано — контактую з {n} пірами', 'ru': 'Пакет импортирован — подключаюсь к {n} пирам', 'tr': 'Paket içe aktarıldı — {n} peer ile iletişime geçiliyor', 'zh': '包已导入 — 正在联系 {n} 个节点', 'ja': 'バンドルをインポートしました — {n} 件のピアに接続中', 'ko': '번들 가져오기 완료 — {n}개의 피어 연결 중', 'hi': 'बंडल आयात हुआ — {n} पीयर से संपर्क हो रहा है', 'th': 'นำเข้าบันเดิลแล้ว — กำลังติดต่อ {n} เพียร์', 'vi': 'Đã nhập gói — đang liên hệ {n} peer', 'id': 'Bundel diimpor — menghubungi {n} peer', 'ms': 'Berkas diimport — menghubungi {n} peer'},
+  // uncertain: all non-de/en below for connection_sheet_bundle_import_error
+  'connection_sheet_bundle_import_error': {'de': 'Ungültiges Bundle (falsches Netzwerk oder beschädigt)', 'en': 'Invalid bundle (wrong network or corrupted)', 'es': 'Paquete inválido (red incorrecta o dañado)', 'hu': 'Érvénytelen csomag (rossz hálózat vagy sérült)', 'sv': 'Ogiltigt paket (fel nätverk eller skadat)', 'ar': 'حزمة غير صالحة (شبكة خاطئة أو تالفة)', 'he': 'חבילה לא תקפה (רשת שגויה או פגומה)', 'fa': 'بسته نامعتبر (شبکه اشتباه یا خراب)', 'fr': 'Paquet invalide (mauvais réseau ou corrompu)', 'it': 'Pacchetto non valido (rete errata o corrotto)', 'pt': 'Pacote inválido (rede errada ou corrompido)', 'nl': 'Ongeldig bundel (verkeerd netwerk of beschadigd)', 'pl': 'Nieprawidłowy pakiet (zła sieć lub uszkodzony)', 'ro': 'Pachet invalid (rețea greșită sau corupt)', 'cs': 'Neplatný balíček (špatná síť nebo poškozený)', 'sk': 'Neplatný balík (zlá sieť alebo poškodený)', 'hr': 'Nevažeći paket (pogrešna mreža ili oštećen)', 'bg': 'Невалиден пакет (грешна мрежа или повреден)', 'el': 'Μη έγκυρο πακέτο (λάθος δίκτυο ή κατεστραμμένο)', 'da': 'Ugyldigt pakke (forkert netværk eller beskadiget)', 'fi': 'Virheellinen paketti (väärä verkko tai vioittunut)', 'no': 'Ugyldig pakke (feil nettverk eller ødelagt)', 'uk': 'Недійсний пакет (неправильна мережа або пошкоджений)', 'ru': 'Недействительный пакет (неправильная сеть или повреждён)', 'tr': 'Geçersiz paket (yanlış ağ veya bozuk)', 'zh': '包无效（网络错误或已损坏）', 'ja': '無効なバンドル（ネットワーク不一致または破損）', 'ko': '번들이 유효하지 않습니다 (잘못된 네트워크 또는 손상)', 'hi': 'अमान्य बंडल (गलत नेटवर्क या दूषित)', 'th': 'บันเดิลไม่ถูกต้อง (เครือข่ายผิดหรือเสียหาย)', 'vi': 'Gói không hợp lệ (sai mạng hoặc bị hỏng)', 'id': 'Bundel tidak valid (jaringan salah atau rusak)', 'ms': 'Berkas tidak sah (rangkaian salah atau rosak)'},
+  // uncertain: all non-de/en below for connection_sheet_bundle_paste_hint
+  'connection_sheet_bundle_paste_hint': {'de': 'Bundle-URI einfügen…', 'en': 'Paste bundle URI…', 'es': 'Pegar URI del paquete…', 'hu': 'Csomag URI beillesztése…', 'sv': 'Klistra in paket-URI…', 'ar': 'الصق URI الحزمة…', 'he': 'הדבק URI של חבילה…', 'fa': 'URI بسته را جایگذاری کنید…', 'fr': 'Coller l\'URI du paquet…', 'it': 'Incolla URI del pacchetto…', 'pt': 'Colar URI do pacote…', 'nl': 'Bundel-URI plakken…', 'pl': 'Wklej URI pakietu…', 'ro': 'Inserați URI pachetul…', 'cs': 'Vložte URI balíčku…', 'sk': 'Vložte URI balíka…', 'hr': 'Zalijepite URI paketa…', 'bg': 'Поставете URI на пакета…', 'el': 'Επικολλήστε URI πακέτου…', 'da': 'Indsæt pakke-URI…', 'fi': 'Liitä paketti-URI…', 'no': 'Lim inn pakke-URI…', 'uk': 'Вставте URI пакету…', 'ru': 'Вставьте URI пакета…', 'tr': 'Paket URI\'sini yapıştır…', 'zh': '粘贴包 URI…', 'ja': 'バンドル URI を貼り付け…', 'ko': '번들 URI 붙여넣기…', 'hi': 'बंडल URI पेस्ट करें…', 'th': 'วาง URI ของบันเดิล…', 'vi': 'Dán URI gói…', 'id': 'Tempel URI bundel…', 'ms': 'Tampal URI berkas…'},
+  // uncertain: all non-de/en below for connection_sheet_manual_peer_section
+  'connection_sheet_manual_peer_section': {'de': 'Peer manuell hinzufügen', 'en': 'Add peer manually', 'es': 'Añadir peer manualmente', 'hu': 'Peer manuális hozzáadása', 'sv': 'Lägg till peer manuellt', 'ar': 'إضافة قران يدوياً', 'he': 'הוסף עמית ידנית', 'fa': 'افزودن همتا به صورت دستی', 'fr': 'Ajouter un pair manuellement', 'it': 'Aggiungi peer manualmente', 'pt': 'Adicionar peer manualmente', 'nl': 'Peer handmatig toevoegen', 'pl': 'Dodaj peera ręcznie', 'ro': 'Adaugă peer manual', 'cs': 'Přidat peer ručně', 'sk': 'Pridať peer ručne', 'hr': 'Ručno dodaj peer', 'bg': 'Добавяне на пиър ръчно', 'el': 'Προσθήκη peer χειροκίνητα', 'da': 'Tilføj peer manuelt', 'fi': 'Lisää peerinen manuaalisesti', 'no': 'Legg til peer manuelt', 'uk': 'Додати пір вручну', 'ru': 'Добавить пир вручную', 'tr': 'Peer manuel ekle', 'zh': '手动添加节点', 'ja': 'ピアを手動で追加', 'ko': '피어 수동 추가', 'hi': 'पीयर मैन्युअल रूप से जोड़ें', 'th': 'เพิ่มเพียร์ด้วยตนเอง', 'vi': 'Thêm peer thủ công', 'id': 'Tambahkan peer secara manual', 'ms': 'Tambah peer secara manual'},
+  // uncertain: all non-de/en below for connection_sheet_peer_ip_hint
+  'connection_sheet_peer_ip_hint': {'de': 'IP-Adresse', 'en': 'IP address', 'es': 'Dirección IP', 'hu': 'IP-cím', 'sv': 'IP-adress', 'ar': 'عنوان IP', 'he': 'כתובת IP', 'fa': 'آدرس IP', 'fr': 'Adresse IP', 'it': 'Indirizzo IP', 'pt': 'Endereço IP', 'nl': 'IP-adres', 'pl': 'Adres IP', 'ro': 'Adresă IP', 'cs': 'IP adresa', 'sk': 'IP adresa', 'hr': 'IP adresa', 'bg': 'IP адрес', 'el': 'Διεύθυνση IP', 'da': 'IP-adresse', 'fi': 'IP-osoite', 'no': 'IP-adresse', 'uk': 'IP-адреса', 'ru': 'IP-адрес', 'tr': 'IP adresi', 'zh': 'IP地址', 'ja': 'IPアドレス', 'ko': 'IP 주소', 'hi': 'IP पता', 'th': 'ที่อยู่ IP', 'vi': 'Địa chỉ IP', 'id': 'Alamat IP', 'ms': 'Alamat IP'},
+  // uncertain: all non-de/en below for connection_sheet_peer_port_hint
+  'connection_sheet_peer_port_hint': {'de': 'Port', 'en': 'Port', 'es': 'Puerto', 'hu': 'Port', 'sv': 'Port', 'ar': 'منفذ', 'he': 'פורט', 'fa': 'پورت', 'fr': 'Port', 'it': 'Porta', 'pt': 'Porta', 'nl': 'Poort', 'pl': 'Port', 'ro': 'Port', 'cs': 'Port', 'sk': 'Port', 'hr': 'Port', 'bg': 'Порт', 'el': 'Θύρα', 'da': 'Port', 'fi': 'Portti', 'no': 'Port', 'uk': 'Порт', 'ru': 'Порт', 'tr': 'Port', 'zh': '端口', 'ja': 'ポート', 'ko': '포트', 'hi': 'पोर्ट', 'th': 'พอร์ต', 'vi': 'Cổng', 'id': 'Port', 'ms': 'Port'},
+  // uncertain: all non-de/en below for connection_sheet_add_peer
+  'connection_sheet_add_peer': {'de': 'Hinzufügen', 'en': 'Add', 'es': 'Añadir', 'hu': 'Hozzáad', 'sv': 'Lägg till', 'ar': 'إضافة', 'he': 'הוסף', 'fa': 'افزودن', 'fr': 'Ajouter', 'it': 'Aggiungi', 'pt': 'Adicionar', 'nl': 'Toevoegen', 'pl': 'Dodaj', 'ro': 'Adaugă', 'cs': 'Přidat', 'sk': 'Pridať', 'hr': 'Dodaj', 'bg': 'Добавяне', 'el': 'Προσθήκη', 'da': 'Tilføj', 'fi': 'Lisää', 'no': 'Legg til', 'uk': 'Додати', 'ru': 'Добавить', 'tr': 'Ekle', 'zh': '添加', 'ja': '追加', 'ko': '추가', 'hi': 'जोड़ें', 'th': 'เพิ่ม', 'vi': 'Thêm', 'id': 'Tambah', 'ms': 'Tambah'},
+
+  // ── §5.8 Message delivery status (One-Shot-Outbox) ───────────────
+  // uncertain: all locales except de/en — native-speaker review recommended
+  'msg_status_queued_offline': {
+    'de': 'Im Netzwerk gespeichert – wartet auf Empfänger',
+    'en': 'Stored in network – waiting for recipient',
+    'es': 'Almacenado en la red – esperando al destinatario', // uncertain:
+    'hu': 'A hálózaton tárolva – várakozás a címzettre', // uncertain:
+    'sv': 'Lagrat i nätverket – väntar på mottagaren', // uncertain:
+    'ar': 'مخزّن في الشبكة – في انتظار المستقبِل', // uncertain:
+    'he': 'מאוחסן ברשת – ממתין לנמען', // uncertain:
+    'fa': 'در شبکه ذخیره شد – در انتظار دریافت‌کننده', // uncertain:
+    'fr': 'Stocké dans le réseau – en attente du destinataire', // uncertain:
+    'it': 'Archiviato nella rete – in attesa del destinatario', // uncertain:
+    'pt': 'Armazenado na rede – aguardando o destinatário', // uncertain:
+    'nl': 'Opgeslagen in het netwerk – wachten op ontvanger', // uncertain:
+    'pl': 'Zapisano w sieci – oczekiwanie na odbiorcę', // uncertain:
+    'ro': 'Stocat în rețea – așteptând destinatarul', // uncertain:
+    'cs': 'Uloženo v síti – čeká na příjemce', // uncertain:
+    'sk': 'Uložené v sieti – čakanie na príjemcu', // uncertain:
+    'hr': 'Pohranjeno u mreži – čeka na primatelja', // uncertain:
+    'bg': 'Съхранено в мрежата – чака получателя', // uncertain:
+    'el': 'Αποθηκεύτηκε στο δίκτυο – αναμονή για παραλήπτη', // uncertain:
+    'da': 'Gemt i netværket – venter på modtageren', // uncertain:
+    'fi': 'Tallennettu verkkoon – odottaa vastaanottajaa', // uncertain:
+    'no': 'Lagret i nettverket – venter på mottaker', // uncertain:
+    'uk': 'Збережено в мережі – очікує на одержувача', // uncertain:
+    'ru': 'Сохранено в сети – ожидает получателя', // uncertain:
+    'tr': 'Ağda saklandı – alıcı bekleniyor', // uncertain:
+    'zh': '已存入网络 – 等待收件人', // uncertain:
+    'ja': 'ネットワークに保存済み – 受信者を待っています', // uncertain:
+    'ko': '네트워크에 저장됨 – 수신자를 기다리는 중', // uncertain:
+    'hi': 'नेटवर्क में संग्रहीत – प्राप्तकर्ता की प्रतीक्षा', // uncertain:
+    'th': 'บันทึกในเครือข่ายแล้ว – รอผู้รับ', // uncertain:
+    'vi': 'Đã lưu trong mạng – đang chờ người nhận', // uncertain:
+    'id': 'Tersimpan di jaringan – menunggu penerima', // uncertain:
+    'ms': 'Tersimpan dalam rangkaian – menunggu penerima', // uncertain:
+  },
+  'msg_status_failed': {
+    'de': 'Nicht gesendet – keine Verbindung',
+    'en': 'Not sent – no connectivity',
+    'es': 'No enviado – sin conexión', // uncertain:
+    'hu': 'Nem elküldve – nincs kapcsolat', // uncertain:
+    'sv': 'Inte skickat – ingen anslutning', // uncertain:
+    'ar': 'لم يُرسَل – لا يوجد اتصال', // uncertain:
+    'he': 'לא נשלח – אין קישוריות', // uncertain:
+    'fa': 'ارسال نشد – بدون اتصال', // uncertain:
+    'fr': 'Non envoyé – pas de connexion', // uncertain:
+    'it': 'Non inviato – nessuna connessione', // uncertain:
+    'pt': 'Não enviado – sem conectividade', // uncertain:
+    'nl': 'Niet verzonden – geen verbinding', // uncertain:
+    'pl': 'Nie wysłano – brak połączenia', // uncertain:
+    'ro': 'Netrimit – fără conexiune', // uncertain:
+    'cs': 'Neodesláno – žádné připojení', // uncertain:
+    'sk': 'Neodoslané – žiadne pripojenie', // uncertain:
+    'hr': 'Nije poslano – nema veze', // uncertain:
+    'bg': 'Не е изпратено – няма връзка', // uncertain:
+    'el': 'Δεν εστάλη – χωρίς σύνδεση', // uncertain:
+    'da': 'Ikke sendt – ingen forbindelse', // uncertain:
+    'fi': 'Ei lähetetty – ei yhteyttä', // uncertain:
+    'no': 'Ikke sendt – ingen tilkobling', // uncertain:
+    'uk': 'Не надіслано – немає зʼєднання', // uncertain:
+    'ru': 'Не отправлено – нет подключения', // uncertain:
+    'tr': 'Gönderilmedi – bağlantı yok', // uncertain:
+    'zh': '未发送 – 无连接', // uncertain:
+    'ja': '送信されませんでした – 接続なし', // uncertain:
+    'ko': '전송되지 않음 – 연결 없음', // uncertain:
+    'hi': 'नहीं भेजा गया – कोई कनेक्टिविटी नहीं', // uncertain:
+    'th': 'ไม่ได้ส่ง – ไม่มีการเชื่อมต่อ', // uncertain:
+    'vi': 'Chưa gửi – không có kết nối', // uncertain:
+    'id': 'Tidak terkirim – tidak ada koneksi', // uncertain:
+    'ms': 'Tidak dihantar – tiada sambungan', // uncertain:
+  },
+  'msg_status_expired': {
+    'de': 'Abgelaufen – 7 Tage ohne Bestätigung',
+    'en': 'Expired – 7 days without confirmation',
+    'es': 'Expirado – 7 días sin confirmación', // uncertain:
+    'hu': 'Lejárt – 7 nap visszaigazolás nélkül', // uncertain:
+    'sv': 'Utgången – 7 dagar utan bekräftelse', // uncertain:
+    'ar': 'انتهت صلاحيته – 7 أيام بدون تأكيد', // uncertain:
+    'he': 'פג תוקפו – 7 ימים ללא אישור', // uncertain:
+    'fa': 'منقضی شد – ۷ روز بدون تأیید', // uncertain:
+    'fr': 'Expiré – 7 jours sans confirmation', // uncertain:
+    'it': 'Scaduto – 7 giorni senza conferma', // uncertain:
+    'pt': 'Expirado – 7 dias sem confirmação', // uncertain:
+    'nl': 'Verlopen – 7 dagen zonder bevestiging', // uncertain:
+    'pl': 'Wygasło – 7 dni bez potwierdzenia', // uncertain:
+    'ro': 'Expirat – 7 zile fără confirmare', // uncertain:
+    'cs': 'Vypršelo – 7 dní bez potvrzení', // uncertain:
+    'sk': 'Vypršalo – 7 dní bez potvrdenia', // uncertain:
+    'hr': 'Isteklo – 7 dana bez potvrde', // uncertain:
+    'bg': 'Изтекло – 7 дни без потвърждение', // uncertain:
+    'el': 'Έληξε – 7 ημέρες χωρίς επιβεβαίωση', // uncertain:
+    'da': 'Udløbet – 7 dage uden bekræftelse', // uncertain:
+    'fi': 'Vanhentunut – 7 päivää ilman vahvistusta', // uncertain:
+    'no': 'Utløpt – 7 dager uten bekreftelse', // uncertain:
+    'uk': 'Термін дії минув – 7 днів без підтвердження', // uncertain:
+    'ru': 'Срок истёк – 7 дней без подтверждения', // uncertain:
+    'tr': 'Süresi doldu – 7 gün boyunca onay yok', // uncertain:
+    'zh': '已过期 – 7天无确认', // uncertain:
+    'ja': '期限切れ – 7日間確認なし', // uncertain:
+    'ko': '만료됨 – 7일 동안 확인 없음', // uncertain:
+    'hi': 'समाप्त – 7 दिन बिना पुष्टि के', // uncertain:
+    'th': 'หมดอายุ – 7 วันไม่มีการยืนยัน', // uncertain:
+    'vi': 'Đã hết hạn – 7 ngày không có xác nhận', // uncertain:
+    'id': 'Kedaluwarsa – 7 hari tanpa konfirmasi', // uncertain:
+    'ms': 'Tamat tempoh – 7 hari tanpa pengesahan', // uncertain:
+  },
+  'msg_resend': {
+    'de': 'Erneut senden',
+    'en': 'Resend',
+    'es': 'Reenviar', // uncertain:
+    'hu': 'Újraküldés', // uncertain:
+    'sv': 'Skicka igen', // uncertain:
+    'ar': 'إعادة الإرسال', // uncertain:
+    'he': 'שלח מחדש', // uncertain:
+    'fa': 'ارسال مجدد', // uncertain:
+    'fr': 'Renvoyer', // uncertain:
+    'it': 'Invia di nuovo', // uncertain:
+    'pt': 'Reenviar', // uncertain:
+    'nl': 'Opnieuw verzenden', // uncertain:
+    'pl': 'Wyślij ponownie', // uncertain:
+    'ro': 'Retrimite', // uncertain:
+    'cs': 'Odeslat znovu', // uncertain:
+    'sk': 'Odoslať znova', // uncertain:
+    'hr': 'Ponovno pošalji', // uncertain:
+    'bg': 'Изпрати отново', // uncertain:
+    'el': 'Επανάληψη αποστολής', // uncertain:
+    'da': 'Send igen', // uncertain:
+    'fi': 'Lähetä uudelleen', // uncertain:
+    'no': 'Send på nytt', // uncertain:
+    'uk': 'Надіслати знову', // uncertain:
+    'ru': 'Отправить снова', // uncertain:
+    'tr': 'Yeniden gönder', // uncertain:
+    'zh': '重新发送', // uncertain:
+    'ja': '再送信', // uncertain:
+    'ko': '다시 보내기', // uncertain:
+    'hi': 'पुनः भेजें', // uncertain:
+    'th': 'ส่งอีกครั้ง', // uncertain:
+    'vi': 'Gửi lại', // uncertain:
+    'id': 'Kirim ulang', // uncertain:
+    'ms': 'Hantar semula', // uncertain:
+  },
 };
