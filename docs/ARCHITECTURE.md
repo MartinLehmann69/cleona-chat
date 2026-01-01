@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:455c9cec2610, 2026-06-27). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:be3585dd0696, 2026-06-28). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1056,6 +1056,8 @@ All four user-key pairs — Ed25519, ML-DSA-65, X25519, ML-KEM-768 — are deter
 
 **Forward-secrecy trade-off (accepted).** The flip side of seed-derivable keys is that the master seed is a permanent root secret: anyone who obtains the 24-word phrase (or a 3-of-5 guardian quorum, §6.2) can regenerate all user keys and decrypt the entire recorded ciphertext history — there is no forward secrecy for either the classical or the PQ half. This is the deliberate consequence of choosing stateless Per-Message KEM over a Double Ratchet (§3.2): no session state to desync, at the cost of no post-compromise secrecy. The seed must be protected accordingly (offline backup, optional Shamir split, §6.2).
 
+**Pairwise Rendezvous Secret (§4.11.3).** In addition to the ephemeral Per-Message KEM, a deterministic, long-lived pairwise secret exists between any two contacts. It is derived via X25519-DH on the founding keys (stable across Emergency Key Rotation) and serves exclusively as input for the External Rendezvous lookup-tag computation (§4.11). It is **never** used for message encryption. Full derivation specified in §4.11.3.
+
 ### 3.4 User Identity Sigs (Ed25519+ML-DSA-65 hybrid)
 
 Every user holds a **User-Sig-Keypair** that carries the authenticity of the User-Identity at the Inner-Frame layer. Hybrid: Ed25519 for performance and long-standing audit trust, ML-DSA-65 for PQ security.
@@ -1692,10 +1694,11 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 
 | Tier | Mechanism | Fires when | Traffic cost |
 |---|---|---|---|
-| **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by score (lastSeen recency × address priority §4.6). One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
+| **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by **stability tier (§4.9.2) first, then lastSeen recency** — Anchor/Stable peers (same address ≥30d/7d) are probed first because they have the highest probability of still being reachable after extended offline. One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
 | **2 — LAN Discovery** | 3× burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76, TTL=4) + IPv6-Multicast, then silence. | Tier 1 exhausted (all stored peers unreachable or routing table empty) | 9 datagrams (3 × 3 channels) |
 | **3 — Bootstrap** | Unicast probe to cached bootstrap addresses: stored peers with public WAN IPs are probed on both their stored port and the channel-default bootstrap port (8081 beta / 8080 live — §17.5). Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–4 PINGs |
-| **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Rate-limited to ~50 pps to avoid flooding upstream WAN links (§4.5.3). Last resort. | Tier 3 exhausted (bootstrap unreachable) | ~65 000 probes over ~22 min |
+| **3b — External Rendezvous** | Resolve anchor/stable contacts via the RendezvousProvider cascade (§4.11). For each contact with `stabilityTier` anchor/stable: compute the pairwise lookup tag for the current epoch, query all available providers (Nostr relays) in parallel (Happy-Eyeballs). First valid, signature-verified record yields the contact's current addresses → direct contact attempt via UDP. Timeout: 10 s per provider. | Tier 3 exhausted AND at least 1 accepted contact exists | < 50 KB (a few WebSocket requests) |
+| **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Rate-limited to ~50 pps to avoid flooding upstream WAN links (§4.5.3). Last resort. | Tier 3b exhausted (no external rendezvous hit or no contacts) | ~65 000 probes over ~22 min |
 
 **Discovery-complete gate**: the node-level flag `_discoveryComplete` is set when **any** tier produces a confirmed peer that delivers a `PEER_LIST_PUSH` with ≥1 entry. Once set:
 - All pending discovery timers are cancelled (no further tier escalation).
@@ -1904,14 +1907,36 @@ Mobile devices change networks frequently: WiFi → mobile, new WiFi, VPN toggle
 **Recovery actions on a network change**:
 1. Retry public-IP discovery via STUN/UPnP.
 2. Liveness republish (debounced 5s, see §3.5/§4.3).
-3. Soft-reset of the routing table: stale routes get a mark-stale flag, prune after 30s.
-4. Topology-aware keepalive filter: ignore keepalives from old WLAN peers when in mobile-only mode.
-5. Re-ping the bootstrap (no re-discovery — the bootstrap entry is kept).
-6. Drain the send queue (S&F pull, mailbox pull) — new messages may arrive on the new addresses.
+3. External Rendezvous republish (debounced 10s, §4.11.7) — updates endpoint records on all RendezvousProviders with new addresses. The 10s debounce (5s after Liveness) ensures addresses are confirmed before external publication.
+4. Soft-reset of the routing table: stale routes get a mark-stale flag, prune after 30s.
+5. Topology-aware keepalive filter: ignore keepalives from old WLAN peers when in mobile-only mode.
+6. Re-ping the bootstrap (no re-discovery — the bootstrap entry is kept).
+7. Drain the send queue (S&F pull, mailbox pull) — new messages may arrive on the new addresses.
 
 **Topology-aware keepalive filter**: mobile-only devices ignore keepalives from WLAN peers when the WLAN has been switched. This prevents stale WLAN addresses from staying "alive" in the cache.
 
 **Routing-table audit on daemon start**: on every start `auditAddresses(currentLocalIps)` runs — pruning carrier-NAT addresses (100.64.0.0/10 RFC 6598, 192.0.0.0/24). All RFC 1918 private IPv4 are kept when the local node itself is on a private network (cross-subnet private peers are L3-routable via the gateway). Public IPv4 + IPv6 are kept (score-decay handles staleness).
+
+#### 4.9.2 Address Stability Score (V3.1.113)
+
+The short-term `effectiveScore` (24h half-life) answers "did the last send work?" but loses all memory after 48h offline. For cold-start recovery after extended offline (weekend, vacation), long-term address persistence matters: a server reachable under the same IP:port for 6 months is qualitatively different from a phone that changes IP every 24h.
+
+**Per-address tracking:** `PeerAddress.stableSince` records the timestamp of the first successful contact under a given ip:port. Set once by `recordSuccess()`, never overwritten, persisted across daemon restarts in `routing_table.json`. Survives address-merge in KBucket (transferred to matching ip:port on firstParty updates).
+
+**Per-peer tracking:** `PeerInfo.addressChangeCount` counts how often the peer's public address set has changed (a public ip:port disappeared AND a new one appeared in the same firstParty update). This distinguishes static-IP servers (count=0) from dynamic-IP DSL connections (count grows with each ISP reconnect).
+
+**StabilityTier classification** (computed property on `PeerInfo`, not persisted — derived from persisted `stableSince` and `addressChangeCount`):
+
+| Tier | Criteria | Semantics |
+|---|---|---|
+| **anchor** | oldest `stableSince` ≥ 30 days, `addressChangeCount` = 0 | Quasi-infrastructure: static IP, always-on. Contacted first on cold start (§4.5 Tier 1), preferred in ContactSeed (§8.1.1). |
+| **stable** | oldest `stableSince` ≥ 7 days, `addressChangeCount` ≤ 2 | Reliable but not permanent (e.g. home server with rare ISP reconnects). |
+| **normal** | everything else | Default — scored by `effectiveScore` as before. |
+| **volatile** | `addressChangeCount` > 10 | Frequently changing address (mobile, dynamic IP). Used only when no better option exists. |
+
+**Usage:**
+- §4.5 Tier-1 Discovery sorts by stability tier before `lastSeen` recency. Anchor peers are probed first — they have the highest probability of still being reachable after extended offline.
+- §8.1.1 ContactSeed peer selection fills anchor/stable peers with public addresses first (up to 3 slots), then remaining relay-capable peers.
 
 **Tunnel-IPv6 filter**: Teredo (2001::/32), 6to4 (2002::/16), Documentation (2001:db8::/32), and IPv4-mapped (::ffff:0:0/96) are filtered out during local address iteration. This prevents a Windows Teredo tunnel flap from triggering a soft reset.
 
@@ -2041,6 +2066,207 @@ The §2.3.5 BOOT-subset RPCs (DHT bootstrap, 2D-DHT identity-resolution lookups,
 - The Distance-Vector route table (ROUTE_UPDATE).
 
 This visibility is identical to V2's behaviour and was implicitly accepted there. V3.0 makes it explicit, so future readers can audit the trade-off rather than rediscover it as a regression.
+
+### 4.11 External Rendezvous (Cold-Start Recovery)
+
+#### 4.11.1 Problem & Design Principle
+
+When a node is offline for more than 24 hours, its ISP may assign a new IP (dynamic IPv4, CGNAT remapping). The stored peer addresses in its routing table are stale, and the internal Cleona DHT (§4.2/§4.3) cannot help — it is only as alive as the node's own peers. The §4.5 Discovery Cascade escalates to LAN discovery (local only), bootstrap (may also have rotated), and subnet scan (22 minutes, local only). For peers on other networks (mobile carrier, different ISP, different city), there is **no** recovery path.
+
+**Solution**: Bob's **current endpoint** is published on **external, permanently running networks** under a stable, privacy-preserving key. Alice — or any of Bob's contacts — can resolve that key after extended offline to obtain Bob's current address and re-enter the Cleona mesh.
+
+**Scope**: External Rendezvous handles only cold-start address resolution. Once a single live peer is found, all further traffic flows over the existing Closed-Network (§4.10) with HMAC authentication. The external networks **never** carry Cleona message traffic — they are a pure `lookupTag → encryptedEndpoint` directory.
+
+**Design principle**: Apply **hardening layers** over a small number of substrates, rather than many substrates without hardening. Four orthogonal layers (§4.11.4–§4.11.5) each cover a different attack axis and compose to close the weaknesses of the individual substrates.
+
+#### 4.11.2 RendezvousProvider Interface
+
+All substrates implement a common interface. The existing IdentityResolver (§4.3) operates as the implicit Tier-0 provider (resolving via the internal Cleona DHT). External providers add parallel resolution channels.
+
+```dart
+abstract class RendezvousProvider {
+  /// Publish a signed, encrypted endpoint record under the derived lookup tag.
+  /// The tag is NOT the identity pubkey — it is an HKDF-derived, epoch-rotated
+  /// value that only the specific contact pair can compute (§4.11.4).
+  Future<void> publish(Uint8List lookupTag, SignedEndpointRecord record);
+
+  /// Resolve the record under the tag. Returns null if nothing found or
+  /// the channel is blocked in the current network.
+  Future<SignedEndpointRecord?> resolve(Uint8List lookupTag);
+
+  /// Whether this provider is usable in the current network context
+  /// (e.g. WebSocket connectivity for Nostr, Tor circuit for Onion).
+  bool get isAvailable;
+}
+```
+
+The cascade logic remains simple: query all available providers in parallel (Happy-Eyeballs), take the first signature-verified hit with the highest `seq`. No provider-specific logic leaks into the caller.
+
+#### 4.11.3 Pairwise Rendezvous Secret
+
+The lookup tag must be unlinkable to the identity pubkey — an observer who knows Bob's public key must not be able to compute the tag and poll for his online presence. This requires a **shared secret** between Alice and Bob that an observer cannot derive.
+
+**Derivation** (deterministic, no round-trip, both sides compute independently):
+
+```
+// Step 1: Convert founding Ed25519 keys to X25519 (libsodium built-in)
+own_x25519_sk     = crypto_sign_ed25519_sk_to_curve25519(own_founding_ed25519_sk)
+contact_x25519_pk = crypto_sign_ed25519_pk_to_curve25519(contact_founding_ed25519_pk)
+
+// Step 2: X25519 Diffie-Hellman
+pairwise_dh = crypto_scalarmult(own_x25519_sk, contact_x25519_pk)
+
+// Step 3: Domain-separated HKDF
+rendezvous_secret = HKDF-SHA-256(
+    ikm  = pairwise_dh,
+    salt = "cleona-rendezvous-v1",
+    info = min(own_userId_hex, contact_userId_hex)
+         || max(own_userId_hex, contact_userId_hex),
+    length = 32
+)
+```
+
+**Why founding keys**: The founding Ed25519 key is the stable identity anchor (§3.1) — it survives Emergency Key Rotation (§7.4b). Using the current key would require a transition window after rotation where both old and new tags are published; the founding key avoids this entirely.
+
+**Symmetry**: `info = sorted(userId_A, userId_B)` ensures both sides derive the same secret regardless of who initiated the contact exchange.
+
+**No new crypto**: `crypto_sign_ed25519_pk_to_curve25519` and `crypto_scalarmult` are existing libsodium functions already linked into Cleona. HKDF-SHA-256 is used elsewhere (§3.3, §7.1.1).
+
+#### 4.11.4 Lookup Tag & Epoch
+
+```
+lookup_tag = HKDF-SHA-256(
+    ikm    = rendezvous_secret,
+    salt   = "cleona-rv-tag-v1",
+    info   = epoch_string || "/" || direction,
+    length = 32
+)
+
+epoch_string = "YYYY-MM-DD-HH"  (UTC, 6-hour boundaries: 00/06/12/18)
+direction    = "0" if publisher_userId < resolver_userId (lexicographic)
+               "1" otherwise
+```
+
+**Properties**:
+- **Pairwise**: each contact pair has a unique tag per epoch → perfect unlinkability. An observer who compromises one contact's key learns only that pair's tags, not the publisher's presence as seen by other contacts.
+- **6-hour epochs**: balance between publish frequency (4×/day per contact) and correlation window. Short enough that an old tag cannot be polled indefinitely; long enough that publisher and resolver don't need tight clock sync.
+- **Overlap publish**: the publisher always publishes for both the current and the next epoch. This covers the transition window where Alice's clock may be in the next epoch while the record was published under the current one. Cost: 2× records per contact, negligible at Nostr's traffic level.
+- **Direction bit**: ensures Bob's "I am here" record is under a different tag than Alice's "I am here" record for the same contact pair — prevents collisions when both publish simultaneously.
+
+**Clock tolerance**: 6-hour epochs tolerate clock skew of up to ±3 hours (the overlap publish extends coverage to ±6 hours). Cleona's existing NTP sync (§2.4.1) keeps clocks within seconds — this is more than adequate.
+
+#### 4.11.5 SignedEndpointRecord
+
+The record stored on external substrates is encrypted and signed:
+
+```
+// Plaintext payload
+endpoint_record = {
+  addresses:    [PeerAddressProto, ...],   // current reachable addresses
+  seq:          uint64,                     // monotonically increasing
+  published_at: uint64,                     // ms since epoch
+  device_id:    bytes[32],                  // publisher's device ID
+}
+
+// Encryption (receiver-specific, only the contact can decrypt)
+nonce      = random 12 bytes
+ciphertext = crypto_aead_aes256gcm_encrypt(
+    plaintext = serialize(endpoint_record),
+    aad       = lookup_tag,
+    key       = rendezvous_secret,
+    nonce     = nonce
+)
+
+// Outer envelope (substrate-facing)
+signed_endpoint_record = {
+  nonce:      nonce,              // 12 bytes (AES-256-GCM)
+  ciphertext: ciphertext,
+  seq:        uint64,             // duplicated outside for cross-provider comparison
+}
+```
+
+**Why AES-256-GCM**: Already bound in `sodium_ffi.dart` (no new FFI binding needed). Provides AEAD with AAD support (lookup-tag binding). The 12-byte nonce is safe here — each record uses a fresh random nonce and the key is pairwise-unique per contact pair, so nonce collision probability is negligible at this traffic volume (< 1000 encryptions per key per epoch).
+
+**PQ residual risk (accepted)**: The key agreement (§4.11.3) relies on X25519-DH, which is not post-quantum secure. No PQ-safe non-interactive key agreement primitive exists today (ML-KEM requires a round-trip). The protected data (current IP addresses) is ephemeral (6h epoch rotation) and worthless for harvest-now-decrypt-later attacks. If a PQ-NIKE is standardized in the future, it can replace the X25519-DH step without changing the record format.
+
+**What the substrate sees**: an opaque blob under an opaque tag. No IP addresses, no identity information, no correlation to Cleona.
+
+**What the resolver does**: compute `lookup_tag` from the pairwise secret + epoch, fetch the record, decrypt with `rendezvous_secret`, verify `seq` is highest seen, extract addresses, attempt direct UDP contact.
+
+**Cross-provider consistency**: `seq` is outside the ciphertext so the cascade can compare records from different providers without decrypting all of them. Highest `seq` wins. A provider returning a stale record (lower `seq` than one already seen from another provider) is ignored.
+
+#### 4.11.6 Nostr Provider (NIP-01, NIP-33)
+
+The first external substrate. Chosen for minimal integration effort, negligible traffic overhead, and no participation obligation (unlike Mainline DHT).
+
+**Identity**: a throwaway secp256k1 keypair generated per publish cycle. **No** correlation to the Cleona Ed25519 identity. The Nostr pubkey is disposable — the real authenticity is inside the encrypted payload (Cleona's own signature via `rendezvous_secret`).
+
+**Event format** (NIP-01 + NIP-33 Parameterized Replaceable Events):
+
+```json
+{
+  "id":         "<sha256 of serialized event>",
+  "pubkey":     "<hex throwaway secp256k1 pubkey>",
+  "created_at": 1719561600,
+  "kind":       30078,
+  "tags":       [["d", "<hex(lookup_tag)>"]],
+  "content":    "<base64(signed_endpoint_record)>",
+  "sig":        "<schnorr signature with throwaway key>"
+}
+```
+
+- **Kind 30078**: Parameterized Replaceable Event (NIP-33). The relay keeps only the latest version per `(pubkey, d-tag)` combination — no garbage accumulation, always-current endpoint.
+- **Tag `["d", hex(lookup_tag)]`**: the relay indexes this for filter queries. The resolver subscribes with `{"#d": [hex(tag)], "kinds": [30078]}`.
+- **Content**: base64-encoded `SignedEndpointRecord` (§4.11.5). Opaque to the relay.
+
+**Relay selection**: 5–10 well-known public relays (`wss://relay.damus.io`, `wss://nos.lol`, `wss://relay.nostr.band`, etc.). Hardcoded initial set, user-configurable. Publisher pushes to all; resolver queries all in parallel, first valid hit wins.
+
+**Protocol flow**:
+
+Publish (Bob goes online or address changes):
+1. Generate throwaway secp256k1 keypair
+2. For each accepted contact: compute `lookup_tag` (current + next epoch)
+3. Build `SignedEndpointRecord` with current addresses
+4. Create Nostr event (kind 30078, d-tag = hex(lookup_tag), content = base64(record))
+5. Sign event with throwaway key
+6. WebSocket connect to each relay, send `["EVENT", event]`, await `["OK", ...]`, close
+
+Resolve (Alice cold-starts after 48h offline, Tier 3b):
+1. For each anchor/stable contact: compute `lookup_tag` (current epoch, try previous if no hit)
+2. WebSocket connect to relays, send `["REQ", "sub1", {"#d": [hex(tag)], "kinds": [30078]}]`
+3. First relay response: parse content, decrypt with `rendezvous_secret`, verify `seq`
+4. Send `["CLOSE", "sub1"]`, close WebSocket
+5. Extracted addresses → direct UDP contact attempt → back in the mesh
+
+**Traffic budget**: < 1 MB/day. At 20 contacts × 2 epochs × 5 relays × ~1 KB per event = 200 KB per publish cycle. With 4h refresh interval (within 6h epoch) = ~1.2 MB/day worst case.
+
+**Dependencies**: secp256k1 Schnorr signing (libsecp256k1 via FFI or pure-Dart implementation), WebSocket client (Dart standard library `web_socket_channel`), JSON serialization (trivial). No new native C shim required.
+
+#### 4.11.7 Publish Triggers & Lifecycle
+
+| Trigger | Action | Debounce |
+|---|---|---|
+| Startup (after §4.5 discovery-complete) | Publish current addresses to all providers for all contacts | none (first publish) |
+| Network change (§4.9) | Republish with new addresses | 10 s (5 s after Liveness, ensures addresses are stable) |
+| Periodic refresh | Republish to survive relay eviction | every 4 h (within 6h epoch) |
+| Epoch boundary | Publish under new epoch tag, retain previous-epoch record | at epoch transition |
+| Contact added/removed | Add/remove lookup tags from publish set | on contact-status change |
+
+**Shutdown**: no explicit unpublish needed. Records become obsolete via `seq` monotonicity (the next publish supersedes) and relay-side eviction (NIP-33 replaceable events are overwritten on next publish from the same pubkey+d-tag).
+
+**Publish budget**: for N contacts, each publish cycle generates `N × 2` (current + next epoch) records across `M` relays = `2NM` WebSocket messages. At N=50, M=5: 500 messages × ~1 KB = ~500 KB per cycle. Acceptable even on mobile data (< 2 MB/day at 4h refresh).
+
+#### 4.11.8 Future Substrates (Planned)
+
+The `RendezvousProvider` interface is designed for multiple substrates. Only the Nostr provider (§4.11.6) is implemented in V3.1.x. The following are architecturally planned and will be added as separate providers behind the same interface:
+
+**(a) Tor Onion (§4.11.8a)** — requires Arti (Rust Tor client) integration via C-shim or sidecar process. Provides the cleanest resolve (no IP leak to relays) and doubles as transport layer for Nostr lookups (Nostr-over-Tor). Highest implementation effort. Additionally serves as **Hardening Layer 3** (§4.11.1): routing all resolve traffic through Tor so the relay/DHT-node cannot see Alice's IP or her interest in a specific tag.
+
+**(b) Mainline DHT BEP44 (§4.11.8b)** — maximum reach (millions of BitTorrent nodes, un-censorable). However: full DHT participation generates 70–250 MB/day background traffic (DHT routing maintenance from millions of foreign nodes), making it impractical as always-on substrate on mobile. Viable only as **on-demand fallback**: bootstrap into DHT, resolve, disconnect. Loses the publish side (records not durable without participation). BEP44 mutable items use ed25519 (not secp256k1), requiring a separate signing path.
+
+**(c) Email Dead-Drop (§4.11.8c)** — lowest priority. Operationally fragile: free email accounts require phone verification, automated access triggers lockouts, rate limits are aggressive. Useful only as last-resort "nothing else works" substrate in extreme censorship environments.
+
+**Substrate cascade**: all available providers are queried in parallel (Happy-Eyeballs). The first valid, signature-verified record with the highest `seq` wins. A provider being blocked in the current network (Nostr relays firewalled, Tor blocked) does not delay the cascade — `isAvailable` returns false and the provider is skipped.
 
 ---
 ## 5. Message Delivery
@@ -3155,15 +3381,19 @@ QR and NFC are inherently synchronous (physical co-presence guarantees both devi
 | `dxk` | 32 bytes, standard base64 | Device-X25519-PK — enables direct KEM-encap of the First-CR InfrastructureFrame without DKE round-trip |
 | `dmk` | 1184 bytes, standard base64 | Device-ML-KEM-768-PK — hybrid KEM counterpart to `dxk` |
 
-**Seed-peer selection criteria** (V3.1.x):
+**Seed-peer selection criteria** (V3.1.113):
 
-1. **At least 1 relay-capable peer** — a peer with confirmed port-mapping (`hasPortMapping` = true, i.e. UPnP/PCP/NAT-PMP has established a public IP:port) **or** a peer with at least one global IPv6 address (not link-local `fe80:` and not ULA `fd`/`fc`). A global-IPv6 peer is end-to-end reachable from any IPv6-capable network — including DS-Lite mobile carriers where IPv4 is CGNAT-tunneled and unreliable — and therefore qualifies as relay entry point. This peer is reachable from any network (internet, other subnet, mobile data) and serves as the relay entry point for scanners that cannot reach the QR emitter directly (AP isolation, different subnets, CGNAT). All known addresses of this peer are included (private IPv4 + IPv6 + public IPv4 + IPv6), so the scanner can choose the optimal address for its network position: private IP when on the same network (avoids mobile data costs), public IP when external.
+Peers are sorted by **stability tier (§4.9.2) first, then by public-address availability**. Selection proceeds in three passes:
 
-2. **Remaining slots (up to 4)** — selected by freshness (`lastSeen` < 30 min), address diversity (different subnets, max 2 LAN + rest public), and score. Each seed peer is included with all known addresses (private + public).
+1. **Pass 1: Anchor/Stable peers with public address** (up to 3 slots) — peers classified as `anchor` or `stable` by the Address Stability Score (§4.9.2) that have at least one public IPv4 or global IPv6 address (not link-local `fe80:` and not ULA `fd`/`fc`). These peers have the highest probability of still being reachable when the ContactSeed is scanned days or weeks later. Sorted by stability tier (anchor before stable). All known addresses of each peer are included (private IPv4 + IPv6 + public IPv4 + IPv6), so the scanner can choose the optimal address for its network position.
 
-3. **Fallback:** When no peer with confirmed port-mapping exists (e.g. all nodes behind CGNAT without UPnP), the 5 peers with the highest scores and greatest address diversity are chosen. The scanner will attempt to find a peer through discovery burst (LAN multicast/broadcast) + subnet scan.
+2. **Pass 2: Remaining relay-capable peers** (up to 5 total) — peers with at least one public IPv4 or global IPv6 address, regardless of stability tier. Fills remaining slots after Pass 1. A global-IPv6 peer is end-to-end reachable from any IPv6-capable network — including DS-Lite mobile carriers where IPv4 is CGNAT-tunneled — and therefore qualifies as relay entry point.
 
-**Rationale:** Without a publicly reachable seed peer in the QR, a scanner in a different network segment (AP isolation, different subnet, mobile data) is permanently isolated — it cannot contact any of the seed peers and the relay cascade has no entry point. Guaranteeing a port-mapped peer as relay ensures at least one path into the mesh exists.
+3. **Pass 3: LAN peers** (remaining capacity up to 5 total) — private IPv4 peers, deduplicated by nodeId. Useful when scanner is on the same network.
+
+4. **Fallback:** When no peer with public address exists (e.g. all nodes behind CGNAT without UPnP), the 5 peers with the greatest address diversity are chosen. The scanner will attempt to find a peer through discovery burst (LAN multicast/broadcast) + subnet scan.
+
+**Rationale (V3.1.113):** The previous selection (1 relay-capable + freshness/score) optimized for the synchronous scan case (QR/NFC, both devices online). For asynchronous ContactSeeds (clipboard/email), the seed may be scanned hours or days later — address freshness at generation time is irrelevant; long-term address stability determines whether the seed peers are still reachable. A server with a static IP for 6 months (`anchor` tier) is qualitatively more valuable in a ContactSeed than a phone that was "freshly seen 5 minutes ago" but will have a different IP tomorrow. Without a publicly reachable seed peer in the ContactSeed, a scanner in a different network segment (AP isolation, different subnet, mobile data) is permanently isolated — it cannot contact any of the seed peers and the relay cascade has no entry point.
 
 **IPv6 address inclusion (V3.1.90+):** When a seed peer qualifies as relay-capable through a global IPv6 address, that IPv6 address **must** be included in the ContactSeed address list, even if the per-peer address limit (currently 3) would otherwise exclude it. Global IPv6 is the DS-Lite bypass path (§4.7) — omitting it from the ContactSeed defeats the relay-capable selection criterion. Implementation: the address list includes up to 3 addresses **plus** any global IPv6 not already in the top 3.
 

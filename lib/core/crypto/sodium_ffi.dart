@@ -883,9 +883,23 @@ class SodiumFFI {
   }
 
   Uint8List _hmacSha256Compute(Uint8List key, Uint8List data) {
+    // crypto_auth_hmacsha256 requires exactly cryptoAuthHmacSha256KeyBytes
+    // (32) bytes. Normalize variable-length keys per HMAC spec (RFC 2104):
+    // - shorter keys: zero-pad to 32 bytes
+    // - longer keys: SHA-256 hash to 32 bytes
+    Uint8List normalizedKey;
+    if (key.length == cryptoAuthHmacSha256KeyBytes) {
+      normalizedKey = key;
+    } else if (key.length > cryptoAuthHmacSha256KeyBytes) {
+      normalizedKey = sha256(key);
+    } else {
+      normalizedKey = Uint8List(cryptoAuthHmacSha256KeyBytes);
+      normalizedKey.setRange(0, key.length, key);
+    }
+
     final out = calloc<Uint8>(cryptoAuthHmacSha256Bytes);
     final inp = _toNative(data);
-    final k = _toNative(key);
+    final k = _toNative(normalizedKey);
     try {
       final rc = _hmacSha256(out, inp, data.length, k);
       if (rc != 0) {

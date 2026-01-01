@@ -69,6 +69,7 @@ import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/channels/contact_issue_reporter.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
+import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -253,6 +254,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // Polls (§24) — delegated to PollService
   late final PollService _polls;
+
+  // §4.11 External Rendezvous (Nostr cold-start address resolution)
+  RendezvousManager? _rendezvousManager;
   @override
   PollManager get pollManager => _polls.pollManager;
   @override
@@ -393,7 +397,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.112';
+  static const String kCurrentAppVersion = '3.1.113';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -614,6 +618,23 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Sync contact/channel tier registration to DV routing table
     _syncTierRegistration();
+
+    // §4.11 External Rendezvous: Nostr cold-start address resolution.
+    // Only init once on the primary identity (rendezvous is identity-scoped
+    // but the node field is shared — first service wins).
+    if (node.rendezvousManager == null) {
+      _rendezvousManager = RendezvousManager(profileDir: profileDir);
+      _rendezvousManager!.init(
+        ownFoundingSk: identity.ed25519SecretKey,
+        ownUserIdHex: identity.userIdHex,
+        deviceId: identity.nodeId,
+        contacts: _buildRendezvousContacts(),
+        addressProvider: () => node.currentSelfAddresses()
+            .map((a) => RendezvousAddress(a.ip, a.port))
+            .toList(),
+      );
+      node.rendezvousManager = _rendezvousManager;
+    }
 
     // Load conversations
     _loadConversations();
@@ -1906,6 +1927,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
   }
 
+  /// §4.11: build RendezvousContact list from accepted contacts.
+  List<RendezvousContact> _buildRendezvousContacts() {
+    return _contacts.entries
+        .where((e) => e.value.status == 'accepted' && e.value.ed25519Pk != null)
+        .map((e) => RendezvousContact(
+              userIdHex: e.key,
+              foundingEd25519Pk: e.value.ed25519Pk!,
+            ))
+        .toList();
+  }
+
+  /// §4.11: notify rendezvous manager about contact list changes.
+  void _updateRendezvousContacts() {
+    _rendezvousManager?.updateContacts(_buildRendezvousContacts());
+  }
+
   /// Edge-triggered offline-message retrieval. Fires once from
   /// [node.onDiscoveryComplete] after the §4.5 discovery cascade completes.
   void _onPostDiscoveryRetrieve() {
@@ -1913,6 +1950,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _postDiscoveryPolledPeers.clear();
     _pollConfirmedPeersOnce();
     _retryPendingContactRequests();
+
+    // §4.11: initial rendezvous publish + start periodic refresh (4h).
+    _rendezvousManager?.publishForAllContacts();
+    _rendezvousManager?.startPeriodicRefresh();
 
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = Timer(const Duration(seconds: 15), () {
@@ -5681,6 +5722,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _fileEnc.writeJsonFile('$profileDir/contacts.json', json);
       _syncTierRegistration();
+      _updateRendezvousContacts();
     } catch (e) {
       _log.warn('Failed to save contacts: $e');
     }
@@ -6885,6 +6927,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         port: primaryPort,
         lastSeen: p.lastSeen,
         allAddresses: addrs,
+        stabilityTierIndex: p.stabilityTier.index,
       );
     }).toList();
   }
@@ -9054,6 +9097,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _delegationRenewalTimer = null;
     _natWizardTrigger?.stop();
     _natWizardTrigger = null;
+    if (node.rendezvousManager == _rendezvousManager) {
+      node.rendezvousManager = null;
+    }
+    _rendezvousManager?.dispose();
+    _rendezvousManager = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
     if (_publisherPeerAddedListener != null) {
       node.routingTable.removeOnPeerAddedListener(_publisherPeerAddedListener!);

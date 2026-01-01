@@ -186,7 +186,22 @@ class KBucket {
               fresh.lastSuccess = old.lastSuccess;
               fresh.lastAttempt = old.lastAttempt;
               fresh.lastReceivedAt = old.lastReceivedAt;
+              fresh.stableSince = old.stableSince;
             }
+          }
+          // Track public address churn for StabilityTier classification.
+          final droppedPublic = existingByKey.values.where((a) =>
+              a.type == PeerAddressType.ipv4Public ||
+              a.type == PeerAddressType.ipv6Global).toList();
+          final newPublic = peer.addresses.where((a) =>
+              (a.type == PeerAddressType.ipv4Public ||
+               a.type == PeerAddressType.ipv6Global) &&
+              !existing.addresses.any((e) =>
+                  e.ip == a.ip && e.port == a.port)).toList();
+          if (droppedPublic.isNotEmpty && newPublic.isNotEmpty) {
+            peer.addressChangeCount = existing.addressChangeCount + 1;
+          } else {
+            peer.addressChangeCount = existing.addressChangeCount;
           }
           // Addresses no longer advertised by the peer but confirmed by
           // received traffic: keep WITHOUT backoff (the NAT mapping is
@@ -237,6 +252,7 @@ class KBucket {
           peer.addresses
             ..clear()
             ..addAll(merged);
+          peer.addressChangeCount = existing.addressChangeCount;
         }
       }
       // Move to end (most recently seen)

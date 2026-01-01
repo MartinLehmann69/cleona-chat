@@ -1070,6 +1070,8 @@ class PeerSummary {
   final DateTime lastSeen;
   /// All known addresses as "ip:port" strings (max 2: local + public).
   final List<String> allAddresses;
+  /// Long-term address stability — drives ContactSeed peer selection.
+  final int stabilityTierIndex;
 
   PeerSummary({
     required this.nodeIdHex,
@@ -1077,6 +1079,7 @@ class PeerSummary {
     required this.port,
     required this.lastSeen,
     this.allAddresses = const [],
+    this.stabilityTierIndex = 2,
   });
 
   Map<String, dynamic> toJson() => {
@@ -1085,6 +1088,7 @@ class PeerSummary {
         'port': port,
         'lastSeen': lastSeen.millisecondsSinceEpoch,
         'allAddresses': allAddresses,
+        if (stabilityTierIndex != 2) 'stabilityTierIndex': stabilityTierIndex,
       };
 
   static PeerSummary fromJson(Map<String, dynamic> json) => PeerSummary(
@@ -1097,6 +1101,7 @@ class PeerSummary {
                 ?.map((e) => e as String)
                 .toList() ??
             const [],
+        stabilityTierIndex: json['stabilityTierIndex'] as int? ?? 2,
       );
 }
 

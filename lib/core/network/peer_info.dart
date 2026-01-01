@@ -5,6 +5,9 @@ import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 
+/// Long-term address stability classification for cold-start prioritisation.
+enum StabilityTier { anchor, stable, normal, volatile_ }
+
 class PeerAddress {
   String ip;
   int port;
@@ -25,6 +28,11 @@ class PeerAddress {
   /// addresses that may map to a different CGNAT port (symmetric NAT).
   DateTime? lastReceivedAt;
 
+  /// First successful contact under this exact ip:port. Set once by
+  /// [recordSuccess] and never overwritten — survives daemon restarts via
+  /// JSON persistence. Drives the [StabilityTier] classification.
+  DateTime? stableSince;
+
   PeerAddress({
     required this.ip,
     required this.port,
@@ -36,6 +44,7 @@ class PeerAddress {
     this.failCount = 0,
     this.consecutiveFailures = 0,
     this.lastReceivedAt,
+    this.stableSince,
   });
 
   /// Base delay for exponential backoff (doubles each failure).
@@ -53,6 +62,7 @@ class PeerAddress {
     consecutiveFailures = 0;
     lastSuccess = DateTime.now();
     lastAttempt = lastSuccess;
+    stableSince ??= lastSuccess;
     score = successCount / (successCount + failCount);
   }
 
@@ -824,6 +834,33 @@ class PeerInfo {
   /// re-bootstrap after Android Doze instead of losing all peers.
   bool isProtectedSeed = false;
 
+  /// How often this peer's public address set has changed (dynamic IP
+  /// reconnects). Incremented by KBucket address-merge on firstParty
+  /// updates when a public ip:port disappears and a new one appears.
+  int addressChangeCount = 0;
+
+  /// Longest [stableSince] across all current addresses.
+  DateTime? get _oldestStableSince {
+    DateTime? best;
+    for (final a in addresses) {
+      final ss = a.stableSince;
+      if (ss != null && (best == null || ss.isBefore(best))) best = ss;
+    }
+    return best;
+  }
+
+  /// Cold-start stability classification based on long-term address
+  /// persistence. Anchor peers are contacted first after prolonged offline.
+  StabilityTier get stabilityTier {
+    final oldest = _oldestStableSince;
+    if (oldest == null) return StabilityTier.normal;
+    final stableDays = DateTime.now().difference(oldest).inDays;
+    if (stableDays >= 30 && addressChangeCount == 0) return StabilityTier.anchor;
+    if (stableDays >= 7 && addressChangeCount <= 2) return StabilityTier.stable;
+    if (addressChangeCount > 10) return StabilityTier.volatile_;
+    return StabilityTier.normal;
+  }
+
   PeerInfo({
     required this.nodeId,
     this.userId,
@@ -1254,8 +1291,11 @@ class PeerInfo {
         'failCount': a.failCount,
         if (a.lastReceivedAt != null)
           'lastReceivedAt': a.lastReceivedAt!.millisecondsSinceEpoch,
+        if (a.stableSince != null)
+          'stableSince': a.stableSince!.millisecondsSinceEpoch,
       }).toList(),
       if (isProtectedSeed) 'isProtectedSeed': true,
+      if (addressChangeCount > 0) 'addressChangeCount': addressChangeCount,
     };
   }
 
@@ -1293,6 +1333,7 @@ class PeerInfo {
         final port = m['port'] as int;
         if (ip.isEmpty || ip == '0.0.0.0' || port <= 0) return null;
         final lrMs = m['lastReceivedAt'] as int?;
+        final ssMs = m['stableSince'] as int?;
         return PeerAddress(
           ip: ip,
           port: port,
@@ -1306,6 +1347,9 @@ class PeerInfo {
           lastReceivedAt: lrMs != null
               ? DateTime.fromMillisecondsSinceEpoch(lrMs)
               : null,
+          stableSince: ssMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(ssMs)
+              : null,
         );
       }).whereType<PeerAddress>().toList() ?? [],
       deviceIdPowNonce: json['deviceIdPowNonce'] != null
@@ -1313,7 +1357,8 @@ class PeerInfo {
           : null,
     )
       ..isProtectedSeed = json['isProtectedSeed'] as bool? ?? false
-      ..idPowVerified = json['idPowVerified'] as bool? ?? false;
+      ..idPowVerified = json['idPowVerified'] as bool? ?? false
+      ..addressChangeCount = json['addressChangeCount'] as int? ?? 0;
   }
 
   @override

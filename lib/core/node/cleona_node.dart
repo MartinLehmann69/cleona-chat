@@ -40,6 +40,7 @@ import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -157,6 +158,10 @@ class CleonaNode {
   /// §2.4.5 + §7.6 — the only periodic UDP traffic in the system besides
   /// hole-punch keepalive in [NatTraversal].
   late UdpKeepalive udpKeepalive;
+
+  /// §4.11 External Rendezvous: cold-start address resolution via external
+  /// networks (Nostr). Wired by CleonaService after identity init.
+  RendezvousManager? rendezvousManager;
 
   // Plan §D2: lightweight signal so application-layer code (e.g. CallManager's
   // per-CallSession route cache) can invalidate stale routes when DV-Routing
@@ -1047,12 +1052,17 @@ class CleonaNode {
   Future<void> _startDiscoveryCascade() async {
     _discoveryComplete = false;
 
-    // Tier 1 — Stored peers: probe persisted routing table (sorted by
-    // lastSeen recency). 1 PING per peer, 2 s timeout, max 5 peers.
+    // Tier 1 — Stored peers: probe persisted routing table. Anchor/Stable
+    // peers first (most likely to still have the same address after extended
+    // offline), then by lastSeen recency. 1 PING per peer, 2 s timeout, max 5.
     final stored = routingTable.allPeers
         .where((p) => !_isLocalIdentity(p.nodeIdHex))
         .toList()
-      ..sort((a, b) => b.lastSeen.compareTo(a.lastSeen));
+      ..sort((a, b) {
+        final tierCmp = a.stabilityTier.index.compareTo(b.stabilityTier.index);
+        if (tierCmp != 0) return tierCmp;
+        return b.lastSeen.compareTo(a.lastSeen);
+      });
 
     if (stored.isNotEmpty) {
       final probeCount = stored.length < 5 ? stored.length : 5;
@@ -1138,6 +1148,32 @@ class CleonaNode {
       }
       if (_discoveryComplete) return;
       _log.info('§4.5 Cascade Tier 3 exhausted — bootstrap unreachable');
+    }
+
+    // Tier 3b — External Rendezvous (§4.11): resolve current addresses
+    // for accepted contacts via Nostr relays. Fires only when internal
+    // discovery (Tier 1–3) failed to reach any peer.
+    if (!_discoveryComplete && rendezvousManager != null) {
+      _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve');
+      try {
+        final resolved = await rendezvousManager!.resolveContacts(
+            rendezvousManager!.contactsSnapshot);
+        for (final ep in resolved) {
+          for (final addr in ep.addresses) {
+            _sendPing(addr.ip, addr.port);
+          }
+        }
+        if (resolved.isNotEmpty) {
+          _log.info('§4.11 Rendezvous: resolved ${resolved.length} contact(s), '
+              'probing addresses');
+          for (var i = 0; i < 10 && !_discoveryComplete; i++) {
+            await Future.delayed(const Duration(milliseconds: 500));
+          }
+        }
+      } catch (e) {
+        _log.debug('§4.11 Rendezvous resolve failed: $e');
+      }
+      if (_discoveryComplete) return;
     }
 
     // Tier 4 — Subnet Scan (last resort).
@@ -4765,6 +4801,10 @@ class CleonaNode {
 
     // 6. Broadcast address update
     _broadcastAddressUpdate(force: true);
+
+    // 6a. §4.11: debounced rendezvous publish (10s) so contacts can
+    // resolve our new address via Nostr after the IP changed.
+    rendezvousManager?.onNetworkChanged();
 
     // 6b. §4.5 Discovery Cascade restart: if step 4's PINGs did not
     // re-establish connectivity (no PONG → discoveryComplete stays false),

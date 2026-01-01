@@ -748,29 +748,40 @@ class ContactSeedBuilder {
         .toList();
 
     // --- Peer selection ---
-    // Slot 1: relay-capable peer (has public IP or global IPv6)
+    // Sort: most stable first (anchor < stable < normal < volatile),
+    // then public-address peers before private-only.
+    validPeers.sort((a, b) {
+      final tierCmp = a.stabilityTierIndex.compareTo(b.stabilityTierIndex);
+      if (tierCmp != 0) return tierCmp;
+      final aPub = _hasPublicAddress(a) ? 0 : 1;
+      final bPub = _hasPublicAddress(b) ? 0 : 1;
+      return aPub.compareTo(bPub);
+    });
+
     final selected = <PeerSummary>[];
     final seenNodeIds = <String>{};
+
+    // Pass 1: Anchor/Stable peers with public address (cold-start priority)
     for (final p in validPeers) {
+      if (p.stabilityTierIndex > 1) break; // normal or worse
       if (_hasPublicAddress(p) && seenNodeIds.add(p.nodeIdHex)) {
         selected.add(p);
-        break;
+        if (selected.length >= 3) break;
       }
     }
-    // LAN peers (max 2, dedup by nodeId only — /16 subnet filter removed:
-    // it collapsed all 192.168.x.y into one slot, yielding 1 seed peer
-    // instead of 3)
+    // Pass 2: remaining relay-capable peers (public IP / global IPv6)
+    for (final p in validPeers) {
+      if (selected.length >= 5) break;
+      if (_hasPublicAddress(p) && seenNodeIds.add(p.nodeIdHex)) {
+        selected.add(p);
+      }
+    }
+    // Pass 3: LAN peers (max 2, dedup by nodeId)
     for (final p in validPeers.where(
         (p) => _isPrivateIp(p.address) && !p.address.contains(':'))) {
-      if (!seenNodeIds.add(p.nodeIdHex)) continue;
-      selected.add(p);
-      if (selected.length >= 3) break;
-    }
-    // Public/IPv6 peers (up to 5 total)
-    for (final p in validPeers.where((p) => !_isPrivateIp(p.address))) {
-      if (!seenNodeIds.add(p.nodeIdHex)) continue;
-      selected.add(p);
       if (selected.length >= 5) break;
+      if (!seenNodeIds.add(p.nodeIdHex)) continue;
+      selected.add(p);
     }
 
     final seedPeers = selected.map((p) {
