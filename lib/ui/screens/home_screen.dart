@@ -272,10 +272,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             MaterialPageRoute(builder: (_) => MultiProvider(
               providers: [
                 ChangeNotifierProvider.value(value: appState),
-                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+                ChangeNotifierProvider.value(value: locale),
               ],
               child: Scaffold(
-                appBar: AppBar(title: Text(AppLocale.read(context).get('stats_title'))),
+                appBar: AppBar(title: Text(locale.get('stats_title'))),
                 body: SafeArea(top: false, child: NetworkStatsScreen(service: service)),
               ),
             )),
@@ -290,7 +290,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             MaterialPageRoute(builder: (_) => MultiProvider(
               providers: [
                 ChangeNotifierProvider.value(value: appState),
-                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+                ChangeNotifierProvider.value(value: locale),
               ],
               child: const CalendarScreen(),
             )),
@@ -305,7 +305,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             MaterialPageRoute(builder: (_) => MultiProvider(
               providers: [
                 ChangeNotifierProvider.value(value: appState),
-                ChangeNotifierProvider.value(value: AppLocale.read(context)),
+                ChangeNotifierProvider.value(value: locale),
               ],
               child: SettingsScreen(service: service),
             )),
@@ -1218,7 +1218,13 @@ class _ConversationListViewState extends State<_ConversationListView> {
             }
           },
           itemBuilder: (_) {
-            final locale = AppLocale.read(context);
+            // Reuses the `locale` captured in build() above — must NOT call
+            // AppLocale.read(context) here: this itemBuilder closure is
+            // stored on the PopupMenuButton and invoked lazily whenever the
+            // menu is opened, by which point `context` (this item's build
+            // context) may already be deactivated if a skin/locale change
+            // rebuilt the tree in between (see route-builder fix elsewhere
+            // in this file for the same class of bug).
             return [
               // Favorite toggle — for all types
               PopupMenuItem(value: 'favorite', child: Row(children: [
@@ -1378,8 +1384,8 @@ class _ConversationListViewState extends State<_ConversationListView> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('${locale.get('original_name')}: ${contact.displayName}',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Theme.of(context).colorScheme.outline,
+              style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                color: Theme.of(ctx).colorScheme.outline,
               ),
             ),
             const SizedBox(height: 12),
@@ -1479,6 +1485,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
     final group = service.groups[groupIdHex];
     if (group == null) return;
     final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
 
     showDialog(
       context: context,
@@ -1508,7 +1515,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(locale.tr('members_count', {'count': '${currentGroup.members.length}'}),
-                      style: Theme.of(context).textTheme.titleSmall),
+                      style: theme.textTheme.titleSmall),
                   const SizedBox(height: 8),
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxHeight: 280),
@@ -1521,7 +1528,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                           leading: Icon(
                             m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
                             size: 20,
-                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? Theme.of(context).colorScheme.primary : null,
+                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? theme.colorScheme.primary : null,
                           ),
                           title: Text('${m.displayName}${isSelf ? " ${locale.get('you_suffix')}" : ""}'),
                           subtitle: Text(
@@ -1640,6 +1647,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
     final channel = service.channels[channelIdHex];
     if (channel == null) return;
     final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
 
     showDialog(
       context: context,
@@ -1669,7 +1677,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(locale.tr('subscribers_count', {'count': '${currentChannel.members.length}'}),
-                      style: Theme.of(context).textTheme.titleSmall),
+                      style: theme.textTheme.titleSmall),
                   const SizedBox(height: 8),
                   ConstrainedBox(
                     constraints: const BoxConstraints(maxHeight: 280),
@@ -1682,7 +1690,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                           leading: Icon(
                             m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.shield : Icons.person,
                             size: 20,
-                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? Theme.of(context).colorScheme.primary : null,
+                            color: m.role == 'owner' ? Colors.amber : m.role == 'admin' ? theme.colorScheme.primary : null,
                           ),
                           title: Text('${m.displayName}${isSelf ? " ${locale.get('you_suffix')}" : ""}'),
                           subtitle: Text(
@@ -2014,13 +2022,14 @@ class _IdentityTabBar extends StatelessWidget {
   void _openIdentityDetail(BuildContext context, Identity identity) {
     final service = appState.service;
     if (service == null) return;
+    final locale = AppLocale.read(context);
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => MultiProvider(
           providers: [
             ChangeNotifierProvider.value(value: appState),
-            ChangeNotifierProvider.value(value: AppLocale.read(context)),
+            ChangeNotifierProvider.value(value: locale),
           ],
           child: IdentityDetailScreen(service: service, identity: identity),
         ),

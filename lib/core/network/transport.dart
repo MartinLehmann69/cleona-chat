@@ -43,6 +43,79 @@ typedef DiscoveryCallback = void Function(
   int remotePort,
 );
 
+/// F4 (S123 UDP-dead RCA, 2026-07-03 Pixel field test): edge-triggered
+/// dead-socket detector, extracted from [Transport] so the edge/re-arm
+/// semantics are unit-testable without a real socket
+/// (`test/smoke/smoke_udp_dead_recovery.dart`).
+///
+/// Counts consecutive 0-byte UDP sends (a single failed send counts 1; a
+/// fragment burst that all returned 0 counts the fragment count). Once the
+/// running count crosses [threshold] the detector reports the crossing
+/// EXACTLY ONCE — every further zero-send while still "armed" is silently
+/// counted, not re-reported — until re-armed by [noteSendSuccess] (a send
+/// returned >0 bytes) or [noteReconnectCompleted] (a `reconnectUdpSockets()`
+/// finished). Both re-arm paths also reset the counter to 0.
+///
+/// Before this fix, `Transport.sendUdp` fired the dead-warning log +
+/// `onUdpSocketDead` callback on EVERY 0-send once the threshold was
+/// crossed — during a ~2.5 min WLAN-zombie period (interface kept its IPs,
+/// uplink dead) this produced 36,030 warn-log lines and 5,156
+/// `onUdpSocketDead` invocations in a single field-test minute.
+class ZeroSendDeadEdgeDetector {
+  ZeroSendDeadEdgeDetector({
+    this.threshold = 10,
+    this.clamp = 1000000,
+  });
+
+  /// Consecutive-0-send count at which the socket is considered dead.
+  final int threshold;
+
+  /// Hard cap on the internal counter — purely a safety clamp against
+  /// unbounded growth during a long dead period; the edge-gate already
+  /// prevents repeat firing regardless of how high the count climbs.
+  final int clamp;
+
+  int _consecutiveZeroSends = 0;
+  bool _edgeFired = false;
+
+  /// Current consecutive-0-send count (for logging).
+  int get consecutiveZeroSends => _consecutiveZeroSends;
+
+  /// Whether the dead-edge has already fired for the current run (i.e.
+  /// further 0-sends will be counted but not re-reported).
+  bool get edgeFired => _edgeFired;
+
+  /// Record a successful send (>0 bytes). Resets the counter and re-arms
+  /// the edge so the next dead period can be detected again.
+  void noteSendSuccess() {
+    _consecutiveZeroSends = 0;
+    _edgeFired = false;
+  }
+
+  /// Record a completed `reconnectUdpSockets()`. Same effect as
+  /// [noteSendSuccess] — kept as a separate method for call-site clarity
+  /// (F1/F4 design: re-arm "on successful send OR completed reconnect").
+  void noteReconnectCompleted() {
+    _consecutiveZeroSends = 0;
+    _edgeFired = false;
+  }
+
+  /// Record [count] consecutive 0-byte sends. Returns `true` exactly once
+  /// per dead period — the call where the running count crosses
+  /// [threshold] — and `false` on every other call (below threshold, or
+  /// already-fired-and-not-yet-re-armed).
+  bool noteZeroSends(int count) {
+    _consecutiveZeroSends += count;
+    if (_consecutiveZeroSends > clamp) _consecutiveZeroSends = clamp;
+    if (_edgeFired) return false;
+    if (_consecutiveZeroSends >= threshold) {
+      _edgeFired = true;
+      return true;
+    }
+    return false;
+  }
+}
+
 /// UDP + TLS transport layer. Single port for all traffic — UDP primary, TLS on the same port as anti-censorship fallback.
 ///
 /// Protocol escalation (V3.1.7): Start with lightest protocol, escalate only on failure.
@@ -56,7 +129,12 @@ class Transport {
   RawDatagramSocket? _udpSocket6; // IPv6 dual-stack (§27 IPv6 Transport)
   RawDatagramSocket? _udpSocketMobile; // Mobile fallback (§27 WiFi-dead detection)
   String? _mobileFallbackIp; // The local IP the mobile socket is bound to
-  int _consecutiveZeroSends = 0;
+  /// F4 (S123 UDP-dead RCA): edge-triggered dead-socket detector. Fires
+  /// [onUdpSocketDead] (via the call sites below) EXACTLY ONCE per dead
+  /// period instead of on every subsequent 0-send — a WLAN-zombie period in
+  /// the field produced 36,030 warn-log lines / 5,156 dead-callbacks in one
+  /// minute before this fix. See [ZeroSendDeadEdgeDetector] doc.
+  final ZeroSendDeadEdgeDetector _deadEdge = ZeroSendDeadEdgeDetector();
   bool _reconnecting = false;
   int _consecutiveDeadFromBirth = 0;
   int _lastReconnectMs = 0;
@@ -837,7 +915,7 @@ class Transport {
           }
         }
         if (anySent) {
-          _consecutiveZeroSends = 0;
+          _deadEdge.noteSendSuccess();
           onBytesSent?.call(data.length);
           _log.info('sendUdp: ${wrappedFragments.length} fragments (${data.length}B) '
               'sent to ${address.address}:$remotePort');
@@ -856,10 +934,9 @@ class Transport {
             _resetFragmentCacheTimer(cacheKey);
           }
         } else {
-          _consecutiveZeroSends += wrappedFragments.length;
           _log.info('sendUdp: all ${wrappedFragments.length} fragments returned 0 for ${address.address}:$remotePort');
-          if (_consecutiveZeroSends >= 10 && !_reconnecting) {
-            _log.warn('UDP socket appears dead ($_consecutiveZeroSends consecutive 0-sends)');
+          if (_deadEdge.noteZeroSends(wrappedFragments.length) && !_reconnecting) {
+            _log.warn('UDP socket appears dead (${_deadEdge.consecutiveZeroSends} consecutive 0-sends)');
             onUdpSocketDead?.call();
           }
         }
@@ -869,15 +946,14 @@ class Transport {
       // Non-fragmented: NetworkPacketV3 carries its tag in-band (no prefix).
       final sent = _udpSendRaw(data, address, remotePort, socket);
       if (sent > 0) {
-        _consecutiveZeroSends = 0;
+        _deadEdge.noteSendSuccess();
         onBytesSent?.call(data.length);
         return true;
       }
-      _consecutiveZeroSends++;
       final v6Hint = address.type == InternetAddressType.IPv6 ? ' [IPv6]' : '';
       _log.info('sendUdp: socket.send returned $sent for ${address.address}:$remotePort (${data.length}B)$v6Hint');
-      if (_consecutiveZeroSends >= 10 && !_reconnecting) {
-        _log.warn('UDP socket appears dead ($_consecutiveZeroSends consecutive 0-sends)');
+      if (_deadEdge.noteZeroSends(1) && !_reconnecting) {
+        _log.warn('UDP socket appears dead (${_deadEdge.consecutiveZeroSends} consecutive 0-sends)');
         onUdpSocketDead?.call();
       }
       return false;
@@ -1537,7 +1613,7 @@ class Transport {
       } catch (e) {
         _udpSocket6 = null;
       }
-      _consecutiveZeroSends = 0;
+      _deadEdge.noteReconnectCompleted();
       _lastUdpReceiveMs = 0;
       _selfProbeAcked = false;
       _startedAtMs = DateTime.now().millisecondsSinceEpoch;

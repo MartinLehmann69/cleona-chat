@@ -57,6 +57,82 @@ void _atomicWriteJson(String path, Object json) {
   tmp.renameSync(path);
 }
 
+/// F2 (S123 UDP-dead RCA, 2026-07-03 Pixel field test): tracks the last time
+/// an inbound packet PROVED our own sends are getting through (a reply to
+/// something we sent: DHT_PONG / DELIVERY_RECEIPT / the generic infra-
+/// response bridge). Extracted from [CleonaNode] as a standalone,
+/// injectable-time class so the gate predicate is unit-testable
+/// (`test/smoke/smoke_udp_dead_recovery.dart`) without spinning up a full
+/// node.
+///
+/// Deliberately distinct from `_confirmedPeers`, which only proves the
+/// RECEIVE path is alive (any inbound packet, including a receive-only
+/// trickle from a peer whose replies to OUR sends never arrive). Field
+/// forensics: a Bootstrap IPv6 trickle (~1.5 pkt/min) kept `_confirmedPeers`
+/// fresh for 2h23min while the send path was black-holed by a WLAN-zombie
+/// interface — every recovery gate built on `_confirmedPeers` alone stayed
+/// permanently suppressed.
+class OutboundLivenessTracker {
+  OutboundLivenessTracker({Duration? window})
+      : window = window ?? defaultWindow;
+
+  /// Default window: 2 keepalive intervals (`UdpKeepalive.initialIntervalMs`,
+  /// §7.6) so one full keepalive round-trip is covered even if the first
+  /// ping in the window was lost, + 10s buffer for scheduling/RTT jitter.
+  static const Duration defaultWindow = Duration(
+    milliseconds: UdpKeepalive.initialIntervalMs * 2 + 10000,
+  );
+
+  final Duration window;
+  DateTime? _lastConfirmedAt;
+
+  /// Timestamp of the last outbound-confirming packet, if any.
+  DateTime? get lastConfirmedAt => _lastConfirmedAt;
+
+  /// Record an inbound packet that proves our own send reached the peer
+  /// (and their reply reached us back).
+  void noteConfirmed([DateTime? now]) {
+    _lastConfirmedAt = now ?? DateTime.now();
+  }
+
+  /// Whether an outbound-confirming packet arrived within [window].
+  bool recentlyConfirmed([DateTime? now]) {
+    final ts = _lastConfirmedAt;
+    if (ts == null) return false;
+    final n = now ?? DateTime.now();
+    return n.difference(ts) <= window;
+  }
+}
+
+/// F1 (S123 UDP-dead RCA): tracks whether a dead-edge-triggered
+/// `onNetworkChanged` rebind recently completed, so a SECOND dead-edge
+/// shortly after can be recognized as "the rebind demonstrably did not
+/// help" (rebind-on-anyIPv4/anyIPv6 stays on the same dead interface) and
+/// escalate straight to the mobile-fallback probe. Extracted from
+/// [CleonaNode] for the same unit-testability reason as
+/// [OutboundLivenessTracker].
+class DeadEdgeEscalationTracker {
+  DeadEdgeEscalationTracker({this.window = const Duration(seconds: 60)});
+
+  final Duration window;
+  DateTime? _lastRebindCompletedAt;
+
+  /// Record that a dead-edge-triggered rebind (`onNetworkChanged` from
+  /// `onUdpSocketDead`) just finished.
+  void noteRebindCompleted([DateTime? now]) {
+    _lastRebindCompletedAt = now ?? DateTime.now();
+  }
+
+  /// Whether a NEW dead-edge arriving at [now] should escalate to mobile
+  /// fallback — true if a rebind completed within [window].
+  bool shouldEscalate([DateTime? now]) {
+    final ts = _lastRebindCompletedAt;
+    if (ts == null) return false;
+    final n = now ?? DateTime.now();
+    return n.difference(ts) < window;
+  }
+}
+
 /// Central network component. Handles transport, DHT, discovery, and message dispatch.
 /// Shared by all identities — one node, one port, one network stack.
 class CleonaNode {
@@ -195,12 +271,6 @@ class CleonaNode {
   // a userId (V3.1.65 multi-device routing); listeners should match either.
   void Function(String peerHex)? onRouteDownForCalls;
 
-  // Architecture §3.5 Push reliability: service-layer hook fires for every
-  // observed FRAGMENT_STORE_ACK so the proactive-push tracker can mark the
-  // matching push as completed and cancel its retry timer. Fires in addition
-  // to the existing dhtRpc.handleResponse path (which matches sender→storage
-  // requests); the two paths are independent and non-conflicting.
-  void Function(Uint8List messageId, int fragmentIndex)? onFragmentStoreAck;
 
   /// Fires when [ackTracker] has exhausted its surgical retry budget for a
   /// (messageId, recipientDeviceId) pair — i.e. all DV routes returned ACK
@@ -395,6 +465,17 @@ class CleonaNode {
   final List<DateTime> _routeDownTimestamps = [];
   bool _networkChangeInProgress = false;
 
+  /// F1 (S123 UDP-dead RCA): when the LAST `onUdpSocketDead` edge finished
+  /// its `onNetworkChanged(force:true)` rebind. If a SECOND dead-edge
+  /// arrives soon after, the rebind demonstrably did not fix anything (same
+  /// dead network — a rebind-on-anyIPv4/anyIPv6 stays on the same dead
+  /// interface) and we escalate straight to `_tryMobileFallback()`,
+  /// bypassing the `_confirmedPeers` gate that made the fallback
+  /// unreachable in the field (WLAN-zombie: rebind ran 8× in ~20s, all
+  /// equally ineffective). See [DeadEdgeEscalationTracker].
+  final DeadEdgeEscalationTracker _deadEdgeEscalation =
+      DeadEdgeEscalationTracker();
+
   /// Zero-peer recovery: periodic timer that re-bootstraps when isolated.
   Timer? _zeroPeerRecoveryTimer;
 
@@ -411,6 +492,27 @@ class CleonaNode {
   /// direct packet in the current session.
   final Map<String, DateTime> _confirmedPeers = {};
   static const Duration _confirmedPeerTtl = Duration(hours: 1);
+
+  /// F2 (S123 UDP-dead RCA, 2026-07-03 Pixel field test): tracks the last
+  /// INBOUND packet that proves our OWN sends are getting through — i.e. a
+  /// reply to something we sent (DHT_PONG / DELIVERY_RECEIPT / the generic
+  /// infra-response bridge covering FRAGMENT_STORE_ACK,
+  /// DHT_FIND_NODE/FIND_VALUE/STORE_RESPONSE, IDENTITY_*_RESPONSE).
+  ///
+  /// This is deliberately DISTINCT from [_confirmedPeers]: that map only
+  /// proves the RECEIVE path is alive (any inbound direct/BOOT packet, even
+  /// a receive-only trickle from a peer whose replies to us never arrive).
+  /// The field forensics (WLAN-zombie: uplink dead, interface kept its IPs
+  /// for ~2.5min, only inbound was a Bootstrap IPv6 trickle) showed
+  /// `_confirmedPeers` staying fresh via that trickle while our own sends
+  /// were black-holed for 2h23min — the recovery gates below were built on
+  /// `_confirmedPeers` and therefore never tripped. They must instead gate
+  /// on send-path liveness. See [OutboundLivenessTracker].
+  final OutboundLivenessTracker _outboundLiveness = OutboundLivenessTracker();
+
+  /// True if an inbound packet proving our own sends reached a peer arrived
+  /// recently. See [_outboundLiveness].
+  bool get _outboundRecentlyConfirmed => _outboundLiveness.recentlyConfirmed();
 
   /// True once at least one peer has been confirmed by a direct packet
   /// (hopCount==0) in the CURRENT daemon session. The QR convergence gate
@@ -792,6 +894,11 @@ class CleonaNode {
     // §3.1 B-1: peerHex is now the ACK sender's deviceId (not userId),
     // so dvRouting.confirmRoute and routingTable.getPeer work directly.
     ackTracker.onAckReceived = (msgIdHex, peerHex, wasDirect) {
+      // F2 (S123 UDP-dead RCA): a DELIVERY_RECEIPT proves our own send
+      // reached the peer AND their reply reached us back — the strongest
+      // possible send-path liveness signal (RUDP-Light architectural
+      // delivery proof). See [OutboundLivenessTracker].
+      _outboundLiveness.noteConfirmed();
       if (wasDirect) {
         dvRouting.confirmRoute(peerHex);
         if (!_isLocalIdentity(peerHex)) {
@@ -954,13 +1061,18 @@ class CleonaNode {
         );
     udpKeepalive.onAllPeersFailed = () {
       if (_networkChangeInProgress) return;
-      // §4.6 IPv6-First: if we have recent confirmed peers (e.g. Bootstrap
-      // via IPv6), keepalive failure means the IPv4-only peers are
-      // structurally unreachable — not that the network is down.
-      if (_confirmedPeers.values.any((ts) =>
-          DateTime.now().difference(ts) <= _confirmedPeerTtl)) {
-        _log.info('UdpKeepalive: all keepalive peers failed but confirmed '
-            'peers exist (IPv6 path alive) — skipping network change');
+      // §4.6 IPv6-First / F2 (S123 UDP-dead RCA): only suppress the
+      // network-change inference when our OWN sends are recently confirmed
+      // as getting through (send-path liveness). `_confirmedPeers` alone is
+      // NOT sufficient — it only proves the receive path is alive, and a
+      // receive-only trickle (e.g. Bootstrap IPv6 keepalive replies to
+      // someone else, or any inbound packet) kept it fresh for 2h23min in
+      // the field while OUR sends were black-holed by a WLAN-zombie
+      // interface, permanently suppressing this exact recovery path.
+      if (_outboundRecentlyConfirmed) {
+        _log.info('UdpKeepalive: all keepalive peers failed but outbound '
+            'send-path recently confirmed (IPv6 path alive) — skipping '
+            'network change');
         return;
       }
       _log.info('UdpKeepalive: all peers failed — inferring network change');
@@ -1000,11 +1112,27 @@ class CleonaNode {
     transport.onBytesSent = (b) => statsCollector.addBytesSent(b);
     transport.onBytesReceived = (b) => statsCollector.addBytesReceived(b);
     transport.onUdpSocketDead = () {
+      // F1 (S123 UDP-dead RCA): a second dead-edge shortly after a
+      // completed dead-edge-triggered rebind proves the rebind (anyIPv4/
+      // anyIPv6 on the same interface) did not help — escalate straight to
+      // the mobile-fallback probe instead of waiting for the
+      // `_confirmedPeers`-gated 15s path in `onNetworkChanged`, which the
+      // field trickle made unreachable. `_tryMobileFallback` verifies the
+      // alternative interface itself (probe-and-check), so no additional
+      // gate beyond "not already active" is needed here.
+      if (_deadEdgeEscalation.shouldEscalate() &&
+          !transport.isMobileFallbackActive) {
+        _log.warn('UDP socket dead again <60s after rebind completed — '
+            'rebind ineffective, escalating to mobile fallback');
+        _tryMobileFallback();
+      }
       if (_networkChangeInProgress) return;
       _log.warn('UDP socket dead — triggering network change');
       _networkChangeInProgress = true;
-      onNetworkChanged(force: true)
-          .whenComplete(() => _networkChangeInProgress = false);
+      onNetworkChanged(force: true).whenComplete(() {
+        _networkChangeInProgress = false;
+        _deadEdgeEscalation.noteRebindCompleted();
+      });
     };
     transport.onEpochExpired = (minVersion) {
       _log.warn('EPOCH_EXPIRED: network requires secret version $minVersion — this build is outdated');
@@ -2005,8 +2133,17 @@ class CleonaNode {
               '${senderHexLocal.substring(0, 8)}');
         }
         _disarmIsolatedNodeTimer();
-        _zeroPeerRecoveryTimer?.cancel();
-        _zeroPeerRecoveryTimer = null;
+        // F3 (S123 UDP-dead RCA): a BOOT frame is receive-only proof — it
+        // fires for inbound requests (e.g. DHT_PING) just as much as
+        // replies, and on Mobilfunk/CGNAT a single chatty peer (observed:
+        // Bootstrap IPv6 trickle, ~1.5 pkt/min) can keep this branch
+        // running indefinitely while OUR sends are black-holed. Only
+        // disarm the zero-peer recovery loop once send-path liveness is
+        // ALSO confirmed — otherwise let it keep retrying.
+        if (_outboundRecentlyConfirmed) {
+          _zeroPeerRecoveryTimer?.cancel();
+          _zeroPeerRecoveryTimer = null;
+        }
       }
     }
     switch (frame.messageType) {
@@ -2144,9 +2281,23 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_STORE_RESPONSE:
-      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
         _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort);
         return true;
+
+      // S123 Erasure-F1: FRAGMENT_STORE_ACK must reach the service-layer
+      // placement tracker (CleonaService.handleIncomingFragmentStoreAckInfra)
+      // so it can resolve the per-fragment-index Completer that
+      // `_distributeErasureFragments` is awaiting and drive
+      // `onProactivePushAcked` (proactive-push retry cancellation). No
+      // `DhtRpc.sendAndWait` ever registers a pending request for this
+      // type, so the bridge call below is a defensive no-op kept for
+      // symmetry with the other DHT-response types — the frame must NOT be
+      // swallowed here, so this returns false to fall through to
+      // `onInfrastructureFramePayload`, mirroring MTV3_PEER_STORE_ACK which
+      // was never listed in this switch at all.
+      case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort);
+        return false;
 
       // ── DHT request side (DHT_PING / DHT_FIND_NODE) ──────────────────
       // Wave 2B.3: ported from the dead-code V2-bridge stubs in
@@ -3308,6 +3459,12 @@ class CleonaNode {
       proto.InfrastructureFrameV3 frame,
       InternetAddress from,
       int fromPort) {
+    // F2 (S123 UDP-dead RCA): every type bridged here (DHT_PONG,
+    // DHT_FIND_NODE/FIND_VALUE/STORE_RESPONSE, FRAGMENT_STORE_ACK,
+    // IDENTITY_*_RESPONSE) is a reply to something WE sent — proof our
+    // send-path is alive, not just our receive-path. See
+    // [OutboundLivenessTracker].
+    _outboundLiveness.noteConfirmed();
     dhtRpc.handleResponse(
       v3ResponseType,
       Uint8List.fromList(frame.payload),
@@ -4969,7 +5126,11 @@ class CleonaNode {
     // IP and sending PINGs. If mobile works → activate mobile fallback socket.
     Future.delayed(const Duration(seconds: 15), () {
       if (!_running) return;
-      if (_confirmedPeers.values.any((ts) => DateTime.now().difference(ts) <= _confirmedPeerTtl)) return; // Peers found via WiFi — no fallback needed
+      // F2 (S123 UDP-dead RCA): gate on send-path liveness, not
+      // `_confirmedPeers` (receive-only — a trickle from an unrelated peer
+      // suppressed this exact fallback for 2h23min in the field even
+      // though our own sends were black-holed).
+      if (_outboundRecentlyConfirmed) return; // Send-path confirmed recently — no fallback needed
       if (transport.isMobileFallbackActive) return; // Already active
       _tryMobileFallback();
     });
@@ -5006,9 +5167,11 @@ class CleonaNode {
     _zeroPeerRecoveryTimer?.cancel();
     _zeroPeerRecoveryTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
       if (!_running) { timer.cancel(); return; }
-      if (_confirmedPeers.values.any((ts) =>
-          DateTime.now().difference(ts) <= _confirmedPeerTtl)) {
-        _log.info('Zero-peer recovery: peer confirmed — stopping recovery loop');
+      // F2 (S123 UDP-dead RCA): stop only on confirmed send-path liveness —
+      // `_confirmedPeers` (receive-only) let a Bootstrap trickle keep this
+      // gate satisfied for 2h23min while the send path stayed dead.
+      if (_outboundRecentlyConfirmed) {
+        _log.info('Zero-peer recovery: outbound confirmed — stopping recovery loop');
         timer.cancel();
         _zeroPeerRecoveryTimer = null;
         return;

@@ -509,6 +509,7 @@ class _MultiServiceDaemon {
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE ||
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE ||
           mt == proto.MessageTypeV3.MTV3_FRAGMENT_DELETE ||
+          mt == proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK ||
           // §5.5 Store-and-Forward on mutual peers:
           mt == proto.MessageTypeV3.MTV3_PEER_STORE ||
           mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
@@ -586,6 +587,12 @@ class _MultiServiceDaemon {
           case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
             service.handleIncomingFragmentDeleteInfra(
                 frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
+            // S123 Erasure-F1: resolve the sender-side per-fragment-index
+            // ACK wait (see CleonaService._distributeErasureFragments) and
+            // drive the proactive-push retry-cancel path.
+            service.handleIncomingFragmentStoreAckInfra(frame, senderDeviceId);
             break;
           case proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE:
             service.handleIncomingChannelIndexExchangeInfra(

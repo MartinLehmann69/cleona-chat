@@ -36,6 +36,7 @@ import 'package:cleona/core/network/v3_frame_codec.dart';
 import 'package:cleona/core/network/sender_identity_snapshot.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
+import 'package:cleona/core/erasure/erasure_placement.dart';
 import 'package:cleona/core/erasure/reed_solomon.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/service_context.dart';
@@ -136,6 +137,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   late MailboxStore mailboxStore;
   late final CallService _calls;
+  /// True once [_calls] has been assigned in [startService]. Guards the
+  /// buffered call-video accessors below, which must be settable before
+  /// startService runs (main.dart's `_wireServiceCallbacks` wires them
+  /// ahead of `await service.startService()`).
+  bool _callsReady = false;
   CallManager get callManager => _calls.callManager;
   GroupCallManager get groupCallManager => _calls.groupCallManager;
   // §2.2.4: per-identity Auth+Liveness Publisher. Eine pro CleonaService-Instanz
@@ -416,7 +422,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.119';
+  static const String kCurrentAppVersion = '3.1.120';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -508,6 +514,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Init call service (call/group-call managers, audio/video engine)
     _calls = CallService(this, notificationSound: notificationSound, log: _log);
+    _callsReady = true;
     _calls.onIncomingCall = (info) => onIncomingCall?.call(info);
     _calls.onCallAccepted = (info) => onCallAccepted?.call(info);
     _calls.onCallRejected = (info, reason) => onCallRejected?.call(info, reason);
@@ -516,6 +523,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _calls.onGroupCallStarted = (info) => onGroupCallStarted?.call(info);
     _calls.onGroupCallEnded = (info) => onGroupCallEnded?.call(info);
     _calls.onStateChanged = () => onStateChanged?.call();
+    // Forward whatever was buffered on the plain fields below (set by
+    // callers that ran before startService, e.g. main.dart's
+    // _wireServiceCallbacks) to the now-constructed CallService.
+    _calls.onGroupVideoI420Frame = _bufferedOnGroupVideoI420Frame;
+    _calls.createVideoEngine = _bufferedCreateVideoEngine;
+    _calls.onVideoFrameReceived = _bufferedOnVideoFrameReceived;
+    _calls.onKeyframeRequested = _bufferedOnKeyframeRequested;
     _calls.init();
 
     // §5.5b: FIRST_CR_STORE_ACK callback — update contact status to
@@ -779,9 +793,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // RUDP Light: downgrade message status on ACK timeout.
     node.ackTracker.onAckTimeout = _handleAckTimeout;
-    // Wire FRAGMENT_STORE_ACK observer for proactive-push reliability tracking
-    // (Architecture §3.5).
-    node.onFragmentStoreAck = onProactivePushAcked;
+    // FRAGMENT_STORE_ACK observation (proactive-push retry-cancel +
+    // Erasure-F1 placement ACKs) is wired via the InfraFrame dispatcher →
+    // handleIncomingFragmentStoreAckInfra (S123 Erasure-F1); the previous
+    // CleonaNode.onFragmentStoreAck hook was dead code (never invoked,
+    // since the DhtRpc bridge swallowed the frame before it could fire).
 
     // §5.1 Layer 3: offline cascade when all DV routes are exhausted.
     node.onMessageRetryExhausted = _handleRetryExhausted;
@@ -2676,11 +2692,17 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// used by the receiver's reassembly buffer to gather all 10 fragments
   /// of the same logical send.
   ///
-  /// Fire-and-forget: errors are logged at debug, callers don't await
-  /// individual FRAGMENT_STORE ACKs (they will arrive asynchronously via
-  /// the standard InfraFrame receive path).
-  /// Returns true if at least one fragment was dispatched (≥1 DHT peer known).
-  /// Returns false when no DHT replicators are reachable (truly offline).
+  /// ACK-verified placement (S123 Erasure-F1): wave 1 sends N=10 fragments
+  /// x min(3, P) replicas to the P closest DHT replicators exactly like the
+  /// pre-F1 fire-and-forget placement, then waits (Completer + 8s timeout,
+  /// [_peerStoreAckTimeout], reused from the S&F F1 pattern) for
+  /// FRAGMENT_STORE_ACKs. Up to 2 retry waves target only the fragment
+  /// indices still unconfirmed, drawing fresh candidates from a deeper pool
+  /// (count:30) — see [ErasurePlacementCoordinator]. Success = at least
+  /// K=[ReedSolomon.defaultK] distinct fragment indices confirmed.
+  /// Returns true iff K-of-N placement was ACK-confirmed within the wave
+  /// budget. Returns false when no DHT replicators are reachable at all, or
+  /// when fewer than K indices could be confirmed (truly offline / eclipse).
   Future<bool> _distributeErasureFragments({
     required Uint8List packetBytes,
     required Uint8List messageId,
@@ -2705,38 +2727,115 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final fragments = rs.encode(packetBytes);
       // D4 (§4.3): subnet-diverse replicator selection (same store/retrieve
       // pattern as the identity records — eclipse cost binding).
-      final peers = node.routingTable.findClosestPeers(mailboxId,
+      final initialPeers = node.routingTable.findClosestPeers(mailboxId,
           count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
-      if (peers.isEmpty) {
+      if (initialPeers.isEmpty) {
         _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
         return false;
       }
 
-      final replicaCount = peers.length < 3 ? peers.length : 3;
-      for (var i = 0; i < fragments.length; i++) {
+      final msgIdHex = bytesToHex(messageId);
+
+      Future<bool> sendAndWait(int fragmentIndex, PeerInfo peer) async {
         final fragStore = proto.FragmentStore()
           ..mailboxId = mailboxId
           ..messageId = messageId
-          ..fragmentIndex = i
+          ..fragmentIndex = fragmentIndex
           ..totalFragments = fragments.length
           ..requiredFragments = ReedSolomon.defaultK
-          ..fragmentData = fragments[i]
+          ..fragmentData = fragments[fragmentIndex]
           ..originalSize = packetBytes.length;
-        final payload = Uint8List.fromList(fragStore.writeToBuffer());
-        for (var r = 0; r < replicaCount; r++) {
-          final targetPeer = peers[(i + r) % peers.length];
-          node.sendInfraTo(
-            messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-            innerPayload: payload,
-            recipientDeviceId: Uint8List.fromList(targetPeer.nodeId),
-          );
+        final key = '$msgIdHex:$fragmentIndex';
+        // Multiple replicas of the SAME fragment index (within or across
+        // waves) share one Completer: FragmentStoreAck carries only
+        // (messageId, fragmentIndex) — no per-send correlation id — so any
+        // one ACK for this index resolves every in-flight wait for it.
+        final completer =
+            _pendingFragmentStoreAcks.putIfAbsent(key, () => Completer<void>());
+        unawaited(node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
+          recipientDeviceId: Uint8List.fromList(peer.nodeId),
+        ));
+        try {
+          await completer.future.timeout(_peerStoreAckTimeout);
+          return true;
+        } on TimeoutException {
+          return false;
         }
       }
-      return true;
+
+      final coordinator = ErasurePlacementCoordinator<PeerInfo>(
+        totalFragments: fragments.length,
+        requiredFragments: ReedSolomon.defaultK,
+        peerId: (p) => p.nodeIdHex,
+        isPeerConfirmed: (p) => node.isPeerConfirmed(p.nodeIdHex),
+      );
+      final result = await coordinator.run(
+        initialPool: initialPeers,
+        deeperPool: () => node.routingTable.findClosestPeers(mailboxId,
+            count: 30, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup),
+        sendAndWait: sendAndWait,
+      );
+
+      // Aufraeumen nach Abschluss (kein Leak): every wait for this
+      // messageId's Completers has already resolved by the time
+      // `coordinator.run()` returns (each wave `await`s Future.wait before
+      // the next starts), so it's safe to drop any remaining entries —
+      // a late/duplicate ACK arriving afterwards is a harmless no-op in
+      // `handleIncomingFragmentStoreAckInfra`.
+      for (var i = 0; i < fragments.length; i++) {
+        _pendingFragmentStoreAcks.remove('$msgIdHex:$i');
+      }
+
+      if (result.success) {
+        if (result.fragile) {
+          _log.warn('Erasure placement fragile '
+              '(${result.confirmedCount}/${result.totalFragments} indices confirmed)');
+        } else {
+          _log.info('Erasure: ${result.confirmedCount}/${result.totalFragments} '
+              'indices confirmed');
+        }
+        return true;
+      }
+      _log.info('Erasure placement FAILED: '
+          '${result.confirmedCount}/${result.totalFragments} indices confirmed');
+      return false;
     } catch (e) {
       _log.debug('Erasure offline-delivery failed: $e');
       return false;
     }
+  }
+
+  /// §5.4 (S123 Erasure-F1): pending FRAGMENT_STORE ACKs keyed by
+  /// `'<messageIdHex>:<fragmentIndex>'`. Distinct from
+  /// [_pendingPeerStoreAcks] (S&F path, keyed by a random per-send storeId)
+  /// because `FragmentStoreAck` carries no correlation id beyond
+  /// (messageId, fragmentIndex) — replicas of the same index share one
+  /// Completer.
+  final Map<String, Completer<void>> _pendingFragmentStoreAcks = {};
+
+  /// Routed from the InfraFrame dispatchers. Resolves the sender-side
+  /// per-fragment-index ACK wait started by `_distributeErasureFragments`
+  /// AND drives the proactive-push retry-cancel path (`onProactivePushAcked`)
+  /// — both concerns share this one FRAGMENT_STORE_ACK observation point
+  /// since S123 Erasure-F1 (previously `onProactivePushAcked` was wired via
+  /// the now-removed `CleonaNode.onFragmentStoreAck` hook, which was never
+  /// invoked because the type was swallowed by the DhtRpc bridge before
+  /// S123).
+  void handleIncomingFragmentStoreAckInfra(
+      proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId) {
+    try {
+      final ack = proto.FragmentStoreAck.fromBuffer(frame.payload);
+      final messageId = Uint8List.fromList(ack.messageId);
+      final msgIdHex = bytesToHex(messageId);
+      final key = '$msgIdHex:${ack.fragmentIndex}';
+      final pending = _pendingFragmentStoreAcks.remove(key);
+      if (pending != null && !pending.isCompleted) {
+        pending.complete();
+      }
+      onProactivePushAcked(messageId, ack.fragmentIndex);
+    } catch (_) {/* malformed ACK — ignore */}
   }
 
   // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
@@ -5894,26 +5993,47 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   Future<void> leaveGroupCall() => _calls.leaveGroupCall();
 
+  // The four accessors below buffer on a plain field instead of delegating
+  // straight to `_calls` because `_calls` is `late` and only assigned inside
+  // startService(): main.dart's `_wireServiceCallbacks` sets these (at least
+  // `createVideoEngine`) before `await service.startService()` runs, which
+  // would otherwise throw LateInitializationError. The buffered value is
+  // handed to `_calls` in startService (see there) once it exists.
   void Function(String senderHex, Uint8List i420, int width, int height)?
-      get onGroupVideoI420Frame => _calls.onGroupVideoI420Frame;
+      _bufferedOnGroupVideoI420Frame;
+  void Function(String senderHex, Uint8List i420, int width, int height)?
+      get onGroupVideoI420Frame => _bufferedOnGroupVideoI420Frame;
   set onGroupVideoI420Frame(
-          void Function(String, Uint8List, int, int)? v) =>
-      _calls.onGroupVideoI420Frame = v;
+      void Function(String, Uint8List, int, int)? v) {
+    _bufferedOnGroupVideoI420Frame = v;
+    if (_callsReady) _calls.onGroupVideoI420Frame = v;
+  }
 
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
-      get createVideoEngine => _calls.createVideoEngine;
+      _bufferedCreateVideoEngine;
+  dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
+      get createVideoEngine => _bufferedCreateVideoEngine;
   set createVideoEngine(
-          dynamic Function(Uint8List, void Function(Uint8List))? v) =>
-      _calls.createVideoEngine = v;
+      dynamic Function(Uint8List, void Function(Uint8List))? v) {
+    _bufferedCreateVideoEngine = v;
+    if (_callsReady) _calls.createVideoEngine = v;
+  }
 
+  void Function(Uint8List serializedVideoFrame)?
+      _bufferedOnVideoFrameReceived;
   void Function(Uint8List serializedVideoFrame)? get onVideoFrameReceived =>
-      _calls.onVideoFrameReceived;
-  set onVideoFrameReceived(void Function(Uint8List)? v) =>
-      _calls.onVideoFrameReceived = v;
+      _bufferedOnVideoFrameReceived;
+  set onVideoFrameReceived(void Function(Uint8List)? v) {
+    _bufferedOnVideoFrameReceived = v;
+    if (_callsReady) _calls.onVideoFrameReceived = v;
+  }
 
-  void Function()? get onKeyframeRequested => _calls.onKeyframeRequested;
-  set onKeyframeRequested(void Function()? v) =>
-      _calls.onKeyframeRequested = v;
+  void Function()? _bufferedOnKeyframeRequested;
+  void Function()? get onKeyframeRequested => _bufferedOnKeyframeRequested;
+  set onKeyframeRequested(void Function()? v) {
+    _bufferedOnKeyframeRequested = v;
+    if (_callsReady) _calls.onKeyframeRequested = v;
+  }
 
   void sendKeyframeRequest() => _calls.sendKeyframeRequest();
 
@@ -10074,6 +10194,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     List<bool>? l3Result,
     int? groupMembershipEpoch,
     Uint8List? groupMembershipHash,
+    Uint8List? targetDeviceId,
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
@@ -10110,7 +10231,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     //    been published yet. DHT resolution runs in the background to warm
     //    the cache for future sends and to discover additional devices.
     List<Uint8List> deviceIds;
-    if (contact.deviceNodeIds.isNotEmpty) {
+    if (targetDeviceId != null && targetDeviceId.isNotEmpty) {
+      // Caller already knows the exact device this frame must reach (e.g. a
+      // DELIVERY_RECEIPT addressed back to the device that sent the original
+      // message) — skip the multi-device cache/DHT resolution below, which
+      // may hold a *different*, stale device of the same recipient user.
+      deviceIds = [targetDeviceId];
+      _log.debug('sendToUser: targeted send to device '
+          '${_hexShort(targetDeviceId)} for ${_hexShort(recipientUserId)}');
+    } else if (contact.deviceNodeIds.isNotEmpty) {
       deviceIds = contact.deviceNodeIds.map(hexToBytes).toList(growable: false);
       _log.debug('sendToUser: fast-path ${deviceIds.length} cached deviceNodeIds '
           'for ${_hexShort(recipientUserId)}');
@@ -11380,6 +11509,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _sendDeliveryReceiptV3(
           recipientUserId: senderUserId,
           messageId: Uint8List.fromList(frame.messageId),
+          senderDeviceId: senderDeviceId,
         );
       }
     }
@@ -11389,9 +11519,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// successfully received ApplicationFrame. Fire-and-forget — receipt
   /// loss is tolerable (sender's AckTracker times out and triggers its
   /// own retry / route-down logic).
+  ///
+  /// [senderDeviceId] is the concrete device that sent the frame being
+  /// acknowledged (from `handleApplicationFrame`'s outer packet). On a
+  /// multi-device account, `sendToUser`'s user-level fan-out may otherwise
+  /// pick a *different*, stale cached device of the same user — the receipt
+  /// would then never reach the device whose AckTracker is actually waiting.
+  /// Targeting the exact device closes that gap without any extra traffic
+  /// (still exactly one receipt).
   void _sendDeliveryReceiptV3({
     required Uint8List recipientUserId,
     required Uint8List messageId,
+    Uint8List? senderDeviceId,
   }) {
     final receipt = proto.DeliveryReceipt()
       ..messageId = messageId
@@ -11400,6 +11539,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       recipientUserId: recipientUserId,
       messageType: proto.MessageTypeV3.MTV3_DELIVERY_RECEIPT,
       payload: receipt.writeToBuffer(),
+      targetDeviceId:
+          (senderDeviceId != null && senderDeviceId.isNotEmpty)
+              ? senderDeviceId
+              : null,
     );
   }
 

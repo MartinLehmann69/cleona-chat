@@ -56,7 +56,7 @@ Future<CrashReportDialogResult> _showNewCrashDialog(
   BuildContext context,
   CrashReport report,
 ) async {
-  final locale = AppLocale.of(context);
+  final locale = AppLocale.read(context);
   final result = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -123,7 +123,7 @@ Future<CrashReportDialogResult> _showKnownCrashDialog(
   int reportCount,
   String existingPostId,
 ) async {
-  final locale = AppLocale.of(context);
+  final locale = AppLocale.read(context);
   final result = await showDialog<bool>(
     context: context,
     barrierDismissible: false,
@@ -169,7 +169,7 @@ Future<CrashReportDialogResult> _showKnownCrashDialog(
 Future<CrashReportDialogResult> _showRateLimitDialog(
   BuildContext context,
 ) async {
-  final locale = AppLocale.of(context);
+  final locale = AppLocale.read(context);
   await showDialog<void>(
     context: context,
     barrierDismissible: false,

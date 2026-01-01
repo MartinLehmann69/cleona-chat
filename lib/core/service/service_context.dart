@@ -38,6 +38,11 @@ abstract class ServiceContext {
     List<bool>? l3Result,
     int? groupMembershipEpoch,
     Uint8List? groupMembershipHash,
+    // When set, bypasses per-user device resolution/cache and sends only to
+    // this specific device (e.g. a DELIVERY_RECEIPT addressed back to the
+    // exact device that sent the original frame, not just any known device
+    // of that user).
+    Uint8List? targetDeviceId,
   });
 
   void saveChannels();
