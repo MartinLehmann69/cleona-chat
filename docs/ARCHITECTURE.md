@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:077d1e127bd5, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:4894067179b2, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -4410,11 +4410,48 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 
 **Reconsideration triggers:** This decision should be revisited only if (1) Android adds a peer-to-peer wake API that does not require a third party, or (2) the user-stated "no third party" constraint is relaxed. Neither is on any visible roadmap.
 
+**Abgrenzung BGTaskScheduler (iOS):** Die in §12.5 beschriebene iOS Background App Refresh via `BGAppRefreshTask` ist **kein** Push-Wakeup und faellt nicht unter diese Ablehnung. BGTaskScheduler ist ein OS-gesteuerter Pull-Mechanismus: das Betriebssystem weckt die App periodisch auf, die App verbindet sich aktiv mit dem P2P-Netz und holt wartende Nachrichten ab. Kein Drittanbieter-Server, kein APNs, kein Firebase. Die Einschraenkungen (OS-kontrolliertes Timing, begrenzte Ausfuehrungszeit) sind akzeptiert — sie sind der Preis fuer Hintergrund-Zustellung ohne zentrale Infrastruktur.
+
 ### 12.5 Platform-Specific Background Behavior
 
 **Android:** The in-process architecture runs all networking within the Flutter app. A foreground service (`CleonaForegroundService`, type `dataSync`) keeps the process alive and the UDP socket open for pushed messages. When the OS suspends the app (Doze mode), WorkManager schedules periodic wake-ups (minimum 15-minute OS interval). The foreground service with persistent notification provides near-instant delivery. Without it, messages arrive during the next WorkManager wake-up. **Lifecycle save:** `CleonaAppState` implements `WidgetsBindingObserver` and calls both `saveState()` (conversations, contacts, groups, channels) **and `saveNetworkState()`** (routing table, DV routing table, peer addresses) when `AppLifecycleState.paused` is received. `saveState()` prevents data loss (e.g., media message types reverting to TEXT); `saveNetworkState()` prevents cold-start peer loss — without it, Android process kills lose the learned topology and the node restarts with routes=0, peers=0.
 
-**iOS:** Background App Refresh provides periodic wake-up windows (iOS controls exact timing). During each window, the node opens its UDP socket and receives pushed messages. iOS limits background execution time; Cleona maximizes each window.
+**iOS:** Kein Daemon-Prozess — die App laeuft In-Process wie auf Android. Im Vordergrund ist der Node aktiv (UDP-Socket offen, Echtzeit-Zustellung). Im Hintergrund nutzt Cleona Apples `BGTaskScheduler` Framework fuer periodische Nachrichten-Abholung:
+
+**BGAppRefreshTask ("Background App Refresh"):**
+- Registriert beim App-Start via `BGTaskScheduler.shared.register(forTaskWithIdentifier:)` mit dem Identifier `chat.cleona.cleona.refresh`
+- Scheduling: `BGAppRefreshTaskRequest` mit `earliestBeginDate` = 15 Minuten. Das OS entscheidet den tatsaechlichen Zeitpunkt (15 Min bis mehrere Stunden, abhaengig von Nutzerverhalten, Akkuladung, Netzwerkverfuegbarkeit)
+- **Ausfuehrung pro Wakeup (~30 Sekunden):**
+  1. Gespeicherte Routing-Tabelle laden (Peers, Adressen, Scores — persistiert bei `AppLifecycleState.paused`)
+  2. UDP-Socket oeffnen auf dem gespeicherten Port
+  3. Bekannte Peers kontaktieren: PING an Top-3-Peers (nach Score sortiert)
+  4. Store-and-Forward abrufen: Mutual Peers nach wartenden Nachrichten fragen
+  5. Reed-Solomon-Fragmente vom DHT holen (fuer Nachrichten die waehrend Offline ankamen)
+  6. Empfangene Nachrichten entschluesseln + als lokale iOS-Notifications anzeigen (`UNUserNotificationCenter`)
+  7. Routing-Tabelle + Nachrichten persistieren
+  8. Socket schliessen, naechsten Task schedulen
+  9. `task.setTaskCompleted(success: true)` aufrufen
+- **Scheduling-Kette:** Jeder abgeschlossene Task registriert den naechsten (`scheduleAppRefresh()` am Ende der Ausfuehrung). Beim allerersten App-Start und nach jedem Vordergrund→Hintergrund-Wechsel wird ebenfalls geschedulet.
+- **Einschraenkungen (akzeptiert):**
+  - Kein Echtzeit-Messaging im Hintergrund (Verzoegerung 15 Min bis Stunden)
+  - OS kann Tasks komplett unterdruecken wenn die App selten geoeffnet wird
+  - ~30 Sekunden Ausfuehrungszeit — genuegt fuer S&F-Abholung und Fragment-Retrieval, nicht fuer DHT-Vollsync
+  - Kein persistenter UDP-Socket (anders als Android Foreground Service)
+
+**Lifecycle-Integration:**
+- `AppLifecycleState.paused` (App geht in Hintergrund): `saveState()` + `saveNetworkState()` + Node herunterfahren (UDP-Socket schliessen, Timer stoppen) + naechsten BGTask schedulen
+- `AppLifecycleState.resumed` (App kommt in Vordergrund): Node komplett starten (UDP-Socket, DHT, Discovery) — Vollmodus wie beim Erststart, aber mit warmer Routing-Tabelle
+- Task-Expiration-Handler: `task.expirationHandler` faehrt den Mini-Node sauber herunter wenn das OS die Zeit abschneidet
+
+**Notification-Bridge:** Im Hintergrund empfangene Nachrichten werden via `UNUserNotificationCenter.add()` als lokale Notifications angezeigt (Absender-Name, Nachrichten-Preview — verschluesselt auf dem Geraet entschluesselt, kein Server sieht den Inhalt). Das App-Badge wird auf die Anzahl ungelesener Nachrichten gesetzt (`UNMutableNotificationContent.badge`).
+
+**Info.plist-Eintraege:**
+- `UIBackgroundModes`: `fetch`, `processing`
+- `BGTaskSchedulerPermittedIdentifiers`: `chat.cleona.cleona.refresh`
+
+**Implementierung:** Nativer Swift-Code (`ios/Runner/BackgroundFetchHandler.swift`) kommuniziert mit dem Dart-Layer via `MethodChannel("cleona/background_fetch")`. Der Dart-Code stellt einen minimalen Node-Startpfad bereit (`CleonaNode.startQuick()` + `CleonaService.fetchPendingMessages()`) der die schweren Teile (Discovery-Burst, Subnet-Scan, DHT-Bootstrap) ueberspringt und nur bekannte Peers kontaktiert.
+
+**Kein APNs, kein Push, kein Drittanbieter.** Dies ist ein reiner Pull-Mechanismus der ausschliesslich auf OS-APIs und dem bestehenden P2P-Netz basiert. Siehe §12.4 fuer die Abgrenzung zu den verworfenen Push-Varianten.
 
 **Linux Desktop:** The daemon process (`cleona-daemon`) runs continuously as a separate process from the GUI. The UDP socket is permanently open, providing instant push delivery. The daemon survives GUI restarts. Becomes fully offline when the system enters standby. System tray icon (GTK3 + libappindicator3) provides visual status.
 
