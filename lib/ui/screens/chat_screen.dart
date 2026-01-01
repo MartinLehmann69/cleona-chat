@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:ui';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -319,6 +320,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               onMessageAction: (action, m) => _handleMessageAction(action, m, service),
                               isSearchHighlight: isHighlighted,
                               isSystemChannel: sys_ch.SystemChannels.isSystemChannel(widget.conversationId),
+                              browserOpenMode: service?.linkPreviewSettings.browserOpenMode ?? BrowserOpenMode.normal,
                             );
                           },
                         ),
@@ -2374,6 +2376,7 @@ class _MessageBubble extends StatelessWidget {
   final void Function(String action, UiMessage message)? onMessageAction;
   final bool isSearchHighlight;
   final bool isSystemChannel;
+  final BrowserOpenMode browserOpenMode;
 
   const _MessageBubble({
     required this.message,
@@ -2384,6 +2387,7 @@ class _MessageBubble extends StatelessWidget {
     this.onMessageAction,
     this.isSearchHighlight = false,
     this.isSystemChannel = false,
+    this.browserOpenMode = BrowserOpenMode.normal,
   });
 
   /// Default edit window: 1 hour.
@@ -2613,36 +2617,8 @@ class _MessageBubble extends StatelessWidget {
               : null,
         ),
           child: Stack(
+            clipBehavior: Clip.none,
             children: [
-              if (_hasMenu)
-                Positioned(
-                  top: -8,
-                  right: -8,
-                  child: PopupMenuButton<String>(
-                    padding: EdgeInsets.zero,
-                    iconSize: 16,
-                    icon: Icon(Icons.more_vert, size: 16, color: colorScheme.outline),
-                    onSelected: (action) => onMessageAction?.call(action, message),
-                    itemBuilder: (_) => [
-                      if (_canReply)
-                        PopupMenuItem(value: 'reply', child: Row(children: [const Icon(Icons.reply, size: 18), const SizedBox(width: 8), Text(locale.get('reply'))])),
-                      if (_canReact)
-                        PopupMenuItem(value: 'react', child: Row(children: [const Icon(Icons.add_reaction_outlined, size: 18), const SizedBox(width: 8), Text(locale.get('react'))])),
-                      if (_canCopyText)
-                        PopupMenuItem(value: 'copy_text', child: Row(children: [const Icon(Icons.copy, size: 18), const SizedBox(width: 8), Text(locale.get('copy_text'))])),
-                      if (_canSaveMedia)
-                        PopupMenuItem(value: 'save_media', child: Row(children: [const Icon(Icons.save_alt, size: 18), const SizedBox(width: 8), Text(locale.get('save_file'))])),
-                      if (_canSaveMedia)
-                        PopupMenuItem(value: 'copy_media', child: Row(children: [const Icon(Icons.copy_all, size: 18), const SizedBox(width: 8), Text(locale.get('copy_to_clipboard'))])),
-                      if (_canForward)
-                        PopupMenuItem(value: 'forward', child: Row(children: [const Icon(Icons.forward, size: 18), const SizedBox(width: 8), Text(locale.get('forward'))])),
-                      if (_canEdit)
-                        PopupMenuItem(value: 'edit', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('edit'))])),
-                      if (_canDelete)
-                        PopupMenuItem(value: 'delete', child: Row(children: [const Icon(Icons.delete, size: 18), const SizedBox(width: 8), Text(locale.get('delete'))])),
-                    ],
-                  ),
-                ),
               Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -2810,6 +2786,35 @@ class _MessageBubble extends StatelessWidget {
               ),
             ],
           ),
+              if (_hasMenu)
+                Positioned(
+                  top: -8,
+                  right: -8,
+                  child: PopupMenuButton<String>(
+                    padding: EdgeInsets.zero,
+                    iconSize: 16,
+                    icon: Icon(Icons.more_vert, size: 16, color: colorScheme.outline),
+                    onSelected: (action) => onMessageAction?.call(action, message),
+                    itemBuilder: (_) => [
+                      if (_canReply)
+                        PopupMenuItem(value: 'reply', child: Row(children: [const Icon(Icons.reply, size: 18), const SizedBox(width: 8), Text(locale.get('reply'))])),
+                      if (_canReact)
+                        PopupMenuItem(value: 'react', child: Row(children: [const Icon(Icons.add_reaction_outlined, size: 18), const SizedBox(width: 8), Text(locale.get('react'))])),
+                      if (_canCopyText)
+                        PopupMenuItem(value: 'copy_text', child: Row(children: [const Icon(Icons.copy, size: 18), const SizedBox(width: 8), Text(locale.get('copy_text'))])),
+                      if (_canSaveMedia)
+                        PopupMenuItem(value: 'save_media', child: Row(children: [const Icon(Icons.save_alt, size: 18), const SizedBox(width: 8), Text(locale.get('save_file'))])),
+                      if (_canSaveMedia)
+                        PopupMenuItem(value: 'copy_media', child: Row(children: [const Icon(Icons.copy_all, size: 18), const SizedBox(width: 8), Text(locale.get('copy_to_clipboard'))])),
+                      if (_canForward)
+                        PopupMenuItem(value: 'forward', child: Row(children: [const Icon(Icons.forward, size: 18), const SizedBox(width: 8), Text(locale.get('forward'))])),
+                      if (_canEdit)
+                        PopupMenuItem(value: 'edit', child: Row(children: [const Icon(Icons.edit, size: 18), const SizedBox(width: 8), Text(locale.get('edit'))])),
+                      if (_canDelete)
+                        PopupMenuItem(value: 'delete', child: Row(children: [const Icon(Icons.delete, size: 18), const SizedBox(width: 8), Text(locale.get('delete'))])),
+                    ],
+                  ),
+                ),
           ],
         ),
     );
@@ -2847,14 +2852,13 @@ class _MessageBubble extends StatelessWidget {
         spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
       }
       final url = match.group(0)!;
-      spans.add(WidgetSpan(
-        child: InkWell(
-          onTap: () => _openUrl(context, url),
-          child: Text(url, style: style.copyWith(
-            color: Colors.blue,
-            decoration: TextDecoration.underline,
-          )),
+      spans.add(TextSpan(
+        text: url,
+        style: style.copyWith(
+          color: Colors.blue,
+          decoration: TextDecoration.underline,
         ),
+        recognizer: TapGestureRecognizer()..onTap = () => _openUrl(context, url),
       ));
       lastEnd = match.end;
     }
@@ -2862,7 +2866,7 @@ class _MessageBubble extends StatelessWidget {
       spans.add(TextSpan(text: text.substring(lastEnd)));
     }
 
-    return SelectableText.rich(TextSpan(style: style, children: spans));
+    return Text.rich(TextSpan(style: style, children: spans));
   }
 
   // ── Link Preview Card ─────────────────────────────────────────────────
@@ -2966,10 +2970,7 @@ class _MessageBubble extends StatelessWidget {
   // ── URL Opening with Incognito Support ────────────────────────────────
 
   void _openUrl(BuildContext context, String url) {
-    final service = Provider.of<ICleonaService>(context, listen: false);
-    final mode = service.linkPreviewSettings.browserOpenMode;
-
-    switch (mode) {
+    switch (browserOpenMode) {
       case BrowserOpenMode.normal:
         launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
       case BrowserOpenMode.incognitoPreferred:
