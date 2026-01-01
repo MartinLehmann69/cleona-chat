@@ -208,17 +208,20 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          # Verify force_load made it into the Pods xcconfig
-          echo "=== Pods-Runner.release.xcconfig (after pod install) ==="
-          XCCONFIG="ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
-          grep 'OTHER_LDFLAGS\|force_load' "$XCCONFIG" || echo "NO OTHER_LDFLAGS in xcconfig!"
-          echo "=== Building IPA ==="
+          # Verbose build — capture full xcodebuild output to extract linker invocation
           flutter build ipa \
             --release \
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
-            --export-options-plist=ios/ExportOptions.plist
-          echo "=== Runner binary size ==="
-          find build/ios -name Runner -type f -exec ls -la {} \; 2>/dev/null | head -3
+            --export-options-plist=ios/ExportOptions.plist \
+            --verbose 2>&1 | tee /tmp/build.log | grep -E 'force_load|Ld |ld |OTHER_LDFLAGS|libcleona_all|error:' || true
+          echo "=== Linker invocation ==="
+          grep -E 'Ld .*Runner|ld .*-o.*Runner' /tmp/build.log | head -3
+          echo "=== force_load in linker args ==="
+          grep 'force_load' /tmp/build.log | head -5
+          echo "=== Pods-Runner.release.xcconfig AFTER flutter internal pod install ==="
+          grep 'force_load\|OTHER_LDFLAGS' "ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig" || echo "NOT FOUND"
+          echo "=== Runner binary ==="
+          find build/ios -name Runner -not -path '*/Frameworks/*' -type f -exec ls -la {} \; 2>/dev/null | head -3
 
       - name: List build outputs
         if: always()
