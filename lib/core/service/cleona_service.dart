@@ -480,7 +480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.159';
+  static const String kCurrentAppVersion = '3.1.160';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -8857,51 +8857,66 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void _migrateDeviceNodeIdToUserId() {
     final deviceHex = identity.nodeIdHex; // = deviceNodeIdHex
     final userHex = identity.userIdHex;
-    if (deviceHex == userHex) return; // No-op if IDs happen to match (shouldn't, but safe)
+    if (deviceHex == userHex) return;
 
     var migrated = false;
 
     // ── Groups ──
     for (final group in _groups.values) {
-      // Re-key self in members map
-      if (group.members.containsKey(deviceHex) && !group.members.containsKey(userHex)) {
-        final self = group.members.remove(deviceHex)!;
+      if (group.members.containsKey(userHex)) {
+        // Already correct — only fix ownerNodeIdHex if stale
+        if (group.ownerNodeIdHex != userHex && _isOurOldKey(group.ownerNodeIdHex)) {
+          group.ownerNodeIdHex = userHex;
+          migrated = true;
+        }
+        continue;
+      }
+
+      final oldKey = _findOurOldMemberKey(group.members, deviceHex);
+      if (oldKey != null) {
+        final self = group.members.remove(oldKey)!;
         group.members[userHex] = GroupMemberInfo(
           nodeIdHex: userHex,
           displayName: self.displayName,
           role: self.role,
-          ed25519Pk: self.ed25519Pk,
-          x25519Pk: self.x25519Pk,
-          mlKemPk: self.mlKemPk,
+          ed25519Pk: identity.ed25519PublicKey,
+          x25519Pk: identity.x25519PublicKey,
+          mlKemPk: identity.mlKemPublicKey,
         );
+        if (group.ownerNodeIdHex == oldKey) {
+          group.ownerNodeIdHex = userHex;
+        }
         migrated = true;
-        _log.info('Migrated self in group "${group.name}": deviceNodeId → userId');
-      }
-      // Fix ownerNodeIdHex
-      if (group.ownerNodeIdHex == deviceHex) {
-        group.ownerNodeIdHex = userHex;
-        migrated = true;
+        _log.info('Migrated self in group "${group.name}": $oldKey → $userHex');
       }
     }
 
     // ── Channels ──
     for (final channel in _channels.values) {
-      if (channel.members.containsKey(deviceHex) && !channel.members.containsKey(userHex)) {
-        final self = channel.members.remove(deviceHex)!;
+      if (channel.members.containsKey(userHex)) {
+        if (channel.ownerNodeIdHex != userHex && _isOurOldKey(channel.ownerNodeIdHex)) {
+          channel.ownerNodeIdHex = userHex;
+          migrated = true;
+        }
+        continue;
+      }
+
+      final oldKey = _findOurOldMemberKey(channel.members, deviceHex);
+      if (oldKey != null) {
+        final self = channel.members.remove(oldKey)!;
         channel.members[userHex] = ChannelMemberInfo(
           nodeIdHex: userHex,
           displayName: self.displayName,
           role: self.role,
-          ed25519Pk: self.ed25519Pk,
-          x25519Pk: self.x25519Pk,
-          mlKemPk: self.mlKemPk,
+          ed25519Pk: identity.ed25519PublicKey,
+          x25519Pk: identity.x25519PublicKey,
+          mlKemPk: identity.mlKemPublicKey,
         );
+        if (channel.ownerNodeIdHex == oldKey) {
+          channel.ownerNodeIdHex = userHex;
+        }
         migrated = true;
-        _log.info('Migrated self in channel "${channel.name}": deviceNodeId → userId');
-      }
-      if (channel.ownerNodeIdHex == deviceHex) {
-        channel.ownerNodeIdHex = userHex;
-        migrated = true;
+        _log.info('Migrated self in channel "${channel.name}": $oldKey → $userHex');
       }
     }
 
@@ -8916,7 +8931,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           msg.senderNodeIdHex = userHex;
           migrated = true;
         }
-        // Reactions: replace deviceHex with userHex in all reaction sets
         for (final reactionSet in msg.reactions.values) {
           if (reactionSet.remove(deviceHex)) {
             reactionSet.add(userHex);
@@ -8932,6 +8946,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _saveConversations();
       _log.info('Migration deviceNodeId→userId complete');
     }
+  }
+
+  /// Find the old member-map key for self: first try the local deviceNodeId,
+  /// then fall back to ed25519 public key matching (cross-device migration).
+  String? _findOurOldMemberKey(Map<String, dynamic> members, String deviceHex) {
+    if (members.containsKey(deviceHex)) return deviceHex;
+    for (final entry in members.entries) {
+      final m = entry.value;
+      final Uint8List? pk = m.ed25519Pk;
+      if (pk != null && _isOurEd25519Pk(pk)) return entry.key;
+    }
+    return null;
+  }
+
+  bool _isOurEd25519Pk(Uint8List pk) {
+    return constantTimeEquals(pk, identity.foundingEd25519Pk) ||
+           constantTimeEquals(pk, identity.ed25519PublicKey);
+  }
+
+  bool _isOurOldKey(String hex) {
+    return hex == identity.nodeIdHex;
   }
 
   // ── Multi-Device Persistence (§26) ─────────────────────────────────
@@ -12094,6 +12129,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// binary back into this node's fragment store so it becomes a
   /// distribution source for other nodes too.
   Future<void> _startInNetworkUpdate(UpdateManifest manifest) async {
+    // S287: the UI may hold a stale cached manifest (e.g. v3.1.158) while
+    // the poll has already promoted _latestManifest to a newer version
+    // (e.g. v3.1.159). Using the stale manifest causes a binSize mismatch
+    // because expectedSize comes from the manifest's binarySizes map.
+    final latest = _latestManifest;
+    if (latest != null) {
+      final checker = UpdateChecker(log: _log);
+      if (checker.isNewer(latest.version, manifest.version)) {
+        _log.info('startInNetworkUpdate: upgrading stale UI manifest '
+            'v${manifest.version} → v${latest.version}');
+        manifest = latest;
+      }
+    }
+
     final platform = Platform.operatingSystem;
     final store = _binaryFragmentStore;
     final updater = _binaryUpdateManager;

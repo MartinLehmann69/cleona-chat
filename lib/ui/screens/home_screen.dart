@@ -1513,6 +1513,13 @@ class _ConversationListViewState extends State<_ConversationListView> {
     super.dispose();
   }
 
+  bool _isGroupManager(String groupId) {
+    final group = widget.service.groups[groupId];
+    if (group == null) return false;
+    final role = group.members[widget.service.nodeIdHex]?.role;
+    return role == 'owner' || role == 'admin';
+  }
+
   List<Conversation> get _filteredConversations {
     if (_searchQuery.isEmpty) return widget.conversations;
     final q = _searchQuery.toLowerCase();
@@ -1652,7 +1659,10 @@ class _ConversationListViewState extends State<_ConversationListView> {
               ])),
               // Type-specific entries
               if (conv.isGroup) ...[
-                PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('group_info'))])),
+                PopupMenuItem(value: 'info', child: Row(children: [
+                  const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8),
+                  Text(locale.get(_isGroupManager(conv.id) ? 'group_management' : 'group_info')),
+                ])),
                 PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_group'), style: const TextStyle(color: Colors.red))])),
               ],
               if (conv.isChannel) ...[

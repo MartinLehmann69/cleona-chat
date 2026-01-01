@@ -88,6 +88,14 @@ class _ChatScreenState extends State<ChatScreen> {
   // Edit mode state
   String? _editingMessageId;
 
+  bool _isGroupManager(ICleonaService? service) {
+    if (service == null || !widget.isGroup) return false;
+    final group = service.groups[widget.conversationId];
+    if (group == null) return false;
+    final role = group.members[service.nodeIdHex]?.role;
+    return role == 'owner' || role == 'admin';
+  }
+
   /// §9.5.3 D3 (S119): cached Feature-Request vote tallies per record id.
   final Map<String, Map<String, int>> _frTallies = {};
   final Set<String> _frTallyLoading = {};
@@ -694,7 +702,9 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(children: [
                 const Icon(Icons.info_outline),
                 const SizedBox(width: 12),
-                Text(locale.get(widget.isGroup ? 'group_info' : 'channel_info')),
+                Text(locale.get(widget.isGroup
+                    ? (_isGroupManager(service) ? 'group_management' : 'group_info')
+                    : 'channel_info')),
               ]),
             ),
           ],

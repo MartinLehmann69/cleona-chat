@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:44dfe57a7382, 2026-07-29). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:fecc664bd892, 2026-07-30). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -7371,7 +7371,7 @@ For users who already have Cleona installed. The network delivers updates itself
    - `deltaBinaryTag: Map<String, Map<String, String>>?` — per platform a map from source version to DHT tag for delta patches.
    - `minMonotoneSeq: int` — monotonically increasing sequence number. Nodes reject any manifest with a `minMonotoneSeq` lower than or equal to the highest previously seen value. Prevents downgrade attacks via replayed old (but validly signed) manifests.
 4. Receiver node reads the manifest (T+30s initial check with T+5min retry, then 6h periodic poll — see §12.2), detects new version. `FRAGMENT_RETRIEVE` requests for manifest fragments use the relay fallback cascade (V3.1.159), so fragments reach peers behind NAT without direct DHT path. Nodes that already hold a newer manifest push it to k-bucket peers at T+90s after startup. The update banner appears: "Update verfügbar: vX.Y.Z" with a **Download** button and a dismiss button (session-scoped).
-5. User clicks **Download** — the receiver fetches K fragments from N over DHT, assembles the binary, verifies SHA-256 hash + Ed25519 signature. The banner shows download progress during this step.
+5. User clicks **Download** — `_startInNetworkUpdate()` compares the UI-provided manifest against `_latestManifest` and uses the newer one (V3.1.159 freshness guard — prevents stale cached manifests from causing `binSize` mismatches when the user clicks before the first poll completes). The receiver fetches K fragments from N over DHT, assembles the binary, verifies SHA-256 hash + Ed25519 signature. The banner shows download progress during this step.
 6. Installation starts automatically once verification succeeds: Android opens the system package installer (user consent via OS dialog), desktop backs up the current binary and exits for restart. No intermediate "tap to install" step — the user's confirmation is the download click in step 5.
 
 **Failed-verification self-healing (V3.1.139):** If SHA-256 hash or Ed25519 signature verification fails after assembly, the **entire version directory** (all fragments + the reconstructed binary) is deleted via `deleteVersion()`. This prevents a poisoned fragment from permanently blocking updates: the next download attempt fetches all fragments fresh from different sources. If `assemble()` itself fails with a Reed-Solomon decode exception (corrupt fragment data), the same full cleanup applies. Transient failures (fewer than K fragments available due to offline sources) do **not** trigger cache deletion — the partial download state is preserved for resumption. Pre-fix: only the reconstructed `complete.bin` was deleted; corrupt fragment files remained on disk and were deterministically reused on retry, producing an identical verification failure in a permanent loop.

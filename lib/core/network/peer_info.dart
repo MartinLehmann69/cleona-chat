@@ -485,14 +485,18 @@ class PeerAddress {
     // Target is private — are WE also on a private network?
     // §4.7: CGNAT (100.64/10) has zero routing relationship to RFC 1918.
     // A CGNAT local must NOT try to reach 192.168.x targets and vice versa.
-    // Cross-class RFC 1918 routing (e.g. 192.168.x ↔ 10.x behind the same
-    // gateway) is common in home/lab networks and remains permitted.
+    // Same RFC1918 block (both 10/8, both 172.16/12, both 192.168/16):
+    // cross-subnet routing is common in home/lab networks → always allowed.
+    // Cross-block (e.g. 10.0.2.x ↔ 192.168.10.x): only with proof of
+    // bidirectional reachability — without proof these are typically QEMU/VPN
+    // internal addresses unreachable from this host (S288 fix).
     final targetIsCgnat = _isCgnat(ip);
     for (final localIp in currentLocalIps) {
       if (!_isPrivateIp(localIp)) continue;
       final localIsCgnat = _isCgnat(localIp);
-      // Both CGNAT or both RFC 1918: potentially same network
-      if (localIsCgnat == targetIsCgnat) return true;
+      if (localIsCgnat != targetIsCgnat) continue;
+      if (samePrivateClass(ip, localIp)) return true;
+      if (lastReceivedAt != null) return true;
     }
     return false;
   }

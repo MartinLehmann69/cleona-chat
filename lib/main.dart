@@ -1479,6 +1479,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
         // §19.6: Desktop update notification from daemon via IPC
         ipcClient.onUpdateAvailable = (manifest, inNetworkAvailable) {
+          final prev = _availableUpdateManifest;
+          if (prev != null &&
+              !UpdateChecker().isNewer(manifest.version, prev.version)) {
+            return;
+          }
           _availableUpdateManifest = manifest;
           _availableUpdateInNetwork = inNetworkAvailable;
           _updateBannerDismissed = false;
@@ -2135,6 +2140,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Store both so the UI can offer the in-network path alongside the
     // external downloadUrl. See [_availableUpdateManifest].
     service.onUpdateAvailable = (manifest, inNetworkAvailable) {
+      final prev = _availableUpdateManifest;
+      if (prev != null &&
+          !UpdateChecker().isNewer(manifest.version, prev.version)) {
+        return;
+      }
       _availableUpdateManifest = manifest;
       _availableUpdateInNetwork = inNetworkAvailable;
       _availableUpdateSourceService = service;
