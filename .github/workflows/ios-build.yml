@@ -264,27 +264,23 @@ jobs:
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
         run: |
-          # altool is deprecated since Xcode 14 and its JWT auth is broken on
-          # macOS-14 runners (iTMSTransporter missing, REST fallback 401).
-          # Fastlane pilot is the reliable replacement.
           gem install fastlane --no-document
 
-          KEY_PATH="$RUNNER_TEMP/asc-api-key.json"
-          P8_PATH="$RUNNER_TEMP/AuthKey.p8"
-          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$P8_PATH"
-
-          cat > "$KEY_PATH" <<KEYJSON
+          KEY_JSON="$RUNNER_TEMP/asc-api-key.json"
+          cat > "$KEY_JSON" <<APIKEY
           {
             "key_id": "$APP_STORE_CONNECT_KEY_ID",
             "issuer_id": "$APP_STORE_CONNECT_ISSUER",
-            "key_filepath": "$P8_PATH"
+            "key": "$APP_STORE_CONNECT_KEY",
+            "is_key_content_base64": true,
+            "in_house": false
           }
-          KEYJSON
+          APIKEY
 
           IPA=$(find build/ios -name "*.ipa" | head -1)
           if [ -n "$IPA" ]; then
             fastlane pilot upload \
-              --api_key_path "$KEY_PATH" \
+              --api_key_path "$KEY_JSON" \
               --ipa "$IPA" \
               --skip_waiting_for_build_processing
           else
