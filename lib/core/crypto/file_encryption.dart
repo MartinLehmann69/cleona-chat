@@ -5,18 +5,27 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 
 /// Encrypts/decrypts JSON files on disk using XSalsa20-Poly1305.
 ///
-/// Key is stored in `<baseDir>/db.key` with restricted permissions.
+/// Key source (Architecture §3.7):
+/// - Preferred: explicit [key] parameter (seed-derived per §3.7/§3.8)
+/// - Legacy fallback: random key from `<baseDir>/db.key` (pre-keyring profiles)
+///
 /// Format: [24-byte nonce][ciphertext with 16-byte MAC]
 class FileEncryption {
   final String baseDir;
   late final Uint8List _key;
   final SodiumFFI _sodium = SodiumFFI();
 
-  FileEncryption({required this.baseDir}) {
-    _key = _loadOrCreateKey();
+  /// Create a FileEncryption instance.
+  ///
+  /// If [key] is provided, uses it directly (seed-derived, per §3.7).
+  /// If [key] is null, falls back to the legacy db.key file (migration path).
+  FileEncryption({required this.baseDir, Uint8List? key}) {
+    _key = key ?? _loadOrCreateLegacyKey();
   }
 
-  Uint8List _loadOrCreateKey() {
+  /// Legacy path: load or create a random key file. Only used for profiles
+  /// that haven't been migrated to keyring-based key derivation yet.
+  Uint8List _loadOrCreateLegacyKey() {
     final keyFile = File('$baseDir/db.key');
     if (keyFile.existsSync()) {
       final bytes = keyFile.readAsBytesSync();

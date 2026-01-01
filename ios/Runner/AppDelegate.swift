@@ -33,6 +33,11 @@ import Network
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
+    // §3.7 OS Keyring: register Keychain MethodChannel handler.
+    if let keyringRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "KeyringHandler") {
+      KeyringHandler.register(with: keyringRegistrar)
+    }
+
     // Set up the MethodChannel for background fetch communication with Dart.
     // The FlutterEngine is now available via the plugin registry's messenger.
     guard let messenger = engineBridge.pluginRegistry.registrar(forPlugin: "BackgroundFetchPlugin")?.messenger() else {

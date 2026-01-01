@@ -1100,7 +1100,8 @@ class PeerInfo {
       ..natType = PeerInfo._natToProto(natType)
       ..capabilities = capabilities;
     for (final addr in addresses) {
-      if (gossipFilter && addr.lastSuccess == null && addr.successCount == 0) {
+      if (gossipFilter && addr.lastSuccess == null && addr.successCount == 0 &&
+          addr.lastReceivedAt == null) {
         continue;
       }
       p.addresses.add(addr.toProto());

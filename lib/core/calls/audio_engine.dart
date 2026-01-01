@@ -303,21 +303,31 @@ class AudioEngine {
     if (!_running) return;
     _running = false;
 
-    // Stop capture isolate
+    _frameSubscription?.cancel();
+    _frameSubscription = null;
+
     _captureCommandPort?.send(_CaptureCommand.stop);
     _captureIsolate?.kill(priority: Isolate.beforeNextEvent);
     _captureIsolate = null;
     _captureCommandPort = null;
-    _frameSubscription?.cancel();
     _frameReceivePort?.close();
+    _frameReceivePort = null;
 
     if (_engine != null) {
-      _shim.stop(_engine!);
-      _shim.destroy(_engine!);
+      try {
+        _shim.stop(_engine!);
+        _shim.destroy(_engine!);
+      } catch (e) {
+        _log.warn('cleona_audio stop/destroy threw: $e');
+      }
       _engine = null;
     }
     if (_playbackPcmPtr != null) {
-      calloc.free(_playbackPcmPtr!);
+      try {
+        calloc.free(_playbackPcmPtr!);
+      } catch (e) {
+        _log.warn('calloc.free(_playbackPcmPtr) threw: $e');
+      }
       _playbackPcmPtr = null;
     }
 

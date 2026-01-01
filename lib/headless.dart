@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:cleona/core/crypto/key_migration.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -72,9 +74,11 @@ void main(List<String> args) {
     }
     File(pidPath).writeAsStringSync('$pid\n');
 
-    // Init crypto
+    // Init crypto + keyring
     SodiumFFI();
     OqsFFI().init();
+    await KeyringService.init(config.profileDir);
+    KeyMigration.migrateIfNeeded(config.profileDir);
 
     // Create identity context
     final identity = IdentityContext(

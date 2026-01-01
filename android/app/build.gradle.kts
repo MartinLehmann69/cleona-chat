@@ -91,6 +91,8 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraxVersion")
     implementation("androidx.concurrent:concurrent-futures:1.2.0")
     implementation("com.google.guava:guava:32.1.3-android")
+    // OS Keyring: EncryptedSharedPreferences backed by AndroidKeyStore (§3.7)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 }
 
 flutter {

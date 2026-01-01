@@ -1,11 +1,12 @@
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 
 /// HD-Wallet style key derivation from a master seed.
 ///
-/// Ed25519 and X25519 keys are deterministically derived via HKDF.
-/// ML-DSA and ML-KEM keys are NOT deterministic (PQ algorithms use
-/// internal randomness), so they are generated fresh and stored separately.
+/// All keys (Ed25519, X25519, ML-DSA-65, ML-KEM-768) are deterministically
+/// derived via HKDF from the master seed. Same seed + index always yields
+/// identical keys — critical for seed-phrase recovery.
 class HdWallet {
   /// Derive Ed25519 keypair from master seed + identity index.
   /// Deterministic: same seed + index always gives same keys.
@@ -36,6 +37,34 @@ class HdWallet {
       publicKey: sodium.ed25519PkToX25519(ed25519Pk),
       secretKey: sodium.ed25519SkToX25519(ed25519Sk),
     );
+  }
+
+  /// Derive deterministic ML-DSA-65 keypair from master seed + identity index.
+  static ({Uint8List publicKey, Uint8List secretKey}) deriveMlDsa(
+    Uint8List masterSeed,
+    int index,
+  ) {
+    final sodium = SodiumFFI();
+    final seed = sodium.hkdfSha256(
+      masterSeed,
+      info: Uint8List.fromList('cleona-mldsa-$index'.codeUnits),
+      length: 64,
+    );
+    return OqsFFI().mlDsaKeypairDerand(seed);
+  }
+
+  /// Derive deterministic ML-KEM-768 keypair from master seed + identity index.
+  static ({Uint8List publicKey, Uint8List secretKey}) deriveMlKem(
+    Uint8List masterSeed,
+    int index,
+  ) {
+    final sodium = SodiumFFI();
+    final seed = sodium.hkdfSha256(
+      masterSeed,
+      info: Uint8List.fromList('cleona-mlkem-$index'.codeUnits),
+      length: 64,
+    );
+    return OqsFFI().mlKemKeypairDerand(seed);
   }
 
   /// Compute User-ID from public key and network secret (Architecture §26).
@@ -71,6 +100,42 @@ class HdWallet {
     combined.setRange(0, networkSecret.length, networkSecret);
     combined.setRange(networkSecret.length, combined.length, deviceEd25519Pk);
     return sodium.sha256(combined);
+  }
+
+  /// Derive the DB-Encryption-Key for a specific identity (Architecture §3.8).
+  /// db_key = SHA-256(ed25519_user_sk || "cleona-db-key-v1")
+  /// Deterministic: same Ed25519 SK always yields the same DB key.
+  static Uint8List deriveDbKey(Uint8List ed25519Sk) {
+    final sodium = SodiumFFI();
+    final combined = Uint8List(ed25519Sk.length + 'cleona-db-key-v1'.length);
+    combined.setRange(0, ed25519Sk.length, ed25519Sk);
+    combined.setRange(ed25519Sk.length, combined.length,
+        'cleona-db-key-v1'.codeUnits);
+    return sodium.sha256(combined);
+  }
+
+  /// Derive the FileEncryption-Key for a specific identity (Architecture §3.7 step 5).
+  /// Used for identity_meta.json.enc, identity_resolution_state.json.enc,
+  /// keys.json.enc and other per-identity files.
+  static Uint8List deriveFileEncKey(Uint8List masterSeed, int index) {
+    final sodium = SodiumFFI();
+    return sodium.hkdfSha256(
+      masterSeed,
+      info: Uint8List.fromList('cleona-file-enc-$index'.codeUnits),
+      length: 32,
+    );
+  }
+
+  /// Derive a shared FileEncryption-Key for daemon-wide files (routing_table,
+  /// network_secret). Not per-identity — shared across all identities on this
+  /// daemon, but still seed-recoverable.
+  static Uint8List deriveSharedFileEncKey(Uint8List masterSeed) {
+    final sodium = SodiumFFI();
+    return sodium.hkdfSha256(
+      masterSeed,
+      info: Uint8List.fromList('cleona-shared-file-enc-v1'.codeUnits),
+      length: 32,
+    );
   }
 
   /// Derive the DHT registry key for multi-identity backup.

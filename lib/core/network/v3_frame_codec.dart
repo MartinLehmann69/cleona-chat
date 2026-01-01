@@ -182,6 +182,10 @@ class V3FrameCodec {
   ///
   /// `skipPoW` lets callers bypass the proof-of-work step for LAN peers /
   /// infrastructure traffic (Architecture §2.4 step 10). Defaults to false.
+  ///
+  /// `precomputedPow` allows callers to pass PoW computed asynchronously
+  /// (via [ProofOfWork.computeAsync]) to avoid blocking the main thread.
+  /// When set, `skipPoW` is ignored and the pre-computed PoW is used.
   static proto.NetworkPacketV3 buildOuter({
     required Uint8List nextHopDeviceId,
     required Uint8List senderDeviceId,
@@ -193,6 +197,7 @@ class V3FrameCodec {
     int hopCount = 0,
     int flags = 0,
     bool skipPoW = false,
+    proto.ProofOfWork? precomputedPow,
   }) {
     final packet = proto.NetworkPacketV3()
       ..version = 1
@@ -205,7 +210,9 @@ class V3FrameCodec {
       ..payloadType = payloadType
       ..payload = innerPayload;
 
-    if (!skipPoW) {
+    if (precomputedPow != null) {
+      packet.pow = precomputedPow;
+    } else if (!skipPoW) {
       packet.pow = ProofOfWork.compute(innerPayload);
     }
 

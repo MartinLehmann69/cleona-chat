@@ -12,6 +12,7 @@ library;
 import 'dart:isolate';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +52,34 @@ Future<({Uint8List publicKey, Uint8List secretKey})>
   final oqs = OqsFFI();
   oqs.init();
   return oqs.mlKemKeypair();
+}
+
+/// Generate deterministic PQ keypairs from master seed + HD index.
+/// Same seed + index always yields identical keys — critical for seed recovery.
+Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})>
+    generatePqKeysDeterministicIsolated(Uint8List masterSeed, int hdIndex) async {
+  final dsaFuture = Isolate.run(() => _generateMlDsaDerand(masterSeed, hdIndex));
+  final kemFuture = Isolate.run(() => _generateMlKemDerand(masterSeed, hdIndex));
+  final dsa = await dsaFuture;
+  final kem = await kemFuture;
+  return (
+    mlDsaPk: dsa.publicKey,
+    mlDsaSk: dsa.secretKey,
+    mlKemPk: kem.publicKey,
+    mlKemSk: kem.secretKey,
+  );
+}
+
+({Uint8List publicKey, Uint8List secretKey}) _generateMlDsaDerand(
+    Uint8List masterSeed, int hdIndex) {
+  OqsFFI().init();
+  return HdWallet.deriveMlDsa(masterSeed, hdIndex);
+}
+
+({Uint8List publicKey, Uint8List secretKey}) _generateMlKemDerand(
+    Uint8List masterSeed, int hdIndex) {
+  OqsFFI().init();
+  return HdWallet.deriveMlKem(masterSeed, hdIndex);
 }
 
 /// Generate both ML-DSA-65 + ML-KEM-768 keypairs for emergency rotation.

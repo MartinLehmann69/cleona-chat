@@ -208,6 +208,12 @@ class MainActivity : FlutterActivity() {
             ClipboardHandler.CHANNEL_NAME
         ).setMethodCallHandler(ClipboardHandler(applicationContext))
 
+        // OS Keyring (§3.7): EncryptedSharedPreferences backed by AndroidKeyStore
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            KeyringHandler.CHANNEL_NAME
+        ).setMethodCallHandler(KeyringHandler(applicationContext))
+
         // Audio-permissions bridge (Bug #U10b) — RECORD_AUDIO runtime
         // permission for calls. has* returns the cached state, request*
         // shows the system dialog and resolves once onRequestPermissionsResult

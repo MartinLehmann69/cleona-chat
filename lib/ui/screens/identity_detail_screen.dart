@@ -537,7 +537,9 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             onPressed: () async {
               Navigator.pop(ctx);
               await appState.deleteIdentity(_identity);
-              if (context.mounted) Navigator.of(context).pop();
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (context.mounted) Navigator.of(context).pop();
+              });
             },
             child: Text(locale.get('delete_permanently')),
           ),

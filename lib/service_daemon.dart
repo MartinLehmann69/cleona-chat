@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/key_migration.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -349,6 +351,10 @@ class _MultiServiceDaemon {
   Future<void> startAll() async {
     if (_running) return;
     log.info('Dienst wird gestartet...');
+
+    // §3.7: Initialize OS keyring before any key access
+    await KeyringService.init(config.baseDir);
+    KeyMigration.migrateIfNeeded(config.baseDir);
 
     // Load all identities
     final mgr = IdentityManager(baseDir: config.baseDir);

@@ -20,6 +20,9 @@ import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/node/cleona_node.dart';
+import 'package:cleona/core/crypto/key_migration.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
+import 'package:cleona/core/crypto/keyring_mobile.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:cleona/core/node/identity_context.dart';
@@ -106,6 +109,14 @@ void main() async {
     debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
     OqsFFI().init();
     debugPrint('[main] OqsFFI OK.');
+    // §3.7: Initialize OS keyring + migrate pre-keyring profiles
+    debugPrint('[main] Initializing KeyringService...');
+    if (Platform.isAndroid || Platform.isIOS) {
+      await MobileKeyringService.init(AppPaths.dataDir);
+    }
+    await KeyringService.init(AppPaths.dataDir);
+    KeyMigration.migrateIfNeeded(AppPaths.dataDir);
+    debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
   } catch (e, stack) {
     startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
         'home=${AppPaths.home}\ndataDir=${AppPaths.dataDir}\n\n$e\n$stack';
@@ -678,13 +689,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   /// Discover own public IPv4 + IPv6 via ipify (§27 — Android has no daemon).
-  void _queryPublicIp() {
+  /// [force]: skip the hasPublicIp guard (network change — IP may have rotated).
+  void _queryPublicIp({bool force = false}) {
     final node = _inProcessNode;
     if (node == null) return;
-    // Delay 5s — let network stabilize after resume
-    Timer(const Duration(seconds: 5), () async {
-      if (!node.isRunning) return; // Node not started yet (late fields uninitialized)
-      if (node.natTraversal.hasPublicIp) return;
+    // Delay: 3s for network-change (fast re-query), 5s for app-resume (stabilize)
+    final delay = force ? 3 : 5;
+    Timer(Duration(seconds: delay), () async {
+      if (!node.isRunning) return;
+      if (!force && node.natTraversal.hasPublicIp) return;
       try {
         final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
         final req = await client.getUrl(Uri.parse('https://api.ipify.org'));
@@ -1267,6 +1280,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     node.primaryIdentity = primaryCtx;
     _inProcessNode = node;
 
+    // Re-query public IP on any network change (Android has no daemon-side
+    // ip-monitor — connectivity_plus fires onNetworkChanged but the ipify
+    // re-query was missing, so Mobilfunk/CGNAT IP changes went unnoticed).
+    node.onNetworkChangeDetected = () {
+      _queryPublicIp(force: true);
+    };
+
     // Register ALL identities with the node
     for (final ctx in _inProcessContexts.values) {
       node.registerIdentity(ctx);
@@ -1465,6 +1485,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // any future ANR — the last heartbeat-tick timestamp narrows the
     // freeze-window from 60s status-beacon to ~5s.
     _heartbeatLastAt = DateTime.now();
+    if (Platform.isAndroid) {
+      try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}'); } catch (_) {}
+    }
     _heartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       final svc = _service;
       if (svc == null || !svc.isRunning) return;
@@ -1482,6 +1505,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Every 60s: an INFO-level beat marker so filtered log viewers
         // still see the app is alive.
         debugPrint('[heartbeat] $msg');
+        if (Platform.isAndroid) {
+          try { File('$_baseDir/.dart-heartbeat').writeAsStringSync('${now.millisecondsSinceEpoch}'); } catch (_) {}
+        }
       }
     });
   }

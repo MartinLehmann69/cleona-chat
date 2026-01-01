@@ -466,17 +466,24 @@ class VideoEngine {
 
     _captureCommandPort?.send(_CaptureCommand.stop);
 
-    // Give the isolate time to clean up, then kill
-    Future.delayed(const Duration(milliseconds: 200), () {
-      _captureIsolate?.kill(priority: Isolate.immediate);
-      _captureIsolate = null;
-    });
+    final iso = _captureIsolate;
+    _captureIsolate = null;
+    _captureCommandPort = null;
+
+    if (iso != null) {
+      Future.delayed(const Duration(milliseconds: 200), () {
+        iso.kill(priority: Isolate.immediate);
+      });
+    }
 
     _frameReceivePort?.close();
     _frameReceivePort = null;
-    _captureCommandPort = null;
 
-    _decoder?.dispose();
+    try {
+      _decoder?.dispose();
+    } catch (e) {
+      _log.warn('VP8 decoder dispose threw: $e');
+    }
     _decoder = null;
 
     _log.info('Video engine stopped');

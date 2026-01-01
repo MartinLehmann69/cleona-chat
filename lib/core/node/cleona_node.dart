@@ -32,6 +32,7 @@ import 'package:cleona/core/network/v3_frame_codec.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
 import 'package:cleona/core/network/rate_limiter.dart';
 import 'package:cleona/core/network/peer_reputation.dart';
+import 'package:cleona/core/node/relay_budget.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/identity_resolution/auth_manifest.dart';
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
@@ -537,6 +538,10 @@ class CleonaNode {
     // Phase 2: ownNodeId = deviceNodeId (per-device routing)
     dvRouting = DvRoutingTable(ownNodeId: primaryIdentity.deviceNodeId);
     dvRouting.onRouteChanged = _onDvRouteChanged;
+    dvRouting.isAdmitted = (hex) {
+      final peer = routingTable.getPeer(hexToBytes(hex));
+      return peer?.idPowVerified ?? false;
+    };
 
     // DV-table sits *next* to the routing table on disk (Architektur §2.7.3).
     // Order matters: routes/neighbors reference nodeIds that must already be
@@ -718,7 +723,12 @@ class CleonaNode {
     };
 
     // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
-    final identityFileEnc = FileEncryption(baseDir: profileDir);
+    // §3.7: derive shared FileEncryption key from master seed for daemon-level files
+    final masterSeed = primaryIdentity.masterSeed;
+    final Uint8List? sharedFileEncKey = masterSeed != null
+        ? HdWallet.deriveSharedFileEncKey(masterSeed)
+        : null;
+    final identityFileEnc = FileEncryption(baseDir: profileDir, key: sharedFileEncKey);
 
     // V3.0 Device-Sig keypair (§3.5). Loaded once per daemon, shared across
     // all hosted identities. Lazy-created on first start.
@@ -726,21 +736,22 @@ class CleonaNode {
       baseDir: profileDir,
       fileEnc: identityFileEnc,
     );
-    // D3 (§13.1.2): Admission-PoW-Nonce lazy sicherstellen — Isolate-Grind,
-    // einmalig pro Device (Fresh-Install und v1/v2-Upgrade gleichermassen).
-    // Fire-and-forget: der naechste Self-Broadcast traegt die Nonce, sobald
-    // sie da ist; bis dahin senden wir ohne (Phase 1, nichts gated).
+    // D3 Phase 2 (§13.1.2): Admission-PoW-Nonce MUSS vor dem ersten
+    // Self-Broadcast bereitstehen — Phase 2 gates Relay/DV/DHT-Rollen auf
+    // idPowVerified, d.h. ohne Nonce im Self-Broadcast werden wir von
+    // anderen Nodes nicht als admitted erkannt.
     if (_deviceKeys.admissionNonce == null) {
-      unawaited(DeviceKeysStore.ensureAdmissionNonce(
-        bundle: _deviceKeys,
-        baseDir: profileDir,
-        fileEnc: identityFileEnc,
-      ).then((_) {
+      try {
+        await DeviceKeysStore.ensureAdmissionNonce(
+          bundle: _deviceKeys,
+          baseDir: profileDir,
+          fileEnc: identityFileEnc,
+        );
         _log.info('D3: Admission-PoW-Nonce bereit '
             '(${AdmissionPow.difficultyBits} bits, Device-PK zertifiziert)');
-      }).catchError((Object e) {
+      } catch (e) {
         _log.warn('D3: Admission-PoW-Grind fehlgeschlagen: $e');
-      }));
+      }
     }
     identityDhtHandler = IdentityDhtHandler(
       ownNodeId: primaryIdentity.deviceNodeId,
@@ -999,14 +1010,14 @@ class CleonaNode {
 
     if (stored.isNotEmpty) {
       final probeCount = stored.length < 5 ? stored.length : 5;
-      _log.info('§4.5 Cascade Tier 1: probing $probeCount stored peers');
+      _log.info('§4.5 Cascade Tier 1: probing $probeCount stored peers (all reachable addresses)');
       for (final peer in stored.take(5)) {
         if (_discoveryComplete) return;
-        final target = peer.allConnectionTargets().cast<PeerAddress?>().firstWhere(
-            (a) => a!.ip.isNotEmpty && a.port > 0,
-            orElse: () => null);
-        if (target != null) {
-          _sendPing(target.ip, target.port);
+        for (final target in peer.allConnectionTargets()) {
+          if (target.ip.isNotEmpty && target.port > 0 &&
+              target.isReachableFromCurrentNetwork) {
+            _sendPing(target.ip, target.port);
+          }
         }
       }
       // Wait up to 5 s for PONG + PEER_LIST_PUSH
@@ -1028,10 +1039,27 @@ class CleonaNode {
     _log.info('§4.5 Cascade Tier 2 exhausted — no LAN peer found');
 
     // Tier 3 — Bootstrap: unicast probe to cached bootstrap addresses.
-    if (_isolatedNodeBootstrapAddrs.isNotEmpty) {
+    // On Android/GUI, _isolatedNodeBootstrapAddrs is empty (no --bootstrap
+    // CLI param). Derive bootstrap targets from stored peers' public
+    // addresses so Mobilfunk/CGNAT nodes can reach Bootstrap via its WAN IP.
+    var tier3Addrs = _isolatedNodeBootstrapAddrs.toList();
+    if (tier3Addrs.isEmpty) {
+      for (final peer in stored) {
+        for (final addr in peer.allConnectionTargets()) {
+          if (addr.ip.isEmpty || addr.port <= 0) continue;
+          if (_isPrivateIp(addr.ip)) continue;
+          if (addr.ip.startsWith('fe80:') || addr.ip.startsWith('fd')) continue;
+          final formatted = addr.ip.contains(':')
+              ? '[${addr.ip}]:${addr.port}'
+              : '${addr.ip}:${addr.port}';
+          if (!tier3Addrs.contains(formatted)) tier3Addrs.add(formatted);
+        }
+      }
+    }
+    if (tier3Addrs.isNotEmpty) {
       _log.info('§4.5 Cascade Tier 3: bootstrap probe '
-          '(${_isolatedNodeBootstrapAddrs.length} address(es))');
-      for (final addr in _isolatedNodeBootstrapAddrs) {
+          '(${tier3Addrs.length} address(es)${_isolatedNodeBootstrapAddrs.isEmpty ? ", derived from stored peers" : ""})');
+      for (final addr in tier3Addrs) {
         _addBootstrapPeer(addr);
       }
       for (var i = 0; i < 10 && !_discoveryComplete; i++) {
@@ -1073,6 +1101,7 @@ class CleonaNode {
       }
       // Kademlia bootstrap — populate DHT after we know the mesh.
       _kademliaBootstrap();
+      onDiscoveryComplete?.call();
     });
   }
 
@@ -1130,18 +1159,15 @@ class CleonaNode {
     }
 
     // D5 (§13.1.3 Collective quota): source classification. A sender is
-    // "introduced" once its admission PoW verified (D3) OR its Device-Sig-PK
-    // was learned firstParty from its own self-broadcast (every build does
-    // this during normal discovery — legacy builds and contact devices are
-    // therefore exempt within seconds). Everything else shares the
-    // collective pool slice of the global budgets. The peer lookup here is
-    // the same O(1) lookup step [4] needs for Device-Sig-Verify below.
+    // "introduced" once its admission PoW verified (D3, Phase 2 hard
+    // enforcement V3.1.90+). The firstParty exemption was removed — every
+    // source must carry a verified admission proof to escape the collective
+    // pool. This makes pool exemption CPU-bound per ID (22-bit PoW).
     final senderPeer = senderDeviceId.isNotEmpty
         ? routingTable.getPeer(senderDeviceId)
         : null;
     final introducedSource = senderPeer != null &&
-        (senderPeer.idPowVerified ||
-            senderPeer.pkSource == PkSource.firstParty);
+        senderPeer.idPowVerified;
 
     // DoS Layer 2: Rate limiting per sender device.
     // PAYLOAD_BOOTSTRAP_INFRASTRUCTURE_FRAME is plaintext (cheap to forge) →
@@ -1387,10 +1413,21 @@ class CleonaNode {
             '(dest=${bytesToHex(nextHop).substring(0, 8)})');
         return;
       }
+      // §5.3 Visited-array loop prevention: if ANY of our local deviceIds
+      // appears in visited_device_ids, the packet has looped through us.
+      // Multi-identity-aware: checks all registered identities, not just primary.
+      for (final visited in packet.visitedDeviceIds) {
+        if (_identitiesByDeviceId.containsKey(bytesToHex(Uint8List.fromList(visited)))) {
+          _log.debug('V3 relay drop: visited-array loop '
+              '(dest=${bytesToHex(nextHop).substring(0, 8)})');
+          return;
+        }
+      }
       // Forward as relay. Decrement TTL, increment hopCount.
-      if (packet.ttl <= 0) {
-        _log.debug('V3 relay drop: TTL exhausted for '
-            '${bytesToHex(nextHop).substring(0, 8)}');
+      if (packet.ttl <= 0 || packet.hopCount >= RelayBudget.maxHops) {
+        _log.debug('V3 relay drop: ${packet.ttl <= 0 ? "TTL exhausted" : "maxHops=${RelayBudget.maxHops}"} '
+            'for ${bytesToHex(nextHop).substring(0, 8)} '
+            '(ttl=${packet.ttl} hops=${packet.hopCount})');
         return;
       }
       // Relay dedup: same packet arriving via multiple paths must only
@@ -1433,6 +1470,11 @@ class CleonaNode {
           '${relaySenderHex != null ? " (excl ${relaySenderHex.substring(0, 8)})" : ""}');
       packet.ttl = packet.ttl - 1;
       packet.hopCount = packet.hopCount + 1;
+      // §5.3 Append ALL local deviceIds to visited_device_ids so downstream
+      // relays can detect multi-identity loops.
+      for (final ctx in _identitiesByDeviceId.values) {
+        packet.visitedDeviceIds.add(ctx.deviceNodeId);
+      }
       // Fire-and-forget relay forward — exclude the relay sender from
       // route candidates to prevent 2-node bounce loops.
       sendToDevice(packet, nextHop,
@@ -1555,6 +1597,19 @@ class CleonaNode {
     if (packet.payloadType != proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME) {
       _log.warn('V3 drop: unsupported payloadType ${packet.payloadType}');
       return;
+    }
+
+    // §13.1 PoW verification for ApplicationFrames.
+    // Exempt: LAN peers (private IP) and relay-delivered packets (0.0.0.0).
+    final isRelayDelivered = from.address == '0.0.0.0';
+    final isLanSource = !isRelayDelivered && PeerAddress.isPrivateIp(from.address);
+    if (!isRelayDelivered && !isLanSource) {
+      if (!packet.hasPow() ||
+          !ProofOfWork.verify(
+              Uint8List.fromList(packet.payload), packet.pow)) {
+        _log.debug('V3 PoW drop: invalid/missing PoW from ${from.address}');
+        return;
+      }
     }
 
     onApplicationFramePayload?.call(packet, from, fromPort, snapshot);
@@ -2609,6 +2664,14 @@ class CleonaNode {
       final msg = proto.RouteUpdateMsg.fromBuffer(frame.payload);
       final fromHex = bytesToHex(senderDeviceId);
 
+      // D3 Phase 2 (§13.1.2): DV route acceptance requires admission PoW.
+      final senderPeer = routingTable.getPeer(senderDeviceId);
+      if (senderPeer != null && !senderPeer.idPowVerified) {
+        _log.debug('D3: ROUTE_UPDATE from non-admitted '
+            '${fromHex.substring(0, 8)} — dropped');
+        return;
+      }
+
       final entries = msg.routes
           .map((r) => RouteEntry(
                 destinationHex:
@@ -3062,8 +3125,12 @@ class CleonaNode {
       final gwBytes = hexToBytes(gwHex);
       final gwPeer = routingTable.getPeer(gwBytes);
       if (gwPeer != null) {
+        // D3 Phase 2: skip GW if not admission-PoW verified.
+        if (!gwPeer.idPowVerified) {
+          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+              '${gwHex.substring(0, 8)} skipped — not admission-verified');
         // §4.7 Relay-Candidate Reachability Filter: skip GW if unreachable from us.
-        if (!_isHopReachableFromHere(gwPeer)) {
+        } else if (!_isHopReachableFromHere(gwPeer)) {
           _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
               '${gwHex.substring(0, 8)} skipped — not reachable from current network');
         } else if (needsDualStack && !_hopIsDualStack(gwPeer)) {
@@ -3091,6 +3158,12 @@ class CleonaNode {
       final nBytes = hexToBytes(neighborHex);
       final nPeer = routingTable.getPeer(nBytes);
       if (nPeer == null) continue;
+      // D3 Phase 2: skip neighbor if not admission-PoW verified.
+      if (!nPeer.idPowVerified) {
+        _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
+            '${neighborHex.substring(0, 8)} skipped — not admission-verified');
+        continue;
+      }
       // §4.7: skip neighbor if we cannot reach it from the current network.
       if (!_isHopReachableFromHere(nPeer)) {
         _log.debug('sendToDevice ${destHex.substring(0, 8)}: neighbor '
@@ -3167,22 +3240,28 @@ class CleonaNode {
     _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: wireSize=$wireSize '
         'large=$isLargePayload confirmed=$isConfirmed '
         'targets=${targets.map((a) => "${a.ip}:${a.port}").join(",")}');
+    var udpSentAny = false;
     for (final addr in targets) {
       try {
         final ok = await transport.sendUdp(
             packet, InternetAddress(addr.ip), addr.port);
         if (ok) {
-          // Confirmed peers: one successful UDP send is enough. RUDP-Light
-          // (DELIVERY_RECEIPT) proves end-to-end delivery; sending to ALL
-          // addresses amplifies traffic 3-4x for no benefit.
-          if (isConfirmed) return true;
-          // Unconfirmed: UDP "ok" is just a local buffer write — continue
-          // to TLS below for real delivery feedback.
+          udpSentAny = true;
+          // Confirmed peers: early-return ONLY when the target address has
+          // recent bidirectional proof (inbound packet within 2 min). A stale
+          // WiFi LAN address that the kernel accepts (same subnet) must NOT
+          // short-circuit the loop — the peer may have moved to Mobilfunk and
+          // only its CGNAT address (further down the list) actually reaches.
+          if (isConfirmed && addr.lastReceivedAt != null &&
+              DateTime.now().difference(addr.lastReceivedAt!) < const Duration(minutes: 2)) {
+            return true;
+          }
         }
       } catch (e) {
         _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
       }
     }
+    if (udpSentAny && isConfirmed) return true;
 
     // §4.6 (V3.1.72): for peers we are not direct-confirmed for (CGNAT,
     // first-contact), a UDP "ok" is only a local buffer write — the packet
@@ -4204,6 +4283,20 @@ class CleonaNode {
     // 6. Broadcast address update
     _broadcastAddressUpdate(force: true);
 
+    // 6b. §4.5 Discovery Cascade restart: if step 4's PINGs did not
+    // re-establish connectivity (no PONG → discoveryComplete stays false),
+    // the full 4-tier cascade provides structured fallback (stored peers at
+    // ALL addresses → LAN → bootstrap → subnet scan). Critical for
+    // WiFi→Mobilfunk transitions where step 4's PINGs went to stale LAN
+    // addresses and the cascade's Tier 3 (bootstrap) is the only path.
+    Future.delayed(const Duration(seconds: 3), () {
+      if (!_running) return;
+      if (!_discoveryComplete) {
+        _log.info('Network change: no peer confirmed after 3s — restarting discovery cascade');
+        _startDiscoveryCascade();
+      }
+    });
+
     // 7. Subnet scan fallback: if no peer responded within 5s after network
     // change, scan /16 range. Covers the case where known peers are in a
     // different subnet or unreachable (AP isolation) but other nodes (e.g.
@@ -4549,6 +4642,12 @@ class CleonaNode {
   /// Called when a network change is detected (ip monitor, mass route-down, etc.).
   /// Used by daemon/headless to re-query public IP via ipify.
   void Function()? onNetworkChangeDetected;
+
+  /// Fires when the §4.5 discovery cascade completes (first PEER_LIST_PUSH
+  /// with >=1 entry). Service-layer consumers use this to trigger one-shot
+  /// retrieval of offline-period messages (S&F poll, DHT-fragment pull, CR
+  /// rebroadcast). Edge-triggered, resets on network change.
+  void Function()? onDiscoveryComplete;
 
   /// H-4: Called during network recovery (§12.3 step 11) so the service layer
   /// can trigger IdentityPublisher.onAddressesChanged() — re-publishes the

@@ -64,8 +64,8 @@ class _HeldMessage {
 /// Messages are stored by recipient nodeId and retrieved when the
 /// recipient comes online and sends a PEER_RETRIEVE.
 class PeerMessageStore {
-  /// Max messages per recipient (budget).
-  static const maxMessagesPerRecipient = 50;
+  /// Max messages per recipient (budget, §5.5).
+  static const maxMessagesPerRecipient = 30;
 
   /// Max size per wrapped envelope (300 KB).
   /// V3.1.7: Raised from 100 KB to 300 KB to match relay payload limit —

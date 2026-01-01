@@ -112,12 +112,13 @@ class AckTracker {
       : _rttSource = rttSource,
         _log = CLogger.get('ack-tracker', profileDir: profileDir);
 
-  /// Compute ACK timeout appropriate for the route type.
-  /// Direct: 2*RTT + 50ms (existing behavior).
-  /// Relay: max(baseRtt * 2 * hopCount, 8000ms) — minimum 8s for any relay.
+  /// Compute ACK timeout appropriate for the route type (§5.2 + §5.3).
+  /// Direct: max(2*RTT + 50ms, 8000ms) — 8s floor per spec.
+  /// Relay: max(baseRtt * 2 * hopCount, 8000ms), capped at 30s.
   static Duration computeTimeout(Duration baseRtt, {int hopCount = 1}) {
     if (hopCount <= 1) {
-      return Duration(milliseconds: baseRtt.inMilliseconds * 2 + 50);
+      final directMs = baseRtt.inMilliseconds * 2 + 50;
+      return Duration(milliseconds: directMs.clamp(8000, 30000));
     }
     final relayMs = baseRtt.inMilliseconds * 2 * hopCount;
     return Duration(milliseconds: relayMs.clamp(8000, 30000));

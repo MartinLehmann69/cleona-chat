@@ -44,6 +44,7 @@ class _CallScreenState extends State<CallScreen> {
 
   void _startDurationTimer() {
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
       setState(() {
         _duration += const Duration(seconds: 1);
       });
@@ -53,6 +54,8 @@ class _CallScreenState extends State<CallScreen> {
   @override
   void dispose() {
     _durationTimer?.cancel();
+    _remoteVideoFrame?.dispose();
+    _localVideoFrame?.dispose();
     super.dispose();
   }
 

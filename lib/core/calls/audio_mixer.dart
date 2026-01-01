@@ -389,22 +389,31 @@ class AudioMixer {
     _mixTimer?.cancel();
     _mixTimer = null;
 
-    // Stop capture isolate
+    _frameSubscription?.cancel();
+    _frameSubscription = null;
+
     _captureCommandPort?.send(_MixerCaptureCommand.stop);
     _captureIsolate?.kill(priority: Isolate.beforeNextEvent);
     _captureIsolate = null;
     _captureCommandPort = null;
-    _frameSubscription?.cancel();
     _frameReceivePort?.close();
+    _frameReceivePort = null;
 
-    // Close engine
     if (_engine != null) {
-      _shim.stop(_engine!);
-      _shim.destroy(_engine!);
+      try {
+        _shim.stop(_engine!);
+        _shim.destroy(_engine!);
+      } catch (e) {
+        _log.warn('cleona_audio stop/destroy threw (mixer): $e');
+      }
       _engine = null;
     }
     if (_playbackPcmPtr != null) {
-      calloc.free(_playbackPcmPtr!);
+      try {
+        calloc.free(_playbackPcmPtr!);
+      } catch (e) {
+        _log.warn('calloc.free(_playbackPcmPtr) threw (mixer): $e');
+      }
       _playbackPcmPtr = null;
     }
 

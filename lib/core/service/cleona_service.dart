@@ -7,6 +7,7 @@ import 'package:image/image.dart' as img;
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/crypto/per_message_kem.dart';
+import 'package:cleona/core/crypto/proof_of_work.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
@@ -327,8 +328,6 @@ class CleonaService implements ICleonaService {
   bool _conversationsLoaded = false;
   bool _groupsLoaded = false;
   bool _channelsLoaded = false;
-  // CR retry timer
-  Timer? _crRetryTimer;
   // Rate limiter: last CR retry time per contact (nodeIdHex -> timestamp)
   final Map<String, DateTime> _lastCrRetryPerContact = {};
   // Exponential backoff counter for CR retries to unreachable contacts.
@@ -424,7 +423,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.89';
+  static const String kCurrentAppVersion = '3.1.90';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -437,15 +436,13 @@ class CleonaService implements ICleonaService {
   Timer? _restorePollingTimer;
   int _restorePollCount = 0;
 
-  // #U1 startup-poll state: Kademlia bootstrap takes ~15-20s after restart, so
-  // peers responsible for our DHT-fragment storage and S&F-stored messages may
-  // not yet be in the routing table when a single-shot poll fires at T+5/8s.
-  // The startup polling timer fires every 3s for ~30s and polls only newly
-  // observed peers, catching late arrivals without re-flooding known peers.
-  Timer? _startupPollingTimer;
+  Timer? _postDiscoverySecondSweep;
   Timer? _delegationRenewalTimer;
-  int _startupPollCount = 0;
-  final Set<String> _startupPolledPeers = {};
+  final Set<String> _postDiscoveryPolledPeers = {};
+
+  // §8.1 per-sender CR rate limit: max 5 CRs per hour per sender.
+  // Key: senderUserIdHex, Value: list of timestamps (kept ≤ 5, pruned on check).
+  final Map<String, List<DateTime>> _crRateTracker = {};
 
   // ── §5.8 One-Shot-Outbox ─────────────────────────────────────────────
   // Messages that could NOT be placed into L3 (Erasure + S&F) because the
@@ -737,30 +734,18 @@ class CleonaService implements ICleonaService {
     }
     if (staleConvs.isNotEmpty) _saveConversations();
 
-    // #U1 fix: aggressive startup polling for DHT-fragment + S&F retrieval.
-    // Single-shot polls at T+5/8s missed peers that joined the routing table
-    // after Kademlia bootstrap (~15-20s), leaving stored CRs and away-period
-    // messages permanently unretrieved. The 30-second window with per-peer
-    // dedup catches late arrivals without re-flooding peers that already
-    // responded with 0 messages.
-    _startupPollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
-      _startupPollCount++;
-      _pollNewPeersForStoredMessages();
-      if (_startupPollCount >= 10) {
-        timer.cancel();
-        _startupPollingTimer = null;
-        _log.info('Startup polling complete (${_startupPolledPeers.length} peers polled)');
-      }
-    });
+    // #U1 fix: edge-triggered offline-message retrieval.
+    // S&F poll, DHT-fragment pull, and CR rebroadcast are all triggered by
+    // node.onDiscoveryComplete (fires once after §4.5 cascade + jitter).
+    // A second sweep 15s later catches peers that joined the routing table
+    // after Kademlia bootstrap. No periodic polling (Arbeitsregel #5).
+    node.onDiscoveryComplete = _onPostDiscoveryRetrieve;
 
     // §26: TWIN_ANNOUNCE at startup so existing twins learn about this device.
     // 6 seconds lets the first peers come up first. Fire-and-forget; a no-op
     // when we have no known twins yet (first twin learns us when its own
     // announce arrives here — our handler echoes _sendTwinAnnounce back).
     Timer(const Duration(seconds: 6), _sendTwinAnnounce);
-
-    // Retry pending outgoing contact requests (every 10 seconds)
-    _crRetryTimer = Timer.periodic(const Duration(seconds: 10), (_) => _retryPendingContactRequests());
 
     // Key rotation: check on startup and schedule daily check
     identity.discardPreviousKeysIfExpired();
@@ -1085,6 +1070,17 @@ class CleonaService implements ICleonaService {
   /// targets our own mailbox, triggers reassembly; otherwise, if we know
   /// the mailbox owner, kicks off a proactive push (§3.5).
   void _handleFragmentStore(Uint8List payload, Uint8List senderDeviceId) {
+    // D3 Phase 2 (§13.1.2): reject fragment stores from non-admitted senders
+    // (unless the sender is a local identity — self-store for own mailbox).
+    if (senderDeviceId.isNotEmpty &&
+        !node.routingTable.isLocalNode(senderDeviceId)) {
+      final senderPeer = node.routingTable.getPeer(senderDeviceId);
+      if (senderPeer != null && !senderPeer.idPowVerified) {
+        _log.debug('D3: FRAGMENT_STORE from non-admitted '
+            '${bytesToHex(senderDeviceId).substring(0, 8)} — rejected');
+        return;
+      }
+    }
     try {
       final frag = proto.FragmentStore.fromBuffer(payload);
       final stored = mailboxStore.storeFragment(StoredFragment(
@@ -1490,6 +1486,13 @@ class CleonaService implements ICleonaService {
     final twoStage = fileSize > 256 * 1024;
     _log.info('[E2E media-send-path-v3] mode=${twoStage ? "two-stage-announce-only" : "inline"} '
         'fileSize=$fileSize recipients=${recipients.length} convId=${conversationId.substring(0, 8)}');
+    // GM-1 (§9.1.4): group media must carry groupId + membership tag
+    final groupForMedia = isGroup ? _groups[conversationId] : null;
+    final mediaGroupId = isGroup ? hexToBytes(conversationId) : null;
+    final mediaGmEpoch = groupForMedia?.membershipEpoch;
+    final mediaGmHash = groupForMedia != null
+        ? _computeMembershipHash(groupForMedia.membershipEpoch, conversationId, groupForMedia.members)
+        : null;
     String? firstMsgId;
     if (!twoStage) {
       for (final recipient in recipients) {
@@ -1500,6 +1503,9 @@ class CleonaService implements ICleonaService {
           payload: bytes,
           contentMetadata: metadata,
           messageId: messageIdBytes,
+          groupId: mediaGroupId,
+          groupMembershipEpoch: mediaGmEpoch,
+          groupMembershipHash: mediaGmHash,
         );
         if (ok) node.statsCollector.addMessageSent();
       }
@@ -1516,6 +1522,9 @@ class CleonaService implements ICleonaService {
           payload: Uint8List(0),
           contentMetadata: metadata,
           messageId: messageIdBytes,
+          groupId: mediaGroupId,
+          groupMembershipEpoch: mediaGmEpoch,
+          groupMembershipHash: mediaGmHash,
         );
       }
       firstMsgId = tempId;
@@ -1731,6 +1740,8 @@ class CleonaService implements ICleonaService {
     final group = _groups[conversationId];
     if (group != null) {
       final groupIdBytes = hexToBytes(conversationId);
+      final gmEpoch = group.membershipEpoch;
+      final gmHash = _computeMembershipHash(gmEpoch, conversationId, group.members);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
         await sendToUser(
@@ -1738,6 +1749,8 @@ class CleonaService implements ICleonaService {
           messageType: proto.MessageTypeV3.MTV3_REACTION,
           payload: basePayload,
           groupId: groupIdBytes,
+          groupMembershipEpoch: gmEpoch,
+          groupMembershipHash: gmHash,
         );
       }
     } else {
@@ -1929,12 +1942,29 @@ class CleonaService implements ICleonaService {
     );
   }
 
-  /// #U1 fix: poll only peers that joined the routing table since the last
-  /// startup-poll iteration. Each new peer receives both a FRAGMENT_RETRIEVE
-  /// (for DHT-erasure-coded mailbox fragments — primary + fallback mailbox IDs)
-  /// and a PEER_RETRIEVE (for Store-and-Forward stored envelopes). Already-
-  /// polled peers are skipped to avoid re-flooding known-empty mailboxes.
-  void _pollNewPeersForStoredMessages() {
+  /// Edge-triggered offline-message retrieval. Fires once from
+  /// [node.onDiscoveryComplete] after the §4.5 discovery cascade completes.
+  void _onPostDiscoveryRetrieve() {
+    _log.info('#U1 discovery-complete: starting one-shot offline retrieval');
+    _postDiscoveryPolledPeers.clear();
+    _pollConfirmedPeersOnce();
+    _retryPendingContactRequests();
+
+    _postDiscoverySecondSweep?.cancel();
+    _postDiscoverySecondSweep = Timer(const Duration(seconds: 15), () {
+      _postDiscoverySecondSweep = null;
+      final count = _pollConfirmedPeersOnce();
+      if (count > 0) {
+        _retryPendingContactRequests();
+      }
+      _log.info('#U1 second sweep complete '
+          '(${_postDiscoveryPolledPeers.length} total peers polled)');
+    });
+  }
+
+  /// Send FRAGMENT_RETRIEVE + PEER_RETRIEVE to all confirmed peers not
+  /// yet polled (dedup via [_postDiscoveryPolledPeers]).
+  int _pollConfirmedPeersOnce() {
     final sodium = SodiumFFI();
     final primaryMailboxId = sodium.sha256(Uint8List.fromList(
       [...utf8.encode('mailbox'), ...identity.ed25519PublicKey],
@@ -1944,17 +1974,17 @@ class CleonaService implements ICleonaService {
     ));
     final newPeers = node.routingTable.allPeers
         .where((p) => node.isPeerConfirmed(p.nodeIdHex) &&
-            _startupPolledPeers.add(p.nodeIdHex))
+            _postDiscoveryPolledPeers.add(p.nodeIdHex))
         .toList();
-    if (newPeers.isEmpty) return;
+    if (newPeers.isEmpty) return 0;
     for (final peer in newPeers) {
       _requestFragments(peer, primaryMailboxId);
       _requestFragments(peer, fallbackMailboxId);
       _requestStoredMessages(peer);
     }
-    _log.info('Startup poll iter $_startupPollCount/10: '
-        '${newPeers.length} new peers polled '
-        '(total ${_startupPolledPeers.length})');
+    _log.info('#U1 polled ${newPeers.length} new peers '
+        '(total ${_postDiscoveryPolledPeers.length})');
+    return newPeers.length;
   }
 
   // ── Sending ────────────────────────────────────────────────────────
@@ -2177,6 +2207,8 @@ class CleonaService implements ICleonaService {
 
     if (group != null) {
       final groupIdBytes = hexToBytes(conversationId);
+      final gmEpoch = group.membershipEpoch;
+      final gmHash = _computeMembershipHash(gmEpoch, conversationId, group.members);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
         final ok = await sendToUser(
@@ -2185,6 +2217,8 @@ class CleonaService implements ICleonaService {
           payload: basePayload,
           groupId: groupIdBytes,
           messageId: wireMessageId,
+          groupMembershipEpoch: gmEpoch,
+          groupMembershipHash: gmHash,
         );
         if (ok) anySent = true;
       }
@@ -2257,6 +2291,8 @@ class CleonaService implements ICleonaService {
     if (group != null) {
       // Pairwise fan-out per member (V3 keeps the same model).
       final groupIdBytes = hexToBytes(conversationId);
+      final gmEpoch = group.membershipEpoch;
+      final gmHash = _computeMembershipHash(gmEpoch, conversationId, group.members);
       for (final member in group.members.values) {
         if (member.nodeIdHex == identity.userIdHex) continue;
         final ok = await sendToUser(
@@ -2265,6 +2301,8 @@ class CleonaService implements ICleonaService {
           payload: basePayload,
           groupId: groupIdBytes,
           messageId: wireMessageId,
+          groupMembershipEpoch: gmEpoch,
+          groupMembershipHash: gmHash,
         );
         if (ok) anySent = true;
       }
@@ -2573,6 +2611,7 @@ class CleonaService implements ICleonaService {
         return false;
       }
 
+      final replicaCount = peers.length < 3 ? peers.length : 3;
       for (var i = 0; i < fragments.length; i++) {
         final fragStore = proto.FragmentStore()
           ..mailboxId = mailboxId
@@ -2582,12 +2621,15 @@ class CleonaService implements ICleonaService {
           ..requiredFragments = ReedSolomon.defaultK
           ..fragmentData = fragments[i]
           ..originalSize = packetBytes.length;
-        final targetPeer = peers[i % peers.length];
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
-          innerPayload: Uint8List.fromList(fragStore.writeToBuffer()),
-          recipientDeviceId: Uint8List.fromList(targetPeer.nodeId),
-        );
+        final payload = Uint8List.fromList(fragStore.writeToBuffer());
+        for (var r = 0; r < replicaCount; r++) {
+          final targetPeer = peers[(i + r) % peers.length];
+          node.sendInfraTo(
+            messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE,
+            innerPayload: payload,
+            recipientDeviceId: Uint8List.fromList(targetPeer.nodeId),
+          );
+        }
       }
       return true;
     } catch (e) {
@@ -2868,9 +2910,12 @@ class CleonaService implements ICleonaService {
     if (port != LocalDiscovery.discoveryPort) {
       node.localDiscovery.sendUnicastDiscovery(ip, port);
     }
-    _log.info('Manual peer entry: LAN-Discovery probe sent to $ip '
-        '(discoveryPort=${LocalDiscovery.discoveryPort}'
-        '${port != LocalDiscovery.discoveryPort ? ", fallback=$port" : ""})');
+    // Cross-NAT: LAN-Discovery probes fail across CGNAT (no pinhole on
+    // discovery port 41338). Also send a V3 DHT_PING to the data port —
+    // works if the target is a KNOWN peer whose addresses include ip:port.
+    node.sendPing(ip, port);
+    _log.info('Manual peer entry: LAN-Discovery probe + V3 PING sent to $ip:$port '
+        '(discoveryPort=${LocalDiscovery.discoveryPort})');
     return true;
   }
 
@@ -6961,7 +7006,11 @@ class CleonaService implements ICleonaService {
   }
 
   void _stopAudioMixer() {
-    _audioMixer?.stop();
+    try {
+      _audioMixer?.stop();
+    } catch (e) {
+      _log.warn('AudioMixer stop threw (swallowed): $e');
+    }
     _audioMixer = null;
     if (Platform.isAndroid) {
       ForegroundServiceControl.demoteAfterCall();
@@ -7063,7 +7112,11 @@ class CleonaService implements ICleonaService {
   }
 
   void _stopAudioEngine() {
-    _audioEngine?.stop();
+    try {
+      _audioEngine?.stop();
+    } catch (e) {
+      _log.warn('AudioEngine stop threw (swallowed): $e');
+    }
     _audioEngine = null;
     // Bug #U10b — demote back to plain DATA_SYNC so the persistent
     // "microphone in use" indicator goes away. Fire-and-forget; failures
@@ -7074,6 +7127,7 @@ class CleonaService implements ICleonaService {
   }
 
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
+    if (session.state == CallState.ended) return;
     session.framesSent++;
     final peerNodeId = hexToBytes(session.peerNodeIdHex);
 
@@ -7143,10 +7197,19 @@ class CleonaService implements ICleonaService {
 
   // ── Persistence ────────────────────────────────────────────────────
 
-  // Cached FileEncryption instance — reuses the same db.key for all operations.
+  // Cached FileEncryption instance — uses seed-derived key per §3.7 step 5.
   FileEncryption? _fileEncCached;
   FileEncryption get _fileEnc {
-    return _fileEncCached ??= FileEncryption(baseDir: '${AppPaths.home}/.cleona');
+    if (_fileEncCached != null) return _fileEncCached!;
+    final baseDir = '${AppPaths.home}/.cleona';
+    // §3.7: derive per-identity FileEncryption key from master seed
+    final seed = identity.masterSeed;
+    final idx = identity.hdIndex;
+    final Uint8List? key = (seed != null && idx != null)
+        ? HdWallet.deriveFileEncKey(seed, idx)
+        : null;
+    _fileEncCached = FileEncryption(baseDir: baseDir, key: key);
+    return _fileEncCached!;
   }
 
   void _loadContacts() {
@@ -7555,6 +7618,7 @@ class CleonaService implements ICleonaService {
   /// Post an Android system notification for an incoming message.
   void _postAndroidNotification(String senderName, String text, String conversationId) {
     if (onPostNotificationAndroid == null) return;
+    if (_isAppResumed) return;
     onPostNotificationAndroid!(senderName, text, conversationId);
   }
 
@@ -8586,10 +8650,10 @@ class CleonaService implements ICleonaService {
     final newX25519Pk = sodium.ed25519PkToX25519(newEd25519.publicKey);
     final newX25519Sk = sodium.ed25519SkToX25519(newEd25519.secretKey);
 
-    // PQ keygen in background isolate (ANR fix)
-    final pqKeys = await generatePqKeypairsIsolated();
-    final newMlDsa = pqKeys.mlDsa;
-    final newMlKem = pqKeys.mlKem;
+    // PQ keygen: deterministic from new seed (recovery must reproduce same keys)
+    final pqKeys = await generatePqKeysDeterministicIsolated(newMasterSeed, hdIndex);
+    final newMlDsa = (publicKey: pqKeys.mlDsaPk, secretKey: pqKeys.mlDsaSk);
+    final newMlKem = (publicKey: pqKeys.mlKemPk, secretKey: pqKeys.mlKemSk);
 
     // 2. Build KeyRotationBroadcast with dual signatures
     final broadcast = proto.KeyRotationBroadcast()
@@ -9170,18 +9234,18 @@ class CleonaService implements ICleonaService {
         final newX25519Pk = sodium.ed25519PkToX25519(newEd25519.publicKey);
         final newX25519Sk = sodium.ed25519SkToX25519(newEd25519.secretKey);
 
-        // PQ keygen in background isolate (ANR fix)
-        final pqKeys = await generatePqKeypairsIsolated();
+        // PQ keygen: deterministic from new seed
+        final pqKeys = await generatePqKeysDeterministicIsolated(newMasterSeed, hdIndex);
 
         identity.rotateIdentityFull(
           newEd25519Pk: newEd25519.publicKey,
           newEd25519Sk: newEd25519.secretKey,
-          newMlDsaPk: pqKeys.mlDsa.publicKey,
-          newMlDsaSk: pqKeys.mlDsa.secretKey,
+          newMlDsaPk: pqKeys.mlDsaPk,
+          newMlDsaSk: pqKeys.mlDsaSk,
           newX25519Pk: newX25519Pk,
           newX25519Sk: newX25519Sk,
-          newMlKemPk: pqKeys.mlKem.publicKey,
-          newMlKemSk: pqKeys.mlKem.secretKey,
+          newMlKemPk: pqKeys.mlKemPk,
+          newMlKemSk: pqKeys.mlKemSk,
         );
         // §5.11 — same as the originating-device path: push refreshed
         // PeerInfo to all known peers so the mesh heals stale-PK caches
@@ -11473,8 +11537,8 @@ class CleonaService implements ICleonaService {
     _stopAudioMixer();
     _stopGroupVideo();
     groupCallManager.leaveGroupCall();
-    _crRetryTimer?.cancel();
-    _crRetryTimer = null;
+    _postDiscoverySecondSweep?.cancel();
+    _postDiscoverySecondSweep = null;
     _keyRotationTimer?.cancel();
     _keyRotationTimer = null;
     _keyRotationRetryTimer?.cancel();
@@ -11485,8 +11549,6 @@ class CleonaService implements ICleonaService {
     _restoreRetryTimer = null;
     _restorePollingTimer?.cancel();
     _restorePollingTimer = null;
-    _startupPollingTimer?.cancel();
-    _startupPollingTimer = null;
     _channelIndexGossipTimer?.cancel();
     _channelIndexGossipTimer = null;
     _moderationTimer?.cancel();
@@ -11792,6 +11854,7 @@ class CleonaService implements ICleonaService {
         recipientUserX25519Pk: contact.x25519Pk!,
         recipientUserMlKemPk: contact.mlKemPk!,
       );
+      final l3Pow = await ProofOfWork.computeAsync(kemBytes);
       final outer = V3FrameCodec.buildOuter(
         nextHopDeviceId: recipientUserId,
         senderDeviceId: node.primaryIdentity.deviceNodeId,
@@ -11799,7 +11862,7 @@ class CleonaService implements ICleonaService {
         innerPayload: kemBytes,
         payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
         applicationFlavor: true,
-        skipPoW: true,
+        precomputedPow: l3Pow,
       );
       final canonicalBytes = node.serializePacketForOfflineDelivery(outer);
       final fragmentBundleId =
@@ -11890,10 +11953,8 @@ class CleonaService implements ICleonaService {
           recipientUserMlKemPk: contact.mlKemPk!,
         );
 
-        // Outer is application-flavor (hybrid Device-Sig). PoW skipped for now
-        // and re-evaluated in Welle 3 once the LAN-detection helper is wired
-        // through the codec — Architecture §2.4 sender step 10 allows the
-        // skip on infrastructure / LAN destinations.
+        // §13.1 PoW: compute async in isolate for ApplicationFrames.
+        final pow = await ProofOfWork.computeAsync(kemBytes);
         final outer = V3FrameCodec.buildOuter(
           nextHopDeviceId: deviceId,
           senderDeviceId: myDeviceNodeId,
@@ -11901,7 +11962,7 @@ class CleonaService implements ICleonaService {
           innerPayload: kemBytes,
           payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
           applicationFlavor: true,
-          skipPoW: true,
+          precomputedPow: pow,
         );
 
         canonicalPacket ??= outer;
@@ -12033,6 +12094,13 @@ class CleonaService implements ICleonaService {
     }
     if (cr.ed25519PublicKey.isEmpty || cr.mlDsaPublicKey.isEmpty) {
       _log.debug('First-CR drop: CR payload missing sender pubkeys');
+      return;
+    }
+
+    // §8.1 per-sender CR rate limit (5/hour) — applies to First-CR path too.
+    final senderHex = bytesToHex(Uint8List.fromList(inner.senderUserId));
+    if (_isCrRateLimited(senderHex)) {
+      _log.debug('First-CR drop: rate limited for ${senderHex.substring(0, 8)}');
       return;
     }
 
@@ -12930,9 +12998,9 @@ class CleonaService implements ICleonaService {
   }
 
   // ──────────────────────────── V3 Handler Stubs ────────────────────────────
-  // All handlers are intentional NO-OPs that log "TODO V3 handler not migrated".
-  // Migration order: C1 (layer-replies) → C2 (messaging) → C3 (calls) → C4 (rest).
-  // Per Architecture-Regel #1: explicit TODO is the spec, NOT silent fallback.
+  // Planned/deferred message types with empty handlers (silent no-op).
+  // Categories: §10.5 (in-call collaboration), moderation Phase 2,
+  // infra-dispatched types (switch exhaustiveness only), dead proto types.
 
   // C1 — Layer-Replies (V3 migration of _handleDeliveryReceipt /
   // _handleReadReceipt / _handleEphemeral-typing). The V3 frame has no
@@ -12979,7 +13047,7 @@ class CleonaService implements ICleonaService {
       for (final msg in conv.messages) {
         if (msg.id == msgIdHex &&
             msg.isOutgoing &&
-            msg.status == MessageStatus.sent) {
+            (msg.status == MessageStatus.sent || msg.status == MessageStatus.queuedOffline)) {
           msg.status = MessageStatus.delivered;
           onStateChanged?.call();
           break;
@@ -13928,9 +13996,9 @@ class CleonaService implements ICleonaService {
   }
 
   void _handleCallAnswerV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    notificationSound.stopRingtone();
-    notificationSound.stopRingback();
-    notificationSound.playConnected();
+    try { notificationSound.stopRingtone(); } catch (_) {}
+    try { notificationSound.stopRingback(); } catch (_) {}
+    try { notificationSound.playConnected(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
       groupCallManager.handleGroupCallAnswerV3(f, sd, s);
     } else {
@@ -13939,8 +14007,8 @@ class CleonaService implements ICleonaService {
   }
 
   void _handleCallRejectV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    notificationSound.stopRingtone();
-    notificationSound.stopRingback();
+    try { notificationSound.stopRingtone(); } catch (_) {}
+    try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
       groupCallManager.handleGroupCallRejectV3(f, sd, s);
     } else {
@@ -13949,8 +14017,8 @@ class CleonaService implements ICleonaService {
   }
 
   void _handleCallHangupV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    notificationSound.stopRingtone();
-    notificationSound.stopRingback();
+    try { notificationSound.stopRingtone(); } catch (_) {}
+    try { notificationSound.stopRingback(); } catch (_) {}
     if (groupCallManager.currentGroupCall != null) {
       groupCallManager.handleGroupCallHangupV3(f, sd, s);
     } else {
@@ -13969,9 +14037,10 @@ class CleonaService implements ICleonaService {
   }
 
   void _handleCallAudioV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    if (_audioEngine == null || !_audioEngine!.isRunning) return;
+    final engine = _audioEngine;
+    if (engine == null || !engine.isRunning) return;
     callManager.currentCall?.framesReceived++;
-    _audioEngine!.playFrame(Uint8List.fromList(f.payload));
+    engine.playFrame(Uint8List.fromList(f.payload));
   }
 
   void _handleCallVideoV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
@@ -14035,20 +14104,14 @@ class CleonaService implements ICleonaService {
   void _handleCallTreeUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
     groupCallManager.handleCallTreeUpdateV3(f, sd, s);
   }
-  void _handleWhiteboardStrokeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: WHITEBOARD_STROKE (C3)');
-  void _handleWhiteboardPageV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: WHITEBOARD_PAGE (C3)');
-  void _handleFileExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: FILE_EXCHANGE (C3)');
-  void _handleClipboardExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: CLIPBOARD_EXCHANGE (C3)');
-  void _handleScreenShareFrameV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: SCREEN_SHARE_FRAME (C3)');
-  void _handleCallChatV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: CALL_CHAT (C3)');
-  void _handleRemoteControlInputV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: REMOTE_CONTROL_INPUT (C3)');
+  // §10.5 In-Call Collaboration (planned, not implemented in v3.x).
+  void _handleWhiteboardStrokeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleWhiteboardPageV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleFileExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleClipboardExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleScreenShareFrameV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleCallChatV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleRemoteControlInputV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
 
   // C4 — Recovery / Identity / Profile / CR / Groups / Channels / DHT /
   //       Fragments / Peer-Store / Chat-Config / Routing / Hole-Punch /
@@ -14217,12 +14280,33 @@ class CleonaService implements ICleonaService {
       Uint8List.fromList(frame.senderUserId),
     );
   }
+  /// §8.1 per-sender CR rate limit: max 5 CRs per hour.
+  bool _isCrRateLimited(String senderHex) {
+    final now = DateTime.now();
+    final cutoff = now.subtract(const Duration(hours: 1));
+    final timestamps = _crRateTracker[senderHex];
+    if (timestamps == null) {
+      _crRateTracker[senderHex] = [now];
+      return false;
+    }
+    timestamps.removeWhere((t) => t.isBefore(cutoff));
+    if (timestamps.length >= 5) {
+      _log.warn('CR rate limit: sender ${senderHex.substring(0, 8)} exceeded 5 CRs/hour');
+      return true;
+    }
+    timestamps.add(now);
+    return false;
+  }
+
   void _handleContactRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     _log.debug('_handleContactRequestV3 from device ${bytesToHex(senderDeviceId).substring(0, 8)}');
     _log.info('_handleContactRequestV3 ENTER for ${identity.userIdHex.substring(0, 8)}');
     try {
       final cr = proto.ContactRequestMsg.fromBuffer(frame.payload);
       final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
+
+      // §8.1 per-sender CR rate limit (5/hour).
+      if (_isCrRateLimited(senderHex)) return;
 
       // Multi-Identity guard: only process CRs addressed to THIS identity.
       // Without this, a CR to identity B could be processed by identity A's
@@ -14733,8 +14817,8 @@ class CleonaService implements ICleonaService {
     _addMessageToConversation(groupIdHex, sysMsg, isGroup: true);
     _log.info('$memberName left group "${group.name}"');
   }
-  void _handleGroupKeyUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: GROUP_KEY_UPDATE (C4)');
+  // GROUP_KEY_UPDATE: no shared group key in pairwise-KEM model (§9.1).
+  void _handleGroupKeyUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
   void _handleChannelCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     // CHANNEL_CREATE shares the CHANNEL_INVITE payload schema and processing path.
     _handleChannelInviteV3(frame, senderDeviceId, snapshot);
@@ -15104,8 +15188,8 @@ class CleonaService implements ICleonaService {
 
     onStateChanged?.call();
   }
-  void _handleChannelBadBadgeReportV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: CHANNEL_BAD_BADGE_REPORT (C4)');
+  // §9.3.1 Bad Badge Reporting (moderation Phase 2, not yet implemented).
+  void _handleChannelBadBadgeReportV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
 
   /// V3-direct handler for MTV3_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
   /// Owner-bound AppFrame; payload is the `ChannelJoinRequest` proto
@@ -15184,8 +15268,8 @@ class CleonaService implements ICleonaService {
   void _handleChannelModDecisionV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     _handleIncomingJuryResult(Uint8List.fromList(frame.payload));
   }
-  void _handleChannelSubscribeProbeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: CHANNEL_SUBSCRIBE_PROBE (C4)');
+  // §9.3.1a Subscribe Probe (moderation reachability check, not yet implemented).
+  void _handleChannelSubscribeProbeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
   // Wave 2B.3: PEER_LIST_*, DHT_*, FRAGMENT_*, PEER_STORE_* dead-stub
   // declarations removed. PEER_LIST_*/DHT_* are §2.3.5 Infrastructure types
   // dispatched in cleona_node.dart's `_dispatchInfrastructureFrameLocal`.
@@ -15298,24 +15382,25 @@ class CleonaService implements ICleonaService {
       _log.info('DM config rejected by ${senderHex.substring(0, 8)}');
     }
   }
-  void _handleChatConfigResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: CHAT_CONFIG_RESPONSE (C4)');
+  // CHAT_CONFIG_RESPONSE (type 141): dead code — the protocol uses
+  // CHAT_CONFIG_UPDATE (type 140) with `accepted` flag for both request
+  // and response directions. Type 141 is never sent.
+  void _handleChatConfigResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+
   // Wave 2B.3: ROUTE_UPDATE, REACHABILITY_*, RELAY_*, HOLE_PUNCH_*
   // dead-stub declarations removed — all dispatched in cleona_node.dart
   // (`_dispatchInfrastructureFrameLocal`, see Wave 2B.3 section). RELAY_*
   // remains on the KEM-path with §5.5 logic (out of Wave 2B.3 scope).
-  void _handleIdentityAuthPublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_PUBLISH (C4)');
-  void _handleIdentityAuthRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_RETRIEVE (C4)');
-  void _handleIdentityAuthResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_AUTH_RESPONSE (C4)');
-  void _handleIdentityLivePublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_PUBLISH (C4)');
-  void _handleIdentityLiveRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_RETRIEVE (C4)');
-  void _handleIdentityLiveResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) =>
-      _log.warn('TODO V3 handler not migrated: IDENTITY_LIVE_RESPONSE (C4)');
+
+  // IDENTITY_AUTH/LIVE_* (types 170-175): dispatched as InfrastructureFrames
+  // in cleona_node.dart (lines 1722-1850). These ApplicationFrame stubs are
+  // unreachable — kept only for switch-case exhaustiveness.
+  void _handleIdentityAuthPublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleIdentityAuthRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleIdentityAuthResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleIdentityLivePublishV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleIdentityLiveRetrieveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  void _handleIdentityLiveResponseV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
   void _handleTwinSyncV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
     // The inner payload is the TwinSyncEnvelope protobuf, already
     // decrypted + authenticated by the V3 pipeline. Sub-handlers operate

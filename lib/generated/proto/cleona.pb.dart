@@ -14228,6 +14228,7 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? deviceMlDsaSig,
     PayloadTypeV3? payloadType,
     $core.List<$core.int>? payload,
+    $core.Iterable<$core.List<$core.int>>? visitedDeviceIds,
   }) {
     final $result = create();
     if (version != null) {
@@ -14269,6 +14270,9 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     if (payload != null) {
       $result.payload = payload;
     }
+    if (visitedDeviceIds != null) {
+      $result.visitedDeviceIds.addAll(visitedDeviceIds);
+    }
     return $result;
   }
   NetworkPacketV3._() : super();
@@ -14289,6 +14293,7 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'deviceMlDsaSig', $pb.PbFieldType.OY)
     ..e<PayloadTypeV3>(12, _omitFieldNames ? '' : 'payloadType', $pb.PbFieldType.OE, defaultOrMaker: PayloadTypeV3.PAYLOAD_APPLICATION_FRAME, valueOf: PayloadTypeV3.valueOf, enumValues: PayloadTypeV3.values)
     ..a<$core.List<$core.int>>(13, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(14, _omitFieldNames ? '' : 'visitedDeviceIds', $pb.PbFieldType.PY)
     ..hasRequiredFields = false
   ;
 
@@ -14433,6 +14438,12 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
   $core.bool hasPayload() => $_has(12);
   @$pb.TagNumber(13)
   void clearPayload() => clearField(13);
+
+  /// §5.3 Anti-loop: each relay hop appends its own deviceId(s).
+  /// Receiver drops if own deviceId is in the list. Backward-compatible:
+  /// old nodes ignore the field but preserve it on forward (protobuf default).
+  @$pb.TagNumber(14)
+  $core.List<$core.List<$core.int>> get visitedDeviceIds => $_getList(13);
 }
 
 ///  ── Inner Layer (ApplicationFrame) — KEM-encrypted unter recipient-User-PK ─

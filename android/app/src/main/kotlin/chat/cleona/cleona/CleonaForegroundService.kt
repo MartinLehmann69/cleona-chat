@@ -9,13 +9,22 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.Process
+import android.util.Log
 import androidx.core.app.NotificationCompat
+import java.io.File
 
 class CleonaForegroundService : Service() {
     companion object {
         const val CHANNEL_ID = "cleona_service"
         const val NOTIFICATION_ID = 1
+        private const val TAG = "CleonaWatchdog"
+        private const val WATCHDOG_INTERVAL_MS = 120_000L
+        private const val WATCHDOG_GRACE_MS = 240_000L
+        private const val HEARTBEAT_STALE_MS = 180_000L
 
         // Bug #U10b — singleton ref so MainActivity can promote/demote the
         // running service to MICROPHONE foreground-service-type at call
@@ -64,10 +73,19 @@ class CleonaForegroundService : Service() {
         }
     }
 
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    private val watchdogRunnable = object : Runnable {
+        override fun run() {
+            checkDartHeartbeat()
+            watchdogHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
         createNotificationChannel()
+        watchdogHandler.postDelayed(watchdogRunnable, WATCHDOG_GRACE_MS)
         // Manifest declares foregroundServiceType="dataSync|microphone".
         // The 2-arg startForeground() implicitly applies ALL manifest types,
         // which forces the system to verify RECORD_AUDIO at boot — crashing
@@ -86,6 +104,7 @@ class CleonaForegroundService : Service() {
     }
 
     override fun onDestroy() {
+        watchdogHandler.removeCallbacks(watchdogRunnable)
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -120,6 +139,21 @@ class CleonaForegroundService : Service() {
             )
         } else {
             startForeground(NOTIFICATION_ID, createNotification())
+        }
+    }
+
+    private fun checkDartHeartbeat() {
+        try {
+            val heartbeatFile = File(applicationContext.filesDir, ".cleona/.dart-heartbeat")
+            if (!heartbeatFile.exists()) return
+            val epochMs = heartbeatFile.readText().trim().toLongOrNull() ?: return
+            val staleMs = System.currentTimeMillis() - epochMs
+            if (staleMs > HEARTBEAT_STALE_MS) {
+                Log.e(TAG, "Dart heartbeat stale by ${staleMs / 1000}s — killing process for START_STICKY restart")
+                Process.killProcess(Process.myPid())
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Heartbeat check failed: ${e.message}")
         }
     }
 

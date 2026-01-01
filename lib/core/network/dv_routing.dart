@@ -69,6 +69,10 @@ class DvRoutingTable {
   // Callback: fired when a route changes (for propagation)
   void Function(String destHex, int cost)? onRouteChanged;
 
+  // D3 Phase 2: callback to query admission-PoW status of a neighbor.
+  // Injected by CleonaNode after construction.
+  bool Function(String nodeIdHex)? isAdmitted;
+
   DvRoutingTable({required this.ownNodeId})
       : _ownHex = bytesToHex(ownNodeId);
 
@@ -764,12 +768,16 @@ class DvRoutingTable {
         avgCost: rc > 0 ? (neighborTotalCost[neighborHex] ?? 0) / rc : 999999,
         newestConfirm: neighborNewestConfirm[neighborHex] ?? DateTime(2000),
         relayConfirmed: _relayConfirmedNeighbors.contains(neighborHex),
+        admitted: isAdmitted?.call(neighborHex) ?? false,
       );
     }
 
-    // Sort: relay-confirmed → unique coverage → route count → cost → recency
+    // Sort: admitted → relay-confirmed → unique coverage → route count → cost → recency
     final sorted = scores.entries.toList()
       ..sort((a, b) {
+        if (a.value.admitted != b.value.admitted) {
+          return a.value.admitted ? -1 : 1;
+        }
         if (a.value.relayConfirmed != b.value.relayConfirmed) {
           return a.value.relayConfirmed ? -1 : 1;
         }
@@ -1116,6 +1124,7 @@ class _GatewayScore {
   final double avgCost;
   final DateTime newestConfirm;
   final bool relayConfirmed;
+  final bool admitted;
 
   _GatewayScore({
     required this.routeCount,
@@ -1123,5 +1132,6 @@ class _GatewayScore {
     required this.avgCost,
     required this.newestConfirm,
     required this.relayConfirmed,
+    required this.admitted,
   });
 }

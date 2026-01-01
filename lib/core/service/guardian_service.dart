@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/shamir_sss.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
@@ -383,7 +384,13 @@ class GuardianService {
   // ── Persistence ───────────────────────────────────────────────────
 
   FileEncryption get _fileEnc {
-    return FileEncryption(baseDir: '${AppPaths.home}/.cleona');
+    final baseDir = '${AppPaths.home}/.cleona';
+    final seed = identity.masterSeed;
+    final idx = identity.hdIndex;
+    final Uint8List? key = (seed != null && idx != null)
+        ? HdWallet.deriveFileEncKey(seed, idx)
+        : null;
+    return FileEncryption(baseDir: baseDir, key: key);
   }
 
   void _loadStoredShares() {

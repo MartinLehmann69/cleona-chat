@@ -1300,7 +1300,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             Navigator.pop(confirmCtx);
                             Navigator.pop(ctx);
                             service.leaveGroup(widget.conversationId);
-                            Navigator.pop(context);
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (context.mounted) Navigator.pop(context);
+                            });
                           },
                           child: Text(locale.get('leave')),
                         ),
@@ -1697,7 +1699,9 @@ class _ChatScreenState extends State<ChatScreen> {
                             Navigator.pop(confirmCtx);
                             Navigator.pop(ctx);
                             service.leaveChannel(widget.conversationId);
-                            Navigator.pop(context);
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (context.mounted) Navigator.pop(context);
+                            });
                           },
                           child: Text(locale.get('leave')),
                         ),

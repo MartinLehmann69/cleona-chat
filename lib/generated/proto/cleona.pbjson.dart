@@ -3115,6 +3115,7 @@ const NetworkPacketV3$json = {
     {'1': 'device_ml_dsa_sig', '3': 11, '4': 1, '5': 12, '10': 'deviceMlDsaSig'},
     {'1': 'payload_type', '3': 12, '4': 1, '5': 14, '6': '.cleona.PayloadTypeV3', '10': 'payloadType'},
     {'1': 'payload', '3': 13, '4': 1, '5': 12, '10': 'payload'},
+    {'1': 'visited_device_ids', '3': 14, '4': 3, '5': 12, '10': 'visitedDeviceIds'},
   ],
 };
 
@@ -3128,7 +3129,8 @@ final $typed_data.Uint8List networkPacketV3Descriptor = $convert.base64Decode(
     'EoCzITLmNsZW9uYS5Qcm9vZk9mV29ya1IDcG93EiwKEmRldmljZV9lZDI1NTE5X3NpZxgKIAEo'
     'DFIQZGV2aWNlRWQyNTUxOVNpZxIpChFkZXZpY2VfbWxfZHNhX3NpZxgLIAEoDFIOZGV2aWNlTW'
     'xEc2FTaWcSOAoMcGF5bG9hZF90eXBlGAwgASgOMhUuY2xlb25hLlBheWxvYWRUeXBlVjNSC3Bh'
-    'eWxvYWRUeXBlEhgKB3BheWxvYWQYDSABKAxSB3BheWxvYWQ=');
+    'eWxvYWRUeXBlEhgKB3BheWxvYWQYDSABKAxSB3BheWxvYWQSLAoSdmlzaXRlZF9kZXZpY2VfaW'
+    'RzGA4gAygMUhB2aXNpdGVkRGV2aWNlSWRz');
 
 @$core.Deprecated('Use applicationFrameV3Descriptor instead')
 const ApplicationFrameV3$json = {

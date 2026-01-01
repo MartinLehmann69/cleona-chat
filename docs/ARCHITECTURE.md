@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:88d4c4f0cb8c, 2026-06-14). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:c1a3c58b8035, 2026-06-15). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -261,7 +261,7 @@ message ApplicationFrame {
 message PerMessageKem {
   bytes  x25519Ciphertext   = 1;
   bytes  mlKemCiphertext    = 2;   // ML-KEM-768
-  bytes  aeadCiphertext     = 3;   // ChaCha20-Poly1305(serialized ApplicationFrame)
+  bytes  aeadCiphertext     = 3;   // AES-256-GCM(serialized ApplicationFrame)
   bytes  aeadNonce          = 4;
   uint32 version            = 5;   // KEM version, V3.0 = 2 (Sec H-5 v2 continues)
 }
@@ -457,7 +457,7 @@ UDP-Packet bytes
           │   → on first success: continue with the matching identity's User-KEM
           │     context for steps [10]-[14]
           ▼
-  [10] AEAD-Decrypt aeadCiphertext  (ChaCha20-Poly1305)
+  [10] AEAD-Decrypt aeadCiphertext  (AES-256-GCM)
           │   → if AEAD-mismatch: drop (forged or wrong recipient)
           ▼
   [11] zstd-Decompress
@@ -610,7 +610,7 @@ service.sendInfrastructureFrame(deviceId, messageType ∈ §2.3.5, payload)
           │   → if KEM-version mismatch: silent drop
           │   → if decap fails: silent drop (forged sender or stale Device-KEM-PK)
           ▼
-  [10'] AEAD-Decrypt aeadCiphertext  (ChaCha20-Poly1305)
+  [10'] AEAD-Decrypt aeadCiphertext  (AES-256-GCM)
           │   → if AEAD-mismatch: drop
           ▼
   [11'] zstd-Decompress
@@ -970,7 +970,7 @@ Cleona uses exclusively audited, established primitives from two C libraries via
 
 | Library | Primitives | Use |
 |---|---|---|
-| **libsodium** (1.0.20+) | Ed25519, X25519, ChaCha20-Poly1305, XSalsa20-Poly1305, BLAKE2b, SHA-256, HMAC-SHA-256, HKDF | Classical crypto + DB-Encryption |
+| **libsodium** (1.0.20+) | Ed25519, X25519, AES-256-GCM, XSalsa20-Poly1305, BLAKE2b, SHA-256, HMAC-SHA-256, HKDF | Classical crypto + DB-Encryption |
 | **liboqs** (0.10+) | ML-KEM-768 (FIPS 203), ML-DSA-65 (FIPS 204) | Post-Quantum layer |
 
 Rationale for this selection:
@@ -983,7 +983,7 @@ Deliberate exclusions:
 - **No TLS** as a crypto layer (TLS is used only as a transport fallback, §4.1). E2E encryption must reach end to end from sender to recipient; TLS only covers sender-to-relay.
 - **No Double Ratchet** (Signal Protocol). Avoids session-state complexity (desync, loss of forward secrecy on state corruption). Replaced by stateless Per-Message KEM (§3.3).
 - **No RSA, no ECDSA with secp256k1**. Ed25519 is more modern, faster, and less side-channel-prone.
-- **No AES-CBC, AES-CTR**. ChaCha20-Poly1305 is AEAD, integrates the MAC, and is faster on ARM without AES-NI.
+- **No AES-CBC, AES-CTR**. AES-256-GCM is AEAD, integrates the MAC, and has hardware acceleration on all target platforms (AES-NI on x86, ARMv8 Cryptography Extensions on modern ARM). Early designs considered ChaCha20-Poly1305 for ARM without AES-NI, but all current Android/iOS devices ship with ARMv8-CE, making AES-GCM the faster choice.
 
 ### 3.3 Per-Message KEM (X25519+ML-KEM-768 hybrid v2)
 
@@ -994,7 +994,7 @@ Cleona's E2E encryption mechanism. Every application message carries its own eph
 - Sender encapsulates against the recipient's X25519 pubkey → `x25519_ct` (32 bytes) + `x25519_shared` (32 bytes)
 - Sender encapsulates against the recipient's ML-KEM-768 pubkey → `mlkem_ct` (1088 bytes) + `mlkem_shared` (32 bytes)
 - Combined key: `combined = HKDF-SHA-256(x25519_shared || mlkem_shared, salt, info)`
-- AEAD encrypt: `aead_ct = ChaCha20-Poly1305(combined, nonce, plaintext)`
+- AEAD encrypt: `aead_ct = AES-256-GCM(combined, nonce, plaintext)`
 
 Recipient:
 - Decapsulates with own X25519 private key → `x25519_shared`
@@ -1759,7 +1759,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 - Both endpoints send `HOLE_PUNCH_PING` to each other's observed IP.
 - The NAT mapping opens on both sides → communication becomes possible.
 
-**Keepalive** (`UdpKeepalive`, §4.6.4): every 20s a HOLE_PUNCH_PING is sent to each **confirmed** NAT-traversal peer to maintain carrier-NAT pinholes. Registration gate (`_needsKeepalive`): IPv6 peers are never registered (no NAT in standard IPv6), private-IPv4 peers are never registered (LAN-reachable), public-IPv4 peers sharing the node's own WAN IP are never registered (behind same NAT). Newly registered peers start **unconfirmed** and receive at most 3 pings; a PONG promotes to **confirmed** (= successful NAT traversal, pinged indefinitely). Unconfirmed peers that exhaust their attempts are **suspended** until a network-change event resets them. After 3 consecutive rounds where all active (non-suspended) peers fail to PONG, `onAllPeersFailed` triggers a full network-change cycle (5-min cooldown). Peers that fail ≥5 consecutive rounds are excluded from the quorum (structurally unreachable). (V3.1.71) **NAT-keepalive (pinhole maintenance, cross-NAT public-IPv4 only) is distinct from the confirmation heartbeat (§4.4): the IPv6/private-LAN/same-WAN exclusions here apply *only* to pinhole maintenance — `direct-confirmed` for those peer types is refreshed by the once-per-hour liveness-PING sweep instead. (V3.1.72)**
+**Keepalive** (`UdpKeepalive`, §4.6.4): HOLE_PUNCH_PING packets are sent to each **confirmed** NAT-traversal peer at an **adaptive per-peer interval** to maintain carrier-NAT pinholes. The interval starts at 20 s and is probed upward (×1.5 after 3 consecutive PONGs: 20 s → 30 s → 45 s → 67 s → 101 s, capped at 120 s). When a probe fails (2 consecutive missed PONGs at the higher interval), the peer falls back to the last confirmed-safe interval and stops probing. This converges to ≈80 % of the actual NAT timeout (the ×1.5 probe overshoots by at most 50 %, so the fallback lands at 67–100 % of the true timeout). On network change all peers reset to 20 s and re-probe (the NAT context may have changed). Registration gate (`_needsKeepalive`): IPv6 peers are never registered (no NAT in standard IPv6), private-IPv4 peers are never registered (LAN-reachable), public-IPv4 peers sharing the node's own WAN IP are never registered (behind same NAT). Newly registered peers start **unconfirmed** and receive at most 3 pings; a PONG promotes to **confirmed** (= successful NAT traversal, pinged indefinitely). Unconfirmed peers that exhaust their attempts are **suspended** until a network-change event resets them. After 3 consecutive rounds where all active (non-suspended) peers fail to PONG, `onAllPeersFailed` triggers a full network-change cycle (5-min cooldown). Peers that fail ≥5 consecutive rounds are excluded from the quorum (structurally unreachable). (V3.1.90) **NAT-keepalive (pinhole maintenance, cross-NAT public-IPv4 only) is distinct from the confirmation heartbeat (§4.4): the IPv6/private-LAN/same-WAN exclusions here apply *only* to pinhole maintenance — `direct-confirmed` for those peer types is refreshed by the once-per-hour liveness-PING sweep instead. (V3.1.72)**
 
 **Address priority by type**:
 
@@ -3378,7 +3378,7 @@ Together these safeguards make accidental leave a three-click path (menu → Ver
 
 #### 9.1.3 Technical Implementation
 
-**Encryption:** Pairwise E2E encryption, identical to regular group chats (see §9.1.x — group encryption pipeline). Each channel post is individually encrypted into one `ApplicationFrame` per recipient and delivered via `sendToUser(userId)` using Per-Message KEM. Relay nodes see only encrypted fragments.
+**Encryption:** Pairwise E2E encryption, identical to regular group chats (see §3.3 Stateless Per-Message KEM). Each channel post is individually encrypted into one `ApplicationFrame` per recipient and delivered via `sendToUser(userId)` using Per-Message KEM. Relay nodes see only encrypted fragments.
 
 **Invitations:** The Owner or Admin generates a signed invite link or QR code. The invite contains the channel ID, channel name, optional channel picture, and optional channel description, encrypted to the invitee's public key. Only the intended recipient can join. The invite must include the complete member list so the invitee knows all participants.
 
@@ -3390,7 +3390,7 @@ Together these safeguards make accidental leave a three-click path (menu → Ver
 
 **Profile data:** Groups and channels can have optional pictures (JPEG, max 64 KB) and descriptions. These are set during creation, included in invites, and updated via `updateGroupProfile()` / `updateChannelProfile()`. Profile data is persisted in the group/channel JSON state and included in restore responses.
 
-#### 9.1.4 Group Membership Consistency (GM-1)
+#### 9.1.4 Group & Channel Membership Consistency (GM-1/GM-4)
 
 **Problem:** Without cryptographic authority enforcement, a compromised or malicious node that knows the group ID can forge GROUP_INVITE updates to inject members or remove legitimate ones (Attack A: Split-View). A removed member who missed the removal can continue posting (Attack B: Ghost Posts).
 
@@ -3409,7 +3409,7 @@ Together these safeguards make accidental leave a three-click path (menu → Ver
 
 **Non-Member Post Drop (Inbound):** `_handleTextV3` checks `group.members.containsKey(senderHex)` and silently drops posts from non-members. This mitigates Attack B for the receiver side.
 
-**Post-Tagging:** Every group text message carries `groupMembershipEpoch` and `groupMembershipHash` in the ApplicationFrameV3 inner fields. This enables future GM-2 split-view detection: if a receiver sees a post tagged with an epoch/hash that doesn't match their local state, they know they have a stale or divergent member list.
+**Post-Tagging (GM-2 input):** Every group and channel message carries `groupMembershipEpoch` and `groupMembershipHash` in the ApplicationFrameV3 inner fields. On every incoming post, the receiver runs the GM-2 gatekeeper (§9.1.5): if the wire epoch/hash doesn't match local state, the receiver either requests a resync (stale) or logs a split-view anomaly (divergent).
 
 **Mixed-Net Transition:** All new fields are optional (protobuf default 0/empty). Legacy nodes that don't set epoch/hash/sig are accepted as `legacy-unverified` (logged, not rejected). The `minRequiredVersion` gate (§19.5.7) will enforce GM-1 fields once the network has fully upgraded.
 
@@ -3422,6 +3422,35 @@ Together these safeguards make accidental leave a three-click path (menu → Ver
 | `membership_sig_ml_dsa` | GroupInviteV3 | 10 | bytes (~3300) |
 | `group_membership_epoch` | ApplicationFrameV3 | 18 | uint64 |
 | `group_membership_hash` | ApplicationFrameV3 | 19 | bytes (32) |
+
+**Channel Parity (GM-4):** Private channels (§9.1) use the **identical** membership consistency protocol as groups — same epoch counter, same canonical hash algorithm, same hybrid signature, same authority gate, same wire format (ChannelInvite fields 7–10 mirror GroupInviteV3 fields 7–10). The only difference is the entity type: group operations go through `_broadcastGroupUpdate`, channel operations through `_broadcastChannelUpdate`. The GM-2 gatekeeper (§9.1.5) and resync protocol are likewise dual-mode — a single handler (`_handleGroupMembershipResyncRequest`) dispatches for both groups and channels based on entity ID lookup.
+
+#### 9.1.5 Split-View Detection & Resync (GM-2)
+
+Every group and channel post carries `groupMembershipEpoch` and `groupMembershipHash` in the ApplicationFrameV3 inner fields (§9.1.4 wire format). On every incoming post, the receiver runs the GM-2 gatekeeper (`_checkGroupPostMembership`):
+
+1. **Non-member posts** are silently dropped (same as §9.1.4 Non-Member Post Drop).
+2. **Legacy posts** (epoch 0 or empty hash) pass without GM-2 checks.
+3. **Epoch + hash match:** Normal — post is accepted.
+4. **Wire epoch > local epoch:** The sender has a newer membership state. The receiver sends a `GroupMembershipResyncRequest` to the group/channel owner (edge-triggered: only once per observed epoch, tracked via `_resyncRequestedAtEpoch` map). The post is accepted — the sender is a known member; the receiver is just behind.
+5. **Same/lower epoch, different hash — Split-View Anomaly:** The receiver and sender have divergent member lists at the same epoch. This indicates a forked membership state (Attack A from §9.1.4). The anomaly is logged (`GM-2: SPLIT-VIEW`), and `membershipMismatch` is set on the displayed message for future UI surfacing.
+
+**Resync Protocol:**
+
+| Step | Actor | Action |
+|------|-------|--------|
+| 1 | Stale receiver | Sends `GroupMembershipResyncRequest` (`MTV3_GROUP_MEMBERSHIP_RESYNC_REQUEST`, type 54) with `groupId` + `localEpoch` to the group/channel owner |
+| 2 | Owner | Validates: (a) is actual owner, (b) sender is member, (c) sender's epoch < owner's epoch |
+| 3 | Owner | Responds with a fresh `GROUP_INVITE` / `CHANNEL_INVITE` broadcast (same signed update as §9.1.4) |
+
+The resync request is edge-triggered per group/channel — a single request per newly observed higher epoch. This prevents resync storms when multiple posts arrive from a sender with newer state. The owner handler is dual-mode: it dispatches to `_broadcastGroupUpdate` or `_broadcastChannelUpdate` based on entity ID lookup.
+
+**Wire Format:**
+
+| Field | Proto Message | Number | Type |
+|-------|--------------|--------|------|
+| `group_id` | GroupMembershipResyncRequest | 1 | bytes |
+| `local_epoch` | GroupMembershipResyncRequest | 2 | uint64 |
 
 ### 9.2 Public Channels
 
@@ -3476,7 +3505,7 @@ The jury is the trust anchor of decentralized moderation, so juror selection mus
 
 **Juror registry (opt-in).** Nodes with "Review channel reports" enabled publish a **JurorAvailabilityRecord** into the Kademlia ring (pattern: Liveness record, §4.3): `juror_record_id = SHA-256("juror" || userPubKey)`, the user's Ed25519 + ML-DSA public keys, creation epoch, hybrid self-signature, adaptive TTL. The record deliberately carries **no language and no adult flag** — both remain local attributes, answered as a plain yes/no when a jury request arrives (preserving the §3.1 anonymity principle and the existing §9.3.1 language-eligibility model).
 
-**Selection point.** When the report threshold for a channel+category is crossed, the selection point is `H = SHA-256("jury-select" || channelId || categoryIndex || epochDay || juryRound)`. The jury consists of the `jurySize` registered jurors whose `juror_record_id` is XOR-closest to `H`. None of the inputs is freely grindable by a reporter (the reporter-chosen `reportId` is deliberately **excluded**); `epochDay` is the UTC day the threshold was crossed, `juryRound` starts at 0 and increments for replacement rounds. Juror qualification (identity age ≥ 7 days via record epoch, anti-Sybil reachability §9.4.1) is checked by verifiers, not asserted.
+**Selection point.** When the report threshold for a channel+category is crossed, the selection point is `H = SHA-256("jury-select" || channelId || categoryIndex || epochDay || juryRound)`. The jury consists of the `jurySize` registered jurors whose `juror_record_id` is XOR-closest to `H`. None of the inputs is freely grindable by a reporter (the reporter-chosen `reportId` is deliberately **excluded**); `epochDay` is the UTC day the threshold was crossed, `juryRound` starts at 0 and increments for replacement rounds. **Juror qualification** is checked by verifiers, not asserted. Three gates: (1) identity age ≥ 7 days (`jurorMinAge`, via record epoch), (2) `isAdult` flag set (`jurorRequiresAdult`, self-declaration per §9.2.2), (3) "Review channel reports" enabled in the node's settings (`jurorRequiresReviewEnabled`). Additionally, the anti-Sybil reachability check (§9.4.1) applies for CSAM-category reports.
 
 **Juror-selection ticket.** A juror proves legitimacy by reference: its signed vote plus its registry record allow any verifier to recompute `H` and confirm the juror lies within the closest set. This is the "verifiable juror-selection ticket" referenced by the §8.2 context-proof exception and §9.4.1.
 
@@ -3491,6 +3520,40 @@ The jury is the trust anchor of decentralized moderation, so juror selection mus
 **Jury language selection:** The language for jury selection comes from the **reported channel's language field** (set at creation, stored in the DHT index), not from any attribute on the juror's identity. A node is eligible for jury duty if it subscribes to at least one channel with the same language setting — a behavioral proxy for language competence that requires no metadata on the identity itself. For channels with `language: multi`, nodes of all languages are eligible. This preserves the anonymity principle (see §3.1 Identity Model): no language attribute is stored on or published with any identity. Eligibility is determined locally from the node's own subscription list and answered as a simple yes/no to jury requests.
 
 **Consequences:** NSFW reclassification, Bad Badge (3-stage escalation, see §9.3.2), or Tombstone deletion (DHT entry marking channel as removed).
+
+#### 9.3.1b Jury Configuration & Operational Parameters
+
+All numerical parameters are centralized in `ModerationConfig` (§9.4.2). The production defaults for jury selection:
+
+| Parameter | Value | Description |
+|-----------|-------|-------------|
+| Report threshold | 3 | Independent reports on a channel+category before a jury is convened |
+| Jury size | 5–11 | `min(juryMaxSize, max(juryMinSize, availableJurors × juryMaxPercent))` |
+| Jury max % | 1% | Maximum fraction of available jurors to select |
+| Vote timeout | 2 days | After which non-responders are replaced (§9.3.4 check 1) |
+| Hard quorum | ⌈2/3 × nominal⌉ | Approvals needed; denominator = selected jurors, never responders |
+| Replacement rounds | 2 | Maximum re-selection attempts for non-responders |
+| Tolerance factor | 2× | Verifiers accept jurors within top 2× jurySize closest to H |
+
+Test presets with drastically shortened values exist for automated E2E testing — see §9.4.2 for the full comparison table. The config also provides calculation methods: `effectiveJurySize(availableJurors)`, `juryHardQuorum(nominalJurySize)`, `juryApproved(approvals, nominalJurySize)`, and time-based checks (`isJuryVoteExpired`, etc.).
+
+#### 9.3.1c Jury Orchestration & Verdict Delivery
+
+**Initiation.** A jury is convened automatically when the report counter for a channel+category reaches the `reportThresholdForJury` (production: 3 independent reports). The node that crosses the threshold becomes the **jury initiator** — it selects jurors and manages the session. There is no centralized coordinator; any node that independently observes the threshold performs the same deterministic selection (§9.3.1a) and arrives at the same jury composition.
+
+**Juror Selection.** The initiator builds the eligible pool from its accepted contacts, excluding: (a) the initiator itself, (b) members/subscribers of the reported channel (independence), (c) reporters for this channel (conflict of interest). From this pool, `JurorRecord`s are constructed (keyed by `SHA-256("juror" || ed25519Pk)`) and the XOR-closest to the selection point `H` (§9.3.1a) are selected. The `eligibilitySnapshotHash` — a hash of all candidate record IDs — is computed as an audit trail and embedded in both the jury request and the final verdict.
+
+**Jury Request.** A `JuryRequestMsg` is sent to each selected juror via `MTV3_CHANNEL_JURY_VOTE` (KEM-encrypted ApplicationFrame). The request contains: `juryId`, `channelId`, `reportId`, `category`, evidence post IDs, report description, `channelName`, `channelLanguage`, `epochDay`, `juryRound`, `eligibilitySnapshotHash`. The KEX Gate (§8.2) admits jury requests via the context-proof exception — the juror-selection ticket (§9.3.1a) serves as the context proof.
+
+**Juror Response.** Each juror reviews the evidence and responds with a `JuryVoteMsg` via the same `MTV3_CHANNEL_JURY_VOTE` type: `juryId`, `reportId`, `vote` (approve/reject/abstain), `reason`, hybrid signatures (Ed25519 + ML-DSA) over the canonical verdict core hash (§9.3.1a), `epochDay`, `juryRound`. Both signatures are required for the vote to count toward quorum in Phase 2 (§9.3.1a mixed-net rollout).
+
+**Timeout & Replacement.** The moderation timer (§9.3.4) checks active jury sessions every tick. When `juryVoteTimeout` (production: 2 days) expires, non-responding jurors are identified. A new selection point `H` is computed with `juryRound + 1` (yielding different XOR-closest jurors), and replacement jurors are selected from the remaining eligible pool — excluding all previously selected jurors. Votes and signatures from previous rounds carry over. Up to `juryReplacementRounds` (production: 2) replacement attempts are made. If the quorum is still not reached after the final round, the session resolves with **no consequence**.
+
+**Resolution.** When all votes are in (or the final replacement round times out), the hard quorum is evaluated: `votes_approve ≥ ⌈juryMajority × nominal jury size⌉`. If met, the consequence is applied locally by the initiator (NSFW reclassification, Bad Badge increment, or Tombstone). For CSAM plausibility juries (§9.3.3), a rejection lifts the temp-hide and cancels any active Stage 3 objection window. All associated reports are marked as resolved.
+
+**Result Broadcast.** A `JuryResultMsg` is sent to all jurors, containing: `juryId`, `reportId`, `channelId`, consequence, vote counts (approve/reject/abstain), `newBadBadgeLevel`, collected `JurorVerdictSig`s (per-juror: UserID + Ed25519 sig + ML-DSA sig + vote), `eligibilitySnapshotHash`, `epochDay`, `juryRound`.
+
+**Verdict as DHT Proof.** The full signed verdict is stored as a `ModerationProofRecord` DHT record under `SHA-256("modproof" || channelId)`. Channel-index gossip entries carrying a badge/tombstone reference this proof via `moderation_proof_hash` (ChannelIndexEntryProto field 13). Before adopting a badge level, a receiving node fetches the proof from the DHT, verifies ≥ quorum distinct juror signatures (tolerance check + hybrid signature verification per §9.3.1a), and only then applies the badge. Unproven entries degrade to badge 0. Phase 1 (observe-only) logs a warning for unproven writes; Phase 2 rejects them (§9.3.1a mixed-net rollout).
 
 #### 9.3.2 Bad Badge System
 
@@ -5127,7 +5190,7 @@ When a node starts, it follows a deterministic initialization sequence:
     → Learn closer peers from responses → PING newly learned peers
 12. Broadcast own PeerInfo to all known peers
 13. Start background timers (see §12.2.4):
-    - Maintenance timer: 60 seconds (routing table cleanup, stale peer pruning)
+    - Maintenance timer: 15 minutes (routing table cleanup, stale peer pruning)
     - Peer exchange timer: 120 seconds (mesh discovery propagation)
     - DV safety-net timer: 1 hour (full Distance-Vector route exchange)
 ```
@@ -5162,7 +5225,7 @@ Four periodic timers run during normal operation:
 | Timer | Interval | Purpose |
 |-------|----------|---------|
 | Daemon heartbeat | 5 seconds | Drift detection (WARN if tick >6.5s — indicates blocked main isolate), receive-health self-probe (`checkReceiveHealth`). At tick 12 (~60s uptime): **firewall blockade heuristic** — if `externalPacketsReceived == 0` (zero non-loopback inbound packets since start), log WARN suggesting OS firewall blocks inbound UDP. Fires once per session. |
-| Maintenance | 60 seconds | Routing table cleanup, stale peer pruning, mailbox housekeeping |
+| Maintenance | 15 minutes | Routing table cleanup, stale peer pruning, mailbox housekeeping |
 | Peer exchange | 120 seconds | Share peer list deltas with known peers (Mesh Discovery, §4.5) |
 | DV safety-net | 1 hour | Full Distance-Vector route exchange with all neighbors (§4.4) |
 
@@ -5337,7 +5400,7 @@ PoW Parameters:
 
 3. **Relay-bound packets**: When the routing layer reports `directBlocked` or no reachable active targets exist, PoW is skipped. Relay-delivered packets (from=0.0.0.0) are exempt from PoW verification on the receiver — the relay's own outer device-signature carries the wire-level authenticity.
 
-Only **chat content messages** (TEXT, IMAGE, FILE, VOICE, CALL_*) sent **directly** to **non-LAN peers** require PoW.
+Only **chat content messages** (TEXT, IMAGE, FILE, VOICE, CALL_*) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW.
 
 **Async PoW Computation:** PoW is computed in a separate Dart isolate via `ProofOfWork.computeAsync()`. The isolate loads libsodium independently. The UI shows the message immediately with "sending" status (hourglass) — the full send pipeline (compress → KEM encrypt → sign → PoW → send) runs asynchronously.
 
@@ -5355,7 +5418,7 @@ Admission PoW:
 - **Bound to the pubkey, not the Device-ID** — it survives secret rotation (Device-IDs change with the secret, the proof does not). The receiver additionally checks `SHA-256(network_secret || pk) == senderDeviceId`, binding the proof to the wire identity.
 - **Transport — no additional packets:** the proof travels alongside the device pubkey it certifies, as `PeerInfoProto.device_id_pow_nonce` (field 21) in self-broadcast `PEER_LIST_PUSH` and `PEER_KEY_RESPONSE`. The 8-byte nonce is part of the **slim** PEER_LIST_PUSH field set (§4.5.x slim mode). Legacy builds ignore the field; legacy gossipers drop it on re-serialization — the peer then simply stays non-admitted until direct contact (harmless in Phase 1).
 - **Verification:** on the key-learning path (`setSigningKeys`): two SHA-256 invocations per newly learned peer; result cached as `idPowVerified` in the PeerInfo and persisted with the routing table.
-- **Phase 1 semantics:** observe-only — nothing is dropped or gated; network stats count admitted vs. non-admitted peers as adoption telemetry. Phase-2 role gating (DHT-store acceptance, relay candidacy, DV route acceptance, fragment storage) activates only behind a `minRequiredVersion` hard-block (§19.5.7/§13.1.8); basic packet receive is never gated.
+- **Phase 2 semantics (V3.1.90+, hard break):** admission PoW is **required** for privileged network roles. Peers without verified admission proof are excluded from: (1) relay candidacy — not selected as relay hop in DV neighbor spray, (2) DV route acceptance — ROUTE_UPDATEs from non-admitted neighbors are silently dropped, (3) DHT fragment storage — FRAGMENT_STORE from non-admitted senders is rejected. Basic packet receive, self-broadcast, and message delivery are **never** gated — a non-admitted peer can still send and receive chat messages on direct paths; admission gates only trust-bearing infrastructure roles. The `minRequiredVersion` transition gate was removed — all pre-V3.1.90 builds are de-facto deprecated (beta distribution only, no external user base). The admission nonce is computed synchronously (awaited) during node startup to ensure the first self-broadcast carries the proof.
 
 #### 13.1.3 Layer 2: Rate Limiting per Device
 
@@ -5386,7 +5449,7 @@ Excessive traffic from a single source is silently dropped. **Exemptions:** Rela
 
 **Positive reputation from accepted traffic:** Every packet that passes the rate limiter generates a `recordGood` event for the sender's reputation score. This is critical because infrastructure messages (DHT, DV-Routing, PeerList, Relay) return early in the node-level switch-case and never reach the application-level handler. Without this, new peers doing normal bootstrap traffic could never build positive reputation.
 
-**Collective quota for non-introduced sources (D5):** in addition to the per-source limits, all senders that have not *introduced* themselves share one collective slice of the global budget. A sender counts as **introduced** once its admission PoW verified (D3, §13.1.2) **or** its Device-Sig-PK was learned **firstParty** from its own self-broadcast — every build does this as part of normal discovery, so legacy builds leave the pool within seconds and contact devices are firstParty by construction. All other (anonymous/unknown) senders collectively share **50% of the global packet and byte budgets** (1,000 packets / 10 MB per 10 s window); per-source limits apply unchanged on top. N minted IDs that never introduce themselves compete with each other inside this slice instead of multiplying per-source budgets. The pool is deliberately generous — it binds only under attack, never during cold-start (the first packet from a new peer is typically the self-broadcast that lifts it out of the pool). Pool drops generate no `recordBad` (rule above unchanged). **Honest limitation:** pre-Phase-2 an insider lifts each minted ID out of the pool with one self-broadcast per ID — the pool throttles *anonymous* floods, not introduction-capable Sybils. Phase-2 enforcement narrows "introduced" to admission-verified (§13.1.8), making pool exemption CPU-bound per ID. Observability: `poolDropsRate` / `poolDropsRelay` counters in network stats.
+**Collective quota for non-introduced sources (D5):** in addition to the per-source limits, all senders that have not *introduced* themselves share one collective slice of the global budget. A sender counts as **introduced** once its admission PoW verified (D3, §13.1.2) **or** its Device-Sig-PK was learned **firstParty** from its own self-broadcast — every build does this as part of normal discovery, so legacy builds leave the pool within seconds and contact devices are firstParty by construction. All other (anonymous/unknown) senders collectively share **50% of the global packet and byte budgets** (1,000 packets / 10 MB per 10 s window); per-source limits apply unchanged on top. N minted IDs that never introduce themselves compete with each other inside this slice instead of multiplying per-source budgets. The pool is deliberately generous — it binds only under attack, never during cold-start (the first packet from a new peer is typically the self-broadcast that lifts it out of the pool). Pool drops generate no `recordBad` (rule above unchanged). **Phase-2 enforcement (V3.1.90+):** "introduced" now requires `idPowVerified == true` — the `pkSource == firstParty` exemption is removed. Every source must carry a verified admission proof to escape the collective pool. This makes pool exemption CPU-bound per ID (22-bit PoW ≈ 4M hashes per identity). The pool is deliberately generous (50%) so that cold-start traffic from honest peers that have not yet exchanged self-broadcasts is not impacted — the first self-broadcast carries the nonce, verification is immediate (two SHA-256), and the peer leaves the pool within the same packet batch. Observability: `poolDropsRate` / `poolDropsRelay` counters in network stats.
 
 #### 13.1.4 Layer 3: Reputation System
 
@@ -5428,7 +5491,7 @@ Each node allocates a limited relay storage budget. **Keying honesty (D5 review)
 
 Nodes can temporarily or permanently ban other nodes based on accumulated misbehavior. Bans are strictly local decisions — no central ban list exists. When many independent nodes ban the same attacker, the attacker becomes effectively isolated from the network through emergent consensus.
 
-**Banned node behavior:** All packets from a banned Device-ID are dropped at the transport layer before any processing. The ban is keyed by Device-ID (not IP), so IP rotation does not bypass bans. Generating a new Device-ID, however, costs only a fresh keypair plus the (extractable, §4.10) network secret. Fleet re-authorization (§7 Multi-Device) gates only the **user layer** — acting as a device of a user (contacts, Auth-Manifest membership). **Network participation** (relay, DHT replication, DV routing) requires no fleet authorization; a banned insider can re-enter under a fresh ID with neutral reputation. See the insider addendum (§13.1.8).
+**Banned node behavior:** All packets from a banned Device-ID are dropped at the transport layer before any processing. The ban is keyed by Device-ID (not IP), so IP rotation does not bypass bans. Generating a new Device-ID, however, costs only a fresh keypair plus the (extractable, §4.10) network secret. Fleet re-authorization (§7 Multi-Device) gates only the **user layer** — acting as a device of a user (contacts, Auth-Manifest membership). **Network participation** (relay, DHT replication, DV routing) requires admission PoW (§13.1.2 Phase 2, V3.1.90+). A banned insider can re-enter under a fresh ID with neutral reputation, but must pay the CPU cost of a 22-bit PoW per minted identity. This does not prevent Sybil attacks but raises the per-identity cost from negligible to measurable. See the insider addendum (§13.1.8).
 
 #### 13.1.7 Attack Scenarios & Mitigations
 
@@ -5436,7 +5499,7 @@ Nodes can temporarily or permanently ban other nodes based on accumulated misbeh
 |--------|----------|------------|
 | Spam flood (bulk messages) | 1+2 | PoW makes each packet expensive; rate limiter drops excess |
 | Sybil (outsider, no secret) | HMAC | without the network secret no valid IDs exist — the closed-network filter holds |
-| Sybil (insider, extracted secret) | §13.1.8 | per-device layers (2/3/5) are bypassable by ID minting; global caps, KEX gate (§8.2), moderation costs (§9.4) and the D1 record anchor (§4.3) remain effective — hardening roadmap in §13.1.8 |
+| Sybil (insider, extracted secret) | §13.1.8 | ID minting is CPU-bound (22-bit admission PoW per identity, Phase 2); minted IDs without PoW are excluded from relay/DV/DHT roles and share collective rate-limit quota (D5). Global caps, KEX gate (§8.2), moderation costs (§9.4), D1 record anchor (§4.3), and D4 replicator diversity remain effective |
 | Fragment storage exhaustion | 4 | Per-source budget prevents monopolization |
 | Relay abuse (relay others' traffic) | 2+3 | Rate limiter per source; relay traffic counts against relay node's budget |
 | DHT poisoning (fake entries) | 3+4 | DHT/infrastructure ops are PoW-exempt (§13.1.2) — addressed instead by per-source storage quota + record-ownership proof on DHT-STORE; low-reputation entries deprioritized. (Storage-poisoning hardening tracked in the security review.) |
@@ -5460,7 +5523,7 @@ The DoS layers keyed on Device-IDs (Layer 2 rate limiting, Layer 3 reputation, L
 - **D3 — Admission PoW per device keypair.** A static, reusable proof — nonce such that `SHA-256("cleona-id-pow-v1" || ed25519_device_pk || nonce)` has ≥ N leading zero bits — computed once at device creation and carried **alongside the device pubkey it certifies** (`PeerInfoProto.device_id_pow_nonce`, PEER_LIST_PUSH / PEER_KEY_RESPONSE — no additional packets), verified and cached by receivers (two hashes). Bound to the **pubkey**, not the Device-ID, so it survives secret rotation. Legacy builds ignore the unknown field. This raises ID minting from free to CPU-bound; it is a cost factor, not a prevention. Spec: §13.1.2.
 - **D4 — Replicator/lookup diversity + publisher self-verify.** K-closest selection prefers IP-subnet diversity (binds eclipse to the genuinely scarce resource — addresses); the publisher verifies its own records with one self-lookup per publish cycle. Spec: §4.3 (*Replicator & lookup diversity* / *Publisher self-verify*).
 - **D5 — Collective quotas.** Non-admitted/unknown sources additionally share a collective fraction of the global budgets, so N minted IDs compete with each other instead of multiplying. Spec: §13.1.3 (*Collective quota for non-introduced sources*) + §5.3 (relay budget); fragments deliberately excluded (§13.1.5).
-- **Phase-2 enforcement** is gated behind a `minRequiredVersion` hard-block (§19.5.7) and implemented as **role gating** (admission required for DHT-store acceptance, relay candidacy, DV route acceptance, fragment storage) — basic packet receive is **never** dropped for missing admission, so no build generation ever loses message delivery.
+- **Phase-2 enforcement (V3.1.90+, hard break):** role gating is **unconditionally active** — admission PoW required for relay candidacy, DV route acceptance, and fragment storage. The `minRequiredVersion` transition gate was removed (no external user base to protect). Basic packet receive is **never** dropped for missing admission — message delivery on direct paths remains unaffected. Default-gateway election (§4.4) additionally prefers admitted neighbors over non-admitted ones as the top-priority sort criterion.
 
 ### 13.2 Secret Rotation
 
@@ -7189,7 +7252,7 @@ Carried inside `NetworkPacket.payload` as a KEM-encrypted ApplicationFrame **or*
 message PerMessageKem {
   bytes  x25519Ciphertext = 1;   // 32 bytes
   bytes  mlKemCiphertext  = 2;   // 1088 bytes ML-KEM-768
-  bytes  aeadCiphertext   = 3;   // ChaCha20-Poly1305(serialized ApplicationFrame) + 16-byte tag
+  bytes  aeadCiphertext   = 3;   // AES-256-GCM(serialized ApplicationFrame) + 16-byte tag
   bytes  aeadNonce        = 4;   // 12 bytes
   uint32 version          = 5;   // KEM version, V3.0 = 2 (Sec H-5)
 }

@@ -24,13 +24,20 @@ typedef SendInfraDirectFn = Future<bool> Function(
   int port,
 );
 
-/// UDP keepalive for **confirmed NAT-traversal peers**.
+/// UDP keepalive for **confirmed NAT-traversal peers** with adaptive
+/// per-peer interval probing (Architecture §7.6).
 ///
-/// Architecture §2.4.5 / §7.6: keepalive HOLE_PUNCH_PING packets maintain
-/// carrier-NAT pinholes (typical lifetime 30–60 s). Registration is gated
-/// by the caller (`_needsKeepalive` in CleonaNode): only peers reachable
-/// through an actual NAT boundary are registered — LAN peers (private IPv4,
-/// same-/64 IPv6) are excluded because no pinhole exists to maintain.
+/// Each peer's keepalive interval starts at [initialIntervalMs] and is
+/// probed upward (×1.5) after [_stableRoundsToEscalate] consecutive
+/// successful PONGs, discovering the carrier's NAT pinhole lifetime.
+/// On failure the interval falls back to the last confirmed-safe value.
+/// The operational interval converges to ~80% of the actual NAT timeout
+/// (since ×1.5 probing overshoots by at most 50%, falling back to the
+/// previous step lands at 67–100% of the true timeout).
+///
+/// Registration is gated by the caller (`_needsKeepalive` in CleonaNode):
+/// only peers reachable through an actual NAT boundary are registered —
+/// LAN peers (private IPv4, same-/64 IPv6) are excluded.
 ///
 /// Newly registered peers start as **unconfirmed** and receive at most
 /// [maxUnconfirmedPings] attempts (default 3). A PONG promotes the peer
@@ -38,31 +45,37 @@ typedef SendInfraDirectFn = Future<bool> Function(
 /// pinged indefinitely. Unconfirmed peers that exhaust their attempts are
 /// **suspended** until a network-change event calls [resetUnconfirmed].
 ///
-/// Distinguished from [NatTraversal]'s built-in keepalive which only runs
-/// for [PunchedConnection]s — those require a coordinated hole punch first.
-///
-/// Architecture §7.6: after 3 consecutive rounds where **all** active
-/// (non-suspended) peers fail to PONG (~75 s), [onAllPeersFailed] is
-/// invoked so the node can run a full `onNetworkChanged()` cycle. A 5-min
-/// cooldown prevents spamming this callback after the trigger fires.
+/// Architecture §7.6: after 3 consecutive tick-rounds where **all** active
+/// (non-suspended) peers fail to PONG, [onAllPeersFailed] is invoked so
+/// the node can run a full `onNetworkChanged()` cycle. A 5-min cooldown
+/// prevents spamming this callback after the trigger fires.
 ///
 /// All public methods are exception-safe — register/send/receive/dispose
 /// never throw.
 class UdpKeepalive {
   final CLogger _log;
 
-  /// Fixed keepalive interval — sub-30s to stay safely under typical
-  /// carrier-NAT pinhole lifetimes (Telekom DE / O2 documented at ≥30 s;
-  /// 25 s + Timer-Periodic jitter sat too close to the edge, 20 s gives
-  /// 33 % safety margin at +0.5 B/s/peer additional traffic).
-  /// Per `docs/SPEC_HYBRID_BULK_TRANSPORT.md` Patch D.
-  static const Duration interval = Duration(seconds: 20);
+  /// Tick interval for the global round timer. Each tick checks which
+  /// peers are due for their next adaptive-interval ping.
+  static const Duration _tickInterval = Duration(seconds: 5);
+
+  /// Initial per-peer keepalive interval (conservative safe default).
+  static const int initialIntervalMs = 20000;
+
+  /// Minimum per-peer keepalive interval (floor).
+  static const int minIntervalMs = 15000;
+
+  /// Maximum per-peer keepalive interval (ceiling).
+  static const int maxIntervalMs = 120000;
+
+  /// After this many consecutive PONGs at the current interval, try ×1.5.
+  static const int _stableRoundsToEscalate = 3;
 
   /// PONG must arrive within this window after a PING for the round to
   /// count as successful.
   static const Duration pongWindow = Duration(seconds: 10);
 
-  /// After this many consecutive rounds where ALL peers fail,
+  /// After this many consecutive tick-rounds where ALL peers fail,
   /// [onAllPeersFailed] is invoked.
   static const int failureThreshold = 3;
 
@@ -91,7 +104,7 @@ class UdpKeepalive {
   /// Periodic timer running rounds.
   Timer? _roundTimer;
 
-  /// Number of consecutive rounds where every registered peer failed.
+  /// Number of consecutive tick-rounds where every registered peer failed.
   int _consecutiveFullFailures = 0;
 
   /// Last time [onAllPeersFailed] fired (for cooldown).
@@ -104,13 +117,6 @@ class UdpKeepalive {
 
   /// V3-direct InfrastructureFrame sender at an explicit address. See
   /// [SendInfraDirectFn]. Wires to `cleona_node.sendInfraDirectTo`.
-  ///
-  /// V3.0: keepalive PINGs ship via `NetworkPacketV3` (the receiver
-  /// only parses V3 since Welle 1 — see
-  /// `transport.dart:_processUdpDatagram`); the legacy raw-bytes path was
-  /// silently dropped at the upstream — pinholes expired ~30-60 s after
-  /// the last real traffic. The V3-direct fn ensures the packet is
-  /// wrapped, KEM-AEAD'd, Outer-Sig'd and HMAC'd correctly.
   SendInfraDirectFn? sendInfraFn;
 
   /// Own deviceNodeId — set on init.
@@ -144,7 +150,6 @@ class UdpKeepalive {
 
       final existing = _peers[peerHex];
       if (existing != null) {
-        // Idempotent: refresh address if it changed, but don't reset state.
         if (existing.ip != ip || existing.port != port) {
           existing.ip = ip;
           existing.port = port;
@@ -209,19 +214,35 @@ class UdpKeepalive {
   }
 
   /// Called by the receive path when ANY PONG is observed for a registered
-  /// peer. Resets the consecutive-full-failure counter (a single PONG
-  /// proves at least one pinhole is alive).
+  /// peer. Updates adaptive interval probing state.
   void onPongReceived(String peerHex) {
     if (_disposed) return;
     try {
-      final entry = _peers[peerHex];
-      if (entry == null) return;
-      entry.lastPongAt = DateTime.now();
-      entry.pendingPong = false;
-      if (!entry.confirmed) {
-        entry.confirmed = true;
+      final p = _peers[peerHex];
+      if (p == null) return;
+      p.lastPongAt = DateTime.now();
+      p.pendingPong = false;
+      if (!p.confirmed) {
+        p.confirmed = true;
         _log.info('NAT keepalive confirmed for ${peerHex.substring(0, 8)} '
             '— pinhole alive');
+      }
+      // Adaptive probing: PONG at current interval → count as stable.
+      p.stableRounds++;
+      p.probeFailures = 0;
+      p.lastConfirmedIntervalMs = p.adaptiveIntervalMs;
+      if (!p.converged && p.stableRounds >= _stableRoundsToEscalate) {
+        final nextMs = (p.adaptiveIntervalMs * 1.5).round();
+        if (nextMs <= maxIntervalMs) {
+          _log.info('${peerHex.substring(0, 8)} stable at '
+              '${p.adaptiveIntervalMs}ms — probing ${nextMs}ms');
+          p.adaptiveIntervalMs = nextMs;
+          p.stableRounds = 0;
+        } else {
+          p.converged = true;
+          _log.info('${peerHex.substring(0, 8)} converged at '
+              '${p.adaptiveIntervalMs}ms (max reached)');
+        }
       }
       if (_consecutiveFullFailures > 0) {
         _log.debug('PONG from ${peerHex.substring(0, 8)} '
@@ -235,9 +256,9 @@ class UdpKeepalive {
   }
 
   /// Reset suspended (unconfirmed) peers so they get another round of
-  /// [maxUnconfirmedPings] attempts. Called on network change — the NAT
-  /// context may have changed, so previously-unreachable peers might now
-  /// respond. Confirmed peers keep their status.
+  /// [maxUnconfirmedPings] attempts. Also resets adaptive probing for all
+  /// confirmed peers — the NAT context may have changed (new carrier,
+  /// new NAT device), so previously-measured timeouts are invalid.
   void resetUnconfirmed() {
     if (_disposed) return;
     var reset = 0;
@@ -246,10 +267,18 @@ class UdpKeepalive {
         p.unconfirmedPingsSent = 0;
         reset++;
       }
+      if (p.confirmed) {
+        p.adaptiveIntervalMs = initialIntervalMs;
+        p.lastConfirmedIntervalMs = initialIntervalMs;
+        p.stableRounds = 0;
+        p.probeFailures = 0;
+        p.converged = false;
+      }
     }
     if (reset > 0) {
       _log.info('Network change: reset $reset suspended peers for retry');
     }
+    _log.info('Network change: reset adaptive intervals to ${initialIntervalMs}ms');
   }
 
   /// Stop all timers and clear state. Idempotent.
@@ -294,7 +323,7 @@ class UdpKeepalive {
   void _ensureTimerRunning() {
     if (_disposed) return;
     if (_roundTimer != null && _roundTimer!.isActive) return;
-    _roundTimer = Timer.periodic(interval, (_) => _runRound());
+    _roundTimer = Timer.periodic(_tickInterval, (_) => _runRound());
   }
 
   void _runRound({DateTime? now}) {
@@ -304,47 +333,30 @@ class UdpKeepalive {
     final tNow = now ?? DateTime.now();
 
     try {
-      // 1. Score the previous round: any peer whose pendingPong is still
-      //    true AND whose ping went out before (now - pongWindow) failed.
-      //
-      // Topology-aware filter (Architektur §2.7.2): peers that have failed
-      // [peerExclusionThreshold] consecutive rounds are considered
-      // structurally unreachable (e.g. LAN peer behind AP isolation, public
-      // peer whose port mapping has gone) and are excluded from the
-      // all-failed quorum. They still get pinged so they can rejoin the
-      // quorum the instant a PONG arrives — a single success resets the
-      // counter via `onPongReceived`.
+      // 1. Score peers whose pong window has elapsed since their last ping.
       var allFailed = true;
       var anyEvaluated = false;
       for (final p in _peers.values) {
-        // Suspended (unconfirmed + exhausted attempts) → not pinged, skip.
         if (!p.confirmed && p.unconfirmedPingsSent >= maxUnconfirmedPings) continue;
-        // Only evaluate peers we sent a ping to last round.
         final pingAt = p.lastPingAt;
         if (pingAt == null) continue;
-        if (tNow.difference(pingAt) < pongWindow) {
-          // Still inside its pong window → not yet failed (treat as
-          // "not evaluated" for this round's allFailed decision).
-          continue;
-        }
-        if (p.pendingPong) {
-          // Did not pong in time. Bookkeep the failure regardless of
-          // exclusion — counter must keep climbing for cooldown logic.
-          p.consecutiveFailures++;
-          // Only structurally-eligible peers contribute to the quorum.
-          if (p.consecutiveFailures < peerExclusionThreshold) {
+        if (tNow.difference(pingAt) < pongWindow) continue;
+        if (!p.scored) {
+          p.scored = true;
+          if (p.pendingPong) {
+            p.consecutiveFailures++;
+            _onPeerPingFailed(p);
+            if (p.consecutiveFailures < peerExclusionThreshold) {
+              anyEvaluated = true;
+            }
+          } else {
             anyEvaluated = true;
+            allFailed = false;
+            p.consecutiveFailures = 0;
           }
-        } else {
-          // Pong arrived in time.
-          anyEvaluated = true;
-          allFailed = false;
-          p.consecutiveFailures = 0;
         }
       }
 
-      // Update the consecutive-full-failure counter only if we actually
-      // evaluated at least one peer's previous round.
       if (anyEvaluated) {
         if (allFailed) {
           _consecutiveFullFailures++;
@@ -355,10 +367,7 @@ class UdpKeepalive {
         }
       }
 
-      // 2. Fire the network-change callback if threshold reached and
-      //    cooldown elapsed. Either way, reset the counter so we
-      //    re-evaluate the next 3 rounds fresh (avoids unbounded growth
-      //    while cooldown is active).
+      // 2. Fire the network-change callback if threshold reached.
       if (_consecutiveFullFailures >= failureThreshold) {
         final last = _lastTriggerAt;
         final cooldownPassed = last == null ||
@@ -378,12 +387,32 @@ class UdpKeepalive {
         }
       }
 
-      // 3. Send pings for the current round.
+      // 3. Send pings only to peers whose adaptive interval has elapsed.
       for (final p in _peers.values) {
+        final pingAt = p.lastPingAt;
+        if (pingAt != null) {
+          final elapsed = tNow.difference(pingAt).inMilliseconds;
+          if (elapsed < p.adaptiveIntervalMs) continue;
+        }
         _sendPing(p, tNow);
       }
     } catch (e) {
       _log.debug('round error: $e');
+    }
+  }
+
+  /// Handle a ping failure for adaptive probing. If we were probing at a
+  /// higher interval and it failed, fall back to the last confirmed value.
+  void _onPeerPingFailed(_KeepalivePeer p) {
+    if (p.converged) return;
+    p.probeFailures++;
+    if (p.probeFailures >= 2 &&
+        p.adaptiveIntervalMs > p.lastConfirmedIntervalMs) {
+      p.adaptiveIntervalMs = p.lastConfirmedIntervalMs;
+      p.converged = true;
+      p.stableRounds = 0;
+      _log.info('${p.peerHex.substring(0, 8)} NAT probe failed at higher '
+          'interval — converged at ${p.adaptiveIntervalMs}ms');
     }
   }
 
@@ -408,9 +437,6 @@ class UdpKeepalive {
         return;
       }
 
-      // V3-direct: build NetworkPacketV3 (HMAC + KEM-AEAD + Outer-Sig)
-      // and push to (addr, port). Fire-and-forget — implementation
-      // swallows its own errors and reports false on KEM-PK miss.
       send(
         proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING,
         ping.writeToBuffer(),
@@ -421,6 +447,7 @@ class UdpKeepalive {
 
       p.lastPingAt = now;
       p.pendingPong = true;
+      p.scored = false;
       if (!p.confirmed) {
         p.unconfirmedPingsSent++;
         if (p.unconfirmedPingsSent >= maxUnconfirmedPings) {
@@ -445,7 +472,7 @@ class UdpKeepalive {
   }
 }
 
-/// Per-peer keepalive bookkeeping.
+/// Per-peer keepalive bookkeeping with adaptive interval state.
 class _KeepalivePeer {
   final String peerHex;
   final Uint8List peerNodeId;
@@ -459,10 +486,29 @@ class _KeepalivePeer {
   /// True once a PONG has been received — the NAT pinhole is confirmed alive.
   bool confirmed = false;
 
-  /// Number of pings sent while unconfirmed. Capped at
-  /// [UdpKeepalive.maxUnconfirmedPings]; once reached the peer is suspended
-  /// until a network change resets the counter.
+  /// Number of pings sent while unconfirmed.
   int unconfirmedPingsSent = 0;
+
+  /// Whether this ping's result has been scored already (prevents
+  /// double-scoring across multiple ticks within the same pong window).
+  bool scored = false;
+
+  // ── Adaptive interval probing (§7.6) ───────────────────────────────
+
+  /// Current keepalive interval for this peer (milliseconds).
+  int adaptiveIntervalMs = UdpKeepalive.initialIntervalMs;
+
+  /// Highest interval at which a PONG was received.
+  int lastConfirmedIntervalMs = UdpKeepalive.initialIntervalMs;
+
+  /// Consecutive PONGs at the current interval.
+  int stableRounds = 0;
+
+  /// Consecutive failures while probing a higher interval.
+  int probeFailures = 0;
+
+  /// True when the NAT timeout has been discovered — no more probing.
+  bool converged = false;
 
   _KeepalivePeer({
     required this.peerHex,

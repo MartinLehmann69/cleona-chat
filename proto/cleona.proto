@@ -1447,6 +1447,11 @@ message NetworkPacketV3 {
   // Payload-Discriminator
   PayloadTypeV3 payload_type       = 12;
   bytes         payload            = 13;  // serialized ApplicationFrameV3 ODER NetworkPacketV3 (Onion)
+
+  // §5.3 Anti-loop: each relay hop appends its own deviceId(s).
+  // Receiver drops if own deviceId is in the list. Backward-compatible:
+  // old nodes ignore the field but preserve it on forward (protobuf default).
+  repeated bytes visited_device_ids = 14;
 }
 
 enum PayloadTypeV3 {

@@ -152,7 +152,7 @@ class IdentityContext {
   /// `<profileDir>/identity_resolution.json` (FileEncryption nutzt den
   /// daemon-weiten `<_baseDir>/db.key`).
   Future<void> persistIdentityResolutionState() async {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
     Directory(profileDir).createSync(recursive: true);
     fileEnc.writeJsonFile('$profileDir/identity_resolution.json', {
       'authManifestSeq': _authManifestSeq,
@@ -167,7 +167,7 @@ class IdentityContext {
   /// Laedt die persistierten seq-Counter beim Identity-Init. Erstes Run:
   /// Datei fehlt -> Defaults bleiben 0.
   Future<void> _loadIdentityResolutionState() async {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
     final data = fileEnc.readJsonFile('$profileDir/identity_resolution.json');
     if (data == null) return;
     _authManifestSeq = (data['authManifestSeq'] as int?) ?? 0;
@@ -183,7 +183,7 @@ class IdentityContext {
   /// group member IDs, etc. — all of these are identity operations, not routing.
   Uint8List get nodeId => userId;
 
-  /// Base directory for shared resources (db.key).
+  /// Base directory for shared resources.
   /// Defaults to ~/.cleona (2 levels up from identities/identity-N/).
   final String _baseDir;
 
@@ -228,10 +228,18 @@ class IdentityContext {
   String get userIdHex => bytesToHex(userId);
   String get deviceNodeIdHex => bytesToHex(deviceNodeId);
 
+  /// §3.7 step 5: per-identity FileEncryption key derived from master seed.
+  /// Null for legacy profiles without HD-Wallet (random keys, pre-migration).
+  Uint8List? get _fileEncKey =>
+      (masterSeed != null && hdIndex != null)
+          ? HdWallet.deriveFileEncKey(masterSeed!, hdIndex!)
+          : null;
+
   /// Initialize keys: load from disk or generate new ones.
-  /// Keys are stored encrypted via FileEncryption.
+  /// Keys are stored encrypted via FileEncryption with a seed-derived key
+  /// (§3.7 step 5) or the legacy db.key fallback for pre-migration profiles.
   Future<void> initKeys() async {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
     final json = fileEnc.readJsonFile('$profileDir/keys.json');
 
     if (json != null) {
@@ -318,9 +326,15 @@ class IdentityContext {
     x25519PublicKey = sodium.ed25519PkToX25519(ed25519PublicKey);
     x25519SecretKey = sodium.ed25519SkToX25519(ed25519SecretKey);
 
-    // PQ keys: generated in background isolate to avoid ANR on Android.
-    // ML-DSA-65 + ML-KEM-768 keygen takes 15-30s on slow devices.
-    final pqKeys = await generatePqKeysIsolated();
+    // PQ keys: deterministic from seed (seed recovery), or random.
+    // Background isolate avoids ANR on Android (15-30s on slow devices).
+    final ({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk}) pqKeys;
+    if (masterSeed != null && hdIndex != null) {
+      pqKeys = await generatePqKeysDeterministicIsolated(masterSeed!, hdIndex!);
+      _log.info('PQ keys derived deterministically from HD-Wallet index $hdIndex');
+    } else {
+      pqKeys = await generatePqKeysIsolated();
+    }
     mlDsaPublicKey = pqKeys.mlDsaPk;
     mlDsaSecretKey = pqKeys.mlDsaSk;
     mlKemPublicKey = pqKeys.mlKemPk;
@@ -364,7 +378,7 @@ class IdentityContext {
   /// Rotate x25519 + ML-KEM keys. Moves current to previous, generates new.
   /// ML-KEM keygen runs in background isolate to avoid ANR on Android.
   Future<void> rotateKemKeys() async {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
     final sodium = SodiumFFI();
 
     // Move current to previous
@@ -399,7 +413,7 @@ class IdentityContext {
     required Uint8List newMlKemPk,
     required Uint8List newMlKemSk,
   }) {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
 
     // SR-2 (§3.1 stable anchor / §7.4b step 4): append the continuity link
     // BEFORE replacing keys — the OLD secret key signs the successor pubkeys
@@ -458,7 +472,7 @@ class IdentityContext {
     required Uint8List newUserMlKemSk,
     required LinkedDeviceKeys newLinkedKeys,
   }) {
-    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
 
     final linkContent = Uint8List(newUserEd25519Pk.length + newUserMlDsaPk.length);
     linkContent.setRange(0, newUserEd25519Pk.length, newUserEd25519Pk);
@@ -496,7 +510,7 @@ class IdentityContext {
     if (DateTime.now().difference(keyRotatedAt!).inDays >= 7) {
       previousX25519Sk = null;
       previousMlKemSk = null;
-      final fileEnc = FileEncryption(baseDir: _baseDir);
+      final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
       _saveKeys(fileEnc);
       _log.info('Previous KEM keys discarded (retention expired)');
     }

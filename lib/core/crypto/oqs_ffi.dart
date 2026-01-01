@@ -323,6 +323,53 @@ class OqsFFI {
     }
   }
 
+  /// Generate a deterministic ML-KEM-768 keypair from a 64-byte seed.
+  ///
+  /// Same DRBG-injection technique as mlDsaKeypairDerand: replaces liboqs's
+  /// randomness source with a SHA-256 counter-mode PRNG seeded from the
+  /// provided seed, then restores the system DRBG after keygen.
+  ({Uint8List publicKey, Uint8List secretKey}) mlKemKeypairDerand(
+      Uint8List seed) {
+    _ensureInitialized();
+    if (seed.length != 64) {
+      throw ArgumentError('seed must be 64 bytes, got ${seed.length}');
+    }
+
+    _derandSeed = Uint8List.fromList(seed);
+    _derandOffset = 0;
+    _derandCallable ??= NativeCallable<Void Function(Pointer<Uint8>, Size)>
+        .isolateLocal(_derandCallback);
+    _randCustom(_derandCallable!.nativeFunction);
+
+    final methodName = _kemAlgorithm.toNativeUtf8();
+    final kem = _kemNew(methodName);
+    calloc.free(methodName);
+
+    if (kem == nullptr) {
+      _restoreSystemDrbg();
+      throw StateError('OQS_KEM_new("$_kemAlgorithm") returned null');
+    }
+
+    final pk = calloc<Uint8>(mlKemPublicKeyLength);
+    final sk = calloc<Uint8>(mlKemSecretKeyLength);
+
+    try {
+      final status = _kemKeypair(kem, pk, sk);
+      if (status != OqsStatus.success) {
+        throw StateError('OQS_KEM_keypair (derand) failed with status $status');
+      }
+      return (
+        publicKey: _copyToUint8List(pk, mlKemPublicKeyLength),
+        secretKey: _copyToUint8List(sk, mlKemSecretKeyLength),
+      );
+    } finally {
+      calloc.free(pk);
+      calloc.free(sk);
+      _kemFree(kem);
+      _restoreSystemDrbg();
+    }
+  }
+
   /// Encapsulate against an ML-KEM-768 public key.
   ///
   /// Returns a record of (ciphertext, sharedSecret).

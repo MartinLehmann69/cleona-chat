@@ -26,6 +26,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
   bool _muted = false;
   bool _speaker = false;
   bool _videoEnabled = true;
+  bool _autoPopScheduled = false;
 
   /// Remote video frames: senderHex -> latest ui.Image
   final Map<String, ui.Image> _remoteFrames = {};
@@ -40,6 +41,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
 
   void _startDurationTimer() {
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
       setState(() {
         _duration += const Duration(seconds: 1);
       });
@@ -78,11 +80,15 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     final appState = context.watch<CleonaAppState>();
     final currentCall = appState.service?.currentGroupCall;
 
-    // Call ended while screen is open
     if (currentCall == null || currentCall.state == GroupCallState.ended) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.of(context).pop();
-      });
+      if (!_autoPopScheduled) {
+        _autoPopScheduled = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && Navigator.of(context).canPop()) {
+            Navigator.of(context).pop();
+          }
+        });
+      }
     }
 
     // Call just got accepted → start timer

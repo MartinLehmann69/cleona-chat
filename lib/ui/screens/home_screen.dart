@@ -92,12 +92,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       if (_natWizardShown) return;
       _natWizardShown = true;
       if (!mounted) return;
-      _showNatWizardDialog(service);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showNatWizardDialog(service);
+      });
     };
     service.onNatWizardUserRequested = () {
       if (!mounted) return;
       _natWizardShown = true;
-      _showNatWizardDialog(service);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _showNatWizardDialog(service);
+      });
     };
   }
 

@@ -4,6 +4,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
@@ -124,15 +125,25 @@ class IdentityManager {
     return masterSeed;
   }
 
-  /// Check if a master seed exists.
+  /// Check if a master seed exists (keyring or legacy file).
   bool hasMasterSeed() {
-    // FileEncryption stores as .json.enc
+    if (KeyringService.isInitialized) {
+      final seed = KeyringService.instance.load('master_seed');
+      if (seed != null) return true;
+    }
+    // Legacy fallback: check for db.key-encrypted file
     return File('$baseDir/master_seed.json.enc').existsSync() ||
            File('$baseDir/master_seed.json').existsSync();
   }
 
-  /// Load the master seed (encrypted on disk).
+  /// Load the master seed. Tries keyring first, falls back to legacy db.key.
   Uint8List? loadMasterSeed() {
+    // §3.7: keyring is the primary source
+    if (KeyringService.isInitialized) {
+      final seed = KeyringService.instance.load('master_seed');
+      if (seed != null) return seed;
+    }
+    // Legacy fallback for pre-migration profiles
     final fileEnc = FileEncryption(baseDir: baseDir);
     final json = fileEnc.readJsonFile('$baseDir/master_seed.json');
     if (json == null) return null;
@@ -142,24 +153,44 @@ class IdentityManager {
   }
 
   void _storeMasterSeed(Uint8List seed) {
-    final fileEnc = FileEncryption(baseDir: baseDir);
-    fileEnc.writeJsonFile('$baseDir/master_seed.json', {
-      'seed': _bytesToHex(seed),
-      'version': 1,
-    });
+    // §3.7: store in OS keyring (primary)
+    if (KeyringService.isInitialized) {
+      KeyringService.instance.store('master_seed', seed);
+    } else {
+      // Fallback: legacy file-based storage
+      final fileEnc = FileEncryption(baseDir: baseDir);
+      fileEnc.writeJsonFile('$baseDir/master_seed.json', {
+        'seed': _bytesToHex(seed),
+        'version': 1,
+      });
+    }
   }
 
-  /// Store the seed phrase words encrypted (for backup display in Settings).
+  /// Store the seed phrase words (for backup display in Settings).
   void _storeSeedPhrase(List<String> words) {
-    final fileEnc = FileEncryption(baseDir: baseDir);
-    fileEnc.writeJsonFile('$baseDir/seed_phrase.json', {
-      'words': words,
-      'version': 1,
-    });
+    if (KeyringService.isInitialized) {
+      // Store as space-separated words in keyring
+      final phraseBytes = Uint8List.fromList(words.join(' ').codeUnits);
+      KeyringService.instance.store('seed_phrase', phraseBytes);
+    } else {
+      final fileEnc = FileEncryption(baseDir: baseDir);
+      fileEnc.writeJsonFile('$baseDir/seed_phrase.json', {
+        'words': words,
+        'version': 1,
+      });
+    }
   }
 
   /// Load stored seed phrase words (for displaying in Settings).
   List<String>? loadSeedPhrase() {
+    if (KeyringService.isInitialized) {
+      final bytes = KeyringService.instance.load('seed_phrase');
+      if (bytes != null) {
+        final words = String.fromCharCodes(bytes).split(' ');
+        if (words.length == 24) return words;
+      }
+    }
+    // Legacy fallback
     final fileEnc = FileEncryption(baseDir: baseDir);
     final json = fileEnc.readJsonFile('$baseDir/seed_phrase.json');
     if (json == null) return null;
@@ -280,11 +311,15 @@ class IdentityManager {
   /// PQ keygen (ML-DSA + ML-KEM) runs in background isolate (ANR fix).
   Future<void> _preGenerateKeys(String profileDir, int? hdIndex) async {
     final sodium = SodiumFFI();
-    final fileEnc = FileEncryption(baseDir: baseDir);
+    // §3.7 step 5: derive per-identity FileEncryption key from seed
+    final masterSeed = loadMasterSeed();
+    final Uint8List? fileEncKey = (masterSeed != null && hdIndex != null)
+        ? HdWallet.deriveFileEncKey(masterSeed, hdIndex)
+        : null;
+    final fileEnc = FileEncryption(baseDir: baseDir, key: fileEncKey);
 
     // Ed25519: deterministic from HD-Wallet seed, or random
     Uint8List ed25519Pk, ed25519Sk;
-    final masterSeed = loadMasterSeed();
     if (masterSeed != null && hdIndex != null) {
       final edKeys = HdWallet.deriveEd25519(masterSeed, hdIndex);
       ed25519Pk = edKeys.publicKey;
@@ -299,12 +334,16 @@ class IdentityManager {
     final x25519Pk = sodium.ed25519PkToX25519(ed25519Pk);
     final x25519Sk = sodium.ed25519SkToX25519(ed25519Sk);
 
-    // PQ keys in background isolate (ML-DSA + ML-KEM: 15-30s on slow devices).
-    // Reuse a prewarmed future if preWarmPqKeys() was called during the seed
-    // phrase dialog — that overlaps keygen with user reading time.
-    final pqPrewarmed = _pqKeygenPrewarm != null;
+    // PQ keys: deterministic from master seed (seed recovery), or random.
+    // Background isolate avoids ANR on Android (15-30s on slow devices).
+    final pqPrewarmed = _pqKeygenPrewarm != null && masterSeed == null;
     final pqStart = Stopwatch()..start();
-    final pqFuture = _pqKeygenPrewarm ?? generatePqKeysIsolated();
+    final Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})> pqFuture;
+    if (masterSeed != null && hdIndex != null) {
+      pqFuture = generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
+    } else {
+      pqFuture = _pqKeygenPrewarm ?? generatePqKeysIsolated();
+    }
     _pqKeygenPrewarm = null;
     final pqKeys = await pqFuture;
     // print() (stdout) is captured in /tmp/cleona-gui.log by the GUI launcher;
