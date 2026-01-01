@@ -32,11 +32,29 @@ class AppPaths {
 
   /// Get the home directory equivalent for the current platform.
   /// On Android, returns the app's internal files directory.
+  /// On iOS, HOME is not set — resolve via the executable path.
   static String get home {
     if (_cachedHome != null) return _cachedHome!;
 
     if (Platform.isAndroid) {
       _cachedHome = '/data/data/$packageName/files';
+    } else if (Platform.isIOS) {
+      final env = Platform.environment['HOME'];
+      if (env != null && env != '/tmp') {
+        _cachedHome = env;
+      } else {
+        // HOME not set on iOS. Derive container root from executable path:
+        // /private/var/.../Runner.app/Runner → /private/var/.../
+        final exe = Platform.resolvedExecutable;
+        final appIdx = exe.lastIndexOf('.app/');
+        if (appIdx > 0) {
+          final bundlePath = exe.substring(0, appIdx);
+          final slash = bundlePath.lastIndexOf('/');
+          _cachedHome = slash > 0 ? bundlePath.substring(0, slash) : bundlePath;
+        } else {
+          _cachedHome = '/tmp';
+        }
+      }
     } else if (Platform.isWindows) {
       _cachedHome = Platform.environment['USERPROFILE'] ??
           Platform.environment['APPDATA'] ?? 'C:\\Users\\Public';

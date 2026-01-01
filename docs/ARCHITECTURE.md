@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:1cc94662a5d8, 2026-06-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:077d1e127bd5, 2026-06-04). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -4998,7 +4998,7 @@ Mapping to wire layers:
 **iOS**:
 - In-process, analogous to Android
 - Background modes: `audio` for live calls, `fetch` for periodic updates, `processing` for DHT maintenance
-- Native libs: all 7 libraries (libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp, libcleona_audio) built as static `.a` archives via `scripts/build-ios-libs.sh`, packaged as XCFrameworks, linked via CleonaNative CocoaPods podspec with `-ObjC -all_load`. Dart FFI loads symbols via `DynamicLibrary.process()`.
+- Native libs: all 7 libraries built as static `.a` archives, merged into `libcleona_all_device.a`, linked via CleonaNative CocoaPods podspec with `-force_load` + `EXPORTED_SYMBOLS_FILE` + `STRIP_STYLE=non-global`. See §20.3b for the full explanation of why each setting is needed.
 - Build: GitHub Actions `macos-14` runner → `flutter build ipa` → IPA signed with Apple Development certificate
 - Deployment Target: iOS 15.5 (required by `mobile_scanner` plugin)
 - Permissions (Info.plist): microphone, camera, photo library, NFC tag reading, local network discovery, background modes
@@ -5641,27 +5641,122 @@ Android, iOS, and macOS builds do not include `libcleona_net` and continue to us
 
 C sources live under `native/cleona_net/` (parallel to `native/cleona_audio/`) with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. The Linux build is bundled into the Flutter Linux release alongside `libcleona_audio.so`; the Windows build drops into `build/windows/x64/runner/Release/` next to `libsodium.dll` and `liboqs.dll`. Exact build invocations and packaging steps are kept with the source tree rather than duplicated here — see `native/cleona_net/README.md` for the build recipe and `docs/PUBLISHING.md` for the release-bundle assembly.
 
-### 20.3b iOS and macOS Native Library Build Pipeline
+### 20.3b iOS Native Library Build Pipeline
 
-iOS forbids loading custom dynamic libraries at runtime — all native code must be statically linked into the app binary. Dart FFI accesses symbols via `DynamicLibrary.process()` (the process-global symbol table). macOS uses traditional dynamic libraries (`.dylib`) loaded from `Cleona.app/Contents/Frameworks/`.
+Dieses Kapitel erklaert wie die nativen C-Bibliotheken fuer iOS gebaut und ins App-Binary gelinkt werden. Es beschreibt jede Einstellung und warum sie genau so sein muss. Die Erkenntnisse stammen aus einer mehrtaegigen Debugging-Session (2026-06-01 bis 2026-06-04) mit ueber 15 CI-Iterationen und On-Device-Diagnostik.
 
-**iOS build** (`scripts/build-ios-libs.sh`, must run on macOS):
-- Cross-compiles all 7 native libraries (libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp, libcleona_audio) as **static archives** (`.a`) for two platforms: `arm64-iphoneos` (device) and `arm64-iphonesimulator`.
-- Packages each library as an **XCFramework** (`xcodebuild -create-xcframework`) in `build/ios-frameworks/`.
-- XCFrameworks are integrated via `ios/CleonaNative/CleonaNative.podspec` (vendored_frameworks, `-ObjC -all_load` linker flags to force-export all symbols for FFI).
-- `libcleona_audio` requires Objective-C compilation on Apple platforms (miniaudio.h includes AVFoundation ObjC headers); CMakeLists.txt conditionally enables `project(cleona_audio C OBJC)` and links AudioToolbox + AVFoundation frameworks.
-- iOS Deployment Target: 15.5 (required by `mobile_scanner` plugin).
+#### Das Grundproblem: iOS erlaubt keine eigenen dynamischen Bibliotheken
 
-**macOS build** (`scripts/build-macos-libs.sh`, must run on macOS):
-- Builds all libraries as shared `.dylib` for arm64 (Apple Silicon), x86_64 (Intel), or universal (lipo merge).
-- `install_name_tool` rewrites LC_LOAD_DYLIB to `@rpath/<name>.dylib`; all dylibs are ad-hoc signed.
-- `scripts/deploy-macos-app.sh` assembles the final `Cleona.app` bundle: Flutter GUI + headless daemon + dylibs in Contents/Frameworks/.
+Auf Linux, Android, Windows und macOS laedt Cleona seine nativen Bibliotheken (libsodium, liboqs usw.) als separate Dateien zur Laufzeit: `.so` auf Linux/Android, `.dylib` auf macOS, `.dll` auf Windows. Jede Bibliothek ist eine eigene Datei mit eigenem Namensraum. Duplikate zwischen Bibliotheken sind kein Problem weil sie nie zusammengefuegt werden.
 
-**CI/CD** (`.github/workflows/ios-build.yml`, GitHub Actions `macos-14` runner):
-- Workflow "Apple Build (iOS + macOS)" with platform selector (both/ios/macos) and channel selector (beta/live).
-- iOS pipeline: build native libs → upload XCFrameworks artifact → flutter build ipa → code sign (manual, Apple Development certificate) → upload IPA artifact.
-- macOS pipeline (parallel): build native dylibs → flutter build macos → dart compile daemon → assemble app bundle → code sign → create DMG → notarize via App Store Connect API.
-- Signing credentials (certificate .p12, provisioning profile, API key) stored as GitHub Secrets (base64-encoded). The .p12 must use legacy PKCS12 format (3DES+SHA1) because macOS `security import` on CI runners rejects the OpenSSL 3.x default cipher suite.
+**iOS verbietet das.** Apple erlaubt in App-Bundles keine eigenen `.dylib`-Dateien. Aller nativer Code muss statisch in das Runner-Binary (die ausfuehrbare Datei der App) gelinkt werden. Darts `DynamicLibrary.process()` sucht die Funktionen dann mit `dlsym(RTLD_DEFAULT, "funktionsname")` in der Symboltabelle des eigenen Prozesses.
+
+Daraus folgt eine Kette von Problemen die auf keiner anderen Plattform auftreten:
+1. Alle sieben Bibliotheken muessen in EIN Binary
+2. Dabei entstehen doppelte Symbole (gleicher Funktionsname in mehreren Bibliotheken)
+3. Der Linker muss diese Duplikate aufloesen ohne Fehler
+4. Die Symbole muessen nach dem Linken fuer `dlsym()` sichtbar bleiben
+5. Der Xcode-Stripping-Schritt darf die Sichtbarkeit nicht zerstoeren
+
+#### Schritt 1: Native Bibliotheken kompilieren
+
+Das Script `scripts/build-ios-libs.sh` kompiliert alle sieben Bibliotheken als statische Archive (`.a`-Dateien) fuer iOS arm64. Es laeuft auf macOS (braucht Xcode mit iOS SDK) und wird im CI auf einem GitHub Actions `macos-14` Runner ausgefuehrt.
+
+Jede Bibliothek wird fuer zwei Zielplattformen gebaut: `arm64-iphoneos` (echtes Geraet) und `arm64-iphonesimulator`. Die Ergebnisse werden als XCFrameworks verpackt (`xcodebuild -create-xcframework`).
+
+Besonderheit `libcleona_audio`: Verwendet miniaudio das auf Apple-Plattformen Objective-C-Header (AVFoundation) einbindet. Deshalb muss CMake mit `project(cleona_audio C OBJC)` konfiguriert werden und die Quelldatei `miniaudio_impl.c` als Objective-C kompiliert werden. Ausserdem baut CMakes Ninja-Generator auf iOS die vendored speexdsp-Objekte direkt in `libcleona_audio.a` ein (anders als auf anderen Plattformen wo speexdsp in die Shared Library eingebettet wird). Deshalb darf `speexdsp/lib` NICHT zusaetzlich in den Merge-Schritt.
+
+#### Schritt 2: Alle Archive in eines zusammenfuehren
+
+Das Build-Script fuehrt alle einzelnen `.a`-Dateien mit `xcrun libtool -static` in ein einziges Archiv zusammen: `libcleona_all_device.a`. Dieses eine Archiv wird dann ins App-Binary gelinkt.
+
+Dabei werden bestimmte Unter-Bibliotheken uebersprungen weil ihr Inhalt bereits in der Haupt-Bibliothek enthalten ist:
+
+| Uebersprungen | Grund |
+|---|---|
+| `libggml-base.a`, `libggml-cpu.a` | Inhalt steckt bereits in `libggml.a` (der Umbrella-Bibliothek von whisper.cpp) |
+
+Alle anderen Bibliotheken bleiben im Merge, auch die Unter-Bibliotheken von liberasurecode (`libXorcode.a`, `libnullcode.a`, `liberasurecode_rs_vand.a`), weil `liberasurecode.a` deren Funktionen referenziert aber NICHT einbettet.
+
+Nach dem Merge enthaelt das Archiv etwa 9 doppelte Symbole:
+
+| Duplikate | Herkunft | Warum doppelt |
+|---|---|---|
+| 4 C++-Runtime-Stubs (`__clang_call_terminate` usw.) | liboqs und whisper.cpp kompilieren beide C++-Code, der identische Compiler-Hilfsfunktionen erzeugt | Beide Bibliotheken brauchen diese Stubs eigenstaendig |
+| 5 `rs_galois_*`-Funktionen | liberasurecode und liberasurecode_rs_vand teilen Galois-Feld-Code | Historisches Build-Artefakt der liberasurecode-Bibliothek |
+
+Diese 9 Duplikate werden NICHT im Build-Script behoben. Sie werden vom Linker aufgeloest (siehe Schritt 3).
+
+#### Schritt 3: Die drei kritischen Xcode-Einstellungen
+
+Die Datei `ios/CleonaNative/CleonaNative.podspec` setzt drei Xcode-Build-Einstellungen die zusammenarbeiten. Jede einzelne ist zwingend notwendig. Wird eine entfernt oder geaendert, bricht entweder der Build oder die App.
+
+**Einstellung 1: `OTHER_LDFLAGS = -force_load <pfad>`**
+
+Sagt dem Linker: Lade ALLE Objekt-Dateien aus dem Archiv in das Binary, auch wenn kein Swift- oder Objective-C-Code sie referenziert. Ohne dieses Flag wuerde der Linker das gesamte Archiv ignorieren weil aus seiner Sicht niemand die C-Funktionen aufruft (der Aufruf kommt erst zur Laufzeit ueber `dlsym`).
+
+**Einstellung 2: `EXPORTED_SYMBOLS_FILE = <pfad>`**
+
+Verweist auf die Datei `ios/CleonaNative/cleona_exported_symbols.txt`. Diese Datei listet alle 67 C-Funktionen auf die Dart zur Laufzeit per `dlsym()` sucht (z.B. `_sodium_init`, `_OQS_init`, `_ZSTD_compress`, `_opus_encode`, `_whisper_init_from_file`, `_cleona_audio_create`).
+
+Diese Einstellung hat zwei Effekte:
+1. Die aufgelisteten Funktionen werden als Wurzeln fuer die Entfernung von totem Code markiert. Der Linker behaelt sie und alles was von ihnen erreichbar ist. Nicht erreichbarer Code (einschliesslich der 9 doppelten Symbole) wird stillschweigend entfernt. So werden die Duplikate aufgeloest ohne dass der Linker einen Fehler meldet.
+2. Die aufgelisteten Funktionen werden in die Export-Tabelle des Binarys geschrieben. Nur Funktionen in der Export-Tabelle sind fuer `dlsym()` zur Laufzeit sichtbar.
+
+**WICHTIG:** Wenn eine neue FFI-Funktion in Dart hinzugefuegt wird (ein neuer `lookupFunction()`-Aufruf), MUSS das entsprechende Symbol in `cleona_exported_symbols.txt` eingetragen werden. Sonst wird die Funktion vom Linker als toter Code entfernt und die App stuerzt zur Laufzeit ab.
+
+**Einstellung 3: `STRIP_STYLE = non-global`**
+
+Nach dem Linken entfernt Xcode Symbole aus dem Binary um die Dateigroesse zu reduzieren (Stripping). Die Standard-Einstellung `all` entfernt ALLE Symbole einschliesslich der Export-Tabelle. Das bedeutet: der Linker schreibt die Export-Tabelle korrekt, aber Xcode loescht sie danach wieder. `dlsym()` findet dann zur Laufzeit nichts.
+
+`non-global` sagt Xcode: Entferne nur lokale Symbole (Debugging-Informationen, interne Hilfsfunktionen), aber behalte die globalen/exportierten Symbole. Damit bleibt die Export-Tabelle intakt und `dlsym()` funktioniert.
+
+#### Zusammenspiel der drei Einstellungen
+
+```
+force_load               → Alle Objekt-Dateien werden geladen (auch ohne statische Referenz)
+EXPORTED_SYMBOLS_FILE    → Markiert FFI-Funktionen als Wurzeln + schreibt sie in die Export-Tabelle
+                           + loest Duplikate auf (toter Code wird entfernt, inkl. doppelter Definitionen)
+STRIP_STYLE=non-global   → Bewahrt die Export-Tabelle beim Stripping
+
+Fehlt force_load         → Keine nativen Symbole im Binary (Linker ignoriert das Archiv)
+Fehlt EXPORTED_SYMBOLS   → Alle Symbole als toter Code entfernt ODER Duplikat-Fehler beim Linken
+Fehlt STRIP_STYLE        → Export-Tabelle geloescht, dlsym findet nichts (weisser Bildschirm)
+```
+
+#### Was NICHT funktioniert (getestete Sackgassen)
+
+Die folgenden Ansaetze wurden zwischen 2026-06-01 und 2026-06-04 getestet und verworfen. Sie sind hier dokumentiert damit sie nicht erneut versucht werden.
+
+| Ansatz | Warum gescheitert |
+|---|---|
+| `DEAD_CODE_STRIPPING = NO` (ohne EXPORTED_SYMBOLS_FILE) | Alle Symbole bleiben erhalten, aber die 9 Duplikate erzeugen Linker-Fehler. Auch mit `-ld_classic` Flag nicht loesbar. |
+| `-ObjC -all_load` statt `-force_load` | Laedt Objekt-Dateien aus ALLEN statischen Bibliotheken, nicht nur aus unserer. Konflikte mit System-Bibliotheken. |
+| `ld -r` (Pre-Link) zum Deduplizieren | Scheitert an den 9 starken (nicht-schwachen) Duplikaten. `ld -r` toleriert nur schwache Duplikate. |
+| Separate `-force_load` pro Bibliothek (statt Merge) | Gleiche Duplikat-Fehler, nur mit mehr Pfaden. |
+| `ar`-basierte Deduplizierung nach dem Merge | Fragil, scheitert an `set -euo pipefail` wenn `grep` keine Treffer findet. Objekt-Dateinamen kollidieren beim Extrahieren. |
+| xcconfig-Injection nach `pod install` | `flutter build ipa` fuehrt intern nochmal `pod install` aus und regeneriert die xcconfigs. |
+| `sed` in `project.pbxproj` | Pods-xcconfig hat hoehere Prioritaet und ueberschreibt pbxproj-Settings. |
+| `-exported_symbols_list` in `OTHER_LDFLAGS` (statt als eigene Einstellung) | Xcode interpretierte nachfolgende Flags (`-lc++`) als Dateipfade. |
+| Nur `EXPORTED_SYMBOLS_FILE` ohne `STRIP_STYLE=non-global` | Symbole werden korrekt gelinkt (nm bestaetigt 81 exportierte Symbole im xcarchive), aber das Standard-Stripping (`all`) loescht die Export-Tabelle. `dlsym()` findet zur Laufzeit nichts. |
+
+#### macOS Build Pipeline
+
+macOS verwendet im Gegensatz zu iOS normale dynamische Bibliotheken (`.dylib`). Es gibt keine der oben beschriebenen Komplikationen.
+
+`scripts/build-macos-libs.sh` baut alle Bibliotheken als Shared Libraries fuer arm64 (Apple Silicon), x86_64 (Intel) oder universal (lipo merge). `install_name_tool` setzt die Lade-Pfade auf `@rpath/<name>.dylib`. Alle dylibs werden ad-hoc signiert.
+
+`scripts/deploy-macos-app.sh` baut das endgueltige `Cleona.app` Bundle zusammen: Flutter GUI + headless Daemon + dylibs in `Contents/Frameworks/`.
+
+#### CI/CD
+
+Der GitHub-Actions-Workflow `.github/workflows/ios-build.yml` baut iOS und macOS auf einem `macos-14` Runner.
+
+Die iOS-Pipeline: Native Bibliotheken kompilieren und mergen → XCFrameworks als Artifact hochladen → `flutter build ipa` → Code-Signierung (Apple Development Zertifikat, manuelles Provisioning Profile) → IPA als Artifact hochladen.
+
+Die macOS-Pipeline (parallel): Native dylibs bauen → `flutter build macos` → Daemon kompilieren → App-Bundle zusammenbauen → Code-Signierung → DMG erstellen → Notarisierung ueber App Store Connect API.
+
+Signatur-Credentials (Zertifikat als .p12, Provisioning Profile, API Key) liegen als GitHub Secrets (base64-kodiert). Die .p12-Datei muss im Legacy-PKCS12-Format (3DES+SHA1) vorliegen weil der `security import`-Befehl auf macOS CI-Runnern das OpenSSL-3.x-Standardformat ablehnt.
 
 ### 20.4 Flutter Packages
 

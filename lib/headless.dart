@@ -3,9 +3,12 @@ import 'dart:io';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
+import 'package:cleona/core/crypto/device_keys_store.dart';
+import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/network/clogger.dart';
 import 'dart:typed_data';
@@ -17,9 +20,17 @@ import 'package:cleona/core/platform/app_paths.dart';
 ///   cleona-headless --profile `dir` --port `port` [--name `name`]
 ///                   [--send-cr <nodeIdHex>]      # send contact request after startup
 ///                   [--send-msg <nodeIdHex:text>] # send message after CR accepted
+///                   [--export-contact-seed]       # print ContactSeed URI to stdout and exit
 void main(List<String> args) {
   runZonedGuarded(() async {
     final config = _parseArgs(args);
+
+    // --export-contact-seed: print URI and exit (no daemon, no lock)
+    if (config.exportContactSeed) {
+      await _exportContactSeed(config);
+      exit(0);
+    }
+
     final log = CLogger.get('headless', profileDir: config.profileDir);
 
     log.info('Starting Cleona headless node...');
@@ -321,6 +332,74 @@ void _startStdinHandler(CleonaService service, CLogger log) {
   });
 }
 
+/// Print ContactSeed URI to stdout and exit. No daemon, no lock, no port bind.
+/// Reads identity + device keys from the profile dir, discovers local + public
+/// IPs, builds the URI per §8.1.1, and prints it.
+Future<void> _exportContactSeed(_HeadlessConfig config) async {
+  SodiumFFI();
+  OqsFFI().init();
+
+  final profileDir = config.profileDir;
+  if (!Directory(profileDir).existsSync()) {
+    stderr.writeln('ERROR: Profile directory does not exist: $profileDir');
+    exit(1);
+  }
+
+  final identity = IdentityContext(
+    profileDir: profileDir,
+    displayName: config.name,
+  );
+  await identity.initKeys();
+
+  final baseDir = '${AppPaths.home}/.cleona';
+  final fileEnc = FileEncryption(baseDir: baseDir);
+  final deviceKeys = DeviceKeysStore.loadOrCreate(
+    baseDir: baseDir,
+    fileEnc: fileEnc,
+  );
+
+  // Local IPs (non-loopback, non-link-local)
+  final interfaces = await NetworkInterface.list();
+  final localIps = <String>[];
+  for (final iface in interfaces) {
+    for (final addr in iface.addresses) {
+      if (addr.isLoopback || addr.isLinkLocal) continue;
+      localIps.add(addr.address);
+    }
+  }
+
+  final ownAddrs = localIps.take(2).map((ip) => '$ip:${config.port}').toList();
+
+  // Public IP: --public-ip flag or ipify query
+  var publicIp = config.publicIp;
+  if (publicIp == null) {
+    try {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 10);
+      final req = await client.getUrl(Uri.parse('https://api.ipify.org'));
+      final resp = await req.close().timeout(const Duration(seconds: 10));
+      final ip = (await resp.transform(const SystemEncoding().decoder).join()).trim();
+      client.close(force: true);
+      if (ip.isNotEmpty && ip.contains('.')) publicIp = ip;
+    } catch (_) {}
+  }
+  if (publicIp != null) {
+    ownAddrs.add('$publicIp:${config.port}');
+  }
+
+  final seed = ContactSeed(
+    nodeIdHex: identity.userIdHex,
+    displayName: config.name,
+    ownAddresses: ownAddrs,
+    seedPeers: const [],
+    channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
+    deviceIdHex: identity.deviceNodeIdHex,
+    deviceX25519Pk: deviceKeys.kem.x25519PublicKey,
+    deviceMlKemPk: deviceKeys.kem.mlKemPublicKey,
+  );
+
+  stdout.writeln(seed.toUri());
+}
+
 /// Network change handler for headless mode.
 Process? _networkMonitor;
 
@@ -428,6 +507,7 @@ class _HeadlessConfig {
   final String? sendCr;
   final String? sendMsg;
   final String? publicIp;
+  final bool exportContactSeed;
 
   _HeadlessConfig({
     required this.profileDir,
@@ -436,6 +516,7 @@ class _HeadlessConfig {
     this.sendCr,
     this.sendMsg,
     this.publicIp,
+    this.exportContactSeed = false,
   });
 }
 
@@ -446,6 +527,7 @@ _HeadlessConfig _parseArgs(List<String> args) {
   String? sendCr;
   String? sendMsg;
   String? publicIp;
+  bool exportContactSeed = false;
 
   // Normalise `--key=value` forms (POSIX getopt-style) into separate
   // tokens so the per-flag matcher below can stay simple.
@@ -480,6 +562,9 @@ _HeadlessConfig _parseArgs(List<String> args) {
       case '--public-ip':
         if (i + 1 < flat.length) publicIp = flat[++i];
         break;
+      case '--export-contact-seed':
+        exportContactSeed = true;
+        break;
     }
   }
 
@@ -496,5 +581,6 @@ _HeadlessConfig _parseArgs(List<String> args) {
     sendCr: sendCr,
     sendMsg: sendMsg,
     publicIp: publicIp,
+    exportContactSeed: exportContactSeed,
   );
 }
