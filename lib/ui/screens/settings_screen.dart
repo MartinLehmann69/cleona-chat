@@ -299,7 +299,7 @@ class SettingsScreen extends StatelessWidget {
             children: [
               SectionRow(
                 label: locale.get('version_label'),
-                value: '1.0.0 (Architecture v3.0)',
+                value: '${CleonaService.kCurrentAppVersion} (Architecture v3.0)',
               ),
               SectionRow(
                 label: locale.get('encryption_label'),
