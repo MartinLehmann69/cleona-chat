@@ -1,0 +1,33 @@
+name: cleona-chat
+version: '3.1.47'
+summary: Decentralized P2P Messenger with Post-Quantum Encryption
+description: |
+  Cleona Chat is a serverless, encrypted messenger. No phone number or
+  email required. Features: text, voice, video, groups, channels,
+  calendar, offline delivery via erasure coding.
+  Encryption: Hybrid X25519 + ML-KEM-768 (post-quantum).
+
+grade: devel
+confinement: devmode
+base: core22
+architectures:
+  - build-on: amd64
+
+apps:
+  cleona-chat:
+    command: cleona
+    plugs:
+      - network
+      - network-bind
+      - audio-playback
+      - audio-record
+      - desktop
+      - desktop-legacy
+      - x11
+      - wayland
+      - home
+
+parts:
+  cleona:
+    plugin: dump
+    source: build/linux/x64/release/bundle/

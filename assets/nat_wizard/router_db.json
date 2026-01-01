@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "notes": "Router database for NAT-Troubleshooting-Wizard (§27.9). Matches UpnpRouterInfo (manufacturer/modelName) to a curated instruction entry. Instructions live in i18n (keyed by steps_i18n_key + notes_i18n_key) so translations ride the existing pipeline. Generic fallback MUST be last — the loader scans top-down and returns the first match. Substring matches are case-insensitive.",
+  "entries": [
+    {
+      "id": "fritzbox_7590",
+      "display_name": "AVM FRITZ!Box 7590",
+      "match": {
+        "manufacturer_contains": ["AVM"],
+        "model_contains": ["FRITZ!Box 7590", "FRITZ Box 7590"]
+      },
+      "admin_url_hints": ["http://fritz.box", "http://192.168.178.1"],
+      "deeplink_path": "/#freigaben",
+      "steps_i18n_key": "nat_wizard_steps_fritzbox_7590",
+      "notes_i18n_key": "nat_wizard_notes_fritzbox_7590"
+    },
+    {
+      "id": "fritzbox_7490",
+      "display_name": "AVM FRITZ!Box 7490",
+      "match": {
+        "manufacturer_contains": ["AVM"],
+        "model_contains": ["FRITZ!Box 7490", "FRITZ Box 7490"]
+      },
+      "admin_url_hints": ["http://fritz.box", "http://192.168.178.1"],
+      "deeplink_path": "/#freigaben",
+      "steps_i18n_key": "nat_wizard_steps_fritzbox_7490",
+      "notes_i18n_key": "nat_wizard_notes_fritzbox_7490"
+    },
+    {
+      "id": "fritzbox_7530",
+      "display_name": "AVM FRITZ!Box 7530",
+      "match": {
+        "manufacturer_contains": ["AVM"],
+        "model_contains": ["FRITZ!Box 7530", "FRITZ Box 7530"]
+      },
+      "admin_url_hints": ["http://fritz.box", "http://192.168.178.1"],
+      "deeplink_path": "/#freigaben",
+      "steps_i18n_key": "nat_wizard_steps_fritzbox_7530",
+      "notes_i18n_key": "nat_wizard_notes_fritzbox_7530"
+    },
+    {
+      "id": "fritzbox_7530_ax",
+      "display_name": "AVM FRITZ!Box 7530 AX",
+      "match": {
+        "manufacturer_contains": ["AVM"],
+        "model_contains": ["FRITZ!Box 7530 AX", "FRITZ Box 7530 AX", "7530 AX"]
+      },
+      "admin_url_hints": ["http://fritz.box", "http://192.168.178.1"],
+      "deeplink_path": "/#freigaben",
+      "steps_i18n_key": "nat_wizard_steps_fritzbox_7530_ax",
+      "notes_i18n_key": "nat_wizard_notes_fritzbox_7530_ax"
+    },
+    {
+      "id": "fritzbox_6591",
+      "display_name": "AVM FRITZ!Box 6591 Cable",
+      "match": {
+        "manufacturer_contains": ["AVM"],
+        "model_contains": ["FRITZ!Box 6591", "FRITZ Box 6591", "6591 Cable"]
+      },
+      "admin_url_hints": ["http://fritz.box", "http://192.168.178.1"],
+      "deeplink_path": "/#freigaben",
+      "steps_i18n_key": "nat_wizard_steps_fritzbox_6591",
+      "notes_i18n_key": "nat_wizard_notes_fritzbox_6591"
+    },
+    {
+      "id": "speedport_smart_3",
+      "display_name": "Telekom Speedport Smart 3",
+      "match": {
+        "manufacturer_contains": ["Telekom", "Deutsche Telekom"],
+        "model_contains": ["Speedport Smart 3", "Smart 3"]
+      },
+      "admin_url_hints": ["http://speedport.ip", "http://192.168.2.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_speedport_smart_3",
+      "notes_i18n_key": "nat_wizard_notes_speedport_smart_3"
+    },
+    {
+      "id": "speedport_smart_4",
+      "display_name": "Telekom Speedport Smart 4",
+      "match": {
+        "manufacturer_contains": ["Telekom", "Deutsche Telekom"],
+        "model_contains": ["Speedport Smart 4", "Smart 4"]
+      },
+      "admin_url_hints": ["http://speedport.ip", "http://192.168.2.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_speedport_smart_4",
+      "notes_i18n_key": "nat_wizard_notes_speedport_smart_4"
+    },
+    {
+      "id": "speedport_pro",
+      "display_name": "Telekom Speedport Pro",
+      "match": {
+        "manufacturer_contains": ["Telekom", "Deutsche Telekom"],
+        "model_contains": ["Speedport Pro"]
+      },
+      "admin_url_hints": ["http://speedport.ip", "http://192.168.2.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_speedport_pro",
+      "notes_i18n_key": "nat_wizard_notes_speedport_pro"
+    },
+    {
+      "id": "tplink_archer_c6",
+      "display_name": "TP-Link Archer C6",
+      "match": {
+        "manufacturer_contains": ["TP-Link", "TPLink"],
+        "model_contains": ["Archer C6"]
+      },
+      "admin_url_hints": ["http://tplinkwifi.net", "http://192.168.0.1", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_tplink_archer_c6",
+      "notes_i18n_key": "nat_wizard_notes_tplink_archer_c6"
+    },
+    {
+      "id": "tplink_archer_c7",
+      "display_name": "TP-Link Archer C7",
+      "match": {
+        "manufacturer_contains": ["TP-Link", "TPLink"],
+        "model_contains": ["Archer C7"]
+      },
+      "admin_url_hints": ["http://tplinkwifi.net", "http://192.168.0.1", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_tplink_archer_c7",
+      "notes_i18n_key": "nat_wizard_notes_tplink_archer_c7"
+    },
+    {
+      "id": "tplink_archer_ax10",
+      "display_name": "TP-Link Archer AX10",
+      "match": {
+        "manufacturer_contains": ["TP-Link", "TPLink"],
+        "model_contains": ["Archer AX10"]
+      },
+      "admin_url_hints": ["http://tplinkwifi.net", "http://192.168.0.1", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_tplink_archer_ax10",
+      "notes_i18n_key": "nat_wizard_notes_tplink_archer_ax10"
+    },
+    {
+      "id": "tplink_archer_ax50",
+      "display_name": "TP-Link Archer AX50",
+      "match": {
+        "manufacturer_contains": ["TP-Link", "TPLink"],
+        "model_contains": ["Archer AX50"]
+      },
+      "admin_url_hints": ["http://tplinkwifi.net", "http://192.168.0.1", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_tplink_archer_ax50",
+      "notes_i18n_key": "nat_wizard_notes_tplink_archer_ax50"
+    },
+    {
+      "id": "netgear_nighthawk_r7000",
+      "display_name": "Netgear Nighthawk R7000",
+      "match": {
+        "manufacturer_contains": ["NETGEAR", "Netgear"],
+        "model_contains": ["R7000", "Nighthawk R7000"]
+      },
+      "admin_url_hints": ["http://routerlogin.net", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_netgear_nighthawk_r7000",
+      "notes_i18n_key": "nat_wizard_notes_netgear_nighthawk_r7000"
+    },
+    {
+      "id": "netgear_nighthawk_rax20",
+      "display_name": "Netgear Nighthawk RAX20",
+      "match": {
+        "manufacturer_contains": ["NETGEAR", "Netgear"],
+        "model_contains": ["RAX20", "Nighthawk RAX20"]
+      },
+      "admin_url_hints": ["http://routerlogin.net", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_netgear_nighthawk_rax20",
+      "notes_i18n_key": "nat_wizard_notes_netgear_nighthawk_rax20"
+    },
+    {
+      "id": "asus_rt_ax55",
+      "display_name": "ASUS RT-AX55",
+      "match": {
+        "manufacturer_contains": ["ASUS", "ASUSTeK"],
+        "model_contains": ["RT-AX55"]
+      },
+      "admin_url_hints": ["http://router.asus.com", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_asus_rt_ax55",
+      "notes_i18n_key": "nat_wizard_notes_asus_rt_ax55"
+    },
+    {
+      "id": "asus_rt_ax58u",
+      "display_name": "ASUS RT-AX58U",
+      "match": {
+        "manufacturer_contains": ["ASUS", "ASUSTeK"],
+        "model_contains": ["RT-AX58U"]
+      },
+      "admin_url_hints": ["http://router.asus.com", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_asus_rt_ax58u",
+      "notes_i18n_key": "nat_wizard_notes_asus_rt_ax58u"
+    },
+    {
+      "id": "asus_rt_ax88u",
+      "display_name": "ASUS RT-AX88U",
+      "match": {
+        "manufacturer_contains": ["ASUS", "ASUSTeK"],
+        "model_contains": ["RT-AX88U"]
+      },
+      "admin_url_hints": ["http://router.asus.com", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_asus_rt_ax88u",
+      "notes_i18n_key": "nat_wizard_notes_asus_rt_ax88u"
+    },
+    {
+      "id": "linksys_mr8300",
+      "display_name": "Linksys MR8300",
+      "match": {
+        "manufacturer_contains": ["Linksys", "Belkin"],
+        "model_contains": ["MR8300"]
+      },
+      "admin_url_hints": ["http://myrouter.local", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_linksys_mr8300",
+      "notes_i18n_key": "nat_wizard_notes_linksys_mr8300"
+    },
+    {
+      "id": "linksys_mr9600",
+      "display_name": "Linksys MR9600",
+      "match": {
+        "manufacturer_contains": ["Linksys", "Belkin"],
+        "model_contains": ["MR9600"]
+      },
+      "admin_url_hints": ["http://myrouter.local", "http://192.168.1.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_linksys_mr9600",
+      "notes_i18n_key": "nat_wizard_notes_linksys_mr9600"
+    },
+    {
+      "id": "dg_ont_default",
+      "display_name": "Deutsche Glasfaser ONT (Standard-CPE)",
+      "match": {
+        "manufacturer_contains": ["Deutsche Glasfaser", "Genexis", "DG"],
+        "model_contains": ["ONT", "FiberTwist", "Platinum"]
+      },
+      "admin_url_hints": ["http://192.168.1.1", "http://192.168.0.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_dg_ont_default",
+      "notes_i18n_key": "nat_wizard_notes_dg_ont_default"
+    },
+    {
+      "id": "generic",
+      "display_name": "Generic router",
+      "match": {
+        "manufacturer_contains": [],
+        "model_contains": []
+      },
+      "admin_url_hints": ["http://192.168.1.1", "http://192.168.178.1", "http://192.168.0.1"],
+      "deeplink_path": null,
+      "steps_i18n_key": "nat_wizard_steps_generic",
+      "notes_i18n_key": "nat_wizard_notes_generic"
+    }
+  ]
+}

@@ -1,0 +1,1302 @@
+syntax = "proto3";
+
+package cleona;
+
+// ── Core Message Envelope ──────────────────────────────────────────────
+
+message MessageEnvelope {
+  uint32 version = 1;
+  bytes sender_id = 2;          // 32 bytes, SHA-256(tag + pubkey)
+  bytes recipient_id = 3;       // 32 bytes, or empty for broadcasts
+  uint64 timestamp = 4;         // Unix milliseconds
+  MessageType message_type = 5;
+  bytes encrypted_payload = 6;
+  bytes signature_ed25519 = 7;
+  bytes signature_ml_dsa = 8;
+  ContentMetadata content_metadata = 9;
+  EditMetadata edit_metadata = 10;
+  ExpiryMetadata expiry_metadata = 11;
+  ErasureCodingMetadata erasure_metadata = 12;
+  ProofOfWork pow = 13;
+  PerMessageKem kem_header = 14;
+  reserved 15;                   // was: PqxdhInit (removed)
+  CompressionType compression = 16;
+  string network_tag = 17;
+  bytes message_id = 18;        // UUID v4 (16 bytes)
+  bytes group_id = 19;          // Non-empty if this is a group message
+  bytes reply_to_message_id = 20; // Message ID being replied to (quote)
+  string reply_to_text = 21;     // Quoted text snippet (max 200 chars)
+  string reply_to_sender = 22;   // Display name of quoted message sender
+  LinkPreview link_preview = 23; // Sender-side link preview (Architecture Section 2.3.4)
+  bytes sender_device_node_id = 24; // Multi-Device (§26): routing target for replies/receipts
+}
+
+// ── Message Types ──────────────────────────────────────────────────────
+
+enum MessageType {
+  // Core messaging
+  TEXT = 0;
+  IMAGE = 1;
+  VIDEO = 2;
+  GIF = 3;
+  EMOJI_REACTION = 4;
+  MEDIA_ANNOUNCEMENT = 5;
+  MEDIA_ACCEPT = 6;
+  MEDIA_REJECT = 7;
+  MESSAGE_EDIT = 8;
+  MESSAGE_EXPIRE_CONFIG = 9;
+
+  // Key management
+  reserved 10;                   // was: KEY_ROTATION (replaced by KEY_ROTATION_BROADCAST = 133)
+  reserved 11, 12;               // was: PREKEY_BUNDLE, KEY_EXCHANGE_RESPONSE
+
+  // Recovery
+  RESTORE_BROADCAST = 13;
+  RESTORE_RESPONSE = 14;
+
+  // Presence & receipts
+  TYPING_INDICATOR = 15;
+  READ_RECEIPT = 16;
+
+  // Groups
+  GROUP_CREATE = 17;
+  GROUP_INVITE = 18;
+  GROUP_LEAVE = 19;
+  GROUP_KEY_UPDATE = 20;
+  MESSAGE_DELETE = 21;
+  VOICE_MESSAGE = 22;
+  FILE = 23;
+
+  // Calls (WebRTC signaling + overlay multicast)
+  CALL_INVITE = 30;
+  CALL_ANSWER = 31;
+  CALL_REJECT = 32;
+  CALL_HANGUP = 33;
+  ICE_CANDIDATE = 34;
+  CALL_REJOIN = 35;
+  CALL_AUDIO = 36;
+
+  // Peer list exchange (3-step delta)
+  PEER_LIST_SUMMARY = 50;
+  PEER_LIST_WANT = 51;
+  PEER_LIST_PUSH = 52;
+
+  // Contact requests
+  reserved 60, 61;               // was: PQXDH_INIT, OTK_BATCH
+  CONTACT_REQUEST = 62;
+  CONTACT_REQUEST_RESPONSE = 63;
+
+  // Channels
+  CHANNEL_CREATE = 70;
+  CHANNEL_POST = 71;
+  CHANNEL_INVITE = 72;
+  CHANNEL_ROLE_UPDATE = 73;
+  CHANNEL_LEAVE = 74;
+
+  CHANNEL_JOIN_REQUEST = 75;     // subscriber → owner: "I want to join"
+
+  // Public channel moderation
+  CHANNEL_REPORT = 76;
+  CHANNEL_REPORT_RESPONSE = 77;
+  JURY_REQUEST = 78;
+  JURY_VOTE_MSG = 79;
+  JURY_RESULT = 88;
+
+  // Channel index gossip
+  CHANNEL_INDEX_EXCHANGE = 89;
+
+  // DHT operations
+  DHT_PING = 80;
+  DHT_PONG = 81;
+  DHT_FIND_NODE = 82;
+  DHT_FIND_NODE_RESPONSE = 83;
+  DHT_STORE = 84;
+  DHT_STORE_RESPONSE = 85;
+  DHT_FIND_VALUE = 86;
+  DHT_FIND_VALUE_RESPONSE = 87;
+
+  // Fragment storage (erasure coding) with RUDP ACK
+  FRAGMENT_STORE = 90;
+  FRAGMENT_STORE_ACK = 91;
+  FRAGMENT_RETRIEVE = 92;
+  FRAGMENT_DELETE = 93;
+
+  // Delivery receipt
+  DELIVERY_RECEIPT = 94;
+
+  // Per-chat configuration
+  CHAT_CONFIG_UPDATE = 100;
+  CHAT_CONFIG_RESPONSE = 101;
+
+  // Identity management
+  IDENTITY_DELETED = 102;
+
+  // Profile updates
+  PROFILE_UPDATE = 103;
+
+  // Guardian recovery (Shamir SSS)
+  GUARDIAN_SHARE_STORE = 104;
+  GUARDIAN_RESTORE_REQUEST = 105;
+  GUARDIAN_RESTORE_RESPONSE = 106;
+
+  // Relay (multi-hop message forwarding)
+  RELAY_FORWARD = 110;
+  RELAY_ACK = 111;
+
+  // Unreachability reports (relay route discovery)
+  REACHABILITY_QUERY = 112;
+  REACHABILITY_RESPONSE = 113;
+
+  // Store-and-Forward (offline delivery via mutual peers)
+  PEER_STORE = 114;
+  PEER_STORE_ACK = 115;
+  PEER_RETRIEVE = 116;
+  PEER_RETRIEVE_RESPONSE = 117;
+
+  // Distance-Vector Routing (V3)
+  ROUTE_UPDATE = 120;
+
+  // NAT Hole Punch (V3)
+  HOLE_PUNCH_REQUEST = 121;
+  HOLE_PUNCH_NOTIFY = 122;
+  HOLE_PUNCH_PING = 123;
+  HOLE_PUNCH_PONG = 124;
+
+  // App-Level Chunking for relay/S&F paths (V3.1.9)
+  MEDIA_CHUNK = 125;
+
+  // Multi-Device (§26)
+  TWIN_ANNOUNCE = 130;
+  TWIN_SYNC = 131;
+  DEVICE_REVOKED = 132;
+  KEY_ROTATION_BROADCAST = 133;
+  KEY_ROTATION_ACK = 134;
+
+  // Calendar (§23)
+  CALENDAR_INVITE = 140;
+  CALENDAR_RSVP = 141;
+  CALENDAR_UPDATE = 142;
+  CALENDAR_DELETE = 143;
+  FREE_BUSY_REQUEST = 144;
+  FREE_BUSY_RESPONSE = 145;
+
+  // Polls & Voting (§24)
+  POLL_CREATE = 146;
+  POLL_VOTE = 147;
+  POLL_UPDATE = 148;
+  POLL_SNAPSHOT = 149;
+  POLL_VOTE_ANONYMOUS = 150;
+  POLL_VOTE_REVOKE = 151;
+
+  // Overlay Multicast Tree (Phase 3d)
+  CALL_RTT_PING = 37;
+  CALL_RTT_PONG = 38;
+  CALL_TREE_UPDATE = 39;
+
+  // Video Calls (Phase 3b)
+  CALL_VIDEO = 40;
+  CALL_KEYFRAME_REQUEST = 41;
+
+  // Group Calls (Phase 3c)
+  CALL_GROUP_AUDIO = 42;
+  CALL_GROUP_LEAVE = 43;
+  CALL_GROUP_KEY_ROTATE = 44;
+  CALL_GROUP_VIDEO = 45;
+}
+
+// ── Compression ────────────────────────────────────────────────────────
+
+enum CompressionType {
+  NONE = 0;
+  ZSTD = 1;
+}
+
+// ── Sub-messages ───────────────────────────────────────────────────────
+
+message ContentMetadata {
+  string mime_type = 1;
+  uint64 file_size = 2;
+  string filename = 3;
+  uint32 duration_ms = 4;       // audio/video duration
+  bytes thumbnail = 5;          // compressed thumbnail, max 100KB
+  bytes content_hash = 6;       // SHA-256 of the full content
+}
+
+// ── Link Preview (Sender-Side) ────────────────────────────────────────
+// Sender fetches og: metadata + thumbnail before encryption.
+// Recipient NEVER contacts the target server — zero network requests.
+
+message LinkPreview {
+  string url = 1;                  // The detected URL
+  string title = 2;                // og:title or <title>
+  string description = 3;          // og:description (max 300 chars)
+  string site_name = 4;            // og:site_name
+  bytes thumbnail = 5;             // og:image as JPEG thumbnail (max 64KB)
+  uint64 fetched_at_ms = 6;        // When the sender fetched the preview
+}
+
+message EditMetadata {
+  bytes original_message_id = 1;
+  uint64 edit_timestamp = 2;
+}
+
+message ExpiryMetadata {
+  uint64 expiry_duration_ms = 1;  // 0 = no expiry
+  uint64 edit_window_ms = 2;     // 0 = no editing allowed
+}
+
+message ErasureCodingMetadata {
+  bytes mailbox_id = 1;         // 32 bytes
+  bytes original_message_id = 2;
+  uint32 fragment_index = 3;
+  uint32 total_fragments = 4;   // N = 10
+  uint32 required_fragments = 5; // K = 7
+  uint32 original_size = 6;
+}
+
+message ProofOfWork {
+  uint64 nonce = 1;
+  uint32 difficulty = 2;
+  bytes hash = 3;
+}
+
+message PerMessageKem {
+  bytes ephemeral_x25519_pk = 1;   // 32 bytes
+  bytes ml_kem_ciphertext = 2;     // 1088 bytes
+  bytes aes_nonce = 3;             // 12 bytes
+}
+
+// ── Peer Information ───────────────────────────────────────────────────
+
+message PeerInfoProto {
+  bytes node_id = 1;
+  string public_ip = 2;
+  uint32 public_port = 3;
+  string local_ip = 4;
+  uint32 local_port = 5;
+  repeated PeerAddressProto addresses = 6;
+  string network_tag = 7;
+  uint64 last_seen = 8;
+  NatType nat_type = 9;
+  uint32 capabilities = 10;
+  bytes ed25519_public_key = 11;
+  bytes ml_dsa_public_key = 12;
+  bytes ed25519_signature = 13;
+  bytes ml_dsa_signature = 14;
+  bytes x25519_public_key = 15;
+  bytes ml_kem_public_key = 16;
+  bytes user_id = 17;             // Multi-Device (§26): stable identity (same across all devices)
+}
+
+message PeerAddressProto {
+  string ip = 1;
+  uint32 port = 2;
+  AddressType address_type = 3;
+  double score = 4;
+  uint64 last_success = 5;
+  uint64 last_attempt = 6;
+  uint32 success_count = 7;
+  uint32 fail_count = 8;
+}
+
+enum AddressType {
+  IPV4_PUBLIC = 0;
+  IPV4_PRIVATE = 1;
+  IPV6_GLOBAL = 2;
+}
+
+enum NatType {
+  NAT_UNKNOWN = 0;
+  NAT_PUBLIC = 1;
+  NAT_FULL_CONE = 2;
+  NAT_SYMMETRIC = 3;
+}
+
+// ── DHT Messages ───────────────────────────────────────────────────────
+
+message DhtPing {
+  bytes sender_id = 1;
+  uint64 timestamp = 2;
+}
+
+message DhtPong {
+  bytes sender_id = 1;
+  uint64 timestamp = 2;
+  string observed_ip = 3;       // reporter's view of sender's public IP
+  uint32 observed_port = 4;
+  repeated bytes additional_node_ids = 5; // secondary identity node IDs on same port
+}
+
+message DhtFindNode {
+  bytes target_id = 1;          // ID to look up
+  bytes sender_id = 2;
+}
+
+message DhtFindNodeResponse {
+  repeated PeerInfoProto closest_peers = 1;
+}
+
+message DhtStore {
+  bytes key = 1;
+  bytes value = 2;
+  uint64 ttl_ms = 3;
+}
+
+message DhtStoreResponse {
+  bool success = 1;
+}
+
+message DhtFindValue {
+  bytes key = 1;
+}
+
+message DhtFindValueResponse {
+  bytes value = 1;
+  repeated PeerInfoProto closest_peers = 2;
+  bool found = 3;
+}
+
+// ── Peer List Exchange (3-step delta) ──────────────────────────────────
+
+message PeerListSummary {
+  repeated PeerSummaryEntry entries = 1;
+}
+
+message PeerSummaryEntry {
+  bytes node_id = 1;
+  uint64 last_seen = 2;
+}
+
+message PeerListWant {
+  repeated bytes wanted_node_ids = 1;
+}
+
+message PeerListPush {
+  repeated PeerInfoProto peers = 1;
+}
+
+// ── Contact Request ────────────────────────────────────────────────────
+
+message ContactRequestMsg {
+  string display_name = 1;
+  bytes ed25519_public_key = 2;
+  bytes ml_dsa_public_key = 3;
+  bytes x25519_public_key = 4;
+  bytes ml_kem_public_key = 5;
+  string message = 6;
+  bytes profile_picture = 7;     // JPEG, max 64KB
+  string description = 8;
+}
+
+message ContactRequestResponse {
+  bool accepted = 1;
+  string rejection_reason = 2;
+  bytes ed25519_public_key = 3;
+  bytes ml_dsa_public_key = 4;
+  bytes x25519_public_key = 5;
+  bytes ml_kem_public_key = 6;
+  string display_name = 7;
+  bytes profile_picture = 8;
+  string description = 9;
+}
+
+// ── Profile ────────────────────────────────────────────────────────────
+
+message ProfileData {
+  bytes profile_picture = 1;     // JPEG, max 64KB
+  string description = 2;
+  uint64 updated_at_ms = 3;
+  string display_name = 4;       // Updated display name (empty = unchanged)
+}
+
+// ── Groups ─────────────────────────────────────────────────────────────
+
+message GroupCreate {
+  bytes group_id = 1;
+  string name = 2;
+  string description = 3;
+  repeated bytes member_ids = 4;
+  bytes picture = 5;
+}
+
+message GroupInvite {
+  bytes group_id = 1;
+  string group_name = 2;
+  bytes inviter_id = 3;
+  repeated GroupMember members = 4;
+  bytes group_picture = 5;
+  string group_description = 6;
+}
+
+message GroupMember {
+  bytes node_id = 1;
+  string display_name = 2;
+  string role = 3;              // "owner", "admin", "member"
+  bytes ed25519_public_key = 4;
+  bytes x25519_public_key = 5;
+  bytes ml_kem_public_key = 6;
+}
+
+message GroupKeyUpdate {
+  bytes group_id = 1;
+  bytes new_group_key = 2;      // encrypted per-member
+}
+
+message GroupLeave {
+  bytes group_id = 1;
+}
+
+// ── Channels ───────────────────────────────────────────────────────────
+
+message ChannelCreate {
+  bytes channel_id = 1;
+  string name = 2;
+  string description = 3;
+  bool announcement_only = 4;
+  ExpiryMetadata default_expiry = 5;
+  bytes picture = 6;
+  bool is_public = 7;
+  bool is_adult = 8;
+  string language = 9;
+}
+
+message ChannelPost {
+  bytes channel_id = 1;
+  bytes post_id = 2;
+  string text = 3;
+  ContentMetadata media = 4;
+  bytes content_data = 5;
+}
+
+message ChannelInvite {
+  bytes channel_id = 1;
+  string channel_name = 2;
+  bytes inviter_id = 3;
+  string role = 4;
+  bytes welcome_message = 5;
+  bytes channel_picture = 6;
+  string channel_description = 7;
+  repeated GroupMember members = 8;   // reuse GroupMember for full member list
+  bool is_public = 9;
+  bool is_adult = 10;
+  string language = 11;
+}
+
+message ChannelRoleUpdate {
+  bytes channel_id = 1;
+  bytes target_id = 2;
+  string new_role = 3;
+}
+
+message ChannelLeave {
+  bytes channel_id = 1;
+}
+
+// ── Chat Config ────────────────────────────────────────────────────────
+
+message ChatConfigUpdate {
+  string conversation_id = 1;
+  bool allow_downloads = 2;
+  bool allow_forwarding = 3;
+  bool is_request = 4;
+  bool accepted = 5;
+  sint64 expiry_duration_ms = 6;
+  sint64 edit_window_ms = 7;
+  bool read_receipts = 8;
+  bool typing_indicators = 9;
+}
+
+// ── Identity Deleted ───────────────────────────────────────────────────
+
+message IdentityDeletedNotification {
+  bytes identity_ed25519_pk = 1;
+  uint64 deleted_at_ms = 2;
+  string display_name = 3;
+}
+
+// ── Restore ────────────────────────────────────────────────────────────
+
+message RestoreBroadcast {
+  bytes old_node_id = 1;
+  bytes new_node_id = 2;
+  bytes new_ed25519_pk = 3;
+  bytes new_x25519_pk = 4;
+  bytes new_ml_kem_pk = 5;
+  bytes new_ml_dsa_pk = 6;
+  string display_name = 7;
+  uint64 timestamp = 8;
+  bytes signature = 9;           // signed with old key (proves ownership)
+}
+
+message RestoreResponse {
+  uint32 phase = 1;              // 1=contacts, 2=recent messages, 3=full history
+  repeated ContactEntry contacts = 2;
+  repeated StoredMessage messages = 3;
+  repeated RestoreGroupInfo groups = 4;
+  repeated RestoreChannelInfo channels = 5;
+}
+
+message RestoreGroupInfo {
+  bytes group_id = 1;
+  string name = 2;
+  string description = 3;
+  string owner_node_id_hex = 4;
+  repeated RestoreGroupMember members = 5;
+}
+
+message RestoreGroupMember {
+  string node_id_hex = 1;
+  string display_name = 2;
+  string role = 3;               // "owner", "admin", "member"
+  bytes ed25519_pk = 4;
+  bytes x25519_pk = 5;
+  bytes ml_kem_pk = 6;
+}
+
+message RestoreChannelInfo {
+  bytes channel_id = 1;
+  string name = 2;
+  string description = 3;
+  string owner_node_id_hex = 4;
+  repeated RestoreChannelMember members = 5;
+}
+
+message RestoreChannelMember {
+  string node_id_hex = 1;
+  string display_name = 2;
+  string role = 3;               // "owner", "admin", "subscriber"
+  bytes ed25519_pk = 4;
+  bytes x25519_pk = 5;
+  bytes ml_kem_pk = 6;
+}
+
+message ContactEntry {
+  bytes node_id = 1;
+  string display_name = 2;
+  bytes ed25519_pk = 3;
+  bytes x25519_pk = 4;
+  bytes ml_kem_pk = 5;
+  bytes ml_dsa_pk = 6;
+  bytes profile_picture = 7;
+  string description = 8;
+}
+
+message StoredMessage {
+  bytes message_id = 1;
+  bytes sender_id = 2;
+  bytes recipient_id = 3;
+  string conversation_id = 4;
+  uint64 timestamp = 5;
+  MessageType message_type = 6;
+  bytes payload = 7;             // encrypted
+}
+
+// ── Fragment Store/Retrieve ────────────────────────────────────────────
+
+message FragmentStore {
+  bytes mailbox_id = 1;
+  bytes message_id = 2;
+  uint32 fragment_index = 3;
+  uint32 total_fragments = 4;
+  uint32 required_fragments = 5;
+  bytes fragment_data = 6;
+  uint32 original_size = 7;
+  uint64 ttl_ms = 8;
+}
+
+message FragmentStoreAck {
+  bytes message_id = 1;
+  uint32 fragment_index = 2;
+}
+
+message FragmentRetrieve {
+  bytes mailbox_id = 1;
+}
+
+message FragmentDelete {
+  bytes mailbox_id = 1;
+  bytes message_id = 2;
+}
+
+// ── Calls ──────────────────────────────────────────────────────────────
+
+message CallInvite {
+  bytes call_id = 1;
+  bytes caller_eph_x25519_pk = 2;
+  bytes caller_kem_ciphertext = 3;
+  bool is_video = 4;
+  bool is_group_call = 5;
+  bytes group_id = 6;
+  bytes group_call_key = 7;        // 32-Byte AES-256 shared key (KEM-encrypted per recipient)
+}
+
+message CallAnswer {
+  bytes call_id = 1;
+  bytes callee_eph_x25519_pk = 2;
+  bytes callee_kem_ciphertext = 3;
+}
+
+message CallReject {
+  bytes call_id = 1;
+  string reason = 2;
+}
+
+message CallHangup {
+  bytes call_id = 1;
+}
+
+message IceCandidate {
+  bytes call_id = 1;
+  string candidate = 2;
+  string sdp_mid = 3;
+  uint32 sdp_m_line_index = 4;
+}
+
+message CallRejoin {
+  bytes call_id = 1;
+}
+
+// ── Key Rotation ───────────────────────────────────────────────────────
+
+message KeyRotation {
+  bytes new_x25519_pk = 1;
+  bytes new_ml_kem_pk = 2;
+  uint64 rotation_timestamp = 3;
+  bytes signature = 4;           // signed with identity key
+}
+
+// ── Channel Join Request ──────────────────────────────────────────────
+
+message ChannelJoinRequest {
+  bytes channel_id = 1;
+  string display_name = 2;         // requester's display name
+  bytes ed25519_pk = 3;            // requester's public keys for encryption
+  bytes x25519_pk = 4;
+  bytes ml_kem_pk = 5;
+}
+
+// ── Channel Index Exchange (Gossip) ──────────────────────────────────
+
+message ChannelIndexExchange {
+  repeated ChannelIndexEntryProto entries = 1;
+}
+
+// ── Channel Moderation ────────────────────────────────────────────────
+
+message ChannelReportMsg {
+  bytes report_id = 1;
+  bytes channel_id = 2;
+  uint32 category = 3;            // ReportCategory enum index
+  repeated bytes evidence_post_ids = 4;
+  string description = 5;
+  uint64 created_at_ms = 6;
+  bool is_post_report = 7;        // true = single-post, false = channel report
+  bytes post_id = 8;              // only for single-post reports
+}
+
+message ChannelReportResponse {
+  bytes report_id = 1;
+  bool accepted = 2;
+  string rejection_reason = 3;
+}
+
+message JuryRequestMsg {
+  bytes jury_id = 1;
+  bytes channel_id = 2;
+  bytes report_id = 3;
+  uint32 category = 4;
+  repeated bytes evidence_post_ids = 5;
+  string report_description = 6;
+  string channel_name = 7;
+  string channel_language = 8;
+}
+
+message JuryVoteMsg {
+  bytes jury_id = 1;
+  bytes report_id = 2;
+  uint32 vote = 3;                // 0=approve, 1=reject, 2=abstain
+  string reason = 4;
+}
+
+message JuryResultMsg {
+  bytes jury_id = 1;
+  bytes report_id = 2;
+  bytes channel_id = 3;
+  uint32 consequence = 4;         // JuryConsequence enum index
+  uint32 votes_approve = 5;
+  uint32 votes_reject = 6;
+  uint32 votes_abstain = 7;
+  uint32 new_bad_badge_level = 8;
+}
+
+// ── DHT Channel Index ─────────────────────────────────────────────────
+
+message ChannelIndexEntryProto {
+  bytes channel_id = 1;
+  string name = 2;
+  string language = 3;
+  bool is_adult = 4;
+  string description = 5;
+  uint32 subscriber_count = 6;
+  uint32 bad_badge_level = 7;
+  uint64 bad_badge_since_ms = 8;
+  bool correction_submitted = 9;
+  bytes owner_node_id = 10;
+  uint64 created_at_ms = 11;
+  bytes owner_signature = 12;     // proves ownership
+}
+
+// Reachability check for anti-Sybil
+message ReachabilityCheck {
+  bytes target_node_id = 1;
+  bytes bloom_filter = 2;         // visited nodes
+  uint32 hops_remaining = 3;
+  bytes request_id = 4;
+}
+
+message ReachabilityResponse {
+  bytes request_id = 1;
+  bool reached = 2;
+}
+
+// ── Delivery/Read Receipts ─────────────────────────────────────────────
+
+message DeliveryReceipt {
+  bytes message_id = 1;
+  uint64 delivered_at = 2;
+}
+
+message ReadReceipt {
+  bytes message_id = 1;
+  uint64 read_at = 2;
+}
+
+// ── Typing Indicator ───────────────────────────────────────────────────
+
+message TypingIndicator {
+  string conversation_id = 1;
+  bool is_typing = 2;
+}
+
+// ── Message Edit/Delete ────────────────────────────────────────────────
+
+message MessageEdit {
+  bytes original_message_id = 1;
+  string new_text = 2;
+  uint64 edit_timestamp = 3;
+}
+
+message MessageDelete {
+  bytes message_id = 1;
+  uint64 deleted_at = 2;
+}
+
+// ── Emoji Reaction ─────────────────────────────────────────────────────
+
+message EmojiReaction {
+  bytes message_id = 1;
+  string emoji = 2;
+  bool remove = 3;
+}
+
+// ── Guardian Recovery (Shamir SSS) ────────────────────────────────────
+
+message GuardianShareStore {
+  bytes share_data = 1;               // [1-byte index][share bytes]
+  bytes owner_node_id = 2;            // Wessen Seed ist das?
+  string owner_display_name = 3;
+}
+
+message GuardianRestoreRequest {
+  bytes owner_node_id = 1;            // Wer wird wiederhergestellt?
+  string owner_display_name = 2;
+  bytes triggering_guardian_node_id = 3;
+  string triggering_guardian_name = 4;
+  bytes recovery_mailbox_id = 5;      // DHT-Mailbox wohin Shares senden
+}
+
+message GuardianRestoreResponse {
+  bytes share_data = 1;               // Der Share
+  bytes owner_node_id = 2;            // Für wen?
+}
+
+// ── Relay (Multi-Hop Message Forwarding) ──────────────────────────────
+
+message RelayForward {
+  bytes relay_id = 1;                  // 16 Bytes UUID, Dedup
+  bytes final_recipient_id = 2;        // 32 Bytes, eigentliches Ziel
+  bytes wrapped_envelope = 3;          // Serialisierter Original-Envelope (unverändert)
+  uint32 hop_count = 4;               // Aktueller Hop (startet bei 1)
+  uint32 max_hops = 5;                // Maximum (Default 3)
+  repeated bytes visited_nodes = 6;    // Node-IDs die bereits weitergeleitet haben
+  bytes origin_node_id = 7;           // Original-Sender für RELAY_ACK-Routing
+  uint64 created_at_ms = 8;           // Erstellungszeitpunkt (TTL: max 5 Min)
+  uint32 ttl = 9;                     // Hop Limit (Startwert 64, pro Hop -1, bei 0 verwerfen)
+}
+
+message RelayAck {
+  bytes relay_id = 1;                  // Zugehörige relay_id
+  bool delivered = 2;                  // true = Ziel erreicht
+  bytes relayed_by = 3;               // Node-ID des zustellenden Relay
+}
+
+// ── Peer Reachability Query (Relay Route Discovery) ───────────────────
+
+message PeerReachabilityQuery {
+  bytes target_node_id = 1;            // Peer den wir suchen
+  bytes query_id = 2;                  // 16-Byte UUID (Dedup)
+  // V3.1.33: Port probe — ask responder to send a CPRB probe packet
+  // to this address. Used to verify port forwarding (manual DNAT, UPnP)
+  // without relying on UPnP AddPortMapping success.
+  string probe_ip = 3;                // Public IP to probe (empty = normal query)
+  uint32 probe_port = 4;              // Port to probe
+}
+
+message PeerReachabilityResponse {
+  bytes target_node_id = 1;
+  bytes query_id = 2;
+  bool can_reach = 3;                  // Peer in Routing-Table und kürzlich gesehen?
+  uint64 last_seen_ms = 4;            // Wann zuletzt gesehen (0 = nie)
+}
+
+// ── Store-and-Forward (offline delivery via peers) ────────────────────
+
+message PeerStore {
+  bytes recipient_node_id = 1;         // Für wen speichern
+  bytes wrapped_envelope = 2;          // Original-Envelope (verschlüsselt, signiert)
+  bytes store_id = 3;                  // 16-Byte UUID (Dedup)
+  uint64 ttl_ms = 4;                  // Wie lange speichern (Default 7 Tage)
+}
+
+message PeerStoreAck {
+  bytes store_id = 1;
+  bool accepted = 2;
+}
+
+message PeerRetrieve {
+  bytes requester_node_id = 1;         // Wer fragt (= eigene NodeId)
+}
+
+message PeerRetrieveResponse {
+  repeated bytes stored_envelopes = 1; // Serialisierte Original-Envelopes
+  uint32 remaining = 2;               // Noch mehr vorhanden? (Pagination)
+}
+
+// ── Distance-Vector Routing (V3) ────────────────────────────────────────
+
+enum ConnectionTypeProto {
+  CT_LAN_SAME_SUBNET = 0;
+  CT_LAN_OTHER_SUBNET = 1;
+  CT_WIFI_DIRECT = 2;
+  CT_PUBLIC_UDP = 3;
+  CT_HOLE_PUNCH = 4;
+  CT_RELAY = 5;
+  CT_MOBILE = 6;
+  CT_MOBILE_RELAY = 7;
+}
+
+message RouteEntryProto {
+  bytes destination = 1;               // 32 Bytes NodeId
+  int32 hop_count = 2;
+  int32 cost = 3;
+  ConnectionTypeProto conn_type = 4;
+  int64 last_confirmed_ms = 5;
+  uint32 capabilities = 6;             // PeerCapabilities bitmask (§27: ipv4=1, ipv6=2)
+}
+
+message RouteUpdateMsg {
+  repeated RouteEntryProto routes = 1;
+}
+
+// ── NAT Hole Punch (V3) ───────────────────────────────────────────────
+
+message HolePunchRequest {
+  bytes target_node_id = 1;        // Peer den wir punchen wollen
+  string my_public_ip = 2;        // Unsere oeffentliche IP
+  int32 my_public_port = 3;       // Unser oeffentlicher Port
+  bytes request_id = 4;           // 16-Byte UUID (Dedup)
+}
+
+message HolePunchNotify {
+  bytes requester_node_id = 1;     // Wer will punchen
+  string requester_ip = 2;        // Dessen oeffentliche IP
+  int32 requester_port = 3;       // Dessen oeffentlicher Port
+  bytes request_id = 4;           // 16-Byte UUID (Dedup)
+}
+
+message HolePunchPing {
+  bytes request_id = 1;           // Zugehoerige request_id
+  bytes sender_node_id = 2;       // Wer pingt
+  int64 timestamp_ms = 3;         // Fuer RTT-Messung
+}
+
+message HolePunchPong {
+  bytes request_id = 1;           // Zugehoerige request_id
+  bytes sender_node_id = 2;       // Wer pongt
+  int64 ping_timestamp_ms = 3;    // Echo des Ping-Timestamps
+}
+
+// ── App-Level Chunking for Relay/S&F (V3.1.9) ───────────────────────
+
+message MediaChunk {
+  bytes transfer_id = 1;          // 16-Byte UUID, identifies the chunked transfer
+  uint32 chunk_index = 2;         // 0-based chunk index
+  uint32 total_chunks = 3;        // Total number of chunks
+  bytes chunk_data = 4;           // Chunk payload (piece of the original serialized envelope)
+  bytes original_recipient_id = 5; // Final recipient (32 bytes) for routing
+}
+
+// ── Overlay Multicast Tree (Phase 3d) ─────────────────────────────────
+
+message CallRttPing {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  int64 timestamp_us = 2;        // Sender's microsecond timestamp
+}
+
+message CallRttPong {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  int64 echo_timestamp_us = 2;   // Echoed from ping (for RTT calculation)
+  int64 responder_timestamp_us = 3; // Responder's own timestamp
+}
+
+message OverlayTreeNode {
+  bytes node_id = 1;              // Participant Node-ID (32 bytes)
+  bytes parent_node_id = 2;       // Parent Node-ID (empty = root)
+  repeated bytes child_node_ids = 3; // Children Node-IDs
+  bool is_lan_cluster_head = 4;   // Represents a LAN multicast cluster
+  repeated bytes lan_member_ids = 5; // Other LAN cluster members (receive via multicast)
+}
+
+message CallTreeUpdate {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  repeated OverlayTreeNode nodes = 2; // Full tree topology
+  bytes initiator_node_id = 3;    // Tree root (call initiator)
+  uint32 version = 4;             // Monotonic version (for conflict resolution)
+}
+
+// ── Video Calls (Phase 3b) ────────────────────────────────────────────
+
+// Video frame flags (bitmask in flags field):
+//   0x01 = keyframe
+//   0x02 = last fragment of this frame
+//   0x04 = frame is a fragment (not complete)
+message VideoFrame {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  uint32 sequence_number = 2;     // Monotonic per-stream sequence
+  uint32 flags = 3;               // Bitmask: keyframe(0x01), last_fragment(0x02), is_fragment(0x04)
+  uint32 fragment_index = 4;      // Fragment index within a frame (0 if not fragmented)
+  uint32 fragment_total = 5;      // Total fragments for this frame (1 if not fragmented)
+  uint32 width = 6;               // Frame width in pixels
+  uint32 height = 7;              // Frame height in pixels
+  bytes nonce = 8;                // 12-Byte AES-256-GCM nonce
+  bytes encrypted_data = 9;       // VP8 encoded + AES-256-GCM encrypted frame data + 16B tag
+  uint32 timestamp_ms = 10;       // Capture timestamp (for sync + jitter)
+}
+
+message KeyframeRequest {
+  bytes call_id = 1;              // 16-Byte Call-ID
+}
+
+// ── Group Calls (Phase 3c) ───────────────────────────────────────────
+
+message GroupCallAudio {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — original audio source
+  uint32 sequence_number = 3;     // Per-sender monotonic sequence
+  bytes encrypted_audio = 4;      // AES-256-GCM encrypted PCM (keyed by group_call_key)
+}
+
+message GroupCallLeave {
+  bytes call_id = 1;              // 16-Byte Call-ID
+}
+
+message GroupCallKeyRotate {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes new_call_key = 2;         // 32 bytes (KEM-encrypted per recipient in envelope)
+  uint32 key_version = 3;         // Monotonic version for race handling
+}
+
+message GroupCallVideo {
+  bytes call_id = 1;              // 16-Byte Call-ID
+  bytes sender_node_id = 2;       // 32 bytes — original video source
+  bytes video_frame_data = 3;     // Serialized VideoFrame proto (encrypted VP8)
+}
+
+// ── Voice Transcription (Source-Side) ────────────────────────────────
+
+message VoicePayload {
+  bytes audio_data = 1;             // Audio-Bytes (Opus/OGG/AAC)
+  string transcript_text = 2;      // Transkript (leer = kein Transkript vorhanden)
+  string transcript_language = 3;  // Erkannte Sprache ("de", "en", ...)
+  float transcript_confidence = 4; // Confidence 0.0-1.0
+}
+
+// ── Multi-Device (§26) ──────────────────────────────────────────────
+
+enum TwinSyncType {
+  CONTACT_ADDED = 0;
+  CONTACT_DELETED = 1;
+  MESSAGE_SENT = 2;
+  MESSAGE_EDITED = 3;
+  MESSAGE_DELETED = 4;
+  TWIN_READ_RECEIPT = 5;
+  GROUP_CREATED = 6;
+  PROFILE_CHANGED = 7;
+  SETTINGS_CHANGED = 8;
+  DEVICE_ANNOUNCE = 9;
+  DEVICE_RENAMED = 10;
+  TWIN_DEVICE_REVOKED = 11;
+}
+
+enum DevicePlatform {
+  PLATFORM_UNKNOWN = 0;
+  PLATFORM_ANDROID = 1;
+  PLATFORM_IOS = 2;
+  PLATFORM_LINUX = 3;
+  PLATFORM_WINDOWS = 4;
+  PLATFORM_MACOS = 5;
+}
+
+message TwinSyncEnvelope {
+  bytes sync_id = 1;               // UUID (16 bytes), for deduplication
+  bytes device_id = 2;             // UUID (16 bytes), originating device
+  uint64 timestamp = 3;            // Unix milliseconds
+  TwinSyncType sync_type = 4;
+  bytes payload = 5;               // Type-specific protobuf
+}
+
+message DeviceRecord {
+  bytes device_id = 1;             // UUID (16 bytes), generated once on first launch
+  string device_name = 2;          // OS hostname by default, user-editable
+  DevicePlatform platform = 3;
+  uint64 first_seen = 4;           // Unix milliseconds
+  uint64 last_seen = 5;            // Unix milliseconds, updated on each TWIN_SYNC
+  repeated PeerAddressProto addresses = 6; // Current network addresses of this device
+  bool is_this_device = 7;         // True if this is the local device
+  bytes device_node_id = 8;        // §26 Phase 4: routing-level ID for this device (for DEVICE_REVOKED)
+}
+
+message KeyRotationBroadcast {
+  bytes new_ed25519_pk = 1;        // 32 bytes — new public key
+  bytes new_ml_dsa_pk = 2;         // ML-DSA-65 public key
+  bytes new_x25519_pk = 3;         // 32 bytes — new X25519 public key
+  bytes new_ml_kem_pk = 4;         // ML-KEM-768 public key
+  bytes old_signature_ed25519 = 5; // Signature with OLD key (proves ownership)
+  bytes new_signature_ed25519 = 6; // Signature with NEW key (proves new identity)
+}
+
+// ── Calendar (§23) ─────────────────────────────────────────────────────
+
+enum EventCategory {
+  APPOINTMENT = 0;
+  TASK = 1;
+  BIRTHDAY = 2;
+  REMINDER = 3;
+  MEETING = 4;
+}
+
+enum FreeBusyLevel {
+  FB_FULL = 0;          // Title, description, location, time visible
+  FB_TIME_ONLY = 1;     // Only "busy from X to Y" visible (no content)
+  FB_HIDDEN = 2;        // Not visible in Free/Busy queries at all
+}
+
+enum RsvpStatus {
+  RSVP_ACCEPTED = 0;
+  RSVP_DECLINED = 1;
+  RSVP_TENTATIVE = 2;
+  RSVP_PROPOSE_NEW_TIME = 3;
+}
+
+message CalendarReminderOffset {
+  int32 minutes_before = 1;       // 5, 15, 60, 1440 (=1 day), etc.
+}
+
+message CalendarInviteMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  string title = 2;
+  string description = 3;
+  string location = 4;
+  int64 start_time = 5;            // Unix milliseconds
+  int64 end_time = 6;              // Unix milliseconds
+  bool all_day = 7;
+  string time_zone = 8;            // IANA timezone, e.g. "Europe/Berlin"
+  string recurrence_rule = 9;      // RFC 5545 RRULE (optional)
+  bool has_call = 10;
+  bytes group_id = 11;             // Linked group (for group events)
+  bytes created_by = 12;           // Inviter's node ID
+  string created_by_name = 13;     // Inviter's display name
+  int64 rsvp_deadline = 14;        // Optional deadline (Unix ms, 0 = no deadline)
+  EventCategory category = 15;
+  repeated CalendarReminderOffset reminders = 16;
+}
+
+message CalendarRsvpMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  RsvpStatus response = 2;
+  int64 proposed_start = 3;        // Only for PROPOSE_NEW_TIME
+  int64 proposed_end = 4;          // Only for PROPOSE_NEW_TIME
+  string comment = 5;              // Optional comment
+}
+
+message CalendarUpdateMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  string title = 2;
+  string description = 3;
+  string location = 4;
+  int64 start_time = 5;
+  int64 end_time = 6;
+  bool all_day = 7;
+  string time_zone = 8;
+  string recurrence_rule = 9;
+  bool has_call = 10;
+  bool cancelled = 11;             // true = event cancelled
+  int64 updated_at = 12;           // Unix milliseconds
+  repeated CalendarReminderOffset reminders = 13;
+}
+
+message CalendarDeleteMsg {
+  bytes event_id = 1;              // UUID (16 bytes)
+  int64 deleted_at = 2;            // Unix milliseconds
+}
+
+message FreeBusyRequestMsg {
+  int64 query_start = 1;           // Unix ms, start of the query window
+  int64 query_end = 2;             // Unix ms, end of the query window
+  bytes request_id = 3;            // UUID (16 bytes) for response correlation
+}
+
+message FreeBusyResponseMsg {
+  bytes request_id = 1;            // UUID (16 bytes), correlates to request
+  repeated FreeBusyBlock blocks = 2;
+}
+
+message FreeBusyBlock {
+  int64 start = 1;                 // Unix ms
+  int64 end = 2;                   // Unix ms
+  FreeBusyLevel level = 3;         // FULL or TIME_ONLY (HIDDEN events omitted entirely)
+  string title = 4;                // Only present if level == FULL
+  string location = 5;             // Only present if level == FULL
+}
+
+// ── Polls & Voting (§24) ───────────────────────────────────────────────
+
+enum PollType {
+  POLL_SINGLE_CHOICE = 0;    // Exactly one option
+  POLL_MULTIPLE_CHOICE = 1;  // Several options
+  POLL_DATE = 2;             // Doodle-style Yes/No/Maybe per slot
+  POLL_SCALE = 3;            // Rating 1..N
+  POLL_FREE_TEXT = 4;        // Open text response
+}
+
+enum PollAction {
+  POLL_ACTION_CLOSE = 0;
+  POLL_ACTION_REOPEN = 1;
+  POLL_ACTION_ADD_OPTIONS = 2;
+  POLL_ACTION_REMOVE_OPTIONS = 3;
+  POLL_ACTION_EXTEND_DEADLINE = 4;
+  POLL_ACTION_DELETE = 5;
+}
+
+enum DateAvailability {
+  DATE_AVAIL_YES = 0;
+  DATE_AVAIL_NO = 1;
+  DATE_AVAIL_MAYBE = 2;
+}
+
+message PollOptionMsg {
+  int32 option_id = 1;             // Sequential (0, 1, 2, ...)
+  string label = 2;
+  int64 date_start = 3;            // For POLL_DATE: slot start (Unix ms, 0 = unused)
+  int64 date_end = 4;              // For POLL_DATE: slot end (Unix ms, 0 = unused)
+}
+
+message PollSettingsMsg {
+  bool anonymous = 1;              // Ring-signed anonymous voting (§24.4)
+  int64 deadline = 2;              // Auto-close time (Unix ms, 0 = none)
+  bool allow_vote_change = 3;      // Default: true
+  bool show_results_before_close = 4; // Default: true
+  int32 max_choices = 5;           // For MULTIPLE_CHOICE (0 = unlimited)
+  int32 scale_min = 6;             // For SCALE (default 1)
+  int32 scale_max = 7;             // For SCALE (default 5)
+  bool only_members_can_vote = 8;  // Channels: members only, not subscribers
+}
+
+message PollCreateMsg {
+  bytes poll_id = 1;               // UUID (16 bytes)
+  string question = 2;
+  string description = 3;
+  PollType poll_type = 4;
+  repeated PollOptionMsg options = 5;
+  PollSettingsMsg settings = 6;
+  bytes group_id = 7;              // Group or channel this poll belongs to
+  bytes created_by = 8;            // Creator's node ID
+  string created_by_name = 9;
+  int64 created_at = 10;           // Unix ms
+}
+
+message DateResponseMsg {
+  int32 option_id = 1;
+  DateAvailability availability = 2;
+}
+
+message PollVoteMsg {
+  bytes poll_id = 1;
+  bytes voter_id = 2;              // Voter's node ID (non-anonymous)
+  string voter_name = 3;
+  repeated int32 selected_options = 4; // SINGLE/MULTIPLE_CHOICE option IDs
+  repeated DateResponseMsg date_responses = 5; // DATE poll
+  int32 scale_value = 6;           // SCALE poll
+  string free_text = 7;            // FREE_TEXT poll
+  int64 voted_at = 8;
+}
+
+message PollUpdateMsg {
+  bytes poll_id = 1;
+  PollAction action = 2;
+  bytes updated_by = 3;            // Must be creator or admin
+  repeated PollOptionMsg added_options = 4;    // POLL_ACTION_ADD_OPTIONS
+  repeated int32 removed_options = 5;          // POLL_ACTION_REMOVE_OPTIONS
+  int64 new_deadline = 6;          // POLL_ACTION_EXTEND_DEADLINE
+  int64 updated_at = 7;
+}
+
+message OptionCountMsg {
+  int32 option_id = 1;
+  int32 count = 2;                 // SINGLE/MULTIPLE/DATE: vote count per option
+  int32 yes_count = 3;             // DATE poll only
+  int32 maybe_count = 4;           // DATE poll only
+  int32 no_count = 5;              // DATE poll only
+}
+
+message PollSnapshotMsg {
+  bytes poll_id = 1;
+  int32 total_votes = 2;
+  repeated OptionCountMsg option_counts = 3;
+  double scale_average = 4;        // SCALE poll only
+  int32 scale_count = 5;           // SCALE poll: number of voters
+  bool closed = 6;
+  int64 snapshot_at = 7;
+}
+
+// Anonymous vote (§24.4): ring signature over all group member keys.
+// Contains no voter_id/voter_name — identity is hidden by the ring, while
+// key_image prevents double-voting.
+message PollVoteAnonymousMsg {
+  bytes poll_id = 1;
+  bytes encrypted_choice = 2;      // Serialised PollVoteMsg with voter_id cleared
+  bytes key_image = 3;             // 32 bytes — linkability tag
+  bytes ring_signature = 4;        // Concatenated (c_i || r_i) pairs, 64B each
+  repeated bytes ring_members = 5; // The N public keys used (Ed25519, 32B each)
+  int64 voted_at = 6;
+}
+
+// Anonymous vote-revocation: owner proves ownership of a key image by
+// re-signing a fixed "revoke" marker with the same ring.
+message PollVoteRevokeMsg {
+  bytes poll_id = 1;
+  bytes key_image = 2;
+  bytes ring_signature = 3;
+  repeated bytes ring_members = 4;
+  int64 revoked_at = 5;
+}

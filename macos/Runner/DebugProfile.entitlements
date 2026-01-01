@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Cleona is a P2P messenger. We need unrestricted access to the
+	     user's home directory (the $HOME/.cleona profile) and to arbitrary
+	     UDP ports for DHT + multicast discovery. Running outside the
+	     sandbox matches the Linux/Windows behaviour; notarized non-App-Store
+	     distribution does not require sandboxing.
+
+	     For a future App Store build the sandbox would have to be
+	     re-enabled, which would force the profile directory into
+	     ~/Library/Containers/<bundle-id>/Data — that is a deliberate
+	     architectural decision, not a v1 goal. -->
+	<key>com.apple.security.app-sandbox</key>
+	<false/>
+
+	<!-- Dart VM uses JIT in debug/profile builds -->
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+
+	<!-- Outbound + inbound network access (explicit so the same file works
+	     even if someone flips sandbox back on) -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+	<key>com.apple.security.network.server</key>
+	<true/>
+</dict>
+</plist>

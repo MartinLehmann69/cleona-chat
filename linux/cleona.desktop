@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Cleona Chat
+Comment=Dezentraler P2P Messenger mit Post-Quantum-Verschluesselung
+Exec=cleona-app/cleona
+Icon=cleona-app/data/flutter_assets/assets/app_icon.png
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=chat;messenger;p2p;encryption;
+StartupNotify=true
+StartupWMClass=cleona

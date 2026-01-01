@@ -1,0 +1,4 @@
+# Limit test concurrency to prevent ENOBUFS (UDP buffer exhaustion)
+# when running many smoke tests in parallel. Each test opens UDP sockets
+# and the OS kernel buffer pool is finite.
+concurrency: 4

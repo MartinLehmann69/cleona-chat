@@ -1,0 +1,90 @@
+name: cleona
+description: "Cleona Chat - Decentralized P2P Messenger with Post-Quantum Encryption"
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # Protobuf
+  protobuf: ^4.0.0
+  fixnum: ^1.1.0
+
+  # FFI for native crypto/erasure libs
+  ffi: ^2.1.0
+
+  # Provider for state management
+  provider: ^6.1.0
+
+  # UUID generation
+  uuid: ^4.0.0
+
+  # Path utilities
+  path: ^1.9.0
+  path_provider: ^2.1.0
+
+  # Connectivity detection
+  connectivity_plus: ^6.0.0
+
+  # QR Code
+  qr_flutter: ^4.1.0
+
+  # Shared preferences for settings
+  shared_preferences: ^2.2.0
+
+  # Collection utilities
+  collection: ^1.18.0
+
+  # File picker for profile pictures
+  file_picker: ^8.0.0
+
+  # Camera capture for profile pictures (Android)
+  image_picker: ^1.0.0
+
+  # QR code scanning (Android camera)
+  mobile_scanner: ^6.0.0
+  pdf: ^3.11.2
+  printing: ^5.14.3
+  video_player: ^2.11.1
+  just_audio: ^0.10.5
+  record: ^6.2.0
+  url_launcher: ^6.3.2
+  desktop_drop: ^0.7.0
+
+  # NFC Contact Exchange (Android only)
+  nfc_manager: ^3.5.0
+  emoji_picker_flutter: ^4.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+  test: ^1.25.0
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/app_icon.png
+    - assets/app_icon.ico
+    - assets/app_icon_beta.png
+    - assets/app_icon_beta.ico
+    - assets/tray_icon.png
+    - assets/tray_icon_beta.png
+    - assets/icons/skins/
+    - assets/cleona_maintainer_public.pem
+    - assets/sounds/
+    - assets/conn_strong.png
+    - assets/conn_good.png
+    - assets/conn_medium.png
+    - assets/conn_weak.png
+    - assets/conn_skeleton.png
+    - assets/nat_wizard/router_db.json

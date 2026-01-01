@@ -1,0 +1,15 @@
+[Unit]
+Description=Cleona Chat Daemon - Decentralized P2P Messenger
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/cleona-app/cleona-daemon --profile %h/.cleona/default --port 0 --name Cleona
+Restart=on-failure
+RestartSec=5
+# Allow reading port from profile at runtime
+Environment=HOME=%h
+
+[Install]
+WantedBy=default.target
