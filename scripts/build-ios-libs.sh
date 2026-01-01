@@ -244,6 +244,9 @@ build_liberasurecode() {
     fi
     cd "$src"
     make distclean 2>/dev/null || true
+    if [ -d m4 ] && [ ! -f "m4/lt~obsolete.m4" ]; then
+        touch "m4/lt~obsolete.m4"
+    fi
     ./autogen.sh
     CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-error" \
     ./configure --host="$CONFIGURE_HOST" \
@@ -265,6 +268,10 @@ build_libopus() {
     fi
     cd "$src"
     make distclean 2>/dev/null || true
+    # macOS APFS + newer libtool may drop lt~obsolete.m4 (tilde in filename)
+    if [ -d m4 ] && [ ! -f "m4/lt~obsolete.m4" ]; then
+        touch "m4/lt~obsolete.m4"
+    fi
     ./autogen.sh
     ./configure --host="$CONFIGURE_HOST" \
         --prefix="$INSTALL_DIR/opus" \
