@@ -91,6 +91,10 @@ class CLogger {
     return List.unmodifiable(_events.sublist(_events.length - count));
   }
 
+  /// B1 (2026-07-27): Modulnamen, fuer die der "kein Log-Buffer"-Selbstalarm
+  /// bereits ausgegeben wurde (einmal pro Modul, kein Flooding).
+  static final Set<String> _blindModulesWarned = {};
+
   /// iOS: mirror log output to this path (Documents/, AFC-accessible).
   /// Set from main.dart via path_provider before any CLogger is created.
   static String? iosMirrorPath;
@@ -158,8 +162,22 @@ class CLogger {
     if (_ring.length > _ringCapacity) _ring.removeAt(0);
 
     // Buffer for file write
-    if (profileDir != null) {
-      _buffers[profileDir]?.writeln(line);
+    final buffer = profileDir != null ? _buffers[profileDir] : null;
+    if (buffer != null) {
+      buffer.writeln(line);
+    } else if (_blindModulesWarned.add(module)) {
+      // B1 (2026-07-27) Selbst-Alarm: ein Modul ohne profileDir loggt ins
+      // Nichts — die Zeile geht nur in Konsole + Ring-Buffer, NIE in
+      // logs/cleona_*.log. Genau so verschwanden alle [resolver]-Zeilen
+      // (D1 Trust-Anchor) aus beiden Logfiles. Einmal pro Modulname, damit
+      // der Alarm selbst kein Flooding wird; stderr, weil er auch dann
+      // sichtbar sein muss, wenn die Datei-Pipeline nicht greift.
+      try {
+        stderr.writeln('$ts [WARN ] [clogger] Modul "$module" hat keinen '
+            'Log-Buffer (profileDir=$profileDir) — seine Zeilen landen in '
+            'KEINEM Logfile, nur in Konsole + Ring-Buffer. '
+            'CLogger.get("$module", profileDir: ...) durchreichen.');
+      } catch (_) {}
     }
 
     // iOS mirror: duplicate ALL log lines to the AFC-accessible Documents path

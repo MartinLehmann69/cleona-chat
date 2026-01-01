@@ -148,27 +148,70 @@ void main() {
     );
     await tester.pump(const Duration(seconds: 2));
 
-    // 2.5 Wait for peer connection (60s timeout)
-    var peerConnected = false;
+    // 2.5 Wait for a CONFIRMED peer (60s timeout)
+    //
+    // S280: Diese Zusicherung las frueher die Zahl aus dem Badge-Widget des
+    // Home-Screens. Das war aus zwei Gruenden falsch.
+    //
+    // Erstens misst sie damit die UI statt das Netz: Woran der Badge gebunden
+    // ist, hat sich zweimal geaendert (07.07. service.peerCount ->
+    // 11.07. confirmedPeerCount -> heute reachablePeerCount), und der Test hat
+    // jedes Mal seine Bedeutung mitgeaendert, ohne dass jemand ihn angefasst
+    // haette.
+    //
+    // Zweitens — und das ist der Schaden — zaehlte service.peerCount die
+    // Peers der Routing-Tabelle, in die addPeersFromContactSeed() den Bootstrap
+    // OPTIMISTISCH eintraegt, bevor je eine Antwort kam. Der Test war deshalb
+    // monatelang gruen, ohne dass ein einziges Paket beantwortet wurde. Beleg,
+    // gruener Lauf 28893933971 vom 07.07.:
+    //   [publisher] onPeerJoined: peerCount=1
+    //   [node] sendToDevice 12d3cabd: cascade exhausted (routes=0, neighbors=0)
+    //   -> 1 test passed
+    // Ein Netzwerk-Integrationstest, der ohne Netzwerkverkehr gruen wird, ist
+    // schlimmer als keiner.
+    //
+    // Jetzt: direkt gegen die Service-API, auf BESTAETIGTE Erreichbarkeit.
+    // reachablePeerCount ist dieselbe Semantik, die der Badge heute anzeigt
+    // (bestaetigte Peers plus DV-Ziele mit hasConfirmedRouteTo), nur aus der
+    // Quelle gelesen statt aus dem Widget-Baum.
+    var reachable = 0;
+    var confirmed = 0;
+    var routingTablePeers = 0;
     for (var i = 0; i < 12; i++) {
       await tester.pump(const Duration(seconds: 5));
-      final badge = find.byType(Badge);
-      for (final b in badge.evaluate()) {
-        final widget = b.widget as Badge;
-        if (widget.label is Text) {
-          final text = (widget.label as Text).data ?? '0';
-          final count = int.tryParse(text);
-          if (count != null && count > 0) {
-            peerConnected = true;
-            break;
-          }
-        }
-      }
-      if (peerConnected) break;
+      reachable = service.reachablePeerCount;
+      confirmed = service.confirmedPeerCount;
+      routingTablePeers = service.peerCount;
+      if (reachable > 0) break;
     }
 
-    expect(peerConnected, isTrue,
-        reason: '2.5 Peer-Count > 0 nach ContactSeed-Import (60s Timeout)');
+    // Diagnose immer ausgeben — ein spaeterer Fehlschlag soll sagen WARUM,
+    // nicht nur "Expected: true, Actual: false".
+    printOnFailure('2.5 Peer-Zaehler nach 60s: '
+        'reachable=$reachable confirmed=$confirmed '
+        'routingTable=$routingTablePeers');
+
+    if (reachable == 0 && routingTablePeers > 0) {
+      // Der Seed wurde eingetragen, aber nichts hat je geantwortet. Genau
+      // dieses Muster zeigten die Laeufe vom 07.07. und 11.07. Geprueft und
+      // als Ursache ausgeschlossen: der Seed ist aktuell (Repo-Variable traegt
+      // die aktive WAN-IP) und der Bootstrap ist oeffentlich erreichbar (sein
+      // Journal zeigt laufend Verkehr mit externen Mobilfunk-/Provider-IPs).
+      // Bleibt als Verdacht der Rueckweg zum Runner: GitHub-Runner haengen
+      // hinter Azure-NAT ohne Port-Mapping ("[nat] External IP known
+      // (no port mapping): 13.105.220.3").
+      fail('2.5 Kein bestaetigter Peer nach 60s, obwohl $routingTablePeers '
+          'Seed-Peer(s) in der Routing-Tabelle stehen — es kam keine einzige '
+          'Antwort zurueck. Der Seed ist aktuell und der Bootstrap ist '
+          'oeffentlich erreichbar; zu pruefen ist der Rueckweg zum Runner '
+          '(Azure-NAT/UDP-Egress). Im Log gegenpruefen: "cascade exhausted", '
+          '"0 confirmed peers after 30s", "D4 self-verify MISS".');
+    }
+
+    expect(reachable, greaterThan(0),
+        reason: '2.5 Bestaetigter Peer nach ContactSeed-Import (60s Timeout) — '
+            'reachable=$reachable confirmed=$confirmed '
+            'routingTable=$routingTablePeers');
 
     // ── Phase 3: Cross-Node CR + Messaging ──────────────────────────
     if (!hasPhase3) {

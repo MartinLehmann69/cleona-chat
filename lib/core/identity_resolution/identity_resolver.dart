@@ -144,14 +144,21 @@ class IdentityResolver {
   /// Einmal-pro-User-Guard fuer das Legacy-Fallback-Log (Transition).
   final Set<String> _legacyLoggedFor = {};
 
-  final CLogger _log = CLogger.get('resolver');
+  /// B1 (2026-07-27): OHNE `profileDir` schreibt CLogger nur in Ring-Buffer
+  /// + Konsole — `CLogger._log` puffert Datei-Zeilen ausschliesslich unter
+  /// `_buffers[profileDir]`. Alle D1-Trust-Anchor-Entscheidungen fehlten
+  /// dadurch in beiden Logfiles (`grep -c "[resolver]"` = 0). Der Node
+  /// reicht seinen profileDir jetzt durch (wie bei DhtRpc/AckTracker).
+  final CLogger _log;
 
   IdentityResolver({
     required this.routingTable,
     required this.dhtRpc,
     this.dhtHandler,
+    String? profileDir,
     Uint8List Function(Uint8List ed25519Pk)? deriveUserId,
-  }) : _deriveUserId = deriveUserId ??
+  })  : _log = CLogger.get('resolver', profileDir: profileDir),
+        _deriveUserId = deriveUserId ??
             ((pk) => HdWallet.computeUserId(pk, NetworkSecret.secret));
 
   /// Auflöse `userId` zu einer Liste authorisierter Devices.
@@ -371,6 +378,19 @@ class IdentityResolver {
       try {
         final p = proto.DeviceKemRecordV3.fromBuffer(response.payload);
         final r = DeviceKemRecord.fromProto(p);
+        // A2 (2026-07-27): dieselbe Record-Bindung wie beim AuthManifest.
+        // Der KEM-Record traegt userId + deviceId selbst — eine Antwort,
+        // die auf den (userId,deviceId)-Lookup ein Paar fuer jemand
+        // anderen liefert, ist nie legitim. Greift auch im Legacy-Pfad
+        // (anchorPk == null), wo sonst nur der selbstreferenzielle
+        // verify(r.userEd25519Pk) laeuft.
+        if (!_bytesEqual(r.userId, userId) ||
+            !_bytesEqual(r.deviceId, deviceId)) {
+          _log.warn('D1: DeviceKemRecord fuer fremdes Paar '
+              '(${_shortHex(r.userId)}/${_shortHex(r.deviceId)}) auf Lookup '
+              '(${_shortHex(userId)}/${_shortHex(deviceId)}) — verworfen');
+          continue;
+        }
         if (anchorPk != null &&
             (!_bytesEqual(r.userEd25519Pk, anchorPk) ||
                 !r.verify(anchorPk))) {
@@ -421,6 +441,22 @@ class IdentityResolver {
       try {
         final p = proto.AuthManifestProto.fromBuffer(response.payload);
         final m = AuthManifest.fromProto(p);
+        // A2 (2026-07-27): Record-Bindung an die ANGEFRAGTE userId. Ohne
+        // diesen Check landet ein fremdes, in sich selbst-konsistentes
+        // Manifest (verifySelfCertified bindet den Key an manifest.userId,
+        // also an sich selbst) in der Klassifikation: fuer einen Kontakt
+        // wird es dann als contactMismatch eingestuft, feuert
+        // onContactKeyMismatch und triggert damit den D1-Self-Heal-Pfad
+        // auf einen wildfremden Key. Ein Replicator, der auf einen
+        // auth-Lookup die falsche (oder eine untergeschobene) Antwort
+        // liefert, darf gar nicht erst in die Kryptopruefung laufen —
+        // deshalb VOR verifySelfCertified verwerfen.
+        if (!_bytesEqual(m.userId, userId)) {
+          _log.warn('D1: AuthManifest fuer fremde userId '
+              '${_shortHex(m.userId)}... auf Lookup '
+              '${_shortHex(userId)}... — verworfen');
+          continue;
+        }
         final status = m.verifySelfCertified(
           deriveUserId: _deriveUserId,
           contactEd25519Pk: contactPk,
@@ -512,6 +548,20 @@ class IdentityResolver {
       try {
         final p = proto.LivenessRecordProto.fromBuffer(response.payload);
         final r = LivenessRecord.fromProto(p);
+        // A2 (2026-07-27): Record-Bindung an das angefragte
+        // (userId, deviceNodeId)-Paar. Der Authorized-List-Filter weiter
+        // unten prueft nur die Mitgliedschaft im Manifest, nicht ob die
+        // Antwort ueberhaupt zum Lookup-Schluessel gehoert — ohne diese
+        // Bindung koennte ein Replicator die Adressen eines fremden
+        // (aber ebenfalls authorisierten) Devices unterschieben.
+        if (!_bytesEqual(r.userId, userId) ||
+            !_bytesEqual(r.deviceNodeId, deviceNodeId)) {
+          _log.warn('D1: LivenessRecord fuer fremdes Paar '
+              '(${_shortHex(r.userId)}/${_shortHex(r.deviceNodeId)}) auf '
+              'Lookup (${_shortHex(userId)}/${_shortHex(deviceNodeId)}) — '
+              'verworfen');
+          continue;
+        }
         if (anchorPk != null && !r.verify(anchorPk)) {
           continue; // forged — Adressen eines Angreifers nie uebernehmen
         }
@@ -590,6 +640,14 @@ class IdentityResolver {
   bool _cacheStillFresh(PeerInfo p) {
     final age = DateTime.now().difference(p.lastSeen);
     return age.inHours < 1;
+  }
+
+  /// Log-Helfer: erste 16 Hex-Zeichen, tolerant gegen kurze/leere Bytes
+  /// (Record-Felder sind Angreifer-kontrolliert — `substring(0, 16)` wuerde
+  /// dort werfen).
+  String _shortHex(Uint8List b) {
+    final hex = bytesToHex(b);
+    return hex.length <= 16 ? hex : hex.substring(0, 16);
   }
 
   bool _bytesEqual(Uint8List a, Uint8List b) {

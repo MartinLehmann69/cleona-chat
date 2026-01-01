@@ -480,7 +480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.157';
+  static const String kCurrentAppVersion = '3.1.158';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -1099,29 +1099,75 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final contact = _contacts[userHex];
       if (contact == null) return;
 
-      // A8 D1 Self-Heal: check Pfad 1 (Founding-Hash) + Pfad 2 (Rotationskette).
-      // contactEd25519Pk: null — Pfad 3 (Contact-Match) is excluded by definition
-      // (this callback fires exactly on contact-mismatch; Fable L1).
+      // A3 (2026-07-27): (a) Das Manifest muss zum ANGEFRAGTEN Kontakt
+      // gehoeren. Der Resolver prueft das seit A2 selbst, hier bleibt es
+      // als zweite Schranke stehen — dieser Callback ist oeffentlich
+      // gesetzt und darf sich nicht darauf verlassen, dass jeder Aufrufer
+      // die Bindung schon geprueft hat.
+      if (!constantTimeEquals(Uint8List.fromList(manifest.userId), userId)) {
+        _log.warn('D1 self-heal abgelehnt: AuthManifest gehoert zu '
+            '${bytesToHex(Uint8List.fromList(manifest.userId))} — Lookup war '
+            'fuer ${userHex.substring(0, 16)} (§4.3 record binding)');
+        return;
+      }
+
+      // (b) Anker-Pruefung OHNE Kontakt-Pk — bewusst. §4.3 (Zeile 1487)
+      // definiert drei gleichwertige Bindungspfade (Founding-Key-Hash,
+      // Rotationskette, Contact-Match); greift EINER, wird der gespeicherte
+      // Key automatisch nachgezogen. Genau das deckt den dokumentierten
+      // Fall "veralteter Kontakt-Key nach delete+re-add" ab, der ohne
+      // Rotationskette auskommt und nur ueber den Founding-Hash bindet.
+      //
+      // Ein Kontakt-Pk hier wuerde `contactMismatch` zum harten Veto machen
+      // (auth_manifest.dart:245-249) und diesen Pfad unerreichbar machen:
+      // der Resolver hat bereits mit dem Kontakt-Pk geprueft, sonst waere
+      // dieser Callback gar nicht gelaufen.
+      //
+      // Sicher ist das seit A2: der Resolver verwirft Antworten, die nicht
+      // zur angefragten userId gehoeren, und (a) oben ist die zweite
+      // Schranke. Ein FREMDES Manifest erreicht diesen Punkt nicht mehr —
+      // und fuer ein Manifest, das nachweislich zu dieser userId gehoert,
+      // ist die Founding-Hash-Bindung ein legitimer Anker.
       final status = manifest.verifySelfCertified(
         deriveUserId: (pk) => HdWallet.computeUserId(pk, NetworkSecret.secret),
         contactEd25519Pk: null,
       );
 
-      if (status == AnchorStatus.verified) {
-        final oldPkHex = contact.ed25519Pk != null
-            ? bytesToHex(contact.ed25519Pk!).substring(0, 16) : '<null>';
-        contact.ed25519Pk = Uint8List.fromList(embeddedPk);
-        _saveContacts();
-        _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
-            '$oldPkHex… replaced with AuthManifest key '
-            '${bytesToHex(embeddedPk).substring(0, 16)}… '
-            '(verifySelfCertified: founding-hash or rotation-chain)');
+      if (status != AnchorStatus.verified) {
+        _log.warn('D1 trust anchor: contact ${userHex.substring(0, 8)} key mismatch '
+            '(status=$status) — Record verworfen (§4.3 contact continuity)');
         return;
       }
 
-      _log.warn('D1 trust anchor: contact ${userHex.substring(0, 8)} key mismatch '
-          '(status=$status) — Record verworfen '
-          '(§4.3 contact continuity)');
+      // (c) Idempotent: identischer Key → nichts tun (kein _saveContacts,
+      // kein §8.3-Downgrade bei jedem wiederholten Lookup).
+      final storedPk = contact.ed25519Pk;
+      if (storedPk != null && constantTimeEquals(storedPk, embeddedPk)) {
+        return;
+      }
+
+      // Das Hybrid-Paar wird GEMEINSAM uebernommen — Ed25519 und ML-DSA
+      // duerfen nie auseinanderlaufen. Der alte Code schrieb nur ed25519Pk;
+      // der Datensatz war danach hybrid-inkonsistent und konnte selbst bei
+      // legitimer Rotation nie wieder verifizieren (v3_frame_codec verlangt
+      // beide). x25519Pk/mlKemPk stehen nicht im AuthManifest und bleiben
+      // unangetastet — die Device-KEM-Keys liefert der DeviceKemRecord-Pfad
+      // (§4.3 4b).
+      //
+      // KEIN §8.3-Downgrade: §4.3 stuft den gebundenen Nachzug ausdruecklich
+      // als automatische lokale Reparatur ein. Die Key-Change-Detection
+      // gehoert an den Ablehnungspfad (kein Bindungspfad greift), nicht an
+      // den Erfolgsfall. Der Vorgang ist ueber die Logzeile nachvollziehbar,
+      // seit der Resolver-Logger einen profileDir hat.
+      final oldPkHex = storedPk != null
+          ? bytesToHex(storedPk).substring(0, 16) : '<null>';
+      contact.ed25519Pk = Uint8List.fromList(embeddedPk);
+      contact.mlDsaPk = Uint8List.fromList(manifest.userMlDsaPk);
+      _saveContacts();
+      _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
+          '$oldPkHex… replaced with AuthManifest key '
+          '${bytesToHex(embeddedPk).substring(0, 16)}… (§4.3 bound path)');
+      onStateChanged?.call();
     };
 
     // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't

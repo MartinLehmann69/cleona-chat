@@ -38,6 +38,27 @@
               android:name="io.flutter.embedding.android.NormalTheme"
               android:resource="@style/NormalTheme"
               />
+            <!-- Flutter's own deep-linking MUST stay off. Since Flutter 3.24
+                 the engine auto-enables it as soon as a VIEW+BROWSABLE
+                 intent-filter is declared (see the cleona:// filter below)
+                 and pushes the incoming URI as a *named route* through the
+                 navigation channel. Cleona's MaterialApp (lib/main.dart)
+                 only defines `home:` — no routes/onGenerateRoute/
+                 onUnknownRoute — so every cleona:// link raised
+                 "Could not find a generator for route ..." which the global
+                 FlutterError handler escalated into a modal crash-consent
+                 dialog (barrierDismissible: false), leaving the app stuck
+                 behind it.
+                 FlutterActivity.shouldHandleDeeplinking() reads exactly this
+                 meta-data; with `false` the engine no longer forwards intent
+                 data to the navigator. Cleona handles cleona:// itself via
+                 MainActivity.handleDeepLinkIntent -> DeepLinkReceiver, which
+                 does not use the navigation channel and is unaffected.
+                 The app uses no named routes, so nothing else is lost. -->
+            <meta-data
+              android:name="flutter_deeplinking_enabled"
+              android:value="false"
+              />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>

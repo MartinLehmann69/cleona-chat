@@ -3,7 +3,25 @@
 #
 # Triggers:
 #   - Manual dispatch (workflow_dispatch) with channel + platform selection
-#   - Push of a tag matching v*
+#   - Push of a tag matching v*                      -> RELEASE mode
+#   - Push to main touching Apple build inputs       -> VERIFY mode
+#
+# Release vs. Verify (S280):
+#   Until S280 a tag push was the ONLY trigger, so iOS and macOS were compiled
+#   exactly once per release. Everything that broke in between surfaced during
+#   the release run and all at once — that is how S279 collected six blockers.
+#   VERIFY mode closes that gap: every push to main that touches an Apple build
+#   input compiles and LINKS both platforms. It deliberately skips signing,
+#   notarization and TestFlight — the goal is a red lamp before the release,
+#   not an artifact. `_ggml_reshape_2d` (S279) is a link error and would have
+#   been caught by exactly this.
+#
+# Cache policy (S279/S280):
+#   These caches hold *build trees*, never immutable downloads, so they carry
+#   NO restore-keys — a prefix fallback serves autoconf state from a different
+#   script version. Release runs skip the cache entirely: a published artifact
+#   must be provably built from its own sources. v3.1.156-beta's iOS libs came
+#   from a restore-key hit on a 2026-07-07 tree; that must not repeat.
 #
 # Required GitHub Secrets:
 #   APPLE_TEAM_ID            — 10-char Apple Developer Team ID
@@ -52,6 +70,17 @@ on:
   push:
     tags:
       - 'v*'
+    # VERIFY mode: every push to main compiles and links both platforms.
+    #
+    # Deliberately NO paths filter, for two reasons:
+    #   1. GitHub does not document whether `paths` is evaluated for TAG
+    #      pushes. If it were, a release tag whose push payload lists no
+    #      matching files would silently stop triggering the Apple build —
+    #      breaking the release pipeline to save runner minutes. Not worth it.
+    #   2. main only moves when sync-to-git.sh + push-cleonagit.sh run, which
+    #      is rare (16 of the last 20 public commits carry a version tag). The
+    #      filter would save almost nothing.
+    branches: [main]
 
 concurrency:
   group: apple-build-${{ github.ref }}
@@ -60,6 +89,10 @@ concurrency:
 env:
   FLUTTER_VERSION: '3.44.6'
   IOS_DEPLOYMENT_TARGET: '15.5'
+  # RELEASE mode = tag push or manual dispatch. Everything else (push to main)
+  # is VERIFY mode: build + link + symbol checks, but no signing, no
+  # notarization, no TestFlight, no cache.
+  IS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
 
 jobs:
   # ════════════════════════════════════════════════════════════════
@@ -76,6 +109,12 @@ jobs:
         run: brew install cmake ninja autoconf automake libtool pkg-config
 
       - name: Cache native lib sources
+        # Skipped in RELEASE mode: a published artifact must be provably built
+        # from its own sources. v3.1.156-beta's iOS libs came from a
+        # restore-key hit on a 2026-07-07 tree that was then re-saved under a
+        # valid-looking key — a foreign tree laundered into a release.
+        # Skipping the step means nothing is restored AND nothing is saved.
+        if: env.IS_RELEASE != 'true'
         uses: actions/cache@v4
         with:
           path: /tmp/ios-libs-build-*
@@ -172,6 +211,8 @@ jobs:
         run: bash scripts/check_ios_exports.sh --ci
 
       - name: Install distribution certificate
+        # VERIFY runs build unsigned — see "Build IPA" below.
+        if: env.IS_RELEASE == 'true'
         env:
           CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
           CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
@@ -192,6 +233,7 @@ jobs:
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
       - name: Install provisioning profile
+        if: env.IS_RELEASE == 'true'
         env:
           PROVISIONING_PROFILE_B64: ${{ secrets.PROVISIONING_PROFILE_B64 }}
         run: |
@@ -228,6 +270,23 @@ jobs:
           # the build number so every upload is unique without hand-bumping
           # pubspec. The marketing version (CFBundleShortVersionString) still
           # comes from pubspec's build-name.
+          if [ "$IS_RELEASE" != "true" ]; then
+            # VERIFY mode: no certificate and no provisioning profile were
+            # installed, so an IPA export is impossible. Build the app target
+            # unsigned instead — that still runs the full compile AND LINK of
+            # the Runner binary against the merged native archives, which is
+            # the whole point: `Undefined symbol: _ggml_reshape_2d` (S279) is a
+            # link error and dies right here, on a push, instead of surfacing
+            # mid-release two sessions later.
+            echo "VERIFY mode — building unsigned (no IPA export, no upload)"
+            flutter build ios \
+              --release \
+              --no-codesign \
+              --build-number="${GITHUB_RUN_NUMBER}" \
+              --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
+            exit 0
+          fi
+
           flutter build ipa \
             --release \
             --build-number="${GITHUB_RUN_NUMBER}" \
@@ -310,6 +369,9 @@ jobs:
           echo "All required privacy keys present for linked frameworks"
 
       - name: Upload to TestFlight
+        # RELEASE only. A VERIFY run has no signed IPA by construction and must
+        # never push a build to testers.
+        if: env.IS_RELEASE == 'true'
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
@@ -363,7 +425,9 @@ jobs:
           done
 
       - name: Upload IPA artifact
-        if: always()
+        # always() so a failed TestFlight upload still leaves the IPA behind,
+        # but only in RELEASE mode — a VERIFY run builds unsigned and has none.
+        if: always() && env.IS_RELEASE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cleona-ios-${{ steps.channel.outputs.channel }}
@@ -390,6 +454,8 @@ jobs:
         run: brew install cmake ninja autoconf automake libtool pkg-config libvpx
 
       - name: Cache native lib sources
+        # Skipped in RELEASE mode — see the iOS cache step above.
+        if: env.IS_RELEASE != 'true'
         uses: actions/cache@v4
         with:
           path: /tmp/macos-libs-build-*
@@ -472,7 +538,14 @@ jobs:
           cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
           chmod +x "$MACOS_BIN/cleona-daemon"
 
+      # ── RELEASE-only tail ────────────────────────────────────────────
+      # A VERIFY run stops after "Assemble app bundle". Everything it needed to
+      # prove is already proven at that point: native libs compiled, the Flutter
+      # macOS target linked, and every required dylib landed in
+      # Contents/Frameworks. Signing, DMG packaging and notarization produce a
+      # distributable — that belongs to a release, not to a push.
       - name: Sign app bundle
+        if: env.IS_RELEASE == 'true'
         env:
           CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
           CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
@@ -504,6 +577,7 @@ jobs:
           codesign --force --deep --sign - "$APP_PATH"
 
       - name: Create DMG
+        if: env.IS_RELEASE == 'true'
         env:
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
@@ -517,6 +591,7 @@ jobs:
             "$DMG_PATH"
 
       - name: Notarize DMG
+        if: env.IS_RELEASE == 'true'
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
@@ -535,6 +610,7 @@ jobs:
           xcrun stapler staple build/cleona-chat-macos-arm64.dmg || true
 
       - name: Upload DMG artifact
+        if: env.IS_RELEASE == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: cleona-macos-${{ steps.channel.outputs.channel }}

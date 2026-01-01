@@ -93,13 +93,13 @@ setup_arch() {
 # build was staged.
 rewrite_install_name() {
     local dylib="$1"
-    local name="$(basename "$dylib")"
+    local name; name="$(basename "$dylib")"
     install_name_tool -id "@rpath/$name" "$dylib"
     # Fix transitive deps (e.g. libwhisper -> libggml)
     otool -L "$dylib" | awk 'NR>1 {print $1}' | while read -r dep; do
         case "$dep" in
             /opt/homebrew/*|/usr/local/*)
-                local depname="$(basename "$dep")"
+                local depname; depname="$(basename "$dep")"
                 install_name_tool -change "$dep" "@rpath/$depname" "$dylib" || true
                 ;;
         esac
@@ -323,8 +323,6 @@ build_cleona_audio() {
 # ── Homebrew shortcut ────────────────────────────────────────────────────────
 use_homebrew_libs() {
     echo ">>> Using Homebrew-installed libs (symlinks into $OUT_DIR)"
-    local BREW
-    BREW="$(brew --prefix)"
     local mapping=(
         "libsodium:libsodium.dylib"
         "libzstd:libzstd.dylib"
@@ -353,7 +351,7 @@ merge_universal() {
     local a64="$PROJECT_DIR/build/macos-libs/arm64"
     local x64="$PROJECT_DIR/build/macos-libs/x86_64"
     for f in "$a64"/*.dylib; do
-        local name="$(basename "$f")"
+        local name; name="$(basename "$f")"
         if [ -f "$x64/$name" ]; then
             lipo -create "$a64/$name" "$x64/$name" -output "$uni/$name"
             codesign --force --sign - "$uni/$name"
@@ -371,7 +369,7 @@ verify() {
     for f in "$OUT_DIR"/*.dylib; do
         [ -f "$f" ] || continue
         local arch; arch="$(lipo -archs "$f" 2>/dev/null || echo '?')"
-        local name="$(basename "$f")"
+        local name; name="$(basename "$f")"
         echo "  ✓ $name ($arch)"
     done
 }

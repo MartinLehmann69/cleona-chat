@@ -34,7 +34,14 @@ env:
 jobs:
   integration-test:
     name: macOS — Integration Test
-    runs-on: macos-14
+    # macos-26, NOT macos-14. Since 9dfd369a (Flutter 3.41.2 -> 3.44.6) the
+    # Swift Package Manager plugin resolution needs the newer Xcode. On
+    # macos-14 Flutter falls back to the CocoaPods layout for
+    # video_player_avfoundation and compiles `@import Flutter` — the iOS
+    # module name — against a macOS target, which fails with
+    # "module 'Flutter' not found". macos/ has no Podfile; this project is
+    # SwiftPM-only on macOS. Every green macOS job runs on macos-26.
+    runs-on: macos-26
     timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +54,10 @@ jobs:
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
-          restore-keys: macos-native-libs-
+          # No restore-keys — see ios-build.yml for the full rationale. This
+          # caches a *build tree*, not immutable downloads. A prefix fallback
+          # serves autoconf state and config.cache from a different version of
+          # the build script; aclocal then dies on m4/lt~obsolete.m4.
 
       - name: Build native dylibs
         run: ./scripts/build-macos-libs.sh --arch arm64

@@ -92,10 +92,10 @@ fi
 
 verify_alignment() {
     local lib="$1"
-    local name="$(basename "$lib")"
+    local name; name="$(basename "$lib")"
     # Alignment is the last hex field on the continuation line after LOAD
     # Format: "   LOAD  0x... 0x... 0x...\n               0x... 0x...  R E  0x4000"
-    local align=$(readelf -l "$lib" 2>/dev/null | grep -A1 '^\s*LOAD' | grep -v 'LOAD' | grep -oP '0x[0-9a-f]+' | tail -1 | head -1)
+    local align; align=$(readelf -l "$lib" 2>/dev/null | grep -A1 '^\s*LOAD' | grep -v 'LOAD' | grep -oP '0x[0-9a-f]+' | tail -1 | head -1)
     if [ "$align" = "0x4000" ]; then
         echo "  [✓] $name: 16KB-aligned (0x4000)"
     else
@@ -223,7 +223,7 @@ build_libwhisper() {
     # whisper.cpp baut: libwhisper.so, libggml.so, libggml-base.so, libggml-cpu.so
     # Alle .so finden (können in src/, ggml/src/ etc. liegen)
     for libname in libwhisper libggml-cpu libggml-base libggml; do
-        local REAL_LIB=$(find "$BUILD" -name "${libname}.so*" -type f ! -type l 2>/dev/null | head -1)
+        local REAL_LIB; REAL_LIB=$(find "$BUILD" -name "${libname}.so*" -type f ! -type l 2>/dev/null | head -1)
         if [ -n "$REAL_LIB" ]; then
             cp "$REAL_LIB" "$JNILIBS/${libname}.so"
             "$STRIP" "$JNILIBS/${libname}.so"
@@ -293,7 +293,7 @@ build_libzstd() {
     ninja install
 
     # zstd baut libzstd.so.X.Y.Z mit Symlinks — wir brauchen nur libzstd.so
-    local REAL_LIB=$(find "$BUILD_DIR/install/zstd/lib" -name "libzstd.so.*.*.*" -type f 2>/dev/null | head -1)
+    local REAL_LIB; REAL_LIB=$(find "$BUILD_DIR/install/zstd/lib" -name "libzstd.so.*.*.*" -type f 2>/dev/null | head -1)
     if [ -n "$REAL_LIB" ]; then
         cp "$REAL_LIB" "$JNILIBS/libzstd.so"
     else
@@ -346,8 +346,16 @@ build_libvpx() {
             --disable-avx --disable-avx2 --disable-avx512)
     fi
 
-    CC="$CC" CXX="$CXX" AR="$AR" AS="$CC" LD="$CC" RANLIB="$RANLIB" \
-    STRIP="$STRIP" \
+    # libvpx's configure expects AS/LD to be the compiler driver, not the raw
+    # assembler/linker. Exportiert statt als Praefix-Zuweisung: in einem
+    # Praefix wie `CC="$CC" AS="$CC" cmd` sieht das zweite `$CC` noch den
+    # AEUSSEREN Wert, nicht den gerade zugewiesenen (SC2097/SC2098). Hier war
+    # das folgenlos, weil `CC="$CC"` eine Identitaetszuweisung ist — aber die
+    # Konstruktion ist irrefuehrend und faellt beim naechsten Umbau auf die
+    # Fuesse.
+    AS="$CC"
+    LD="$CC"
+    export AR AS CC CXX LD RANLIB STRIP
     "$SRC/configure" --target="$VPX_TARGET" \
         --disable-examples --disable-tools --disable-docs --disable-unit-tests \
         --enable-vp8 --disable-vp9 --enable-pic \

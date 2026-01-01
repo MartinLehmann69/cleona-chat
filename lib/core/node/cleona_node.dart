@@ -1111,6 +1111,10 @@ class CleonaNode {
       routingTable: routingTable,
       dhtRpc: dhtRpc,
       dhtHandler: identityDhtHandler,
+      // B1 (2026-07-27): ohne profileDir landet KEINE Resolver-Zeile im
+      // Logfile (CLogger puffert nur unter _buffers[profileDir]) — die
+      // D1-Trust-Anchor-Entscheidungen waren im Feld unsichtbar.
+      profileDir: profileDir,
       // V3-direct: outer Device-Sig + KEM-AEAD inner are added by the
       // §2.3.5 InfraFrame pipeline (`_sendInfra` keyed by the sending
       // identity's device-keypair) when DhtRpc.sendFunction fires.

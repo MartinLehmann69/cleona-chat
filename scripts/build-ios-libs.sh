@@ -82,7 +82,6 @@ setup_env() {
             TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET}"
             CONFIGURE_HOST="aarch64-apple-darwin"
             PLATFORM_TAG="device"
-            CMAKE_SYSTEM_NAME="iOS"
             ;;
         iphonesimulator)
             SDK_PATH="$SIM_SDK"
@@ -90,7 +89,6 @@ setup_env() {
             TARGET_TRIPLE="arm64-apple-ios${IOS_DEPLOYMENT_TARGET}-simulator"
             CONFIGURE_HOST="aarch64-apple-darwin"
             PLATFORM_TAG="simulator"
-            CMAKE_SYSTEM_NAME="iOS"
             ;;
         *) echo "Unknown platform: $platform"; exit 1 ;;
     esac
@@ -564,19 +562,66 @@ for platform_tag in device simulator; do
     [ -d "$INSTALL" ] || continue
 
     # Collect all .a files from all lib install dirs.
-    # Skip libggml-base.a and libggml-cpu.a — libggml.a is the umbrella
-    # that already contains their object files. Including all three causes
-    # duplicate symbols when DEAD_CODE_STRIPPING is disabled.
-    ALL_ARCHIVES=()
+    #
+    # ggml is split across libggml.a / libggml-base.a / libggml-cpu.a and how
+    # the objects are distributed across those three archives is a whisper.cpp
+    # implementation detail that CHANGES BETWEEN VERSIONS. Up to whisper 1.7.1
+    # libggml.a was an umbrella that already contained the other two, so this
+    # loop skipped them by name. b042cd09 pinned whisper 1.8.4, where the three
+    # archives are disjoint — the hardcoded skip then dropped every symbol that
+    # only lives in libggml-base.a / libggml-cpu.a and the Runner link died with
+    # "Undefined symbol: _ggml_reshape_2d" and ~200 siblings (S279, run
+    # 30209700530). The macOS job ships all three as separate dylibs, which is
+    # what proved they are disjoint under 1.8.4.
+    #
+    # So: do not encode the layout, MEASURE it. Include an archive unless its
+    # global symbols are already fully covered by an archive we accepted
+    # earlier. That is correct for both the umbrella layout and the disjoint
+    # layout, and it stays correct across the next whisper bump.
+    # Order matters: an umbrella archive must be considered BEFORE its parts,
+    # otherwise the parts get accepted first and the umbrella still adds unique
+    # symbols on top, so all three land in the merge and we are back to
+    # duplicate symbols. Processing by descending symbol count makes the
+    # umbrella win in the 1.7.1 layout, and is a no-op in the 1.8.4 layout where
+    # the three archives are disjoint and all three are needed.
+    _symdir="$(mktemp -d)"
+    _index="$_symdir/index"
+    : > "$_index"
+
     for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib cleona_pow/lib vpx/lib cleona_vpx/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
-            case "$(basename "$a")" in
-                libggml-base.a|libggml-cpu.a) echo "  skip $(basename "$a") (in libggml.a)"; continue ;;
-            esac
-            ALL_ARCHIVES+=("$a")
+            _slug="$(echo "$a" | tr -c 'A-Za-z0-9' '_')"
+            # Defined global symbols. Uppercase type letters are definitions;
+            # 'U' entries are undefined references and must not count as
+            # "provided by this archive".
+            nm -g "$a" 2>/dev/null \
+              | awk '$2 ~ /^[A-TV-Z]$/ { print $3 }' \
+              | sort -u > "$_symdir/$_slug"
+            printf '%s\t%s\t%s\n' \
+              "$(wc -l < "$_symdir/$_slug" | tr -d ' ')" "$a" "$_symdir/$_slug" >> "$_index"
         done
     done
+
+    ALL_ARCHIVES=()
+    _accepted="$_symdir/.accepted"
+    : > "$_accepted"
+    # Descending symbol count, path as tie-breaker for reproducibility.
+    while IFS=$'\t' read -r _count _path _syms; do
+        [ -n "$_path" ] || continue
+        if [ "$_count" -eq 0 ]; then
+            echo "  skip $(basename "$_path") (no global symbols)"
+            continue
+        fi
+        if [ -s "$_accepted" ] && [ -z "$(comm -23 "$_syms" "$_accepted" | head -1)" ]; then
+            echo "  skip $(basename "$_path") ($_count symbols already covered)"
+            continue
+        fi
+        ALL_ARCHIVES+=("$_path")
+        sort -u -o "$_accepted" "$_accepted" "$_syms"
+    done < <(sort -t"$(printf '\t')" -k1,1nr -k2,2 "$_index")
+
+    rm -rf "$_symdir"
 
     if [ ${#ALL_ARCHIVES[@]} -eq 0 ]; then
         echo "  [!] No .a files for $platform_tag — skipping merge"

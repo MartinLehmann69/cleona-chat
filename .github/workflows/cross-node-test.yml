@@ -97,7 +97,9 @@ jobs:
   # ── Job 2: macOS build + integration test (Phase 1+2+3) ─────────────
   macos-test:
     name: macOS — Cross-Node Test
-    runs-on: macos-14
+    # macos-26, NOT macos-14 — Flutter 3.44's SwiftPM plugin resolution needs
+    # the newer Xcode. See macos-integration-test.yml for the full rationale.
+    runs-on: macos-26
     needs: setup-node1
     timeout-minutes: 50
     steps:
@@ -111,7 +113,8 @@ jobs:
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
-          restore-keys: macos-native-libs-
+          # No restore-keys — build tree, not immutable downloads.
+          # See ios-build.yml for the full rationale.
 
       - name: Build native dylibs
         run: ./scripts/build-macos-libs.sh --arch arm64

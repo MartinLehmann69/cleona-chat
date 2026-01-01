@@ -32,7 +32,8 @@ jobs:
         with:
           path: /tmp/macos-libs-build-*
           key: macos-native-libs-${{ hashFiles('scripts/build-macos-libs.sh') }}
-          restore-keys: macos-native-libs-
+          # No restore-keys — build tree, not immutable downloads.
+          # See ios-build.yml for the full rationale.
 
       - name: Build macOS native libs
         run: ./scripts/build-macos-libs.sh --arch arm64
@@ -130,7 +131,8 @@ jobs:
         with:
           path: /tmp/ios-libs-build-*
           key: ios-native-libs-${{ hashFiles('scripts/build-ios-libs.sh') }}
-          restore-keys: ios-native-libs-
+          # No restore-keys — build tree, not immutable downloads.
+          # See ios-build.yml for the full rationale.
 
       - name: Build iOS native libs
         continue-on-error: true
