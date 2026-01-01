@@ -202,10 +202,17 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
+          # Verify force_load made it into the Pods xcconfig
+          echo "=== Pods-Runner.release.xcconfig (after pod install) ==="
+          XCCONFIG="ios/Pods/Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"
+          grep 'OTHER_LDFLAGS\|force_load' "$XCCONFIG" || echo "NO OTHER_LDFLAGS in xcconfig!"
+          echo "=== Building IPA ==="
           flutter build ipa \
             --release \
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
+          echo "=== Runner binary size ==="
+          find build/ios -name Runner -type f -exec ls -la {} \; 2>/dev/null | head -3
 
       - name: List build outputs
         if: always()
