@@ -56,13 +56,13 @@ class PeerReputation {
     if (isPermBanned) return true;
     if (isTempBanned) {
       if (tempBanExpiry != null && DateTime.now().isAfter(tempBanExpiry!)) {
-        // Temp ban expired — auto-clear + decay badActions (Fix B).
-        // Without decay, a single new violation immediately re-triggers the ban
-        // (badActions still >= threshold), making temp bans de-facto permanent.
+        // Temp ban expired — full reset so the peer starts clean.
+        // 50% decay was insufficient: 201 * 0.5 = 101, still above threshold
+        // 20, causing immediate re-ban on next interaction (perpetual cycle).
         isTempBanned = false;
         tempBanExpiry = null;
         banReason = null;
-        badActions = (badActions * 0.5).round();
+        badActions = 0;
         return false;
       }
       return true;

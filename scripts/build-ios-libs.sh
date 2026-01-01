@@ -321,13 +321,16 @@ build_cleona_audio() {
         "$src"
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
-    cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
-    # speexdsp is built as a CMake subdirectory — separate install dir to
-    # avoid double-inclusion (cleona_audio doesn't embed speexdsp objects)
+    # Merge speexdsp INTO cleona_audio so the final all-libs merge has only
+    # one copy of each speexdsp symbol (mirrors other platforms where the
+    # shared .so embeds speexdsp).
     SPEEX_A=$(find . -name 'libspeexdsp.a' -print -quit)
     if [ -n "$SPEEX_A" ]; then
-        mkdir -p "$INSTALL_DIR/speexdsp/lib"
-        cp "$SPEEX_A" "$INSTALL_DIR/speexdsp/lib/"
+        xcrun libtool -static -o "$INSTALL_DIR/cleona_audio/lib/libcleona_audio.a" \
+            libcleona_audio.a "$SPEEX_A"
+        echo "  merged speexdsp into libcleona_audio.a"
+    else
+        cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
     fi
     cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
     cd "$PROJECT_DIR"
@@ -436,7 +439,7 @@ for platform_tag in device simulator; do
     # that already contains their object files. Including all three causes
     # duplicate symbols when DEAD_CODE_STRIPPING is disabled.
     ALL_ARCHIVES=()
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib speexdsp/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             case "$(basename "$a")" in
@@ -455,7 +458,17 @@ for platform_tag in device simulator; do
     echo "  Merging ${#ALL_ARCHIVES[@]} archives for $platform_tag..."
     # Apple libtool -static merges multiple .a into one, resolving internal refs
     xcrun libtool -static -o "$MERGED" "${ALL_ARCHIVES[@]}"
-    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1))"
+    # Pre-link into a single .o to resolve duplicate weak symbols
+    # (C++ runtime stubs emitted by both liboqs and whisper.cpp).
+    DEDUP_O="${MERGED%.a}.o"
+    if xcrun ld -r -force_load "$MERGED" -o "$DEDUP_O" 2>/dev/null; then
+        xcrun ar rcs "${MERGED%.a}_dedup.a" "$DEDUP_O"
+        mv "${MERGED%.a}_dedup.a" "$MERGED"
+        rm -f "$DEDUP_O"
+        echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1)) [deduped via ld -r]"
+    else
+        echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1)) [ld -r skipped, using raw merge]"
+    fi
 done
 
 # Create XCFramework for the merged archive
