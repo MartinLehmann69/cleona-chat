@@ -2187,10 +2187,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 ListTile(
                   title: Text(locale.get('edit_window_label')),
                   subtitle: Text(_formatEditWindow(context, config.editWindowMs)),
-                  trailing: canEdit ? PopupMenuButton<int?>(
-                    onSelected: (v) => setDialogState(() => config.editWindowMs = v),
+                  trailing: canEdit ? PopupMenuButton<int>(
+                    onSelected: (v) => setDialogState(() => config.editWindowMs = v == -1 ? null : v),
                     itemBuilder: (_) => [
-                      PopupMenuItem(value: null, child: Text(locale.get('default_1h'))),
+                      PopupMenuItem(value: -1, child: Text(locale.get('default_1h'))),
                       PopupMenuItem(value: 5 * 60 * 1000, child: Text(locale.get('five_minutes'))),
                       PopupMenuItem(value: 15 * 60 * 1000, child: Text(locale.get('fifteen_minutes'))),
                       PopupMenuItem(value: 60 * 60 * 1000, child: Text(locale.get('one_hour'))),
@@ -2201,10 +2201,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 ListTile(
                   title: Text(locale.get('auto_delete_label')),
                   subtitle: Text(_formatExpiry(context, config.expiryDurationMs)),
-                  trailing: canEdit ? PopupMenuButton<int?>(
-                    onSelected: (v) => setDialogState(() => config.expiryDurationMs = v),
+                  trailing: canEdit ? PopupMenuButton<int>(
+                    onSelected: (v) => setDialogState(() => config.expiryDurationMs = v == -1 ? null : v),
                     itemBuilder: (_) => [
-                      PopupMenuItem(value: null, child: Text(locale.get('off'))),
+                      PopupMenuItem(value: -1, child: Text(locale.get('off'))),
                       PopupMenuItem(value: 60 * 1000, child: Text(locale.get('one_minute'))),
                       PopupMenuItem(value: 5 * 60 * 1000, child: Text(locale.get('five_minutes'))),
                       PopupMenuItem(value: 60 * 60 * 1000, child: Text(locale.get('one_hour'))),
@@ -2238,15 +2238,16 @@ class _ChatScreenState extends State<ChatScreen> {
                     subtitle: Text(notifySoundName != null
                         ? Ringtone.fromName(notifySoundName!).displayName
                         : locale.get('default_sound')),
-                    trailing: PopupMenuButton<String?>(
+                    trailing: PopupMenuButton<String>(
                       onSelected: (v) {
-                        setDialogState(() => notifySoundName = v);
-                        if (v != null) {
-                          service.notificationSound.previewRingtone(Ringtone.fromName(v));
+                        final actual = v.isEmpty ? null : v;
+                        setDialogState(() => notifySoundName = actual);
+                        if (actual != null) {
+                          service.notificationSound.previewRingtone(Ringtone.fromName(actual));
                         }
                       },
                       itemBuilder: (_) => [
-                        PopupMenuItem(value: null, child: Text(locale.get('default_sound'))),
+                        PopupMenuItem(value: '', child: Text(locale.get('default_sound'))),
                         ...Ringtone.values.map((rt) =>
                           PopupMenuItem(value: rt.name, child: Text(rt.displayName))),
                       ],

@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:4521d1021420, 2026-07-14). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:d10d2536648e, 2026-07-14). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1200,6 +1200,8 @@ master_seed (32 bytes, from 24-word phrase via PBKDF2-SHA-512, 4096 rounds)
 1. **Seed recovery regenerates User-Keys, not Device-Keys.** The 24-word phrase regenerates all User-Identities and their keys via deterministic HD-Wallet derivation. Device-Keys are freshly created on the replacement device — that is acceptable because the DeviceID is a routing identifier, not an identity subject. Restore-Broadcast (§6.3) carries the UserID identity, and Device-Authorization-Update (§7.1) registers the new DeviceID in the Auth-Manifest.
 
 2. **Multi-Identity is deterministically derivable.** When a user starts on a replacement device with the same seed, the same N identities can be recreated.
+
+   **Restore-Index-Probing.** A historical off-by-one (HD index starting at 1 instead of 0) means pre-fix installations have their first identity at `m/identity/1`. The fix corrects new identity creation to start at `m/identity/0`, but seed restore on a clean device must detect which index the user's first identity was at. The recovery flow (§6.4.3 step 5) probes: after the DHT registry lookup (preferred), a fallback AuthManifest (§4.3) lookup checks `computeUserId(derive(seed, 1))`. If an AuthManifest exists at index 1 but the local primary is at index 0, the correct identity is created at index 1 alongside the phantom. The probing is local key derivation plus one DHT lookup — no seed material leaves the device.
 
 3. **`Identity Registry` (erasure-coded in the DHT, §6.4)** stores the list of User-Identities together with display names and profile pictures. During recovery the user fetches this list and decides which identities to reconstruct on the replacement device (sometimes only 1 of 5 is desired).
 
@@ -2520,7 +2522,9 @@ If the receiver is offline, the message is stored on the K=10 closest DHT nodes 
 
 **Erasure is push-based**: the sender places fragments on send-failure, not on every send. Storage efficiency stays bounded. If erasure placement fails (**fewer than K=7 distinct fragment indices confirmed** after the wave budget below, or zero DHT peers reachable at placement time), the serialized packet is parked in the persistent outbox (§5.1) and placement is re-attempted on the next `onNetworkChanged` edge — the sender does not silently drop unplaceable messages.
 
-**ACK-verified placement (D-c fix, V3.1.120):** the sender counts `FRAGMENT_STORE_ACK`s per **distinct fragment index** (matched on `(messageId, fragmentIndex)` — no protocol change; replicators have always sent these ACKs on successful store, the sender previously discarded them). Wave 1 is the classic 10-fragments-×-3-replica spread; the sender then waits up to 8 s (edge-driven completers, no polling). Placement succeeds only when **≥K=7 distinct indices** are confirmed by at least one replicator each; 7–9 confirmed logs an "erasure placement fragile" warning. Unconfirmed indices are re-sent in up to 2 additional waves (+1 copy per fragment per wave, respecting the 5-copies-per-fragment bound) to fresh replicators from a deeper closest-peer pool (30, confirmed-first per the §5.5 Phase-1 ranking rationale). Below K after the wave budget, placement counts as **failed** and the message is parked in the outbox unless §5.5 S&F succeeded. Pre-fix the placement was fire-and-forget and "success" meant "dispatched" (2026-07-03 field evidence: 222 FRAGMENT_STOREs sent, 0 received by the addressed replicator, unnoticed — the message was unreconstructable while the sender reported `queuedOffline`). The same ACK now also cancels the replicator-side proactive-push retry backoffs (previously a dead code path — every replicator burned all 3 push attempts even after the owner had acknowledged).
+**ACK-verified placement (D-c fix, V3.1.120):** the sender counts `FRAGMENT_STORE_ACK`s per **distinct fragment index** (matched on `(messageId, fragmentIndex)` — no protocol change needed; the sender previously discarded ACKs). **Conditional ACK (V3.1.139 fix):** the replicator sends `FRAGMENT_STORE_ACK` only when the fragment was actually accepted — either freshly stored or an idempotent duplicate (same key AND same bytes). Budget-exceeded, quota-exceeded, or generation-conflict rejections produce **no ACK**; the sender's per-index completer times out after 8 s and the `ErasurePlacementCoordinator` retries with a fresh peer in the next wave. Pre-fix: the ACK was unconditional, so the coordinator could count K=7 confirmed indices even when replicators had silently rejected the fragments (dedup collision, budget exceeded) — the placement reported success while fewer than K fragments were actually stored. Wave 1 is the classic 10-fragments-×-3-replica spread; the sender then waits up to 8 s (edge-driven completers, no polling). Placement succeeds only when **≥K=7 distinct indices** are confirmed by at least one replicator each; 7–9 confirmed logs an "erasure placement fragile" warning. Unconfirmed indices are re-sent in up to 2 additional waves (+1 copy per fragment per wave, respecting the 5-copies-per-fragment bound) to fresh replicators from a deeper closest-peer pool (30, confirmed-first per the §5.5 Phase-1 ranking rationale). Below K after the wave budget, placement counts as **failed** and the message is parked in the outbox unless §5.5 S&F succeeded. Pre-fix the placement was fire-and-forget and "success" meant "dispatched" (2026-07-03 field evidence: 222 FRAGMENT_STOREs sent, 0 received by the addressed replicator, unnoticed — the message was unreconstructable while the sender reported `queuedOffline`). The same ACK now also cancels the replicator-side proactive-push retry backoffs (previously a dead code path — every replicator burned all 3 push attempts even after the owner had acknowledged).
+
+**Replicator-side proactive push (V3.1.138):** When a replicator stores a fragment via `FRAGMENT_STORE`, it resolves the fragment's `mailboxId` to the owner by checking both primary and fallback mailbox salts (§5.6), then immediately attempts to forward the fragment to the owner via `FRAGMENT_PUSH` (an `InfrastructureFrame` carrying the fragment payload). The push uses a 3-attempt budget with exponential backoff (500 ms, 2 s, 4 s). If the owner is currently unreachable, the push budget is consumed without delivery. **Re-arm on owner reappearance (V3.1.138 fix):** when the replicator subsequently confirms the mailbox owner as a live peer (`onPeerConfirmed` edge — direct PONG, relay-PONG, or any verified inbound from the owner's DeviceID), the push budget is reset and a new push attempt is triggered. This closes a gap where fragments placed while the owner was offline were never delivered if the owner came online after the initial push budget was exhausted but before the next startup poll. The re-arm fires at most once per 60 s per mailbox to prevent push storms during rapid peer-flap. The `FRAGMENT_STORE_ACK` from the placement sender still cancels remaining push attempts for that fragment (no double-delivery).
 
 ### 5.5 Store-and-Forward on Contact Peers
 
@@ -2529,7 +2533,7 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 **Sender-side peer selection** (`_findMutualPeerDeviceIds`):
 - **Phase 1**: Iterate own accepted contacts (excluding the recipient), filter for alive DV routes, rank by number of alive routes, pick top 3.
 - **Phase 1 ranking (V3.1.117 field amendment)**: candidates that are *confirmed* (bidirectional UDP contact within the confirmation TTL) rank strictly above candidates that merely have alive DV routes — relay routes without traffic are never pruned and can point at devices that have been offline for days (2026-07-03 field evidence: an S&F copy was placed on a days-dead contact device).
-- **Phase 2 (always appended)**: Confirmed routing-table peers (e.g. Bootstrap) are **always included** in the candidate pool after Phase 1 candidates, ranked by alive-route count. Phase 1 contacts may all reject the store because the recipient is not *their* contact (receiver-enforced criterion 3); the wave-retry mechanism (F1) then falls through to Phase 2 candidates in the same pool. Pre-fix (V3.1.124), Phase 2 was gated on `candidates.isEmpty` — if Phase 1 found *any* contact with an alive route, Bootstrap was never even tried, making S&F undeliverable when no Phase 1 candidate was mutual (2026-07-06 field evidence: Martin→Alice, 0/6 stores accepted, Bootstrap online and willing but excluded). **Infrastructure exception (F4, V3.1.117):** headless/bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
+- **Phase 2 (structurally guaranteed)**: Confirmed routing-table peers (e.g. Bootstrap) occupy **reserved slots** at the tail of the candidate pool — Phase 1 is capped to `limit − safTargetCopies` entries, Phase 2 fills the remaining `safTargetCopies` slots. No global re-sort across phases; waves process the pool sequentially (Phase-1 mutual-peer preference first, Phase-2 infra fallback guaranteed at the tail). Phase 1 contacts may all reject the store because the recipient is not *their* contact (receiver-enforced criterion 3); the wave-retry mechanism (F1) then falls through to Phase 2 candidates in the same pool. Pre-fix (V3.1.124), Phase 2 was gated on `candidates.isEmpty`; second fix (V3.1.200): `sort + take(limit)` displaced Phase 2 when Phase 1 had ≥ `limit` confirmed contacts (2026-07-14 field evidence: 9/9 Phase-1 candidates, Bootstrap with `acceptAnyPeerStore` excluded, 0/9 stores accepted, 134 budget rejections on Bootstrap in one day). **Infrastructure exception (F4, V3.1.117):** headless/bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
 - **Observability**: if the total number of selected peers (Phase 1 + Phase 2) is less than 3, the sender logs a warning (`S&F: only N/3 mutual peers — offline delivery fragile`). In small networks where only one or two relay peers are available, S&F redundancy is reduced and delivery depends on those peers remaining online until the recipient polls. The warning aids operational diagnosis without altering the placement logic.
 
 **Storage-peer validation (receiver-side):** On receiving a `PEER_STORE` infrastructure message, the storage peer validates:
@@ -2645,8 +2649,8 @@ The receiver polls **both** (primary + fallback) on every mailbox poll, so no se
 - The receiver then fetches and decrypts the full message via S&F pull or fragment reassembly
 
 **Polling schedule** (event-driven, not periodic):
-- At daemon startup: aggressive polling, 10× every 3s after discovery-complete (~30s total)
-- After restore broadcast: aggressive polling, 10× every 3s
+- At daemon startup: aggressive polling, 10× every 3s after discovery-complete (~30s total). Each round sends both `FRAGMENT_RETRIEVE` (erasure) and `PEER_RETRIEVE` (S&F) to all confirmed peers.
+- After restore broadcast: aggressive polling, 10× every 3s (same scope: fragments + S&F)
 - On `onNetworkChanged`: one-shot re-poll (edge-triggered, no timer)
 - Steady state: **push-first** — relay nodes forward fragments immediately (< 1s); **no timer-based polling** (Arbeitsregel #5)
 
@@ -3009,16 +3013,22 @@ To recover multiple identities from a single master seed, Cleona stores an encry
 
 #### 6.4.2 Erasure-Coded Redundancy
 
-The encrypted registry is split using Reed-Solomon coding (**N=10, K=7**) and distributed across the 10 DHT nodes closest to the registry's DHT key. This ensures the registry survives even when up to 3 of those nodes are offline. Retrieval uses multiple polling rounds to collect enough fragments for reassembly. The erasure-coding parameters and the fragment-distribution mechanics are the same as for offline message storage (§5.4).
+The encrypted registry is split using Reed-Solomon coding (**N=10, K=7**) and distributed across the 10 DHT nodes closest to the registry's DHT key. This ensures the registry survives even when up to 3 of those nodes are offline. Retrieval uses multiple polling rounds to collect enough fragments for reassembly. The erasure-coding parameters and the ACK-verified placement mechanism are the same as for offline message storage (§5.4).
+
+**Per-generation messageId (V3.1.139):** The registry's `mailboxId` is the stable `SHA-256(master_seed + "cleona-registry-id")` — it identifies *where* in the DHT the registry lives and does not change across publishes. The `messageId` is `SHA-256(encrypted_payload)` — it identifies *which generation* of the registry a fragment belongs to and changes on every publish (because each publish uses a fresh secretbox nonce). This separation ensures that a re-publish does not collide with fragments of a previous generation that are still stored on replicators (7-day TTL). Pre-fix: `messageId` was set equal to `mailboxId`, so the `storeKey` (`mailboxId:messageId:fragmentIndex`) was identical across generations — replicators rejected new generations as dedup duplicates while the publisher received unconditional ACKs (§5.4), making registry updates silently ineffective for the fragment TTL window.
+
+**Recovery grouping:** During recovery, collected fragments are grouped by `messageId` before Reed-Solomon decode. Each group is decoded and decrypted independently; the group with the highest `updated_at` in the decrypted payload is selected. Groups with fewer than K=7 fragments are skipped. Mixed-generation fragment sets are never fed to a single RS decode — they would produce garbage bytes and fail at the secretbox auth tag.
 
 #### 6.4.3 Recovery Flow
 
 1. User enters recovery phrase → master seed derived.
-2. Compute registry DHT key from master seed.
-3. Retrieve erasure-coded fragments from DHT.
-4. Reassemble and decrypt registry → list of active identity indices and display names.
-5. For each identity index: derive Ed25519/X25519 user-identity keys from master seed + index.
-6. For each identity: generate a fresh device-sig keypair (§3.5), start the identity's node, and trigger a Restore Broadcast.
+2. Create the primary identity at HD index 0 (post-fix default), start the node.
+3. Compute registry DHT key from master seed.
+4. Retrieve erasure-coded fragments from DHT.
+5. **If registry found:** reassemble and decrypt → list of active identity indices and display names. Create identities for all indices not yet present locally. (If the registry lists index 1 but not 0, the primary at index 0 is a phantom from the off-by-one fix — the registry-recovered index 1 carries the correct keys.)
+6. **If no registry found** (single-identity user or offline network): **Restore-Index-Probing** — probe AuthManifest (§4.3) at userId derived from HD index 1. If an AuthManifest exists there but the local primary is at index 0, create the identity at index 1 (pre-fix user). Otherwise index 0 is correct (post-fix user or genuinely new).
+7. For each identity: derive Ed25519/X25519 user-identity keys from master seed + index.
+8. For each identity: generate a fresh device-sig keypair (§3.5), start the identity's node, and trigger a Restore Broadcast.
 
 ---
 
@@ -5750,7 +5760,7 @@ After initialization completes, the node performs a single poll to collect misse
 2. Simultaneously, send `PEER_RETRIEVE` to all recently-confirmed peers to collect Store-and-Forward whole messages (§5.5).
 3. Process and deduplicate all received messages (§5.7).
 
-After this initial poll, the node switches to pure push-based operation. No further polling occurs during normal operation (except after network changes — see §12.3 — or Restore Broadcasts — see §6.3).
+After this initial poll, the node switches to pure push-based operation. No further polling occurs during normal operation (except after network changes — see §12.3 — or Restore Broadcasts — see §6.3). **Complementary push-side:** when a confirmed peer comes online (detected via `onPeerConfirmed` — PONG, relay traffic, or verified inbound), the local node checks whether it holds stored fragments or S&F messages for that peer and pushes them proactively (§5.4 replicator-side proactive push, §5.5 S&F). This ensures delivery even when the owner's startup poll completed before the replicator confirmed the owner as a peer.
 
 #### 12.2.3 Sync Priority During Startup
 
@@ -7222,6 +7232,8 @@ For users who already have Cleona installed. The network delivers updates itself
 4. Receiver node reads the manifest (existing 6h poller), detects new version.
 5. Receiver fetches K fragments from N over DHT, assembles the binary, verifies SHA-256 hash + Ed25519 signature.
 6. Installation starts automatically: Android opens the system package installer (user consent via OS dialog), desktop backs up the current binary and exits for restart. No intermediate "tap to install" step.
+
+**Failed-verification self-healing (V3.1.139):** If SHA-256 hash or Ed25519 signature verification fails after assembly, the **entire version directory** (all fragments + the reconstructed binary) is deleted via `deleteVersion()`. This prevents a poisoned fragment from permanently blocking updates: the next download attempt fetches all fragments fresh from different sources. If `assemble()` itself fails with a Reed-Solomon decode exception (corrupt fragment data), the same full cleanup applies. Transient failures (fewer than K fragments available due to offline sources) do **not** trigger cache deletion — the partial download state is preserved for resumption. Pre-fix: only the reconstructed `complete.bin` was deleted; corrupt fragment files remained on disk and were deterministically reused on retry, producing an identical verification failure in a permanent loop.
 
 **Release protection — no dev builds in the network:**
 

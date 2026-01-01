@@ -6,6 +6,9 @@ import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/platform/disk_space.dart';
 
+/// Result of a fragment store attempt (3-valued: stored, duplicate, rejected).
+enum FragmentStoreResult { stored, duplicateIdentical, rejected }
+
 /// Stored fragment entry.
 class StoredFragment {
   final Uint8List mailboxId;
@@ -329,17 +332,26 @@ class MailboxStore {
   }
 
   /// Store a fragment (relay or own).
-  /// Returns true if stored, false if rejected (dedup, budget exceeded).
-  bool storeFragment(StoredFragment fragment) {
+  /// Returns [FragmentStoreResult.stored] on success,
+  /// [FragmentStoreResult.duplicateIdentical] if the same key+data already exists,
+  /// [FragmentStoreResult.rejected] on generation conflict or budget exceeded.
+  FragmentStoreResult storeFragment(StoredFragment fragment) {
     final key = fragment.storeKey;
-    if (_fragments.containsKey(key)) return false; // Dedup
+    if (_fragments.containsKey(key)) {
+      final existing = _fragments[key]!;
+      if (existing.data.length == fragment.data.length &&
+          _bytesEqual(existing.data, fragment.data)) {
+        return FragmentStoreResult.duplicateIdentical;
+      }
+      return FragmentStoreResult.rejected; // generation conflict
+    }
 
     // Budget check: total
     final currentTotal = totalRelayBytes;
     if (currentTotal + fragment.diskSize > _totalBudget) {
       _log.debug('Fragment rejected: total budget exceeded '
           '(${currentTotal ~/ 1024}KB + ${fragment.diskSize ~/ 1024}KB > ${_totalBudget ~/ 1024}KB)');
-      return false;
+      return FragmentStoreResult.rejected;
     }
 
     // Budget check: per-source
@@ -348,13 +360,16 @@ class MailboxStore {
     if (sourceBytes + fragment.diskSize > perSourceMax) {
       _log.debug('Fragment rejected: per-source budget exceeded for '
           '${bytesToHex(fragment.mailboxId).substring(0, 8)}');
-      return false;
+      return FragmentStoreResult.rejected;
     }
 
     _fragments[key] = fragment;
     _dirty = true;
-    return true;
+    return FragmentStoreResult.stored;
   }
+
+  /// Retrieve a single stored fragment by its storeKey.
+  StoredFragment? retrieveByKey(String storeKey) => _fragments[storeKey];
 
   /// Retrieve all fragments for a mailbox ID (byte comparison).
   List<StoredFragment> retrieveFragments(Uint8List mailboxId) {
@@ -424,6 +439,27 @@ class MailboxStore {
       }
     }
     return null;
+  }
+
+  /// Reset push budget for a specific storeKey so it can be re-attempted.
+  /// Used by the §5.4 V3.1.138 re-arm-on-owner-reappearance mechanism.
+  void resetPushBudget(String storeKey) {
+    final state = _pushState[storeKey];
+    if (state == null) return;
+    if (state.pushAcked) return;
+    state.cancelRetry();
+    state.attempts = 0;
+    state.lastPushAt = null;
+  }
+
+  /// Fragments whose push budget is exhausted but not ACKed — candidates
+  /// for re-arm when the owner reappears (§5.4 V3.1.138).
+  List<MapEntry<String, FragmentPushState>> exhaustedPushEntries() {
+    return _pushState.entries
+        .where((e) => !e.value.pushAcked &&
+            e.value.attempts >= maxPushAttempts &&
+            _fragments.containsKey(e.key))
+        .toList();
   }
 
   /// Pending pushes (not acked, attempts < max) for a specific owner.

@@ -1740,8 +1740,10 @@ class CleonaNode {
       final addr = PeerAddress(ip: from.address, port: fromPort);
       final ct = connectionTypeFromPriority(addr.priority);
       final isNewNeighbor = dvRouting.addDirectNeighbor(senderDeviceId, ct);
+      final wasConfirmed = isPeerConfirmed(senderHex);
       _confirmedPeers[senderHex] = DateTime.now();
       _notifyEndpointConfirmed(senderHex);
+      if (!wasConfirmed) onPeerNewlyConfirmed?.call(senderHex);
       if (!hasSessionConfirmedPeers) {
         hasSessionConfirmedPeers = true;
         _log.info('First session-confirmed peer: ${senderHex.substring(0, 8)}');
@@ -2204,8 +2206,10 @@ class CleonaNode {
       // hasSessionConfirmedPeers stays false and the QR convergence gate
       // never opens.
       if (from.address != '0.0.0.0') {
+        final wasConfirmedLocal = isPeerConfirmed(senderHexLocal);
         _confirmedPeers[senderHexLocal] = DateTime.now();
         _notifyEndpointConfirmed(senderHexLocal);
+        if (!wasConfirmedLocal) onPeerNewlyConfirmed?.call(senderHexLocal);
         if (!hasSessionConfirmedPeers) {
           hasSessionConfirmedPeers = true;
           _log.info('First session-confirmed peer (BOOT): '
@@ -5578,7 +5582,10 @@ class CleonaNode {
     for (final c in contacts) {
       final userIdBytes = hexToBytes(c.userIdHex);
       // Prefer cached manifest; fall back to live 2D-DHT lookup (§4.3) so
-      // fresh contacts can still be resolved.
+      // fresh contacts can still be resolved. Third fallback: locally cached
+      // deviceNodeIds from the contact record (legacy peers without
+      // Auth-Manifest). Only at empty resolve — never merged with manifest
+      // results to preserve device revocation semantics.
       final manifest = identityDhtHandler.getAuthManifest(userIdBytes);
       if (manifest != null) {
         deviceIds[c.userIdHex] =
@@ -5588,6 +5595,10 @@ class CleonaNode {
         if (resolved.isNotEmpty) {
           deviceIds[c.userIdHex] =
               resolved.map((d) => bytesToHex(d.deviceNodeId)).toList();
+        } else if (c.deviceNodeIds.isNotEmpty) {
+          deviceIds[c.userIdHex] = c.deviceNodeIds;
+          _log.info('§4.11 RV: legacy fallback deviceNodeIds for '
+              '${c.userIdHex.substring(0, 8)}');
         }
       }
     }
@@ -5890,6 +5901,12 @@ class CleonaNode {
   /// rebroadcast). Edge-triggered, resets on network change.
   void Function()? onDiscoveryComplete;
 
+  /// §5.4 V3.1.138: fires when a peer transitions from not-confirmed to
+  /// confirmed (first direct packet in this session, or after confirmation
+  /// TTL expired). Used by the service layer to re-arm proactive fragment
+  /// push (replicator side) and to poll late-arriving peers (receiver side).
+  void Function(String deviceHex)? onPeerNewlyConfirmed;
+
   /// H-4: Called during network recovery (§12.3 step 11) so the service layer
   /// can trigger IdentityPublisher.onAddressesChanged() — re-publishes the
   /// Liveness Record with the new addresses before the address broadcast.
@@ -6058,7 +6075,9 @@ class CleonaNode {
         if (list.isNotEmpty) _firstCrMailbox[entry.key] = list;
       }
       var total = 0;
-      for (final list in _firstCrMailbox.values) total += list.length;
+      for (final list in _firstCrMailbox.values) {
+        total += list.length;
+      }
       _log.info('Loaded $total First-CR-Mailbox entries from disk');
     } catch (e) {
       _log.warn('Failed to load First-CR-Mailbox: $e');
@@ -6294,7 +6313,9 @@ class CleonaNode {
     // S128: throttle catch-up to prevent post-restart feedback loop
     final lastSent = _lastRouteUpdateSentTo[neighborHex];
     if (lastSent != null &&
-        DateTime.now().difference(lastSent).inSeconds < 5) return;
+        DateTime.now().difference(lastSent).inSeconds < 5) {
+      return;
+    }
     final peer = routingTable.getPeer(hexToBytes(neighborHex));
     if (peer == null) return;
     // F5-A: use delta with Split Horizon instead of full-table blast
@@ -6337,8 +6358,10 @@ class CleonaNode {
 
     // Bidirectional reachability confirmed — mark as confirmed peer so
     // _sendV3ViaHop can stop after first successful send (no scatter-shot).
+    final wasConfirmedPunch = isPeerConfirmed(peerHex);
     _confirmedPeers[peerHex] = DateTime.now();
     _notifyEndpointConfirmed(peerHex);
+    if (!wasConfirmedPunch) onPeerNewlyConfirmed?.call(peerHex);
     if (!hasSessionConfirmedPeers) {
       hasSessionConfirmedPeers = true;
       _log.info('First session-confirmed peer: ${peerHex.substring(0, 8)}');

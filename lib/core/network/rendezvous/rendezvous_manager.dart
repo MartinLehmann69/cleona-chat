@@ -27,10 +27,12 @@ const Duration kRendezvousNetworkChangeDebounce = Duration(seconds: 10);
 class RendezvousContact {
   final String userIdHex;
   final Uint8List foundingEd25519Pk;
+  final List<String> deviceNodeIds;
 
   const RendezvousContact({
     required this.userIdHex,
     required this.foundingEd25519Pk,
+    this.deviceNodeIds = const [],
   });
 }
 

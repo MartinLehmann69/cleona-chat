@@ -83,7 +83,7 @@ class Identity {
 /// Supports HD-Wallet key derivation from a master seed.
 class IdentityManager {
   final String baseDir; // ~/.cleona
-  int _maxHdIndex = 0;
+  int _maxHdIndex = -1;
 
   IdentityManager({String? baseDir})
       : baseDir = baseDir ?? AppPaths.dataDir;
@@ -300,7 +300,7 @@ class IdentityManager {
     if (storedMax != null) {
       _maxHdIndex = storedMax;
     } else {
-      var computed = 0;
+      var computed = -1;
       for (final id in identities) {
         if (id.hdIndex != null && id.hdIndex! > computed) {
           computed = id.hdIndex!;

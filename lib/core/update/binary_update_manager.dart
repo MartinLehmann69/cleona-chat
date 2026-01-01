@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
@@ -288,14 +289,14 @@ class BinaryUpdateManager {
 
   /// Verify assembled binary: SHA-256 hash against [expectedHash] (hex) and
   /// Ed25519 signature by the maintainer key over that hash.
-  bool verify(
+  Future<bool> verify(
     Uint8List binary,
     String expectedHash,
     Uint8List maintainerSignature,
-  ) {
+  ) async {
     _setState(BinaryUpdateState.verifying, 0.0);
     try {
-      final hash = SodiumFFI().sha256(binary);
+      final hash = await Isolate.run(() => SodiumFFI().sha256(binary));
       final hashHex = bytesToHex(hash);
       if (hashHex.toLowerCase() != expectedHash.toLowerCase()) {
         _fail('Hash mismatch: expected=$expectedHash got=$hashHex');
@@ -437,6 +438,8 @@ class BinaryUpdateManager {
       final isZip = header.length >= 4 &&
           header[0] == 0x50 && header[1] == 0x4B &&
           header[2] == 0x03 && header[3] == 0x04;
+      final isGzip = header.length >= 2 &&
+          header[0] == 0x1F && header[1] == 0x8B;
 
       if (isZip && Platform.isWindows) {
         final appDir = currentFile.parent.path;
@@ -477,7 +480,58 @@ class BinaryUpdateManager {
           return false;
         }
         _log.info('Extracted ZIP bundle to $appDir (${File(verifiedPath).lengthSync()}B)');
+      } else if (isGzip && Platform.isLinux) {
+        // Linux tar.gz: extract to temp, find the target binary by basename,
+        // install it with the same rename-to-.bak + copy pattern.
+        final targetName = currentFile.uri.pathSegments.last; // e.g. "cleona-daemon"
+        final tmpDir = Directory('$_updateDir/extract-tmp');
+        if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+        tmpDir.createSync(recursive: true);
+        try {
+          final tarResult = await Process.run(
+            'tar', ['-xzf', verifiedPath, '-C', tmpDir.path],
+          );
+          if (tarResult.exitCode != 0) {
+            _log.error('tar extraction failed (exit ${tarResult.exitCode}): ${tarResult.stderr}');
+            tmpDir.deleteSync(recursive: true);
+            return false;
+          }
+
+          // Find the target binary anywhere in the extracted tree
+          final findResult = await Process.run(
+            'find', [tmpDir.path, '-name', targetName, '-type', 'f'],
+          );
+          final candidates = (findResult.stdout as String)
+              .split('\n')
+              .where((l) => l.trim().isNotEmpty)
+              .toList();
+          if (candidates.isEmpty) {
+            _log.error('tar.gz does not contain "$targetName" — cannot auto-install');
+            tmpDir.deleteSync(recursive: true);
+            return false;
+          }
+          final extractedBinary = candidates.first;
+          _log.info('Found $targetName in archive: $extractedBinary');
+
+          if (currentFile.existsSync()) {
+            currentFile.renameSync(bakPath);
+            _log.info('Backed up current binary to $bakPath');
+          }
+          File(extractedBinary).copySync(currentBinaryPath);
+          Process.runSync('chmod', ['+x', currentBinaryPath]);
+          _log.info('Installed $targetName from tar.gz (${File(currentBinaryPath).lengthSync()}B)');
+        } finally {
+          if (tmpDir.existsSync()) {
+            try { tmpDir.deleteSync(recursive: true); } catch (_) {}
+          }
+        }
+      } else if (isGzip || isZip) {
+        // macOS DMG or other archive on wrong platform — refuse instead of clobbering
+        _log.warn('applyDesktopUpdate: archive format (${isGzip ? "gzip" : "zip"}) '
+            'not supported on ${Platform.operatingSystem} — skipping');
+        return false;
       } else {
+        // Raw binary (direct ELF/Mach-O) — simple copy
         if (currentFile.existsSync()) {
           currentFile.renameSync(bakPath);
           _log.info('Backed up current binary to $bakPath');

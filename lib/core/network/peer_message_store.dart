@@ -160,10 +160,12 @@ class PeerMessageStore {
     final recipientHex = bytesToHex(recipientUserId);
     final list = _messages.putIfAbsent(recipientHex, () => []);
 
-    // Per-recipient budget
+    // Per-recipient budget: oldest-first eviction per §5.5
     if (list.length >= maxMessagesPerRecipient) {
-      _log.debug('PEER_STORE rejected: budget exceeded for ${recipientHex.substring(0, 8)}');
-      return false;
+      final evicted = list.removeAt(0);
+      _knownStoreIds.remove(evicted.storeIdHex);
+      _log.debug('PEER_STORE evicted oldest for ${recipientHex.substring(0, 8)} '
+          '(${list.length}/$maxMessagesPerRecipient)');
     }
 
     // Global limits
@@ -193,19 +195,25 @@ class PeerMessageStore {
     return true;
   }
 
-  /// Retrieve all messages for a recipient WITHOUT removing them.
+  /// Retrieve all messages for a recipient and remove them from the store.
   ///
-  /// Multi-device: a second device with the same Node-ID may retrieve
-  /// the same messages later. Messages expire via TTL (7 days) and
-  /// are cleaned up by [pruneExpired].
-  /// The recipient's deduplication layer discards already-processed messages.
+  /// §5.5: "holds the message for at most 7 days or until the receiver
+  /// retrieves it" — retrieve is destructive, freeing the per-recipient
+  /// budget for new stores. Multi-device delivery uses Twin-Sync (§7),
+  /// not S&F re-retrieval.
   List<Uint8List> retrieveMessages(Uint8List recipientUserId) {
     final recipientHex = bytesToHex(recipientUserId);
-    final list = _messages[recipientHex];
+    final list = _messages.remove(recipientHex);
     if (list == null || list.isEmpty) return [];
 
-    final result = list.where((m) => !m.isExpired).map((m) => m.wrappedEnvelope).toList();
-    _log.info('Retrieved ${result.length} messages for ${recipientHex.substring(0, 8)} (non-destructive)');
+    final result = <Uint8List>[];
+    for (final m in list) {
+      _knownStoreIds.remove(m.storeIdHex);
+      if (!m.isExpired) result.add(m.wrappedEnvelope);
+    }
+    _dirty = true;
+    _log.info('Retrieved and removed ${result.length} messages for '
+        '${recipientHex.substring(0, 8)}');
     return result;
   }
 

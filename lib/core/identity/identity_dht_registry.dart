@@ -179,14 +179,18 @@ class IdentityDhtRegistry {
   }
 
   /// Prepare erasure-coded fragments for DHT storage.
-  /// Returns (mailboxId, fragments, payloadSize) for use with ErasurePlacementCoordinator.
-  ({Uint8List mailboxId, List<({int index, Uint8List data})> fragments, int payloadSize}) prepareForDht(
+  /// Returns (mailboxId, messageId, fragments, payloadSize) for use with ErasurePlacementCoordinator.
+  /// [messageId] = SHA-256(encrypted_payload) — unique per publish (fresh nonce each time),
+  /// unlike [mailboxId] which is stable across publishes.
+  ({Uint8List mailboxId, Uint8List messageId, List<({int index, Uint8List data})> fragments, int payloadSize}) prepareForDht(
     List<Map<String, dynamic>> identities,
     int nextIndex,
   ) {
     final payload = buildPayload(identities, nextIndex);
     final fragments = encodeFragments(payload);
+    // messageId = SHA-256 of the encrypted payload (includes random nonce, so unique per publish)
+    final messageId = _sodium.sha256(payload);
     _log.info('Registry prepared for DHT: ${fragments.length} fragments, ${payload.length} bytes');
-    return (mailboxId: registryDhtKey, fragments: fragments, payloadSize: payload.length);
+    return (mailboxId: registryDhtKey, messageId: messageId, fragments: fragments, payloadSize: payload.length);
   }
 }

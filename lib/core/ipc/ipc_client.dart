@@ -1197,8 +1197,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName}) {
     _sendRequest('update_conversation_notifications', params: {
       'conversationId': conversationId,
-      if (enabled != null) 'enabled': enabled,
-      if (soundName != null) 'soundName': soundName,
+      'enabled': ?enabled,
+      'soundName': ?soundName,
     });
   }
 

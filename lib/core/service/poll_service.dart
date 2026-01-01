@@ -231,7 +231,9 @@ class PollService {
         final x25519Pk = contact?.x25519Pk ?? member.x25519Pk;
         final mlKemPk = contact?.mlKemPk ?? member.mlKemPk;
         if (x25519Pk == null || x25519Pk.isEmpty ||
-            mlKemPk == null || mlKemPk.isEmpty) continue;
+            mlKemPk == null || mlKemPk.isEmpty) {
+          continue;
+        }
         await _ctx.sendToUser(
           recipientUserId: hexToBytes(member.nodeIdHex),
           messageType: type,
@@ -357,7 +359,9 @@ class PollService {
       final x25519Pk = contact?.x25519Pk ?? chMember?.x25519Pk;
       final mlKemPk = contact?.mlKemPk ?? chMember?.mlKemPk;
       if (x25519Pk == null || x25519Pk.isEmpty ||
-          mlKemPk == null || mlKemPk.isEmpty) continue;
+          mlKemPk == null || mlKemPk.isEmpty) {
+        continue;
+      }
 
       final inner = proto.ApplicationFrameV3()
         ..recipientUserId = hexToBytes(recipientHex)
@@ -451,7 +455,9 @@ class PollService {
         final x25519Pk = contact?.x25519Pk ?? m?.x25519Pk;
         final mlKemPk = contact?.mlKemPk ?? m?.mlKemPk;
         if (x25519Pk == null || x25519Pk.isEmpty ||
-            mlKemPk == null || mlKemPk.isEmpty) continue;
+            mlKemPk == null || mlKemPk.isEmpty) {
+          continue;
+        }
         await _ctx.sendToUser(
           recipientUserId: hexToBytes(memberHex),
           messageType: messageType,

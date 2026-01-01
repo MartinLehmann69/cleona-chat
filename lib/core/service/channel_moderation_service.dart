@@ -1311,7 +1311,9 @@ class ChannelModerationService {
       if (channel != null && channel.members.containsKey(c.nodeIdHex)) continue;
       if (channelReports.values.any((r) =>
           r.channelIdHex == session.channelIdHex &&
-          r.reporterNodeIdHex == c.nodeIdHex)) continue;
+          r.reporterNodeIdHex == c.nodeIdHex)) {
+        continue;
+      }
       // Exclude already-selected jurors (both responded and non-responded)
       if (session.jurorNodeIds.contains(c.nodeIdHex)) continue;
       eligible.add(c);
