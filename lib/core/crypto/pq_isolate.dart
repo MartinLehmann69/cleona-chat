@@ -56,30 +56,26 @@ Future<({Uint8List publicKey, Uint8List secretKey})>
 
 /// Generate deterministic PQ keypairs from master seed + HD index.
 /// Same seed + index always yields identical keys — critical for seed recovery.
+///
+/// MUST run sequentially in ONE isolate: liboqs OQS_randombytes_custom_algorithm
+/// sets a process-global C function pointer (not thread-local), so concurrent
+/// workers would race on the DRBG callback — crash or silent key corruption.
 Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})>
-    generatePqKeysDeterministicIsolated(Uint8List masterSeed, int hdIndex) async {
-  final dsaFuture = Isolate.run(() => _generateMlDsaDerand(masterSeed, hdIndex));
-  final kemFuture = Isolate.run(() => _generateMlKemDerand(masterSeed, hdIndex));
-  final dsa = await dsaFuture;
-  final kem = await kemFuture;
+    generatePqKeysDeterministicIsolated(Uint8List masterSeed, int hdIndex) {
+  return Isolate.run(() => _generatePqKeysDerand(masterSeed, hdIndex));
+}
+
+({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})
+    _generatePqKeysDerand(Uint8List masterSeed, int hdIndex) {
+  OqsFFI().init();
+  final dsa = HdWallet.deriveMlDsa(masterSeed, hdIndex);
+  final kem = HdWallet.deriveMlKem(masterSeed, hdIndex);
   return (
     mlDsaPk: dsa.publicKey,
     mlDsaSk: dsa.secretKey,
     mlKemPk: kem.publicKey,
     mlKemSk: kem.secretKey,
   );
-}
-
-({Uint8List publicKey, Uint8List secretKey}) _generateMlDsaDerand(
-    Uint8List masterSeed, int hdIndex) {
-  OqsFFI().init();
-  return HdWallet.deriveMlDsa(masterSeed, hdIndex);
-}
-
-({Uint8List publicKey, Uint8List secretKey}) _generateMlKemDerand(
-    Uint8List masterSeed, int hdIndex) {
-  OqsFFI().init();
-  return HdWallet.deriveMlKem(masterSeed, hdIndex);
 }
 
 /// Generate both ML-DSA-65 + ML-KEM-768 keypairs for emergency rotation.
