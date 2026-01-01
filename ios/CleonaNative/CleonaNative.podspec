@@ -31,12 +31,26 @@ Pod::Spec.new do |s|
 
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation', 'Accelerate', 'Metal', 'MetalKit'
 
-  # Force-load all symbols from static archives so dart:ffi
-  # DynamicLibrary.process() can find them at runtime.
+  # dart:ffi loads symbols at runtime via DynamicLibrary.process().
+  # Without -force_load the linker dead-strips unreferenced symbols.
+  # We force-load only the libs that FFI actually needs; liberasurecode
+  # is excluded (Reed-Solomon is pure Dart) because its xor_hd backend
+  # has unresolved deps that would break the link.
+  ffi_libs = %w[libsodium liboqs libzstd libopus libcleona_audio libwhisper libggml]
+  force_flags = ffi_libs.map { |name|
+    xcfw = File.join(frameworks_dir, "#{name}.xcframework")
+    lib_dir = File.join(xcfw, 'ios-arm64')
+    lib_file = Dir.glob("#{lib_dir}/#{name}.a").first ||
+               Dir.glob("#{lib_dir}/lib*.a").first
+    if lib_file
+      "-force_load $(PODS_ROOT)/CleonaNative/Frameworks/#{name}.xcframework/ios-arm64/#{File.basename(lib_file)}"
+    end
+  }.compact
+
   s.pod_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-ObjC -all_load',
+    'OTHER_LDFLAGS' => '-ObjC',
   }
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-ObjC -all_load',
+    'OTHER_LDFLAGS' => (['-ObjC'] + force_flags).join(' '),
   }
 end
