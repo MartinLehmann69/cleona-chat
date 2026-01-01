@@ -219,7 +219,12 @@ class _GlobalUpdateBanner extends StatelessWidget {
     final locale = AppLocale.read(context);
     final state = appState.updateState;
     final progress = appState.updateProgress;
+    final needsPermission = appState.updateNeedsInstallPermission;
     final cs = Theme.of(context).colorScheme;
+
+    if (needsPermission && state == BinaryUpdateState.ready) {
+      return _permissionHint(appState, locale, cs);
+    }
 
     return GestureDetector(
       onTap: state == BinaryUpdateState.idle
@@ -242,6 +247,44 @@ class _GlobalUpdateBanner extends StatelessWidget {
               ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _permissionHint(
+      CleonaAppState appState, AppLocale locale, ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      color: cs.primaryContainer,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            locale.get('update_install_permission_hint'),
+            style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton(
+                onPressed: appState.cancelUpdate,
+                child: Text(locale.get('update_cancel'),
+                    style: TextStyle(color: cs.onPrimaryContainer, fontSize: 12)),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: appState.retryInstallPermission,
+                child: Text(locale.get('update_install_permission_retry'),
+                    style: TextStyle(
+                        color: cs.onPrimaryContainer,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold)),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

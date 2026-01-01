@@ -611,7 +611,7 @@ class CleonaNode {
         .toSet();
     for (final destHex in dvRouting.allDestinations) {
       if (!set.contains(destHex) &&
-          dvRouting.hasRecentAliveRouteTo(destHex)) {
+          dvRouting.hasConfirmedRouteTo(destHex)) {
         set.add(destHex);
       }
     }
@@ -3961,6 +3961,7 @@ class CleonaNode {
     final routes = dvRouting.routesTo(destHex);
     var attempts = 0;
     const maxRouteAttempts = 3;
+    var triedDirectViaDv = false;
     for (final route in routes) {
       if (attempts >= maxRouteAttempts) break;
       if (!route.isAlive) continue;
@@ -3986,6 +3987,7 @@ class CleonaNode {
           continue;
         }
       }
+      if (route.isDirect) triedDirectViaDv = true;
       attempts++;
       _log.info('sendToDevice ${destHex.substring(0, 8)}: DV route #$attempts '
           'via hop=${bytesToHex(hopId).substring(0, 8)} '
@@ -4004,7 +4006,10 @@ class CleonaNode {
     // receives from LAN node via relay with hopCount==0 punched, but Phone→
     // LAN direct is black-holed). Always fall through to the relay cascade
     // so at least one path with actual delivery evidence gets tried.
-    if (dvRouting.neighbors.containsKey(destHex) &&
+    // S269: skip if the DV-route loop already tried the direct route to this
+    // exact destination — avoids duplicate sends to the same address list.
+    if (!triedDirectViaDv &&
+        dvRouting.neighbors.containsKey(destHex) &&
         isPeerConfirmed(destHex)) {
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'confirmed neighbor — direct + relay cascade');
@@ -4128,6 +4133,13 @@ class CleonaNode {
       if (!nPeer.idPowVerified && !nPeer.isProtectedSeed) continue;
       if (!_isHopReachableFromHere(nPeer)) continue;
       if (needsDualStack && !_hopIsDualStack(nPeer)) continue;
+      // S269: skip neighbors that already failed as relay for this destination
+      final destPeer = routingTable.getPeer(deviceId);
+      if (destPeer != null && destPeer.isRelayInCooldown(neighborHex)) {
+        _log.debug('sendToDevice ${destHex.substring(0, 8)}: '
+            'neighbor ${neighborHex.substring(0, 8)} in relay cooldown — skipped');
+        continue;
+      }
       neighborsTried++;
       _log.info('sendToDevice ${destHex.substring(0, 8)}: '
           'trying neighbor ${neighborHex.substring(0, 8)} as relay '
@@ -4158,12 +4170,35 @@ class CleonaNode {
   /// [hopDeviceId]. Protocol Escalation per §4.1: UDP (auto-fragments
   /// >1200B via Transport.sendUdp) → TLS fallback if UDP fails on all
   /// targets and payload is large.
+  // S272 Befund 1: sender-side per-hop outbound pacing (150 pkt / 10s).
+  // Without this, a startup burst relays 1200+ packets through a single hop,
+  // exhausting the receiver's per-source rate-limit budget.
+  final Map<String, ({int count, DateTime windowStart})> _hopSendBudget = {};
+  static const int _hopSendBudgetLimit = 150;
+  static const Duration _hopSendBudgetWindow = Duration(seconds: 10);
+
   Future<bool> _sendV3ViaHop(
       proto.NetworkPacketV3 packet, Uint8List hopDeviceId) async {
     // packet.nextHopDeviceId is set by the caller (sendToDevice) to the final
     // destination, not to hopDeviceId. This ensures relay nodes forward the
     // packet rather than delivering it locally. Do NOT overwrite it here.
     final hopHex = bytesToHex(hopDeviceId);
+
+    // Sender-side per-hop pacing: drop if we already sent too many packets
+    // to this hop in the current 10s window. Prevents relay amplification
+    // when 200+ ghost peers route through a single neighbor at startup.
+    final now = DateTime.now();
+    var budget = _hopSendBudget[hopHex];
+    if (budget == null || now.difference(budget.windowStart) >= _hopSendBudgetWindow) {
+      budget = (count: 0, windowStart: now);
+    }
+    if (budget.count >= _hopSendBudgetLimit) {
+      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: sender-side hop '
+          'budget exhausted (${budget.count}/$_hopSendBudgetLimit in 10s)');
+      return false;
+    }
+    _hopSendBudget[hopHex] = (count: budget.count + 1, windowStart: budget.windowStart);
+
     var hopPeer = routingTable.getPeer(hopDeviceId);
     if (hopPeer == null) {
       // §3.1 B-1: fallback — caller may have passed a userId (legacy path).
@@ -5469,6 +5504,7 @@ class CleonaNode {
     _unackedPacketsToPeer.clear();
     _lastMeshRefresh.clear();
     _meshRefreshGlobalBucket.clear();
+    _hopSendBudget.clear();
     // Learned relay routes are NOT
     // cleared but marked `stale` (cost penalty +5, 30 s revalidation
     // deadline): a route that was working before the event almost always

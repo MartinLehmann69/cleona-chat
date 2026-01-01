@@ -193,9 +193,8 @@ class _IsolateCameraCapture {
   }
 
   Uint8List? grabI420Frame() {
-    // In the actual implementation, this would call the v4l2 shim FFI functions.
-    // For now, return a synthetic I420 frame (gray) for testing.
-    // TODO: Wire up actual v4l2 FFI calls when capture isolate is fully integrated.
+    // Stub: returns synthetic gray frames. Real V4L2 capture is in
+    // video_capture_linux.dart but not yet wired into the isolate.
     if (!_started) return null;
     final i420Size = width * height * 3 ~/ 2;
     final frame = Uint8List(i420Size);
@@ -284,8 +283,7 @@ class VideoEngine {
     if (_running) return true;
 
     // Create the VP8 codec pair (encoder + decoder). If libvpx / the shim
-    // isn't available on this platform (e.g. Android/iOS today, where
-    // libcleona_vpx is not yet built into jniLibs/XCFrameworks), fail soft —
+    // isn't loadable (e.g. stale .so in an old APK), fail soft —
     // the caller treats `false` as "continue the call audio-only".
     try {
       _decoder = VpxFFI(

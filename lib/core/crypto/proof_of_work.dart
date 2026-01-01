@@ -54,8 +54,23 @@ _PowFindNonceDart? _loadNativePow() {
     ]) {
       candidates.add(p);
     }
+  } else if (Platform.isIOS) {
+    try {
+      final lib = ffi.DynamicLibrary.process();
+      _nativePowFindNonce = lib.lookupFunction<_PowFindNonceNative,
+          _PowFindNonceDart>('cleona_pow_find_nonce');
+      return _nativePowFindNonce;
+    } catch (_) {}
+    return null;
+  } else if (Platform.isAndroid) {
+    try {
+      final lib = ffi.DynamicLibrary.open('libcleona_pow.so');
+      _nativePowFindNonce = lib.lookupFunction<_PowFindNonceNative,
+          _PowFindNonceDart>('cleona_pow_find_nonce');
+      return _nativePowFindNonce;
+    } catch (_) {}
+    return null;
   }
-  // iOS/Android: static-link or separate .so — not yet deployed
 
   for (final c in candidates) {
     try {

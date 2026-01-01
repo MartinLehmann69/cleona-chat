@@ -281,6 +281,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Android: post/cancel incoming call notification with fullScreenIntent.
   void Function(String callerName, String callId)? onPostCallNotificationAndroid;
   void Function()? onCancelCallNotificationAndroid;
+  void Function(bool speaker)? onSetCallAudioModeAndroid;
+  void Function()? onResetCallAudioModeAndroid;
+  void Function(String reason)? onVideoUnavailable;
 
   // Contact storage
   final Map<String, ContactInfo> _contacts = {};
@@ -477,7 +480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.154';
+  static const String kCurrentAppVersion = '3.1.156';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -594,6 +597,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _calls.onStateChanged = () => onStateChanged?.call();
     _calls.onPostCallNotificationAndroid = (name, id) => onPostCallNotificationAndroid?.call(name, id);
     _calls.onCancelCallNotificationAndroid = () => onCancelCallNotificationAndroid?.call();
+    _calls.onSetCallAudioModeAndroid = (speaker) => onSetCallAudioModeAndroid?.call(speaker);
+    _calls.onResetCallAudioModeAndroid = () => onResetCallAudioModeAndroid?.call();
+    _calls.onVideoUnavailable = (reason) => onVideoUnavailable?.call(reason);
     // Forward whatever was buffered on the plain fields below (set by
     // callers that ran before startService, e.g. main.dart's
     // _wireServiceCallbacks) to the now-constructed CallService.
@@ -1868,8 +1874,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final fileSize = audioBytes.length;
     final isVoice = _isVoiceFromMime(mimeType);
     final isGroup = _groups.containsKey(conversationId);
+    final isChannel = !isGroup && _channels.containsKey(conversationId);
 
-    if (!isGroup) _maybeWriteStaleContactWarning(conversationId);
+    if (!isGroup && !isChannel) _maybeWriteStaleContactWarning(conversationId);
 
     // Copy file to media directory so sent media survives source deletion
     final mediaDir = Directory('$profileDir/media');
@@ -1924,7 +1931,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       filename: filename,
       mediaState: MediaDownloadState.completed,
     );
-    _addMessageToConversation(conversationId, msg, isGroup: isGroup);
+    _addMessageToConversation(conversationId, msg, isGroup: isGroup, isChannel: isChannel);
 
     // Yield to let UI repaint before heavy crypto/transcription work
     await Future.delayed(Duration.zero);
@@ -2024,6 +2031,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
                 status: 'accepted',
               ))
           .toList();
+    } else if (isChannel) {
+      final channel = _channels[conversationId];
+      if (channel == null) return null;
+      if (!_hasChannelPermission(channel, 'post')) {
+        _log.warn('sendMediaMessage: no post permission in channel $conversationId');
+        return null;
+      }
+      recipients = [];
+      for (final member in channel.members.values) {
+        if (member.nodeIdHex == identity.userIdHex) continue;
+        final (x25519Pk, mlKemPk) = _resolveMemberKeys(member.nodeIdHex,
+            memberX25519Pk: member.x25519Pk, memberMlKemPk: member.mlKemPk);
+        if (x25519Pk == null || mlKemPk == null) continue;
+        recipients.add(ContactInfo(
+          nodeId: hexToBytes(member.nodeIdHex),
+          displayName: member.displayName,
+          x25519Pk: x25519Pk,
+          mlKemPk: mlKemPk,
+          status: 'accepted',
+        ));
+      }
     } else {
       final contact = _contacts[conversationId];
       if (contact == null || contact.status != 'accepted') {
@@ -2042,13 +2070,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final twoStage = fileSize > 256 * 1024;
     _log.info('[E2E media-send-path-v3] mode=${twoStage ? "two-stage-announce-only" : "inline"} '
         'fileSize=$fileSize recipients=${recipients.length} convId=${conversationId.substring(0, 8)}');
-    // GM-1 (§9.1.4): group media must carry groupId + membership tag
+    // GM-1 (§9.1.4): group/channel media must carry groupId + membership tag
     final groupForMedia = isGroup ? _groups[conversationId] : null;
-    final mediaGroupId = isGroup ? hexToBytes(conversationId) : null;
-    final mediaGmEpoch = groupForMedia?.membershipEpoch;
+    final channelForMedia = isChannel ? _channels[conversationId] : null;
+    final mediaGroupId = (isGroup || isChannel) ? hexToBytes(conversationId) : null;
+    final mediaGmEpoch = groupForMedia?.membershipEpoch ?? channelForMedia?.membershipEpoch;
     final mediaGmHash = groupForMedia != null
         ? _computeMembershipHash(groupForMedia.membershipEpoch, conversationId, groupForMedia.members)
-        : null;
+        : channelForMedia != null
+            ? _computeChannelMembershipHash(channelForMedia.membershipEpoch, conversationId, channelForMedia.members)
+            : null;
     String? firstMsgId;
     if (!twoStage) {
       for (final recipient in recipients) {
@@ -3230,15 +3261,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         ? displayName
         : (_contacts[msg.senderNodeIdHex]?.effectiveName ?? msg.senderNodeIdHex.substring(0, 8));
 
-    // Check if this is a media message with a local file
-    if (msg.isMedia && msg.filePath != null && File(msg.filePath!).existsSync()) {
-      // Forward media: re-send the file to the target
-      final result = await sendMediaMessage(targetConversationId, msg.filePath!);
-      if (result != null) {
-        result.forwardedFrom = originalSenderName;
-        _saveConversations();
+    // Check if this is a media message
+    if (msg.isMedia) {
+      if (msg.filePath != null && File(msg.filePath!).existsSync()) {
+        final result = await sendMediaMessage(targetConversationId, msg.filePath!);
+        if (result != null) {
+          result.forwardedFrom = originalSenderName;
+          _saveConversations();
+        }
+        return result;
       }
-      return result;
+      // Media not locally available — don't degrade to text
+      _log.warn('forwardMessage: media file not available locally for ${messageId.substring(0, 8)}');
+      return null;
     }
 
     // Text-only forward
@@ -4782,6 +4817,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Create conversation with system message so the contact appears
     // immediately in the "Aktuell" tab after acceptance.
     if (!conversations.containsKey(nodeIdHex)) {
+      for (final entry in _contacts.entries) {
+        if (entry.key == nodeIdHex) continue;
+        if (entry.value.status != 'accepted') continue;
+        if (entry.value.displayName == contact.displayName) {
+          _log.warn('DUPLICATE-CONTACT-DIAG: acceptContactRequest creating conversation for '
+              '"${contact.displayName}" userId=${nodeIdHex.substring(0, 16)} '
+              'but accepted contact with SAME displayName already exists at '
+              'userId=${entry.key.substring(0, 16)}');
+        }
+      }
       final systemMsg = UiMessage(
         id: bytesToHex(SodiumFFI().randomBytes(16)),
         conversationId: nodeIdHex,
@@ -10474,7 +10519,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
       }
 
-      _log.info('Valid RESTORE_BROADCAST from ${contact.displayName} (old: ${oldNodeIdHex.substring(0, 8)}, new: ${newNodeIdHex.substring(0, 8)})');
+      _log.warn('RESTORE-BROADCAST-DIAG: "${contact.displayName}" userId migration '
+          'old=${oldNodeIdHex.substring(0, 16)} → new=${newNodeIdHex.substring(0, 16)} '
+          '— contact map entry will be re-keyed');
 
       // H-2 Part B: detect whether this restore actually CHANGES the
       // contact's identity key (new-seed re-identity or forge attempt) vs.
@@ -12184,6 +12231,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     int? groupMembershipEpoch,
     Uint8List? groupMembershipHash,
     Uint8List? targetDeviceId,
+    bool skipL3 = false,
   }) async {
     // 1. Sender identity: this CleonaService is bound to a single
     //    IdentityContext (see ipc_server `_resolveService` per-request
@@ -12242,6 +12290,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     if (deviceIds.isEmpty) {
+      if (skipL3) {
+        _log.info('sendToUser: no devices for ${_hexShort(recipientUserId)}'
+            ' — skipL3=true, not placing offline delivery');
+        return false;
+      }
       // §5.1 Layer 1 empty → skip Layer 2, go directly to Layer 3.
       _log.info('sendToUser: no devices for ${_hexShort(recipientUserId)}'
           ' — triggering offline cascade (S&F + Erasure)');
@@ -12472,7 +12525,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // the message is considered delivered and erasure-distribution is
     // skipped — the recipient will receive the inner ApplicationFrame
     // through the standard receive pipeline.
-    if (dispatched == 0 && canonicalPacket != null) {
+    if (dispatched == 0 && canonicalPacket != null && !skipL3) {
       final canonicalBytes =
           node.serializePacketForOfflineDelivery(canonicalPacket);
       final useErasure = canonicalBytes.length > _l3SizeThresholdBytes;
@@ -15016,8 +15069,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             status: MessageStatus.delivered,
           );
           oldConv.messages.add(systemMsg);
-          _log.info('Stale contact detected: ${cr.displayName} has new identity '
-              '${senderHex.substring(0, 8)}, old was ${entry.key.substring(0, 8)}');
+          _log.warn('DUPLICATE-CONTACT-DIAG: "${cr.displayName}" CR from new userId=${senderHex.substring(0, 16)} '
+              'but accepted contact with SAME displayName exists at old userId=${entry.key.substring(0, 16)} '
+              '— probable reinstall with different seed');
         }
       }
 

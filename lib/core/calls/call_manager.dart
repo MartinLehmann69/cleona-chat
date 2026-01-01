@@ -208,13 +208,12 @@ class CallManager {
         false;
     _log.info('Call invite sent to ${peerNodeIdHex.substring(0, 8)}: ${sent ? "OK" : "FAILED"}');
 
-    // UDP has no delivery guarantee — retry the CALL_INVITE up to 2 more
-    // times if no CALL_ACCEPT/REJECT arrives within 3s each. This is NOT a
-    // timeout increase; it compensates for UDP packet loss or stale routes
-    // that haven't converged yet after a cold start.
-    if (sent) {
-      _scheduleInviteRetry(recipientId, inviteBytes, peerNodeIdHex, 2);
-    }
+    // UDP has no delivery guarantee — retry the CALL_INVITE every 3s for
+    // the entire ringing duration (60s / 3s = 19 retries). Retries fire
+    // regardless of the initial send result: cold routes may not have
+    // converged yet, and a failed first attempt doesn't mean later ones
+    // will fail too.
+    _scheduleInviteRetry(recipientId, inviteBytes, peerNodeIdHex, 19);
 
     // 60s Ringing Timeout — auto-hangup if not answered
     _startRingingTimeout();
@@ -390,6 +389,11 @@ class CallManager {
     SenderIdentitySnapshot snapshot,
   ) {
     if (_currentCall != null) {
+      final retryInvite = proto.CallInvite.fromBuffer(frame.payload);
+      if (_callIdMatches(_currentCall!.callId, retryInvite.callId)) {
+        _log.debug('Duplicate INVITE for current call — ignoring');
+        return;
+      }
       _sendRejectV3(frame, senderDeviceId, 'busy');
       return;
     }

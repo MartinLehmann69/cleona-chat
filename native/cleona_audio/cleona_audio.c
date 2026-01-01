@@ -58,7 +58,7 @@ CLEONA_AUDIO_API cleona_audio_engine_t* cleona_audio_create(
 
     if (cleona_ring_init(&e->capture_ring,  ring_capacity_frames, e->frame_bytes) != 0) goto fail_capture_ring;
     if (cleona_ring_init(&e->playback_ring, ring_capacity_frames, e->frame_bytes) != 0) goto fail_playback_ring;
-    if (cleona_ring_init(&e->far_end_ring, 1, e->frame_bytes) != 0) goto fail_far_end_ring;
+    if (cleona_ring_init(&e->far_end_ring, 4, e->frame_bytes) != 0) goto fail_far_end_ring;
 
     // Speex AEC: tail = 250ms @ sample_rate
     int32_t tail_samples = (sample_rate * 250) / 1000; // 4000 @ 16kHz
@@ -123,7 +123,12 @@ static void capture_callback(ma_device* dev, void* output_unused, const void* in
     cleona_audio_engine_t* e = (cleona_audio_engine_t*)dev->pUserData;
     if (!e) return;
     if ((int32_t)frame_count != e->frame_samples) return; // unexpected — drop
-    if (atomic_load(&e->muted)) return;
+    if (atomic_load(&e->muted)) {
+        if (atomic_load(&e->aec_enabled)) {
+            cleona_ring_try_read(&e->far_end_ring, e->far_end_scratch);
+        }
+        return;
+    }
 
     int16_t cleaned[CLEONA_AUDIO_MAX_FRAME_SAMPLES]; // sized to clamp; actual use = e->frame_samples
     const int16_t* src = (const int16_t*)input;
@@ -162,11 +167,11 @@ static void playback_callback(ma_device* dev, void* output, const void* input_un
     int16_t buf[CLEONA_AUDIO_MAX_FRAME_SAMPLES];
     if (cleona_ring_try_read(&e->playback_ring, buf)) {
         memcpy(output, buf, (size_t)e->frame_bytes);
-        cleona_ring_try_write(&e->far_end_ring, buf);  // atomic SPSC handoff to capture thread
+        cleona_ring_overwrite(&e->far_end_ring, buf);
     } else {
         memset(output, 0, (size_t)e->frame_bytes);
         static const int16_t zero_frame[CLEONA_AUDIO_MAX_FRAME_SAMPLES] = {0};
-        cleona_ring_try_write(&e->far_end_ring, zero_frame);
+        cleona_ring_overwrite(&e->far_end_ring, zero_frame);
         atomic_fetch_add(&e->playback_underruns, 1);
     }
 }

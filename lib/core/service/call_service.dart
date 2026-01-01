@@ -60,6 +60,9 @@ class CallService {
   void Function()? onStateChanged;
   void Function(String callerName, String callId)? onPostCallNotificationAndroid;
   void Function()? onCancelCallNotificationAndroid;
+  void Function(bool speaker)? onSetCallAudioModeAndroid;
+  void Function()? onResetCallAudioModeAndroid;
+  void Function(String reason)? onVideoUnavailable;
 
   CallService(this._ctx, {required this.notificationSound, required CLogger log})
       : _log = log;
@@ -76,6 +79,7 @@ class CallService {
           recipientUserId: recipientUserId,
           messageType: type,
           payload: payload,
+          skipL3: true,
         );
     callManager.onIncomingCall = (session) {
       onIncomingCall?.call(session.toCallInfo());
@@ -131,6 +135,7 @@ class CallService {
           recipientUserId: recipientUserId,
           messageType: type,
           payload: payload,
+          skipL3: true,
         );
     groupCallManager.onIncomingGroupCall = (info) {
       onIncomingGroupCall?.call(info);
@@ -296,7 +301,11 @@ class CallService {
       _audioMixer!.onAudioFrame = (encryptedFrame) {
         groupCallManager.sendGroupAudioFrame(encryptedFrame);
       };
+      _audioMixer!.onSpeakerToggle = (speaker) {
+        onSetCallAudioModeAndroid?.call(speaker);
+      };
       await _audioMixer!.start();
+      onSetCallAudioModeAndroid?.call(true);
       // Poll audio levels at 4 Hz for active speaker detection + mute inference.
       _audioLevelTimer?.cancel();
       _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
@@ -323,6 +332,7 @@ class CallService {
       _log.warn('AudioMixer stop threw (swallowed): $e');
     }
     _audioMixer = null;
+    onResetCallAudioModeAndroid?.call();
     if (Platform.isAndroid) {
       ForegroundServiceControl.demoteAfterCall();
     }
@@ -394,7 +404,11 @@ class CallService {
       _audioEngine!.onAudioFrame = (encryptedFrame) {
         _sendAudioFrame(session, encryptedFrame);
       };
+      _audioEngine!.onSpeakerToggle = (speaker) {
+        onSetCallAudioModeAndroid?.call(speaker);
+      };
       await _audioEngine!.start();
+      onSetCallAudioModeAndroid?.call(true);
     } catch (e) {
       _log.error('Audio engine start failed: $e');
     }
@@ -407,6 +421,7 @@ class CallService {
       _log.warn('AudioEngine stop threw (swallowed): $e');
     }
     _audioEngine = null;
+    onResetCallAudioModeAndroid?.call();
     if (Platform.isAndroid) {
       ForegroundServiceControl.demoteAfterCall();
     }
@@ -426,6 +441,7 @@ class CallService {
     if (createVideoEngine == null) {
       _log.debug('Video call requested but no video engine factory wired '
           '— continuing audio-only');
+      onVideoUnavailable?.call('Video nicht verfuegbar (kein Video-Engine)');
       return;
     }
     try {
@@ -440,6 +456,7 @@ class CallService {
     } catch (e) {
       _log.error('Video engine start failed — continuing audio-only: $e');
       _videoEngine = null;
+      onVideoUnavailable?.call('Video nicht verfuegbar (Codec-Fehler)');
     }
   }
 
@@ -687,6 +704,13 @@ class CallService {
 
   void handleCallInviteV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
+    final ageMs = DateTime.now().millisecondsSinceEpoch - f.timestampMs.toInt();
+    if (ageMs > 60000) {
+      _log.info('Stale CALL_INVITE (${(ageMs / 1000).toStringAsFixed(0)}s old) '
+          'from ${bytesToHex(Uint8List.fromList(f.senderUserId)).substring(0, 8)} '
+          '— discarded (S&F ghost prevention)');
+      return;
+    }
     proto.CallInvite invite;
     try {
       invite = proto.CallInvite.fromBuffer(f.payload);

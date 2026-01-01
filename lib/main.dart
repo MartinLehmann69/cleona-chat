@@ -875,11 +875,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   double _updateProgress = 0.0;
   bool _updateBannerDismissed = false;
   bool _updateApplyPending = false;
+  bool _updateNeedsInstallPermission = false;
 
   BinaryUpdateState get updateState => _updateState;
   double get updateProgress => _updateProgress;
   bool get updateBannerDismissed => _updateBannerDismissed;
   bool get updateApplyPending => _updateApplyPending;
+  bool get updateNeedsInstallPermission => _updateNeedsInstallPermission;
 
   void dismissUpdateBanner() {
     _updateBannerDismissed = true;
@@ -888,6 +890,25 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void undismissUpdateBanner() {
     _updateBannerDismissed = false;
+    notifyListeners();
+  }
+
+  Future<void> retryInstallPermission() async {
+    await ApkInstaller.openInstallPermissionSettings();
+    final hasPermission = await ApkInstaller.canInstallPackages();
+    if (hasPermission) {
+      _updateNeedsInstallPermission = false;
+      notifyListeners();
+      await applyUpdate();
+    } else {
+      notifyListeners();
+    }
+  }
+
+  void cancelUpdate() {
+    _updateNeedsInstallPermission = false;
+    _updateState = BinaryUpdateState.idle;
+    _updateBannerDismissed = true;
     notifyListeners();
   }
 
@@ -930,6 +951,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final mgr = source.binaryUpdateManager;
       final store = source.binaryFragmentStore;
       if (mgr == null || store == null) return;
+      _updateNeedsInstallPermission = false;
       _updateState = BinaryUpdateState.verifying;
       _updateProgress = 0.0;
       notifyListeners();
@@ -940,11 +962,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         notifyListeners();
         return;
       }
-      final hasPermission = await ApkInstaller.canInstallPackages();
+      var hasPermission = await ApkInstaller.canInstallPackages();
       if (!hasPermission) {
+        await ApkInstaller.openInstallPermissionSettings();
+        hasPermission = await ApkInstaller.canInstallPackages();
+      }
+      if (!hasPermission) {
+        _updateNeedsInstallPermission = true;
         _updateState = BinaryUpdateState.ready;
         notifyListeners();
-        await ApkInstaller.openInstallPermissionSettings();
         return;
       }
       await ApkInstaller.installApk(completePath);
@@ -2136,6 +2162,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.createVideoEngine = (sharedSecret, onFrame) =>
         _createVideoEngine(sharedSecret, onFrame);
 
+    service.onVideoUnavailable = (reason) {
+      debugPrint('[video] $reason');
+    };
+
     // Android: inject platform-specific callbacks
     if (Platform.isAndroid) {
       service.setPlatformAudioDecoder(_androidDecodeToWav);
@@ -2180,6 +2210,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       service.notificationSound.onVibrateAndroid = (durationMs) async {
         const channel = MethodChannel('chat.cleona/vibration');
         await channel.invokeMethod('vibrate', {'duration': durationMs});
+      };
+
+      service.onSetCallAudioModeAndroid = (speaker) {
+        const channel = MethodChannel('chat.cleona/notification');
+        channel.invokeMethod('setCallAudioMode', {'speaker': speaker});
+      };
+      service.onResetCallAudioModeAndroid = () {
+        const channel = MethodChannel('chat.cleona/notification');
+        channel.invokeMethod('resetCallAudioMode');
       };
 
       service.onPostCallNotificationAndroid = (callerName, callId) {

@@ -43,6 +43,9 @@ abstract class ServiceContext {
     // exact device that sent the original frame, not just any known device
     // of that user).
     Uint8List? targetDeviceId,
+    // When true, skips Layer 3 offline delivery (S&F + Erasure). Used for
+    // ephemeral signaling (call invites) that is useless when delayed.
+    bool skipL3 = false,
   });
 
   void saveChannels();

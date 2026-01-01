@@ -8,6 +8,7 @@ import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/calls/audio_engine_shim.dart';
+import 'package:cleona/core/calls/jitter_buffer.dart';
 
 // ── Capture Isolate ───────────────────────────────────────────────────────
 
@@ -124,6 +125,13 @@ class AudioEngine {
   // Callback: encrypted audio frame ready to send
   void Function(Uint8List encryptedFrame)? onAudioFrame;
 
+  // Callback: speaker routing changed (for Android AudioManager)
+  void Function(bool speaker)? onSpeakerToggle;
+
+  // Jitter buffer for reordering received frames before playback
+  final JitterBuffer _jitterBuffer = JitterBuffer(bufferDepth: 5, maxBufferSize: 30);
+  Timer? _playbackTimer;
+
   // Audio parameters
   static const int sampleRate = 16000;
   static const int channels = 1;
@@ -178,6 +186,11 @@ class AudioEngine {
       _playbackPcmPtr = null;
       return false;
     }
+
+    _playbackTimer = Timer.periodic(
+      const Duration(milliseconds: frameDurationMs),
+      (_) => _drainJitterBuffer(),
+    );
 
     _running = true;
     _log.info(
@@ -247,17 +260,28 @@ class AudioEngine {
     return true;
   }
 
-  /// Play received encrypted audio frame.
+  /// Queue received encrypted audio frame for jitter-buffered playback.
   void playFrame(Uint8List encryptedFrame) {
-    if (!_running || _engine == null || _playbackPcmPtr == null) return;
-    if (!_speakerEnabled) return;
+    if (!_running) return;
+    if (encryptedFrame.length < 16 + cryptoAeadAes256GcmABytes) return;
 
+    final seqNum = ByteData.sublistView(encryptedFrame).getUint32(0, Endian.big);
     final pcmData = _decryptFrame(encryptedFrame);
     if (pcmData == null) return;
     if (pcmData.length != frameSize) return;
 
+    _jitterBuffer.push(AudioFrame(seqNum: seqNum, data: pcmData));
+  }
+
+  void _drainJitterBuffer() {
+    if (!_running || _engine == null || _playbackPcmPtr == null) return;
+    if (!_speakerEnabled) return;
+
+    final frame = _jitterBuffer.pop();
+    if (frame == null) return;
+
     final byteView = _playbackPcmPtr!.cast<Uint8>().asTypedList(frameSize);
-    byteView.setAll(0, pcmData);
+    byteView.setAll(0, frame.data);
 
     _shim.playbackWrite(_engine!, _playbackPcmPtr!, samplesPerFrame);
   }
@@ -282,6 +306,10 @@ class AudioEngine {
   void stop() {
     if (!_running) return;
     _running = false;
+
+    _playbackTimer?.cancel();
+    _playbackTimer = null;
+    _jitterBuffer.clear();
 
     _frameSubscription?.cancel();
     _frameSubscription = null;
@@ -337,10 +365,11 @@ class AudioEngine {
     _log.info('Microphone ${value ? "muted" : "unmuted"}');
   }
 
-  /// Lautsprecher ein-/ausschalten.
+  /// Lautsprecher ein-/ausschalten (+ Android AudioManager routing).
   bool get isSpeakerEnabled => _speakerEnabled;
   set speakerEnabled(bool value) {
     _speakerEnabled = value;
+    onSpeakerToggle?.call(value);
     _log.info('Speaker ${value ? "enabled" : "disabled"}');
   }
 }

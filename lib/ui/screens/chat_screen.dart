@@ -879,9 +879,14 @@ class _ChatScreenState extends State<ChatScreen> {
               final target = targets[i];
               return ListTile(
                 title: Text(target.value),
-                onTap: () {
+                onTap: () async {
                   Navigator.pop(ctx);
-                  service.forwardMessage(widget.conversationId, msg.id, target.key);
+                  final result = await service.forwardMessage(widget.conversationId, msg.id, target.key);
+                  if (result == null && mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text(locale.get('forward_media_not_available'))),
+                    );
+                  }
                 },
               );
             },

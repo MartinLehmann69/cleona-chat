@@ -785,6 +785,18 @@ class DvRoutingTable {
     return false;
   }
 
+  /// Like [hasRecentAliveRouteTo] but requires the route to have been proven
+  /// by actual traffic (ackConfirmed via DELIVERY_RECEIPT). Prevents
+  /// hub-advertised transit routes from inflating the UI peer count.
+  bool hasConfirmedRouteTo(String destHex) {
+    final routes = _routes[destHex];
+    if (routes == null) return false;
+    for (final r in routes) {
+      if (r.isAlive && r.ackConfirmed) return true;
+    }
+    return false;
+  }
+
   /// Remove relay-type routes whose [lastConfirmed] is older than [maxAge]
   /// and that were never ACK-confirmed. These are speculative hints from
   /// [addRelayRouteHint] that accumulated without ever carrying traffic.

@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:5630a498aa08, 2026-07-23). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:6e63ba2df649, 2026-07-24). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1608,10 +1608,21 @@ class CleonaNode {
 ```
 sendToDevice(packet, deviceId):
   routes = routingTable.routesFor(deviceId)  // sorted by cost ascending
+  triedDirectViaDv = false
   for route in routes:
+    if route.isDirect: triedDirectViaDv = true
     success = _attemptDelivery(packet, route, maxRetries=3)
     if success: return true
     // ACK timeout 0.5-2s direct (RTT-based), 8s relay, surgical mark route DOWN
+  // Confirmed-neighbor fallback: only if no DV route already attempted
+  // a direct send to this peer (avoids duplicate direct sends)
+  if !triedDirectViaDv &&
+     deviceId in dvRouting.neighbors && isPeerConfirmed(deviceId):
+    targetPeer = routingTable.getPeer(deviceId)
+    if targetPeer != null:
+      reachableAddrs = filterNatContext(targetPeer.allAddresses)
+      for addr in reachableAddrs:
+        transport.sendUdp(packet, addr)   // best-effort, no ACK wait
   // Direct-target attempt: target is in routing table (e.g. from
   // addPeersFromContactSeed) with addresses but is NOT yet a DV neighbor
   // — the PING→PONG round-trip hasn't completed. Fire-and-forget UDP
@@ -1629,6 +1640,13 @@ sendToDevice(packet, deviceId):
     if gwPeer != null:
       success = _sendViaNextHop(packet, deviceId, gwPeer, maxRetries=3)
       if success: return true
+  // Neighbor-spray relay: try each DV neighbor as relay hop,
+  // skipping neighbors in relay cooldown for this destination
+  for neighbor in dvRouting.neighbors:
+    if neighbor == deviceId: continue
+    if dest.isRelayInCooldown(neighbor): continue
+    success = _sendViaNextHop(packet, deviceId, neighbor)
+    if success: return true
   // No path worked — return failure. Caller decides next step.
   return false
 ```
@@ -1654,7 +1672,7 @@ sendToDevice(packet, deviceId):
 - Phase 2: the caller (`CleonaNode.start()`) invokes `prune(maxAge: 2h)` separately.
 - Safety net: if the 2h prune would remove **all** peers, the table is re-loaded without pruning.
 
-**Maintenance pruning (V3.1.149)**: a scheduled run every 15 minutes identifies non-contact peers older than 7 days as prune candidates. Before removal, each candidate is probed with 3× Cleona-PING (10ms/500ms inter-probe delay, 2s PONG timeout each); only peers that fail all 3 probes are evicted. **Contact-device peers are never time-pruned** — they persist until explicit contact deletion, ensuring stored addresses survive arbitrarily long offline periods (Nostr-resolve refreshes addresses when needed). `evictStalePeers()` catches high-failure zombies (≥10 consecutive route failures + 15min stale + no alive DV routes); `pruneStaleAddresses()` handles address entries at 14d TTL.
+**Maintenance pruning (V3.1.149)**: a scheduled run every 15 minutes identifies non-contact peers older than 7 days as prune candidates. Before removal, each candidate is probed with 3× Cleona-PING (10ms/500ms inter-probe delay, 2s PONG timeout each); only peers that fail all 3 probes are evicted. **Contact-device peers are never time-pruned** — they persist until explicit contact deletion, ensuring stored addresses survive arbitrarily long offline periods (Nostr-resolve refreshes addresses when needed). `evictStalePeers()` catches high-failure zombies (≥10 consecutive route failures + 15min stale + no alive DV routes); `pruneStaleAddresses()` handles address entries with differentiated TTL: **48h for public IPs** (CGNAT/carrier IPs rotate frequently and become stale targets for send-scatter), **14d for private IPs** (LAN addresses are stable and survive longer offline periods). The criterion is `lastSuccess` — an address that is actively exchanging traffic is never pruned regardless of age.
 
 **Preference**: `findClosestPeers()` partitions into "recent" (< 10 min) and "stale", preferring recent peers by XOR distance. DHT/resolution lookups select by **age and XOR distance only** — they are **not** filtered by `direct-confirmed` (the V3.1.71 `defaultPeerFilter = isPeerConfirmed` is removed in V3.1.72: it broke first-contact identity resolution, which must reach replicators chosen by distance, not by whether we recently heard from them directly).
 
@@ -1846,6 +1864,8 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 > **V3.1.71 regression (fixed in V3.1.72):** the four V3.1.71 gates used *direct-confirmed* to suppress **all** outbound, including `_sendV3ViaHop` and relay-forward. This silently dropped (a) every first-contact CR to an as-yet-unconfirmed target, and (b) the first message to any established LAN/IPv6 peer that had been idle > TTL — because the idle-traffic elimination simultaneously removed the keepalive that kept those peer types confirmed. The send/relay decision now uses *reachable*; *direct-confirmed* gates only proactive periodic direct traffic.
 
 **Single-success-return for confirmed peers** (V3.1.86): `_sendV3ViaHop` sends to the peer's known addresses in priority order. For **confirmed** peers (at least one prior successful exchange), the function returns immediately after the first successful UDP send — it does not continue to remaining addresses. For **unconfirmed** peers, all addresses are attempted (scatter-shot) to maximize first-contact probability, followed by a TLS fallback. Previously, large payloads (≥ 2 UDP fragments) were sent to ALL known addresses of a confirmed peer, causing 3–4× amplification per send (e.g. a 6-fragment route update sent to 4 addresses = 24 UDP packets instead of 6).
+
+**Sender-side per-hop outbound pacing** (V3.1.155): `_sendV3ViaHop` enforces a per-hop send budget of **150 packets / 10 s** per destination hop. If a hop's budget is exhausted, the send returns `false` without transmitting. The budget map is cleared on `onNetworkChanged()`. This complements the receiver-side rate limiter (§13.1.3) — the receiver protects itself, the hop-budget prevents the sender from flooding a single neighbor that serves as relay for many destinations (e.g. 200+ stale DV-route peers routed through one Bootstrap neighbor generating 1200+ relay sends in one startup burst).
 
 ### 4.7 IPv6 Dual-Stack & CGNAT Bypass
 
@@ -6021,7 +6041,7 @@ PoW Parameters:
 
 Only **chat content messages** (TEXT, IMAGE, FILE, VOICE), **call signaling** (CALL_INVITE, CALL_ANSWER, CALL_REJECT, CALL_HANGUP, CALL_REJOIN) and **deferred-key-exchange messages** (DEVICE_KEM_REQUEST, DEVICE_KEM_OFFER) sent **directly** to **non-LAN peers** require PoW. **Live-media frames (76–79) never carry PoW** — neither on LAN nor WAN paths.
 
-**Async Crypto Pipeline:** The full inner send pipeline (User-Sign → zstd → KEM-Encrypt → PoW) runs in a single background isolate via `V3FrameCodec.buildAndEncryptInnerWithPowAsync()`. The isolate loads libsodium and liboqs independently. Two performance optimizations reduce per-message overhead: (1) **Native PoW loop (`libcleona_pow`):** the SHA-256 hashcash iteration runs in C (`cleona_pow_find_nonce`), eliminating ~1M Dart↔C FFI transitions per message. On platforms where `libcleona_pow` is not deployed, the Dart-side iteration loop serves as transparent fallback. (2) **OQS context caching:** the `OQS_SIG` and `OQS_KEM` context handles for ML-DSA-65 and ML-KEM-768 are allocated once per isolate and reused across calls, eliminating per-operation `OQS_*_new`/`OQS_*_free` overhead. Pre-hashing (§13.1.2) ensures PoW iteration time is constant regardless of payload size. The UI shows the message immediately with "sending" status (hourglass).
+**Async Crypto Pipeline:** The full inner send pipeline (User-Sign → zstd → KEM-Encrypt → PoW) runs in a single background isolate via `V3FrameCodec.buildAndEncryptInnerWithPowAsync()`. The isolate loads libsodium and liboqs independently. Two performance optimizations reduce per-message overhead: (1) **Native PoW loop (`libcleona_pow`):** the SHA-256 hashcash iteration runs in C (`cleona_pow_find_nonce`), eliminating ~1M Dart↔C FFI transitions per message. `libcleona_pow` is deployed on all five target platforms (Linux, Windows, macOS: dynamic library; iOS: statically linked via XCFramework + `DynamicLibrary.process()`; Android: `libcleona_pow.so` via jniLibs + `DynamicLibrary.open()`). The Dart-side iteration loop serves as transparent fallback if the native library fails to load. (2) **OQS context caching:** the `OQS_SIG` and `OQS_KEM` context handles for ML-DSA-65 and ML-KEM-768 are allocated once per isolate and reused across calls, eliminating per-operation `OQS_*_new`/`OQS_*_free` overhead. Pre-hashing (§13.1.2) ensures PoW iteration time is constant regardless of payload size. The UI shows the message immediately with "sending" status (hourglass).
 
 **Admission PoW (identity-bound, D3 — Phase 1 observe-only):** distinct from the per-message PoW above, the admission proof prices **ID minting** (insider-Sybil cost anchor, §13.1.8):
 
@@ -6065,6 +6085,8 @@ Test Limits:
 Excessive traffic from a single source is silently dropped. **Exemptions:** Relay-unwrapped inner frames, reassembled media chunks, and S&F-retrieved frames are exempt — the outer packet was already counted against the relay/storage node's budget.
 
 **Rate limiting is throughput control, not a trust signal.** Packets dropped by the rate limiter do NOT generate `recordBad()` events. A legitimate peer (e.g. Bootstrap) can exceed burst limits during startup cascades while sending exclusively valid, HMAC-authenticated packets. Penalizing valid traffic would create a perverse incentive where high-activity nodes (Bootstrap, relay hubs) accumulate bad reputation purely from serving the network. The reputation system (§13.1.4) only records bad actions for semantically invalid behavior (failed signatures, malformed frames, unauthorized operations).
+
+**Sender-side outbound pacing (V3.1.155):** complementary to the receiver-side limits above, each node also paces its own *outgoing* traffic per next-hop: `_sendV3ViaHop` enforces **150 packets / 10 s** per hop Device-ID (see §4.6 for full description). This prevents relay amplification during startup cascades — when N stale DV routes point through a single neighbor, the sender would otherwise flood that neighbor with N× the per-peer startup traffic (PINGs, WANTs, route updates). The hop budget is a sender-side courtesy, not a security boundary; it protects relay neighbors from legitimate but bursty traffic without relying on the neighbor's own rate limiter to absorb the burst. The budget map is cleared on network-change events.
 
 **Positive reputation from accepted traffic:** Every packet that passes the rate limiter generates a `recordGood` event for the sender's reputation score. This is critical because infrastructure messages (DHT, DV-Routing, PeerList, Relay) return early in the node-level switch-case and never reach the application-level handler. Without this, new peers doing normal bootstrap traffic could never build positive reputation.
 
@@ -7608,7 +7630,7 @@ For environments where network-based distribution is compromised or unavailable.
 | **miniaudio** | via `libcleona_audio` C shim | Cross-platform audio capture + playback (PulseAudio/ALSA on Linux, AAudio/OpenSL on Android, WASAPI on Windows, Core Audio on macOS/iOS) | Single-header library, version 0.11.21, vendored at SHA256 `6b2029714f8634c4d7c70cc042f45074e0565766113fc064f20cd27c986be9c9`. See §10.4. |
 | **speexdsp** | via `libcleona_audio` C shim | Acoustic Echo Cancellation + Noise Suppression for the audio capture path | Version 1.2.1, **vendored as full source** under `native/cleona_audio/vendor/speexdsp/` (SHA256 `d17ca363654556a4ff1d02cc13d9eb1fc5a8642c90b40bd54ce266c3807b91a7`), statically linked. AEC tail = 250 ms @ 16 kHz. |
 | **cleona_net** | `native_udp_sender.dart` via `libcleona_net` C shim (v1.3.0). On Android, `AndroidUdpSender` uses the fd-based variants (`cleona_udp_sendto_fd` / `cleona_udp_sendto_fd6`) to send on existing Dart socket fds. | Direct-syscall UDP send-path for IPv4 and IPv6. Wraps POSIX `sendto` on Linux and Win32 `WSASendTo` on Windows synchronously. `NativeUdpSender` (IPv4) + `NativeUdpSender6` (IPv6, `AF_INET6`/`IPV6_V6ONLY`). Required on both desktop platforms (no runtime fallback). See §4.5.2 for the architectural rationale and §20.3a below for the build details. |
-| **cleona_pow** | `proof_of_work.dart` (inline FFI) | PoW SHA-256 iteration loop in C — calls `crypto_hash_sha256` in a tight loop without per-iteration Dart↔C transitions | Links against libsodium. Build: `cmake -B build -S native/cleona_pow && cmake --build build`. Graceful fallback: platforms without the library use the Dart-side iteration loop transparently. |
+| **cleona_pow** | `proof_of_work.dart` (inline FFI) | PoW SHA-256 iteration loop in C — calls `crypto_hash_sha256` in a tight loop without per-iteration Dart↔C transitions | Links against libsodium. Build: `cmake -B build -S native/cleona_pow && cmake --build build`. Deployed on all five platforms. Graceful fallback: if the native symbol fails to load, the Dart-side iteration loop is used transparently. |
 
 The **cleona_net** entry in the table above deserves a longer explanation because, unlike the other native libraries in this list, it does not unlock a feature that would otherwise be unavailable — Dart already ships a perfectly working `RawDatagramSocket`. We introduced the shim because Dart's implementation on Windows silently drops roughly 89 percent of sustained UDP send calls during the LAN-Discovery subnet-scan phase, while the very same workload (200-15000 packets at up to 500 pps to many different destinations) goes through with zero drops when issued by PowerShell's `.NET UdpClient`. The forensic chain that established this is documented at §4.5.2 — pktmon-counters on the Windows TCPIP layer confirm the dropped sends never reach the kernel, and raising the kernel `SO_SNDBUF` to 4 MB did not change the drop rate. The defect therefore lives inside Dart's Windows I/O implementation (likely the IOCP-based UDP send path), below where any Dart-level workaround can reach. Linux is unaffected — Dart's POSIX path uses blocking `sendto` and behaves identically to the C shim. We build and link the shim on Linux as well for the **discovery send path** (`LocalDiscovery`, port 41338). The **main data-port** transport (`Transport.sendUdp`), however, uses the native sender **only on Windows** (V3.1.72 for IPv4, V3.1.145 for IPv6). On Windows, `Transport` holds both a `NativeUdpSender` (IPv4) and a `NativeUdpSender6` (IPv6) — the IPv6 sender was added to prevent a Dart VM crash (`GetStackPointerForStackBounds failed`) when sending to IPv6 destinations without a valid route (see §4.5.2). Both native senders are closed and reopened during `reconnectUdpSockets()` and disposed on shutdown. Rationale for the Windows-only restriction: `cleona_udp_open` binds a real `SO_REUSEADDR` UDP socket on the given port; when opened on the *data* port in addition to Dart's receive socket, the Linux kernel delivered inbound datagrams to the send-only native socket — which is never read — starving the Dart `RawDatagramSocket` and breaking **all** inbound processing (no PONG → no peer ever confirmed → dead mesh). This was a regression introduced by commit `2fbc879` (it extended the Windows send-fix to the main port without updating this section). Because Dart's POSIX send path is unaffected (stated above), the Linux main port now uses `RawDatagramSocket` for both send and receive — exactly **one** socket per data port. `Transport.start()` enforces this with a `/proc/net/udp` self-check that logs an error if a second IPv4 socket ever binds the data port again. A behavioural regression guard lives in `test/smoke/smoke_udp_receive_path.dart`.
 

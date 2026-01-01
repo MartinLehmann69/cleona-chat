@@ -39,6 +39,11 @@ void cleona_ring_close(cleona_ring_t* ring); // wake all waiters
 // Non-blocking, safe from realtime audio thread.
 int  cleona_ring_try_write(cleona_ring_t* ring, const void* frame);
 
+// Always writes, discarding oldest unread frame if ring is full.
+// Non-blocking, safe from realtime audio thread.
+// Used for far_end_ring where the latest frame is always preferred.
+int  cleona_ring_overwrite(cleona_ring_t* ring, const void* frame);
+
 // Returns 1 = got frame, 0 = timeout, -1 = closed.
 // Blocks up to timeout_ms on cond-var.
 int  cleona_ring_read(cleona_ring_t* ring, void* out_frame, int32_t timeout_ms);

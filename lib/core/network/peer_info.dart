@@ -965,13 +965,18 @@ class PeerInfo {
   }
 
   /// Remove addresses that haven't had a successful connection in [maxAge].
+  /// Public IPs use a shorter threshold (48h) because NAT/relay-derived
+  /// addresses (e.g. Apple iCloud relay, CGNAT mappings) rotate frequently
+  /// and a 14-day retention wastes send attempts on dead addresses.
   /// Returns the number of removed addresses.
   int pruneStaleAddresses({Duration maxAge = const Duration(days: 14)}) {
-    final cutoff = DateTime.now().subtract(maxAge);
+    final now = DateTime.now();
+    final privateCutoff = now.subtract(maxAge);
+    final publicCutoff = now.subtract(const Duration(hours: 48));
     final before = addresses.length;
     addresses.removeWhere((addr) {
+      final cutoff = _isPrivateIp(addr.ip) ? privateCutoff : publicCutoff;
       final ls = addr.lastSuccess;
-      // Never succeeded and older than maxAge based on lastAttempt
       if (ls == null) {
         final la = addr.lastAttempt;
         return la != null && la.isBefore(cutoff);

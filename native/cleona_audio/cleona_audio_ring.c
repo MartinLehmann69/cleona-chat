@@ -85,6 +85,28 @@ int cleona_ring_try_write(cleona_ring_t* ring, const void* frame) {
     return 1;
 }
 
+int cleona_ring_overwrite(cleona_ring_t* ring, const void* frame) {
+    int32_t w = atomic_load(&ring->write_idx);
+    int32_t r = atomic_load(&ring->read_idx);
+    if (w - r >= ring->capacity) {
+        atomic_store(&ring->read_idx, r + 1);
+        atomic_fetch_add(&ring->frames_dropped, 1);
+    }
+    int32_t slot = w % ring->capacity;
+    memcpy(ring->buffer + (size_t)slot * ring->frame_bytes, frame, ring->frame_bytes);
+    atomic_store(&ring->write_idx, w + 1);
+#ifdef _WIN32
+    EnterCriticalSection(&ring->mutex);
+    WakeConditionVariable(&ring->cond);
+    LeaveCriticalSection(&ring->mutex);
+#else
+    pthread_mutex_lock(&ring->mutex);
+    pthread_cond_signal(&ring->cond);
+    pthread_mutex_unlock(&ring->mutex);
+#endif
+    return 1;
+}
+
 int cleona_ring_try_read(cleona_ring_t* ring, void* out_frame) {
     int32_t w = atomic_load(&ring->write_idx);
     int32_t r = atomic_load(&ring->read_idx);

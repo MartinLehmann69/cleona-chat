@@ -24,7 +24,7 @@ class _CallScreenState extends State<CallScreen> {
   Timer? _durationTimer;
   Duration _duration = Duration.zero;
   bool _muted = false;
-  bool _speaker = false;
+  bool _speaker = true;
   bool _videoEnabled = true;
   bool _frontCamera = true;
   bool _userInitiatedPop = false;

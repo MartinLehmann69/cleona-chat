@@ -24,34 +24,21 @@ const int _frameSize = _samplesPerFrame * 2; // 640 bytes
 class _MixerCaptureInit {
   final SendPort frameSendPort;
   final Uint8List callKey;
-  _MixerCaptureInit(this.frameSendPort, this.callKey);
+  final int engineAddress;
+  _MixerCaptureInit(this.frameSendPort, this.callKey, this.engineAddress);
 }
 
 enum _MixerCaptureCommand { mute, unmute, stop }
 
 void _mixerCaptureIsolateEntry(_MixerCaptureInit init) {
-  // See audio_engine.dart 2026-04-26 fix: a parent-created ReceivePort can't
-  // travel through Isolate.spawn ("object is unsendable - _ReceivePortImpl").
-  // Child owns its own command RX and sends its SendPort back as the first
-  // wire message; ready-flag follows.
   final commandPort = ReceivePort();
   final frameSendPort = init.frameSendPort;
   frameSendPort.send(commandPort.sendPort);
 
   final shim = AudioEngineShim.load();
-  final engine = shim.create(
-    sampleRate: _sampleRate,
-    channels: _channels,
-    frameSamples: _samplesPerFrame,
-    ringCapacityFrames: 8,
-  );
+  final engine =
+      Pointer<CleonaAudioEngine>.fromAddress(init.engineAddress);
   if (engine.address == 0) {
-    frameSendPort.send(null);
-    commandPort.close();
-    return;
-  }
-  if (shim.start(engine) != 0) {
-    shim.destroy(engine);
     frameSendPort.send(null);
     commandPort.close();
     return;
@@ -104,8 +91,6 @@ void _mixerCaptureIsolateEntry(_MixerCaptureInit init) {
   }
 
   calloc.free(pcmPtr);
-  shim.stop(engine);
-  shim.destroy(engine);
 }
 
 // ── AudioMixer ───────────────────────────────────────────────────────────
@@ -159,6 +144,9 @@ class AudioMixer {
   // Callback: encrypted audio frame ready to send
   void Function(Uint8List encryptedFrame)? onAudioFrame;
 
+  // Callback: speaker routing changed (for Android AudioManager)
+  void Function(bool speaker)? onSpeakerToggle;
+
   AudioMixer({
     required Uint8List ownSendKey,
     required String profileDir,
@@ -188,8 +176,9 @@ class AudioMixer {
       _log.error('cleona_audio_create failed (mixer)');
       return false;
     }
-    if (_shim.start(_engine!) != 0) {
-      _log.error('cleona_audio_start failed (mixer)');
+    final startRc = _shim.startDirected(_engine!, 0);
+    if (startRc != 0) {
+      _log.error('cleona_audio_start failed (mixer): rc=$startRc');
       _shim.destroy(_engine!);
       _engine = null;
       return false;
@@ -219,7 +208,8 @@ class AudioMixer {
 
   Future<bool> _startCaptureIsolate() async {
     _frameReceivePort = ReceivePort();
-    final init = _MixerCaptureInit(_frameReceivePort!.sendPort, _ownSendKey);
+    final init = _MixerCaptureInit(
+        _frameReceivePort!.sendPort, _ownSendKey, _engine!.address);
 
     // Two-stage handshake (see audio_engine.dart 2026-04-26 fix): SendPort,
     // then ready-flag, then audio frames.
@@ -293,7 +283,7 @@ class AudioMixer {
     // Get or create peer's JitterBuffer
     final buffer = _peerBuffers.putIfAbsent(
       senderNodeIdHex,
-      () => JitterBuffer(bufferDepth: 3, maxBufferSize: 20),
+      () => JitterBuffer(bufferDepth: 5, maxBufferSize: 20),
     );
 
     buffer.push(AudioFrame(seqNum: seqNum, data: pcm));
@@ -412,6 +402,15 @@ class AudioMixer {
     _frameSubscription = null;
 
     _captureCommandPort?.send(_MixerCaptureCommand.stop);
+
+    if (_engine != null) {
+      try {
+        _shim.stop(_engine!);
+      } catch (e) {
+        _log.warn('cleona_audio stop threw (mixer): $e');
+      }
+    }
+
     _captureIsolate?.kill(priority: Isolate.beforeNextEvent);
     _captureIsolate = null;
     _captureCommandPort = null;
@@ -420,10 +419,9 @@ class AudioMixer {
 
     if (_engine != null) {
       try {
-        _shim.stop(_engine!);
         _shim.destroy(_engine!);
       } catch (e) {
-        _log.warn('cleona_audio stop/destroy threw (mixer): $e');
+        _log.warn('cleona_audio destroy threw (mixer): $e');
       }
       _engine = null;
     }
@@ -454,6 +452,7 @@ class AudioMixer {
   bool get isSpeakerEnabled => _speakerEnabled;
   set speakerEnabled(bool value) {
     _speakerEnabled = value;
+    onSpeakerToggle?.call(value);
     _log.info('Speaker ${value ? "enabled" : "disabled"}');
   }
 }

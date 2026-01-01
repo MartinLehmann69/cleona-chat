@@ -13,6 +13,7 @@ import android.provider.OpenableColumns
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
@@ -192,6 +193,15 @@ class MainActivity : FlutterActivity() {
                 }
                 "stopSound" -> {
                     stopLoopSound()
+                    result.success(null)
+                }
+                "setCallAudioMode" -> {
+                    val speaker = call.argument<Boolean>("speaker") ?: false
+                    setCallAudioMode(speaker)
+                    result.success(null)
+                }
+                "resetCallAudioMode" -> {
+                    resetCallAudioMode()
                     result.success(null)
                 }
                 "updateBadge" -> {
@@ -643,6 +653,20 @@ class MainActivity : FlutterActivity() {
                 mp.release()
             } catch (_: Exception) {}
         }
+    }
+
+    private fun setCallAudioMode(speaker: Boolean) {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.mode = AudioManager.MODE_IN_COMMUNICATION
+        @Suppress("DEPRECATION")
+        am.isSpeakerphoneOn = speaker
+    }
+
+    private fun resetCallAudioMode() {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.mode = AudioManager.MODE_NORMAL
+        @Suppress("DEPRECATION")
+        am.isSpeakerphoneOn = false
     }
 
     private fun triggerVibration(durationMs: Long) {
