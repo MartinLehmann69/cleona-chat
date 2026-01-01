@@ -109,6 +109,27 @@ jobs:
           cd ios
           pod install --repo-update
 
+      - name: Force-link native FFI libraries
+        run: |
+          # dart:ffi uses DynamicLibrary.process() which needs symbols in the
+          # Runner binary. CocoaPods vendored_frameworks does not reliably link
+          # static .a XCFrameworks. We inject -force_load directly into the
+          # Pods-Runner xcconfigs after pod install.
+          FWDIR="ios/CleonaNative/Frameworks"
+          FLAGS=""
+          for lib in libsodium liboqs libzstd libopus libwhisper libggml; do
+            A="$FWDIR/$lib.xcframework/ios-arm64/$lib.a"
+            if [ -f "$A" ]; then
+              FLAGS="$FLAGS -force_load \${PODS_ROOT}/../CleonaNative/Frameworks/$lib.xcframework/ios-arm64/$lib.a"
+              echo "  + $lib"
+            fi
+          done
+          for cfg in ios/Pods/Target\ Support\ Files/Pods-Runner/Pods-Runner.*.xcconfig; do
+            echo "" >> "$cfg"
+            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> "$cfg"
+          done
+          echo "Injected force_load into $(ls ios/Pods/Target\ Support\ Files/Pods-Runner/Pods-Runner.*.xcconfig | wc -l) xcconfigs"
+
       - name: Install distribution certificate
         env:
           CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}

@@ -51,25 +51,4 @@ post_install do |installer|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
     end
   end
-
-  # dart:ffi loads native symbols at runtime via DynamicLibrary.process().
-  # vendored_frameworks is not used (causes duplicate symbols with
-  # -force_load). Instead we inject -force_load for each .a file directly
-  # into the xcconfig. This ensures ALL symbols from each archive are
-  # included in the Runner binary.
-  ffi_libs = %w[libsodium liboqs libzstd libopus libwhisper libggml]
-  fwdir = File.join(__dir__, 'CleonaNative', 'Frameworks')
-  force_flags = ffi_libs.filter_map { |lib|
-    a_path = File.join(fwdir, "#{lib}.xcframework", 'ios-arm64', "#{lib}.a")
-    "-force_load #{a_path}" if File.exist?(a_path)
-  }
-  if force_flags.any?
-    flag_str = force_flags.join(' ')
-    Dir.glob(File.join(__dir__, 'Pods', 'Target Support Files', 'Pods-Runner', '*.xcconfig')).each do |xcconfig|
-      content = File.read(xcconfig)
-      content += "\nOTHER_LDFLAGS = $(inherited) #{flag_str}\n"
-      File.write(xcconfig, content)
-    end
-    Pod::UI.puts "Injected -force_load for #{force_flags.length} FFI libraries"
-  end
 end
