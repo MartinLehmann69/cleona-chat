@@ -70,8 +70,21 @@ void main() {
     ));
   }
 
-  SodiumFFI();
-  OqsFFI().init();
+  // iOS startup diagnostics: catch FFI init failures that would otherwise
+  // silently prevent runApp() from being reached (→ white screen).
+  String? startupError;
+  try {
+    debugPrint('[main] Platform: ${Platform.operatingSystem}, home: ${AppPaths.home}, dataDir: ${AppPaths.dataDir}');
+    debugPrint('[main] Initializing SodiumFFI...');
+    SodiumFFI();
+    debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
+    OqsFFI().init();
+    debugPrint('[main] OqsFFI OK.');
+  } catch (e, stack) {
+    startupError = 'FFI init failed: $e\n$stack';
+    debugPrint('[main] FATAL: $startupError');
+    _logCrash('main-ffi-init', e, stack);
+  }
 
   // Enable accessibility semantics so AT-SPI can inspect the widget tree
   // This is required for automated GUI testing via accessibility tools
@@ -87,6 +100,27 @@ void main() {
     _logCrash('PlatformDispatcher', error, stack);
     return true;
   };
+
+  // If FFI init failed, show error on screen instead of white screen.
+  if (startupError != null) {
+    runApp(MaterialApp(
+      home: Scaffold(
+        backgroundColor: Colors.red.shade900,
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Text(
+              'Cleona Startup Error:\n\n$startupError',
+              style: const TextStyle(color: Colors.white, fontSize: 12,
+                fontFamily: 'monospace'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    return;
+  }
+
   // Sec H-5 (V3.1.72) / T13: Hard-block check at startup.
   // Reads the cached, signature-verified update manifest written by the
   // previous session's 6h DHT-poll (`CleonaService._checkForUpdates`).
