@@ -296,14 +296,17 @@ jobs:
           # Check if IPC socket exists (daemon started successfully)
           ls -la "$HOME/.cleona/cleona.sock" 2>/dev/null || echo "WARNING: No IPC socket found"
 
-          # Trigger screen recording permission dialog with a dummy capture,
-          # then dismiss ALL system dialogs (local network + screen recording)
-          screencapture -x /tmp/dummy-trigger.png 2>/dev/null || true
-          sleep 3
-          echo "Dismissing system dialogs..."
+          # Grant screen recording permission via TCC database (avoids persistent dialog)
+          echo "Granting screen recording permission..."
+          for client in /usr/sbin/screencapture /bin/bash /bin/zsh; do
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, auth_version) \
+               VALUES ('kTCCServiceScreenCapture', '$client', 1, 2, 4, 1);" 2>/dev/null && \
+              echo "  Granted: $client" || echo "  WARN: TCC insert failed for $client"
+          done
+          # Also dismiss any remaining system dialogs (e.g. local network)
           osascript <<'DISMISS' 2>/dev/null || true
           tell application "System Events"
-            -- Click "Allow" on all visible dialogs (local network + screen recording)
             set procNames to name of every process whose visible is true
             repeat with procName in procNames
               try
@@ -321,7 +324,7 @@ jobs:
           end tell
           DISMISS
           sleep 3
-          # Re-activate Cleona after dialog dismissal
+          # Re-activate Cleona after any dialog dismissal
           osascript -e 'tell application "Cleona" to activate' 2>/dev/null || true
           sleep 2
 
