@@ -70,12 +70,12 @@ void main() {
     }
 
     // ── 1.2 Home Screen ───────────────────────────────────────────
-    // In-process init is async (deferred via Future()) — wait for settings icon
-    // and cell_tower chip to appear as the service initializes.
+    // In-process init is async (deferred via Future()) — wait for settings
+    // icon and bar_chart (network stats badge) to appear.
     for (var i = 0; i < 30; i++) {
       await tester.pump(const Duration(seconds: 1));
       if (find.byIcon(Icons.settings).evaluate().isNotEmpty &&
-          find.byIcon(Icons.cell_tower).evaluate().isNotEmpty) {
+          find.byIcon(Icons.bar_chart).evaluate().isNotEmpty) {
         break;
       }
     }
@@ -83,8 +83,8 @@ void main() {
     expect(find.byIcon(Icons.settings), findsOneWidget,
         reason: '1.2 Settings-Button existiert');
 
-    expect(find.byIcon(Icons.cell_tower), findsOneWidget,
-        reason: '1.2 Peer-Count Chip sichtbar');
+    expect(find.byIcon(Icons.bar_chart), findsOneWidget,
+        reason: '1.2 Network-Stats-Badge sichtbar');
 
     // ── 1.3 Settings Screen ───────────────────────────────────────
     await tester.tap(find.byIcon(Icons.settings));
@@ -144,28 +144,19 @@ void main() {
     await tester.pumpAndSettle(const Duration(seconds: 2));
 
     // 2.4 Wait for peer connection (§5.8: relay timeout ~16s, 60s total)
+    // The peer count is in the Badge label of the bar_chart IconButton.
     var peerConnected = false;
     for (var i = 0; i < 12; i++) {
       await tester.pump(const Duration(seconds: 5));
-      // Peer count chip shows "N Peers" — check if text contains a digit > 0
-      final cellTower = find.byIcon(Icons.cell_tower);
-      if (cellTower.evaluate().isNotEmpty) {
-        final chipWidget = find.ancestor(
-          of: cellTower,
-          matching: find.byType(Row),
-        );
-        if (chipWidget.evaluate().isNotEmpty) {
-          final textWidgets = find.descendant(
-            of: chipWidget.first,
-            matching: find.byType(Text),
-          );
-          for (final tw in textWidgets.evaluate()) {
-            final text = (tw.widget as Text).data ?? '';
-            final count = int.tryParse(text.replaceAll(RegExp(r'[^0-9]'), ''));
-            if (count != null && count > 0) {
-              peerConnected = true;
-              break;
-            }
+      final badge = find.byType(Badge);
+      for (final b in badge.evaluate()) {
+        final widget = b.widget as Badge;
+        if (widget.label is Text) {
+          final text = (widget.label as Text).data ?? '0';
+          final count = int.tryParse(text);
+          if (count != null && count > 0) {
+            peerConnected = true;
+            break;
           }
         }
       }
