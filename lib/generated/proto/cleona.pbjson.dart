@@ -576,6 +576,7 @@ const PeerInfoProto$json = {
     {'1': 'device_ed25519_public_key', '3': 18, '4': 1, '5': 12, '10': 'deviceEd25519PublicKey'},
     {'1': 'device_ml_dsa_public_key', '3': 19, '4': 1, '5': 12, '10': 'deviceMlDsaPublicKey'},
     {'1': 'key_fingerprint', '3': 20, '4': 1, '5': 12, '10': 'keyFingerprint'},
+    {'1': 'device_id_pow_nonce', '3': 21, '4': 1, '5': 12, '10': 'deviceIdPowNonce'},
   ],
 };
 
@@ -595,7 +596,8 @@ final $typed_data.Uint8List peerInfoProtoDescriptor = $convert.base64Decode(
     'VtUHVibGljS2V5EhcKB3VzZXJfaWQYESABKAxSBnVzZXJJZBI5ChlkZXZpY2VfZWQyNTUxOV9w'
     'dWJsaWNfa2V5GBIgASgMUhZkZXZpY2VFZDI1NTE5UHVibGljS2V5EjYKGGRldmljZV9tbF9kc2'
     'FfcHVibGljX2tleRgTIAEoDFIUZGV2aWNlTWxEc2FQdWJsaWNLZXkSJwoPa2V5X2ZpbmdlcnBy'
-    'aW50GBQgASgMUg5rZXlGaW5nZXJwcmludA==');
+    'aW50GBQgASgMUg5rZXlGaW5nZXJwcmludBItChNkZXZpY2VfaWRfcG93X25vbmNlGBUgASgMUh'
+    'BkZXZpY2VJZFBvd05vbmNl');
 
 @$core.Deprecated('Use peerAddressProtoDescriptor instead')
 const PeerAddressProto$json = {

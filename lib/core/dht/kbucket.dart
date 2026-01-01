@@ -86,6 +86,10 @@ class KBucket {
         peer.deviceMlDsaPublicKey = existing.deviceMlDsaPublicKey;
         peer.pkSource = existing.pkSource;
         peer.pkStale = existing.pkStale;
+        // D3 (§13.1.2): Admission-Nonce folgt dem Device-PK, den sie
+        // zertifiziert — gleiche Provenance-Schranke.
+        peer.deviceIdPowNonce = existing.deviceIdPowNonce;
+        peer.idPowVerified = existing.idPowVerified;
       } else {
         // Preserve known PK if new entry lacks it (regardless of provenance —
         // missing fields just inherit; provenance reflects the actual source).
@@ -104,6 +108,18 @@ class KBucket {
         if (peer.deviceMlDsaPublicKey == null ||
             peer.deviceMlDsaPublicKey!.isEmpty) {
           peer.deviceMlDsaPublicKey = existing.deviceMlDsaPublicKey;
+        }
+        // D3 (§13.1.2): inherit-when-missing fuer die Admission-Nonce; das
+        // Verified-Flag wandert nur mit, wenn die Nonce unveraendert bleibt
+        // (neue Nonce → Re-Verifikation im Node-Layer).
+        if (peer.deviceIdPowNonce == null ||
+            peer.deviceIdPowNonce!.isEmpty) {
+          peer.deviceIdPowNonce = existing.deviceIdPowNonce;
+          peer.idPowVerified = existing.idPowVerified;
+        } else if (existing.idPowVerified &&
+            _bytesEqual(peer.deviceIdPowNonce!,
+                existing.deviceIdPowNonce ?? Uint8List(0))) {
+          peer.idPowVerified = true;
         }
         // §5.10.5: firstParty PK arrival clears stale status.
         if (peer.pkSource == PkSource.firstParty) peer.pkStale = false;

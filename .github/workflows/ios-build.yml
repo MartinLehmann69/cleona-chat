@@ -259,35 +259,37 @@ jobs:
           find build/ios -name "*.ipa" -o -name "*.xcarchive" 2>/dev/null
 
       - name: Upload to TestFlight
-        continue-on-error: true
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
         run: |
-          # Write the decoded .p8 into a dedicated temp directory named exactly
-          # AuthKey_<KEY_ID>.p8 so altool's JWT generator finds it unambiguously.
-          # altool searches for the file in: ./private_keys, ~/private_keys,
-          # ~/.private_keys, ~/.appstoreconnect/private_keys, and $API_PRIVATE_KEYS_DIR.
-          # Using $API_PRIVATE_KEYS_DIR makes the lookup explicit and immune to
-          # working-directory changes. altool is deprecated since Xcode 14 but
-          # remains the only CLI path for iOS IPA upload (notarytool is macOS-only).
-          KEY_DIR="$RUNNER_TEMP/asc-private-keys"
-          mkdir -p "$KEY_DIR"
-          KEY_PATH="$KEY_DIR/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
-          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
-          chmod 600 "$KEY_PATH"
+          # altool is deprecated since Xcode 14 and its JWT auth is broken on
+          # macOS-14 runners (iTMSTransporter missing, REST fallback 401).
+          # Fastlane pilot is the reliable replacement.
+          gem install fastlane --no-document
+
+          KEY_PATH="$RUNNER_TEMP/asc-api-key.json"
+          P8_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$P8_PATH"
+
+          cat > "$KEY_PATH" <<KEYJSON
+          {
+            "key_id": "$APP_STORE_CONNECT_KEY_ID",
+            "issuer_id": "$APP_STORE_CONNECT_ISSUER",
+            "key_filepath": "$P8_PATH"
+          }
+          KEYJSON
 
           IPA=$(find build/ios -name "*.ipa" | head -1)
           if [ -n "$IPA" ]; then
-            API_PRIVATE_KEYS_DIR="$KEY_DIR" xcrun altool --upload-app \
-              --type ios \
-              --file "$IPA" \
-              --apiKey "$APP_STORE_CONNECT_KEY_ID" \
-              --apiIssuer "$APP_STORE_CONNECT_ISSUER" \
-              --verbose
+            fastlane pilot upload \
+              --api_key_path "$KEY_PATH" \
+              --ipa "$IPA" \
+              --skip_waiting_for_build_processing
           else
             echo "No IPA found — skipping upload"
+            exit 1
           fi
 
       - name: Upload IPA artifact

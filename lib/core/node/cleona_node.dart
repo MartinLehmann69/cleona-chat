@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/admission_pow.dart';
 import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_keys_store.dart';
@@ -676,6 +677,22 @@ class CleonaNode {
       baseDir: profileDir,
       fileEnc: identityFileEnc,
     );
+    // D3 (§13.1.2): Admission-PoW-Nonce lazy sicherstellen — Isolate-Grind,
+    // einmalig pro Device (Fresh-Install und v1/v2-Upgrade gleichermassen).
+    // Fire-and-forget: der naechste Self-Broadcast traegt die Nonce, sobald
+    // sie da ist; bis dahin senden wir ohne (Phase 1, nichts gated).
+    if (_deviceKeys.admissionNonce == null) {
+      unawaited(DeviceKeysStore.ensureAdmissionNonce(
+        bundle: _deviceKeys,
+        baseDir: profileDir,
+        fileEnc: identityFileEnc,
+      ).then((_) {
+        _log.info('D3: Admission-PoW-Nonce bereit '
+            '(${AdmissionPow.difficultyBits} bits, Device-PK zertifiziert)');
+      }).catchError((Object e) {
+        _log.warn('D3: Admission-PoW-Grind fehlgeschlagen: $e');
+      }));
+    }
     identityDhtHandler = IdentityDhtHandler(
       ownNodeId: primaryIdentity.deviceNodeId,
       fileEncryption: identityFileEnc,
@@ -1897,6 +1914,7 @@ class CleonaNode {
         peer.pkSource =
             isSelfBroadcast ? PkSource.firstParty : PkSource.thirdParty;
         routingTable.addPeer(peer);
+        _verifyAdmissionPow(peer.nodeId);
 
         // Slim-push key-fetch: if PQ keys are missing or fingerprint changed,
         // send PEER_KEY_REQUEST to the sender (with 60s cooldown per peer).
@@ -2000,6 +2018,7 @@ class CleonaNode {
         allLocalIps: _localIps,
         deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
         deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+        deviceIdPowNonce: _deviceKeys.admissionNonce,
       ).toProto());
     }
     _sendInfra(
@@ -2023,9 +2042,37 @@ class CleonaNode {
         }
         peer.pkSource = PkSource.firstParty;
         routingTable.addPeer(peer);
+        _verifyAdmissionPow(peer.nodeId);
       }
     } catch (e) {
       _log.debug('PeerKeyResponse parse error: $e');
+    }
+  }
+
+  /// D3 (§13.1.2, Phase 1 observe-only): verifiziere die Admission-PoW-Nonce
+  /// eines Peers, sobald Device-PK + Nonce vorliegen. Zwei Checks: (1) der
+  /// PK gehoert zur Wire-Identitaet (`SHA-256(secret || pk) == nodeId`),
+  /// (2) der PoW-Hash erreicht die Schwierigkeit. Ergebnis wird im PeerInfo
+  /// persistiert; nichts wird gegated.
+  void _verifyAdmissionPow(Uint8List nodeId) {
+    final peer = routingTable.getPeer(nodeId);
+    if (peer == null || peer.idPowVerified) return;
+    final pk = peer.deviceEd25519PublicKey;
+    final nonce = peer.deviceIdPowNonce;
+    if (pk == null || pk.isEmpty || nonce == null || nonce.isEmpty) return;
+    final boundId = HdWallet.computeDeviceNodeId(pk, NetworkSecret.secret);
+    if (bytesToHex(boundId) != bytesToHex(peer.nodeId)) {
+      _log.warn('D3: Admission-Nonce fuer ${peer.nodeIdHex.substring(0, 8)} '
+          'verworfen — Device-PK gehoert nicht zur Wire-Identitaet');
+      return;
+    }
+    if (AdmissionPow.verify(pk, nonce)) {
+      peer.idPowVerified = true;
+      _log.info('D3: Peer ${peer.nodeIdHex.substring(0, 8)} admission-PoW '
+          'verifiziert');
+    } else {
+      _log.warn('D3: Admission-Nonce fuer ${peer.nodeIdHex.substring(0, 8)} '
+          'ungueltig (PoW-Schwierigkeit verfehlt)');
     }
   }
 
@@ -3487,6 +3534,7 @@ class CleonaNode {
         final info = PeerInfo.fromProto(p);
         if (info.networkChannel.isNotEmpty && info.networkChannel != networkChannel) continue;
         routingTable.addPeer(info);
+        _verifyAdmissionPow(info.nodeId);
         result.add(info);
         // Probe newly learned peers (standard Kademlia behavior).
         // Without this, peers learned via FIND_NODE_RESPONSE never get confirmed
@@ -4187,6 +4235,7 @@ class CleonaNode {
         allLocalIps: _localIps,
         deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
         deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+        deviceIdPowNonce: _deviceKeys.admissionNonce,
       ).toProto(slim: true));
       _sendInfra(
         messageType: proto.MessageTypeV3.MTV3_PEER_LIST_PUSH,
@@ -4255,6 +4304,7 @@ class CleonaNode {
         allLocalIps: _localIps,
         deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
         deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+        deviceIdPowNonce: _deviceKeys.admissionNonce,
       ).toProto(slim: true));
       final innerBytes = pushData.writeToBuffer();
 
@@ -4304,6 +4354,7 @@ class CleonaNode {
       allLocalIps: _localIps,
       deviceEd25519PublicKey: _deviceKeys.sig.ed25519PublicKey,
       deviceMlDsaPublicKey: _deviceKeys.sig.mlDsaPublicKey,
+      deviceIdPowNonce: _deviceKeys.admissionNonce,
     );
   }
 

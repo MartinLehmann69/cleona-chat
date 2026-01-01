@@ -669,6 +669,16 @@ class PeerInfo {
   /// so the receiver can detect key changes without the full PQ keys.
   Uint8List? keyFingerprint;
 
+  /// D3 Admission-PoW (§13.1.2): 8-byte nonce certifying
+  /// [deviceEd25519PublicKey]. Travels in PEER_LIST_PUSH (also slim) and
+  /// PEER_KEY_RESPONSE; persisted with the routing table.
+  Uint8List? deviceIdPowNonce;
+
+  /// D3: true once [deviceIdPowNonce] verified against the pubkey AND the
+  /// deviceId binding (`SHA-256(secret || pk) == nodeId`, checked in
+  /// cleona_node). Phase 1 observe-only — feeds network stats, gates nothing.
+  bool idPowVerified = false;
+
   Uint8List? get computedKeyFingerprint {
     if (ed25519PublicKey == null) return null;
     final buf = <int>[
@@ -820,6 +830,7 @@ class PeerInfo {
     this.ed25519Signature,
     this.mlDsaSignature,
     this.keyFingerprint,
+    this.deviceIdPowNonce,
     this.pkSource = PkSource.none,
   })  : addresses = addresses ?? [],
         lastSeen = lastSeen ?? DateTime.now();
@@ -1009,6 +1020,10 @@ class PeerInfo {
     if (deviceEd25519PublicKey != null) {
       p.deviceEd25519PublicKey = deviceEd25519PublicKey!;
     }
+    // D3: Admission-Nonce reist mit dem Device-PK — auch im slim-Set (8 B).
+    if (deviceIdPowNonce != null && deviceIdPowNonce!.isNotEmpty) {
+      p.deviceIdPowNonce = deviceIdPowNonce!;
+    }
     if (ed25519Signature != null) p.ed25519Signature = ed25519Signature!;
     if (slim) {
       final fp = computedKeyFingerprint;
@@ -1052,6 +1067,9 @@ class PeerInfo {
       ed25519Signature: p.ed25519Signature.isEmpty ? null : Uint8List.fromList(p.ed25519Signature),
       mlDsaSignature: p.mlDsaSignature.isEmpty ? null : Uint8List.fromList(p.mlDsaSignature),
       keyFingerprint: p.keyFingerprint.isEmpty ? null : Uint8List.fromList(p.keyFingerprint),
+      deviceIdPowNonce: p.deviceIdPowNonce.isEmpty
+          ? null
+          : Uint8List.fromList(p.deviceIdPowNonce),
     );
   }
 
@@ -1107,6 +1125,11 @@ class PeerInfo {
       // protection (Architecture §17.3). Without this, every restart would
       // reset to thirdParty and re-open the pollution window.
       if (pkSource != PkSource.none) 'pkSource': pkSource.name,
+      // D3 (§13.1.2): Admission-Nonce + Verifikationsergebnis ueberleben
+      // den Daemon-Restart (sonst wuerde jeder Restart neu verifizieren).
+      if (deviceIdPowNonce != null)
+        'deviceIdPowNonce': _bytesToHex(deviceIdPowNonce!),
+      if (idPowVerified) 'idPowVerified': true,
       'addresses': addresses.map((a) => {
         'ip': a.ip,
         'port': a.port,
@@ -1170,7 +1193,12 @@ class PeerInfo {
               : null,
         );
       }).whereType<PeerAddress>().toList() ?? [],
-    )..isProtectedSeed = json['isProtectedSeed'] as bool? ?? false;
+      deviceIdPowNonce: json['deviceIdPowNonce'] != null
+          ? _hexToBytes(json['deviceIdPowNonce'] as String)
+          : null,
+    )
+      ..isProtectedSeed = json['isProtectedSeed'] as bool? ?? false
+      ..idPowVerified = json['idPowVerified'] as bool? ?? false;
   }
 
   @override

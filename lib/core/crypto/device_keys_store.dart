@@ -48,6 +48,7 @@
 
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/admission_pow.dart';
 import 'package:cleona/core/crypto/device_kem.dart';
 import 'package:cleona/core/crypto/device_signature.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
@@ -58,7 +59,12 @@ class DeviceKeyBundle {
   final DeviceKeyPair sig;
   final DeviceKemKeyPair kem;
 
-  const DeviceKeyBundle({required this.sig, required this.kem});
+  /// D3 Admission-PoW nonce (§13.1.2) — 8 bytes certifying sig.ed25519PublicKey.
+  /// Null until computed; [DeviceKeysStore.ensureAdmissionNonce] fills it
+  /// lazily (isolate) and persists the container as v3.
+  Uint8List? admissionNonce;
+
+  DeviceKeyBundle({required this.sig, required this.kem, this.admissionNonce});
 }
 
 class DeviceKeysStore {
@@ -70,8 +76,11 @@ class DeviceKeysStore {
   /// v2+ containers (with header) from the unheadered v1 layout.
   static const List<int> _magic = [0x43, 0x4C, 0x44, 0x4B];
 
-  /// Current container format version.
-  static const int containerVersion = 2;
+  /// Current container format version (v3 = v2 + 8-byte admission nonce, D3).
+  static const int containerVersion = 3;
+
+  /// D3 Admission-PoW nonce length (§13.1.2).
+  static const int _nonceLength = 8;
 
   /// v1 container length (Sig keypair only, no header).
   static int get _v1Length => DeviceKeyPair.serializedLength;
@@ -79,6 +88,9 @@ class DeviceKeysStore {
   /// v2 container length (header + Sig + KEM).
   static int get _v2Length =>
       _magic.length + 4 + DeviceKeyPair.serializedLength + DeviceKemKeyPair.serializedLength;
+
+  /// v3 container length (v2 + admission nonce).
+  static int get _v3Length => _v2Length + _nonceLength;
 
   /// Load the daemon's Device-Sig + Device-KEM keypair bundle from disk, or
   /// generate-and-persist a fresh one if none exists. If a legacy v1 blob
@@ -96,19 +108,21 @@ class DeviceKeysStore {
 
     if (existing == null) {
       // Fresh install — generate both keypairs, persist v2, return.
+      // Die Admission-Nonce (D3) wird NICHT hier berechnet (sync-Pfad) —
+      // [ensureAdmissionNonce] grindet sie nach dem Start im Isolate und
+      // schreibt den Container als v3 um.
       final fresh = DeviceKeyBundle(
         sig: DeviceKeyPair.generate(),
         kem: DeviceKemKeyPair.generate(),
       );
-      fileEnc.writeBinaryFile(path, _encodeV2(fresh));
+      fileEnc.writeBinaryFile(path, _encodeBundle(fresh));
       return fresh;
     }
 
-    // Detect format: v2 starts with magic; v1 is exactly _v1Length bytes
+    // Detect format: v2/v3 start with magic; v1 is exactly _v1Length bytes
     // and lacks the magic prefix.
     if (_hasMagic(existing)) {
-      // v2 (or future versions — currently only 2 is accepted).
-      return _decodeV2(existing);
+      return _decodeVersioned(existing);
     }
 
     if (existing.length == _v1Length) {
@@ -119,8 +133,8 @@ class DeviceKeysStore {
       final sig = DeviceKeyPair.deserialize(existing);
       final kem = DeviceKemKeyPair.generate();
       final bundle = DeviceKeyBundle(sig: sig, kem: kem);
-      // Rewrite atomically as v2 — on next launch the v2 path is taken.
-      fileEnc.writeBinaryFile(path, _encodeV2(bundle));
+      // Rewrite atomically as v2 — on next launch the versioned path is taken.
+      fileEnc.writeBinaryFile(path, _encodeBundle(bundle));
       return bundle;
     }
 
@@ -139,7 +153,22 @@ class DeviceKeysStore {
       {required String baseDir,
       required FileEncryption fileEnc,
       required DeviceKeyBundle bundle}) {
-    fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeV2(bundle));
+    fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
+  }
+
+  /// D3 (§13.1.2): stelle sicher, dass die Admission-PoW-Nonce existiert.
+  /// Lazy-Pfad fuer Bestandsgeraete (v1/v2-Container) UND Fresh-Installs:
+  /// grindet im Isolate (~50-100ms Desktop, <=2s Mobile, einmalig) und
+  /// persistiert den Container als v3. No-op, wenn die Nonce schon da ist.
+  static Future<void> ensureAdmissionNonce(
+      {required DeviceKeyBundle bundle,
+      required String baseDir,
+      required FileEncryption fileEnc}) async {
+    if (bundle.admissionNonce != null) return;
+    final nonce =
+        await AdmissionPow.computeAsync(bundle.sig.ed25519PublicKey);
+    bundle.admissionNonce = nonce;
+    fileEnc.writeBinaryFile('$baseDir/$_filename', _encodeBundle(bundle));
   }
 
   /// Test/util: explicit reset path so a profile-wipe test can drop the
@@ -161,7 +190,10 @@ class DeviceKeysStore {
     return true;
   }
 
-  static Uint8List _encodeV2(DeviceKeyBundle bundle) {
+  /// Encode the bundle: v3 when the admission nonce is present, v2 otherwise
+  /// (a fresh install before [ensureAdmissionNonce] completes stays v2 —
+  /// the next nonce-persist upgrades it in place).
+  static Uint8List _encodeBundle(DeviceKeyBundle bundle) {
     final sigBytes = bundle.sig.serialize();
     final kemBytes = bundle.kem.serialize();
     if (sigBytes.length != DeviceKeyPair.serializedLength) {
@@ -172,32 +204,44 @@ class DeviceKeysStore {
       throw DeviceKeysStoreException(
           'unexpected kem serializedLength: ${kemBytes.length}');
     }
+    final nonce = bundle.admissionNonce;
+    if (nonce != null && nonce.length != _nonceLength) {
+      throw DeviceKeysStoreException(
+          'unexpected admission nonce length: ${nonce.length}');
+    }
+    final version = nonce != null ? 3 : 2;
     final out = BytesBuilder(copy: false);
     out.add(_magic);
-    final ver = ByteData(4)..setUint32(0, containerVersion, Endian.little);
+    final ver = ByteData(4)..setUint32(0, version, Endian.little);
     out.add(ver.buffer.asUint8List());
     out.add(sigBytes);
     out.add(kemBytes);
+    if (nonce != null) out.add(nonce);
     final result = out.toBytes();
-    if (result.length != _v2Length) {
+    final expected = nonce != null ? _v3Length : _v2Length;
+    if (result.length != expected) {
       throw DeviceKeysStoreException(
-          'v2 encode length mismatch: got ${result.length}, expected $_v2Length');
+          'v$version encode length mismatch: got ${result.length}, expected $expected');
     }
     return result;
   }
 
-  static DeviceKeyBundle _decodeV2(Uint8List bytes) {
-    if (bytes.length != _v2Length) {
+  static DeviceKeyBundle _decodeVersioned(Uint8List bytes) {
+    if (bytes.length < _magic.length + 4) {
       throw DeviceKeysStoreException(
-          'v2 container length mismatch: got ${bytes.length}, expected $_v2Length');
+          'container too short: ${bytes.length} bytes');
     }
-    // Verify version field (offset 4..8).
     final ver =
         ByteData.sublistView(bytes, _magic.length, _magic.length + 4)
             .getUint32(0, Endian.little);
-    if (ver != containerVersion) {
+    if (ver != 2 && ver != 3) {
       throw DeviceKeysStoreException(
-          'unsupported container version $ver (this build expects $containerVersion)');
+          'unsupported container version $ver (this build expects 2 or 3)');
+    }
+    final expected = ver == 3 ? _v3Length : _v2Length;
+    if (bytes.length != expected) {
+      throw DeviceKeysStoreException(
+          'v$ver container length mismatch: got ${bytes.length}, expected $expected');
     }
     var off = _magic.length + 4;
     final sigSlice = Uint8List.sublistView(
@@ -205,10 +249,17 @@ class DeviceKeysStore {
     off += DeviceKeyPair.serializedLength;
     final kemSlice = Uint8List.sublistView(
         bytes, off, off + DeviceKemKeyPair.serializedLength);
+    off += DeviceKemKeyPair.serializedLength;
+    Uint8List? nonce;
+    if (ver == 3) {
+      nonce = Uint8List.fromList(
+          Uint8List.sublistView(bytes, off, off + _nonceLength));
+    }
 
     return DeviceKeyBundle(
       sig: DeviceKeyPair.deserialize(Uint8List.fromList(sigSlice)),
       kem: DeviceKemKeyPair.deserialize(Uint8List.fromList(kemSlice)),
+      admissionNonce: nonce,
     );
   }
 }

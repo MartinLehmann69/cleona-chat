@@ -606,6 +606,7 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     $core.List<$core.int>? deviceEd25519PublicKey,
     $core.List<$core.int>? deviceMlDsaPublicKey,
     $core.List<$core.int>? keyFingerprint,
+    $core.List<$core.int>? deviceIdPowNonce,
   }) {
     final $result = create();
     if (nodeId != null) {
@@ -668,6 +669,9 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     if (keyFingerprint != null) {
       $result.keyFingerprint = keyFingerprint;
     }
+    if (deviceIdPowNonce != null) {
+      $result.deviceIdPowNonce = deviceIdPowNonce;
+    }
     return $result;
   }
   PeerInfoProto._() : super();
@@ -695,6 +699,7 @@ class PeerInfoProto extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(18, _omitFieldNames ? '' : 'deviceEd25519PublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(19, _omitFieldNames ? '' : 'deviceMlDsaPublicKey', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(20, _omitFieldNames ? '' : 'keyFingerprint', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(21, _omitFieldNames ? '' : 'deviceIdPowNonce', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -897,6 +902,19 @@ class PeerInfoProto extends $pb.GeneratedMessage {
   $core.bool hasKeyFingerprint() => $_has(19);
   @$pb.TagNumber(20)
   void clearKeyFingerprint() => clearField(20);
+
+  /// D3 Admission-PoW (§13.1.2): 8-byte nonce certifying device_ed25519_public_key
+  /// (SHA-256("cleona-id-pow-v1" || pk || nonce) >= 22 leading zero bits).
+  /// Travels alongside the key it certifies; part of the slim field set (8 B).
+  /// Legacy builds ignore it; legacy gossipers drop it on re-serialization.
+  @$pb.TagNumber(21)
+  $core.List<$core.int> get deviceIdPowNonce => $_getN(20);
+  @$pb.TagNumber(21)
+  set deviceIdPowNonce($core.List<$core.int> v) { $_setBytes(20, v); }
+  @$pb.TagNumber(21)
+  $core.bool hasDeviceIdPowNonce() => $_has(20);
+  @$pb.TagNumber(21)
+  void clearDeviceIdPowNonce() => clearField(21);
 }
 
 class PeerAddressProto extends $pb.GeneratedMessage {

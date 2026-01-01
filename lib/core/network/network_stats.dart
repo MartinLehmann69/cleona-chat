@@ -73,6 +73,12 @@ class NetworkStats {
   // ── Section 1: Network Health ──────────────────────────────────
   final int activePeerCount;
   final int totalKnownPeers;
+
+  /// D3 (§13.1.2, Phase 1): Adoptions-Telemetrie — wie viele bekannte Peers
+  /// haben eine verifizierte Admission-PoW-Nonce / ueberhaupt eine Nonce.
+  final int idPowVerifiedPeers;
+  final int idPowNoncePeers;
+
   final String natType;
   final String? publicIp;
   final int? publicPort;
@@ -118,6 +124,8 @@ class NetworkStats {
   const NetworkStats({
     this.activePeerCount = 0,
     this.totalKnownPeers = 0,
+    this.idPowVerifiedPeers = 0,
+    this.idPowNoncePeers = 0,
     this.natType = 'unknown',
     this.publicIp,
     this.publicPort,
@@ -152,6 +160,8 @@ class NetworkStats {
   Map<String, dynamic> toJson() => {
         'activePeerCount': activePeerCount,
         'totalKnownPeers': totalKnownPeers,
+        'idPowVerifiedPeers': idPowVerifiedPeers,
+        'idPowNoncePeers': idPowNoncePeers,
         'natType': natType,
         'publicIp': publicIp,
         'publicPort': publicPort,
@@ -185,6 +195,8 @@ class NetworkStats {
   static NetworkStats fromJson(Map<String, dynamic> json) => NetworkStats(
         activePeerCount: json['activePeerCount'] as int? ?? 0,
         totalKnownPeers: json['totalKnownPeers'] as int? ?? 0,
+        idPowVerifiedPeers: json['idPowVerifiedPeers'] as int? ?? 0,
+        idPowNoncePeers: json['idPowNoncePeers'] as int? ?? 0,
         natType: json['natType'] as String? ?? 'unknown',
         publicIp: json['publicIp'] as String?,
         publicPort: json['publicPort'] as int?,
@@ -450,6 +462,11 @@ class NetworkStatsCollector {
     return NetworkStats(
       activePeerCount: activePeers.length,
       totalKnownPeers: allPeers.length,
+      idPowVerifiedPeers: allPeers.where((p) => p.idPowVerified).length,
+      idPowNoncePeers: allPeers
+          .where((p) =>
+              p.deviceIdPowNonce != null && p.deviceIdPowNonce!.isNotEmpty)
+          .length,
       natType: natTraversal.natType.name,
       publicIp: natTraversal.publicIp,
       publicPort: natTraversal.publicPort,

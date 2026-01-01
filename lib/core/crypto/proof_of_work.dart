@@ -72,6 +72,10 @@ class ProofOfWork {
   }
 
   /// Check if [hash] has at least [bits] leading zero bits.
+  /// Public: shared with AdmissionPow (D3, §13.1.2).
+  static bool hasLeadingZeroBits(Uint8List hash, int bits) =>
+      _hasLeadingZeroBits(hash, bits);
+
   static bool _hasLeadingZeroBits(Uint8List hash, int bits) {
     int remaining = bits;
     for (final byte in hash) {

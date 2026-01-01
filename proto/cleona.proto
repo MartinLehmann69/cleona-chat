@@ -93,6 +93,11 @@ message PeerInfoProto {
   bytes device_ed25519_public_key = 18;
   bytes device_ml_dsa_public_key = 19;
   bytes key_fingerprint = 20;           // SHA-256(ed25519_pk ‖ ml_dsa_pk ‖ x25519_pk ‖ ml_kem_pk ‖ device_ed25519_pk ‖ device_ml_dsa_pk) — slim PEER_LIST_PUSH omits PQ keys; receiver compares fingerprint to detect key changes and requests full keys via PEER_KEY_REQUEST on mismatch.
+  // D3 Admission-PoW (§13.1.2): 8-byte nonce certifying device_ed25519_public_key
+  // (SHA-256("cleona-id-pow-v1" || pk || nonce) >= 22 leading zero bits).
+  // Travels alongside the key it certifies; part of the slim field set (8 B).
+  // Legacy builds ignore it; legacy gossipers drop it on re-serialization.
+  bytes device_id_pow_nonce = 21;
 }
 
 message PeerAddressProto {

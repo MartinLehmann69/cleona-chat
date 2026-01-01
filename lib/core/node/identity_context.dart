@@ -370,6 +370,10 @@ class IdentityContext {
     // lenient-bootstrap pass dies in §5.10.2 stale-PK recovery.
     Uint8List? deviceEd25519PublicKey,
     Uint8List? deviceMlDsaPublicKey,
+    // D3 (§13.1.2): Admission-PoW-Nonce reist mit dem Device-PK, den sie
+    // zertifiziert. Null solange der Grind (ensureAdmissionNonce) noch
+    // laeuft — der naechste Self-Broadcast traegt sie dann.
+    Uint8List? deviceIdPowNonce,
   }) {
     // Build multi-address list from all available IPs.
     //
@@ -440,6 +444,7 @@ class IdentityContext {
       mlKemPublicKey: mlKemPublicKey,
       deviceEd25519PublicKey: deviceEd25519PublicKey,
       deviceMlDsaPublicKey: deviceMlDsaPublicKey,
+      deviceIdPowNonce: deviceIdPowNonce,
     );
   }
 }
