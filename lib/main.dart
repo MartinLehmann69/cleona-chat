@@ -177,13 +177,24 @@ void _logCrash(String source, Object error, StackTrace? stack) {
     File('${dir.path}/crash.log').writeAsStringSync(
       entry, mode: FileMode.append, flush: true);
   } catch (_) {/* never crash the crash handler */}
-  // iOS: also write to Documents/ (reachable via HouseArrest/AFC).
   if (Platform.isIOS) {
-    try {
-      final home = AppPaths.home;
-      File('$home/Documents/crash.log').writeAsStringSync(
-        entry, mode: FileMode.append, flush: true);
-    } catch (_) {}
+    // Try multiple paths — HOME may not be set on iOS, and AFC
+    // can only see the app container root.
+    final candidates = <String>[
+      if (Platform.environment['HOME'] != null)
+        '${Platform.environment['HOME']}/Documents/crash.log',
+      // Resolve via executable path (always inside the .app bundle's container)
+      '${Platform.resolvedExecutable.split('.app/').first.replaceAll('/Runner.app', '')}/Documents/crash.log',
+      '/tmp/crash.log',
+    ];
+    for (final path in candidates) {
+      try {
+        final dir = Directory(path).parent;
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        File(path).writeAsStringSync(entry, mode: FileMode.append, flush: true);
+        break;
+      } catch (_) {}
+    }
   }
 }
 
