@@ -3572,34 +3572,37 @@ class CleonaNode {
           'TLS-first failed on all targets, falling back to UDP fragmentation');
     }
     var udpSentAny = false;
+    var udpSocketError = false;
     for (final addr in targets) {
       try {
         final ok = await transport.sendUdp(
             packet, InternetAddress(addr.ip), addr.port);
         if (ok) {
           udpSentAny = true;
-          // Confirmed peers: early-return ONLY when the target address has
-          // recent bidirectional proof (inbound packet within 2 min). A stale
-          // WiFi LAN address that the kernel accepts (same subnet) must NOT
-          // short-circuit the loop — the peer may have moved to Mobilfunk and
-          // only its CGNAT address (further down the list) actually reaches.
+          // Confirmed peers with recent bidirectional proof: early-return
+          // on the first proven address — skip remaining targets.
           if (isConfirmed && addr.lastReceivedAt != null &&
               DateTime.now().difference(addr.lastReceivedAt!) < const Duration(minutes: 2)) {
             return true;
           }
         }
       } catch (e) {
+        udpSocketError = true;
         _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
       }
     }
-    // §4.6.1: UDP sent to a confirmed peer but NO address had recent
-    // bidirectional proof (the early-return at line 3468 above didn't fire).
-    // Don't trust OS-level UDP success — packets may be black-holed
-    // (e.g. CGNAT phone → Fritzbox:12136 without port-forward). Fall
-    // through to TLS and let the sendToDevice cascade try relay routes.
+
+    // §4.6.2 (V3.1.102): Confirmed peer + UDP sent = success.
+    // DELIVERY_RECEIPT (RUDP-Light) is the architectural delivery proof,
+    // not lastReceivedAt. A confirmed peer whose bidirectional proof
+    // expired (>2 min idle) must NOT be penalised with recordFailure() —
+    // that creates a death spiral (cf++ → backoff → no targets → peer
+    // unreachable) contradicting the 1h direct-confirmed TTL (§4.6) and
+    // the "no timer-based expiry" principle (§5.3). The sendToDevice
+    // cascade still tries relay routes via the stale-direct guard (§4.6.2)
+    // when freshestInboundAt > 30s.
     if (udpSentAny && isConfirmed) {
-      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: confirmed peer, '
-          'UDP sent but no address has recent bidirectional proof');
+      return true;
     }
 
     // §4.6 (V3.1.72): for peers we are not direct-confirmed for (CGNAT,
@@ -3624,28 +3627,15 @@ class CleonaNode {
       return false;
     }
 
-    // Confirmed peer, UDP failed on all targets: try TLS as last resort.
-    _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP failed on all '
-        '${targets.length} targets, trying TLS for ${wireSize}B payload');
-    for (final addr in targets) {
-      final ia = InternetAddress(addr.ip);
-      if (!transport.tlsBulkCapable(ia, addr.port)) continue;
-      try {
-        final ok = await transport.sendBulkViaTLS(packet, ia, addr.port);
-        if (ok) {
-          addr.recordSuccess();
-          return true;
-        }
-      } catch (e) {
-        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: TLS to ${addr.ip}:${addr.port} failed: $e');
+    // Only reachable for confirmed peers when ALL UDP sends threw socket
+    // errors (udpSentAny == false). Record failure only on actual errors.
+    if (udpSocketError) {
+      for (final addr in targets) {
+        addr.recordFailure();
       }
+      _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: all ${targets.length} targets failed '
+          '(${targets.map((a) => "${a.ip}:${a.port} cf=${a.consecutiveFailures}").join(", ")})');
     }
-
-    for (final addr in targets) {
-      addr.recordFailure();
-    }
-    _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: all ${targets.length} targets failed '
-        '(${targets.map((a) => "${a.ip}:${a.port} cf=${a.consecutiveFailures}").join(", ")})');
     return false;
   }
 
@@ -4013,15 +4003,17 @@ class CleonaNode {
         final addrKey = '$ip:$port';
         final known = existing.addresses.any((a) => '${a.ip}:${a.port}' == addrKey);
         if (!known) {
-          existing.addresses.add(PeerAddress(
+          final newAddr = PeerAddress(
             ip: ip,
             port: port,
             type: PeerAddress.classifyIp(ip),
-          ));
+          );
+          newAddr.recordReceived();
+          existing.addresses.add(newAddr);
         } else {
           for (final addr in existing.addresses) {
-            if (addr.ip == ip && addr.port == port && addr.consecutiveFailures > 0) {
-              addr.consecutiveFailures = 0;
+            if (addr.ip == ip && addr.port == port) {
+              addr.recordReceived();
             }
           }
         }
@@ -4046,11 +4038,13 @@ class CleonaNode {
             peer.publicPort = port;
           }
         }
-        peer.addresses.add(PeerAddress(
+        final newAddr = PeerAddress(
           ip: ip,
           port: port,
           type: PeerAddress.classifyIp(ip),
-        ));
+        );
+        newAddr.recordReceived();
+        peer.addresses.add(newAddr);
       }
       routingTable.addPeer(peer);
     }
