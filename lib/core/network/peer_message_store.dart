@@ -75,6 +75,10 @@ class PeerMessageStore {
   /// Default TTL: 7 days.
   static const defaultTtlMs = 7 * 24 * 60 * 60 * 1000;
 
+  /// Global limits across all recipients.
+  static const maxTotalMessages = 3000;
+  static const maxTotalBytes = 100 * 1024 * 1024;
+
   final String _profileDir;
   final CLogger _log;
 
@@ -139,6 +143,8 @@ class PeerMessageStore {
     required String storeIdHex,
     int ttlMs = defaultTtlMs,
   }) {
+    if (ttlMs <= 0 || ttlMs > defaultTtlMs) ttlMs = defaultTtlMs;
+
     // Size check
     if (wrappedEnvelope.length > maxEnvelopeSize) {
       _log.debug('PEER_STORE rejected: envelope too large (${wrappedEnvelope.length} bytes)');
@@ -154,9 +160,22 @@ class PeerMessageStore {
     final recipientHex = bytesToHex(recipientUserId);
     final list = _messages.putIfAbsent(recipientHex, () => []);
 
-    // Budget
+    // Per-recipient budget
     if (list.length >= maxMessagesPerRecipient) {
       _log.debug('PEER_STORE rejected: budget exceeded for ${recipientHex.substring(0, 8)}');
+      return false;
+    }
+
+    // Global limits
+    final totalMsgs = _messages.values.fold<int>(0, (s, l) => s + l.length);
+    if (totalMsgs >= maxTotalMessages) {
+      _log.debug('PEER_STORE rejected: global message limit reached ($totalMsgs)');
+      return false;
+    }
+    final totalBytes = _messages.values.fold<int>(0,
+        (sum, list) => sum + list.fold<int>(0, (s, m) => s + m.wrappedEnvelope.length));
+    if (totalBytes + wrappedEnvelope.length > maxTotalBytes) {
+      _log.debug('PEER_STORE rejected: global byte limit reached ($totalBytes bytes)');
       return false;
     }
 
@@ -221,6 +240,7 @@ class PeerMessageStore {
       result.add(m.wrappedEnvelope);
     }
 
+    if (result.isNotEmpty) _dirty = true;
     return result;
   }
 

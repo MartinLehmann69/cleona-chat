@@ -86,6 +86,22 @@ class _ShareCleonaDialogContent extends StatelessWidget {
                   locale: locale,
                   theme: theme,
                 ),
+                const SizedBox(height: 4),
+                Row(
+                  children: [
+                    Icon(Icons.cloud_done, size: 14,
+                        color: theme.colorScheme.primary.withValues(alpha: 0.7)),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        locale.get('share_cleona_nostr_hint'),
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: theme.colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
                 if (lanIp != null) ...[
                   const SizedBox(height: 8),
                   const Divider(),

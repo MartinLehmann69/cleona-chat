@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8246a5bbd760, 2026-07-12). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:4521d1021420, 2026-07-14). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1193,6 +1193,8 @@ master_seed (32 bytes, from 24-word phrase via PBKDF2-SHA-512, 4096 rounds)
     └── mlkem_device                    → Device ML-KEM-768 KEM keypair (NEW in v3.0 Welle 5, §3.5b)
 ```
 
+**Invariant:** An identity that carries an `hdIndex` MUST have all keys deterministically derived from the master seed at that index position. Creating an identity with `hdIndex` but random keys (e.g. because the seed file is corrupt) is forbidden — `_preGenerateKeys()` throws `StateError` in this case. This prevents silent identity loss: the user believes the identity is seed-recoverable (because `hdIndex` is set), but a restore would produce different keys. Recovery path: re-enter the 24-word phrase via `restoreFromPhrase()`, which rewrites the seed before identity creation.
+
 **Important properties**:
 
 1. **Seed recovery regenerates User-Keys, not Device-Keys.** The 24-word phrase regenerates all User-Identities and their keys via deterministic HD-Wallet derivation. Device-Keys are freshly created on the replacement device — that is acceptable because the DeviceID is a routing identifier, not an identity subject. Restore-Broadcast (§6.3) carries the UserID identity, and Device-Authorization-Update (§7.1) registers the new DeviceID in the Auth-Manifest.
@@ -1228,7 +1230,7 @@ files/.cleona/                                (Android, in app-private storage)
 ```
 
 **Key cascade**:
-1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) with a **round-trip probe** at `init()` — a 4-byte test value is encrypted, decrypted, and compared; if the probe fails (Session-0 context, corrupted master keys, service accounts), the Windows backend falls back to `_FileKeyringFallback` instead of silently producing unreadable ciphertext. The DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.dpapi` files. On Android: AndroidKeyStore with a biometric/device-credential gate. On macOS: Keychain via `security` CLI. When no OS keyring is available (headless daemons, iOS, unsupported platforms, or Windows DPAPI probe failure), a **file-based fallback** encrypts key material at rest using XSalsa20-Poly1305 (secretbox) with a key derived from `SHA-256(hostname + salt)` (v2 — baseDir was removed from the derivation in S106 because path changes silently broke all stored secrets; v1 files are transparently migrated on first load). The master seed is dual-written to both keyring and legacy file as defence-in-depth against keyring loss; `_storeMasterSeed()` checks the keyring `store()` return value and logs a warning on failure. Both `DeviceKeysStore.loadOrCreate()` and `loadMasterSeed()` refuse to silently regenerate keys when encrypted key material exists on disk but cannot be decrypted — `DeviceKeysStore` tries legacy `db.key` fallback first then fails loud; `loadMasterSeed()` throws `StateError` when a `.dpapi` file exists but DPAPI decryption fails and no file fallback is available (preventing the catastrophic cascade: null seed → null fileEncKey → new random keys → silent identity loss). This is not equivalent to hardware-backed protection (the key is reconstructible from machine context), but prevents plaintext seed exposure via backup copies, accidental file access, or forensic disk reads.
+1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) with a **round-trip probe** at `init()` — a 4-byte test value is encrypted, decrypted, and compared; if the probe fails (Session-0 context, corrupted master keys, service accounts), the Windows backend falls back to `_FileKeyringFallback` instead of silently producing unreadable ciphertext. The DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.dpapi` files. On Android: AndroidKeyStore with a biometric/device-credential gate. On macOS: Keychain via `security` CLI. When no OS keyring is available (headless daemons, iOS, unsupported platforms, or Windows DPAPI probe failure), a **file-based fallback** encrypts key material at rest using XSalsa20-Poly1305 (secretbox) with a key derived from `SHA-256(hostname + salt)` (v2 — baseDir was removed from the derivation in S106 because path changes silently broke all stored secrets; v1 files are transparently migrated on first load). The master seed is dual-written to both keyring and legacy file as defence-in-depth against keyring loss; `_storeMasterSeed()` checks the keyring `store()` return value and logs a warning on failure. Both `DeviceKeysStore.loadOrCreate()` and `loadMasterSeed()` refuse to silently regenerate keys when encrypted key material exists on disk but cannot be decrypted — `DeviceKeysStore` tries legacy `db.key` fallback first then fails loud; `loadMasterSeed()` throws `StateError` when a `.dpapi` file exists but DPAPI decryption fails and no file fallback is available (preventing the catastrophic cascade: null seed → null fileEncKey → new random keys → silent identity loss). The same fail-loud principle extends to `FileEncryption._loadOrCreateLegacyKey()`: a legacy `db.key` with invalid length (≠ 32 bytes) is NOT silently replaced with a random key when profile data exists on disk — `StateError` is thrown instead, because regeneration would make all encrypted files unreadable. A 0-byte `db.key` without any profile data (interrupted first write) is the one exception: regeneration is safe there. The seed phrase is dual-written (keyring + file) analogous to the master seed; `_storeSeedPhrase()` falls back to file persistence when the keyring store fails. In `KeyMigration`, the legacy `seed_phrase.json.enc` is only deleted after confirmed keyring storage — preventing phrase loss when the keyring is transiently unavailable. This is not equivalent to hardware-backed protection (the key is reconstructible from machine context), but prevents plaintext seed exposure via backup copies, accidental file access, or forensic disk reads.
 2. The **Master-Seed** is held in RAM after daemon start (in a protected memory region via libsodium `sodium_mlock`).
 3. **HD-Wallet derivation** (§3.6) generates all further keys on demand — the private keys live only in protected memory.
 4. The **DB-Encryption-Key** is derived from the User-Identity Ed25519 private key (§3.8).
@@ -2558,7 +2560,7 @@ Criterion 3 transforms "mutual" from a sender-side heuristic into a **receiver-e
 - v3.0 removes this queue entirely — S&F takes over the responsibility
 - Benefit: receiver-pull instead of sender-push, less traffic, less ID confusion
 
-**Storage limit**: per receiver, max 30 stored messages on a single storage peer. On overflow: oldest-first eviction.
+**Storage limit**: per receiver, max 30 stored messages on a single storage peer. On overflow: oldest-first eviction. Global limit per storage peer: max 3000 messages / 100 MB total across all recipients; on infrastructure nodes (`acceptAnyPeerStore`) the message cap is 10000. New stores are rejected when either global limit is reached.
 
 ### 5.5b First-CR-Mailbox (Store-and-Forward for Non-Contacts)
 
@@ -2745,6 +2747,8 @@ ApplicationFrame bytes (after user signing)
 - Live-call frames: SKIP zstd (latency-critical, frames are small anyway)
 
 **Verified gain**: text messages ~50-70% smaller. Media (JPEG/AAC/H.264) ~5% smaller.
+
+**Decompression guard**: `decompress()` enforces a hard 64 MB cap on the decompressed output size — aligned with `Transport.maxBulkFrameSize` (60 MB) plus margin for zstd frame overhead. Both the known-size path (`ZSTD_getFrameContentSize`) and the growing-buffer fallback are capped. This prevents memory exhaustion from crafted zstd frames with inflated content-size headers. The guard is defence-in-depth: decompression runs after authenticated decryption (Per-Message KEM + AES-256-GCM), so an attacker must hold valid KEM keys (= accepted contact).
 
 ### 5.10 Send-Cascade Recovery & Self-Healing
 
@@ -6717,18 +6721,30 @@ Flutter UI with ThemeExtensions, 5 token primitives, 6 component classes, 10 Ski
 ### 15.5 Notifications, Sounds, Vibration
 
 **Sound events**:
-- New message (default tone)
+- New message (default tone, per-conversation overridable)
 - Contact request
 - Call ringtone (6 selectable tones)
 - Calendar reminder
-- Channel post (optional, per-channel setting)
 
-**Ringtone selection**: 6 predefined tones, plus a user-supplied custom file (stored locally).
+**Per-Conversation Notification Settings** (persisted in `Conversation`, UI in Chat-Settings):
+- **Enabled/Disabled toggle** (on/off, no timed mute).
+- **Sound selection**: one of 6 predefined tones (same pool as call ringtones), or identity default.
+- **Defaults by conversation type:**
+  - Direct chats: **enabled**
+  - Groups: **enabled**
+  - Channels: **disabled**
+- Defaults are applied automatically when a conversation is created. Existing conversations are not affected by default changes.
+
+**Global Default Override** (UI in global Settings > Notifications):
+- Per conversation type (Direct/Group/Channel) the user can toggle the default for **newly created** conversations of that type.
+- Stored in `NotificationSettings` (per identity, `notification_settings.json`).
+
+**Ringtone selection**: 6 predefined tones, plus a user-supplied custom file (stored locally). The same tone pool is available for both call ringtones and per-conversation message sounds.
 
 **Vibration**: configurable per notification type (pattern + duration).
 
-**Notification settings**:
-- Per conversation: mute/unmute, custom sound
+**Notification settings layers**:
+- Per conversation: enabled/disabled, custom sound (§15.5 above)
 - Per identity: master mute, quiet-hours schedule
 - Per platform: respect system notifications (Do Not Disturb)
 
@@ -6738,8 +6754,8 @@ Flutter UI with ThemeExtensions, 5 token primitives, 6 component classes, 10 Ski
 - Android: NotificationManager
 - iOS: UNUserNotificationCenter
 
-**Suppression layers**:
-- Layer 1: per-conversation mute
+**Suppression layers** (evaluated in order, first match suppresses):
+- Layer 1: per-conversation disabled
 - Layer 2: quiet hours
 - Layer 3: system DND (Do Not Disturb)
 - Layer 4: active call (notifications are held back during a call)
@@ -7057,7 +7073,7 @@ Development uses a three-directory model to separate working code from secrets a
 | `CleonaPrivat/` | Private keys, credentials, internal documentation | No | Never |
 | `CleonaGit/` | Sanitized prestage for GitHub (source + public docs + releases) | Yes (pushed to GitHub) | Yes |
 
-**Release pipeline (5 scripts):** `sync-to-git.sh` copies sanitized source from `Cleona/` to `CleonaGit/` (allowlist-based, default-deny, with tripwire security checks). `dry-run-cleonagit-push.sh` validates the push against a local bare mirror (6 invariants). `approve-cleonagit-push.sh` requires interactive human approval (`JA-PUSH`). `push-cleonagit.sh` pushes code and tag to GitHub (no release creation). `release-build.sh` orchestrates all platform builds in parallel (Apple CI + Windows RDP first, then Android + Linux locally), signs the update manifest with per-platform `dhtBinaryTag`, publishes the in-network update via DHT seeding, and creates the GitHub Release with all artifacts. See `docs/PUBLISHING.md` for the full pipeline specification.
+**Release pipeline (5 scripts):** `sync-to-git.sh` copies sanitized source from `Cleona/` to `CleonaGit/` (allowlist-based, default-deny, with tripwire security checks). `dry-run-cleonagit-push.sh` validates the push against a local bare mirror (6 invariants). `approve-cleonagit-push.sh` requires interactive human approval (`JA-PUSH`). `push-cleonagit.sh` pushes code and tag to GitHub (no release creation). `release-build.sh` orchestrates all platform builds in parallel (Apple CI + Windows RDP first, then Android + Linux locally), signs the update manifest with per-platform `dhtBinaryTag`, publishes the in-network update via DHT seeding, creates the GitHub Release with all artifacts, and deploys the project website (cleona.org) via SFTP. See `docs/PUBLISHING.md` for the full pipeline specification.
 
 **Commit date neutralization:** All commits pushed to GitHub use a fixed neutral date (`2026-01-01T12:00:00+00:00`) to hide the development timeline. Push timestamps (set by GitHub server-side) are accepted as unavoidable.
 
@@ -7067,7 +7083,7 @@ Development uses a three-directory model to separate working code from secrets a
 
 **Reproducible builds:** Users can verify that official binaries match the published source by building from source and comparing the unsigned output. The Ed25519 release signature is a separate verification step (authenticity, not integrity). The maintainer's private key is never needed by verifiers.
 
-**Distribution channels (external, for initial installation):** GitHub Releases (signed binaries for Linux, Windows, Android, macOS), Apple TestFlight (iOS, uploaded automatically by Apple CI via Fastlane), Google Play (maintainer-signed APK), project website. F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
+**Distribution channels (external, for initial installation):** GitHub Releases (signed binaries for Linux, Windows, Android, macOS), Apple TestFlight (iOS, uploaded automatically by Apple CI via Fastlane), Google Play (maintainer-signed APK), project website (cleona.org — Astro/Tailwind static site, download page fetches latest GitHub Release assets dynamically via GitHub API, deployed automatically by `release-build.sh` Phase 9 via SFTP). F-Droid is not possible (requires OSS license). See `docs/PUBLISHING.md` for the full publishing strategy. For censorship-resistant distribution and in-network updates, see §19.6.
 
 **Linux packaging:** Three formats built from the Flutter Linux bundle via `scripts/build-linux-packages.sh`: AppImage (universal, no installation), .deb (Debian/Ubuntu/Mint), .rpm (Fedora/openSUSE/RHEL). All install to `/opt/cleona/` with a wrapper script in `/usr/bin/cleona-chat` and a `.desktop` entry for application menu integration.
 
@@ -7437,7 +7453,7 @@ Users in high-threat environments should use the physical transfer path (§19.6.
 
 **iOS special case:** The web app can download an IPA, but iOS does not install it (no sideloading, except EU-DMA markets from iOS 17.4). The web app detects iOS and shows: "On iOS, Cleona is available through the App Store" + Store link.
 
-**Platform-specific installation (implemented, auto-install):** Once §19.6.2 delivers and verifies the binary, `onUpdateStateChanged` triggers `applyUpdate()` automatically — no user tap required. RS fragment seeding runs fire-and-forget after the install fires, so the CPU-intensive encoding does not block the UI. Platform details: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it with the verified copy, writes an `update-pending.json` marker, and calls `exit(0)` for restart. **Android** — the Kotlin `installApk` handler copies the complete binary to `cacheDir/update.apk` on a background thread, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission); user consent is provided by the OS installer dialog. **Windows** — same desktop flow as Linux (backup + replace + restart). **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
+**Platform-specific installation (implemented, auto-install):** Once §19.6.2 delivers and verifies the binary, `onUpdateStateChanged` triggers `applyUpdate()` automatically — no user tap required. RS fragment seeding runs fire-and-forget after the install fires, so the CPU-intensive encoding does not block the UI. Platform details: **Linux** — `applyDesktopUpdate()` backs up the current binary (`.bak`), replaces it with the verified copy, writes an `update-pending.json` marker, and calls `exit(0)` for restart. **Android** — the Kotlin `installApk` handler copies the complete binary to `cacheDir/update.apk` on a background thread, obtains a `content://` URI via `FileProvider`, and launches `ACTION_VIEW` for the system package installer (requires `REQUEST_INSTALL_PACKAGES` permission); user consent is provided by the OS installer dialog. **Windows** — the update arrives as a ZIP bundle containing the EXE, DLLs, and Flutter data directory. Before extraction, the entire application directory is backed up (`robocopy /E` to `.update-bak/`). On extraction failure or post-update crash (within 30s), the full directory is restored from the backup. After successful restart, the backup is deleted. This differs from the Linux single-binary flow because Windows bundles are multi-file — a partial rollback (EXE only) produces an incompatible mix of old runner and new DLLs. **macOS** — App Store distribution only; in-network updates are not applicable. **iOS** — no sideloading; `shouldUseInNetworkUpdate()` returns `false`.
 
 **No user-facing rollback (architectural decision, 2026-07-08).** Cleona does NOT offer a rollback/downgrade mechanism to the user, for three reasons: (1) **Forward-only database migrations.** Drift/SQLite schema migrations are irreversible — a newer version may alter tables that the older binary cannot read, causing data loss or crashes on downgrade. (2) **Cryptographic protocol evolution.** Newer versions may rotate KEM parameters, key formats, or message envelope fields. A rolled-back binary may fail to decrypt messages sent by peers who already upgraded, silently dropping traffic. (3) **Monotone sequence enforcement.** The `minMonotoneSeq` field in signed update manifests prevents downgrade attacks (§19.6.2). Accepting a rollback would require bypassing this security gate, weakening the update chain's integrity. Instead: if a release introduces a critical bug, the maintainer publishes a hotfix release (new version, forward migration) within the same distribution pipeline. The Beta cluster provides early detection; the 6h DHT manifest refresh cycle bounds worst-case exposure. Desktop nodes retain a `.bak` backup internally for crash recovery (auto-restore if the app fails within 30s of an update), but this is a safety net, not a user-facing feature — it does not survive across database migrations.
 

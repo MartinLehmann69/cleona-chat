@@ -30,6 +30,7 @@ class InviteLink {
   final Map<String, String> binarySignatures;
   final String version;
   final String? fallbackUrl;
+  final String? inviteNonce;
 
   const InviteLink({
     required this.nodeIp,
@@ -39,6 +40,7 @@ class InviteLink {
     required this.binarySignatures,
     required this.version,
     this.fallbackUrl,
+    this.inviteNonce,
   });
 
   /// Generate the full invite link URL.
@@ -54,6 +56,9 @@ class InviteLink {
     frag.write('&v=${Uri.encodeComponent(version)}');
     if (fallbackUrl != null && fallbackUrl!.isNotEmpty) {
       frag.write('&f=${Uri.encodeComponent(fallbackUrl!)}');
+    }
+    if (inviteNonce != null && inviteNonce!.isNotEmpty) {
+      frag.write('&n=${Uri.encodeComponent(inviteNonce!)}');
     }
 
     return 'http://$host:$nodePort$_path#$frag';
@@ -110,6 +115,7 @@ class InviteLink {
         binarySignatures: sigs,
         version: version,
         fallbackUrl: params['f'],
+        inviteNonce: params['n'],
       );
     } catch (_) {
       return null;

@@ -17,6 +17,7 @@ import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/ui/screens/call_screen.dart';
@@ -1342,8 +1343,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Text(locale.tr('members_count', {'count': '${currentGroup.members.length}'}),
                       style: Theme.of(context).textTheme.titleSmall),
                   const SizedBox(height: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 280),
+                  Flexible(
                     child: ListView(
                       shrinkWrap: true,
                       children: currentGroup.members.values.map((m) {
@@ -2047,13 +2047,17 @@ class _ChatScreenState extends State<ChatScreen> {
                 Text(locale.get('report_category'),
                     style: Theme.of(context).textTheme.titleSmall),
                 const SizedBox(height: 8),
-                ...List.generate(categories.length, (i) =>
-                  RadioListTile<int>(
-                    title: Text(categories[i], style: const TextStyle(fontSize: 14)),
-                    value: i,
-                    groupValue: selectedCategory,
-                    dense: true,
-                    onChanged: (v) => setDialogState(() => selectedCategory = v ?? 0),
+                RadioGroup<int>(
+                  groupValue: selectedCategory,
+                  onChanged: (v) => setDialogState(() => selectedCategory = v ?? 0),
+                  child: Column(
+                    children: List.generate(categories.length, (i) =>
+                      RadioListTile<int>(
+                        title: Text(categories[i], style: const TextStyle(fontSize: 14)),
+                        value: i,
+                        dense: true,
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -2068,13 +2072,12 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () async {
                 Navigator.pop(ctx);
                 final ok = await service.reportChannel(channelId, selectedCategory, []);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text(ok
-                        ? locale.get('report_submitted')
-                        : locale.get('report_limit_reached'))),
-                  );
-                }
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(ok
+                      ? locale.get('report_submitted')
+                      : locale.get('report_limit_reached'))),
+                );
               },
               child: Text(locale.get('send')),
             ),
@@ -2131,6 +2134,11 @@ class _ChatScreenState extends State<ChatScreen> {
     if (service == null) return;
     final conv = service.conversations[widget.conversationId];
     if (conv == null) return;
+
+    final defaultNotify = service.notificationSound.settings.defaultForType(
+        isGroup: conv.isGroup, isChannel: conv.isChannel);
+    bool notifyEnabled = conv.notificationsEnabled ?? defaultNotify;
+    String? notifySoundName = conv.notificationSoundName;
 
     // For groups/channels, owner or admin can change config
     final group = service.groups[widget.conversationId];
@@ -2217,6 +2225,33 @@ class _ChatScreenState extends State<ChatScreen> {
                   value: config.typingIndicators,
                   onChanged: canEdit ? (v) => setDialogState(() => config.typingIndicators = v) : null,
                 ),
+                const Divider(),
+                SwitchListTile(
+                  title: Text(locale.get('chat_notifications')),
+                  subtitle: Text(locale.get('chat_notifications_subtitle')),
+                  value: notifyEnabled,
+                  onChanged: (v) => setDialogState(() => notifyEnabled = v),
+                ),
+                if (notifyEnabled)
+                  ListTile(
+                    title: Text(locale.get('chat_notification_sound')),
+                    subtitle: Text(notifySoundName != null
+                        ? Ringtone.fromName(notifySoundName!).displayName
+                        : locale.get('default_sound')),
+                    trailing: PopupMenuButton<String?>(
+                      onSelected: (v) {
+                        setDialogState(() => notifySoundName = v);
+                        if (v != null) {
+                          service.notificationSound.previewRingtone(Ringtone.fromName(v));
+                        }
+                      },
+                      itemBuilder: (_) => [
+                        PopupMenuItem(value: null, child: Text(locale.get('default_sound'))),
+                        ...Ringtone.values.map((rt) =>
+                          PopupMenuItem(value: rt.name, child: Text(rt.displayName))),
+                      ],
+                    ),
+                  ),
                 if (!canEdit && (widget.isGroup || widget.isChannel))
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
@@ -2241,14 +2276,17 @@ class _ChatScreenState extends State<ChatScreen> {
               onPressed: () => Navigator.pop(ctx),
               child: Text(locale.get('cancel')),
             ),
-            if (canEdit)
-              FilledButton(
-                onPressed: () {
-                  Navigator.pop(ctx);
+            FilledButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                service.updateConversationNotifications(widget.conversationId,
+                    enabled: notifyEnabled, soundName: notifySoundName);
+                if (canEdit) {
                   service.updateChatConfig(widget.conversationId, config);
-                },
-                child: Text(isDm ? locale.get('propose') : locale.get('save')),
-              ),
+                }
+              },
+              child: Text(locale.get('save')),
+            ),
           ],
         ),
       ),

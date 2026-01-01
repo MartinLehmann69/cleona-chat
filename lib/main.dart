@@ -640,6 +640,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   CleonaService? get _activeCleonaService {
+    final s = _service;
+    if (s is CleonaService && _inProcessServices.containsValue(s)) {
+      return s;
+    }
     if (_inProcessServices.isNotEmpty) {
       return _inProcessServices.values.first;
     }
@@ -659,13 +663,16 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _scheduleCrashDialog(CleonaService service, Object error, StackTrace stack) {
     if (_crashDialogShowing) return;
+    _crashDialogShowing = true;
     final reporter = service.crashReporter;
     final report = reporter.buildReport(error, stack);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = navigatorKey.currentContext;
-      if (ctx == null) return;
-      _crashDialogShowing = true;
+      if (ctx == null) {
+        _crashDialogShowing = false;
+        return;
+      }
       showCrashReportDialog(
         context: ctx,
         reporter: reporter,
@@ -1945,11 +1952,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           '[${_inProcessServices.keys.map((k) => k.substring(0, 8)).join(", ")}]');
     }
 
-    debugPrint('[switchIdentity] FALLTHROUGH: setActiveIdentity without '
-        'service switch — ContactSeed will use WRONG identity keys!');
-    IdentityManager().setActiveIdentity(identity);
-    notifyListeners();
-    _scheduleSkinPrecache(identity.skinId);
+    debugPrint('[switchIdentity] FALLTHROUGH: both IPC and in-process switch '
+        'failed — NOT persisting to avoid wrong-identity-key corruption');
+    return;
   }
 
   /// Schedules a [precacheImage] call for the hero asset of the skin identified
@@ -2262,8 +2267,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       return false;
     }
 
-    // Android: in-process
+    // Android: in-process — broadcast IDENTITY_DELETED before cleanup
     if (_inProcessServices.isNotEmpty) {
+      final svc = _inProcessServices[nodeIdHex];
+      if (svc != null) {
+        try {
+          await svc.broadcastIdentityDeleted().timeout(const Duration(seconds: 15));
+        } catch (_) {}
+      }
       IdentityManager().deleteIdentity(identity.id);
       return deleteIdentityAndroid(nodeIdHex);
     }
@@ -2275,6 +2286,58 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       await switchIdentity(remaining.first);
     }
     return true;
+  }
+
+  /// §6.4.3: Recover additional identities from DHT registry after seed restore.
+  /// Fire-and-forget — runs in background, notifies UI when done.
+  Future<void> recoverIdentitiesFromRegistry() async {
+    // Linux: delegate to daemon via IPC
+    if (_ipcClient != null) {
+      final count = await (_ipcClient as IpcClient).recoverIdentitiesFromRegistry();
+      if (count > 0) {
+        debugPrint('[main] Registry recovery: $count identities restored via IPC');
+        notifyListeners();
+      }
+      return;
+    }
+
+    // Android: in-process
+    final svc = _service;
+    if (svc is CleonaService && _inProcessNode != null) {
+      final created = await svc.recoverIdentitiesFromRegistry();
+      if (created.isNotEmpty) {
+        final mgr = IdentityManager();
+        final masterSeed = mgr.loadMasterSeed();
+        for (final identity in created) {
+          final ctx = await IdentityContext.createFromIdentity(
+            identity: identity,
+            baseDir: _baseDir,
+            masterSeed: masterSeed,
+          );
+          final ids = mgr.loadIdentities();
+          for (final id in ids) {
+            if (id.id == identity.id) {
+              id.nodeIdHex = ctx.userIdHex;
+              break;
+            }
+          }
+          mgr.saveIdentities(ids);
+          _inProcessContexts[ctx.userIdHex] = ctx;
+          _inProcessNode!.registerIdentity(ctx);
+          final service = CleonaService(
+            identity: ctx,
+            node: _inProcessNode!,
+            displayName: identity.displayName,
+          );
+          if (_sessionReducedMode) service.reducedMode = true;
+          _wireServiceCallbacks(service);
+          await service.startService();
+          _inProcessServices[ctx.userIdHex] = service;
+        }
+        debugPrint('[main] Registry recovery: ${created.length} identities restored in-process');
+        notifyListeners();
+      }
+    }
   }
 
   Future<void> _handleGuiAction(Map<String, dynamic> data) async {

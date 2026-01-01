@@ -757,7 +757,6 @@ class CalendarSyncService {
         } on GoogleSyncTokenExpired {
           _log.info('Google sync token expired, doing full re-sync.');
           _googleSyncToken = null;
-          _googleRefs.clear();
           await _googlePullPhase(client, result);
         }
       }
@@ -820,6 +819,16 @@ class CalendarSyncService {
 
     if (status == 'cancelled') {
       if (localEventId != null) {
+        final existing = calendar.events[localEventId];
+        final updatedStr = ge['updated'] as String?;
+        final cancelledAt = updatedStr != null
+            ? DateTime.tryParse(updatedStr)?.millisecondsSinceEpoch ??
+                DateTime.now().millisecondsSinceEpoch
+            : DateTime.now().millisecondsSinceEpoch;
+        if (existing != null && existing.updatedAt > cancelledAt) {
+          _googleRefs.remove(localEventId);
+          return;
+        }
         calendar.deleteEvent(localEventId);
         _googleRefs.remove(localEventId);
         result.pulledDeleted++;

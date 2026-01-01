@@ -12,6 +12,15 @@ import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/storage/atomic_json_writer.dart';
 
+/// Thrown when identities.json is corrupt but identity directories exist on
+/// disk — distinct from an empty-but-valid list (e.g. after last delete).
+class IdentitiesFileCorruptException implements Exception {
+  IdentitiesFileCorruptException(this.message);
+  final String message;
+  @override
+  String toString() => 'IdentitiesFileCorruptException: $message';
+}
+
 /// Represents a single identity profile.
 class Identity {
   final String id;
@@ -74,6 +83,7 @@ class Identity {
 /// Supports HD-Wallet key derivation from a master seed.
 class IdentityManager {
   final String baseDir; // ~/.cleona
+  int _maxHdIndex = 0;
 
   IdentityManager({String? baseDir})
       : baseDir = baseDir ?? AppPaths.dataDir;
@@ -183,16 +193,20 @@ class IdentityManager {
   /// Store the seed phrase words (for backup display in Settings).
   void _storeSeedPhrase(List<String> words) {
     if (KeyringService.isInitialized) {
-      // Store as space-separated words in keyring
       final phraseBytes = Uint8List.fromList(words.join(' ').codeUnits);
-      KeyringService.instance.store('seed_phrase', phraseBytes);
-    } else {
-      final fileEnc = FileEncryption(baseDir: baseDir);
-      fileEnc.writeJsonFile('$baseDir/seed_phrase.json', {
-        'words': words,
-        'version': 1,
-      });
+      final stored = KeyringService.instance.store('seed_phrase', phraseBytes);
+      if (!stored) {
+        stderr.writeln('[IdentityManager] WARNING: keyring store failed '
+            'for seed_phrase — using file fallback');
+      }
+      if (stored) return;
     }
+    // File fallback (keyring unavailable or store failed)
+    final fileEnc = FileEncryption(baseDir: baseDir);
+    fileEnc.writeJsonFile('$baseDir/seed_phrase.json', {
+      'words': words,
+      'version': 1,
+    });
   }
 
   /// Load stored seed phrase words (for displaying in Settings).
@@ -214,15 +228,31 @@ class IdentityManager {
   }
 
   /// Get the next HD index for a new identity.
+  /// Uses _maxHdIndex (persisted high-water-mark) to survive identity deletions.
   int nextHdIndex() {
     final identities = loadIdentities();
-    var maxIndex = -1;
+    var maxFromList = -1;
     for (final id in identities) {
-      if (id.hdIndex != null && id.hdIndex! > maxIndex) {
-        maxIndex = id.hdIndex!;
+      if (id.hdIndex != null && id.hdIndex! > maxFromList) {
+        maxFromList = id.hdIndex!;
       }
     }
-    return maxIndex + 1;
+    final effective = _maxHdIndex > maxFromList ? _maxHdIndex : maxFromList;
+    return effective + 1;
+  }
+
+  /// Monotonically increasing identity number — survives deletions.
+  /// Parses 'identity-N' ids to find max N, then returns N+1.
+  static int _nextIdentityNum(List<Identity> identities) {
+    var maxNum = 0;
+    for (final id in identities) {
+      final match = RegExp(r'^identity-(\d+)$').firstMatch(id.id);
+      if (match != null) {
+        final n = int.parse(match.group(1)!);
+        if (n > maxNum) maxNum = n;
+      }
+    }
+    return maxNum + 1;
   }
 
   static String _bytesToHex(Uint8List bytes) {
@@ -252,16 +282,47 @@ class IdentityManager {
       return _migrateFromSingleProfile();
     }
     final json = AtomicJsonWriter.readJsonFile(_identitiesFile);
-    if (json == null) return [];
+    if (json == null) {
+      final idDir = Directory('$baseDir/identities');
+      if (idDir.existsSync() &&
+          idDir.listSync().whereType<Directory>().any(
+              (d) => d.path.contains('identity-'))) {
+        throw IdentitiesFileCorruptException(
+            'identities.json corrupt but identity directories exist '
+            'on disk — use seed phrase to restore');
+      }
+      return [];
+    }
     final list = json['identities'] as List<dynamic>? ?? [];
-    return list.map((e) => Identity.fromJson(e as Map<String, dynamic>)).toList();
+    final identities = list.map((e) => Identity.fromJson(e as Map<String, dynamic>)).toList();
+    // Restore high-water-mark: v2+ stores it explicitly, v1 computes from list
+    final storedMax = json['maxHdIndex'] as int?;
+    if (storedMax != null) {
+      _maxHdIndex = storedMax;
+    } else {
+      var computed = 0;
+      for (final id in identities) {
+        if (id.hdIndex != null && id.hdIndex! > computed) {
+          computed = id.hdIndex!;
+        }
+      }
+      _maxHdIndex = computed;
+    }
+    return identities;
   }
 
   /// Atomically save identities list (tmp+rename, sidecar-recovery on read).
   void saveIdentities(List<Identity> identities) {
     Directory(baseDir).createSync(recursive: true);
+    // Update high-water-mark from current identity list
+    for (final id in identities) {
+      if (id.hdIndex != null && id.hdIndex! > _maxHdIndex) {
+        _maxHdIndex = id.hdIndex!;
+      }
+    }
     AtomicJsonWriter.writeJsonFile(_identitiesFile, {
-      'version': 1,
+      'version': 2,
+      'maxHdIndex': _maxHdIndex,
       'identities': identities.map((e) => e.toJson()).toList(),
     });
   }
@@ -288,7 +349,14 @@ class IdentityManager {
   /// Like [preWarmPqKeys] but starts **deterministic** PQ keygen from the
   /// master seed + HD index. This way the prewarmed keys are the exact keys
   /// that [createIdentity] will need — no discard/re-generate.
+  /// If a previous prewarm was started for a different index (or as random
+  /// via [preWarmPqKeys]), the stale Future is discarded and a fresh keygen
+  /// is started for [hdIndex].
   Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})> preWarmPqKeysDeterministic(Uint8List masterSeed, int hdIndex) {
+    if (_pqKeygenPrewarm != null && _pqPrewarmHdIndex != hdIndex) {
+      _pqKeygenPrewarm!.ignore();
+      _pqKeygenPrewarm = null;
+    }
     _pqPrewarmHdIndex = hdIndex;
     return _pqKeygenPrewarm ??= generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
   }
@@ -297,7 +365,7 @@ class IdentityManager {
   /// Async because PQ keygen runs in a background isolate (ANR prevention).
   Future<Identity> createIdentity(String displayName) async {
     final identities = loadIdentities();
-    final nextNum = identities.length + 1;
+    final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';
     final port = 10000 + Random().nextInt(55000);
@@ -311,10 +379,43 @@ class IdentityManager {
     int? hdIndex;
     if (hasMasterSeed()) {
       hdIndex = nextHdIndex();
+      _maxHdIndex = hdIndex;
     }
 
     // Pre-generate ALL keys (Ed25519 + X25519 + ML-DSA-65 + ML-KEM-768).
     // PQ keygen runs in background isolate to avoid ANR on Android.
+    await _preGenerateKeys(profileDir, hdIndex);
+
+    final identity = Identity(
+      id: id,
+      displayName: displayName,
+      profileDir: profileDir,
+      port: port,
+      createdAt: DateTime.now(),
+      hdIndex: hdIndex,
+    );
+
+    identities.add(identity);
+    saveIdentities(identities);
+    return identity;
+  }
+
+  /// Create an identity at a specific HD-Wallet index (§6.4.3 registry recovery).
+  /// Unlike [createIdentity], this targets an exact [hdIndex] instead of auto-incrementing.
+  Future<Identity> createIdentityAtIndex(int hdIndex, String displayName) async {
+    final identities = loadIdentities();
+    if (identities.any((i) => i.hdIndex == hdIndex)) {
+      throw StateError('Identity with hdIndex=$hdIndex already exists');
+    }
+    final nextNum = _nextIdentityNum(identities);
+    final id = 'identity-$nextNum';
+    final profileDir = '$baseDir/identities/$id';
+    final port = 10000 + Random().nextInt(55000);
+
+    Directory(profileDir).createSync(recursive: true);
+    File('$profileDir/port').writeAsStringSync('$port');
+
+    if (hdIndex > _maxHdIndex) _maxHdIndex = hdIndex;
     await _preGenerateKeys(profileDir, hdIndex);
 
     final identity = Identity(
@@ -339,6 +440,14 @@ class IdentityManager {
     final sodium = SodiumFFI();
     // §3.7 step 5: derive per-identity FileEncryption key from seed
     final masterSeed = loadMasterSeed();
+    // §3.6 invariant: hdIndex implies deterministic keys from seed.
+    // Random keys with hdIndex would appear recoverable but aren't.
+    if (hdIndex != null && masterSeed == null) {
+      throw StateError(
+          'hdIndex=$hdIndex requested but master seed unreadable — '
+          'refusing random keys (identity would be unrecoverable '
+          'from seed phrase). Re-enter recovery phrase to fix.');
+    }
     final Uint8List? fileEncKey = (masterSeed != null && hdIndex != null)
         ? HdWallet.deriveFileEncKey(masterSeed, hdIndex)
         : null;

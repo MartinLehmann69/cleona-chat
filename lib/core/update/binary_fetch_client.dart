@@ -18,6 +18,9 @@ class BinaryFetchClient {
   static const Duration kFullBinaryTimeout = Duration(minutes: 10);
   static const Duration kConnectTimeout = Duration(seconds: 3);
 
+  static const int kMaxFullBinaryBytes = 200 * 1024 * 1024; // 200 MB
+  static const int kMaxFragmentBytes = 10 * 1024 * 1024; // 10 MB
+
   final CLogger _log;
   final HttpClient _client;
 
@@ -29,8 +32,11 @@ class BinaryFetchClient {
 
   /// Fetch a fragment (or complete binary when [index] == -1) from [address].
   /// Returns the raw bytes, or null on failure (timeout, HTTP error, etc.).
+  /// [expectedSize], if given, is used as the primary download size limit;
+  /// otherwise falls back to [kMaxFullBinaryBytes] / [kMaxFragmentBytes].
   Future<Uint8List?> fetch(
-      EndpointAddress address, String platform, int index) async {
+      EndpointAddress address, String platform, int index,
+      {int? expectedSize}) async {
     if (address.ip.isEmpty || address.port == 0) return null;
 
     final host = address.ip.contains(':') ? '[${address.ip}]' : address.ip;
@@ -51,9 +57,27 @@ class BinaryFetchClient {
         return null;
       }
 
+      final hardCap = index == -1 ? kMaxFullBinaryBytes : kMaxFragmentBytes;
+      final maxBytes = expectedSize ?? hardCap;
+
+      final contentLength = response.contentLength;
+      if (contentLength > 0 && contentLength > maxBytes) {
+        _log.warn('fetch $url: Content-Length ${contentLength}B exceeds '
+            'limit ${maxBytes}B — rejecting');
+        await response.drain<void>();
+        return null;
+      }
+
       final streamTimeout = index == -1 ? kFullBinaryTimeout : kFetchTimeout;
       final builder = BytesBuilder(copy: false);
+      var totalBytes = 0;
       await for (final chunk in response.timeout(streamTimeout)) {
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          _log.warn('fetch $url: streamed ${totalBytes}B exceeds '
+              'limit ${maxBytes}B — aborting');
+          return null;
+        }
         builder.add(chunk);
       }
       final bytes = builder.toBytes();

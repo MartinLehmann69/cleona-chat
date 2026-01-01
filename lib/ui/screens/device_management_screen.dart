@@ -401,13 +401,12 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
               OutlinedButton.icon(
                 onPressed: () async {
                   final ok = await widget.service.requestDelegationRenewal();
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text(locale.get(
-                        ok ? 'linked_device_renewal_sent' : 'linked_device_renewal_failed',
-                      ))),
-                    );
-                  }
+                  if (!context.mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(locale.get(
+                      ok ? 'linked_device_renewal_sent' : 'linked_device_renewal_failed',
+                    ))),
+                  );
                 },
                 icon: const Icon(Icons.refresh, size: 16),
                 label: Text(locale.get('linked_device_renew_now')),

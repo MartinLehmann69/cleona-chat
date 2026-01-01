@@ -8,6 +8,7 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/secp256k1_schnorr.dart';
@@ -104,6 +105,7 @@ class BinaryAvailabilityRecord {
 class BinaryRendezvousManager {
   final List<RendezvousProvider> _providers;
   final CLogger _log;
+  final String? _profileDir;
 
   Uint8List? _networkSecret;
   Uint8List? _deviceId;
@@ -117,8 +119,12 @@ class BinaryRendezvousManager {
   BinaryRendezvousManager({
     List<RendezvousProvider>? providers,
     String? profileDir,
-  })  : _providers = providers ?? [NostrProvider(profileDir: profileDir)],
+  })  : _profileDir = profileDir,
+        _providers = providers ?? [NostrProvider(profileDir: profileDir)],
         _log = CLogger.get('binary-rv', profileDir: profileDir);
+
+  List<RendezvousProvider> get providers =>
+      List.unmodifiable(_providers);
 
   void init({
     required Uint8List networkSecret,
@@ -128,6 +134,28 @@ class BinaryRendezvousManager {
     _networkSecret = networkSecret;
     _deviceId = deviceId;
     _addressProvider = addressProvider;
+    _loadSeq();
+  }
+
+  void _loadSeq() {
+    final dir = _profileDir;
+    if (dir == null) return;
+    try {
+      final file = File('$dir/rendezvous_seq');
+      if (file.existsSync()) {
+        _seq = int.tryParse(file.readAsStringSync().trim()) ?? 0;
+      }
+    } catch (_) {
+      _seq = 0;
+    }
+  }
+
+  void _saveSeq() {
+    final dir = _profileDir;
+    if (dir == null) return;
+    try {
+      File('$dir/rendezvous_seq').writeAsStringSync('$_seq');
+    } catch (_) {}
   }
 
   // -------------------------------------------------------------------------
@@ -149,6 +177,7 @@ class BinaryRendezvousManager {
     }
 
     _seq++;
+    _saveSeq();
     final currentEpoch = currentEpochString();
     final nextEpoch = nextEpochString();
 

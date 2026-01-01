@@ -99,6 +99,10 @@ class ZstdCompression {
   /// Initial buffer size used when decompressed size is unknown.
   static const int _defaultDecompressBuffer = 256 * 1024; // 256 KiB
 
+  /// §5.9: hard cap on decompressed output — aligned with
+  /// Transport.maxBulkFrameSize (60 MB) plus margin.
+  static const int _maxDecompressedSize = 64 * 1024 * 1024; // 64 MiB
+
   /// Compress [data] using Zstandard at the given [level] (1-22, default 3).
   ///
   /// Returns the compressed bytes. Throws [ZstdException] on failure.
@@ -151,6 +155,12 @@ class ZstdCompression {
       }
 
       if (frameSize != _contentSizeUnknown && frameSize >= 0) {
+        if (frameSize > _maxDecompressedSize) {
+          throw ZstdException(
+              'Frame claims ${frameSize ~/ 1024}KB decompressed — '
+              'exceeds ${_maxDecompressedSize ~/ (1024 * 1024)}MB limit '
+              '(cf. Transport.maxBulkFrameSize)');
+        }
         return _decompressKnownSize(src, srcSize, frameSize);
       }
 
@@ -183,6 +193,10 @@ class ZstdCompression {
 
     // Try increasing buffer sizes until decompression succeeds.
     for (var attempt = 0; attempt < 10; attempt++) {
+      if (dstCapacity > _maxDecompressedSize) {
+        throw ZstdException(
+            'Growing buffer exceeded ${_maxDecompressedSize ~/ (1024 * 1024)}MB limit');
+      }
       final dst = malloc.allocate<Uint8>(dstCapacity);
       try {
         final result = _decompress(

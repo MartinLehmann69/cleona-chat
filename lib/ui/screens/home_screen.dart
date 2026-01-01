@@ -563,7 +563,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   // Category selector (only for public channels)
                   if (isPublic)
                     DropdownButtonFormField<String>(
-                      value: category,
+                      initialValue: category,
                       decoration: InputDecoration(
                         labelText: locale.get('channel_category'),
                         border: const OutlineInputBorder(),
@@ -1069,11 +1069,10 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
                 reason: reasonController.text.trim().isNotEmpty
                     ? reasonController.text.trim() : null,
               );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
-                );
-              }
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+              );
             },
             child: Text(locale.get('jury_vote_abstain')),
           ),
@@ -1086,11 +1085,10 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
                 reason: reasonController.text.trim().isNotEmpty
                     ? reasonController.text.trim() : null,
               );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
-                );
-              }
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+              );
             },
             child: Text(locale.get('jury_vote_reject')),
           ),
@@ -1102,11 +1100,10 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
                 reason: reasonController.text.trim().isNotEmpty
                     ? reasonController.text.trim() : null,
               );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
-                );
-              }
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+              );
             },
             child: Text(locale.get('jury_vote_approve')),
           ),

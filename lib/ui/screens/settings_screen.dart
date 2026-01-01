@@ -1652,6 +1652,38 @@ class _NotificationSettingsScreenState extends State<NotificationSettingsScreen>
             ],
           ),
           FormGroup(
+            title: locale.get('notification_defaults_section'),
+            children: [
+              SwitchListTile(
+                secondary: const Icon(Icons.person),
+                title: Text(locale.get('notification_default_direct')),
+                value: _settings.defaultDirectNotify,
+                onChanged: (v) {
+                  _settings.defaultDirectNotify = v;
+                  _save();
+                },
+              ),
+              SwitchListTile(
+                secondary: const Icon(Icons.group),
+                title: Text(locale.get('notification_default_group')),
+                value: _settings.defaultGroupNotify,
+                onChanged: (v) {
+                  _settings.defaultGroupNotify = v;
+                  _save();
+                },
+              ),
+              SwitchListTile(
+                secondary: const Icon(Icons.campaign),
+                title: Text(locale.get('notification_default_channel')),
+                value: _settings.defaultChannelNotify,
+                onChanged: (v) {
+                  _settings.defaultChannelNotify = v;
+                  _save();
+                },
+              ),
+            ],
+          ),
+          FormGroup(
             title: locale.get('notification_ringtone_section'),
             children: [
               ...Ringtone.values.map((rt) => RadioListTile<Ringtone>(

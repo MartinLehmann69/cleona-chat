@@ -130,10 +130,14 @@ class UdpFragmenter {
   static FragmentHeader? parseHeader(Uint8List data) {
     if (!isFragment(data)) return null;
 
+    final index = data[6];
+    final total = data[7];
+    if (total < 1 || index >= total) return null;
+
     return FragmentHeader(
       fragmentId: (data[4] << 8) | data[5],
-      index: data[6],
-      total: data[7],
+      index: index,
+      total: total,
     );
   }
 
@@ -257,7 +261,9 @@ class FragmentReassembler {
           'from $sourceIp:$sourcePort');
 
       // Hard timeout — cleanup even if NACKs are pending
+      final bufferRef = buffer;
       Timer(reassemblyTimeout, () {
+        if (_buffers[key] != bufferRef) return;
         final expired = _buffers.remove(key);
         if (expired != null) {
           expired.nackTimer?.cancel();

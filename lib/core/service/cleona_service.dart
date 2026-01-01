@@ -5,6 +5,7 @@ import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
+import 'package:path/path.dart' as p;
 import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -318,6 +319,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // §19.6.2 — periodic housekeeping on the fragment store (prunes
   // superseded versions + enforces the platform storage budget).
   Timer? _binaryGcTimer;
+  Timer? _registryRepublishTimer;
   // Fetches fragments/binaries from other nodes' embedded HTTP servers
   // (§19.6.6) — the `fetchFragment` callback for BinaryUpdateManager /
   // DeltaUpdateManager downloads.
@@ -473,7 +475,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.137';
+  static const String kCurrentAppVersion = '3.1.138';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -818,7 +820,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _binaryHttpServer!.binaryProvider = (platform) {
         final versions = _binaryFragmentStore!.storedVersionsSync(platform);
         if (versions.isEmpty) return null;
-        return _binaryFragmentStore!.getCompleteSync(platform, versions.last);
+        return _binaryFragmentStore!.getCompletePath(platform, versions.last);
       };
       _binaryHttpServer!.fragmentProvider = (platform, index) {
         final versions = _binaryFragmentStore!.storedVersionsSync(platform);
@@ -868,6 +870,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         _runBinaryFragmentGc();
       });
     }
+
+    // Identity registry DHT republish (P4-Publish): keep fragments alive
+    // across DHT TTL (7d). Republish every 24h — low traffic, idempotent.
+    _registryRepublishTimer = Timer.periodic(const Duration(hours: 24), (_) {
+      _publishIdentityRegistryIfPossible();
+    });
 
     // Load conversations
     _loadConversations();
@@ -1387,17 +1395,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         originalSize: frag.originalSize,
       ));
 
-      if (stored) {
-        final ackPayload = (proto.FragmentStoreAck()
-              ..messageId = frag.messageId
-              ..fragmentIndex = frag.fragmentIndex)
-            .writeToBuffer();
-        node.sendInfraTo(
-          messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK,
-          innerPayload: Uint8List.fromList(ackPayload),
-          recipientDeviceId: senderDeviceId,
-        );
-      }
+      final ackPayload = (proto.FragmentStoreAck()
+            ..messageId = frag.messageId
+            ..fragmentIndex = frag.fragmentIndex)
+          .writeToBuffer();
+      node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK,
+        innerPayload: Uint8List.fromList(ackPayload),
+        recipientDeviceId: senderDeviceId,
+      );
 
       final mailboxId = Uint8List.fromList(frag.mailboxId);
       if (_isOurMailbox(mailboxId)) {
@@ -1676,8 +1682,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return null;
     }
 
+    const maxFileSize = 500 * 1024 * 1024; // 500 MB
+    final fileSizeOnDisk = file.lengthSync();
+    if (fileSizeOnDisk > maxFileSize) {
+      _log.warn('sendMediaMessage: file too large (${fileSizeOnDisk ~/ (1024 * 1024)} MB), max ${maxFileSize ~/ (1024 * 1024)} MB');
+      return null;
+    }
+
     final audioBytes = await file.readAsBytes();
-    final filename = filePath.split('/').last;
+    final filename = p.basename(filePath);
     final mimeType = _guessMimeType(filename);
     final fileSize = audioBytes.length;
     final isVoice = _isVoiceFromMime(mimeType);
@@ -1690,15 +1703,30 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
     var persistentPath = '${mediaDir.path}/$filename';
     if (filePath != persistentPath) {
-      // Avoid overwriting a different file with the same name
       final existing = File(persistentPath);
-      if (existing.existsSync() && existing.lengthSync() != fileSize) {
-        final dot = filename.lastIndexOf('.');
-        final base = dot > 0 ? filename.substring(0, dot) : filename;
-        final ext = dot > 0 ? filename.substring(dot) : '';
-        persistentPath = '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
+      if (existing.existsSync()) {
+        if (existing.lengthSync() == fileSize) {
+          final existingHash = SodiumFFI().sha256(existing.readAsBytesSync());
+          final newHash = SodiumFFI().sha256(audioBytes);
+          if (constantTimeEquals(existingHash, newHash)) {
+            // Identical content — skip copy
+          } else {
+            final dot = filename.lastIndexOf('.');
+            final base = dot > 0 ? filename.substring(0, dot) : filename;
+            final ext = dot > 0 ? filename.substring(dot) : '';
+            persistentPath = '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
+            file.copySync(persistentPath);
+          }
+        } else {
+          final dot = filename.lastIndexOf('.');
+          final base = dot > 0 ? filename.substring(0, dot) : filename;
+          final ext = dot > 0 ? filename.substring(dot) : '';
+          persistentPath = '${mediaDir.path}/${base}_${DateTime.now().millisecondsSinceEpoch}$ext';
+          file.copySync(persistentPath);
+        }
+      } else {
+        file.copySync(persistentPath);
       }
-      file.copySync(persistentPath);
     }
 
     // ── Show message in UI IMMEDIATELY (optimistic update) ──
@@ -4753,12 +4781,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final group = _groups[conversationId];
     final channel = _channels[conversationId];
     final conv = conversations.putIfAbsent(conversationId, () {
+      final defaults = notificationSound.settings;
       if (isChannel && channel != null) {
         return Conversation(
           id: conversationId,
           displayName: channel.name,
           profilePictureBase64: channel.pictureBase64,
           isChannel: true,
+          notificationsEnabled: defaults.defaultChannelNotify,
         );
       }
       if (isGroup && group != null) {
@@ -4767,12 +4797,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           displayName: group.name,
           profilePictureBase64: group.pictureBase64,
           isGroup: true,
+          notificationsEnabled: defaults.defaultGroupNotify,
         );
       }
       return Conversation(
         id: conversationId,
         displayName: contact?.displayName ?? conversationId.substring(0, 8),
         profilePictureBase64: contact?.profilePictureBase64,
+        notificationsEnabled: defaults.defaultDirectNotify,
       );
     });
     // Keep profile picture in sync
@@ -4910,6 +4942,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Badge updates run in a different code path and are NOT gated by this.
   bool _shouldSuppressNotification(String conversationId, int messageTimestampMs) {
     if (_isAppResumed && _activeConversationId == conversationId) return true;
+    final conv = conversations[conversationId];
+    if (conv != null) {
+      final enabled = conv.notificationsEnabled ??
+          notificationSound.settings.defaultForType(
+              isGroup: conv.isGroup, isChannel: conv.isChannel);
+      if (!enabled) return true;
+    }
     final ageMs = DateTime.now().millisecondsSinceEpoch - messageTimestampMs;
     if (ageMs > _notificationStaleThresholdMs) return true;
     final last = _lastNotifiedAt[conversationId];
@@ -4926,6 +4965,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final conv = conversations[conversationId];
     if (conv == null) return;
     conv.isFavorite = !conv.isFavorite;
+    _saveConversations();
+    onStateChanged?.call();
+  }
+
+  @override
+  void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName}) {
+    final conv = conversations[conversationId];
+    if (conv == null) return;
+    conv.notificationsEnabled = enabled;
+    conv.notificationSoundName = soundName;
     _saveConversations();
     onStateChanged?.call();
   }
@@ -5067,6 +5116,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       id: groupIdHex,
       displayName: name,
       isGroup: true,
+      notificationsEnabled: notificationSound.settings.defaultGroupNotify,
     );
     _saveConversations();
 
@@ -5636,6 +5686,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       id: channelIdHex,
       displayName: name,
       isChannel: true,
+      notificationsEnabled: notificationSound.settings.defaultChannelNotify,
     );
     _saveConversations();
 
@@ -6383,6 +6434,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     displayName = newName;
     _broadcastProfileUpdate();
+    _publishIdentityRegistryIfPossible();
     onStateChanged?.call();
     _log.info('Display name updated to "$newName", broadcast sent');
   }
@@ -7117,6 +7169,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           profilePictureBase64: convData['profilePicture'] as String?,
           isFavorite: convData['isFavorite'] as bool? ?? false,
           unreadCount: convData['unreadCount'] as int? ?? 0,
+          notificationsEnabled: convData['notificationsEnabled'] as bool?,
+          notificationSoundName: convData['notificationSoundName'] as String?,
         );
       }
       _conversationsLoaded = true;
@@ -7460,6 +7514,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           id: idHex,
           displayName: name,
           isChannel: true,
+          notificationsEnabled: notificationSound.settings.defaultChannelNotify,
         );
         changed = true;
       }
@@ -10046,6 +10101,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           profilePictureBase64: oldConv.profilePictureBase64,
           config: oldConv.config,
           isFavorite: oldConv.isFavorite,
+          notificationsEnabled: oldConv.notificationsEnabled,
+          notificationSoundName: oldConv.notificationSoundName,
         );
         _saveConversations();
       }
@@ -10585,7 +10642,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _saveConversationsPending = false;
       _saveConversationsNow();
     }
-    _calls.dispose();
+    await _calls.dispose();
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = null;
     _crRetryTimer?.cancel();
@@ -10608,6 +10665,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _sysChanSaveDebounce = null;
     _updateCheckTimer?.cancel();
     _updateCheckTimer = null;
+    _registryRepublishTimer?.cancel();
+    _registryRepublishTimer = null;
     _delegationRenewalTimer?.cancel();
     _delegationRenewalTimer = null;
     _natWizardTrigger?.stop();
@@ -10817,16 +10876,52 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
     if (seed == null) return null;
 
+    // §19.6.5: derive invite_nonce from the ContactSeed (SHA-256, first 16
+    // bytes as hex). Deterministic — same seed always yields same nonce.
+    final seedUri = seed.toUri();
+    final seedHash = SodiumFFI().sha256(
+        Uint8List.fromList(utf8.encode(seedUri)));
+    final inviteNonce = bytesToHex(
+        Uint8List.sublistView(seedHash, 0, 16));
+
     final link = InviteLink(
       nodeIp: pip,
       nodePort: pport,
-      contactSeed: seed.toUri(),
+      contactSeed: seedUri,
       binaryHashes: hashes,
       binarySignatures: sigs,
       version: manifest.version,
       fallbackUrl: manifest.downloadUrl,
+      inviteNonce: inviteNonce,
     );
+
+    // §19.6.5: fire-and-forget invite-scoped Nostr publish so Bob can
+    // discover binary sources even after Alice's IP changes (72h TTL).
+    _publishInviteScopedRecords(inviteNonce);
+
     return link.toUrl();
+  }
+
+  void _publishInviteScopedRecords(String inviteNonce) {
+    final ils = _inviteLinkService;
+    final brm = _binaryRendezvousManager;
+    if (ils == null || brm == null) return;
+    final records = _buildBinaryAvailabilityRecords();
+    if (records.isEmpty) return;
+    final providers = brm.providers;
+    if (providers.isEmpty) return;
+
+    for (final record in records) {
+      ils.publishInviteScopedRecord(
+        networkSecret: NetworkSecret.secret,
+        inviteNonce: inviteNonce,
+        record: record,
+        providers: providers,
+        deviceId: identity.deviceNodeId,
+      ).catchError((e) {
+        _log.debug('Invite-scoped Nostr publish failed: $e');
+      });
+    }
   }
 
   /// Builds the current [BinaryAvailabilityRecord] for this device (§19.6.5)
@@ -11270,53 +11365,106 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Poll the DHT for identity registry fragments after seed recovery.
   ///
   /// [masterSeed] is the recovered master seed (from 24-word phrase).
-  /// [onRecovered] is called with the list of identity entries if recovery succeeds.
-  void pollRegistryFromDht(
-    Uint8List masterSeed, {
-    void Function(List<Map<String, dynamic>> identities, int nextIndex)? onRecovered,
-  }) {
+  /// Returns the recovered identity list, or null if no registry found.
+  /// Retries up to 3 times with increasing delay (10s/20s/30s).
+  Future<({List<Map<String, dynamic>> identities, int nextIndex})?> pollRegistryFromDht(
+    Uint8List masterSeed,
+  ) async {
     final registry = IdentityDhtRegistry(masterSeed: masterSeed, profileDir: profileDir);
     final registryMailboxId = registry.registryDhtKey;
 
     _log.info('Registry recovery: polling DHT for registry fragments (key: ${registry.registryDhtKeyHex.substring(0, 16)}...)');
 
-    // Use the same FRAGMENT_RETRIEVE mechanism as mailbox polling
-    final peers = node.routingTable.allPeers;
-    for (final peer in peers) {
-      _requestFragments(peer, registryMailboxId);
-    }
+    const delays = [Duration(seconds: 10), Duration(seconds: 20), Duration(seconds: 30)];
+    for (var attempt = 0; attempt < delays.length; attempt++) {
+      final peers = node.routingTable.allPeers;
+      if (peers.isEmpty) {
+        _log.debug('Registry recovery attempt ${attempt + 1}: no peers yet');
+      } else {
+        for (final peer in peers) {
+          _requestFragments(peer, registryMailboxId);
+        }
+      }
 
-    // Collect fragments over time — check local mailbox store after delay
-    // (fragments arrive asynchronously from responding peers)
-    Timer(const Duration(seconds: 10), () {
+      await Future<void>.delayed(delays[attempt]);
+
       final fragments = mailboxStore.retrieveFragments(registryMailboxId);
       if (fragments.isEmpty) {
-        _log.info('Registry recovery: no fragments found in DHT');
-        return;
+        _log.info('Registry recovery attempt ${attempt + 1}/${delays.length}: no fragments');
+        continue;
       }
 
-      // Build fragment map (index -> data)
       final fragmentMap = <int, Uint8List>{};
-      int maxSize = 0;
+      int originalSize = 0;
       for (final frag in fragments) {
         fragmentMap[frag.fragmentIndex] = Uint8List.fromList(frag.data);
-        if (frag.data.length > maxSize) maxSize = frag.data.length;
+        if (originalSize == 0 && frag.originalSize > 0) {
+          originalSize = frag.originalSize;
+        }
       }
 
-      _log.info('Registry recovery: collected ${fragmentMap.length} fragments');
+      if (originalSize == 0) {
+        _log.warn('Registry recovery attempt ${attempt + 1}: all fragments have originalSize=0, skipping');
+        continue;
+      }
 
-      // Try reassembly with estimated original size
-      // The original size is not stored explicitly — try with fragment count * fragment size
-      final estimatedSize = maxSize * ReedSolomon.defaultK;
-      final payload = registry.recoverFromFragments(fragmentMap, estimatedSize);
-      if (payload == null) return;
+      _log.info('Registry recovery attempt ${attempt + 1}: collected ${fragmentMap.length} fragments');
+
+      final payload = registry.recoverFromFragments(fragmentMap, originalSize);
+      if (payload == null) continue;
 
       final identities = IdentityDhtRegistry.extractIdentities(payload);
       final nextIndex = IdentityDhtRegistry.extractNextIndex(payload);
 
       _log.info('Registry recovery: found ${identities.length} identities, next_index=$nextIndex');
-      onRecovered?.call(identities, nextIndex);
-    });
+      return (identities: identities, nextIndex: nextIndex);
+    }
+
+    _log.info('Registry recovery: no registry found after ${delays.length} attempts');
+    return null;
+  }
+
+  /// §6.4.3: Recover multi-identity list from DHT after seed-phrase restore.
+  /// Polls DHT for the erasure-coded registry, then creates identities for
+  /// each active HD index that doesn't already exist locally.
+  /// Returns the list of newly created identities (empty if none found or
+  /// all already existed). The caller (daemon or in-process) is responsible
+  /// for starting services for the returned identities.
+  Future<List<Identity>> recoverIdentitiesFromRegistry() async {
+    final masterSeed = identity.masterSeed;
+    if (masterSeed == null) {
+      _log.debug('Registry recovery skipped: no master seed');
+      return [];
+    }
+
+    final result = await pollRegistryFromDht(masterSeed);
+    if (result == null) return [];
+
+    final mgr = IdentityManager();
+    final existing = mgr.loadIdentities();
+    final existingIndices = existing
+        .where((i) => i.hdIndex != null)
+        .map((i) => i.hdIndex!)
+        .toSet();
+
+    final created = <Identity>[];
+    for (final entry in result.identities) {
+      final idx = entry['index'] as int;
+      if (existingIndices.contains(idx)) continue;
+      final name = entry['name'] as String? ?? 'Identity ${idx + 1}';
+      try {
+        final id = await mgr.createIdentityAtIndex(idx, name);
+        created.add(id);
+        _log.info('Registry recovery: created identity "$name" at hdIndex=$idx');
+      } catch (e) {
+        _log.warn('Registry recovery: failed to create identity at hdIndex=$idx: $e');
+      }
+    }
+
+    if (created.isNotEmpty) {
+      _log.info('Registry recovery: ${created.length} identities restored from DHT');
+    }
+    return created;
   }
 
   /// Store the current identity registry in the DHT with ACK-verified placement.
@@ -11384,6 +11532,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.warn('Registry DHT store FAILED: ${result.confirmedCount}/${result.totalFragments} indices confirmed');
     }
     return result.success;
+  }
+
+  /// Fire-and-forget: publish identity registry to DHT after rename.
+  void _publishIdentityRegistryIfPossible() {
+    final masterSeed = identity.masterSeed;
+    if (masterSeed == null) return;
+    final mgr = IdentityManager();
+    final identities = mgr.loadIdentities();
+    final entries = identities
+        .map((i) => (hdIndex: i.hdIndex, name: i.displayName))
+        .toList();
+    final nextIndex = mgr.nextHdIndex();
+    unawaited(storeRegistryInDht(masterSeed, entries, nextIndex).catchError((e) {
+      _log.debug('Identity registry DHT publish error: $e');
+      return false;
+    }));
   }
 
   /// Single-source-of-truth log message for KEM version rejections (Sec H-5
@@ -13180,7 +13344,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           isGroup: isGroup, isChannel: isChannel);
       if (isNew && !_shouldSuppressNotification(
           conversationId, msg.timestamp.millisecondsSinceEpoch)) {
-        notificationSound.playMessageSound();
+        notificationSound.playMessageSound(
+            soundName: conversations[conversationId]?.notificationSoundName);
         notificationSound.vibrate(VibrationType.message);
         final senderName =
             _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
@@ -13275,7 +13440,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final isNew = _addMessageToConversation(conversationId, msg, isGroup: isGroup);
       if (isNew && !_shouldSuppressNotification(
           conversationId, msg.timestamp.millisecondsSinceEpoch)) {
-        notificationSound.playMessageSound();
+        notificationSound.playMessageSound(
+            soundName: conversations[conversationId]?.notificationSoundName);
         notificationSound.vibrate(VibrationType.message);
         final senderName =
             _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);

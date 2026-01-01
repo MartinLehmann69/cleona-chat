@@ -57,7 +57,7 @@ class IdentityDhtHandler {
   void Function(Uint8List userId, int oldCount, int newCount)?
       _onDeviceSetShrinkWithoutProof;
 
-  void set onDeviceSetShrinkWithoutProof(
+  set onDeviceSetShrinkWithoutProof(
       void Function(Uint8List userId, int oldCount, int newCount)? cb) {
     _onDeviceSetShrinkWithoutProof = cb;
   }

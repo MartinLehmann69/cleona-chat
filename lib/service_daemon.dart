@@ -755,6 +755,7 @@ class _MultiServiceDaemon {
     );
     ipcServer.onCreateIdentity = _createIdentityAtRuntime;
     ipcServer.onDeleteIdentity = _deleteIdentityAtRuntime;
+    ipcServer.onRecoveredIdentity = _startRecoveredIdentity;
     ipcServer.onCalDAVServerGetState = getCalDAVServerState;
     ipcServer.onCalDAVServerSetEnabled = setCalDAVServerEnabled;
     ipcServer.onCalDAVServerRegenerateToken = regenerateCalDAVServerToken;
@@ -981,17 +982,46 @@ class _MultiServiceDaemon {
     mgr.saveIdentities(identities);
 
     await addIdentity(ctx);
+    _publishIdentityRegistry();
     return ctx.userIdHex;
+  }
+
+  /// IPC callback: start a recovered identity (from DHT registry).
+  /// The Identity record already exists on disk (created by
+  /// recoverIdentitiesFromRegistry), just needs an IdentityContext + service.
+  Future<void> _startRecoveredIdentity(Identity identity) async {
+    if (_node == null || !_running) return;
+    final mgr = IdentityManager(baseDir: config.baseDir);
+    final ctx = await IdentityContext.createFromIdentity(
+      identity: identity,
+      baseDir: config.baseDir,
+      masterSeed: mgr.loadMasterSeed(),
+    );
+    final identities = mgr.loadIdentities();
+    for (final id in identities) {
+      if (id.id == identity.id) {
+        id.nodeIdHex = ctx.userIdHex;
+        break;
+      }
+    }
+    mgr.saveIdentities(identities);
+    await addIdentity(ctx);
+    log.info('Recovered identity started: ${identity.displayName} (hdIndex=${identity.hdIndex})');
   }
 
   /// IPC callback: delete an identity at runtime.
   Future<bool> _deleteIdentityAtRuntime(String nodeIdHex) async {
     if (_services.length <= 1) return false;
 
-    // Send IDENTITY_DELETED notification to all contacts BEFORE removing
+    // Send IDENTITY_DELETED to all contacts + hang up active calls BEFORE removing.
+    // Bounded timeout: contacts may be offline → sequential sendToUser can block.
     final service = _services[nodeIdHex];
     if (service != null) {
-      service.broadcastIdentityDeleted();
+      try {
+        await service.broadcastIdentityDeleted().timeout(const Duration(seconds: 15));
+      } catch (_) {
+        log.warn('broadcastIdentityDeleted timed out for $nodeIdHex, proceeding with deletion');
+      }
     }
 
     // Look up profileDir from context before removing (for fallback match)
@@ -1012,7 +1042,29 @@ class _MultiServiceDaemon {
       mgr.deleteIdentity(id.id);
     }
 
+    _publishIdentityRegistry();
     return true;
+  }
+
+  /// Publish the current identity list to DHT (fire-and-forget).
+  /// Uses the first available service — the registry is keyed by masterSeed,
+  /// not per-identity.
+  void _publishIdentityRegistry() {
+    final service = _services.values.firstOrNull;
+    if (service == null) return;
+    final mgr = IdentityManager(baseDir: config.baseDir);
+    final masterSeed = mgr.loadMasterSeed();
+    if (masterSeed == null) return;
+    final identities = mgr.loadIdentities();
+    final entries = identities
+        .map((i) => (hdIndex: i.hdIndex, name: i.displayName))
+        .toList();
+    final nextIndex = mgr.nextHdIndex();
+    service.storeRegistryInDht(masterSeed, entries, nextIndex).then((ok) {
+      log.info('Identity registry DHT publish: ${ok ? 'success' : 'failed'}');
+    }).catchError((e) {
+      log.debug('Identity registry DHT publish error: $e');
+    });
   }
 
   Future<void> stopAll() async {
@@ -1461,7 +1513,7 @@ class _MultiServiceDaemon {
   void _launchGui() {
     if (_ipcServer != null && _ipcServer!.hasClients) {
       final triggerFile = File('${config.baseDir}/gui.show');
-      triggerFile.writeAsStringSync('${pid}');
+      triggerFile.writeAsStringSync('$pid');
       log.info('Tray: GUI already connected — wrote gui.show trigger');
       return;
     }

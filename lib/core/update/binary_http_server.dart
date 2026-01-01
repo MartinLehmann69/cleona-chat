@@ -15,15 +15,17 @@ import 'package:cleona/core/network/clogger.dart';
 class BinaryHttpServer {
   static const _requestTimeout = Duration(seconds: 10);
   static const _maxRequestLineBytes = 8192;
+  static const _maxActiveConnections = 3;
 
   final CLogger _log;
   bool _enabled = true;
+  int _activeConnections = 0;
 
   /// Static HTML+JS served at GET /cleona.
   Uint8List? bootstrapWebApp;
 
-  /// Full binary for `GET /cleona/binary/<platform>`.
-  Uint8List? Function(String platform)? binaryProvider;
+  /// File path for `GET /cleona/binary/<platform>` (streamed in 64KB chunks).
+  String? Function(String platform)? binaryProvider;
 
   /// Single fragment for `GET /cleona/fragment/<platform>/<index>`.
   Uint8List? Function(String platform, int index)? fragmentProvider;
@@ -146,46 +148,56 @@ class BinaryHttpServer {
   }
 
   void _handleRequest(Socket client, Uint8List bytes, int headerEnd) {
-    final headerBlock = ascii.decode(bytes.sublist(0, headerEnd), allowInvalid: true);
-    final lines = headerBlock.split('\r\n');
-    final requestLine = lines.isNotEmpty ? lines.first : '';
-    final parts = requestLine.split(' ');
-    if (parts.length < 2) {
-      _sendResponse(client, 400);
+    if (_activeConnections >= _maxActiveConnections) {
+      _sendResponse(client, 503);
       return;
     }
+    _activeConnections++;
 
-    final method = parts[0].toUpperCase();
-    if (method != 'GET' && method != 'HEAD') {
-      _sendResponse(client, 405);
-      return;
-    }
-
-    final rawPath = parts[1];
-    final path = rawPath.split('?').first;
-    final segments = path.split('/').where((s) => s.isNotEmpty).toList();
-
-    if (segments.length == 1 && segments[0] == 'cleona') {
-      _serveBootstrapWebApp(client, path, method);
-      return;
-    }
-    if (segments.length == 3 && segments[0] == 'cleona' && segments[1] == 'binary') {
-      _serveBinary(client, path, method, segments[2]);
-      return;
-    }
-    if (segments.length == 4 && segments[0] == 'cleona' && segments[1] == 'fragment') {
-      final index = int.tryParse(segments[3]);
-      if (index == null) {
-        _sendResponse(client, 404);
-        _logRequest(method, path, 404, 0);
+    try {
+      final headerBlock = ascii.decode(bytes.sublist(0, headerEnd), allowInvalid: true);
+      final lines = headerBlock.split('\r\n');
+      final requestLine = lines.isNotEmpty ? lines.first : '';
+      final parts = requestLine.split(' ');
+      if (parts.length < 2) {
+        _sendResponse(client, 400);
         return;
       }
-      _serveFragment(client, path, method, segments[2], index);
-      return;
-    }
 
-    _sendResponse(client, 404);
-    _logRequest(method, path, 404, 0);
+      final method = parts[0].toUpperCase();
+      if (method != 'GET' && method != 'HEAD') {
+        _sendResponse(client, 405);
+        return;
+      }
+
+      final rawPath = parts[1];
+      final path = rawPath.split('?').first;
+      final segments = path.split('/').where((s) => s.isNotEmpty).toList();
+
+      if (segments.length == 1 && segments[0] == 'cleona') {
+        _serveBootstrapWebApp(client, path, method);
+        return;
+      }
+      if (segments.length == 3 && segments[0] == 'cleona' && segments[1] == 'binary') {
+        _serveBinary(client, path, method, segments[2]);
+        return;
+      }
+      if (segments.length == 4 && segments[0] == 'cleona' && segments[1] == 'fragment') {
+        final index = int.tryParse(segments[3]);
+        if (index == null) {
+          _sendResponse(client, 404);
+          _logRequest(method, path, 404, 0);
+          return;
+        }
+        _serveFragment(client, path, method, segments[2], index);
+        return;
+      }
+
+      _sendResponse(client, 404);
+      _logRequest(method, path, 404, 0);
+    } finally {
+      _activeConnections--;
+    }
   }
 
   void _serveBootstrapWebApp(Socket client, String path, String method) {
@@ -203,14 +215,14 @@ class BinaryHttpServer {
   }
 
   void _serveBinary(Socket client, String path, String method, String platform) {
-    Uint8List? body;
+    String? filePath;
     try {
-      body = binaryProvider?.call(platform);
+      filePath = binaryProvider?.call(platform);
     } catch (e) {
       _log.debug('binaryProvider threw for platform=$platform: $e');
-      body = null;
+      filePath = null;
     }
-    if (body == null) {
+    if (filePath == null) {
       _sendResponse(client, 404);
       _logRequest(method, path, 404, 0);
       return;
@@ -224,14 +236,67 @@ class BinaryHttpServer {
     final mime = platform == 'android'
         ? 'application/vnd.android.package-archive'
         : 'application/octet-stream';
-    _sendResponse(client, 200,
-        contentType: mime,
-        body: method == 'HEAD' ? null : body,
-        bodyLength: body.length,
-        extraHeaders: {
-          'Content-Disposition': 'attachment; filename="cleona$ext"',
+    try {
+      final file = File(filePath);
+      final fileLength = file.lengthSync();
+      if (method == 'HEAD') {
+        _sendResponse(client, 200,
+            contentType: mime,
+            bodyLength: fileLength,
+            extraHeaders: {
+              'Content-Disposition': 'attachment; filename="cleona$ext"',
+            });
+        _logRequest(method, path, 200, fileLength);
+        return;
+      }
+      _streamFile(client, file, fileLength, mime, 'cleona$ext');
+      _logRequest(method, path, 200, fileLength);
+    } catch (e) {
+      _log.debug('_serveBinary file streaming failed: $e');
+      _sendResponse(client, 404);
+      _logRequest(method, path, 404, 0);
+    }
+  }
+
+  void _streamFile(Socket client, File file, int fileLength, String mime,
+      String filename) {
+    final reason = _reasonPhrases[200] ?? 'OK';
+    final header = StringBuffer()
+      ..write('HTTP/1.1 200 $reason\r\n')
+      ..write('Content-Type: $mime\r\n')
+      ..write('Content-Length: $fileLength\r\n')
+      ..write('Content-Disposition: attachment; filename="$filename"\r\n')
+      ..write('Access-Control-Allow-Origin: *\r\n')
+      ..write('Connection: close\r\n')
+      ..write('\r\n');
+
+    try {
+      client.add(ascii.encode(header.toString()));
+      const chunkSize = 65536;
+      final raf = file.openSync();
+      try {
+        var remaining = fileLength;
+        while (remaining > 0) {
+          final toRead = remaining < chunkSize ? remaining : chunkSize;
+          final chunk = raf.readSync(toRead);
+          if (chunk.isEmpty) break;
+          client.add(chunk);
+          remaining -= chunk.length;
+        }
+      } finally {
+        raf.closeSync();
+      }
+      client.flush().then((_) => client.close()).catchError((_) {}).whenComplete(() {
+        final destroyDelay = Duration(
+            seconds: fileLength > 0 ? (fileLength ~/ 500000).clamp(30, 600) : 30);
+        Future.delayed(destroyDelay, () {
+          try { client.destroy(); } catch (_) {}
         });
-    _logRequest(method, path, 200, body.length);
+      });
+    } catch (e) {
+      _log.debug('_streamFile write failed: $e');
+      try { client.destroy(); } catch (_) {}
+    }
   }
 
   void _serveFragment(
@@ -264,6 +329,7 @@ class BinaryHttpServer {
     400: 'Bad Request',
     404: 'Not Found',
     405: 'Method Not Allowed',
+    503: 'Service Unavailable',
   };
 
   /// Builds and writes a raw HTTP/1.1 response, then closes the connection.

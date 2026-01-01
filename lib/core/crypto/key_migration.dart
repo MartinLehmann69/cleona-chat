@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/file_encryption.dart';
@@ -145,7 +146,10 @@ class KeyMigration {
     }
   }
 
+  static bool _seedPhraseStored = false;
+
   static void _performMigration(String baseDir, File dbKeyFile) {
+    _seedPhraseStored = false;
     final keyring = KeyringService.instance;
     final oldFileEnc = FileEncryption(baseDir: baseDir); // uses db.key
 
@@ -153,12 +157,20 @@ class KeyMigration {
 
     final seedJson = oldFileEnc.readJsonFile('$baseDir/master_seed.json');
     if (seedJson == null) {
-      _log.warn('No master_seed.json found — skipping migration');
+      if (_anyIdentityHasHdIndex(baseDir)) {
+        throw StateError('master_seed.json missing but HD-derived identities '
+            'exist — seed file corrupted, cannot migrate');
+      }
+      _log.warn('No master_seed.json found — skipping migration (legacy pre-HD profile)');
       return;
     }
     final seedHex = seedJson['seed'] as String?;
     if (seedHex == null) {
-      _log.warn('master_seed.json has no seed field — skipping');
+      if (_anyIdentityHasHdIndex(baseDir)) {
+        throw StateError('master_seed.json has no seed field but HD-derived '
+            'identities exist — seed file corrupted, cannot migrate');
+      }
+      _log.warn('master_seed.json has no seed field — skipping (legacy pre-HD profile)');
       return;
     }
     final masterSeed = _hexToBytes(seedHex);
@@ -174,8 +186,13 @@ class KeyMigration {
       final words = phraseJson['words'] as List<dynamic>?;
       if (words != null) {
         final phraseBytes = Uint8List.fromList(words.join(' ').codeUnits);
-        keyring.store('seed_phrase', phraseBytes);
-        _log.info('Seed phrase stored in keyring');
+        _seedPhraseStored = keyring.store('seed_phrase', phraseBytes);
+        if (!_seedPhraseStored) {
+          _log.warn('Keyring store failed for seed_phrase — '
+              'keeping legacy file as fallback');
+        } else {
+          _log.info('Seed phrase stored in keyring');
+        }
       }
     }
 
@@ -231,9 +248,15 @@ class KeyMigration {
 
     // ── 4. Remove old encryption artefacts ─────────────────────────────
 
-    // master_seed and seed_phrase are now in the keyring — remove .enc files
+    // master_seed is in keyring — remove .enc file
     _deleteEncFile('$baseDir/master_seed.json');
-    _deleteEncFile('$baseDir/seed_phrase.json');
+    // seed_phrase: only delete if keyring store succeeded
+    if (_seedPhraseStored) {
+      _deleteEncFile('$baseDir/seed_phrase.json');
+    } else {
+      _log.info('Keeping seed_phrase.json.enc — keyring store was '
+          'skipped or failed');
+    }
 
     // Rename db.key for rollback safety (not deleted)
     final backupPath = '$baseDir/.db.key.migrated';
@@ -253,6 +276,26 @@ class KeyMigration {
     for (final suffix in ['.enc', '.enc.tmp', '.enc.old']) {
       final f = File('$basePath$suffix');
       if (f.existsSync()) f.deleteSync();
+    }
+  }
+
+  /// Returns true if any identity in identities.json has hdIndex > 0,
+  /// indicating a seed must have existed at some point.
+  static bool _anyIdentityHasHdIndex(String baseDir) {
+    try {
+      final identitiesFile = File('$baseDir/identities.json');
+      if (!identitiesFile.existsSync()) return false;
+      final content = identitiesFile.readAsStringSync();
+      final json = jsonDecode(content) as Map<String, dynamic>;
+      final list = json['identities'] as List<dynamic>? ?? [];
+      for (final entry in list) {
+        final map = entry as Map<String, dynamic>;
+        final hdIndex = map['hdIndex'] as int?;
+        if (hdIndex != null && hdIndex > 0) return true;
+      }
+      return false;
+    } catch (_) {
+      return false;
     }
   }
 

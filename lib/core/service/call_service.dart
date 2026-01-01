@@ -173,10 +173,13 @@ class CallService {
     };
   }
 
-  void dispose() {
+  Future<void> dispose() async {
     _stopAudioMixer();
     _stopGroupVideo();
-    groupCallManager.leaveGroupCall();
+    if (callManager.currentCall != null) {
+      await callManager.hangup();
+    }
+    await groupCallManager.leaveGroupCall();
   }
 
   // ── 1:1 Calls ──────────────────────────────────────────────────────

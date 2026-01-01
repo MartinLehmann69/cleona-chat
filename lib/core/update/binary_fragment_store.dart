@@ -58,10 +58,14 @@ class BinaryFragmentStore {
     try {
       final dir = Directory(_versionDir(platform, version));
       if (!await dir.exists()) await dir.create(recursive: true);
-      await File(_fragmentPath(platform, version, index)).writeAsBytes(data);
+      final target = _fragmentPath(platform, version, index);
+      final tmpFile = File('$target.tmp');
+      await tmpFile.writeAsBytes(data);
+      await tmpFile.rename(target);
       await _touchMeta(platform, version);
     } catch (e) {
       _log.error('storeFragment $platform/$version#$index failed: $e');
+      rethrow;
     }
   }
 
@@ -82,11 +86,15 @@ class BinaryFragmentStore {
     try {
       final dir = Directory(_versionDir(platform, version));
       if (!await dir.exists()) await dir.create(recursive: true);
-      await File(completePath(platform, version)).writeAsBytes(data);
+      final target = completePath(platform, version);
+      final tmpFile = File('$target.tmp');
+      await tmpFile.writeAsBytes(data);
+      await tmpFile.rename(target);
       final hash = bytesToHex(SodiumFFI().sha256(data));
       await _touchMeta(platform, version, binaryHash: hash);
     } catch (e) {
       _log.error('storeComplete $platform/$version failed: $e');
+      rethrow;
     }
   }
 
@@ -121,6 +129,19 @@ class BinaryFragmentStore {
       return f.readAsBytesSync();
     } catch (e) {
       _log.error('getCompleteSync $platform/$version failed: $e');
+      return null;
+    }
+  }
+
+  /// Returns the file path to `complete.bin` for a given platform/version,
+  /// or null if it does not exist. Used by the HTTP server for streaming.
+  String? getCompletePath(String platform, String version) {
+    try {
+      final path = completePath(platform, version);
+      if (File(path).existsSync()) return path;
+      return null;
+    } catch (e) {
+      _log.error('getCompletePath $platform/$version failed: $e');
       return null;
     }
   }
@@ -184,6 +205,21 @@ class BinaryFragmentStore {
       _log.error('storedVersionsSync $platform failed: $e');
     }
     return versions;
+  }
+
+  /// Returns the `binaryHash` from meta.json for a given platform/version,
+  /// or null if unavailable.
+  Future<String?> getBinaryHash(String platform, String version) async {
+    try {
+      final metaFile = File(_metaPath(platform, version));
+      if (!await metaFile.exists()) return null;
+      final meta = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+      final hash = meta['binaryHash'] as String?;
+      return (hash != null && hash.isNotEmpty) ? hash : null;
+    } catch (e) {
+      _log.error('getBinaryHash $platform/$version failed: $e');
+      return null;
+    }
   }
 
   Future<List<int>> availableFragments(String platform, String version) async {

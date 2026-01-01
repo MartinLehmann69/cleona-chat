@@ -163,6 +163,7 @@ abstract class ICleonaService {
   Future<UiMessage?> resendExpiredMessage(String conversationId, String messageId);
   Future<void> sendReaction({required String conversationId, required String messageId, required String emoji, required bool remove});
   Future<bool> updateChatConfig(String conversationId, ChatConfig config);
+  void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName});
   Future<bool> acceptConfigProposal(String conversationId);
   Future<bool> rejectConfigProposal(String conversationId);
   Future<UiMessage?> forwardMessage(String sourceConversationId, String messageId, String targetConversationId);

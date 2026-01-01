@@ -496,6 +496,8 @@ class CleonaNode {
   // Mass route-down detection: infer network change when ≥3 routes fail within 30s.
   final List<DateTime> _routeDownTimestamps = [];
   bool _networkChangeInProgress = false;
+  bool _networkChangePending = false;
+  bool _networkChangePendingForce = false;
 
   /// F1 (S123 UDP-dead RCA): when the LAST `onUdpSocketDead` edge finished
   /// its `onNetworkChanged(force:true)` rebind. If a SECOND dead-edge
@@ -906,12 +908,11 @@ class CleonaNode {
       _routeDownTimestamps.add(DateTime.now());
       _routeDownTimestamps.removeWhere((t) =>
           DateTime.now().difference(t).inSeconds > 30);
-      if (_routeDownTimestamps.length >= 3 && !_networkChangeInProgress) {
+      if (_routeDownTimestamps.length >= 3) {
         _log.info('Mass route-down detected (${_routeDownTimestamps.length} in 30s) '
             '— checking for network change');
         _routeDownTimestamps.clear();
-        _networkChangeInProgress = true;
-        onNetworkChanged().whenComplete(() => _networkChangeInProgress = false);
+        _scheduleNetworkChange();
       }
 
       // Per-device routing table bookkeeping.
@@ -1109,7 +1110,6 @@ class CleonaNode {
           port: port,
         );
     udpKeepalive.onAllPeersFailed = () {
-      if (_networkChangeInProgress) return;
       // §4.6 IPv6-First / F2 (S123 UDP-dead RCA): only suppress the
       // network-change inference when our OWN sends are recently confirmed
       // as getting through (send-path liveness). `_confirmedPeers` alone is
@@ -1125,9 +1125,7 @@ class CleonaNode {
         return;
       }
       _log.info('UdpKeepalive: all peers failed — inferring network change');
-      _networkChangeInProgress = true;
-      onNetworkChanged(force: true)
-          .whenComplete(() => _networkChangeInProgress = false);
+      _scheduleNetworkChange(force: true);
     };
 
     // Get all local IPs BEFORE transport starts — isReachableFromCurrentNetwork
@@ -1175,13 +1173,11 @@ class CleonaNode {
             'rebind ineffective, escalating to mobile fallback');
         _tryMobileFallback();
       }
-      if (_networkChangeInProgress) return;
       _log.warn('UDP socket dead — triggering network change');
-      _networkChangeInProgress = true;
-      onNetworkChanged(force: true).whenComplete(() {
-        _networkChangeInProgress = false;
-        _deadEdgeEscalation.noteRebindCompleted();
-      });
+      _scheduleNetworkChange(
+        force: true,
+        onComplete: () => _deadEdgeEscalation.noteRebindCompleted(),
+      );
     };
     transport.onEpochExpired = (minVersion) {
       _log.warn('EPOCH_EXPIRED: network requires secret version $minVersion — this build is outdated');
@@ -5079,6 +5075,25 @@ class CleonaNode {
       innerPayload: summary.writeToBuffer(),
       recipientDeviceId: peer.nodeId,
     );
+  }
+
+  void _scheduleNetworkChange({bool force = false, void Function()? onComplete}) {
+    if (_networkChangeInProgress) {
+      _networkChangePending = true;
+      if (force) _networkChangePendingForce = true;
+      return;
+    }
+    _networkChangeInProgress = true;
+    onNetworkChanged(force: force).whenComplete(() {
+      _networkChangeInProgress = false;
+      onComplete?.call();
+      if (_networkChangePending) {
+        _networkChangePending = false;
+        final pendingForce = _networkChangePendingForce;
+        _networkChangePendingForce = false;
+        _scheduleNetworkChange(force: pendingForce);
+      }
+    });
   }
 
   // ── Network Change ─────────────────────────────────────────────────

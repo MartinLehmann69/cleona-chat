@@ -99,11 +99,6 @@ class BinaryUpdateManager {
         _setState(BinaryUpdateState.idle, 0.0);
         return false;
       }
-      if (manifest.minMonotoneSeq != null &&
-          manifest.minMonotoneSeq! > _highestSeenMonotoneSeq) {
-        _highestSeenMonotoneSeq = manifest.minMonotoneSeq!;
-        _saveMonotoneSeq();
-      }
 
       final tag = manifest.dhtBinaryTag?[platform];
       final hash = manifest.binaryHashes?[platform];
@@ -117,6 +112,12 @@ class BinaryUpdateManager {
         _log.debug('Manifest v${manifest.version} not newer than $currentVersion');
         _setState(BinaryUpdateState.idle, 0.0);
         return false;
+      }
+
+      if (manifest.minMonotoneSeq != null &&
+          manifest.minMonotoneSeq! > _highestSeenMonotoneSeq) {
+        _highestSeenMonotoneSeq = manifest.minMonotoneSeq!;
+        _saveMonotoneSeq();
       }
 
       _targetVersion = manifest.version;
@@ -209,7 +210,11 @@ class BinaryUpdateManager {
           try {
             final data = await fetchFragment(entry.value, platform, entry.key);
             if (data != null) {
-              await _store.storeFragment(platform, version, entry.key, data);
+              try {
+                await _store.storeFragment(platform, version, entry.key, data);
+              } catch (e) {
+                _log.warn('Fragment ${entry.key} store failed: $e');
+              }
             } else {
               _log.warn('Fragment ${entry.key} fetch returned null');
             }
@@ -323,20 +328,33 @@ class BinaryUpdateManager {
   Future<String?> getVerifiedBinaryPath(String platform, String version) async {
     final srcFile = File(_store.completePath(platform, version));
     if (!srcFile.existsSync()) return null;
-    final srcLen = srcFile.lengthSync();
 
     final dir = Directory('$_updateDir/verified');
     final ext = platform == 'android' ? 'apk' : 'bin';
     final destPath = '${dir.path}/cleona-$platform-$version.$ext';
     final destFile = File(destPath);
 
-    if (destFile.existsSync() && destFile.lengthSync() == srcLen) {
-      return destPath;
+    if (destFile.existsSync()) {
+      final expectedHash = await _store.getBinaryHash(platform, version);
+      final destHash = bytesToHex(SodiumFFI().sha256(destFile.readAsBytesSync()));
+      if (expectedHash != null && expectedHash.isNotEmpty) {
+        if (destHash.toLowerCase() == expectedHash.toLowerCase()) {
+          return destPath;
+        }
+        _log.warn('Cached binary hash mismatch: expected=$expectedHash '
+            'got=$destHash — re-copying');
+      } else {
+        final srcHash = bytesToHex(SodiumFFI().sha256(srcFile.readAsBytesSync()));
+        if (destHash.toLowerCase() == srcHash.toLowerCase()) {
+          return destPath;
+        }
+        _log.warn('Cached binary hash differs from source — re-copying');
+      }
+      destFile.deleteSync();
     }
 
     try {
       if (!dir.existsSync()) dir.createSync(recursive: true);
-      if (destFile.existsSync()) destFile.deleteSync();
       await srcFile.copy(destPath);
       return destPath;
     } catch (e) {
@@ -377,6 +395,7 @@ class BinaryUpdateManager {
   }
 
   void _setState(BinaryUpdateState state, double progress) {
+    if (_cancelled && state != BinaryUpdateState.idle) return;
     _state = state;
     _progress = progress;
     try {
@@ -421,10 +440,21 @@ class BinaryUpdateManager {
 
       if (isZip && Platform.isWindows) {
         final appDir = currentFile.parent.path;
-        if (currentFile.existsSync()) {
-          currentFile.renameSync(bakPath);
-          _log.info('Backed up current binary to $bakPath');
+        final bakDir = '$appDir.update-bak';
+
+        try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
+
+        final robocopyBak = await Process.run('robocopy', [
+          appDir.replaceAll('/', '\\'),
+          bakDir.replaceAll('/', '\\'),
+          '/E', '/NFL', '/NDL', '/NJH', '/NJS',
+        ]);
+        if (robocopyBak.exitCode > 7) {
+          _log.error('Directory backup failed (robocopy exit ${robocopyBak.exitCode})');
+          return false;
         }
+        _log.info('Backed up app directory to $bakDir');
+
         final tmpZip = '$verifiedPath.zip'.replaceAll('/', '\\');
         final destPath = appDir.replaceAll('/', '\\');
         File(verifiedPath).copySync('$verifiedPath.zip');
@@ -435,7 +465,15 @@ class BinaryUpdateManager {
         try { File('$verifiedPath.zip').deleteSync(); } catch (_) {}
         if (result.exitCode != 0) {
           _log.error('ZIP extraction failed (exit ${result.exitCode}): ${result.stderr}');
-          if (bakFile.existsSync()) bakFile.renameSync(currentBinaryPath);
+          final robocopyRestore = await Process.run('robocopy', [
+            bakDir.replaceAll('/', '\\'),
+            appDir.replaceAll('/', '\\'),
+            '/E', '/NFL', '/NDL', '/NJH', '/NJS',
+          ]);
+          if (robocopyRestore.exitCode <= 7) {
+            _log.info('Restored app directory from backup after extraction failure');
+          }
+          try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
           return false;
         }
         _log.info('Extracted ZIP bundle to $appDir (${File(verifiedPath).lengthSync()}B)');
@@ -484,6 +522,11 @@ class BinaryUpdateManager {
       if (bakPath != null) {
         final bak = File(bakPath);
         if (bak.existsSync()) bak.deleteSync();
+        final appDir = File(bakPath).parent.path;
+        final bakDir = Directory('$appDir.update-bak');
+        if (bakDir.existsSync()) {
+          try { bakDir.deleteSync(recursive: true); } catch (_) {}
+        }
       }
     } catch (_) {}
   }
@@ -507,6 +550,26 @@ class BinaryUpdateManager {
   static bool rollback(String currentBinaryPath, String? profileDir) {
     final updateDir = '${profileDir ?? AppPaths.dataDir}/update';
     final markerFile = File('$updateDir/update-pending.json');
+
+    if (Platform.isWindows) {
+      final appDir = File(currentBinaryPath).parent.path;
+      final bakDir = '$appDir.update-bak';
+      if (Directory(bakDir).existsSync()) {
+        try {
+          final result = Process.runSync('robocopy', [
+            bakDir.replaceAll('/', '\\'),
+            appDir.replaceAll('/', '\\'),
+            '/E', '/NFL', '/NDL', '/NJH', '/NJS',
+          ]);
+          if (result.exitCode <= 7) {
+            try { Directory(bakDir).deleteSync(recursive: true); } catch (_) {}
+            if (markerFile.existsSync()) markerFile.deleteSync();
+            return true;
+          }
+        } catch (_) {}
+      }
+    }
+
     String? bakPath;
     if (markerFile.existsSync()) {
       try {

@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 
 /// Content extracted from the system clipboard.
 class ClipboardContent {
@@ -153,7 +154,7 @@ class ClipboardHelper {
           if (path.isEmpty) continue;
           final file = File(path);
           if (!file.existsSync()) continue;
-          final filename = path.split('/').last;
+          final filename = p.basename(path);
           final mime = _mimeFromFilename(filename);
           return ClipboardContent(
             filePath: path,
@@ -292,7 +293,7 @@ class ClipboardHelper {
         final path = uri.toFilePath();
         final file = File(path);
         if (!file.existsSync()) continue;
-        final filename = path.split('/').last;
+        final filename = p.basename(path);
         final mime = _mimeFromFilename(filename);
         return ClipboardContent(
           filePath: path,

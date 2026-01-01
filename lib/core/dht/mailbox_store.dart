@@ -81,7 +81,12 @@ class StoredFragment {
 
     final mailboxId = Uint8List.fromList(bytes.sublist(offset, offset + 32));
     offset += 32;
-    final messageId = Uint8List.fromList(bytes.sublist(offset, offset + 32));
+    final rawMessageId = bytes.sublist(offset, offset + 32);
+    var msgLen = 32;
+    while (msgLen > 16 && rawMessageId[msgLen - 1] == 0) {
+      msgLen--;
+    }
+    final messageId = Uint8List.fromList(rawMessageId.sublist(0, msgLen));
     offset += 32;
 
     final fragmentIndex = buf.getUint32(offset, Endian.big); offset += 4;
@@ -172,8 +177,7 @@ class MailboxStore {
   /// Max fraction of total budget for a single source.
   static const double perSourceFraction = 0.20; // 20%
 
-  /// Min/max bounds for total budget.
-  static const int minBudget = 100 * 1024 * 1024;  // 100 MB
+  /// Max bound for total budget.
   static const int maxBudget = 2 * 1024 * 1024 * 1024; // 2 GB
 
   /// Fraction of free disk space to use for relay storage.
@@ -188,6 +192,8 @@ class MailboxStore {
     if (!dir.existsSync()) {
       dir.createSync(recursive: true);
       await _updateBudget();
+      _startFlushTimer();
+      _startPruneTimer();
       return;
     }
 
@@ -259,15 +265,21 @@ class MailboxStore {
     try {
       final freeBytes = await DiskSpace.getFreeDiskSpace(profileDir);
       if (freeBytes > 0) {
-        _totalBudget = (freeBytes * diskFraction).toInt().clamp(minBudget, maxBudget);
+        final desiredBudget = (freeBytes * diskFraction).toInt();
+        final safeCap = (freeBytes * 0.50).toInt();
+        _totalBudget = desiredBudget.clamp(0, maxBudget);
+        if (_totalBudget > safeCap) _totalBudget = safeCap;
+        if (freeBytes < 50 * 1024 * 1024) {
+          _totalBudget = 0;
+          _log.warn('Free disk critically low (${(freeBytes / (1024 * 1024)).round()} MB) — relay storage disabled');
+        }
         _log.info('Storage budget: ${(_totalBudget / (1024 * 1024)).round()} MB '
             '(${(diskFraction * 100).round()}% of ${(freeBytes / (1024 * 1024)).round()} MB free)');
       } else {
-        // Fallback: keep current budget (500 MB default)
-        _totalBudget = _totalBudget.clamp(minBudget, maxBudget);
+        _totalBudget = 0;
       }
     } catch (_) {
-      _totalBudget = minBudget;
+      _totalBudget = 0;
     }
   }
 
@@ -276,7 +288,7 @@ class MailboxStore {
 
   /// Set the total budget explicitly (e.g. from platform-specific disk query).
   set totalBudget(int bytes) {
-    _totalBudget = bytes.clamp(minBudget, maxBudget);
+    _totalBudget = bytes.clamp(0, maxBudget);
   }
 
   /// Total bytes used by all stored fragments.

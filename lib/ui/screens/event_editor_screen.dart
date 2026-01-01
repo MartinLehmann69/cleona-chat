@@ -478,61 +478,58 @@ class _EventEditorScreenState extends State<EventEditorScreen> {
             title: Text(locale.get('calendar_select_participants')),
             content: SizedBox(
               width: double.maxFinite,
-              child: ListView(
-                shrinkWrap: true,
-                children: [
-                  // Personal
-                  RadioListTile<String?>(
-                    title: Text(locale.get('calendar_personal_event')),
-                    value: null,
-                    groupValue: isPersonal ? null : (tempGroupId ?? '__contacts__'),
-                    onChanged: (_) => setDialogState(() {
-                      tempGroupId = null;
-                      tempAttendees.clear();
-                    }),
-                  ),
-                  const Divider(),
-
-                  // Contacts section
-                  Padding(
-                    padding: const EdgeInsets.only(left: 16, top: 8, bottom: 4),
-                    child: Text(locale.get('tab_chats'),
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-                  ),
-                  ...contacts.map((entry) => CheckboxListTile(
-                    title: Text(entry.value.effectiveName),
-                    value: tempAttendees.contains(entry.key),
-                    onChanged: (checked) => setDialogState(() {
-                      if (checked == true) {
-                        tempAttendees.add(entry.key);
-                        tempGroupId = null;
-                      } else {
-                        tempAttendees.remove(entry.key);
-                      }
-                    }),
-                    dense: true,
-                  )),
-
-                  // Groups section
-                  if (groups.isNotEmpty) ...[
+              child: RadioGroup<String?>(
+                groupValue: isPersonal ? null : (tempGroupId ?? '__contacts__'),
+                onChanged: (v) => setDialogState(() {
+                  tempGroupId = v;
+                  tempAttendees.clear();
+                }),
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    // Personal
+                    RadioListTile<String?>(
+                      title: Text(locale.get('calendar_personal_event')),
+                      value: null,
+                    ),
                     const Divider(),
+
+                    // Contacts section
                     Padding(
                       padding: const EdgeInsets.only(left: 16, top: 8, bottom: 4),
-                      child: Text(locale.get('calendar_group_event'),
+                      child: Text(locale.get('tab_chats'),
                           style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
                     ),
-                    ...groups.entries.map((e) => RadioListTile<String>(
-                      title: Text((e.value as dynamic).name as String),
-                      value: e.key,
-                      groupValue: tempGroupId,
-                      onChanged: (v) => setDialogState(() {
-                        tempGroupId = v;
-                        tempAttendees.clear();
+                    ...contacts.map((entry) => CheckboxListTile(
+                      title: Text(entry.value.effectiveName),
+                      value: tempAttendees.contains(entry.key),
+                      onChanged: (checked) => setDialogState(() {
+                        if (checked == true) {
+                          tempAttendees.add(entry.key);
+                          tempGroupId = null;
+                        } else {
+                          tempAttendees.remove(entry.key);
+                        }
                       }),
                       dense: true,
                     )),
+
+                    // Groups section
+                    if (groups.isNotEmpty) ...[
+                      const Divider(),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 16, top: 8, bottom: 4),
+                        child: Text(locale.get('calendar_group_event'),
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      ),
+                      ...groups.entries.map((e) => RadioListTile<String?>(
+                        title: Text((e.value as dynamic).name as String),
+                        value: e.key,
+                        dense: true,
+                      )),
+                    ],
                   ],
-                ],
+                ),
               ),
             ),
             actions: [

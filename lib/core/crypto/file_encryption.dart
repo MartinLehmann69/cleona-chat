@@ -27,9 +27,12 @@ class FileEncryption {
   /// that haven't been migrated to keyring-based key derivation yet.
   Uint8List _loadOrCreateLegacyKey() {
     final keyFile = File('$baseDir/db.key');
-    if (keyFile.existsSync()) {
+    final keyExists = keyFile.existsSync();
+
+    if (keyExists) {
       final bytes = keyFile.readAsBytesSync();
       if (bytes.length == 32) return Uint8List.fromList(bytes);
+      // Invalid length — try .migrated fallback below
     }
 
     // S106 defence-in-depth: if KeyMigration renamed db.key to
@@ -39,10 +42,24 @@ class FileEncryption {
     if (migratedFile.existsSync()) {
       final bytes = migratedFile.readAsBytesSync();
       if (bytes.length == 32) {
-        stderr.writeln('[FileEncryption] WARNING: db.key missing but '
+        stderr.writeln('[FileEncryption] WARNING: db.key missing/corrupt but '
             '.db.key.migrated exists — using migrated key as fallback');
         return Uint8List.fromList(bytes);
       }
+    }
+
+    // §3.7 fail-loud: if db.key existed with wrong length and no
+    // .migrated fallback, check if profile data would be lost.
+    if (keyExists) {
+      final hasProfileData = Directory('$baseDir/identities').existsSync();
+      if (hasProfileData) {
+        throw StateError(
+            'db.key has invalid length ${keyFile.lengthSync()} '
+            '(expected 32) and profile data exists — refusing to '
+            'generate new key (would make encrypted data unreadable)');
+      }
+      stderr.writeln('[FileEncryption] WARNING: corrupt db.key '
+          'with no profile data — regenerating (interrupted first write)');
     }
 
     // Genuine fresh install — generate new random key

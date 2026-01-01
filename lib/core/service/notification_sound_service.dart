@@ -34,6 +34,9 @@ class NotificationSettings {
   bool messageSoundEnabled;
   Ringtone callRingtone;
   double callVolume;
+  bool defaultDirectNotify;
+  bool defaultGroupNotify;
+  bool defaultChannelNotify;
 
   NotificationSettings({
     this.soundEnabled = true,
@@ -41,6 +44,9 @@ class NotificationSettings {
     this.messageSoundEnabled = true,
     this.callRingtone = Ringtone.gentle,
     this.callVolume = 0.8,
+    this.defaultDirectNotify = true,
+    this.defaultGroupNotify = true,
+    this.defaultChannelNotify = false,
   });
 
   factory NotificationSettings.fromJson(Map<String, dynamic> json) {
@@ -50,6 +56,9 @@ class NotificationSettings {
       messageSoundEnabled: json['messageSoundEnabled'] as bool? ?? true,
       callRingtone: Ringtone.fromName(json['callRingtone'] as String? ?? 'gentle'),
       callVolume: (json['callVolume'] as num?)?.toDouble() ?? 0.8,
+      defaultDirectNotify: json['defaultDirectNotify'] as bool? ?? true,
+      defaultGroupNotify: json['defaultGroupNotify'] as bool? ?? true,
+      defaultChannelNotify: json['defaultChannelNotify'] as bool? ?? false,
     );
   }
 
@@ -59,7 +68,16 @@ class NotificationSettings {
     'messageSoundEnabled': messageSoundEnabled,
     'callRingtone': callRingtone.name,
     'callVolume': callVolume,
+    'defaultDirectNotify': defaultDirectNotify,
+    'defaultGroupNotify': defaultGroupNotify,
+    'defaultChannelNotify': defaultChannelNotify,
   };
+
+  bool defaultForType({bool isGroup = false, bool isChannel = false}) {
+    if (isChannel) return defaultChannelNotify;
+    if (isGroup) return defaultGroupNotify;
+    return defaultDirectNotify;
+  }
 }
 
 /// Manages notification sounds and vibration (Architecture 18.8).
@@ -248,9 +266,15 @@ class NotificationSoundService {
   }
 
   /// Play short message notification sound.
-  Future<void> playMessageSound() async {
+  /// If [soundName] is provided, play the corresponding ringtone file instead.
+  Future<void> playMessageSound({String? soundName}) async {
     if (!_settings.soundEnabled || !_settings.messageSoundEnabled) return;
-    await _playOnce('message.ogg');
+    if (soundName != null) {
+      final rt = Ringtone.fromName(soundName);
+      await _playOnce(rt.filename);
+    } else {
+      await _playOnce('message.ogg');
+    }
   }
 
   /// Play message sound synchronously and return the process exit code.

@@ -524,6 +524,10 @@ class Conversation {
   String? pendingConfigProposer;
   /// Marked as favorite.
   bool isFavorite;
+  /// Per-conversation notification toggle (null = use identity default).
+  bool? notificationsEnabled;
+  /// Per-conversation notification sound (null = use identity default).
+  String? notificationSoundName;
 
   Conversation({
     required this.id,
@@ -538,6 +542,8 @@ class Conversation {
     this.pendingConfigProposal,
     this.pendingConfigProposer,
     this.isFavorite = false,
+    this.notificationsEnabled,
+    this.notificationSoundName,
   })  : messages = messages ?? [],
         lastActivity = lastActivity ?? DateTime.now(),
         config = config ?? ChatConfig();
@@ -554,6 +560,8 @@ class Conversation {
         if (pendingConfigProposal != null) 'pendingConfigProposal': pendingConfigProposal!.toJson(),
         if (pendingConfigProposer != null) 'pendingConfigProposer': pendingConfigProposer,
         if (isFavorite) 'isFavorite': true,
+        if (notificationsEnabled != null) 'notificationsEnabled': notificationsEnabled,
+        if (notificationSoundName != null) 'notificationSoundName': notificationSoundName,
         'messages': messages.map((m) => m.toJson()).toList(),
       };
 
@@ -580,6 +588,8 @@ class Conversation {
           : null,
       pendingConfigProposer: json['pendingConfigProposer'] as String?,
       isFavorite: json['isFavorite'] as bool? ?? false,
+      notificationsEnabled: json['notificationsEnabled'] as bool?,
+      notificationSoundName: json['notificationSoundName'] as String?,
     );
   }
 }

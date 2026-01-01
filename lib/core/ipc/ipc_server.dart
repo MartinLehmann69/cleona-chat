@@ -54,6 +54,8 @@ class IpcServer {
   Future<String?> Function(String displayName)? onCreateIdentity;
   /// Callback to delete an identity at runtime.
   Future<bool> Function(String nodeIdHex)? onDeleteIdentity;
+  /// Callback to start a recovered identity (from DHT registry).
+  Future<void> Function(Identity identity)? onRecoveredIdentity;
 
   /// Rate-limit for `get_seed_phrase` — defence-in-depth against local scraping.
   DateTime? _lastSeedPhraseAccess;
@@ -1089,6 +1091,23 @@ class IpcServer {
           ));
           break;
 
+        case 'update_conversation_notifications':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final notifConvId = req.params['conversationId'] as String?;
+          if (notifConvId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId'));
+            break;
+          }
+          service.updateConversationNotifications(notifConvId,
+              enabled: req.params['enabled'] as bool?,
+              soundName: req.params['soundName'] as String?);
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
         case 'accept_config_proposal':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -1731,6 +1750,27 @@ class IpcServer {
             service.testResetNatWizardDismissed();
             _broadcastEvent(IpcEvent(event: 'gui_action', data: {'action': 'reset_nat_wizard_latch'}));
             _sendResponse(client, IpcResponse(id: req.id, success: true));
+          }
+          break;
+
+        case 'recover_identities_from_registry':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final created = await service.recoverIdentitiesFromRegistry();
+            if (created.isNotEmpty && onRecoveredIdentity != null) {
+              for (final id in created) {
+                await onRecoveredIdentity!(id);
+              }
+            }
+            _sendResponse(client, IpcResponse(
+              id: req.id,
+              success: true,
+              data: {'count': created.length},
+            ));
           }
           break;
 

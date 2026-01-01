@@ -504,6 +504,11 @@ class _RestoreScreenState extends State<_RestoreScreen> {
           });
         }
       };
+
+      // §6.4.3: Recover additional identities from DHT registry (fire-and-forget).
+      // Runs in background — DHT lookup takes 30-60s. Primary identity is
+      // already active; additional identities start as they are discovered.
+      appState.recoverIdentitiesFromRegistry();
     } catch (e) {
       if (mounted) {
         setState(() {

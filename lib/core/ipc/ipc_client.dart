@@ -902,6 +902,16 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     return resp.success;
   }
 
+  /// §6.4.3: Recover multi-identity list from DHT registry.
+  /// Returns the number of newly created + started identities.
+  Future<int> recoverIdentitiesFromRegistry() async {
+    final resp = await _sendRequest('recover_identities_from_registry');
+    if (resp.success) {
+      return resp.data['count'] as int? ?? 0;
+    }
+    return 0;
+  }
+
   /// List all identities with their status.
   Future<List<Map<String, dynamic>>> listIdentities() async {
     final resp = await _sendRequest('list_identities');
@@ -1181,6 +1191,15 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       onStateChanged?.call();
     }
     return resp.success;
+  }
+
+  @override
+  void updateConversationNotifications(String conversationId, {bool? enabled, String? soundName}) {
+    _sendRequest('update_conversation_notifications', params: {
+      'conversationId': conversationId,
+      if (enabled != null) 'enabled': enabled,
+      if (soundName != null) 'soundName': soundName,
+    });
   }
 
   @override

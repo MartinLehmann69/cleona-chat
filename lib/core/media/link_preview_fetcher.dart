@@ -446,10 +446,10 @@ class LinkPreviewFetcher {
 
         // Check content-type is HTML
         final contentType = response.headers.contentType;
-        if (contentType != null &&
-            contentType.primaryType != 'text' &&
-            contentType.subType != 'html') {
-          return null;
+        if (contentType != null) {
+          final isHtml = (contentType.primaryType == 'text' && contentType.subType == 'html') ||
+              (contentType.primaryType == 'application' && contentType.subType == 'xhtml+xml');
+          if (!isHtml) return null;
         }
 
         // Read response with size limit

@@ -64,6 +64,8 @@ class BinarySeeder {
       _log.info('seed $platform/$version: encoding ${binary.length}B '
           '(N=${params.n}, K=${params.k}, hash=$hash)');
 
+      await _store.storeComplete(platform, version, binary);
+
       final sw = Stopwatch()..start();
       final rs = ReedSolomon.withParams(params.n, params.k);
       final fragments = rs.encode(binary);
