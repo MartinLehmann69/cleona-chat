@@ -24,11 +24,8 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
-	<!-- Export compliance: Cleona uses non-exempt encryption (post-quantum
-	     ML-KEM/ML-DSA via liboqs + libsodium for core E2E messaging).
-	     Compliance documentation configured on ASC (2026-06-12). -->
 	<key>ITSAppUsesNonExemptEncryption</key>
-	<true/>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSceneManifest</key>
