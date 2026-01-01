@@ -56,6 +56,7 @@ class IpcServer {
 
   ServerSocket? _server;
   final List<_ClientState> _clients = [];
+  bool get hasClients => _clients.isNotEmpty;
   ModerationConfig _moderationConfig = ModerationConfig.production();
 
   /// Shared secret for TCP loopback auth (Windows only). Null on Unix socket.
@@ -719,12 +720,16 @@ class IpcServer {
           if (_services.containsKey(identityId)) {
             client.activeIdentityId = identityId;
             final service = _services[identityId]!;
+            _log.info('switch_active OK: ${identityId.substring(0, 8)} '
+                '(${service.displayName})');
             _sendResponse(client, IpcResponse(
               id: req.id,
               success: true,
               data: service.getStateSnapshot(),
             ));
           } else {
+            _log.warn('switch_active FAIL: ${identityId.substring(0, 8)} '
+                'not in services [${_services.keys.map((k) => k.substring(0, 8)).join(", ")}]');
             _sendResponse(client, IpcResponse(
               id: req.id,
               success: false,
@@ -874,7 +879,7 @@ class IpcServer {
           // Route to group or DM based on whether recipientId is a group
           final isGroupMsg = service.groups.containsKey(recipientId);
           final result = isGroupMsg
-              ? await service.sendGroupTextMessage(recipientId, text)
+              ? await service.sendGroupTextMessage(recipientId, text, replyToMessageId: replyToMessageId, replyToText: replyToText, replyToSender: replyToSender)
               : await service.sendTextMessage(recipientId, text, replyToMessageId: replyToMessageId, replyToText: replyToText, replyToSender: replyToSender);
           _sendResponse(client, IpcResponse(
             id: req.id,
@@ -979,40 +984,46 @@ class IpcServer {
 
         case 'toggle_favorite':
           final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
           final favConvId = req.params['conversationId'] as String?;
           if (favConvId == null) {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId'));
             break;
           }
-          if (service != null) {
-            service.toggleFavorite(favConvId);
-          }
+          service.toggleFavorite(favConvId);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
         case 'send_typing':
           final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
           final typingConvId = req.params['conversationId'] as String?;
           if (typingConvId == null) {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId'));
             break;
           }
-          if (service != null) {
-            service.sendTypingIndicator(typingConvId);
-          }
+          service.sendTypingIndicator(typingConvId);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
         case 'mark_read':
           final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
           final markReadConvId = req.params['conversationId'] as String?;
           if (markReadConvId == null) {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: conversationId'));
             break;
           }
-          if (service != null) {
-            service.markConversationRead(markReadConvId);
-          }
+          service.markConversationRead(markReadConvId);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
@@ -1342,7 +1353,11 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: groupIdHex or text'));
             break;
           }
-          final groupMsg = await service.sendGroupTextMessage(groupId, groupText);
+          final groupMsg = await service.sendGroupTextMessage(groupId, groupText,
+            replyToMessageId: req.params['replyToMessageId'] as String?,
+            replyToText: req.params['replyToText'] as String?,
+            replyToSender: req.params['replyToSender'] as String?,
+          );
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: groupMsg != null,
@@ -1576,432 +1591,36 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: joinResult));
           break;
 
+        // ── Moderation (§9) ──────────────────────────────────
         case 'report_channel':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final rptChId = (req.params['channelIdHex'] ?? req.params['channelId']) as String?;
-          final rptCatRaw = req.params['category'];
-          final rptCat = rptCatRaw is int ? rptCatRaw : _parseCategoryString(rptCatRaw as String?);
-          final rptEvidence = (req.params['evidencePostIds'] as List<dynamic>?)?.cast<String>() ?? [];
-          final rptDesc = req.params['description'] as String?;
-          if (rptChId == null || rptCat == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params'));
-            break;
-          }
-          final rptResult = await service.reportChannel(rptChId, rptCat, rptEvidence, description: rptDesc);
-          _sendResponse(client, IpcResponse(id: req.id, success: rptResult));
-          break;
-
         case 'report_post':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final rptpChId = (req.params['channelIdHex'] ?? req.params['channelId']) as String?;
-          final rptpPostId = req.params['postId'] as String?;
-          final rptpCatRaw = req.params['category'];
-          final rptpCat = rptpCatRaw is int ? rptpCatRaw : _parseCategoryString(rptpCatRaw as String?);
-          final rptpDesc = req.params['description'] as String?;
-          if (rptpChId == null || rptpPostId == null || rptpCat == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params'));
-            break;
-          }
-          final rptpResult = await service.reportPost(rptpChId, rptpPostId, rptpCat, description: rptpDesc);
-          _sendResponse(client, IpcResponse(id: req.id, success: rptpResult));
-          break;
-
         case 'submit_jury_vote':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final voteJuryId = req.params['juryId'] as String?;
-          final voteReportId = req.params['reportId'] as String?;
-          final voteValue = req.params['vote'] as int?;
-          final voteReason = req.params['reason'] as String?;
-          if (voteJuryId == null || voteReportId == null || voteValue == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params'));
-            break;
-          }
-          final voteResult = await service.submitJuryVote(voteJuryId, voteReportId, voteValue, reason: voteReason);
-          _sendResponse(client, IpcResponse(id: req.id, success: voteResult));
-          break;
-
         case 'set_is_adult':
-          final identityId = _resolveIdentityId(client, req);
-          if (identityId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active identity'));
-            break;
-          }
-          final isAdultVal = req.params['value'] as bool? ?? false;
-          IdentityManager().setIsAdult(identityId, isAdultVal);
-          // Propagate to runtime IdentityContext
-          final adultService = _resolveService(client, req);
-          if (adultService != null) {
-            adultService.identity.isAdult = isAdultVal;
-          }
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'set_can_review_reports':
-          final identityId = _resolveIdentityId(client, req);
-          if (identityId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active identity'));
-            break;
-          }
-          final reviewVal = req.params['value'] as bool? ?? true;
-          IdentityManager().setReviewEnabled(identityId, reviewVal);
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'get_moderation_config':
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'juryVoteTimeoutMs': _moderationConfig.juryVoteTimeout.inMilliseconds,
-            'juryMinSize': _moderationConfig.juryMinSize,
-            'juryMaxSize': _moderationConfig.juryMaxSize,
-            'juryMajority': _moderationConfig.juryMajority,
-            'reportThresholdForJury': _moderationConfig.reportThresholdForJury,
-            'maxReportsPerIdentityPerDay': _moderationConfig.maxReportsPerIdentityPerDay,
-            'singlePostEscalationTimeoutMs': _moderationConfig.singlePostEscalationTimeout.inMilliseconds,
-            'badgeProbationLevel1Ms': _moderationConfig.badgeProbationLevel1.inMilliseconds,
-            'badgeProbationLevel2Ms': _moderationConfig.badgeProbationLevel2.inMilliseconds,
-            'csamStage2Min': _moderationConfig.csamStage2Min,
-            'csamStage3Min': _moderationConfig.csamStage3Min,
-            'csamTempHideDurationMs': _moderationConfig.csamTempHideDuration.inMilliseconds,
-            'csamReporterCooldownMs': _moderationConfig.csamReporterCooldown.inMilliseconds,
-            'identityMinAgeMs': _moderationConfig.identityMinAge.inMilliseconds,
-            'identityMinAgeCsamMs': _moderationConfig.identityMinAgeCSAM.inMilliseconds,
-            'reachabilityEnabled': _moderationConfig.reachabilityEnabled,
-            'reachabilityThreshold': _moderationConfig.reachabilityThreshold,
-            'channelCreationMinAgeMs': _moderationConfig.channelCreationMinAge.inMilliseconds,
-          }));
-          break;
-
         case 'set_moderation_config':
-          final preset = req.params['preset'] as String? ?? 'production';
-          switch (preset) {
-            case 'test':
-              _moderationConfig = ModerationConfig.test();
-            case 'lab':
-              _moderationConfig = ModerationConfig.lab();
-            default:
-              _moderationConfig = ModerationConfig.production();
-          }
-          // Propagate to all services
-          for (final service in _services.values) {
-            service.moderationConfig = _moderationConfig;
-          }
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
-        case 'create_public_channel':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final pubChName = req.params['name'] as String?;
-          if (pubChName == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: name'));
-            break;
-          }
-          final pubChLang = req.params['language'] as String? ?? 'de';
-          final pubChAdult = req.params['isAdultContent'] as bool? ?? true;
-          final pubChDesc = req.params['description'] as String?;
-          final pubChId = await service.createChannel(pubChName, [],
-            isPublic: true, isAdult: pubChAdult, language: pubChLang, description: pubChDesc);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: pubChId != null,
-            data: pubChId != null ? {'channelIdHex': pubChId} : {},
-          ));
-          break;
-
-        case 'subscribe_to_channel':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final subChId = req.params['channelId'] as String?;
-          if (subChId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelId'));
-            break;
-          }
-          final subResult = await service.joinPublicChannel(subChId);
-          _sendResponse(client, IpcResponse(id: req.id, success: subResult));
-          break;
-
         case 'get_channel_moderation_info':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final modChId = req.params['channelId'] as String?;
-          if (modChId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelId'));
-            break;
-          }
-          final modInfo = service.getChannelModerationInfo(modChId);
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: modInfo));
-          break;
-
         case 'get_jury_requests':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final juryRequests = service.pendingJuryRequests.map((r) => r.toJson()).toList();
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {'requests': juryRequests}));
-          break;
-
-        case 'vote_on_jury':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final vjRequestId = req.params['requestId'] as String?;
-          final vjVote = req.params['vote'] as String?;
-          if (vjRequestId == null || vjVote == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params'));
-            break;
-          }
-          final vjVoteIdx = vjVote == 'approve' ? 0 : (vjVote == 'reject' ? 1 : 2);
-          final vjResult = await service.submitJuryVote(vjRequestId, vjRequestId, vjVoteIdx);
-          _sendResponse(client, IpcResponse(id: req.id, success: vjResult));
-          break;
-
         case 'dismiss_post_report':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final dprChId = req.params['channelId'] as String?;
-          final dprReportId = req.params['reportId'] as String?;
-          if (dprChId == null || dprReportId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params'));
-            break;
-          }
-          final dprResult = await service.dismissPostReport(dprChId, dprReportId);
-          _sendResponse(client, IpcResponse(id: req.id, success: dprResult));
-          break;
-
         case 'submit_badge_correction':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final sbcChId = req.params['channelId'] as String?;
-          if (sbcChId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelId'));
-            break;
-          }
-          final sbcName = req.params['newName'] as String?;
-          final sbcDesc = req.params['newDescription'] as String?;
-          final sbcResult = await service.submitBadgeCorrection(sbcChId, newName: sbcName, newDescription: sbcDesc);
-          _sendResponse(client, IpcResponse(id: req.id, success: sbcResult));
-          break;
-
         case 'contest_csam_hide':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final cchChId = req.params['channelId'] as String?;
-          if (cchChId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelId'));
-            break;
-          }
-          final cchResult = await service.contestCsamHide(cchChId);
-          _sendResponse(client, IpcResponse(id: req.id, success: cchResult));
+          await _handleModeration(client, req);
           break;
 
+        // ── Calls (§10) ──────────────────────────────────────
         case 'start_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final peerNodeIdHex = req.params['peerNodeIdHex'] as String?;
-          if (peerNodeIdHex == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: peerNodeIdHex'));
-            break;
-          }
-          final video = req.params['video'] as bool? ?? false;
-          final callInfo = await service.startCall(peerNodeIdHex, video: video);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: callInfo != null,
-            data: callInfo != null ? callInfo.toJson() : {},
-            error: callInfo == null ? 'Call failed' : null,
-          ));
-          break;
-
         case 'accept_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          await service.acceptCall();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-          ));
-          break;
-
         case 'reject_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final reason = req.params['reason'] as String? ?? 'busy';
-          await service.rejectCall(reason: reason);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-          ));
-          break;
-
         case 'hangup':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          await service.hangup();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-          ));
-          break;
-
         case 'get_call_state':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final call = service.currentCall;
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-            data: {
-              'currentCall': call?.toJson(),
-              'isMuted': service.isMuted,
-              'isSpeakerEnabled': service.isSpeakerEnabled,
-            },
-          ));
-          break;
-
         case 'toggle_mute':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          service.toggleMute();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-            data: {'isMuted': service.isMuted},
-          ));
-          break;
-
         case 'toggle_speaker':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          service.toggleSpeaker();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-            data: {'isSpeakerEnabled': service.isSpeakerEnabled},
-          ));
-          break;
-
-        // ── Group Calls (Phase 3c) ─────────────────────────────────
-
         case 'start_group_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final gcGroupId = req.params['groupIdHex'] as String?;
-          if (gcGroupId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing groupIdHex'));
-            break;
-          }
-          final gcInfo = await service.startGroupCall(gcGroupId);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: gcInfo != null,
-            data: gcInfo != null ? gcInfo.toJson() : {'error': 'Failed to start group call'},
-          ));
-          break;
-
         case 'accept_group_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          await service.acceptGroupCall();
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'reject_group_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final gcRejectReason = req.params['reason'] as String? ?? 'busy';
-          await service.rejectGroupCall(reason: gcRejectReason);
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'leave_group_call':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          await service.leaveGroupCall();
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
         case 'get_group_call_state':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final gcState = service.currentGroupCall;
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-            data: {
-              'currentGroupCall': gcState?.toJson(),
-              'isMuted': service.isMuted,
-              'isSpeakerEnabled': service.isSpeakerEnabled,
-            },
-          ));
+          await _handleCalls(client, req);
           break;
 
         case 'get_network_stats':
@@ -2640,7 +2259,7 @@ class IpcServer {
               'host': config.archiveHost,
             }));
           } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: '$e'));
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'archive_test_connection: $e'));
           }
           break;
 
@@ -2853,6 +2472,456 @@ class IpcServer {
           }));
           break;
 
+        // ── Calendar (§23) ───────────────────────────────────
+        case 'calendar_create_event':
+        case 'calendar_update_event':
+        case 'calendar_delete_event':
+        case 'calendar_list_events':
+        case 'calendar_list_tasks':
+        case 'calendar_list_birthdays':
+        case 'calendar_send_rsvp':
+        case 'calendar_query_free_busy':
+        case 'calendar_get_free_busy_settings':
+        case 'calendar_set_free_busy_settings':
+        case 'calendar_sync_status':
+        case 'calendar_sync_trigger':
+        case 'calendar_sync_configure_caldav':
+        case 'calendar_sync_caldav_list_calendars':
+        case 'calendar_sync_remove_caldav':
+        case 'calendar_sync_google_oauth_start':
+        case 'calendar_sync_remove_google':
+        case 'calendar_sync_configure_local_ics':
+        case 'calendar_sync_remove_local_ics':
+        case 'calendar_sync_list_conflicts':
+        case 'calendar_sync_clear_conflicts':
+        case 'calendar_sync_restore_conflict':
+        case 'calendar_sync_resolve_pending':
+        case 'caldav_server_state':
+        case 'caldav_server_set_enabled':
+        case 'caldav_server_regenerate_token':
+        case 'caldav_server_set_port':
+        case 'calendar_sync_set_foreground':
+        case 'contact_set_birthday':
+          await _handleCalendar(client, req);
+          break;
+
+        // ── Polls (§24) ──────────────────────────────────────
+        case 'poll_create':
+        case 'poll_vote':
+        case 'poll_vote_anonymous':
+        case 'poll_vote_revoke':
+        case 'poll_update':
+        case 'poll_list':
+        case 'poll_convert_to_event':
+          await _handlePolls(client, req);
+          break;
+
+        default:
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: false,
+            error: 'Unknown command: ${req.command}',
+          ));
+      }
+    } catch (e, st) {
+      _log.error('IPC command "${req.command}" failed: $e\n$st');
+      _sendResponse(client, IpcResponse(
+        id: req.id,
+        success: false,
+        error: '$e',
+      ));
+    }
+  }
+
+
+  Future<void> _handleModeration(_ClientState client, IpcRequest req) async {
+    switch (req.command) {
+        case 'report_channel':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final rptChId = req.params['channelIdHex'] as String?;
+          final rptCatRaw = req.params['category'];
+          final rptCat = rptCatRaw is int ? rptCatRaw : _parseCategoryString(rptCatRaw as String?);
+          final rptEvidence = (req.params['evidencePostIds'] as List<dynamic>?)?.cast<String>() ?? [];
+          final rptDesc = req.params['description'] as String?;
+          if (rptChId == null || rptCat == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params: channelIdHex or category'));
+            break;
+          }
+          final rptResult = await service.reportChannel(rptChId, rptCat, rptEvidence, description: rptDesc);
+          _sendResponse(client, IpcResponse(id: req.id, success: rptResult));
+          break;
+
+        case 'report_post':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final rptpChId = req.params['channelIdHex'] as String?;
+          final rptpPostId = req.params['postId'] as String?;
+          final rptpCatRaw = req.params['category'];
+          final rptpCat = rptpCatRaw is int ? rptpCatRaw : _parseCategoryString(rptpCatRaw as String?);
+          final rptpDesc = req.params['description'] as String?;
+          if (rptpChId == null || rptpPostId == null || rptpCat == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params: channelIdHex, postId, or category'));
+            break;
+          }
+          final rptpResult = await service.reportPost(rptpChId, rptpPostId, rptpCat, description: rptpDesc);
+          _sendResponse(client, IpcResponse(id: req.id, success: rptpResult));
+          break;
+
+        case 'submit_jury_vote':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final voteJuryId = req.params['juryId'] as String?;
+          final voteReportId = req.params['reportId'] as String?;
+          final voteValue = req.params['vote'] as int?;
+          final voteReason = req.params['reason'] as String?;
+          if (voteJuryId == null || voteReportId == null || voteValue == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params: juryId, reportId, or vote'));
+            break;
+          }
+          final voteResult = await service.submitJuryVote(voteJuryId, voteReportId, voteValue, reason: voteReason);
+          _sendResponse(client, IpcResponse(id: req.id, success: voteResult));
+          break;
+
+        case 'set_is_adult':
+          final identityId = _resolveIdentityId(client, req);
+          if (identityId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active identity'));
+            break;
+          }
+          final isAdultVal = req.params['value'] as bool? ?? false;
+          IdentityManager().setIsAdult(identityId, isAdultVal);
+          // Propagate to runtime IdentityContext
+          final adultService = _resolveService(client, req);
+          if (adultService != null) {
+            adultService.identity.isAdult = isAdultVal;
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'set_can_review_reports':
+          final identityId = _resolveIdentityId(client, req);
+          if (identityId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active identity'));
+            break;
+          }
+          final reviewVal = req.params['value'] as bool? ?? true;
+          IdentityManager().setReviewEnabled(identityId, reviewVal);
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'get_moderation_config':
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+            'juryVoteTimeoutMs': _moderationConfig.juryVoteTimeout.inMilliseconds,
+            'juryMinSize': _moderationConfig.juryMinSize,
+            'juryMaxSize': _moderationConfig.juryMaxSize,
+            'juryMajority': _moderationConfig.juryMajority,
+            'reportThresholdForJury': _moderationConfig.reportThresholdForJury,
+            'maxReportsPerIdentityPerDay': _moderationConfig.maxReportsPerIdentityPerDay,
+            'singlePostEscalationTimeoutMs': _moderationConfig.singlePostEscalationTimeout.inMilliseconds,
+            'badgeProbationLevel1Ms': _moderationConfig.badgeProbationLevel1.inMilliseconds,
+            'badgeProbationLevel2Ms': _moderationConfig.badgeProbationLevel2.inMilliseconds,
+            'csamStage2Min': _moderationConfig.csamStage2Min,
+            'csamStage3Min': _moderationConfig.csamStage3Min,
+            'csamTempHideDurationMs': _moderationConfig.csamTempHideDuration.inMilliseconds,
+            'csamReporterCooldownMs': _moderationConfig.csamReporterCooldown.inMilliseconds,
+            'identityMinAgeMs': _moderationConfig.identityMinAge.inMilliseconds,
+            'identityMinAgeCsamMs': _moderationConfig.identityMinAgeCSAM.inMilliseconds,
+            'reachabilityEnabled': _moderationConfig.reachabilityEnabled,
+            'reachabilityThreshold': _moderationConfig.reachabilityThreshold,
+            'channelCreationMinAgeMs': _moderationConfig.channelCreationMinAge.inMilliseconds,
+          }));
+          break;
+
+        case 'set_moderation_config':
+          final preset = req.params['preset'] as String? ?? 'production';
+          switch (preset) {
+            case 'test':
+              _moderationConfig = ModerationConfig.test();
+            case 'lab':
+              _moderationConfig = ModerationConfig.lab();
+            default:
+              _moderationConfig = ModerationConfig.production();
+          }
+          // Propagate to all services
+          for (final service in _services.values) {
+            service.moderationConfig = _moderationConfig;
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'get_channel_moderation_info':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final modChId = req.params['channelIdHex'] as String?;
+          if (modChId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelIdHex'));
+            break;
+          }
+          final modInfo = service.getChannelModerationInfo(modChId);
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: modInfo));
+          break;
+
+        case 'get_jury_requests':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final juryRequests = service.pendingJuryRequests.map((r) => r.toJson()).toList();
+          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {'requests': juryRequests}));
+          break;
+
+        case 'dismiss_post_report':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final dprChId = req.params['channelIdHex'] as String?;
+          final dprReportId = req.params['reportId'] as String?;
+          if (dprChId == null || dprReportId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params: channelIdHex or reportId'));
+            break;
+          }
+          final dprResult = await service.dismissPostReport(dprChId, dprReportId);
+          _sendResponse(client, IpcResponse(id: req.id, success: dprResult));
+          break;
+
+        case 'submit_badge_correction':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final sbcChId = req.params['channelIdHex'] as String?;
+          if (sbcChId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelIdHex'));
+            break;
+          }
+          final sbcName = req.params['newName'] as String?;
+          final sbcDesc = req.params['newDescription'] as String?;
+          final sbcResult = await service.submitBadgeCorrection(sbcChId, newName: sbcName, newDescription: sbcDesc);
+          _sendResponse(client, IpcResponse(id: req.id, success: sbcResult));
+          break;
+
+        case 'contest_csam_hide':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final cchChId = req.params['channelIdHex'] as String?;
+          if (cchChId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: channelIdHex'));
+            break;
+          }
+          final cchResult = await service.contestCsamHide(cchChId);
+          _sendResponse(client, IpcResponse(id: req.id, success: cchResult));
+          break;
+
+    }
+  }
+
+
+  Future<void> _handleCalls(_ClientState client, IpcRequest req) async {
+    switch (req.command) {
+        case 'start_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final peerNodeIdHex = req.params['peerNodeIdHex'] as String?;
+          if (peerNodeIdHex == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: peerNodeIdHex'));
+            break;
+          }
+          final video = req.params['video'] as bool? ?? false;
+          final callInfo = await service.startCall(peerNodeIdHex, video: video);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: callInfo != null,
+            data: callInfo != null ? callInfo.toJson() : {},
+            error: callInfo == null ? 'Call failed' : null,
+          ));
+          break;
+
+        case 'accept_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          await service.acceptCall();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+          ));
+          break;
+
+        case 'reject_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final reason = req.params['reason'] as String? ?? 'busy';
+          await service.rejectCall(reason: reason);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+          ));
+          break;
+
+        case 'hangup':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          await service.hangup();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+          ));
+          break;
+
+        case 'get_call_state':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final call = service.currentCall;
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {
+              'currentCall': call?.toJson(),
+              'isMuted': service.isMuted,
+              'isSpeakerEnabled': service.isSpeakerEnabled,
+            },
+          ));
+          break;
+
+        case 'toggle_mute':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          service.toggleMute();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {'isMuted': service.isMuted},
+          ));
+          break;
+
+        case 'toggle_speaker':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          service.toggleSpeaker();
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {'isSpeakerEnabled': service.isSpeakerEnabled},
+          ));
+          break;
+
+        // ── Group Calls (Phase 3c) ─────────────────────────────────
+
+        case 'start_group_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final gcGroupId = req.params['groupIdHex'] as String?;
+          if (gcGroupId == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing groupIdHex'));
+            break;
+          }
+          final gcInfo = await service.startGroupCall(gcGroupId);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: gcInfo != null,
+            data: gcInfo != null ? gcInfo.toJson() : {},
+            error: gcInfo == null ? 'Failed to start group call' : null,
+          ));
+          break;
+
+        case 'accept_group_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          await service.acceptGroupCall();
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'reject_group_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final gcRejectReason = req.params['reason'] as String? ?? 'busy';
+          await service.rejectGroupCall(reason: gcRejectReason);
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'leave_group_call':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          await service.leaveGroupCall();
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'get_group_call_state':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final gcState = service.currentGroupCall;
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: true,
+            data: {
+              'currentGroupCall': gcState?.toJson(),
+              'isMuted': service.isMuted,
+              'isSpeakerEnabled': service.isSpeakerEnabled,
+            },
+          ));
+          break;
+
+    }
+  }
+
+
+  Future<void> _handleCalendar(_ClientState client, IpcRequest req) async {
+    switch (req.command) {
         // ── Calendar (§23) ───────────────────────────────────────────────
 
         case 'calendar_create_event':
@@ -3078,7 +3147,7 @@ class IpcServer {
               'status': service.calendarSyncService.publicStatusJson(),
             }));
           } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: '$e'));
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_configure_caldav: $e'));
           }
           break;
 
@@ -3098,7 +3167,7 @@ class IpcServer {
               'calendars': calendars.map((c) => c.toJson()).toList(),
             }));
           } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: '$e'));
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_caldav_list_calendars: $e'));
           }
           break;
 
@@ -3154,7 +3223,7 @@ class IpcServer {
               'port': handle.port,
             }));
           } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: '$e'));
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_google_oauth_start: $e'));
           }
           break;
 
@@ -3186,7 +3255,7 @@ class IpcServer {
               'status': service.calendarSyncService.publicStatusJson(),
             }));
           } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: '$e'));
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_configure_local_ics: $e'));
           }
           break;
 
@@ -3293,7 +3362,7 @@ class IpcServer {
                 data: state));
           } catch (e) {
             _sendResponse(client, IpcResponse(id: req.id, success: false,
-                error: '$e'));
+                error: 'caldav_server_set_enabled: $e'));
           }
           break;
 
@@ -3326,7 +3395,7 @@ class IpcServer {
                 data: state));
           } catch (e) {
             _sendResponse(client, IpcResponse(id: req.id, success: false,
-                error: '$e'));
+                error: 'caldav_server_set_port: $e'));
           }
           break;
 
@@ -3367,6 +3436,12 @@ class IpcServer {
               error: ok ? null : 'Contact not found'));
           break;
 
+    }
+  }
+
+
+  Future<void> _handlePolls(_ClientState client, IpcRequest req) async {
+    switch (req.command) {
         // ── Polls (§24) ────────────────────────────────────────────────
 
         case 'poll_create':
@@ -3539,20 +3614,6 @@ class IpcServer {
           }
           break;
 
-        default:
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: false,
-            error: 'Unknown command: ${req.command}',
-          ));
-      }
-    } catch (e, st) {
-      _log.error('IPC command "${req.command}" failed: $e\n$st');
-      _sendResponse(client, IpcResponse(
-        id: req.id,
-        success: false,
-        error: '$e',
-      ));
     }
   }
 

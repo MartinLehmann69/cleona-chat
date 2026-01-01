@@ -9,12 +9,15 @@ import 'package:cleona/core/calls/foreground_service.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/calls/group_call_session.dart';
 import 'package:cleona/core/calls/group_video_receiver.dart';
+import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/network/sender_identity_snapshot.dart';
+import 'package:cleona/core/network/v3_frame_codec.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/service/service_context.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 class CallService {
@@ -95,7 +98,7 @@ class CallService {
       identity: _ctx.identity,
       node: _ctx.node,
       contacts: _ctx.contacts,
-      groups: _ctx.groups,
+      getGroups: () => _ctx.groups,
       profileDir: _ctx.profileDir,
     );
     groupCallManager.sendViaUser = (recipientUserId, type, payload) =>
@@ -345,25 +348,81 @@ class CallService {
     }
   }
 
+  /// V3 fast-path for live-media frames (Architecture §10.3).
+  ///
+  /// Live audio/video MUST NOT go through [ServiceContext.sendToUser] because
+  /// that path adds ML-DSA user-sig + zstd compression + PoW — all of which
+  /// are latency-prohibitive for real-time media. Instead we build the V3
+  /// inner+outer directly, skip PoW, use Ed25519-only device-sig
+  /// (`applicationFlavor: false`), and fire-and-forget via
+  /// [CleonaNode.sendToDevice].
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
     if (session.state == CallState.ended) return;
     session.framesSent++;
-    final peerNodeId = hexToBytes(session.peerNodeIdHex);
+    final peerUserId = hexToBytes(session.peerNodeIdHex);
 
+    // --- Contact KEM pubkeys (needed for inner encryption) ----------------
+    final contact = _ctx.contacts[session.peerNodeIdHex];
+    if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) {
+      // Graceful degradation: fall back to full sendToUser path.
+      unawaited(_ctx.sendToUser(
+        recipientUserId: peerUserId,
+        messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
+        payload: encryptedFrame,
+      ));
+      return;
+    }
+
+    // --- Resolve peer device route ----------------------------------------
     if (session.cachedRoute == null) {
-      final peer = _ctx.node.routingTable.getPeer(peerNodeId) ??
-          _ctx.node.routingTable.getPeerByUserId(peerNodeId);
+      final peer = _ctx.node.routingTable.getPeer(peerUserId) ??
+          _ctx.node.routingTable.getPeerByUserId(peerUserId);
       if (peer != null) {
         session.cachedRoute = peer;
         session.cachedRouteAt = DateTime.now();
       }
     }
+    final peer = session.cachedRoute;
+    if (peer == null) {
+      // No route yet — fall back to sendToUser which runs the full cascade.
+      unawaited(_ctx.sendToUser(
+        recipientUserId: peerUserId,
+        messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
+        payload: encryptedFrame,
+      ));
+      return;
+    }
 
-    unawaited(_ctx.sendToUser(
-      recipientUserId: peerNodeId,
-      messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
-      payload: encryptedFrame,
-    ));
+    // --- Build V3 inner (ApplicationFrame, KEM-encrypted) -----------------
+    final inner = proto.ApplicationFrameV3()
+      ..recipientUserId = peerUserId
+      ..senderUserId = _ctx.identity.userId
+      ..messageType = proto.MessageTypeV3.MTV3_CALL_AUDIO
+      ..messageId = SodiumFFI().randomBytes(16)
+      ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
+      ..payload = encryptedFrame;
+
+    final innerPayload = V3FrameCodec.buildAndEncryptInner(
+      inner: inner,
+      senderUserEd25519Sk: _ctx.identity.signingEd25519Sk,
+      senderUserMlDsaSk: _ctx.identity.signingMlDsaSk,
+      recipientUserX25519Pk: contact.x25519Pk!,
+      recipientUserMlKemPk: contact.mlKemPk!,
+    );
+
+    // --- Build V3 outer (NetworkPacket, Ed25519-only device sig, no PoW) --
+    final outer = V3FrameCodec.buildOuter(
+      nextHopDeviceId: peer.nodeId,
+      senderDeviceId: _ctx.node.primaryIdentity.deviceNodeId,
+      deviceKeys: _ctx.node.deviceKeyPair,
+      innerPayload: innerPayload,
+      payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
+      applicationFlavor: false, // Ed25519-only device sig — §3.5
+      skipPoW: true,
+    );
+
+    // Fire-and-forget — no await, no ACK tracking for live media.
+    unawaited(_ctx.node.sendToDevice(outer, peer.nodeId));
   }
 
   void sendKeyframeRequest() {

@@ -167,6 +167,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// Extracted moderation sub-service (§9.3 jury, §9.4 reports, channel index gossip).
   late final ChannelModerationService _moderation;
+  @override
   ModerationConfig get moderationConfig => _moderation.moderationConfig;
   set moderationConfig(ModerationConfig value) {
     _moderation.moderationConfig = value;
@@ -392,7 +393,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.102';
+  static const String kCurrentAppVersion = '3.1.106';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -412,6 +413,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // §8.1 per-sender CR rate limit: max 5 CRs per hour per sender.
   // Key: senderUserIdHex, Value: list of timestamps (kept ≤ 5, pruned on check).
   final Map<String, List<DateTime>> _crRateTracker = {};
+
+  // §5.6 Key-rotation transition: previous primary mailbox ID, polled for 7
+  // days after key rotation so messages stored under the old pubkey are found.
+  Uint8List? _previousMailboxPrimary;
+  DateTime? _previousMailboxPrimarySetAt;
+  static const _mailboxTransitionDays = 7;
 
   // ── §5.8 One-Shot-Outbox ─────────────────────────────────────────────
   // Messages that could NOT be placed into L3 (Erasure + S&F) because the
@@ -629,6 +636,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // sender had 0 connectivity). Flush is edge-triggered by onNetworkChanged —
     // NOT by any startup timer.
     _loadOutbox();
+    _loadMailboxTransition();
     _loadPendingMembershipResends();
 
     // V3.1.44: Migrate self-entries from deviceNodeId to userIdHex in groups/channels/messages.
@@ -1746,7 +1754,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final fallbackInput = Uint8List.fromList(
       [...utf8.encode('mailbox-nid'), ...identity.nodeId],
     );
-    return _bytesEqual(mailboxId, sodium.sha256(fallbackInput));
+    if (_bytesEqual(mailboxId, sodium.sha256(fallbackInput))) return true;
+
+    // §5.6: accept fragments for previous primary during key-rotation transition
+    if (_previousMailboxPrimary != null &&
+        _bytesEqual(mailboxId, _previousMailboxPrimary!)) {
+      return true;
+    }
+
+    return false;
   }
 
   static bool _bytesEqual(Uint8List a, Uint8List b) {
@@ -1833,18 +1849,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
     final fallbackMailboxId = sodium.sha256(fallbackInput);
 
+    // §5.6 Key-rotation transition: expire old primary after 7 days.
+    if (_previousMailboxPrimary != null && _previousMailboxPrimarySetAt != null) {
+      final age = DateTime.now().difference(_previousMailboxPrimarySetAt!);
+      if (age.inDays >= _mailboxTransitionDays) {
+        _log.info('Mailbox transition: dropping old primary after $age');
+        _previousMailboxPrimary = null;
+        _previousMailboxPrimarySetAt = null;
+        _saveMailboxTransition();
+      }
+    }
+
     // Request fragments from confirmed peers only (§4.4).
     final peers = node.routingTable.allPeers
         .where((p) => node.isPeerConfirmed(p.nodeIdHex))
         .toList();
     for (final peer in peers) {
-      // Primary mailbox
       _requestFragments(peer, primaryMailboxId);
-      // Fallback mailbox
       _requestFragments(peer, fallbackMailboxId);
+      // §5.6: poll old primary mailbox during key-rotation transition
+      if (_previousMailboxPrimary != null) {
+        _requestFragments(peer, _previousMailboxPrimary!);
+      }
     }
 
-    _log.info('Mailbox poll sent to ${peers.length} peers');
+    _log.info('Mailbox poll sent to ${peers.length} peers'
+        '${_previousMailboxPrimary != null ? ' (+ transition primary)' : ''}');
   }
 
   void _requestFragments(PeerInfo peer, Uint8List mailboxId) {
@@ -2586,7 +2616,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     );
 
     // §5.5: S&F copy on mutual peers
-    _storeSafOnMutualPeers(
+    _storeSafOnContactPeers(
       recipientUserId: recipientUserId,
       wrappedEnvelope: serializedPacket,
       storeId: SodiumFFI().randomBytes(16),
@@ -2603,12 +2633,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// §5.5: Store a complete message copy on up to 3 mutual peers.
   /// Returns true if at least one mutual peer was reachable.
-  bool _storeSafOnMutualPeers({
+  bool _storeSafOnContactPeers({
     required Uint8List recipientUserId,
     required Uint8List wrappedEnvelope,
     required Uint8List storeId,
   }) {
-    final mutuals = _findMutualPeerDeviceIds(recipientUserId, limit: 3);
+    final mutuals = _findContactPeerDeviceIds(recipientUserId, limit: 3);
     if (mutuals.isEmpty) {
       _log.debug('S&F: no mutual peers for ${_hexShort(recipientUserId)}');
       return false;
@@ -2635,7 +2665,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// recipient know them). Heuristic: accepted contacts with a known
   /// deviceNodeId in the routing table (i.e. online and reachable).
   /// Excludes the recipient itself.
-  List<Uint8List> _findMutualPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
+  List<Uint8List> _findContactPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
     final recipientHex = bytesToHex(recipientUserId);
     final selfDeviceHex = bytesToHex(identity.nodeId);
     final candidates = <(Uint8List, int)>[];
@@ -3237,33 +3267,28 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final storeBytes = Uint8List.fromList(storeMsg.writeToBuffer());
 
     // Find seed peers: protected DV neighbors that are NOT the target.
+    // Route via sendInfraViaDeviceRoute (DV relay cascade) instead of
+    // sendInfraDirect — from CGNAT/mobile, direct UDP to seed-peer
+    // addresses is unreachable (private IPs not routable, public IPs
+    // lack NAT pinholes). The relay cascade falls through to Bootstrap
+    // which has an established connection.
     var sent = 0;
     for (final nhHex in node.dvRouting.neighborIds) {
       if (nhHex == recipDevHex) continue;
       final peer = node.routingTable.getPeer(hexToBytes(nhHex));
       if (peer == null || !peer.isProtectedSeed) continue;
-      if (peer.addresses.isEmpty) continue;
-      // Send to ALL known addresses (fire-and-forget, first-ACK-wins).
-      // Critical for DS-Lite/CGNAT: private IPv4 unreachable from mobile,
-      // but global IPv6 is.
-      var peerSent = false;
-      for (final addr in peer.allConnectionTargets()) {
-        if (addr.ip.isEmpty || addr.port <= 0) continue;
-        try {
-          final ok = await node.sendInfraDirect(
-            messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
-            innerPayload: storeBytes,
-            recipientDeviceId: hexToBytes(nhHex),
-            addr: InternetAddress(addr.ip),
-            port: addr.port,
-          );
-          if (ok && !peerSent) { sent++; peerSent = true; }
-          _log.info('§5.5b FIRST_CR_STORE → ${nhHex.substring(0, 8)} '
-              '(${addr.ip}:${addr.port}) ok=$ok');
-        } catch (e) {
-          _log.debug('§5.5b FIRST_CR_STORE to ${nhHex.substring(0, 8)} '
-              '(${addr.ip}:${addr.port}) error: $e');
-        }
+      try {
+        final ok = await node.sendInfraViaDeviceRoute(
+          messageType: proto.MessageTypeV3.MTV3_FIRST_CR_STORE,
+          innerPayload: storeBytes,
+          recipientDeviceId: hexToBytes(nhHex),
+        );
+        if (ok) sent++;
+        _log.info('§5.5b FIRST_CR_STORE → ${nhHex.substring(0, 8)} '
+            'via DV cascade ok=$ok');
+      } catch (e) {
+        _log.debug('§5.5b FIRST_CR_STORE to ${nhHex.substring(0, 8)} '
+            'error: $e');
       }
     }
     if (sent > 0) {
@@ -3520,7 +3545,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Allow 'pending' (normal accept), 'accepted' (re-contact response),
     // 'pending_outgoing' and 'storedForDelivery' (bidirectional CR auto-accept).
     if (contact.status != 'pending' && contact.status != 'accepted' &&
-        contact.status != 'pending_outgoing' && contact.status != 'storedForDelivery') return false;
+        contact.status != 'pending_outgoing' && contact.status != 'storedForDelivery') {
+      return false;
+    }
 
     contact.status = 'accepted';
     contact.acceptedAt ??= DateTime.now();
@@ -4195,7 +4222,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   }
 
   @override
-  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text) async {
+  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender}) async {
     if (_reducedMode) {
       _log.warn('sendGroupTextMessage blocked: reducedMode active');
       return null;
@@ -4227,6 +4254,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     if (wirePreview != null) tm.linkPreview = wirePreview;
+    if (replyToMessageId != null && replyToMessageId.isNotEmpty) {
+      try {
+        tm.replyToMessageId = hexToBytes(replyToMessageId);
+      } catch (_) {
+        _log.debug(
+            'sendGroupTextMessage: replyToMessageId not hex — wire-tag dropped');
+      }
+      if (replyToText != null && replyToText.isNotEmpty) {
+        tm.replyToSnippet = replyToText.length > 120
+            ? '${replyToText.substring(0, 120)}…'
+            : replyToText;
+      }
+    }
     final basePayload = tm.writeToBuffer();
     final groupIdBytes = hexToBytes(groupIdHex);
     // GM-1 (§9.1.4): post-tag with sender's local membership state
@@ -4264,6 +4304,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       type: UiMessageType.text,
       status: MessageStatus.sent,
       isOutgoing: true,
+      replyToMessageId: replyToMessageId,
+      replyToText: replyToText,
+      replyToSender: replyToSender,
     );
     if (previewUrl != null) {
       msg.linkPreviewUrl = previewUrl;
@@ -5666,6 +5709,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  void _loadMailboxTransition() {
+    try {
+      final json = _fileEnc.readJsonFile('$profileDir/mailbox_transition.json');
+      if (json == null) return;
+      final hexId = json['previousMailboxPrimary'] as String?;
+      final setAtMs = json['setAtMs'] as int?;
+      if (hexId != null && setAtMs != null) {
+        final setAt = DateTime.fromMillisecondsSinceEpoch(setAtMs);
+        if (DateTime.now().difference(setAt).inDays < _mailboxTransitionDays) {
+          _previousMailboxPrimary = hexToBytes(hexId);
+          _previousMailboxPrimarySetAt = setAt;
+          _log.info('Mailbox transition: loaded previous primary (age: ${DateTime.now().difference(setAt)})');
+        } else {
+          final f = File('$profileDir/mailbox_transition.json.enc');
+          if (f.existsSync()) f.deleteSync();
+        }
+      }
+    } catch (e) {
+      _log.debug('Mailbox transition: load failed: $e');
+    }
+  }
+
+  void _saveMailboxTransition() {
+    try {
+      if (_previousMailboxPrimary == null) {
+        final f = File('$profileDir/mailbox_transition.json.enc');
+        if (f.existsSync()) f.deleteSync();
+        return;
+      }
+      _fileEnc.writeJsonFile('$profileDir/mailbox_transition.json', {
+        'previousMailboxPrimary': bytesToHex(_previousMailboxPrimary!),
+        'setAtMs': _previousMailboxPrimarySetAt!.millisecondsSinceEpoch,
+      });
+    } catch (e) {
+      _log.warn('Mailbox transition: save failed: $e');
+    }
+  }
+
   /// §5.8: Add a message to the one-shot outbox.
   void _addToOutbox({
     required String messageIdHex,
@@ -5685,14 +5766,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         '(total: ${_outbox.length})');
   }
 
-  /// §5.8: Edge-triggered one-shot outbox flush.
+  /// §5.1 One-shot outbox flush (full cascade: L1→L2→L3).
   ///
   /// Called ONLY from onNetworkChanged — NOT from any timer.  For each parked
-  /// entry we attempt L3 placement (Erasure + S&F) exactly once.  If placement
-  /// succeeds the entry is removed and the message status is upgraded to
-  /// [MessageStatus.queuedOffline].  If it still fails (0 DHT peers — possible
-  /// in the split-second before Kademlia converges) the entry is retained for
-  /// the next network-change edge.
+  /// entry we first attempt direct delivery (L1 identity-resolve + L2
+  /// sendToDevice — the recipient may now be online), then fall back to L3
+  /// (Erasure + S&F) on L2 failure.  On success the entry is removed and the
+  /// message status is upgraded.  On continued failure (still zero peers) the
+  /// entry is retained for the next network-change edge.
   Future<void> _flushOutbox() async {
     if (_outbox.isEmpty) return;
     _log.info('Outbox flush: ${_outbox.length} entries on network-change edge');
@@ -5701,6 +5782,35 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       try {
         final recipientUserId = hexToBytes(entry.recipientUserIdHex);
         final canonicalBytes = base64Decode(entry.canonicalPacketB64);
+
+        // ── Layer 1+2: Try direct delivery first ──
+        var directOk = false;
+        final devices = await node.identityResolver
+            .resolve(recipientUserId);
+        if (devices.isNotEmpty) {
+          final packet = proto.NetworkPacketV3.fromBuffer(canonicalBytes);
+          for (final dev in devices) {
+            final ok = await node.sendToDevice(
+              packet, dev.deviceNodeId);
+            if (ok) {
+              directOk = true;
+              break;
+            }
+          }
+        }
+
+        if (directOk) {
+          toRemove.add(entry.messageIdHex);
+          _updateMessageStatusById(
+              entry.messageIdHex,
+              entry.recipientUserIdHex,
+              MessageStatus.delivered);
+          _log.info('Outbox flush: direct delivery OK for '
+              '${entry.messageIdHex.substring(0, 8)} → delivered');
+          continue;
+        }
+
+        // ── Layer 3: Erasure + S&F fallback ──
         final fragmentBundleId =
             SodiumFFI().sha256(canonicalBytes).sublist(0, 16);
         final recipientEd25519Pk = entry.recipientEd25519PkHex != null
@@ -5713,7 +5823,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           recipientUserEd25519Pk: recipientEd25519Pk,
           recipientUserNodeId: recipientUserId,
         );
-        final safOk = _storeSafOnMutualPeers(
+        final safOk = _storeSafOnContactPeers(
           recipientUserId: recipientUserId,
           wrappedEnvelope: canonicalBytes,
           storeId: SodiumFFI().randomBytes(16),
@@ -7027,6 +7137,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     final sodium = SodiumFFI();
+
+    // §5.6: save current primary mailbox ID before Ed25519 changes
+    final preRotInput = Uint8List.fromList(
+      [...utf8.encode('mailbox'), ...identity.ed25519PublicKey],
+    );
+    _previousMailboxPrimary = sodium.sha256(preRotInput);
+    _previousMailboxPrimarySetAt = DateTime.now();
+    _saveMailboxTransition();
 
     // 1. Generate new seed → new keys (BEFORE sending, so we can dual-sign)
     final newEntropy = sodium.randomBytes(32);
@@ -9230,7 +9348,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
-      final safOk = _storeSafOnMutualPeers(
+      final safOk = _storeSafOnContactPeers(
         recipientUserId: recipientUserId,
         wrappedEnvelope: canonicalBytes,
         storeId: SodiumFFI().randomBytes(16),
@@ -9395,7 +9513,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         recipientUserEd25519Pk: contact.ed25519Pk,
         recipientUserNodeId: recipientUserId,
       );
-      _storeSafOnMutualPeers(
+      _storeSafOnContactPeers(
         recipientUserId: recipientUserId,
         wrappedEnvelope: canonicalBytes,
         storeId: SodiumFFI().randomBytes(16),
@@ -9733,6 +9851,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     try {
       final store = proto.PeerStore.fromBuffer(frame.payload);
       final recipientUserId = Uint8List.fromList(store.recipientNodeId);
+
+      // §5.5 receiver-side validation: only store for recipients that are
+      // our accepted contacts.  This enforces "contact peer" at the storage
+      // node rather than relying on sender-side heuristics.
+      final recipientHex = bytesToHex(recipientUserId);
+      final isOurContact = _contacts.values.any((c) =>
+          bytesToHex(c.nodeId) == recipientHex && c.status == 'accepted');
+      if (!isOurContact) {
+        final ack = proto.PeerStoreAck()
+          ..storeId = store.storeId
+          ..accepted = false;
+        node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_PEER_STORE_ACK,
+          innerPayload: Uint8List.fromList(ack.writeToBuffer()),
+          recipientDeviceId: senderDeviceId,
+        );
+        return;
+      }
+
       final storeIdHex = bytesToHex(Uint8List.fromList(store.storeId));
       final ttlMs = store.ttlMs.toInt();
       final stored = node.peerMessageStore.storeMessage(
@@ -12171,7 +12308,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (wireHash.isNotEmpty && sigEd.isNotEmpty) {
           final senderEd25519Pk = senderOldMember.ed25519Pk;
           if (senderEd25519Pk != null && senderEd25519Pk.isNotEmpty) {
-            if (!SodiumFFI().verifyEd25519(sigEd, wireHash, senderEd25519Pk)) {
+            if (!SodiumFFI().verifyEd25519(wireHash, sigEd, senderEd25519Pk)) {
               _log.warn('GM-4: CHANNEL_INVITE Ed25519 sig invalid from ${senderHex.substring(0, 8)} — rejected');
               return;
             }
@@ -12343,6 +12480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         channel.ownerNodeIdHex = targetIdHex;
       }
 
+      channel.membershipEpoch++;
       _saveChannels();
 
       final sysMsg = UiMessage(
@@ -12381,6 +12519,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         group.ownerNodeIdHex = targetIdHex;
       }
 
+      group.membershipEpoch++;
       _saveGroups();
 
       final sysMsg = UiMessage(

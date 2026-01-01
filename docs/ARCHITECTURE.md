@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:0dc66a743ad4, 2026-06-21). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8531be222857, 2026-06-24). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -95,7 +95,7 @@ V3.0 changes several fundamental structures compared to v2.2. The changes are no
 
 **3. Default-Gateway as routing-layer fallback** (§5.1, §4.4). v2.2 explicitly removed the Default-Gateway fallback from the send path ("hard cut, bundled with Sec H-5 KEM v2") and replaced it with identity resolution alone — which resulted in five parallel fragile conditions for a successful send. V3.0 restores the Default-Gateway as a clean routing-layer last resort, without weakening the 2D-DHT resolver. The resolver remains the fast path; the Default-Gateway is the resilience tier.
 
-**4. MessageQueue retired** (§5.5, §5.6). v2.2 held failed sends for 7 days in a local MessageQueue and retried periodically — often with the same (potentially wrong) ID that had already failed on the first attempt. V3.0 removes the MessageQueue entirely: when "all routes exhausted" the sender stops, S&F (erasure-coded on mutual peers) plus mailbox pull (the receiver pulls upon coming online) take over offline delivery. There is no longer any sender-side retry.
+**4. MessageQueue retired** (§5.5, §5.6). v2.2 held failed sends for 7 days in a local MessageQueue and retried periodically — often with the same (potentially wrong) ID that had already failed on the first attempt. V3.0 removes the MessageQueue entirely: when "all routes exhausted" the sender stops, S&F (on contact peers, §5.5) plus mailbox pull (the receiver pulls upon coming online) take over offline delivery. There is no longer any sender-side retry.
 
 **5. Onion-routing hook prepared, not active** (§2.5). The Outer-Frame format has a `payloadType` discriminator: `payload` can be an ApplicationFrame (V3.0 default) or a nested NetworkPacket (onion layer). This makes multi-hop onion routing activatable in a later version **without another hard break**. V3.0 implements only 1 hop. When activation occurs later, a taboo list is firmly planned: live calls, DHT infrastructure, hole punch, routing updates must never traverse onion layers — latency and functionality forbid it.
 
@@ -315,7 +315,7 @@ message InfrastructureFrame {
 | 2D-DHT identity resolution — RETRIEVE side | IDENTITY_AUTH_RETRIEVE/RESPONSE, IDENTITY_LIVE_RETRIEVE/RESPONSE, IDENTITY_KEM_RETRIEVE/RESPONSE | **BOOT** |
 | 2D-DHT identity resolution — PUBLISH side | IDENTITY_AUTH_PUBLISH, IDENTITY_LIVE_PUBLISH, IDENTITY_KEM_PUBLISH | **BOOT** |
 | Fragment storage | FRAGMENT_STORE, FRAGMENT_STORE_ACK, FRAGMENT_RETRIEVE, FRAGMENT_RETRIEVE_RESPONSE, FRAGMENT_DELETE | KEM |
-| S&F on mutual peers | PEER_STORE, PEER_STORE_ACK, PEER_RETRIEVE, PEER_RETRIEVE_RESPONSE | KEM |
+| S&F on contact peers (§5.5) | PEER_STORE, PEER_STORE_ACK, PEER_RETRIEVE, PEER_RETRIEVE_RESPONSE | KEM |
 | Peer-list gossip | PEER_LIST_PUSH, PEER_LIST_SUMMARY, PEER_LIST_WANT, PEER_KEY_REQUEST, PEER_KEY_RESPONSE | **BOOT** |
 | Routing — DV updates | ROUTE_UPDATE | **BOOT** |
 | Reachability probes | REACHABILITY_QUERY, REACHABILITY_RESPONSE | **BOOT** |
@@ -1139,7 +1139,7 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 
 **Use cases**:
 
-1. **Infrastructure-Frame KEM** (§2.3.5) — DHT pings, routing probes, NAT/hole-punch, reachability queries, peer-list gossip, fragment storage, S&F on mutual peers, 2D-DHT identity-resolution operations. Sender encapsulates under recipient Device-KEM-PK; recipient decapsulates with Device-KEM-PrivKey.
+1. **Infrastructure-Frame KEM** (§2.3.5) — DHT pings, routing probes, NAT/hole-punch, reachability queries, peer-list gossip, fragment storage, S&F on contact peers (§5.5), 2D-DHT identity-resolution operations. Sender encapsulates under recipient Device-KEM-PK; recipient decapsulates with Device-KEM-PrivKey.
 2. **First-Contact-Request bootstrap** (§8.1.1) — when Alice scans Bob's ContactSeed she knows his DeviceID and userEd25519Pk (from the QR/URI). She resolves his Device-KEM-PK via DHT lookup (primary, §4.3) or DEVICE_KEM_REQUEST/OFFER handshake (fallback, §8.1.1 rev3). She does not yet know his User-KEM-PK (which she only learns from CONTACT_REQUEST_RESPONSE). The CONTACT_REQUEST itself is therefore wrapped as `InfrastructureFrame.payload` (KEM under Bob's Device-KEM-PK), with Alice's full user-signed ApplicationFrame carried as the inner payload.
 3. **Onion routing** (§2.5, future) — the per-hop KEM subject that makes the onion-hook structurally tragfähig. Without a Device-KEM-Keypair the §2.5 onion construction had no concrete cryptographic subject.
 
@@ -1369,7 +1369,7 @@ Identity resolution answers the question: *"which devices currently host this Us
    value = LivenessRecord { userId, deviceId, currentAddresses[], ttl, seq, ed25519Sig }
    ```
    - signed Ed25519-only by the user key
-   - refreshed every 15 min (foreground) or 1 h (background)
+   - refreshed every 15 min (foreground) or 1 h (background); **change-gated**: the periodic timer fires but `_skipBecauseNoChange()` suppresses the DHT publish when addresses are byte-identical AND < 80% of TTL has elapsed — only genuine address changes or TTL-expiry-proximity trigger actual wire traffic. Event-driven publishes (`onAddressesChanged`, `onPeerJoined` while under peer threshold) bypass the skip gate.
    - returns the current addresses for this device
 
 3. **DeviceKem-record lookup per device** (long-lived, 7-day TTL — NEW in V3.0 Welle 5):
@@ -1559,6 +1559,7 @@ Cleona's routing layer operates exclusively on **DeviceIDs**. The routing table 
   Total route cost = sum of all link costs along the path.
 
 - **Updates are event-driven**: on every `PEER_LIST_PUSH`, `ROUTE_UPDATE`, `RELAY_ACK`, routes are updated. There is no periodic refresh apart from a safety net (1×/hour full exchange).
+- **DV-update propagation (traffic-bounded)**: route changes fire `onRouteChanged`, which adds the destination to a pending-changes set (`_dvPendingChanges`, dedup by destination). A **2-second debounce timer** (`_dvPropagationDebounce`) accumulates all changes within the window; after 2s of silence, `_flushDvUpdates()` sends **one `ROUTE_UPDATE` per confirmed neighbor** (Split Horizon applied), then clears the set. Additionally, a **per-neighbor hold-down of 10 seconds** suppresses further updates to the same neighbor even if the debounce timer fires again — changes accumulate and ship with the next permitted flush. This bounds worst-case DV traffic to 6 updates/minute/neighbor regardless of topology churn. The `_pushSelfToNeighborsExcept` self-broadcast is separately throttled to at most once per 30 seconds (global).
 - **Stale-route revalidation**: when an incoming direct packet calls `addDirectNeighbor()` and a stale route from the same `connType` already exists, the route is revalidated in-place (`revalidate()`) without triggering a new-neighbor event or incrementing `routeEpoch`. Previously, the stale route's inflated cost (+5 penalty from `onNetworkChanged`) was compared against the fresh cost — the fresh route always "won", causing every inbound packet from a known peer to fire new-neighbor logic (welcome route update + mesh broadcast), even though the peer was already established. The fix is surgical: only stale direct routes with the same connection type are revalidated; genuinely new connection types (e.g. a peer appearing on a new network interface) still trigger a full new-neighbor event.
 - **Receive-side `_touchPeer`**: every successfully verified incoming V3 packet calls `_touchPeer(senderDeviceId, from.address, fromPort)` immediately after `dvRouting.addDirectNeighbor`. This keeps `routingTable` (peer info + addresses) and `dvRouting._neighbors` in sync regardless of the discovery channel (LAN multicast, cross-subnet unicast scan, third-party `PEER_LIST_PUSH`) — without it, cross-subnet peers would land in `dvRouting` but never in `routingTable`, leaving the send cascade with `routes=0` despite a "DV: New neighbor" log line.
 - **Split Horizon**: routes are NOT advertised back to the neighbor they were learned from.
@@ -1632,7 +1633,7 @@ sendToDevice(packet, deviceId):
 - **Wormhole (attacker faithfully forwards but observes/correlates):** **not prevented.** Detecting it would require signed path-vectors (S-BGP-style), disproportionate here — a wormhole sees only routing metadata (the same class of insider leakage discussed in §4.10), while message content stays KEM-encrypted and user-signed end-to-end.
 - **Reverse attack (on-path receipt-dropping forces a victim off a good direct route onto relay):** on-path dropping is not generically preventable; surgical route-down (§5.8) plus the multipath fallback bound the damage. This affects deliverability, not confidentiality.
 
-**Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: erasure-coded S&F on mutual peers (§5.5) plus a mailbox entry (§5.6) for receiver pull-up.
+**Important**: when `sendToDevice` returns `false`, the sender has tried every available path including the default gateway. The caller (typically `service.sendToUser`) then decides on the failover path: erasure-coded S&F on contact peers (§5.5) plus a mailbox entry (§5.6) for receiver pull-up.
 
 **MessageQueue no longer exists.** v2.2's MessageQueue retried the same send for 7 days. v3.0 stops after cascade exhaustion. The receiver pulls offline messages from the mailbox itself.
 
@@ -1778,7 +1779,7 @@ Cleona nodes behind NATs must make themselves mutually reachable. Cleona combine
 7. Relay (multi-hop via DV routing)
 
 **Active UDP Hole Punch** (V3):
-- The coordinator (bootstrap or mutual peer) sends `HOLE_PUNCH_NOTIFY` to both endpoints simultaneously.
+- The coordinator (bootstrap or shared contact peer) sends `HOLE_PUNCH_NOTIFY` to both endpoints simultaneously.
 - Both endpoints send `HOLE_PUNCH_PING` to each other's observed IP.
 - The NAT mapping opens on both sides → communication becomes possible.
 
@@ -1850,7 +1851,7 @@ V3.0 nodes operate **dual-stack** (IPv4 + IPv6 in parallel). IPv6 is increasingl
 
 **Bridging architecture** (dual-stack nodes as IPv4↔IPv6 bridges):
 - A node with both IPv4 and global IPv6 automatically becomes a bridge between IPv4-only and IPv6-only nodes.
-- When sender (IPv4-only) and receiver (IPv6-only) share mutual peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
+- When sender (IPv4-only) and receiver (IPv6-only) share contact peers via a dual-stack node, multi-hop relay implicitly acts as a bridge.
 - **Invariant:** A dual-stack relay node MUST forward incoming packets on IPv6 to recipients on IPv4 (and vice versa). The relay-forward logic (`_sendV3ViaHop`) selects the best address of the next hop independent of the IP version of the incoming packet — the bridge function follows implicitly from address selection.
 
 **CGNAT address reachability (V3.1.90+, updated V3.1.94):** The `isReachableFromCurrentNetwork` filter and `_filterNatContext` distinguish RFC 1918 private addresses from CGNAT addresses (RFC 6598 `100.64.0.0/10` + RFC 7335 `192.0.0.0/24` DS-Lite). A node on a CGNAT address **must not** send to RFC 1918 targets and vice versa — these address spaces have zero routing relationship. Cross-class private-to-private is permitted only within RFC 1918 (e.g. two RFC 1918 ranges behind the same gateway, common in home/lab networks). This eliminates guaranteed-futile UDP sends that waste traffic and obscure real delivery failures in logs.
@@ -2067,8 +2068,8 @@ Layer 2 — Per-Device Routing (§4.4)
 Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
   if Layer 2 returned false for ALL resolved devices (or Layer 1 was empty):
     → Erasure-coded backup on K=10 closest DHT nodes (§5.4)
-    → S&F copy on 3 mutual peers (§5.5)
-    → For First-CRs (no mutual peers exist): First-CR-Mailbox on SeedPeers (§5.5b)
+    → S&F copy on up to 3 contact peers (§5.5, receiver-validated)
+    → For First-CRs (no shared contacts exist): First-CR-Mailbox on SeedPeers (§5.5b)
     → Mailbox entry (§5.6) for receiver pull
     → Sender is done — receiver will poll on next coming-online
 ```
@@ -2081,7 +2082,9 @@ Layer 3 — Offline Delivery (§5.4 + §5.5 + §5.6)
 
 **Sender-side retries no longer exist.** Once all Layer-2 routes are exhausted and Layer-3 (S&F + Mailbox) has been triggered, the sender has done its duty. The receiver will pull the message from its mailbox on next coming-online.
 
-**Zero-connectivity exception (one-shot outbox).** The above assumes the sender had mesh connectivity to *place* the Layer-3 artifacts. When the sender itself has **no** connectivity (airplane mode, dead network) or the daemon crashes between Layer-2 exhaustion and Layer-3 placement, the offline layers cannot be written at all and the message would be lost. For exactly this case — and **only** this case — the message is held in a minimal local **outbox** and re-attempts Layer-3 placement **once**, edge-triggered by the next `onNetworkChanged`/first-peer-confirmed event. This is **not** the v2.2 MessageQueue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message — it is a single deferred placement of artifacts that could never be written in the first place. After a successful placement (or a successful direct send), the outbox entry is cleared.
+**Zero-connectivity exception (one-shot outbox).** The above assumes the sender had mesh connectivity to *place* the Layer-3 artifacts. When the sender itself has **no** connectivity (airplane mode, dead network) or the daemon crashes between Layer-2 exhaustion and Layer-3 placement, the offline layers cannot be written at all and the message would be lost. For exactly this case — and **only** this case — the message is held in a minimal local **outbox** (persistent: `outbox.json.enc` on disk, survives daemon crashes) and re-attempts delivery **once**, edge-triggered by the next `onNetworkChanged`/first-peer-confirmed event. The flush runs the **full cascade**: first Layer 1+2 (identity-resolve + `sendToDevice` — the recipient may now be online), then Layer 3 (erasure + S&F) on Layer-2 failure. This is **not** the v2.2 MessageQueue: there is no timer, no periodic retry against reachable network, and no re-send of an already-placed message — it is a single deferred delivery attempt for messages that could never be sent in the first place. On success (direct delivery OR Layer-3 placement), the outbox entry is cleared; on continued failure (still zero peers), the entry is retained for the next `onNetworkChanged` edge. After 7 days (`_offlineTtlMs`), undelivered entries are marked `expired` — the user can manually retry or delete.
+
+**Cascade latency budget.** Layer 2 attempts routes sequentially — each route waits for `DELIVERY_RECEIPT` or ACK timeout (`max(2 × RTT × hopCount, 8s)`, capped 30s) before trying the next. With up to 3 alive routes per device, the worst-case Layer-2 latency per device is ~30s (typical: 8–16s). Layer 3 begins only after Layer 2 is exhausted for ALL resolved devices. For latency-sensitive sends (call setup), `sendToUser` accepts `requireOnline=true` — Layer 3 is skipped entirely and the call returns `false` immediately on Layer-2 failure. **Speculative Layer-3 placement is intentionally omitted.** Placing erasure fragments while Layer 2 is still running would waste storage bandwidth for messages that may yet be delivered directly. The sequential model trades worst-case placement latency (~30s) for storage efficiency — fragments are placed only on confirmed send failure. This is acceptable because the delay affects only the *placement* timing, not the *delivery* timing to the receiver.
 
 ### 5.2 Direct Delivery (Single-Hop UDP)
 
@@ -2163,7 +2166,7 @@ If the receiver is offline, the message is stored on the K=10 closest DHT nodes 
 **Encoded payload (V3.0)**: each fragment carries a slice of the complete V3 `NetworkPacket` bytes (Outer-Device-Sig + KEM-payload + Inner). The sender does not build a separate "offline-delivery envelope" — the canonical packet is identical-or-equivalent to one of the per-device packets already built for direct delivery in §2.4.
 
 - For **ApplicationFrame** payloads (User-KEM-targeted, see §3.3): one erasure-coded copy per recipient **user** suffices, because the inner KEM-ciphertext is identical across all devices of the recipient user (KEM is User-PK-keyed). All devices polling the user's mailbox find the same fragments and reassemble independently.
-- For **InfrastructureFrame** payloads on the §2.3.5 Identity-Layer Infrastructure list (`RESTORE_BROADCAST`, Emergency `KEY_ROTATION_BROADCAST`): KEM is **Device**-PK-keyed (§3.5b), so the encoded blob can only reach one specific device. The sender takes the per-device packet built for the contact's first-resolved device as the canonical erasure-source; other devices of the same contact pick up via subsequent Direct-Send retries or via S&F on Mutual Peers (§5.5).
+- For **InfrastructureFrame** payloads on the §2.3.5 Identity-Layer Infrastructure list (`RESTORE_BROADCAST`, Emergency `KEY_ROTATION_BROADCAST`): KEM is **Device**-PK-keyed (§3.5b), so the encoded blob can only reach one specific device. The sender takes the per-device packet built for the contact's first-resolved device as the canonical erasure-source; other devices of the same contact pick up via subsequent Direct-Send retries or via S&F on contact peers (§5.5).
 
 **Receiver polling**:
 - At daemon startup: mailbox + fragment lookup for own UserID
@@ -2174,23 +2177,33 @@ If the receiver is offline, the message is stored on the K=10 closest DHT nodes 
 
 **Erasure is push-based**: the sender places fragments on send-failure, not on every send. Storage efficiency stays bounded.
 
-### 5.5 Store-and-Forward on Mutual Peers
+### 5.5 Store-and-Forward on Contact Peers
 
-In addition to erasure-coded fragments, on failure the sender also stores a **complete copy** of the message on 3 mutual peers (= peers that have both the sender and the receiver as a contact). This way the message is held on intentionally trustworthy nodes, not only on random DHT replicators.
+In addition to erasure-coded fragments, on failure the sender also stores a **complete copy** of the message on up to 3 **contact peers** — peers from the sender's own accepted-contact list that have alive routes. The sender selects by route quality (most alive routes first), falling back to well-connected routing-table peers if no contacts are currently reachable. This way the message is held on intentionally trustworthy nodes, not only on random DHT replicators.
 
-**Mutual-peer selection** (Architecture Section 5.5 v2.2):
-- The sender's `Contact` store contains the UserIDs of its contacts
-- For each contact, the sender checks: does this contact also have the receiver in its contact list? (via shared-channel membership or an explicit hint)
-- If yes, it is a "mutual peer" — Cleona trusts mutuals more than random DHT nodes
+**Sender-side peer selection** (`_findMutualPeerDeviceIds`):
+- **Phase 1**: Iterate own accepted contacts (excluding the recipient), filter for alive DV routes, rank by number of alive routes, pick top 3.
+- **Phase 2 (fallback)**: If Phase 1 yields zero candidates, fall back to confirmed routing-table peers (e.g. Bootstrap) — any reachable peer can serve as S&F relay because the receiver polls ALL confirmed peers on startup.
+
+**Storage-peer validation (receiver-side):** On receiving a `PEER_STORE` infrastructure message, the storage peer validates:
+
+1. Valid Closed-Network HMAC (official builds)
+2. Valid outer Device-Sig (sender authentication)
+3. `recipientUserId` is a **known contact** of the storage peer (exists in the peer's local contact store with status `accepted`)
+4. Per-recipient budget: max 30 messages
+5. Per-sender rate limit: max 10 stores per hour
+6. Dedup via `SHA-256(wrappedEnvelope)`
+
+Criterion 3 transforms "mutual" from a sender-side heuristic into a **receiver-enforced property**: only peers that are genuinely contacts of both sender and recipient will accept a store. No contact-list exchange is needed — the check is a local lookup in the storage peer's own contact DB. Stores for unknown recipients are silently rejected; the sender detects this via a missing `PEER_STORE_ACK` and can try the next candidate. This is consistent with the First-CR-Mailbox (§5.5b), which already validates `recipient_device_id is in the SeedPeer's routing table`.
 
 **S&F storage**:
 - Same inner frame (`ApplicationFrame`) as the original send target
-- Outer wrap to the mutual peer as a `STORE_AND_FORWARD` MessageType
-- The mutual holds the message for at most 7 days or until the receiver retrieves it
+- Outer wrap to the storage peer as a `PEER_STORE` InfrastructureFrame (Device-KEM-encrypted)
+- The storage peer holds the message for at most 7 days or until the receiver retrieves it
 
 **Receiver pull**:
-- On coming online: `STORE_AND_FORWARD_RETRIEVE` to all known mutual peers
-- Mutuals send the stored messages back
+- On coming online: `PEER_RETRIEVE` to all confirmed peers
+- Confirmed peers check their local S&F store and return stored messages
 - Dedup via `messageId`
 
 **Connection to the disappearance of MessageQueue**:
@@ -2198,13 +2211,13 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 - v3.0 removes this queue entirely — S&F takes over the responsibility
 - Benefit: receiver-pull instead of sender-push, less traffic, less ID confusion
 
-**Storage limit**: per receiver, max 30 stored messages on a single mutual. On overflow: oldest-first eviction.
+**Storage limit**: per receiver, max 30 stored messages on a single storage peer. On overflow: oldest-first eviction.
 
 ### 5.5b First-CR-Mailbox (Store-and-Forward for Non-Contacts)
 
-Regular S&F (§5.5) requires mutual peers (peers that are contacts of both sender and receiver). For First-Contact-Requests this precondition is never met — the sender and receiver do not know each other yet. The First-CR-Mailbox extends S&F to cover this gap.
+Regular S&F (§5.5) requires contact peers (peers that are contacts of the recipient, enforced receiver-side). For First-Contact-Requests this precondition is never met — the sender and receiver do not know each other yet. The First-CR-Mailbox extends S&F to cover this gap.
 
-**Mechanism**: The SeedPeers listed in the ContactSeed (§8.1.1) serve as the "mutual peers" for the First-CR. They are the only nodes known to both sides: the ContactSeed-generator selected them from its routing table, and the scanner learned about them from the QR/URI. Any node can be a SeedPeer — there is no special bootstrap role, no hardcoded addresses, no central infrastructure.
+**Mechanism**: The SeedPeers listed in the ContactSeed (§8.1.1) serve as the "contact peers" for the First-CR. They are the only nodes known to both sides: the ContactSeed-generator selected them from its routing table, and the scanner learned about them from the QR/URI. Any node can be a SeedPeer — there is no special bootstrap role, no hardcoded addresses, no central infrastructure.
 
 **New message types** (Infrastructure-Level, §2.3.5 selector list):
 
@@ -2273,17 +2286,20 @@ mailbox_id_fallback = SHA-256("mailbox-nid" || userId)                 // 32 byt
 - **Primary**: pubkey-based, used by senders that already know the receiver's pubkey (contact store)
 - **Fallback**: UserID-based, used by senders that do not yet have the pubkey (e.g. first KEM encapsulation toward a new contact)
 
-The receiver polls **both** on every mailbox poll, so no send is lost.
+The receiver polls **both** (primary + fallback) on every mailbox poll, so no send is lost.
+
+**Key-rotation transition (§7.4b):** when the user's Ed25519 key rotates, `mailbox_id_primary` changes (new pubkey → new hash). Contacts that still cache the old pubkey will store under the old primary ID until they refresh via Auth-Manifest (up to 20 hours). To prevent message loss during this window, the receiver retains the **previous primary mailbox ID** and polls it alongside the current primary + fallback for **7 days** post-rotation (matching the mailbox-storage lifetime). After 7 days, the old primary is dropped — any undelivered messages stored there have expired on the DHT side anyway. Implementation: `_pollMailbox()` maintains a `_previousMailboxPrimary` field, set during key rotation in `_onKeyRotated()`, cleared after 7 days.
 
 **Mailbox storage**:
 - Key: mailbox_id_*
 - Value: small per-recipient records keyed by `mailboxId` — encrypted fragments (erasure path) or a wrapped envelope (S&F). The hosting node learns only the recipient `mailboxId` and a `messageId`; the **senderUserId, message type and content stay inside the KEM-encrypted payload** and are not visible to the host.
 - The receiver then fetches and decrypts the full message via S&F pull or fragment reassembly
 
-**Polling schedule**:
-- At daemon startup: aggressive polling, 10× every 3s (~30s total)
-- In steady state: one mailbox poll every 60s
-- On `onNetworkChanged`: re-poll on the new address
+**Polling schedule** (event-driven, not periodic):
+- At daemon startup: aggressive polling, 10× every 3s after discovery-complete (~30s total)
+- After restore broadcast: aggressive polling, 10× every 3s
+- On `onNetworkChanged`: one-shot re-poll (edge-triggered, no timer)
+- Steady state: **push-first** — relay nodes forward fragments immediately (< 1s); **no timer-based polling** (Arbeitsregel #5)
 
 **PK propagation**: if receiver A does not yet have the pubkey of sender B (e.g. first CR), A cannot decrypt the KEM. In that case the message is a `CONTACT_REQUEST`, which carries the sender pubkey in cleartext (in the inner frame) — handled specially in §8.1 Contact Request Protocol.
 
@@ -2571,7 +2587,7 @@ The Restore Broadcast is the mechanism that makes Cleona's recovery truly unique
 1. User recovers their user-identity private key via recovery phrase or Social Recovery.
 2. App performs a complete profile wipe and re-derives user keys from the seed; a fresh per-device signing keypair is generated (§3.5).
 3. App connects to the network using the recovered `userId` and the fresh `deviceId`. The Identity Resolver (§4.3) is updated so that other peers can re-discover this device.
-4. App emits a `RESTORE_BROADCAST` `InfrastructureFrame` per contact device, KEM-encrypted under the contact's Device-KEM-PK (§3.5b), Outer-signed under the recovering peer's fresh Device-Sig-Keys (rotation-stable per §3.5b). The body carries an old-Ed25519 signature for inner authenticity. The frame is additionally erasure-coded into the DHT (§5.4) so offline contacts pick it up via Mailbox-Pull when they come online — the encoded blob is the canonical NetworkPacket built for the contact's first-resolved device (per §5.4: InfraFrame KEM is device-PK-keyed, so one encoded copy reaches at most one device of the contact; further devices of the same contact pick up via subsequent Direct-Send retries or via S&F on Mutual Peers, §5.5).
+4. App emits a `RESTORE_BROADCAST` `InfrastructureFrame` per contact device, KEM-encrypted under the contact's Device-KEM-PK (§3.5b), Outer-signed under the recovering peer's fresh Device-Sig-Keys (rotation-stable per §3.5b). The body carries an old-Ed25519 signature for inner authenticity. The frame is additionally erasure-coded into the DHT (§5.4) so offline contacts pick it up via Mailbox-Pull when they come online — the encoded blob is the canonical NetworkPacket built for the contact's first-resolved device (per §5.4: InfraFrame KEM is device-PK-keyed, so one encoded copy reaches at most one device of the contact; further devices of the same contact pick up via subsequent Direct-Send retries or via S&F on contact peers, §5.5).
 5. Every node that processes the broadcast checks: "Is this `userId` in my contact list?"
 6. If yes, the contact's app automatically responds with: their contact information (so the recovering user rebuilds their contact list), the encrypted chat history of their shared conversation, group memberships with member crypto keys and profile data.
 7. For anti-abuse protection the recovery is made **visible and authenticated**, not silently followed: the inner hybrid signature (H-2) binds the proof to both the contact's stored Ed25519 and ML-DSA keys, and a restore that actually changes the contact's identity key routes through §8.3 Key-Change-Detection (verification reset + warning, §6.3.5). (Guardian-quorum gating of data release is documented as an aspiration in §6.3.5 but is **not** cryptographically enforced — see there.)
@@ -3409,7 +3425,7 @@ Groups and channels share a similar but distinct role hierarchy:
 
 The Owner configures whether Members can post (discussion mode) or only read (announcement mode). Channel/group settings (name, description, picture, posting policy, message expiry) can be changed by the **Owner or Admin**. This applies identically to groups and channels.
 
-**Role updates:** `CHANNEL_ROLE_UPDATE` messages must be sent to ALL group/channel members, not just the affected member. The role update handler checks both `channelManager` and `groupManager` to find the correct entity.
+**Role updates:** `CHANNEL_ROLE_UPDATE` messages must be sent to ALL group/channel members, not just the affected member. The role update handler checks both `channelManager` and `groupManager` to find the correct entity. **Receiver-side epoch sync:** Receivers increment their local `membershipEpoch` on each valid `CHANNEL_ROLE_UPDATE` to stay synchronized with the sender (who incremented in `setMemberRole` per §9.1.4). Without this, a receiver who later becomes owner would broadcast `CHANNEL_INVITE`s with a stale epoch, causing GM-4 rejection by peers who received the intermediate role updates from the previous owner.
 
 ##### 9.1.2.1 Leave Semantics & Ownership Transfer
 
@@ -5269,7 +5285,7 @@ After this initial poll, the node switches to pure push-based operation. No furt
 Within the startup poll window, operations are strictly prioritized:
 
 1. Retrieve own pending message fragments from DHT mailbox (highest priority).
-2. Retrieve Store-and-Forward whole messages from mutual peers (§5.5).
+2. Retrieve Store-and-Forward whole messages from contact peers (§5.5).
 3. Send own queued outbound `ApplicationFrame`s from the persistent Store-and-Forward + Mailbox-Pull buffer (§5.5 / §5.6).
 4. Exchange peer list deltas with contacted peers (Mesh Discovery propagation, §4.5).
 5. Update DHT routing table with fresh peer information (§4.4).
@@ -5390,7 +5406,7 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
   1. Gespeicherte Routing-Tabelle laden (Peers, Adressen, Scores — persistiert bei `AppLifecycleState.paused`)
   2. UDP-Socket oeffnen auf dem gespeicherten Port
   3. Bekannte Peers kontaktieren: PING an Top-3-Peers (nach Score sortiert)
-  4. Store-and-Forward abrufen: Mutual Peers nach wartenden Nachrichten fragen
+  4. Store-and-Forward abrufen: Contact Peers nach wartenden Nachrichten fragen
   5. Reed-Solomon-Fragmente vom DHT holen (fuer Nachrichten die waehrend Offline ankamen)
   6. Empfangene Nachrichten entschluesseln + als lokale iOS-Notifications anzeigen (`UNUserNotificationCenter`)
   7. Routing-Tabelle + Nachrichten persistieren
@@ -6142,7 +6158,7 @@ Future<bool> _offlineFallback(ApplicationFrame frame, Uint8List userId) async {
   // Erasure-coded across K=10 closest DHT replicators
   await erasureBackup.store(frame, userId);
 
-  // S&F copy on 3 mutual peers
+  // S&F copy on up to 3 contact peers (receiver-validated)
   await sfStore.distribute(frame, userId);
 
   // Mailbox notification
@@ -7414,7 +7430,7 @@ enum MessageType {
   FRAGMENT_RETRIEVE_RESPONSE = 123;
   FRAGMENT_DELETE            = 124;
 
-  // ── Store-and-Forward on Mutual Peers ─────────────────────
+  // ── Store-and-Forward on Contact Peers ─────────────────────
   PEER_STORE                 = 130;
   PEER_STORE_ACK             = 131;
   PEER_RETRIEVE              = 132;
@@ -7929,7 +7945,7 @@ Complete sub-section cross-walk table, derived from `docs/V3_MIGRATION_MAP.md`. 
 | 3.3.3 | Recipient Offline | REWRITE | 5.4 + 5.5 |
 | 3.3.4 | Message Deduplication | PORT | 5.7 |
 | 3.3.5 / 5a / 6 | Mailbox & PK Lookup | PORT | 5.6 |
-| 3.3.7 | S&F on Mutual Peers | REWRITE | 5.5 |
+| 3.3.7 | S&F on Contact Peers | REWRITE | 5.5 |
 | 3.4 / 3.4.1-3 | Two-Stage Media | PORT | 5.7 / 5.7.x |
 | 3.5 | Relay Storage Management | PORT | 5.5.x |
 | 4.1 / 4.2 | Crypto Philosophy + Primitives | PORT/REWRITE | 3.2 |

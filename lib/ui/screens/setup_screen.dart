@@ -136,22 +136,28 @@ class _SetupScreenState extends State<SetupScreen> {
       // Create identity via IdentityManager
       final identityMgr = IdentityManager();
 
-      // Kick off PQ keygen immediately — runs in a background isolate and
-      // overlaps with the seed-phrase dialog. On slow VMs the keygen takes
-      // 15-30s; without prewarming the user would wait for it *after*
-      // confirming the seed phrase, so the Home screen appears much later.
-      identityMgr.preWarmPqKeys();
-      log('preWarmPqKeys kicked');
-
-      // Generate seed phrase for recovery
       if (!identityMgr.hasMasterSeed()) {
         final words = identityMgr.generateSeedPhrase();
         log('seed-phrase generated');
-        // Show the seed phrase to the user
+        // Kick off deterministic PQ keygen NOW — runs in a background isolate
+        // and overlaps with the seed-phrase dialog. On slow VMs the keygen
+        // takes 15-30s; the dialog reading time covers most of it.
+        final masterSeed = identityMgr.loadMasterSeed()!;
+        final hdIndex = identityMgr.nextHdIndex();
+        identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        log('deterministic prewarm kicked (hdIndex=$hdIndex)');
         if (mounted) {
           await _showSeedPhraseBackup(words);
           log('seed-dialog dismissed');
         }
+      } else {
+        // Seed already exists (restore/re-create case). Still use
+        // deterministic prewarm — random keys would be discarded by
+        // _preGenerateKeys because masterSeed != null.
+        final masterSeed = identityMgr.loadMasterSeed()!;
+        final hdIndex = identityMgr.nextHdIndex();
+        identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
+        log('deterministic prewarm kicked (existing seed, hdIndex=$hdIndex)');
       }
 
       final identity = await identityMgr.createIdentity(name);

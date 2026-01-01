@@ -254,6 +254,11 @@ class CleonaNode {
   Timer? _discoveryCascadeTimer;
 
   final Set<String> _dvPendingChanges = {};
+  // §4.4: Per-neighbor hold-down — suppress DV updates to a neighbor for 10s
+  // after the last flush to that neighbor.  Bounds worst-case traffic to
+  // 6 updates/min/neighbor regardless of topology churn.
+  final Map<String, DateTime> _dvHoldDownUntil = {};
+  static const _dvHoldDownDuration = Duration(seconds: 10);
   final RelayDedupCache _relayDedup = RelayDedupCache();
 
   // D5 (§5.3 + §13.1.3): collective relay-forward slice for non-introduced
@@ -1059,7 +1064,27 @@ class CleonaNode {
           }
         }
       }
-      // Wait up to 5 s for PONG + PEER_LIST_PUSH
+      // PINGs produce PONGs but NOT PEER_LIST_PUSH. Send PEER_LIST_WANT
+      // alongside to explicitly trigger a PUSH response → _onDiscoveryComplete.
+      final wantData = proto.PeerListWant();
+      for (final peer in stored.take(20)) {
+        wantData.wantedNodeIds.add(peer.nodeId);
+      }
+      final wantBytes = wantData.writeToBuffer();
+      for (final peer in stored.take(3)) {
+        for (final addr in _filterNatContext(
+            peer.allConnectionTargets(), peer)) {
+          sendInfraDirect(
+            messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+            innerPayload: wantBytes,
+            recipientDeviceId: peer.nodeId,
+            addr: InternetAddress(addr.ip),
+            port: addr.port,
+          );
+        }
+        _outstandingPeerListWants[peer.nodeIdHex] = DateTime.now();
+      }
+      // Wait up to 5 s for PEER_LIST_PUSH response
       for (var i = 0; i < 10 && !_discoveryComplete; i++) {
         await Future.delayed(const Duration(milliseconds: 500));
       }
@@ -3307,7 +3332,6 @@ class CleonaNode {
     final routes = dvRouting.routesTo(destHex);
     var attempts = 0;
     const maxRouteAttempts = 3;
-    var directSentBestEffort = false;
     for (final route in routes) {
       if (attempts >= maxRouteAttempts) break;
       if (!route.isAlive) continue;
@@ -3338,7 +3362,6 @@ class CleonaNode {
             _log.info('sendToDevice ${destHex.substring(0, 8)}: direct route '
                 'sent but no recent inbound (${inbound != null ? "${DateTime.now().difference(inbound).inSeconds}s ago" : "never"}) '
                 '— continuing cascade');
-            directSentBestEffort = true;
             continue;
           }
         }
@@ -3384,7 +3407,6 @@ class CleonaNode {
                   packet, InternetAddress(addr.ip), addr.port);
             } catch (_) {}
           }
-          directSentBestEffort = true;
         }
       }
     }
@@ -3880,6 +3902,24 @@ class CleonaNode {
       _log.debug('sendInfraDirect: transport error to ${addr.address}:$port: $e');
       return false;
     }
+  }
+
+  /// Build a BOOT-path infrastructure packet and deliver it via the full
+  /// DV relay cascade ([sendToDevice]).  Unlike [sendInfraDirect] this
+  /// works from CGNAT/mobile because the cascade falls through to relay
+  /// hops when direct UDP is unreachable.
+  Future<bool> sendInfraViaDeviceRoute({
+    required proto.MessageTypeV3 messageType,
+    required Uint8List innerPayload,
+    required Uint8List recipientDeviceId,
+  }) async {
+    final packet = _buildInfraPacket(
+      messageType: messageType,
+      innerPayload: innerPayload,
+      recipientDeviceId: recipientDeviceId,
+    );
+    if (packet == null) return false;
+    return sendToDevice(packet, recipientDeviceId, expectsReply: false);
   }
 
   /// Resolve a user identifier to the set of authorized device-node-IDs
@@ -4660,6 +4700,53 @@ class CleonaNode {
       }
     }
 
+    // 4b. §4.5: Send PEER_LIST_WANT to restore _discoveryComplete after
+    // network change. Step 4's PINGs produce PONGs but NOT PEER_LIST_PUSH.
+    // Without this WANT, _discoveryComplete stays false → DV propagation,
+    // Welcome, and Catch-Up route updates are blocked indefinitely (only
+    // the 15-min maintenance timer would recover). The PUSH response
+    // triggers _onDiscoveryComplete.
+    {
+      final wantTargets = <PeerInfo>[];
+      for (final hex in _confirmedPeers.keys) {
+        final peer = routingTable.getPeer(hexToBytes(hex));
+        if (peer != null && !_isLocalIdentity(hex)) {
+          wantTargets.add(peer);
+        }
+        if (wantTargets.length >= 3) break;
+      }
+      if (wantTargets.isEmpty) {
+        for (final peer in routingTable.allPeers) {
+          if (!_isLocalIdentity(peer.nodeIdHex)) {
+            wantTargets.add(peer);
+          }
+          if (wantTargets.length >= 3) break;
+        }
+      }
+      if (wantTargets.isNotEmpty) {
+        final wantData = proto.PeerListWant();
+        for (final peer in routingTable.allPeers.take(20)) {
+          wantData.wantedNodeIds.add(peer.nodeId);
+        }
+        final wantBytes = wantData.writeToBuffer();
+        _log.info('§4.5 Network change: PEER_LIST_WANT → '
+            '${wantTargets.length} peers to restore discoveryComplete');
+        for (final target in wantTargets) {
+          for (final addr in _filterNatContext(
+              target.allConnectionTargets(), target)) {
+            sendInfraDirect(
+              messageType: proto.MessageTypeV3.MTV3_PEER_LIST_WANT,
+              innerPayload: wantBytes,
+              recipientDeviceId: target.nodeId,
+              addr: InternetAddress(addr.ip),
+              port: addr.port,
+            );
+          }
+          _outstandingPeerListWants[target.nodeIdHex] = DateTime.now();
+        }
+      }
+    }
+
     // 5. Re-bootstrap
     await _kademliaBootstrap();
 
@@ -5273,9 +5360,18 @@ class CleonaNode {
     // For each neighbor an individual update (Split Horizon).
     // §4.4: only send to confirmed peers.
     var sent = 0;
+    var heldDown = 0;
     final now = DateTime.now();
     for (final neighborHex in dvRouting.neighbors.keys) {
       if (!isPeerConfirmed(neighborHex)) continue;
+
+      // §4.4 per-neighbor hold-down: suppress updates for 10s after last flush
+      final holdUntil = _dvHoldDownUntil[neighborHex];
+      if (holdUntil != null && now.isBefore(holdUntil)) {
+        heldDown++;
+        continue;
+      }
+
       final entries = dvRouting.buildUpdateFor(neighborHex);
       if (entries.isEmpty) continue;
 
@@ -5285,15 +5381,19 @@ class CleonaNode {
       _sendRouteUpdate(peer, entries);
       _lastRouteUpdateSentTo[neighborHex] = now;
       _lastRouteEpochSentTo[neighborHex] = dvRouting.routeEpoch;
+      _dvHoldDownUntil[neighborHex] = now.add(_dvHoldDownDuration);
       sent++;
     }
-    if (sent > 0) {
-      _log.debug('DV: Flush sent updates to $sent neighbors ($changes pending changes)');
+    if (heldDown > 0) {
+      // Re-schedule flush for held-down neighbors
+      _dvPropagationDebounce?.cancel();
+      _dvPropagationDebounce =
+          Timer(_dvHoldDownDuration, _flushDvUpdates);
     }
-
-    // V3.0: Drain-on-DV-Update entfällt — keine persistente SendQueue mehr.
-    // Stattdessen: Empfänger holt offline gewordene Nachrichten via Mailbox-Pull
-    // (Architektur §5). TODO(C-Phase): Mailbox-Pull-Trigger bei DV-Route-Recovery.
+    if (sent > 0) {
+      _log.debug('DV: Flush sent updates to $sent neighbors '
+          '($changes pending changes, $heldDown held-down)');
+    }
   }
 
   void _sendRouteUpdate(PeerInfo peer, List<RouteEntry> entries) {

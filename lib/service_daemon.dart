@@ -1348,6 +1348,12 @@ class _MultiServiceDaemon {
   }
 
   void _launchGui() {
+    if (_ipcServer != null && _ipcServer!.hasClients) {
+      final triggerFile = File('${config.baseDir}/gui.show');
+      triggerFile.writeAsStringSync('${pid}');
+      log.info('Tray: GUI already connected — wrote gui.show trigger');
+      return;
+    }
     final exePath = Platform.resolvedExecutable;
     final sep = Platform.pathSeparator;
     final dir = exePath.substring(0, exePath.lastIndexOf(sep));

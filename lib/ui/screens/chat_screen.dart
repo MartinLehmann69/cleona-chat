@@ -2044,7 +2044,12 @@ class _ChatScreenState extends State<ChatScreen> {
     if (widget.isChannel) {
       sendFuture = service.sendChannelPost(widget.conversationId, text);
     } else if (widget.isGroup) {
-      sendFuture = service.sendGroupTextMessage(widget.conversationId, text);
+      sendFuture = service.sendGroupTextMessage(
+        widget.conversationId, text,
+        replyToMessageId: replyMsg?.id,
+        replyToText: replyMsg != null ? (replyMsg.text.length > 200 ? replyMsg.text.substring(0, 200) : replyMsg.text) : null,
+        replyToSender: replyMsg == null || replyMsg.isOutgoing ? null : _getSenderName(replyMsg, service),
+      );
     } else {
       sendFuture = service.sendTextMessage(
         widget.conversationId, text,

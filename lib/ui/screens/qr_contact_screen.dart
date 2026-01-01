@@ -57,6 +57,13 @@ class _QrShowScreenState extends State<QrShowScreen> {
     final qrDisplayName = activeIdentity?.displayName ?? service.displayName;
     final channelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
 
+    final idHexSource = activeIdentity?.nodeIdHex != null
+        ? 'identity' : 'service-FALLBACK';
+    debugPrint('[ContactSeed:qr] identity="${qrDisplayName}" '
+        'nodeIdHex=${qrNodeIdHex.substring(0, 8)} (from $idHexSource) '
+        'service.nodeIdHex=${service.nodeIdHex.substring(0, 8)} '
+        'match=${qrNodeIdHex == service.nodeIdHex}');
+
     final seed = service.contactSeedBuilder.getContactSeedFor(
       nodeIdHex: qrNodeIdHex,
       displayName: qrDisplayName,

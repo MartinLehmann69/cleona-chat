@@ -257,6 +257,10 @@ class IdentityManager {
   /// instead of running in the critical path.
   Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})>? _pqKeygenPrewarm;
 
+  /// HD index corresponding to [_pqKeygenPrewarm] when it was started via
+  /// [preWarmPqKeysDeterministic]. Consumed by [_preGenerateKeys].
+  int? _pqPrewarmHdIndex;
+
   /// Kick off ML-DSA-65 + ML-KEM-768 keygen in an isolate without blocking.
   /// The caller is expected to invoke [createIdentity] afterwards; the pending
   /// keys are consumed there. Safe to call multiple times (first call wins).
@@ -265,6 +269,14 @@ class IdentityManager {
   /// instead of appearing as post-confirm latency.
   void preWarmPqKeys() {
     _pqKeygenPrewarm ??= generatePqKeysIsolated();
+  }
+
+  /// Like [preWarmPqKeys] but starts **deterministic** PQ keygen from the
+  /// master seed + HD index. This way the prewarmed keys are the exact keys
+  /// that [createIdentity] will need — no discard/re-generate.
+  void preWarmPqKeysDeterministic(Uint8List masterSeed, int hdIndex) {
+    _pqKeygenPrewarm ??= generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
+    _pqPrewarmHdIndex = hdIndex;
   }
 
   /// Create a new identity. Uses HD-Wallet index if master seed exists.
@@ -336,15 +348,22 @@ class IdentityManager {
 
     // PQ keys: deterministic from master seed (seed recovery), or random.
     // Background isolate avoids ANR on Android (15-30s on slow devices).
-    final pqPrewarmed = _pqKeygenPrewarm != null && masterSeed == null;
     final pqStart = Stopwatch()..start();
     final Future<({Uint8List mlDsaPk, Uint8List mlDsaSk, Uint8List mlKemPk, Uint8List mlKemSk})> pqFuture;
-    if (masterSeed != null && hdIndex != null) {
+    final bool pqPrewarmed;
+    if (_pqKeygenPrewarm != null && masterSeed != null && hdIndex != null && _pqPrewarmHdIndex == hdIndex) {
+      // Deterministic prewarm matches — reuse the already-running keygen.
+      pqFuture = _pqKeygenPrewarm!;
+      pqPrewarmed = true;
+    } else if (masterSeed != null && hdIndex != null) {
       pqFuture = generatePqKeysDeterministicIsolated(masterSeed, hdIndex);
+      pqPrewarmed = false;
     } else {
       pqFuture = _pqKeygenPrewarm ?? generatePqKeysIsolated();
+      pqPrewarmed = _pqKeygenPrewarm != null;
     }
     _pqKeygenPrewarm = null;
+    _pqPrewarmHdIndex = null;
     final pqKeys = await pqFuture;
     // print() (stdout) is captured in /tmp/cleona-gui.log by the GUI launcher;
     // stderr is not. No flutter/foundation import here because this file also

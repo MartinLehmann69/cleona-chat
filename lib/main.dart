@@ -784,9 +784,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _instance = this;
     WidgetsBinding.instance.addObserver(this);
     _restoreThemeMode();
-    // Monitor show-trigger (Unix desktops — pairs with Single-Instance-Guard
-    // in main() which writes $home/.cleona/gui.show on re-launch)
-    if (Platform.isLinux || Platform.isMacOS) {
+    if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
       _showTriggerTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
         _checkShowTrigger();
       });
@@ -1545,15 +1543,20 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Switches to another identity — IMMEDIATELY via IPC or in-process.
   Future<void> switchIdentity(Identity identity) async {
+    debugPrint('[switchIdentity] → ${identity.displayName} '
+        'nodeIdHex=${identity.nodeIdHex?.substring(0, 8) ?? "NULL"}');
     if (_ipcClient != null && identity.nodeIdHex != null) {
-      // Linux: instant switch via IPC
       final ok = await _ipcClient!.switchIdentity(identity.nodeIdHex!);
+      debugPrint('[switchIdentity] IPC result=$ok '
+          'service.nodeIdHex=${_ipcClient!.nodeIdHex.substring(0, 8)}');
       if (ok) {
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
         _scheduleSkinPrecache(identity.skinId);
         return;
       }
+      debugPrint('[switchIdentity] WARNING: IPC switch FAILED for '
+          '${identity.displayName} — service stays on previous identity!');
     }
 
     // In-process: switch to the right service
@@ -1561,13 +1564,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final service = _inProcessServices[identity.nodeIdHex!];
       if (service != null) {
         _service = service;
+        debugPrint('[switchIdentity] in-process OK: ${identity.displayName}');
         IdentityManager().setActiveIdentity(identity);
         notifyListeners();
         _scheduleSkinPrecache(identity.skinId);
         return;
       }
+      debugPrint('[switchIdentity] WARNING: in-process switch FAILED — '
+          'nodeIdHex ${identity.nodeIdHex!.substring(0, 8)} not in '
+          '[${_inProcessServices.keys.map((k) => k.substring(0, 8)).join(", ")}]');
     }
 
+    debugPrint('[switchIdentity] FALLTHROUGH: setActiveIdentity without '
+        'service switch — ContactSeed will use WRONG identity keys!');
     IdentityManager().setActiveIdentity(identity);
     notifyListeners();
     _scheduleSkinPrecache(identity.skinId);

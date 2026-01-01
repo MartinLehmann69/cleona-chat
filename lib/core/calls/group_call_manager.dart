@@ -37,7 +37,7 @@ class GroupCallManager {
   final IdentityContext identity;
   final CleonaNode node;
   final Map<String, ContactInfo> contacts;
-  final Map<String, GroupInfo> groups;
+  final Map<String, GroupInfo> Function() _getGroups;
   final CLogger _log;
 
   GroupCallSession? _currentGroupCall;
@@ -78,9 +78,10 @@ class GroupCallManager {
     required this.identity,
     required this.node,
     required this.contacts,
-    required this.groups,
+    required Map<String, GroupInfo> Function() getGroups,
     required String profileDir,
-  }) : _log = CLogger.get('group-calls', profileDir: profileDir);
+  }) : _getGroups = getGroups,
+       _log = CLogger.get('group-calls', profileDir: profileDir);
 
   GroupCallSession? get currentGroupCall => _currentGroupCall;
   bool get inGroupCall => _currentGroupCall?.state == GroupCallState.inCall;
@@ -94,7 +95,7 @@ class GroupCallManager {
       return null;
     }
 
-    final group = groups[groupIdHex];
+    final group = _getGroups()[groupIdHex];
     if (group == null) {
       _log.warn('Group $groupIdHex not found');
       return null;
@@ -597,7 +598,7 @@ class GroupCallManager {
     final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
     final groupIdHex = bytesToHex(Uint8List.fromList(invite.groupId));
 
-    final group = groups[groupIdHex];
+    final group = _getGroups()[groupIdHex];
     final groupName = group?.name ?? groupIdHex.substring(0, 8);
 
     final session = GroupCallSession(

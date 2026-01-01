@@ -37,6 +37,7 @@ _crypto_core_ed25519_scalar_mul
 _crypto_core_ed25519_scalar_random
 _crypto_scalarmult_ed25519_base_noclamp
 _crypto_scalarmult_ed25519_noclamp
+_sodium_memzero
 
 # liboqs
 _OQS_init

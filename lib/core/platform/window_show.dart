@@ -1,17 +1,25 @@
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
 
 /// Shows/raises the application window.
 /// - Linux: GTK3 FFI (gtk_window_present).
 /// - macOS: MethodChannel to Swift (NSApp.activate).
-/// - Windows: no-op (Windows variant uses native_tray_windows to restore).
+/// - Windows: Win32 FFI (FindWindowW + ShowWindow + SetForegroundWindow).
 class WindowShow {
   static bool _initialized = false;
   static late void Function(Pointer, int) _gtkWindowPresent;
   static late Pointer Function() _gtkWindowListToplevels;
   static late void Function(Pointer) _gtkWidgetShowAll;
+
+  // Windows
+  static bool _winInitialized = false;
+  static late int Function(int, int) _showWindow;
+  static late int Function(int) _setForegroundWindow;
+  static late int Function(Pointer<Utf16>, Pointer<Utf16>) _findWindowW;
+  static late int Function(int) _isIconic;
 
   static const MethodChannel _macChannel =
       MethodChannel('chat.cleona.cleona/window');
@@ -35,16 +43,43 @@ class WindowShow {
           void Function(Pointer)>('gtk_widget_show_all');
 
       _initialized = true;
-    } catch (_) {
-      // Silently fail — window show will be a no-op
-    }
+    } catch (_) {}
+  }
+
+  static void _initWindows() {
+    if (_winInitialized) return;
+
+    try {
+      final user32 = DynamicLibrary.open('user32.dll');
+
+      _showWindow = user32.lookupFunction<
+          Int32 Function(IntPtr, Int32),
+          int Function(int, int)>('ShowWindow');
+
+      _setForegroundWindow = user32.lookupFunction<
+          Int32 Function(IntPtr),
+          int Function(int)>('SetForegroundWindow');
+
+      _findWindowW = user32.lookupFunction<
+          IntPtr Function(Pointer<Utf16>, Pointer<Utf16>),
+          int Function(Pointer<Utf16>, Pointer<Utf16>)>('FindWindowW');
+
+      _isIconic = user32.lookupFunction<
+          Int32 Function(IntPtr),
+          int Function(int)>('IsIconic');
+
+      _winInitialized = true;
+    } catch (_) {}
   }
 
   /// Show/raise the main application window.
   static void show() {
     if (Platform.isMacOS) {
-      // Fire-and-forget — platform side handles NSApp.activate + window orderFront.
       _macChannel.invokeMethod('show').catchError((_) => null);
+      return;
+    }
+    if (Platform.isWindows) {
+      _showWindows();
       return;
     }
     if (!Platform.isLinux) return;
@@ -55,7 +90,6 @@ class WindowShow {
       final toplevels = _gtkWindowListToplevels();
       if (toplevels == nullptr) return;
 
-      // GList struct: { void *data, GList *next, GList *prev }
       var node = toplevels;
       while (node != nullptr) {
         final data = node.cast<Pointer>().value;
@@ -64,13 +98,30 @@ class WindowShow {
           _gtkWindowPresent(data, 0);
           break;
         }
-        // Move to next: offset 1 pointer-width
         final nextPtr = Pointer<Pointer>.fromAddress(
             node.address + sizeOf<Pointer>());
         node = nextPtr.value;
       }
-    } catch (_) {
-      // Ignore errors — best effort
-    }
+    } catch (_) {}
+  }
+
+  static void _showWindows() {
+    _initWindows();
+    if (!_winInitialized) return;
+
+    try {
+      final className = 'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf16();
+      final hwnd = _findWindowW(className, nullptr.cast());
+      calloc.free(className);
+
+      if (hwnd != 0) {
+        if (_isIconic(hwnd) != 0) {
+          _showWindow(hwnd, 9); // SW_RESTORE
+        } else {
+          _showWindow(hwnd, 5); // SW_SHOW
+        }
+        _setForegroundWindow(hwnd);
+      }
+    } catch (_) {}
   }
 }

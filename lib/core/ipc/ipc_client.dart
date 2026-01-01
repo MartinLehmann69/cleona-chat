@@ -1206,10 +1206,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text) async {
+  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender}) async {
     final resp = await _sendRequest('send_group_text', params: {
       'groupIdHex': groupIdHex,
       'text': text,
+      'replyToMessageId': ?replyToMessageId,
+      'replyToText': ?replyToText,
+      'replyToSender': ?replyToSender,
     });
     if (resp.success) {
       return UiMessage(

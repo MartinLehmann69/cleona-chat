@@ -87,7 +87,7 @@ abstract class ICleonaService {
   // Groups
   Map<String, GroupInfo> get groups;
   Future<String?> createGroup(String name, List<String> memberNodeIdHexList);
-  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text);
+  Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
   Future<bool> leaveGroup(String groupIdHex);
   Future<bool> inviteToGroup(String groupIdHex, String memberNodeIdHex);
   Future<bool> removeMemberFromGroup(String groupIdHex, String memberNodeIdHex);

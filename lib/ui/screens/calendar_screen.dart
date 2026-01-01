@@ -31,31 +31,28 @@ enum CalendarView { day, week, month, year, tasks }
 class _CalendarScreenState extends State<CalendarScreen> {
   CalendarView _currentView = CalendarView.month;
   late DateTime _selectedDate;
+  IpcClient? _ipcForDispose;
 
   @override
   void initState() {
     super.initState();
     _selectedDate = DateTime.now();
-    _setSyncForeground(true);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final svc = context.read<CleonaAppState?>()?.service;
+    if (svc is IpcClient) {
+      _ipcForDispose = svc;
+      svc.setCalendarSyncForeground(true);
+    }
   }
 
   @override
   void dispose() {
-    _setSyncForeground(false);
+    _ipcForDispose?.setCalendarSyncForeground(false);
     super.dispose();
-  }
-
-  /// Signal the daemon whether the calendar is currently being viewed,
-  /// so it can adapt the external-sync polling cadence (§23.8 P2P
-  /// substitute for FCM push).
-  void _setSyncForeground(bool foreground) {
-    final appState = context.read<CleonaAppState?>();
-    final svc = appState?.service;
-    if (svc is IpcClient) {
-      // Fire-and-forget — the daemon replies to keep the IPC pipeline happy
-      // but the UI doesn't need the response.
-      svc.setCalendarSyncForeground(foreground);
-    }
   }
 
   @override

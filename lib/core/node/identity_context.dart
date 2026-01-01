@@ -241,7 +241,21 @@ class IdentityContext {
   /// (§3.7 step 5) or the legacy db.key fallback for pre-migration profiles.
   Future<void> initKeys() async {
     final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKey);
-    final json = fileEnc.readJsonFile('$profileDir/keys.json');
+    var json = fileEnc.readJsonFile('$profileDir/keys.json');
+
+    // Migration: keys.json.enc may have been written with the legacy db.key
+    // (pre-§3.7 binary). Try the legacy key before regenerating.
+    bool migratedFromLegacy = false;
+    if (json == null && _fileEncKey != null &&
+        File('$profileDir/keys.json.enc').existsSync()) {
+      final legacyEnc = FileEncryption(baseDir: _baseDir, key: null);
+      json = legacyEnc.readJsonFile('$profileDir/keys.json');
+      if (json != null) {
+        migratedFromLegacy = true;
+        _log.info('Keys decrypted with legacy db.key — migrating to '
+            'seed-derived encryption');
+      }
+    }
 
     if (json != null) {
       ed25519PublicKey = hexToBytes(json['ed25519_pk'] as String);
@@ -280,6 +294,10 @@ class IdentityContext {
       }
       _log.info('Keys loaded from disk'
           '${rotationChain.isNotEmpty ? ' (rotation chain: ${rotationChain.length} link(s))' : ''}');
+      if (migratedFromLegacy) {
+        _saveKeys(fileEnc);
+        _log.info('Keys re-encrypted with seed-derived key');
+      }
     } else {
       await _generateKeysAsync();
       keysCreatedAt = DateTime.now();

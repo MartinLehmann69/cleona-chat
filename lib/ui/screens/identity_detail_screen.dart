@@ -133,6 +133,12 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     final idDisplayName = widget.identity.displayName;
     final channelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
 
+    final idHexSource = widget.identity.nodeIdHex != null ? 'identity' : 'service-FALLBACK';
+    debugPrint('[ContactSeed:detail] identity="${idDisplayName}" '
+        'nodeIdHex=${idNodeIdHex.substring(0, 8)} (from $idHexSource) '
+        'service.nodeIdHex=${service.nodeIdHex.substring(0, 8)} '
+        'match=${idNodeIdHex == service.nodeIdHex}');
+
     final seed = service.contactSeedBuilder.getContactSeedFor(
       nodeIdHex: idNodeIdHex,
       displayName: idDisplayName,
@@ -396,9 +402,11 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
                 onTap: () {
                   IdentityManager().setSkinId(_identity.id, skin.id);
                   appState.refresh();
-                  setState(() {
-                    _identity = IdentityManager().getActiveIdentity() ?? _identity;
-                  });
+                  if (mounted) {
+                    setState(() {
+                      _identity = IdentityManager().getActiveIdentity() ?? _identity;
+                    });
+                  }
                 },
                 child: Container(
                   width: 90,
