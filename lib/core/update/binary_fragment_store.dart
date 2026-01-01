@@ -14,6 +14,7 @@ import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 ///   - `complete.bin` (fully reconstructed binary, if present)
 ///   - `meta.json` ({"storedAt": unix_ts_ms, "fragmentCount": N, "binaryHash": "..."})
 class BinaryFragmentStore {
+  final String profileDir;
   final String _storageDir;
   final CLogger _log;
 
@@ -25,7 +26,7 @@ class BinaryFragmentStore {
   static const int kDesktopBudgetBytes = 20 * 1024 * 1024; // 20 MB
   static const int kMobileBudgetBytes = 5 * 1024 * 1024; // 5 MB
 
-  BinaryFragmentStore(String profileDir)
+  BinaryFragmentStore(this.profileDir)
       : _storageDir = '$profileDir/binary-updates',
         _log = CLogger.get('bin-store', profileDir: profileDir);
 

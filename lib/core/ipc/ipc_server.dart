@@ -17,9 +17,6 @@ import 'package:cleona/core/calendar/sync/sync_types.dart';
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/network/peer_rescue_bundle.dart';
-import 'package:cleona/core/crypto/network_secret.dart' show NetworkSecret, NetworkChannel;
-import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart' show EndpointAddress;
-import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
 /// Per-client state tracking active identity.
 class _ClientState {
@@ -1164,26 +1161,7 @@ class IpcServer {
             targetDxkB64: req.params['targetDxkB64'] as String?,
             targetDmkB64: req.params['targetDmkB64'] as String?,
             targetEpB64: req.params['targetEpB64'] as String?,
-            targetRendezvousNonceB64:
-                req.params['targetRendezvousNonceB64'] as String?,
           );
-          _sendResponse(client, IpcResponse(id: req.id, success: true));
-          break;
-
-        case 'rendezvous_uri_shared':
-          // §4.11.10 owner side: the GUI copied/shared a ContactSeed-URI
-          // with an `r` nonce — start the First-Contact rendezvous session.
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final nonceB64 = req.params['nonceB64'] as String?;
-          if (nonceB64 == null || nonceB64.isEmpty) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nonceB64'));
-            break;
-          }
-          service.notifyContactSeedUriShared(nonceB64);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
@@ -1500,61 +1478,6 @@ class IpcServer {
             data: chPostMsg != null ? {'messageId': chPostMsg.id} : {},
             error: chPostMsg == null ? 'Send failed' : null,
           ));
-          break;
-
-        case 'submit_feature_request':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final frTitle = req.params['title'] as String? ?? '';
-          final frBody = req.params['body'] as String? ?? '';
-          final frMsg = await service.submitFeatureRequest(frTitle, frBody);
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: frMsg != null,
-            data: frMsg != null
-                ? {
-                    'messageId': frMsg.id,
-                    'channelIdHex': frMsg.conversationId,
-                    'text': frMsg.text,
-                  }
-                : {},
-            error: frMsg == null ? 'Submit failed' : null,
-          ));
-          break;
-
-        case 'vote_feature_request':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final voteRecId = req.params['recordIdHex'] as String?;
-          final voteOption = (req.params['option'] as num?)?.toInt();
-          if (voteRecId == null || voteOption == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex or option'));
-            break;
-          }
-          final voteOk = await service.voteFeatureRequest(voteRecId, voteOption);
-          _sendResponse(client, IpcResponse(id: req.id, success: voteOk,
-              error: voteOk ? null : 'Vote failed'));
-          break;
-
-        case 'feature_request_tally':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final tallyRecId = req.params['recordIdHex'] as String?;
-          if (tallyRecId == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: recordIdHex'));
-            break;
-          }
-          final tally = await service.featureRequestTally(tallyRecId);
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: tally));
           break;
 
         case 'leave_channel':
@@ -2549,229 +2472,6 @@ class IpcServer {
           }));
           break;
 
-        // ── Binary Updates (§19.6) ────────────────────────────
-        case 'get_update_status':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final statusManifest = service.latestUpdateManifest;
-          if (statusManifest == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-              'available': false,
-              'inNetwork': false,
-              'version': null,
-              'manifest': null,
-            }));
-            break;
-          }
-          final statusChecker = UpdateChecker(log: _log);
-          final statusAvailable = statusChecker.isNewer(statusManifest.version, service.currentAppVersion);
-          // Mirrors BinaryUpdateManager.checkForUpdate's tag/version check
-          // (no live DHT round-trip here — this is a cheap status query, the
-          // actual reachability of peers is (re-)confirmed by
-          // start_in_network_update / BinaryRendezvousManager.resolve).
-          final statusInNetwork = statusAvailable &&
-              statusManifest.dhtBinaryTag?[Platform.operatingSystem] != null;
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'available': statusAvailable,
-            'inNetwork': statusInNetwork,
-            'version': statusManifest.version,
-            'manifest': statusManifest.toJson(),
-          }));
-          break;
-
-        case 'start_in_network_update':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final updateManifest = service.latestUpdateManifest;
-          if (updateManifest == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No update manifest available'));
-            break;
-          }
-          if (service.binarySeeder == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
-            break;
-          }
-          // Fire-and-forget — the download/verify/seed cycle can run for
-          // minutes on a slow link. The internal flow logs+aborts on any
-          // failure (no exception surfaces), so there is nothing further to
-          // await here; the client polls get_update_status for the outcome.
-          unawaited(service.startInNetworkUpdate(updateManifest).catchError((e) {
-            _log.warn('start_in_network_update error: $e');
-          }));
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'version': updateManifest.version,
-          }));
-          break;
-
-        case 'export_binary':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final transferHelper = service.physicalTransferHelper;
-          if (transferHelper == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
-            break;
-          }
-          final exportPlatform = req.params['platform'] as String?;
-          final exportVersion = req.params['version'] as String?;
-          final exportOutputPath = req.params['outputPath'] as String?;
-          if (exportPlatform == null || exportVersion == null || exportOutputPath == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: platform, version or outputPath'));
-            break;
-          }
-          final exportedHash = await transferHelper.exportBinary(
-            platform: exportPlatform,
-            version: exportVersion,
-            outputPath: exportOutputPath,
-          );
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: exportedHash != null,
-            data: exportedHash != null ? {'hash': exportedHash} : {},
-            error: exportedHash == null
-                ? 'Export failed — no complete binary stored for $exportPlatform/$exportVersion'
-                : null,
-          ));
-          break;
-
-        case 'seed_binary':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final seeder = service.binarySeeder;
-          if (seeder == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
-            break;
-          }
-          final seedPlatform = req.params['platform'] as String?;
-          final seedVersion = req.params['version'] as String?;
-          final seedFilePath = req.params['filePath'] as String?;
-          final seedMaxFragments = req.params['maxFragments'] as int?;
-          if (seedPlatform == null || seedVersion == null || seedFilePath == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: platform, version or filePath'));
-            break;
-          }
-          final seedFile = File(seedFilePath);
-          if (!seedFile.existsSync()) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'File not found: $seedFilePath'));
-            break;
-          }
-          final seedData = await seedFile.readAsBytes();
-          final seedCount = await seeder.seed(
-            binary: seedData,
-            platform: seedPlatform,
-            version: seedVersion,
-            maxFragments: seedMaxFragments,
-          );
-          service.node.binaryHasContentToShare = true;
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: seedCount > 0,
-            data: {
-              'fragmentCount': seedCount,
-              'platform': seedPlatform,
-              'version': seedVersion,
-              'hash': seeder.computeHash(seedData),
-            },
-            error: seedCount == 0 ? 'Seeding failed — 0 fragments stored' : null,
-          ));
-          break;
-
-        case 'get_seeded_platforms':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final store = service.binaryFragmentStore;
-          if (store == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
-            break;
-          }
-          final seededMap = <String, List<String>>{};
-          for (final platform in ['linux', 'windows', 'macos', 'android', 'ios']) {
-            final versions = store.storedVersionsSync(platform);
-            if (versions.isNotEmpty) {
-              seededMap[platform] = versions;
-            }
-          }
-          _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
-            'platforms': seededMap,
-          }));
-          break;
-
-        case 'create_invite_link':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          final inviteService = service.inviteLinkService;
-          if (inviteService == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Binary-update subsystem not initialized'));
-            break;
-          }
-          // Maintainer-only tooling (§19.6.4): invite links are signed with
-          // the network maintainer's Ed25519 key, which lives OFFLINE
-          // (~/Schreibtisch/cleona_maintainer_private.pem, same key
-          // scripts/sign-update-manifest.sh uses) and is never stored by the
-          // daemon. The caller must supply it explicitly per-request; it is
-          // used only for this one signature and never persisted or logged.
-          final maintainerSkHex = req.params['maintainerSkHex'] as String?;
-          if (maintainerSkHex == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: maintainerSkHex (maintainer-only operation)'));
-            break;
-          }
-          final inviteManifest = service.latestUpdateManifest;
-          final inviteBinaryHashes = inviteManifest?.binaryHashes;
-          final inviteVersion = req.params['version'] as String? ?? inviteManifest?.version;
-          if (inviteBinaryHashes == null || inviteVersion == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No update manifest with binaryHashes available'));
-            break;
-          }
-          final inviteChannelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
-          final inviteSeed = service.contactSeedBuilder.getContactSeedFor(
-            nodeIdHex: service.nodeIdHex,
-            displayName: service.displayName,
-            channelTag: inviteChannelTag,
-            userEd25519Pk: service.userEd25519Pk,
-            deviceX25519Pk: service.deviceX25519Pk,
-            deviceMlKemPk: service.deviceMlKemPk,
-          );
-          if (inviteSeed == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Network not ready yet (no address/peer available)'));
-            break;
-          }
-          final inviteAddresses = <EndpointAddress>[
-            if (service.publicIp != null)
-              EndpointAddress(service.publicIp!, service.publicPort ?? service.port),
-            ...service.localIps.map((ip) => EndpointAddress(ip, service.port)),
-          ];
-          try {
-            final link = inviteService.createInviteLink(
-              maintainerSk: hexToBytes(maintainerSkHex),
-              contactSeed: inviteSeed.toUri(),
-              nodeAddresses: inviteAddresses,
-              currentVersion: inviteVersion,
-              binaryHashes: inviteBinaryHashes,
-              fallbackUrl: req.params['fallbackUrl'] as String?,
-            );
-            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {'link': link}));
-          } catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'createInviteLink failed: $e'));
-          }
-          break;
-
         // ── Calendar (§23) ───────────────────────────────────
         case 'calendar_create_event':
         case 'calendar_update_event':
@@ -3142,20 +2842,6 @@ class IpcServer {
             id: req.id,
             success: true,
             data: {'isSpeakerEnabled': service.isSpeakerEnabled},
-          ));
-          break;
-
-        case 'toggle_video_mute':
-          final service = _resolveService(client, req);
-          if (service == null) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
-            break;
-          }
-          service.toggleVideoMute();
-          _sendResponse(client, IpcResponse(
-            id: req.id,
-            success: true,
-            data: {'isVideoMuted': service.isVideoMuted},
           ));
           break;
 
@@ -3925,6 +3611,69 @@ class IpcServer {
             final evId = await service.convertDatePollToEvent(pollId, winning);
             _sendResponse(client, IpcResponse(
                 id: req.id, success: evId != null, data: {'eventId': evId ?? ''}));
+          }
+          break;
+
+        // §19.6 — In-network update IPC commands
+        case 'seed_binary':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final platform = req.params['platform'] as String?;
+            final version = req.params['version'] as String?;
+            final filePath = req.params['filePath'] as String?;
+            if (platform == null || version == null || filePath == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false,
+                  error: 'Missing platform/version/filePath'));
+              break;
+            }
+            final result = await service.seedBinaryFromFile(platform, version, filePath);
+            final hasError = result.containsKey('error');
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: !hasError, data: result,
+                error: hasError ? result['error'] as String : null));
+          }
+          break;
+
+        case 'get_seeded_platforms':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: {'platforms': service.getSeededPlatforms()}));
+          }
+          break;
+
+        case 'reload_manifest':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            final result = service.reloadManifest();
+            final hasError = result.containsKey('error');
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: !hasError, data: result,
+                error: hasError ? result['error'] as String : null));
+          }
+          break;
+
+        case 'get_update_status':
+          {
+            final service = _resolveService(client, req);
+            if (service == null) {
+              _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+              break;
+            }
+            _sendResponse(client, IpcResponse(
+                id: req.id, success: true, data: service.getUpdateStatus()));
           }
           break;
 

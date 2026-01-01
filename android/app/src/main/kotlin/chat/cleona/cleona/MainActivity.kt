@@ -39,6 +39,7 @@ class MainActivity : FlutterActivity() {
     private val NOTIFICATION_MSG_CHANNEL = "chat.cleona/notification"
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
+    private val UPDATE_CHANNEL = "chat.cleona/update"
     private val MSG_CHANNEL_ID = "cleona_messages"
     private val CALL_CHANNEL_ID = "cleona_calls"
     private val CALL_NOTIFICATION_ID = 42001
@@ -217,6 +218,48 @@ class MainActivity : FlutterActivity() {
                         result.success(appInfo.sourceDir)
                     } catch (e: Exception) {
                         result.error("APK_ERROR", e.message, null)
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // §19.6 In-network update: APK install via FileProvider content:// URI
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, UPDATE_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "canInstallPackages" -> {
+                    result.success(packageManager.canRequestPackageInstalls())
+                }
+                "openInstallPermissionSettings" -> {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                        android.net.Uri.parse("package:$packageName")
+                    )
+                    startActivity(intent)
+                    result.success(null)
+                }
+                "installApk" -> {
+                    val path = call.argument<String>("path")
+                    if (path == null) {
+                        result.error("MISSING_PATH", "path argument required", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val srcFile = File(path)
+                        val dstFile = File(cacheDir, "update.apk")
+                        srcFile.copyTo(dstFile, overwrite = true)
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            this, "$packageName.fileprovider", dstFile
+                        )
+                        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        startActivity(intent)
+                        result.success("ok")
+                    } catch (e: Exception) {
+                        result.error("INSTALL_ERROR", e.message, null)
                     }
                 }
                 else -> result.notImplemented()

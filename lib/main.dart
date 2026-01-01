@@ -46,6 +46,8 @@ import 'package:cleona/core/platform/ios_background_fetch.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/core/update/binary_update_manager.dart';
+import 'package:cleona/core/platform/apk_installer.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/core/channels/system_channels.dart' as sys_ch;
 import 'package:cleona/ui/components/connection_sheet.dart';
@@ -401,6 +403,9 @@ class _CleonaAppState extends State<CleonaApp> {
               inNetworkAvailable: inNetworkAvailable,
               onStartInNetworkUpdate:
                   inNetworkAvailable ? appState.startInNetworkUpdate : null,
+              onApplyUpdate: appState.applyUpdate,
+              updateState: appState.updateState,
+              updateProgress: appState.updateProgress,
               onSkipLimited: () {
                 appState.setReducedModeSession(true);
                 setState(() {
@@ -850,6 +855,19 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   UpdateManifest? get availableUpdateManifest => _availableUpdateManifest;
   bool get availableUpdateInNetwork => _availableUpdateInNetwork;
 
+  BinaryUpdateState _updateState = BinaryUpdateState.idle;
+  double _updateProgress = 0.0;
+  bool _updateBannerDismissed = false;
+
+  BinaryUpdateState get updateState => _updateState;
+  double get updateProgress => _updateProgress;
+  bool get updateBannerDismissed => _updateBannerDismissed;
+
+  void dismissUpdateBanner() {
+    _updateBannerDismissed = true;
+    notifyListeners();
+  }
+
   /// Starts the in-network binary update using the service that most
   /// recently reported [_availableUpdateManifest]. No-op if no update (or
   /// its owning service) is currently known.
@@ -858,6 +876,31 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     final source = _availableUpdateSourceService;
     if (manifest == null || source == null) return;
     await source.startInNetworkUpdate(manifest);
+  }
+
+  /// Called when the user taps "Install" (Android) or "Restart" (desktop) on
+  /// the update-ready banner.
+  Future<void> applyUpdate() async {
+    final source = _availableUpdateSourceService;
+    if (source == null) return;
+    if (Platform.isAndroid) {
+      final mgr = source.binaryUpdateManager;
+      if (mgr == null) return;
+      final path = await mgr.getVerifiedBinaryPath(
+          Platform.operatingSystem, mgr.targetVersion ?? '');
+      if (path == null) return;
+      final hasPermission = await ApkInstaller.canInstallPackages();
+      if (!hasPermission) {
+        await ApkInstaller.openInstallPermissionSettings();
+        return;
+      }
+      await ApkInstaller.installApk(path);
+    } else {
+      final mgr = source.binaryUpdateManager;
+      if (mgr == null) return;
+      final ok = await mgr.applyDesktopUpdate(Platform.resolvedExecutable);
+      if (ok) exit(0);
+    }
   }
 
   /// The active skin based on the current identity's skinId.
@@ -1446,6 +1489,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     // Process any crashes that occurred before services were ready (§9.5)
     _processPendingCrashes();
 
+    // §19.6: mark previous update as healthy after 30s of stable running.
+    Timer(const Duration(seconds: 30), () {
+      BinaryUpdateManager.markUpdateHealthy(null);
+    });
+
     // §2.4 receiver step [9] — multi-identity KEM-Try-Loop for in-process
     // mode (Android/iOS/macOS). Mirrors service_daemon.dart wiring.
     final serviceRecency = <String>[];
@@ -1833,6 +1881,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _availableUpdateManifest = manifest;
       _availableUpdateInNetwork = inNetworkAvailable;
       _availableUpdateSourceService = service;
+      notifyListeners();
+    };
+    service.onUpdateStateChanged = (state, progress) {
+      _updateState = state;
+      _updateProgress = progress;
       notifyListeners();
     };
 

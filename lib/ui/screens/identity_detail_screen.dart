@@ -1,17 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:qr/qr.dart' as qr_lib;
-import 'package:qr_flutter/qr_flutter.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/ui/components/contact_share_card.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
@@ -78,13 +76,11 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
           children: [
             // ── 1. QR Code ─────────────────────────────────────────
             _SectionHeader(locale.get('section_qr_code')),
-            _buildQrSection(context),
-
-            const Divider(height: 32),
-
-            // ── 1b. Cleona teilen ─────────────────────────────────
-            _SectionHeader(locale.get('share_cleona')),
-            _buildShareSection(context),
+            ContactShareCard(
+              service: widget.service,
+              identity: widget.identity,
+              showShareCleonaButton: true,
+            ),
 
             const Divider(height: 32),
 
@@ -127,169 +123,6 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
         ),
       ),
     );
-  }
-
-  // ── QR Code Section ─────────��────────────────────────────────────────
-
-  Widget _buildQrSection(BuildContext context) {
-    final locale = AppLocale.read(context);
-    final service = widget.service;
-
-    final idNodeIdHex = widget.identity.nodeIdHex ?? service.nodeIdHex;
-    final idDisplayName = widget.identity.displayName;
-    final channelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
-
-    final idHexSource = widget.identity.nodeIdHex != null ? 'identity' : 'service-FALLBACK';
-    debugPrint('[ContactSeed:detail] identity="${idDisplayName}" '
-        'nodeIdHex=${idNodeIdHex.substring(0, 8)} (from $idHexSource) '
-        'service.nodeIdHex=${service.nodeIdHex.substring(0, 8)} '
-        'match=${idNodeIdHex == service.nodeIdHex}');
-
-    final seed = service.contactSeedBuilder.getContactSeedFor(
-      nodeIdHex: idNodeIdHex,
-      displayName: idDisplayName,
-      channelTag: channelTag,
-      userEd25519Pk: service.userEd25519Pk,
-      foundingEd25519Pk: service.foundingEd25519Pk,
-      deviceX25519Pk: service.deviceX25519Pk,
-      deviceMlKemPk: service.deviceMlKemPk,
-    );
-
-    if (seed == null) {
-      return Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 32),
-        child: Column(
-          children: [
-            const SizedBox(width: 48, height: 48, child: CircularProgressIndicator()),
-            const SizedBox(height: 12),
-            Text(locale.get('qr_mesh_converging'),
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium),
-          ],
-        ),
-      );
-    }
-
-    final qrBytes = seed.toQrBytes();
-    final shareUri = seed.toUri();
-    final qrCode = qr_lib.QrCode.fromUint8List(
-      data: qrBytes,
-      errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
-    );
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: QrImageView.withQr(
-              qr: qrCode,
-              size: 400,
-              backgroundColor: Colors.white,
-            ),
-          ),
-          const SizedBox(height: 8),
-          // Problem 1 (S119): Node-ID natively selectable (long-press).
-          SelectableText(
-            'Node-ID: ${idNodeIdHex.substring(0, 16)}...',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
-          ),
-          const SizedBox(height: 4),
-          TextButton.icon(
-            icon: const Icon(Icons.copy, size: 16),
-            label: Text(locale.get('copy')),
-            onPressed: () {
-              Clipboard.setData(ClipboardData(text: shareUri));
-              // §4.11.10: start the owner-side First-Contact rendezvous
-              // session for the copied URI (transport-side, no UI).
-              final rn = seed.rendezvousNonce;
-              if (rn != null) {
-                service.notifyContactSeedUriShared(
-                    base64Url.encode(rn).replaceAll('=', ''));
-              }
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── Share Cleona Section ─────────────────────────────────────────────
-
-  Widget _buildShareSection(BuildContext context) {
-    final locale = AppLocale.read(context);
-    final service = widget.service;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          OutlinedButton.icon(
-            icon: const Icon(Icons.link, size: 18),
-            label: Text(locale.get('share_cleona_download_link')),
-            onPressed: () {
-              Clipboard.setData(const ClipboardData(
-                text: 'https://github.com/MartinLehmann69/cleona-chat/releases/latest',
-              ));
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(locale.get('copied_to_clipboard'))),
-              );
-            },
-          ),
-          const SizedBox(height: 8),
-          FutureBuilder<String?>(
-            future: _getLanUrl(service.port),
-            builder: (context, snap) {
-              if (snap.data == null) return const SizedBox.shrink();
-              return OutlinedButton.icon(
-                icon: const Icon(Icons.wifi, size: 18),
-                label: Text(locale.get('share_cleona_lan_url')),
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: snap.data!));
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text('${locale.get('copied_to_clipboard')}\n${snap.data}')),
-                  );
-                },
-              );
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  static Future<String?> _getLanUrl(int port) async {
-    try {
-      final interfaces = await NetworkInterface.list(
-        type: InternetAddressType.IPv4,
-      );
-      for (final iface in interfaces) {
-        for (final addr in iface.addresses) {
-          final ip = addr.address;
-          if (ip.startsWith('10.') ||
-              ip.startsWith('192.168.') ||
-              (ip.startsWith('172.') && _isPrivate172(ip))) {
-            return 'http://$ip:$port/cleona/binary/${Platform.operatingSystem}';
-          }
-        }
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  static bool _isPrivate172(String ip) {
-    final parts = ip.split('.');
-    if (parts.length < 2) return false;
-    final second = int.tryParse(parts[1]) ?? 0;
-    return second >= 16 && second <= 31;
   }
 
   // ── Profile Picture Section ──────────────��────────────────────���──────

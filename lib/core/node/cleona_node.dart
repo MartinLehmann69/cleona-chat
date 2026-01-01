@@ -254,7 +254,7 @@ class CleonaNode {
   /// [binaryRendezvousManager] needs to (re-)publish on network change. Set
   /// by CleonaService once its BinaryFragmentStore/BinaryUpdateManager are
   /// ready.
-  BinaryAvailabilityRecord Function()? binaryRecordProvider;
+  List<BinaryAvailabilityRecord> Function()? binaryRecordProvider;
 
   /// True once this device holds at least one binary/fragment worth
   /// advertising via [binaryRendezvousManager] (§19.6.5). Gates the

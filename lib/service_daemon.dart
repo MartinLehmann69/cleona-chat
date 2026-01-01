@@ -23,6 +23,7 @@ import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
 import 'package:cleona/core/calendar/sync/caldav_server.dart';
 import 'package:cleona/core/service/notification_sound_service.dart' show VibrationType;
+import 'package:cleona/core/update/binary_update_manager.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 /// Holds the machine-global single-instance flock (§15.1) for the entire
@@ -725,6 +726,11 @@ class _MultiServiceDaemon {
     // / Outlook / Apple Calendar / Evolution) can sync directly against
     // the daemon without any external server. Opt-in; disabled by default.
     await _startLocalCalDAVServer();
+
+    // §19.6: mark previous update as healthy after 30s of stable running.
+    Timer(const Duration(seconds: 30), () {
+      BinaryUpdateManager.markUpdateHealthy(config.baseDir);
+    });
 
     // Periodic timers
     _statusTimer = Timer.periodic(const Duration(seconds: 60), (_) {

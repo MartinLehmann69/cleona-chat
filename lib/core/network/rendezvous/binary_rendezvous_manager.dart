@@ -108,7 +108,6 @@ class BinaryRendezvousManager {
   Uint8List? _networkSecret;
   Uint8List? _deviceId;
   List<RendezvousAddress> Function()? _addressProvider;
-  String Function()? _platformProvider;
 
   int _seq = 0;
   Timer? _refreshTimer;
@@ -125,12 +124,10 @@ class BinaryRendezvousManager {
     required Uint8List networkSecret,
     required Uint8List deviceId,
     required List<RendezvousAddress> Function() addressProvider,
-    required String Function() platformProvider,
   }) {
     _networkSecret = networkSecret;
     _deviceId = deviceId;
     _addressProvider = addressProvider;
-    _platformProvider = platformProvider;
   }
 
   // -------------------------------------------------------------------------
@@ -142,13 +139,6 @@ class BinaryRendezvousManager {
     final devId = _deviceId;
     final addrFn = _addressProvider;
     if (secret == null || devId == null || addrFn == null) return;
-
-    final currentPlatform = _platformProvider?.call();
-    if (currentPlatform != null && currentPlatform != record.platform) {
-      _log.debug('Binary-RV publish: platform mismatch '
-          '(record=${record.platform}, current=$currentPlatform), skipping');
-      return;
-    }
 
     final addresses = addrFn();
     final publicAddresses =
@@ -205,18 +195,26 @@ class BinaryRendezvousManager {
         '${publicAddresses.length} public addresses)');
   }
 
-  void onNetworkChanged(BinaryAvailabilityRecord Function() recordProvider) {
+  Future<void> publishAll(List<BinaryAvailabilityRecord> records) async {
+    for (final record in records) {
+      await publish(record);
+    }
+  }
+
+  void onNetworkChanged(
+      List<BinaryAvailabilityRecord> Function() recordsProvider) {
     if (_disposed) return;
     _debounceTimer?.cancel();
     _debounceTimer = Timer(kBinaryNetworkChangeDebounce, () {
-      publish(recordProvider());
+      publishAll(recordsProvider());
     });
   }
 
-  void startPeriodicRefresh(BinaryAvailabilityRecord Function() recordProvider) {
+  void startPeriodicRefresh(
+      List<BinaryAvailabilityRecord> Function() recordsProvider) {
     _refreshTimer?.cancel();
     _refreshTimer = Timer.periodic(kBinaryRefreshInterval, (_) {
-      publish(recordProvider());
+      publishAll(recordsProvider());
     });
   }
 

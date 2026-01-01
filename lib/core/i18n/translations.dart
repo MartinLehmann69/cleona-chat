@@ -20,8 +20,6 @@ const Map<String, Map<String, String>> translations = {
   'close': {'de': 'Schließen', 'en': 'Close', 'es': 'Cerrar', 'hu': 'Bezárás', 'sv': 'Stäng', 'ar': 'إغلاق', 'he': 'סגירה', 'fa': 'بستن', 'fr': 'Fermer', 'it': 'Chiudi', 'pt': 'Fechar', 'nl': 'Sluiten', 'pl': 'Zamknij', 'ro': 'Închide', 'cs': 'Zavřít', 'sk': 'Zavrieť', 'hr': 'Zatvori', 'bg': 'Затвори', 'el': 'Κλείσιμο', 'da': 'Luk', 'fi': 'Sulje', 'no': 'Lukk', 'uk': 'Закрити', 'ru': 'Закрыть', 'tr': 'Kapat', 'zh': '关闭', 'ja': '閉じる', 'ko': '닫기', 'hi': 'बंद करें', 'th': 'ปิด', 'vi': 'Đóng', 'id': 'Tutup', 'ms': 'Tutup'},
   'ok': {'de': 'OK', 'en': 'OK', 'es': 'OK', 'hu': 'OK', 'sv': 'OK', 'ar': 'موافق', 'he': 'אישור', 'fa': 'تأیید', 'fr': 'OK', 'it': 'OK', 'pt': 'OK', 'nl': 'OK', 'pl': 'OK', 'ro': 'OK', 'cs': 'OK', 'sk': 'OK', 'hr': 'OK', 'bg': 'OK', 'el': 'OK', 'da': 'OK', 'fi': 'OK', 'no': 'OK', 'uk': 'OK', 'ru': 'OK', 'tr': 'Tamam', 'zh': '确定', 'ja': 'OK', 'ko': '확인', 'hi': 'ठीक है', 'th': 'ตกลง', 'vi': 'OK', 'id': 'OK', 'ms': 'OK'},
   'leave': {'de': 'Verlassen', 'en': 'Leave', 'es': 'Salir', 'hu': 'Kilépés', 'sv': 'Lämna', 'ar': 'مغادرة', 'he': 'עזיבה', 'fa': 'خروج', 'fr': 'Quitter', 'it': 'Esci', 'pt': 'Sair', 'nl': 'Verlaten', 'pl': 'Opuść', 'ro': 'Părăsește', 'cs': 'Opustit', 'sk': 'Opustiť', 'hr': 'Napusti', 'bg': 'Напусни', 'el': 'Αποχώρηση', 'da': 'Forlad', 'fi': 'Poistu', 'no': 'Forlat', 'uk': 'Покинути', 'ru': 'Покинуть', 'tr': 'Ayrıl', 'zh': '离开', 'ja': '退出', 'ko': '나가기', 'hi': 'छोड़ें', 'th': 'ออก', 'vi': 'Rời', 'id': 'Keluar', 'ms': 'Keluar'},
-  'leave_group': {'de': 'Gruppe verlassen', 'en': 'Leave group', 'es': 'Salir del grupo', 'hu': 'Kilépés a csoportból', 'sv': 'Lämna grupp', 'ar': 'مغادرة المجموعة', 'he': 'עזיבת הקבוצה', 'fa': 'خروج از گروه', 'fr': 'Quitter le groupe', 'it': 'Lasciare il gruppo', 'pt': 'Sair do grupo', 'nl': 'Groep verlaten', 'pl': 'Opuść grupę', 'ro': 'Părăsește grupul', 'cs': 'Opustit skupinu', 'sk': 'Opustiť skupinu', 'hr': 'Napusti grupu', 'bg': 'Напусни групата', 'el': 'Αποχώρηση από ομάδα', 'da': 'Forlad gruppe', 'fi': 'Poistu ryhmästä', 'no': 'Forlat gruppe', 'uk': 'Покинути групу', 'ru': 'Покинуть группу', 'tr': 'Gruptan ayrıl', 'zh': '退出群组', 'ja': 'グループを退出', 'ko': '그룹 나가기', 'hi': 'समूह छोड़ें', 'th': 'ออกจากกลุ่ม', 'vi': 'Rời nhóm', 'id': 'Keluar dari grup', 'ms': 'Keluar kumpulan'},
-  'leave_channel': {'de': 'Channel verlassen', 'en': 'Leave channel', 'es': 'Salir del canal', 'hu': 'Kilépés a csatornából', 'sv': 'Lämna kanal', 'ar': 'مغادرة القناة', 'he': 'עזיבת הערוץ', 'fa': 'خروج از کانال', 'fr': 'Quitter la chaîne', 'it': 'Lasciare il canale', 'pt': 'Sair do canal', 'nl': 'Kanaal verlaten', 'pl': 'Opuść kanał', 'ro': 'Părăsește canalul', 'cs': 'Opustit kanál', 'sk': 'Opustiť kanál', 'hr': 'Napusti kanal', 'bg': 'Напусни канала', 'el': 'Αποχώρηση από κανάλι', 'da': 'Forlad kanal', 'fi': 'Poistu kanavalta', 'no': 'Forlat kanal', 'uk': 'Покинути канал', 'ru': 'Покинуть канал', 'tr': 'Kanaldan ayrıl', 'zh': '退出频道', 'ja': 'チャンネルを退出', 'ko': '채널 나가기', 'hi': 'चैनल छोड़ें', 'th': 'ออกจากช่อง', 'vi': 'Rời kênh', 'id': 'Keluar dari kanal', 'ms': 'Keluar saluran'},
   'invite': {'de': 'Einladen', 'en': 'Invite', 'es': 'Invitar', 'hu': 'Meghívás', 'sv': 'Bjud in', 'ar': 'دعوة', 'he': 'הזמנה', 'fa': 'دعوت', 'fr': 'Inviter', 'it': 'Invita', 'pt': 'Convidar', 'nl': 'Uitnodigen', 'pl': 'Zaproś', 'ro': 'Invită', 'cs': 'Pozvat', 'sk': 'Pozvať', 'hr': 'Pozovi', 'bg': 'Покани', 'el': 'Πρόσκληση', 'da': 'Inviter', 'fi': 'Kutsu', 'no': 'Inviter', 'uk': 'Запросити', 'ru': 'Пригласить', 'tr': 'Davet et', 'zh': '邀请', 'ja': '招待', 'ko': '초대', 'hi': 'आमंत्रित करें', 'th': 'เชิญ', 'vi': 'Mời', 'id': 'Undang', 'ms': 'Jemput'},
   'remove': {'de': 'Entfernen', 'en': 'Remove', 'es': 'Eliminar', 'hu': 'Eltávolítás', 'sv': 'Ta bort', 'ar': 'إزالة', 'he': 'הסרה', 'fa': 'حذف', 'fr': 'Retirer', 'it': 'Rimuovi', 'pt': 'Remover', 'nl': 'Verwijderen', 'pl': 'Usuń', 'ro': 'Elimină', 'cs': 'Odebrat', 'sk': 'Odstrániť', 'hr': 'Ukloni', 'bg': 'Премахни', 'el': 'Αφαίρεση', 'da': 'Fjern', 'fi': 'Poista', 'no': 'Fjern', 'uk': 'Видалити', 'ru': 'Удалить', 'tr': 'Kaldır', 'zh': '移除', 'ja': '削除', 'ko': '제거', 'hi': 'हटाएं', 'th': 'ลบ', 'vi': 'Xóa', 'id': 'Hapus', 'ms': 'Buang'},
   'rename': {'de': 'Umbenennen', 'en': 'Rename', 'es': 'Renombrar', 'hu': 'Átnevezés', 'sv': 'Byt namn', 'ar': 'إعادة تسمية', 'he': 'שינוי שם', 'fa': 'تغییر نام', 'fr': 'Renommer', 'it': 'Rinomina', 'pt': 'Renomear', 'nl': 'Hernoemen', 'pl': 'Zmień nazwę', 'ro': 'Redenumește', 'cs': 'Přejmenovat', 'sk': 'Premenovať', 'hr': 'Preimenuj', 'bg': 'Преименувай', 'el': 'Μετονομασία', 'da': 'Omdøb', 'fi': 'Nimeä uudelleen', 'no': 'Gi nytt navn', 'uk': 'Перейменувати', 'ru': 'Переименовать', 'tr': 'Yeniden adlandır', 'zh': '重命名', 'ja': '名前変更', 'ko': '이름 변경', 'hi': 'नाम बदलें', 'th': 'เปลี่ยนชื่อ', 'vi': 'Đổi tên', 'id': 'Ubah nama', 'ms': 'Namakan semula'},
@@ -33,8 +31,6 @@ const Map<String, Map<String, String>> translations = {
   'you': {'de': 'Du', 'en': 'You', 'es': 'Tú', 'hu': 'Te', 'sv': 'Du', 'ar': 'أنت', 'he': 'את/ה', 'fa': 'شما', 'fr': 'Vous', 'it': 'Tu', 'pt': 'Você', 'nl': 'Jij', 'pl': 'Ty', 'ro': 'Tu', 'cs': 'Ty', 'sk': 'Ty', 'hr': 'Ti', 'bg': 'Ти', 'el': 'Εσύ', 'da': 'Dig', 'fi': 'Sinä', 'no': 'Du', 'uk': 'Ви', 'ru': 'Вы', 'tr': 'Sen', 'zh': '你', 'ja': 'あなた', 'ko': '나', 'hi': 'आप', 'th': 'คุณ', 'vi': 'Bạn', 'id': 'Anda', 'ms': 'Anda'},
   'save_file': {'de': 'Speichern', 'en': 'Save file', 'es': 'Guardar archivo', 'hu': 'Fájl mentése', 'sv': 'Spara fil', 'ar': 'حفظ الملف', 'he': 'שמור קובץ', 'fa': 'ذخیره فایل', 'fr': 'Enregistrer', 'it': 'Salva file', 'pt': 'Salvar arquivo', 'nl': 'Bestand opslaan', 'pl': 'Zapisz plik', 'ro': 'Salvează fișier', 'cs': 'Uložit soubor', 'sk': 'Uložiť súbor', 'hr': 'Spremi datoteku', 'bg': 'Запази файл', 'el': 'Αποθήκευση αρχείου', 'da': 'Gem fil', 'fi': 'Tallenna tiedosto', 'no': 'Lagre fil', 'uk': 'Зберегти файл', 'ru': 'Сохранить файл', 'tr': 'Dosyayı kaydet', 'zh': '保存文件', 'ja': 'ファイルを保存', 'ko': '파일 저장', 'hi': 'फ़ाइल सहेजें', 'th': 'บันทึกไฟล์', 'vi': 'Lưu tệp', 'id': 'Simpan file', 'ms': 'Simpan fail'},
   'copy_to_clipboard': {'de': 'In Zwischenablage', 'en': 'Copy to clipboard', 'es': 'Copiar al portapapeles', 'hu': 'Másolás vágólapra', 'sv': 'Kopiera till urklipp', 'ar': 'نسخ إلى الحافظة', 'he': 'העתק ללוח', 'fa': 'کپی به کلیپ‌بورد', 'fr': 'Copier', 'it': 'Copia negli appunti', 'pt': 'Copiar', 'nl': 'Kopiëren naar klembord', 'pl': 'Kopiuj do schowka', 'ro': 'Copiază în clipboard', 'cs': 'Kopírovat do schránky', 'sk': 'Kopírovať do schránky', 'hr': 'Kopiraj u međuspremnik', 'bg': 'Копирай в клипборда', 'el': 'Αντιγραφή', 'da': 'Kopier til udklipsholder', 'fi': 'Kopioi leikepöydälle', 'no': 'Kopier til utklippstavle', 'uk': 'Копіювати в буфер', 'ru': 'Копировать в буфер', 'tr': 'Panoya kopyala', 'zh': '复制到剪贴板', 'ja': 'クリップボードにコピー', 'ko': '클립보드에 복사', 'hi': 'क्लिपबोर्ड पर कॉपी', 'th': 'คัดลอกไปคลิปบอร์ด', 'vi': 'Sao chép vào clipboard', 'id': 'Salin ke papan klip', 'ms': 'Salin ke papan keratan'},
-  // uncertain: all non-de/en below for share_media
-  'share_media': {'de': 'Teilen', 'en': 'Share', 'es': 'Compartir', 'hu': 'Megosztás', 'sv': 'Dela', 'ar': 'مشاركة', 'he': 'שתף', 'fa': 'اشتراک', 'fr': 'Partager', 'it': 'Condividi', 'pt': 'Compartilhar', 'nl': 'Delen', 'pl': 'Udostępnij', 'ro': 'Partajează', 'cs': 'Sdílet', 'sk': 'Zdieľať', 'hr': 'Podijeli', 'bg': 'Сподели', 'el': 'Κοινοποίηση', 'da': 'Del', 'fi': 'Jaa', 'no': 'Del', 'uk': 'Поділитися', 'ru': 'Поделиться', 'tr': 'Paylaş', 'zh': '分享', 'ja': '共有', 'ko': '공유', 'hi': 'साझा करें', 'th': 'แชร์', 'vi': 'Chia sẻ', 'id': 'Bagikan', 'ms': 'Kongsi'},
   'file_saved_to': {'de': 'Gespeichert: {path}', 'en': 'Saved to: {path}', 'es': 'Guardado en: {path}', 'hu': 'Mentve: {path}', 'sv': 'Sparad: {path}', 'ar': 'تم الحفظ: {path}', 'he': 'נשמר ב: {path}', 'fa': 'ذخیره شد: {path}', 'fr': 'Enregistré : {path}', 'it': 'Salvato: {path}', 'pt': 'Salvo em: {path}', 'nl': 'Opgeslagen: {path}', 'pl': 'Zapisano: {path}', 'ro': 'Salvat: {path}', 'cs': 'Uloženo: {path}', 'sk': 'Uložené: {path}', 'hr': 'Spremljeno: {path}', 'bg': 'Запазено: {path}', 'el': 'Αποθηκεύτηκε: {path}', 'da': 'Gemt: {path}', 'fi': 'Tallennettu: {path}', 'no': 'Lagret: {path}', 'uk': 'Збережено: {path}', 'ru': 'Сохранено: {path}', 'tr': 'Kaydedildi: {path}', 'zh': '已保存: {path}', 'ja': '保存先: {path}', 'ko': '저장됨: {path}', 'hi': 'सहेजा गया: {path}', 'th': 'บันทึกที่: {path}', 'vi': 'Đã lưu: {path}', 'id': 'Disimpan: {path}', 'ms': 'Disimpan: {path}'},
   'copy': {'de': 'Kopieren', 'en': 'Copy', 'es': 'Copiar', 'hu': 'Másolás', 'sv': 'Kopiera', 'ar': 'نسخ', 'he': 'העתקה', 'fa': 'کپی', 'fr': 'Copier', 'it': 'Copia', 'pt': 'Copiar', 'nl': 'Kopiëren', 'pl': 'Kopiuj', 'ro': 'Copiază', 'cs': 'Kopírovat', 'sk': 'Kopírovať', 'hr': 'Kopiraj', 'bg': 'Копирай', 'el': 'Αντιγραφή', 'da': 'Kopier', 'fi': 'Kopioi', 'no': 'Kopier', 'uk': 'Копіювати', 'ru': 'Копировать', 'tr': 'Kopyala', 'zh': '复制', 'ja': 'コピー', 'ko': '복사', 'hi': 'कॉपी', 'th': 'คัดลอก', 'vi': 'Sao chép', 'id': 'Salin', 'ms': 'Salin'},
   'accept': {'de': 'Annehmen', 'en': 'Accept', 'es': 'Aceptar', 'hu': 'Elfogadás', 'sv': 'Acceptera', 'ar': 'قبول', 'he': 'אישור', 'fa': 'پذیرفتن', 'fr': 'Accepter', 'it': 'Accetta', 'pt': 'Aceitar', 'nl': 'Accepteren', 'pl': 'Akceptuj', 'ro': 'Acceptă', 'cs': 'Přijmout', 'sk': 'Prijať', 'hr': 'Prihvati', 'bg': 'Приеми', 'el': 'Αποδοχή', 'da': 'Accepter', 'fi': 'Hyväksy', 'no': 'Godta', 'uk': 'Прийняти', 'ru': 'Принять', 'tr': 'Kabul et', 'zh': '接受', 'ja': '承諾', 'ko': '수락', 'hi': 'स्वीकार करें', 'th': 'ยอมรับ', 'vi': 'Chấp nhận', 'id': 'Terima', 'ms': 'Terima'},
@@ -171,7 +167,6 @@ const Map<String, Map<String, String>> translations = {
   'forward_to': {'de': 'Weiterleiten an', 'en': 'Forward to', 'es': 'Reenviar a', 'hu': 'Továbbítás ide', 'sv': 'Vidarebefordra till', 'ar': 'إعادة توجيه إلى', 'he': 'העבר אל', 'fa': 'بازارسال به', 'fr': 'Transférer à', 'it': 'Inoltra a', 'pt': 'Encaminhar para', 'nl': 'Doorsturen naar', 'pl': 'Przekaż do', 'ro': 'Redirecționează către', 'cs': 'Přeposlat komu', 'sk': 'Preposlať komu', 'hr': 'Proslijedi kome', 'bg': 'Препрати на', 'el': 'Προώθηση σε', 'da': 'Videresend til', 'fi': 'Välitä käyttäjälle', 'no': 'Videresend til', 'uk': 'Переслати до', 'ru': 'Переслать кому', 'tr': 'İlet', 'zh': '转发至', 'ja': '転送先', 'ko': '전달 대상', 'hi': 'अग्रेषित करें', 'th': 'ส่งต่อไปยัง', 'vi': 'Chuyển tiếp đến', 'id': 'Teruskan ke', 'ms': 'Majukan kepada'},
   'delete_message_title': {'de': 'Nachricht löschen', 'en': 'Delete message', 'es': 'Eliminar mensaje', 'hu': 'Üzenet törlése', 'sv': 'Radera meddelande', 'ar': 'حذف الرسالة', 'he': 'מחיקת הודעה', 'fa': 'حذف پیام', 'fr': 'Supprimer le message', 'it': 'Elimina messaggio', 'pt': 'Excluir mensagem', 'nl': 'Bericht verwijderen', 'pl': 'Usuń wiadomość', 'ro': 'Șterge mesaj', 'cs': 'Smazat zprávu', 'sk': 'Zmazať správu', 'hr': 'Obriši poruku', 'bg': 'Изтрий съобщение', 'el': 'Διαγραφή μηνύματος', 'da': 'Slet besked', 'fi': 'Poista viesti', 'no': 'Slett melding', 'uk': 'Видалити повідомлення', 'ru': 'Удалить сообщение', 'tr': 'Mesajı sil', 'zh': '删除消息', 'ja': 'メッセージ削除', 'ko': '메시지 삭제', 'hi': 'संदेश हटाएं', 'th': 'ลบข้อความ', 'vi': 'Xóa tin nhắn', 'id': 'Hapus pesan', 'ms': 'Padam mesej'},
   'delete_message_content': {'de': 'Nachricht für alle löschen?', 'en': 'Delete message for everyone?', 'es': '¿Eliminar mensaje para todos?', 'hu': 'Üzenet törlése mindenkinél?', 'sv': 'Radera meddelande för alla?', 'ar': 'حذف الرسالة للجميع؟', 'he': 'למחוק את ההודעה לכולם?', 'fa': 'حذف پیام برای همه؟', 'fr': 'Supprimer pour tous ?', 'it': 'Eliminare per tutti?', 'pt': 'Excluir para todos?', 'nl': 'Bericht voor iedereen verwijderen?', 'pl': 'Usunąć dla wszystkich?', 'ro': 'Șterge pentru toți?', 'cs': 'Smazat pro všechny?', 'sk': 'Zmazať pre všetkých?', 'hr': 'Obrisati za sve?', 'bg': 'Изтрий за всички?', 'el': 'Διαγραφή για όλους;', 'da': 'Slet for alle?', 'fi': 'Poista kaikilta?', 'no': 'Slett for alle?', 'uk': 'Видалити для всіх?', 'ru': 'Удалить для всех?', 'tr': 'Herkesten sil?', 'zh': '为所有人删除？', 'ja': '全員のメッセージを削除？', 'ko': '모두에게서 삭제?', 'hi': 'सबके लिए हटाएं?', 'th': 'ลบสำหรับทุกคน?', 'vi': 'Xóa cho tất cả?', 'id': 'Hapus untuk semua?', 'ms': 'Padam untuk semua?'},
-  'delete_message_failed': {'de': 'Nachricht konnte nicht gelöscht werden', 'en': 'Message could not be deleted', 'es': 'No se pudo eliminar el mensaje', 'fr': 'Impossible de supprimer le message', 'hu': 'Az üzenetet nem sikerült törölni', 'sv': 'Meddelandet kunde inte raderas', 'ar': 'تعذر حذف الرسالة', 'he': 'לא ניתן היה למחוק את ההודעה', 'fa': 'پیام حذف نشد', 'it': 'Impossibile eliminare il messaggio', 'pt': 'Não foi possível excluir a mensagem', 'nl': 'Bericht kon niet worden verwijderd', 'pl': 'Nie udało się usunąć wiadomości', 'ro': 'Mesajul nu a putut fi șters', 'cs': 'Zprávu se nepodařilo smazat', 'sk': 'Správu sa nepodarilo zmazať', 'hr': 'Poruku nije moguće izbrisati', 'bg': 'Съобщението не можа да бъде изтрито', 'el': 'Δεν ήταν δυνατή η διαγραφή του μηνύματος', 'da': 'Beskeden kunne ikke slettes', 'fi': 'Viestiä ei voitu poistaa', 'no': 'Meldingen kunne ikke slettes', 'uk': 'Не вдалося видалити повідомлення', 'ru': 'Не удалось удалить сообщение', 'tr': 'Mesaj silinemedi', 'zh': '无法删除消息', 'ja': 'メッセージを削除できませんでした', 'ko': '메시지를 삭제할 수 없습니다', 'hi': 'संदेश हटाया नहीं जा सका', 'th': 'ไม่สามารถลบข้อความได้', 'vi': 'Không thể xóa tin nhắn', 'id': 'Pesan tidak dapat dihapus', 'ms': 'Mesej tidak dapat dipadamkan'},
   'editing_message': {'de': 'Nachricht bearbeiten', 'en': 'Editing message', 'es': 'Editando mensaje', 'hu': 'Üzenet szerkesztése', 'sv': 'Redigerar meddelande', 'ar': 'تعديل الرسالة', 'he': 'עריכת הודעה', 'fa': 'ویرایش پیام', 'fr': 'Modification du message', 'it': 'Modifica messaggio', 'pt': 'Editando mensagem', 'nl': 'Bericht bewerken', 'pl': 'Edycja wiadomości', 'ro': 'Editare mesaj', 'cs': 'Úprava zprávy', 'sk': 'Úprava správy', 'hr': 'Uređivanje poruke', 'bg': 'Редактиране', 'el': 'Επεξεργασία', 'da': 'Redigerer besked', 'fi': 'Muokkaa viestiä', 'no': 'Redigerer melding', 'uk': 'Редагування', 'ru': 'Редактирование', 'tr': 'Mesaj düzenleniyor', 'zh': '编辑消息', 'ja': 'メッセージ編集中', 'ko': '메시지 편집 중', 'hi': 'संदेश संपादन', 'th': 'แก้ไขข้อความ', 'vi': 'Đang sửa', 'id': 'Mengedit pesan', 'ms': 'Menyunting mesej'},
   'message_hint': {'de': 'Nachricht...', 'en': 'Message...', 'es': 'Mensaje...', 'hu': 'Üzenet...', 'sv': 'Meddelande...', 'ar': 'رسالة...', 'he': 'הודעה...', 'fa': 'پیام...', 'fr': 'Message...', 'it': 'Messaggio...', 'pt': 'Mensagem...', 'nl': 'Bericht...', 'pl': 'Wiadomość...', 'ro': 'Mesaj...', 'cs': 'Zpráva...', 'sk': 'Správa...', 'hr': 'Poruka...', 'bg': 'Съобщение...', 'el': 'Μήνυμα...', 'da': 'Besked...', 'fi': 'Viesti...', 'no': 'Melding...', 'uk': 'Повідомлення...', 'ru': 'Сообщение...', 'tr': 'Mesaj...', 'zh': '消息...', 'ja': 'メッセージ...', 'ko': '메시지...', 'hi': 'संदेश...', 'th': 'ข้อความ...', 'vi': 'Tin nhắn...', 'id': 'Pesan...', 'ms': 'Mesej...'},
   'message_hint_editing': {'de': 'Nachricht bearbeiten...', 'en': 'Edit message...', 'es': 'Editar mensaje...', 'hu': 'Üzenet szerkesztése...', 'sv': 'Redigera meddelande...', 'ar': 'تعديل الرسالة...', 'he': 'עריכת הודעה...', 'fa': 'ویرایش پیام...', 'fr': 'Modifier le message...', 'it': 'Modifica messaggio...', 'pt': 'Editar mensagem...', 'nl': 'Bericht bewerken...', 'pl': 'Edytuj wiadomość...', 'ro': 'Editare mesaj...', 'cs': 'Upravit zprávu...', 'sk': 'Upraviť správu...', 'hr': 'Uredi poruku...', 'bg': 'Редактирай...', 'el': 'Επεξεργασία...', 'da': 'Rediger besked...', 'fi': 'Muokkaa viestiä...', 'no': 'Rediger melding...', 'uk': 'Редагувати...', 'ru': 'Редактировать...', 'tr': 'Mesajı düzenle...', 'zh': '编辑消息...', 'ja': 'メッセージ編集...', 'ko': '메시지 편집...', 'hi': 'संदेश संपादित...', 'th': 'แก้ไขข้อความ...', 'vi': 'Sửa tin nhắn...', 'id': 'Edit pesan...', 'ms': 'Sunting mesej...'},
@@ -573,7 +568,6 @@ const Map<String, Map<String, String>> translations = {
   'calendar_start_call': {'de': 'Anruf starten', 'en': 'Start call', 'es': 'Iniciar llamada', 'fr': 'Démarrer l\'appel', 'uk': 'Почати виклик', 'ru': 'Начать звонок', 'hu': 'Hívás indítása', 'sv': 'Starta samtal', 'ar': 'بدء مكالمة', 'he': 'התחלת שיחה', 'fa': 'شروع تماس', 'it': 'Avvia chiamata', 'pt': 'Iniciar chamada', 'nl': 'Oproep starten', 'pl': 'Rozpocznij połączenie', 'ro': 'Începe apelul', 'cs': 'Zahájit hovor', 'sk': 'Spustiť hovor', 'hr': 'Započni poziv', 'bg': 'Започни разговор', 'el': 'Έναρξη κλήσης', 'da': 'Start opkald', 'fi': 'Aloita puhelu', 'no': 'Start samtale', 'tr': 'Aramayı başlat', 'zh': '发起通话', 'ja': '通話を開始', 'ko': '통화 시작', 'hi': 'कॉल शुरू करें', 'th': 'เริ่มโทร', 'vi': 'Bắt đầu cuộc gọi', 'id': 'Mulai panggilan', 'ms': 'Mulakan panggilan'},
   'calendar_start_call_hint': {'de': 'Gruppenanruf bei Terminbeginn starten', 'en': 'Start group call at event start', 'es': 'Iniciar llamada grupal al comienzo del evento', 'hu': 'Csoporthívás indítása az esemény kezdetén', 'sv': 'Starta gruppsamtal vid mötets början', 'ar': 'ابدأ مكالمة جماعية عند بدء الحدث', 'he': 'התחל שיחה קבוצתית בתחילת האירוע', 'fa': 'شروع تماس گروهی در آغاز رویداد', 'fr': 'Démarrer l\'appel de groupe au début', 'it': 'Avvia chiamata di gruppo all\'inizio dell\'evento', 'pt': 'Iniciar chamada em grupo no início do evento', 'nl': 'Groepsgesprek starten bij begin afspraak', 'pl': 'Rozpocznij rozmowę grupową na początku wydarzenia', 'ro': 'Pornește apel de grup la începutul evenimentului', 'cs': 'Spustit skupinový hovor na začátku události', 'sk': 'Spustiť skupinový hovor na začiatku udalosti', 'hr': 'Pokreni grupni poziv na početku događaja', 'bg': 'Започни групово обаждане в началото на събитието', 'el': 'Έναρξη ομαδικής κλήσης στην αρχή του συμβάντος', 'da': 'Start gruppeopkald ved begivenhedsstart', 'fi': 'Aloita ryhmäpuhelu tapahtuman alussa', 'no': 'Start gruppeanrop ved hendelsens start', 'uk': 'Почати груповий виклик на початку події', 'ru': 'Начать групповой звонок в начале события', 'tr': 'Etkinlik başlangıcında grup araması başlat', 'zh': '在事件开始时启动群组通话', 'ja': 'イベント開始時にグループ通話を開始', 'ko': '이벤트 시작 시 그룹 통화 시작', 'hi': 'इवेंट शुरू होने पर समूह कॉल शुरू करें', 'th': 'เริ่มการโทรกลุ่มเมื่อถึงเวลานัดหมาย', 'vi': 'Bắt đầu cuộc gọi nhóm khi sự kiện bắt đầu', 'id': 'Mulai panggilan grup saat acara dimulai', 'ms': 'Mulakan panggilan kumpulan pada permulaan acara'},
   'calendar_select_group': {'de': 'Gruppe auswählen', 'en': 'Select group', 'es': 'Seleccionar grupo', 'fr': 'Sélectionner le groupe', 'uk': 'Обрати групу', 'ru': 'Выбрать группу', 'hu': 'Csoport kiválasztása', 'sv': 'Välj grupp', 'ar': 'اختر مجموعة', 'he': 'בחר קבוצה', 'fa': 'انتخاب گروه', 'it': 'Seleziona gruppo', 'pt': 'Selecionar grupo', 'nl': 'Groep selecteren', 'pl': 'Wybierz grupę', 'ro': 'Selectează grupul', 'cs': 'Vybrat skupinu', 'sk': 'Vybrať skupinu', 'hr': 'Odaberi grupu', 'bg': 'Избери група', 'el': 'Επιλογή ομάδας', 'da': 'Vælg gruppe', 'fi': 'Valitse ryhmä', 'no': 'Velg gruppe', 'tr': 'Grup seç', 'zh': '选择群组', 'ja': 'グループを選択', 'ko': '그룹 선택', 'hi': 'समूह चुनें', 'th': 'เลือกกลุ่ม', 'vi': 'Chọn nhóm', 'id': 'Pilih grup', 'ms': 'Pilih kumpulan'},
-  'calendar_select_participants': {'de': 'Teilnehmer auswählen', 'en': 'Select participants', 'es': 'Seleccionar participantes', 'fr': 'Sélectionner les participants', 'uk': 'Обрати учасників', 'ru': 'Выбрать участников', 'hu': 'Résztvevők kiválasztása', 'sv': 'Välj deltagare', 'ar': 'اختر المشاركين', 'he': 'בחר משתתפים', 'fa': 'انتخاب شرکت‌کنندگان', 'it': 'Seleziona partecipanti', 'pt': 'Selecionar participantes', 'nl': 'Deelnemers selecteren', 'pl': 'Wybierz uczestników', 'ro': 'Selectează participanții', 'cs': 'Vybrat účastníky', 'sk': 'Vybrať účastníkov', 'hr': 'Odaberi sudionike', 'bg': 'Избери участници', 'el': 'Επιλογή συμμετεχόντων', 'da': 'Vælg deltagere', 'fi': 'Valitse osallistujat', 'no': 'Velg deltakere', 'tr': 'Katılımcıları seç', 'zh': '选择参与者', 'ja': '参加者を選択', 'ko': '참가자 선택', 'hi': 'प्रतिभागियों को चुनें', 'th': 'เลือกผู้เข้าร่วม', 'vi': 'Chọn người tham gia', 'id': 'Pilih peserta', 'ms': 'Pilih peserta'},
   'calendar_visibility': {'de': 'Sichtbarkeit', 'en': 'Visibility', 'es': 'Visibilidad', 'fr': 'Visibilité', 'uk': 'Видимість', 'ru': 'Видимость', 'hu': 'Láthatóság', 'sv': 'Synlighet', 'ar': 'الظهور', 'he': 'נראות', 'fa': 'قابلیت دیده شدن', 'it': 'Visibilità', 'pt': 'Visibilidade', 'nl': 'Zichtbaarheid', 'pl': 'Widoczność', 'ro': 'Vizibilitate', 'cs': 'Viditelnost', 'sk': 'Viditeľnosť', 'hr': 'Vidljivost', 'bg': 'Видимост', 'el': 'Ορατότητα', 'da': 'Synlighed', 'fi': 'Näkyvyys', 'no': 'Synlighet', 'tr': 'Görünürlük', 'zh': '可见性', 'ja': '表示範囲', 'ko': '공개 범위', 'hi': 'दृश्यता', 'th': 'การมองเห็น', 'vi': 'Mức hiển thị', 'id': 'Visibilitas', 'ms': 'Keterlihatan'},
   'calendar_priority': {'de': 'Priorität', 'en': 'Priority', 'es': 'Prioridad', 'fr': 'Priorité', 'uk': 'Пріоритет', 'ru': 'Приоритет', 'hu': 'Prioritás', 'sv': 'Prioritet', 'ar': 'الأولوية', 'he': 'עדיפות', 'fa': 'اولویت', 'it': 'Priorità', 'pt': 'Prioridade', 'nl': 'Prioriteit', 'pl': 'Priorytet', 'ro': 'Prioritate', 'cs': 'Priorita', 'sk': 'Priorita', 'hr': 'Prioritet', 'bg': 'Приоритет', 'el': 'Προτεραιότητα', 'da': 'Prioritet', 'fi': 'Prioriteetti', 'no': 'Prioritet', 'tr': 'Öncelik', 'zh': '优先级', 'ja': '優先度', 'ko': '우선순위', 'hi': 'प्राथमिकता', 'th': 'ลำดับความสำคัญ', 'vi': 'Ưu tiên', 'id': 'Prioritas', 'ms': 'Keutamaan'},
   'calendar_priority_none': {'de': 'Keine', 'en': 'None', 'es': 'Ninguna', 'fr': 'Aucune', 'hu': 'Nincs', 'sv': 'Ingen', 'ar': 'بدون', 'he': 'ללא', 'fa': 'هیچ', 'it': 'Nessuna', 'pt': 'Nenhuma', 'nl': 'Geen', 'pl': 'Brak', 'ro': 'Niciuna', 'cs': 'Žádná', 'sk': 'Žiadna', 'hr': 'Nijedan', 'bg': 'Няма', 'el': 'Καμία', 'da': 'Ingen', 'fi': 'Ei mitään', 'no': 'Ingen', 'uk': 'Немає', 'ru': 'Нет', 'tr': 'Yok', 'zh': '无', 'ja': 'なし', 'ko': '없음', 'hi': 'कोई नहीं', 'th': 'ไม่มี', 'vi': 'Không', 'id': 'Tidak ada', 'ms': 'Tiada'},
@@ -966,8 +960,18 @@ const Map<String, Map<String, String>> translations = {
   'update_required_title': {'de': 'Update erforderlich', 'en': 'Update required', 'es': 'Actualización requerida', 'hu': 'Frissítés szükséges', 'sv': 'Uppdatering krävs', 'ar': 'تحديث مطلوب', 'he': 'נדרש עדכון', 'fa': 'به‌روزرسانی الزامی است', 'fr': 'Mise à jour requise', 'it': 'Aggiornamento richiesto', 'pt': 'Atualização necessária', 'nl': 'Update vereist', 'pl': 'Wymagana aktualizacja', 'ro': 'Actualizare necesară', 'cs': 'Vyžadována aktualizace', 'sk': 'Vyžadovaná aktualizácia', 'hr': 'Potrebno ažuriranje', 'bg': 'Изисква се актуализация', 'el': 'Απαιτείται ενημέρωση', 'da': 'Opdatering påkrævet', 'fi': 'Päivitys vaaditaan', 'no': 'Oppdatering kreves', 'uk': 'Потрібне оновлення', 'ru': 'Требуется обновление', 'tr': 'Güncelleme gerekli', 'zh': '需要更新', 'ja': 'アップデートが必要です', 'ko': '업데이트 필요', 'hi': 'अपडेट आवश्यक है', 'th': 'ต้องอัปเดต', 'vi': 'Cần cập nhật', 'id': 'Pembaruan diperlukan', 'ms': 'Kemaskini diperlukan'},
   'update_required_kem_v2': {'de': 'Diese Version unterstützt das aktuelle Verschlüsselungsformat nicht mehr. Bitte aktualisiere, um Nachrichten senden und empfangen zu können.', 'en': 'This version no longer supports the current encryption format. Please update to send and receive messages.', 'es': 'Esta versión ya no admite el formato de cifrado actual. Actualiza para enviar y recibir mensajes.', 'hu': 'Ez a verzió már nem támogatja a jelenlegi titkosítási formátumot. Frissítsd az üzenetek küldéséhez és fogadásához.', 'sv': 'Den här versionen stöder inte längre det aktuella krypteringsformatet. Uppdatera för att skicka och ta emot meddelanden.', 'ar': 'لم تعد هذه النسخة تدعم تنسيق التشفير الحالي. يرجى التحديث لإرسال الرسائل واستلامها.', 'he': 'גרסה זו אינה תומכת עוד בפורמט ההצפנה הנוכחי. עדכן כדי לשלוח ולקבל הודעות.', 'fa': 'این نسخه دیگر از قالب رمزنگاری فعلی پشتیبانی نمی‌کند. لطفاً برای ارسال و دریافت پیام‌ها به‌روزرسانی کنید.', 'fr': 'Cette version ne prend plus en charge le format de chiffrement actuel. Mets à jour pour envoyer et recevoir des messages.', 'it': 'Questa versione non supporta più il formato di crittografia attuale. Aggiorna per inviare e ricevere messaggi.', 'pt': 'Esta versão já não suporta o formato de cifragem atual. Atualiza para enviar e receber mensagens.', 'nl': 'Deze versie ondersteunt het huidige versleutelingsformaat niet meer. Werk bij om berichten te kunnen verzenden en ontvangen.', 'pl': 'Ta wersja nie obsługuje już aktualnego formatu szyfrowania. Zaktualizuj, aby wysyłać i odbierać wiadomości.', 'ro': 'Această versiune nu mai acceptă formatul de criptare actual. Actualizează pentru a trimite și primi mesaje.', 'cs': 'Tato verze již nepodporuje aktuální formát šifrování. Aktualizujte, abyste mohli odesílat a přijímat zprávy.', 'sk': 'Táto verzia už nepodporuje aktuálny šifrovací formát. Aktualizuj, aby si mohol posielať a prijímať správy.', 'hr': 'Ova verzija više ne podržava trenutni format enkripcije. Ažurirajte kako biste slali i primali poruke.', 'bg': 'Тази версия вече не поддържа текущия формат за криптиране. Моля, актуализирайте, за да изпращате и получавате съобщения.', 'el': 'Αυτή η έκδοση δεν υποστηρίζει πλέον την τρέχουσα μορφή κρυπτογράφησης. Ενημερώστε για να στέλνετε και να λαμβάνετε μηνύματα.', 'da': 'Denne version understøtter ikke længere det aktuelle krypteringsformat. Opdater for at sende og modtage beskeder.', 'fi': 'Tämä versio ei enää tue nykyistä salausmuotoa. Päivitä lähettääksesi ja vastaanottaaksesi viestejä.', 'no': 'Denne versjonen støtter ikke lenger det gjeldende krypteringsformatet. Oppdater for å sende og motta meldinger.', 'uk': 'Ця версія більше не підтримує поточний формат шифрування. Оновіть, щоб надсилати та отримувати повідомлення.', 'ru': 'Эта версия больше не поддерживает текущий формат шифрования. Обновите, чтобы отправлять и получать сообщения.', 'tr': 'Bu sürüm artık mevcut şifreleme biçimini desteklemiyor. Mesaj gönderip almak için lütfen güncelleyin.', 'zh': '此版本不再支持当前的加密格式。请更新以发送和接收消息。', 'ja': 'このバージョンは現在の暗号化形式をサポートしていません。メッセージの送受信にはアップデートしてください。', 'ko': '이 버전은 현재 암호화 형식을 더 이상 지원하지 않습니다. 메시지를 주고받으려면 업데이트하세요.', 'hi': 'यह संस्करण वर्तमान एन्क्रिप्शन प्रारूप का समर्थन नहीं करता। संदेश भेजने और प्राप्त करने के लिए अपडेट करें।', 'th': 'เวอร์ชันนี้ไม่รองรับรูปแบบการเข้ารหัสปัจจุบันอีกต่อไป กรุณาอัปเดตเพื่อส่งและรับข้อความ', 'vi': 'Phiên bản này không còn hỗ trợ định dạng mã hóa hiện tại. Vui lòng cập nhật để gửi và nhận tin nhắn.', 'id': 'Versi ini tidak lagi mendukung format enkripsi terkini. Perbarui untuk mengirim dan menerima pesan.', 'ms': 'Versi ini tidak lagi menyokong format penyulitan semasa. Sila kemaskini untuk menghantar dan menerima mesej.'},
   'update_required_download': {'de': 'Update herunterladen', 'en': 'Download update', 'es': 'Descargar actualización', 'hu': 'Frissítés letöltése', 'sv': 'Hämta uppdatering', 'ar': 'تنزيل التحديث', 'he': 'הורד עדכון', 'fa': 'دانلود به‌روزرسانی', 'fr': 'Télécharger la mise à jour', 'it': 'Scarica aggiornamento', 'pt': 'Baixar atualização', 'nl': 'Update downloaden', 'pl': 'Pobierz aktualizację', 'ro': 'Descarcă actualizarea', 'cs': 'Stáhnout aktualizaci', 'sk': 'Stiahnuť aktualizáciu', 'hr': 'Preuzmi ažuriranje', 'bg': 'Изтегли актуализацията', 'el': 'Λήψη ενημέρωσης', 'da': 'Hent opdatering', 'fi': 'Lataa päivitys', 'no': 'Last ned oppdatering', 'uk': 'Завантажити оновлення', 'ru': 'Скачать обновление', 'tr': 'Güncellemeyi indir', 'zh': '下载更新', 'ja': 'アップデートをダウンロード', 'ko': '업데이트 다운로드', 'hi': 'अपडेट डाउनलोड करें', 'th': 'ดาวน์โหลดอัปเดต', 'vi': 'Tải xuống bản cập nhật', 'id': 'Unduh pembaruan', 'ms': 'Muat turun kemaskini'},
-  'updateInNetworkButton': {'de': 'Update über Netzwerk', 'en': 'Update via Network', 'es': 'Actualizar a través de la red', 'hu': 'Frissítés hálózaton keresztül', 'sv': 'Uppdatera via nätverket', 'ar': 'التحديث عبر الشبكة', 'he': 'עדכון דרך הרשת', 'fa': 'به‌روزرسانی از طریق شبکه', 'fr': 'Mise à jour via le réseau', 'it': 'Aggiorna tramite rete', 'pt': 'Atualizar via rede', 'nl': 'Updaten via netwerk', 'pl': 'Aktualizuj przez sieć', 'ro': 'Actualizează prin rețea', 'cs': 'Aktualizovat přes síť', 'sk': 'Aktualizovať cez sieť', 'hr': 'Ažuriraj putem mreže', 'bg': 'Актуализация през мрежата', 'el': 'Ενημέρωση μέσω δικτύου', 'da': 'Opdater via netværk', 'fi': 'Päivitä verkon kautta', 'no': 'Oppdater via nettverk', 'uk': 'Оновити через мережу', 'ru': 'Обновить через сеть', 'tr': 'Ağ üzerinden güncelle', 'zh': '通过网络更新', 'ja': 'ネットワーク経由でアップデート', 'ko': '네트워크를 통해 업데이트', 'hi': 'नेटवर्क के माध्यम से अपडेट करें', 'th': 'อัปเดตผ่านเครือข่าย', 'vi': 'Cập nhật qua mạng', 'id': 'Perbarui melalui jaringan', 'ms': 'Kemas kini melalui rangkaian'},
   'update_required_skip_limited': {'de': 'Trotzdem öffnen (eingeschränkt)', 'en': 'Open anyway (limited)', 'es': 'Abrir de todos modos (limitado)', 'hu': 'Megnyitás mégis (korlátozott)', 'sv': 'Öppna ändå (begränsat)', 'ar': 'متابعة على أي حال (محدود)', 'he': 'פתח בכל זאת (מוגבל)', 'fa': 'به هر حال باز کن (محدود)', 'fr': 'Ouvrir quand même (limité)', 'it': 'Apri comunque (limitato)', 'pt': 'Abrir mesmo assim (limitado)', 'nl': 'Toch openen (beperkt)', 'pl': 'Otwórz mimo to (ograniczone)', 'ro': 'Deschide oricum (limitat)', 'cs': 'Přesto otevřít (omezeně)', 'sk': 'Aj tak otvoriť (obmedzene)', 'hr': 'Ipak otvori (ograničeno)', 'bg': 'Отвори въпреки това (ограничено)', 'el': 'Άνοιγμα ούτως ή άλλως (περιορισμένα)', 'da': 'Åbn alligevel (begrænset)', 'fi': 'Avaa silti (rajoitettu)', 'no': 'Åpne likevel (begrenset)', 'uk': 'Все одно відкрити (обмежено)', 'ru': 'Всё равно открыть (ограниченно)', 'tr': 'Yine de aç (sınırlı)', 'zh': '仍然打开（受限）', 'ja': 'それでも開く（制限あり）', 'ko': '그래도 열기 (제한됨)', 'hi': 'फिर भी खोलें (सीमित)', 'th': 'เปิดต่อไป (จำกัด)', 'vi': 'Vẫn mở (hạn chế)', 'id': 'Tetap buka (terbatas)', 'ms': 'Tetap buka (terhad)'},
+  'update_available_title': {'de': 'Update verfügbar', 'en': 'Update available', 'es': 'Actualización disponible', 'hu': 'Frissítés elérhető', 'sv': 'Uppdatering tillgänglig', 'ar': 'تحديث متاح', 'he': 'עדכון זמין', 'fa': 'به‌روزرسانی موجود است', 'fr': 'Mise à jour disponible', 'it': 'Aggiornamento disponibile', 'pt': 'Atualização disponível', 'nl': 'Update beschikbaar', 'pl': 'Dostępna aktualizacja', 'ro': 'Actualizare disponibilă', 'cs': 'Aktualizace k dispozici', 'sk': 'Aktualizácia k dispozícii', 'hr': 'Dostupno ažuriranje', 'bg': 'Налична е актуализация', 'el': 'Διαθέσιμη ενημέρωση', 'da': 'Opdatering tilgængelig', 'fi': 'Päivitys saatavilla', 'no': 'Oppdatering tilgjengelig', 'uk': 'Доступне оновлення', 'ru': 'Доступно обновление', 'tr': 'Güncelleme mevcut', 'zh': '有可用更新', 'ja': 'アップデートがあります', 'ko': '업데이트 사용 가능', 'hi': 'अपडेट उपलब्ध है', 'th': 'มีอัปเดตใหม่', 'vi': 'Có bản cập nhật', 'id': 'Pembaruan tersedia', 'ms': 'Kemaskini tersedia'},
+  'update_available_body': {'de': 'Eine neue Version ist verfügbar', 'en': 'A new version is available', 'es': 'Una nueva versión está disponible', 'hu': 'Új verzió érhető el', 'sv': 'En ny version finns tillgänglig', 'ar': 'يتوفر إصدار جديد', 'he': 'גרסה חדשה זמינה', 'fa': 'نسخه جدید موجود است', 'fr': 'Une nouvelle version est disponible', 'it': 'Una nuova versione è disponibile', 'pt': 'Uma nova versão está disponível', 'nl': 'Een nieuwe versie is beschikbaar', 'pl': 'Nowa wersja jest dostępna', 'ro': 'O versiune nouă este disponibilă', 'cs': 'Je k dispozici nová verze', 'sk': 'Je k dispozícii nová verzia', 'hr': 'Nova verzija je dostupna', 'bg': 'Налична е нова версия', 'el': 'Μια νέα έκδοση είναι διαθέσιμη', 'da': 'En ny version er tilgængelig', 'fi': 'Uusi versio on saatavilla', 'no': 'En ny versjon er tilgjengelig', 'uk': 'Доступна нова версія', 'ru': 'Доступна новая версия', 'tr': 'Yeni bir sürüm mevcut', 'zh': '有新版本可用', 'ja': '新しいバージョンが利用可能です', 'ko': '새 버전을 사용할 수 있습니다', 'hi': 'एक नया संस्करण उपलब्ध है', 'th': 'มีเวอร์ชันใหม่ให้ใช้งาน', 'vi': 'Có phiên bản mới', 'id': 'Versi baru tersedia', 'ms': 'Versi baharu tersedia'},
+  'update_download': {'de': 'Herunterladen', 'en': 'Download', 'es': 'Descargar', 'hu': 'Letöltés', 'sv': 'Hämta', 'ar': 'تنزيل', 'he': 'הורד', 'fa': 'دانلود', 'fr': 'Télécharger', 'it': 'Scarica', 'pt': 'Baixar', 'nl': 'Downloaden', 'pl': 'Pobierz', 'ro': 'Descarcă', 'cs': 'Stáhnout', 'sk': 'Stiahnuť', 'hr': 'Preuzmi', 'bg': 'Изтегли', 'el': 'Λήψη', 'da': 'Hent', 'fi': 'Lataa', 'no': 'Last ned', 'uk': 'Завантажити', 'ru': 'Скачать', 'tr': 'İndir', 'zh': '下载', 'ja': 'ダウンロード', 'ko': '다운로드', 'hi': 'डाउनलोड', 'th': 'ดาวน์โหลด', 'vi': 'Tải xuống', 'id': 'Unduh', 'ms': 'Muat turun'},
+  'update_downloading': {'de': 'Wird heruntergeladen', 'en': 'Downloading', 'es': 'Descargando', 'hu': 'Letöltés folyamatban', 'sv': 'Hämtar', 'ar': 'جارٍ التنزيل', 'he': 'מוריד', 'fa': 'در حال دانلود', 'fr': 'Téléchargement en cours', 'it': 'Download in corso', 'pt': 'A transferir', 'nl': 'Wordt gedownload', 'pl': 'Pobieranie', 'ro': 'Se descarcă', 'cs': 'Stahování', 'sk': 'Sťahovanie', 'hr': 'Preuzimanje', 'bg': 'Изтегляне', 'el': 'Λήψη σε εξέλιξη', 'da': 'Henter', 'fi': 'Ladataan', 'no': 'Laster ned', 'uk': 'Завантаження', 'ru': 'Загрузка', 'tr': 'İndiriliyor', 'zh': '正在下载', 'ja': 'ダウンロード中', 'ko': '다운로드 중', 'hi': 'डाउनलोड हो रहा है', 'th': 'กำลังดาวน์โหลด', 'vi': 'Đang tải xuống', 'id': 'Mengunduh', 'ms': 'Memuat turun'},
+  'update_assembling': {'de': 'Wird zusammengesetzt', 'en': 'Assembling', 'es': 'Ensamblando', 'hu': 'Összeállítás', 'sv': 'Sätter ihop', 'ar': 'جارٍ التجميع', 'he': 'מרכיב', 'fa': 'در حال مونتاژ', 'fr': 'Assemblage en cours', 'it': 'Assemblaggio in corso', 'pt': 'A montar', 'nl': 'Wordt samengesteld', 'pl': 'Składanie', 'ro': 'Se asamblează', 'cs': 'Sestavování', 'sk': 'Zostavovanie', 'hr': 'Sastavljanje', 'bg': 'Сглобяване', 'el': 'Συναρμολόγηση', 'da': 'Samler', 'fi': 'Kootaan', 'no': 'Setter sammen', 'uk': 'Збирання', 'ru': 'Сборка', 'tr': 'Birleştiriliyor', 'zh': '正在组装', 'ja': '組み立て中', 'ko': '조립 중', 'hi': 'जोड़ा जा रहा है', 'th': 'กำลังประกอบ', 'vi': 'Đang lắp ráp', 'id': 'Merakit', 'ms': 'Memasang'},
+  'update_verifying': {'de': 'Wird überprüft', 'en': 'Verifying', 'es': 'Verificando', 'hu': 'Ellenőrzés', 'sv': 'Verifierar', 'ar': 'جارٍ التحقق', 'he': 'מאמת', 'fa': 'در حال بررسی', 'fr': 'Vérification en cours', 'it': 'Verifica in corso', 'pt': 'A verificar', 'nl': 'Wordt geverifieerd', 'pl': 'Weryfikacja', 'ro': 'Se verifică', 'cs': 'Ověřování', 'sk': 'Overovanie', 'hr': 'Provjera', 'bg': 'Проверка', 'el': 'Επαλήθευση', 'da': 'Verificerer', 'fi': 'Tarkistetaan', 'no': 'Verifiserer', 'uk': 'Перевірка', 'ru': 'Проверка', 'tr': 'Doğrulanıyor', 'zh': '正在验证', 'ja': '検証中', 'ko': '확인 중', 'hi': 'सत्यापन हो रहा है', 'th': 'กำลังตรวจสอบ', 'vi': 'Đang xác minh', 'id': 'Memverifikasi', 'ms': 'Mengesahkan'},
+  'update_ready_install': {'de': 'Update bereit — tippen zum Installieren', 'en': 'Update ready — tap to install', 'es': 'Actualización lista — toca para instalar', 'hu': 'Frissítés kész — érintsd meg a telepítéshez', 'sv': 'Uppdatering klar — tryck för att installera', 'ar': 'التحديث جاهز — انقر للتثبيت', 'he': 'העדכון מוכן — הקש להתקנה', 'fa': 'به‌روزرسانی آماده است — برای نصب ضربه بزنید', 'fr': 'Mise à jour prête — appuyez pour installer', 'it': 'Aggiornamento pronto — tocca per installare', 'pt': 'Atualização pronta — toque para instalar', 'nl': 'Update gereed — tik om te installeren', 'pl': 'Aktualizacja gotowa — dotknij, aby zainstalować', 'ro': 'Actualizare pregătită — atinge pentru a instala', 'cs': 'Aktualizace připravena — klepněte pro instalaci', 'sk': 'Aktualizácia pripravená — ťuknite pre inštaláciu', 'hr': 'Ažuriranje spremno — dodirnite za instalaciju', 'bg': 'Актуализацията е готова — докоснете за инсталиране', 'el': 'Ενημέρωση έτοιμη — πατήστε για εγκατάσταση', 'da': 'Opdatering klar — tryk for at installere', 'fi': 'Päivitys valmis — napauta asentaaksesi', 'no': 'Oppdatering klar — trykk for å installere', 'uk': 'Оновлення готове — натисніть для встановлення', 'ru': 'Обновление готово — нажмите для установки', 'tr': 'Güncelleme hazır — yüklemek için dokunun', 'zh': '更新就绪——点击安装', 'ja': 'アップデート準備完了——タップしてインストール', 'ko': '업데이트 준비 완료 — 탭하여 설치', 'hi': 'अपडेट तैयार — इंस्टॉल करने के लिए टैप करें', 'th': 'อัปเดตพร้อม — แตะเพื่อติดตั้ง', 'vi': 'Bản cập nhật sẵn sàng — chạm để cài đặt', 'id': 'Pembaruan siap — ketuk untuk memasang', 'ms': 'Kemaskini sedia — ketik untuk memasang'},
+  'update_ready_restart': {'de': 'Update bereit — Neustart erforderlich', 'en': 'Update ready — restart required', 'es': 'Actualización lista — reinicio necesario', 'hu': 'Frissítés kész — újraindítás szükséges', 'sv': 'Uppdatering klar — omstart krävs', 'ar': 'التحديث جاهز — يلزم إعادة التشغيل', 'he': 'העדכון מוכן — נדרשת הפעלה מחדש', 'fa': 'به‌روزرسانی آماده است — راه‌اندازی مجدد لازم است', 'fr': 'Mise à jour prête — redémarrage requis', 'it': 'Aggiornamento pronto — riavvio necessario', 'pt': 'Atualização pronta — reinício necessário', 'nl': 'Update gereed — herstart vereist', 'pl': 'Aktualizacja gotowa — wymagany restart', 'ro': 'Actualizare pregătită — repornire necesară', 'cs': 'Aktualizace připravena — vyžadován restart', 'sk': 'Aktualizácia pripravená — vyžadovaný reštart', 'hr': 'Ažuriranje spremno — potrebno ponovno pokretanje', 'bg': 'Актуализацията е готова — необходимо рестартиране', 'el': 'Ενημέρωση έτοιμη — απαιτείται επανεκκίνηση', 'da': 'Opdatering klar — genstart påkrævet', 'fi': 'Päivitys valmis — uudelleenkäynnistys vaaditaan', 'no': 'Oppdatering klar — omstart kreves', 'uk': 'Оновлення готове — потрібен перезапуск', 'ru': 'Обновление готово — требуется перезапуск', 'tr': 'Güncelleme hazır — yeniden başlatma gerekli', 'zh': '更新就绪——需要重启', 'ja': 'アップデート準備完了——再起動が必要です', 'ko': '업데이트 준비 완료 — 재시작 필요', 'hi': 'अपडेट तैयार — पुनरारंभ आवश्यक', 'th': 'อัปเดตพร้อม — ต้องรีสตาร์ท', 'vi': 'Bản cập nhật sẵn sàng — cần khởi động lại', 'id': 'Pembaruan siap — mulai ulang diperlukan', 'ms': 'Kemaskini sedia — mula semula diperlukan'},
+  'update_failed': {'de': 'Update fehlgeschlagen', 'en': 'Update failed', 'es': 'Actualización fallida', 'hu': 'Frissítés sikertelen', 'sv': 'Uppdatering misslyckades', 'ar': 'فشل التحديث', 'he': 'העדכון נכשל', 'fa': 'به‌روزرسانی ناموفق بود', 'fr': 'Mise à jour échouée', 'it': 'Aggiornamento fallito', 'pt': 'Atualização falhou', 'nl': 'Update mislukt', 'pl': 'Aktualizacja nie powiodła się', 'ro': 'Actualizare eșuată', 'cs': 'Aktualizace selhala', 'sk': 'Aktualizácia zlyhala', 'hr': 'Ažuriranje neuspješno', 'bg': 'Актуализацията е неуспешна', 'el': 'Η ενημέρωση απέτυχε', 'da': 'Opdatering mislykkedes', 'fi': 'Päivitys epäonnistui', 'no': 'Oppdatering mislyktes', 'uk': 'Оновлення не вдалося', 'ru': 'Обновление не удалось', 'tr': 'Güncelleme başarısız', 'zh': '更新失败', 'ja': 'アップデートに失敗しました', 'ko': '업데이트 실패', 'hi': 'अपडेट विफल', 'th': 'อัปเดตล้มเหลว', 'vi': 'Cập nhật thất bại', 'id': 'Pembaruan gagal', 'ms': 'Kemaskini gagal'},
+  'update_retry': {'de': 'Erneut versuchen', 'en': 'Retry', 'es': 'Reintentar', 'hu': 'Újrapróbálkozás', 'sv': 'Försök igen', 'ar': 'إعادة المحاولة', 'he': 'נסה שוב', 'fa': 'تلاش مجدد', 'fr': 'Réessayer', 'it': 'Riprova', 'pt': 'Tentar novamente', 'nl': 'Opnieuw proberen', 'pl': 'Ponów próbę', 'ro': 'Reîncearcă', 'cs': 'Zkusit znovu', 'sk': 'Skúsiť znova', 'hr': 'Pokušaj ponovno', 'bg': 'Опитай отново', 'el': 'Επανάληψη', 'da': 'Prøv igen', 'fi': 'Yritä uudelleen', 'no': 'Prøv igjen', 'uk': 'Спробувати знову', 'ru': 'Повторить', 'tr': 'Tekrar dene', 'zh': '重试', 'ja': '再試行', 'ko': '다시 시도', 'hi': 'पुनः प्रयास करें', 'th': 'ลองอีกครั้ง', 'vi': 'Thử lại', 'id': 'Coba lagi', 'ms': 'Cuba lagi'},
+  'updateInNetworkButton': {'de': 'P2P-Update herunterladen', 'en': 'Download P2P update', 'es': 'Descargar actualización P2P', 'hu': 'P2P frissítés letöltése', 'sv': 'Hämta P2P-uppdatering', 'ar': 'تنزيل تحديث P2P', 'he': 'הורד עדכון P2P', 'fa': 'دانلود به‌روزرسانی P2P', 'fr': 'Télécharger la mise à jour P2P', 'it': 'Scarica aggiornamento P2P', 'pt': 'Baixar atualização P2P', 'nl': 'P2P-update downloaden', 'pl': 'Pobierz aktualizację P2P', 'ro': 'Descarcă actualizare P2P', 'cs': 'Stáhnout P2P aktualizaci', 'sk': 'Stiahnuť P2P aktualizáciu', 'hr': 'Preuzmi P2P ažuriranje', 'bg': 'Изтегли P2P актуализация', 'el': 'Λήψη ενημέρωσης P2P', 'da': 'Hent P2P-opdatering', 'fi': 'Lataa P2P-päivitys', 'no': 'Last ned P2P-oppdatering', 'uk': 'Завантажити P2P-оновлення', 'ru': 'Скачать P2P-обновление', 'tr': 'P2P güncellemesini indir', 'zh': '下载P2P更新', 'ja': 'P2Pアップデートをダウンロード', 'ko': 'P2P 업데이트 다운로드', 'hi': 'P2P अपडेट डाउनलोड करें', 'th': 'ดาวน์โหลดอัปเดต P2P', 'vi': 'Tải xuống bản cập nhật P2P', 'id': 'Unduh pembaruan P2P', 'ms': 'Muat turun kemaskini P2P'},
 
   // ── System Channels — Crash Report Dialog (§9.5) ────────────────────
   'crash_dialog_title': {'de': 'Absturz erkannt', 'en': 'Crash Detected', 'es': 'Crash detectado', 'hu': 'Összeomlás észlelve', 'sv': 'Krasch upptäckt', 'ar': 'تم اكتشاف عطل', 'he': 'קריסה זוהתה', 'fa': 'خرابی شناسایی شد', 'fr': 'Crash détecté', 'it': 'Crash rilevato', 'pt': 'Erro detetado', 'nl': 'Crash gedetecteerd', 'pl': 'Awaria wykryta', 'ro': 'Eroare detectată', 'cs': 'Pád zjištěn', 'sk': 'Pád zistený', 'hr': 'Pad otkriven', 'bg': 'Открит срив', 'el': 'Ανιχνεύθηκε σφάλμα', 'da': 'Nedbrud registreret', 'fi': 'Kaatuminen havaittu', 'no': 'Krasj oppdaget', 'uk': 'Збій виявлено', 'ru': 'Обнаружен сбой', 'tr': 'Çökme algılandı', 'zh': '检测到崩溃', 'ja': 'クラッシュを検出', 'ko': '충돌 감지됨', 'hi': 'क्रैश का पता चला', 'th': 'ตรวจพบข้อขัดข้อง', 'vi': 'Phát hiện lỗi', 'id': 'Kerusakan terdeteksi', 'ms': 'Ranap dikesan'},
@@ -982,7 +986,6 @@ const Map<String, Map<String, String>> translations = {
   'feature_request_submit': {'de': 'Feature Request einreichen', 'en': 'Submit Feature Request', 'es': 'Enviar solicitud', 'fr': 'Soumettre une demande', 'hu': 'Kérés beküldése', 'sv': 'Skicka förfrågan', 'ar': 'إرسال طلب ميزة', 'he': 'שלח בקשת תכונה', 'fa': 'ارسال درخواست', 'it': 'Invia richiesta', 'pt': 'Enviar pedido', 'nl': 'Verzoek indienen', 'pl': 'Zgłoś prośbę', 'ro': 'Trimite cerere', 'cs': 'Odeslat požadavek', 'sk': 'Odoslať požiadavku', 'hr': 'Pošalji zahtjev', 'bg': 'Изпрати заявка', 'el': 'Υποβολή αιτήματος', 'da': 'Indsend ønske', 'fi': 'Lähetä pyyntö', 'no': 'Send forespørsel', 'uk': 'Надіслати запит', 'ru': 'Отправить запрос', 'tr': 'İstek gönder', 'zh': '提交功能请求', 'ja': '機能リクエスト送信', 'ko': '기능 요청 제출', 'hi': 'अनुरोध सबमिट करें', 'th': 'ส่งคำขอ', 'vi': 'Gửi yêu cầu', 'id': 'Kirim permintaan', 'ms': 'Hantar permintaan'},
   'feature_request_heading': {'de': 'Überschrift', 'en': 'Heading', 'es': 'Título', 'fr': 'Titre', 'hu': 'Cím', 'sv': 'Rubrik', 'ar': 'العنوان', 'he': 'כותרת', 'fa': 'عنوان', 'it': 'Titolo', 'pt': 'Título', 'nl': 'Titel', 'pl': 'Tytuł', 'ro': 'Titlu', 'cs': 'Nadpis', 'sk': 'Nadpis', 'hr': 'Naslov', 'bg': 'Заглавие', 'el': 'Τίτλος', 'da': 'Overskrift', 'fi': 'Otsikko', 'no': 'Overskrift', 'uk': 'Заголовок', 'ru': 'Заголовок', 'tr': 'Başlık', 'zh': '标题', 'ja': '見出し', 'ko': '제목', 'hi': 'शीर्षक', 'th': 'หัวข้อ', 'vi': 'Tiêu đề', 'id': 'Judul', 'ms': 'Tajuk'},
   'feature_request_description': {'de': 'Beschreibung (optional)', 'en': 'Description (optional)', 'es': 'Descripción (opcional)', 'fr': 'Description (facultatif)', 'hu': 'Leírás (opcionális)', 'sv': 'Beskrivning (valfri)', 'ar': 'الوصف (اختياري)', 'he': 'תיאור (אופציונלי)', 'fa': 'توضیحات (اختیاری)', 'it': 'Descrizione (facoltativo)', 'pt': 'Descrição (opcional)', 'nl': 'Beschrijving (optioneel)', 'pl': 'Opis (opcjonalnie)', 'ro': 'Descriere (opțional)', 'cs': 'Popis (volitelné)', 'sk': 'Popis (voliteľné)', 'hr': 'Opis (neobavezno)', 'bg': 'Описание (по избор)', 'el': 'Περιγραφή (προαιρετικά)', 'da': 'Beskrivelse (valgfri)', 'fi': 'Kuvaus (valinnainen)', 'no': 'Beskrivelse (valgfritt)', 'uk': 'Опис (необов\'язково)', 'ru': 'Описание (необязательно)', 'tr': 'Açıklama (isteğe bağlı)', 'zh': '描述（可选）', 'ja': '説明（任意）', 'ko': '설명 (선택)', 'hi': 'विवरण (वैकल्पिक)', 'th': 'คำอธิบาย (ไม่บังคับ)', 'vi': 'Mô tả (tùy chọn)', 'id': 'Deskripsi (opsional)', 'ms': 'Penerangan (pilihan)'},
-  'feature_request_options_hint': {'de': 'Die Abstimmungsoptionen werden automatisch angelegt', 'en': 'Voting options are added automatically', 'es': 'Las opciones de votación se crean automáticamente', 'fr': 'Les options de vote sont créées automatiquement', 'hu': 'A szavazási lehetőségek automatikusan létrejönnek', 'sv': 'Röstningsalternativen skapas automatiskt', 'ar': 'تُنشأ خيارات التصويت تلقائيًا', 'he': 'אפשרויות ההצבעה נוצרות אוטומטית', 'fa': 'گزینه\u200cهای رأی\u200cگیری به\u200cطور خودکار ایجاد می\u200cشوند', 'it': 'Le opzioni di voto vengono create automaticamente', 'pt': 'As opções de votação são criadas automaticamente', 'nl': 'Stemopties worden automatisch aangemaakt', 'pl': 'Opcje głosowania są tworzone automatycznie', 'ro': 'Opțiunile de vot sunt create automat', 'cs': 'Možnosti hlasování se vytvoří automaticky', 'sk': 'Možnosti hlasovania sa vytvoria automaticky', 'hr': 'Opcije glasovanja stvaraju se automatski', 'bg': 'Опциите за гласуване се създават автоматично', 'el': 'Οι επιλογές ψηφοφορίας δημιουργούνται αυτόματα', 'da': 'Afstemningsmuligheder oprettes automatisk', 'fi': 'Äänestysvaihtoehdot luodaan automaattisesti', 'no': 'Avstemningsalternativene opprettes automatisk', 'uk': 'Варіанти голосування створюються автоматично', 'ru': 'Варианты голосования создаются автоматически', 'tr': 'Oylama seçenekleri otomatik olarak oluşturulur', 'zh': '投票选项会自动创建', 'ja': '投票の選択肢は自動的に作成されます', 'ko': '투표 옵션은 자동으로 생성됩니다', 'hi': 'मतदान विकल्प स्वचालित रूप से बनाए जाते हैं', 'th': 'ตัวเลือกการโหวตจะถูกสร้างขึ้นโดยอัตโนมัติ', 'vi': 'Các tùy chọn bỏ phiếu được tạo tự động', 'id': 'Opsi voting dibuat secara otomatis', 'ms': 'Pilihan undian dibuat secara automatik'},
   'feature_vote_yes': {'de': 'Ja, umsetzen', 'en': 'Yes, implement', 'es': 'Sí, implementar', 'fr': 'Oui, implémenter', 'hu': 'Igen, megvalósítani', 'sv': 'Ja, genomför', 'ar': 'نعم، تنفيذ', 'he': 'כן, ליישם', 'fa': 'بله، پیاده‌سازی', 'it': 'Sì, implementare', 'pt': 'Sim, implementar', 'nl': 'Ja, implementeren', 'pl': 'Tak, wdrożyć', 'ro': 'Da, implementează', 'cs': 'Ano, implementovat', 'sk': 'Áno, implementovať', 'hr': 'Da, implementirati', 'bg': 'Да, имплементирай', 'el': 'Ναι, υλοποίηση', 'da': 'Ja, implementér', 'fi': 'Kyllä, toteuta', 'no': 'Ja, implementer', 'uk': 'Так, реалізувати', 'ru': 'Да, реализовать', 'tr': 'Evet, uygula', 'zh': '是，实现', 'ja': 'はい、実装する', 'ko': '예, 구현', 'hi': 'हाँ, लागू करें', 'th': 'ใช่ ดำเนินการ', 'vi': 'Có, triển khai', 'id': 'Ya, implementasi', 'ms': 'Ya, laksanakan'},
   'feature_vote_no': {'de': 'Nein', 'en': 'No', 'es': 'No', 'fr': 'Non', 'hu': 'Nem', 'sv': 'Nej', 'ar': 'لا', 'he': 'לא', 'fa': 'خیر', 'it': 'No', 'pt': 'Não', 'nl': 'Nee', 'pl': 'Nie', 'ro': 'Nu', 'cs': 'Ne', 'sk': 'Nie', 'hr': 'Ne', 'bg': 'Не', 'el': 'Όχι', 'da': 'Nej', 'fi': 'Ei', 'no': 'Nei', 'uk': 'Ні', 'ru': 'Нет', 'tr': 'Hayır', 'zh': '否', 'ja': 'いいえ', 'ko': '아니요', 'hi': 'नहीं', 'th': 'ไม่', 'vi': 'Không', 'id': 'Tidak', 'ms': 'Tidak'},
   'feature_vote_neutral': {'de': 'Egal', 'en': 'Don\'t care', 'es': 'Me da igual', 'fr': 'Peu importe', 'hu': 'Mindegy', 'sv': 'Spelar ingen roll', 'ar': 'لا يهم', 'he': 'לא משנה', 'fa': 'فرقی نمی‌کند', 'it': 'Non importa', 'pt': 'Tanto faz', 'nl': 'Maakt niet uit', 'pl': 'Bez znaczenia', 'ro': 'Nu contează', 'cs': 'Je mi to jedno', 'sk': 'Je mi to jedno', 'hr': 'Svejedno', 'bg': 'Без значение', 'el': 'Αδιάφορο', 'da': 'Ligegyldigt', 'fi': 'Ei väliä', 'no': 'Likegyldig', 'uk': 'Байдуже', 'ru': 'Всё равно', 'tr': 'Farketmez', 'zh': '无所谓', 'ja': 'どちらでも', 'ko': '상관없음', 'hi': 'कोई फर्क नहीं', 'th': 'ไม่สนใจ', 'vi': 'Không quan tâm', 'id': 'Tidak peduli', 'ms': 'Tidak kisah'},
@@ -1013,7 +1016,6 @@ const Map<String, Map<String, String>> translations = {
   'connection_sheet_title': {'de': 'Verbindung', 'en': 'Connection', 'es': 'Conexión', 'hu': 'Kapcsolat', 'sv': 'Anslutning', 'ar': 'الاتصال', 'he': 'חיבור', 'fa': 'اتصال', 'fr': 'Connexion', 'it': 'Connessione', 'pt': 'Conexão', 'nl': 'Verbinding', 'pl': 'Połączenie', 'ro': 'Conexiune', 'cs': 'Připojení', 'sk': 'Pripojenie', 'hr': 'Veza', 'bg': 'Връзка', 'el': 'Σύνδεση', 'da': 'Forbindelse', 'fi': 'Yhteys', 'no': 'Tilkobling', 'uk': 'Підключення', 'ru': 'Подключение', 'tr': 'Bağlantı', 'zh': '连接', 'ja': '接続', 'ko': '연결', 'hi': 'कनेक्शन', 'th': 'การเชื่อมต่อ', 'vi': 'Kết nối', 'id': 'Koneksi', 'ms': 'Sambungan'},
   'connection_sheet_active_peers': {'de': 'Aktive Peers', 'en': 'Active peers', 'es': 'Peers activos', 'hu': 'Aktív peerek', 'sv': 'Aktiva peers', 'ar': 'أقران نشطون', 'he': 'עמיתים פעילים', 'fa': 'همتایان فعال', 'fr': 'Pairs actifs', 'it': 'Peer attivi', 'pt': 'Peers ativos', 'nl': 'Actieve peers', 'pl': 'Aktywni peerzy', 'ro': 'Peers activi', 'cs': 'Aktivní peeři', 'sk': 'Aktívni peeri', 'hr': 'Aktivni peerovi', 'bg': 'Активни пиъри', 'el': 'Ενεργοί peers', 'da': 'Aktive peers', 'fi': 'Aktiiviset peerit', 'no': 'Aktive peers', 'uk': 'Активні піри', 'ru': 'Активные пиры', 'tr': 'Aktif peerler', 'zh': '活跃节点', 'ja': 'アクティブピア', 'ko': '활성 피어', 'hi': 'सक्रिय पीयर', 'th': 'เพียร์ที่ใช้งาน', 'vi': 'Peer hoạt động', 'id': 'Peer aktif', 'ms': 'Peer aktif'},
   // uncertain: all non-de/en below for connection_sheet_no_peers
-  'connection_sheet_last_seen': {'de': 'Zuletzt gesehen vor {t}', 'en': 'Last seen {t} ago', 'es': 'Visto por última vez hace {t}', 'fr': 'Vu pour la dernière fois il y a {t}', 'hu': 'Utoljára látva: {t} ezelőtt', 'sv': 'Senast sedd för {t} sedan', 'ar': 'آخر ظهور قبل {t}', 'he': 'נראה לאחרונה לפני {t}', 'fa': 'آخرین بازدید {t} پیش', 'it': 'Visto l\'ultima volta {t} fa', 'pt': 'Visto pela última vez há {t}', 'nl': 'Laatst gezien {t} geleden', 'pl': 'Ostatnio widziany {t} temu', 'ro': 'Văzut ultima dată acum {t}', 'cs': 'Naposledy viděn před {t}', 'sk': 'Naposledy videný pred {t}', 'hr': 'Zadnji put viđen prije {t}', 'bg': 'Последно видян преди {t}', 'el': 'Τελευταία εμφάνιση πριν από {t}', 'da': 'Sidst set for {t} siden', 'fi': 'Nähty viimeksi {t} sitten', 'no': 'Sist sett for {t} siden', 'uk': 'Востаннє в мережі {t} тому', 'ru': 'Последний раз в сети {t} назад', 'tr': '{t} önce görüldü', 'zh': '{t}前在线', 'ja': '{t}前に確認', 'ko': '{t} 전 마지막 확인', 'hi': '{t} पहले देखा गया', 'th': 'พบล่าสุดเมื่อ {t} ที่แล้ว', 'vi': 'Lần cuối trực tuyến {t} trước', 'id': 'Terakhir terlihat {t} lalu', 'ms': 'Kali terakhir dilihat {t} lalu'},
   'connection_sheet_no_peers': {'de': 'Keine verbundenen Peers', 'en': 'No connected peers', 'es': 'Sin peers conectados', 'hu': 'Nincs csatlakoztatott peer', 'sv': 'Inga anslutna peers', 'ar': 'لا يوجد أقران متصلون', 'he': 'אין עמיתים מחוברים', 'fa': 'هیچ همتایی متصل نیست', 'fr': 'Aucun pair connecté', 'it': 'Nessun peer connesso', 'pt': 'Nenhum peer conectado', 'nl': 'Geen verbonden peers', 'pl': 'Brak połączonych peerów', 'ro': 'Niciun peer conectat', 'cs': 'Žádní připojení peeři', 'sk': 'Žiadni pripojení peeri', 'hr': 'Nema povezanih peerova', 'bg': 'Няма свързани пиъри', 'el': 'Δεν υπάρχουν συνδεδεμένοι peers', 'da': 'Ingen forbundne peers', 'fi': 'Ei yhdistettyjä peereitä', 'no': 'Ingen tilkoblede peers', 'uk': 'Немає підключених пірів', 'ru': 'Нет подключённых пиров', 'tr': 'Bağlı peer yok', 'zh': '没有已连接的节点', 'ja': '接続中のピアなし', 'ko': '연결된 피어 없음', 'hi': 'कोई जुड़ा हुआ पीयर नहीं', 'th': 'ไม่มีเพียร์ที่เชื่อมต่อ', 'vi': 'Không có peer nào kết nối', 'id': 'Tidak ada peer terhubung', 'ms': 'Tiada peer disambung'},
   // uncertain: all non-de/en below for connection_sheet_reconnect
   'connection_sheet_reconnect': {'de': 'Erneut verbinden', 'en': 'Reconnect', 'es': 'Reconectar', 'hu': 'Újracsatlakozás', 'sv': 'Återanslut', 'ar': 'إعادة الاتصال', 'he': 'התחבר מחדש', 'fa': 'اتصال مجدد', 'fr': 'Reconnecter', 'it': 'Riconnetti', 'pt': 'Reconectar', 'nl': 'Opnieuw verbinden', 'pl': 'Połącz ponownie', 'ro': 'Reconectare', 'cs': 'Znovu připojit', 'sk': 'Znovu pripojiť', 'hr': 'Povežite se ponovo', 'bg': 'Повторно свързване', 'el': 'Επανασύνδεση', 'da': 'Genopret forbindelse', 'fi': 'Yhdistä uudelleen', 'no': 'Koble til på nytt', 'uk': 'Перепідключитись', 'ru': 'Переподключиться', 'tr': 'Yeniden bağlan', 'zh': '重新连接', 'ja': '再接続', 'ko': '재연결', 'hi': 'पुनः कनेक्ट करें', 'th': 'เชื่อมต่อใหม่', 'vi': 'Kết nối lại', 'id': 'Hubungkan kembali', 'ms': 'Sambung semula'},
@@ -1715,41 +1717,6 @@ const Map<String, Map<String, String>> translations = {
     'id': 'Atur perangkat ini sebagai perangkat tertaut', // uncertain:
     'ms': 'Tetapkan peranti ini sebagai peranti terpaut', // uncertain:
   },
-  'linked_device_request_pairing_help': {
-    'de': 'Dieses Gerät als zweites Gerät mit einem bestehenden Cleona-Konto verknüpfen. Das Primärgerät muss die Anfrage bestätigen. Beide Geräte teilen dann dieselbe Identität.',
-    'en': 'Link this device as a secondary device to an existing Cleona account. The primary device must confirm the request. Both devices then share the same identity.',
-    'es': 'Vincular este dispositivo como dispositivo secundario a una cuenta Cleona existente. El dispositivo primario debe confirmar la solicitud. Ambos dispositivos comparten entonces la misma identidad.', // uncertain:
-    'hu': 'Eszköz csatlakoztatása másodlagos eszközként egy meglévő Cleona-fiókhoz. Az elsődleges eszköznek meg kell erősítenie a kérést. Mindkét eszköz ezután ugyanazt az identitást használja.', // uncertain:
-    'sv': 'Länka denna enhet som en sekundär enhet till ett befintligt Cleona-konto. Den primära enheten måste bekräfta förfrågan. Båda enheterna delar sedan samma identitet.', // uncertain:
-    'ar': 'ربط هذا الجهاز كجهاز ثانوي بحساب Cleona موجود. يجب على الجهاز الأساسي تأكيد الطلب. يشترك كلا الجهازين بعد ذلك في نفس الهوية.', // uncertain:
-    'he': 'קשר מכשיר זה כמכשיר משני לחשבון Cleona קיים. המכשיר הראשי חייב לאשר את הבקשה. שני המכשירים חולקים אז את אותה זהות.', // uncertain:
-    'fa': 'این دستگاه را به‌عنوان دستگاه ثانویه به یک حساب Cleona موجود متصل کنید. دستگاه اصلی باید درخواست را تأیید کند. هر دو دستگاه سپس همان هویت را به اشتراک می‌گذارند.', // uncertain:
-    'fr': 'Lier cet appareil comme appareil secondaire à un compte Cleona existant. L\'appareil principal doit confirmer la demande. Les deux appareils partagent ensuite la même identité.', // uncertain:
-    'it': 'Collegare questo dispositivo come dispositivo secondario a un account Cleona esistente. Il dispositivo primario deve confermare la richiesta. Entrambi i dispositivi condividono quindi la stessa identità.', // uncertain:
-    'pt': 'Vincular este dispositivo como dispositivo secundário a uma conta Cleona existente. O dispositivo primário deve confirmar a solicitação. Ambos os dispositivos compartilham então a mesma identidade.', // uncertain:
-    'nl': 'Dit apparaat als secundair apparaat koppelen aan een bestaand Cleona-account. Het primaire apparaat moet het verzoek bevestigen. Beide apparaten delen dan dezelfde identiteit.', // uncertain:
-    'pl': 'Połącz to urządzenie jako urządzenie dodatkowe z istniejącym kontem Cleona. Urządzenie główne musi potwierdzić żądanie. Oba urządzenia dzielą wtedy tę samą tożsamość.', // uncertain:
-    'ro': 'Asociază acest dispozitiv ca dispozitiv secundar la un cont Cleona existent. Dispozitivul principal trebuie să confirme cererea. Ambele dispozitive partajează apoi aceeași identitate.', // uncertain:
-    'cs': 'Propojit toto zařízení jako sekundární zařízení s existujícím účtem Cleona. Primární zařízení musí potvrdit žádost. Obě zařízení pak sdílejí stejnou identitu.', // uncertain:
-    'sk': 'Prepojiť toto zariadenie ako sekundárne zariadenie s existujúcim účtom Cleona. Primárne zariadenie musí potvrdiť žiadosť. Obe zariadenia potom zdieľajú rovnakú identitu.', // uncertain:
-    'hr': 'Poveži ovaj uređaj kao sekundarni uređaj s postojećim Cleona računom. Primarni uređaj mora potvrditi zahtjev. Oba uređaja zatim dijele isti identitet.', // uncertain:
-    'bg': 'Свържете това устройство като вторично устройство към съществуващ Cleona акаунт. Основното устройство трябва да потвърди заявката. И двете устройства след това споделят една и съща самоличност.', // uncertain:
-    'el': 'Σύνδεση αυτής της συσκευής ως δευτερεύουσα συσκευή σε έναν υπάρχοντα λογαριασμό Cleona. Η κύρια συσκευή πρέπει να επιβεβαιώσει το αίτημα. Και οι δύο συσκευές μοιράζονται στη συνέχεια την ίδια ταυτότητα.', // uncertain:
-    'da': 'Tilknyt denne enhed som en sekundær enhed til en eksisterende Cleona-konto. Den primære enhed skal bekræfte anmodningen. Begge enheder deler derefter den samme identitet.', // uncertain:
-    'fi': 'Yhdistä tämä laite toissijaiseksi laitteeksi olemassa olevaan Cleona-tiliin. Ensisijaisen laitteen on vahvistettava pyyntö. Molemmat laitteet jakavat sitten saman identiteetin.', // uncertain:
-    'no': 'Koble denne enheten som en sekundær enhet til en eksisterende Cleona-konto. Primærenheten må bekrefte forespørselen. Begge enhetene deler deretter den samme identiteten.', // uncertain:
-    'uk': 'Прив\'язати цей пристрій як вторинний пристрій до існуючого облікового запису Cleona. Основний пристрій повинен підтвердити запит. Обидва пристрої потім використовують одну й ту саму ідентичність.', // uncertain:
-    'ru': 'Привязать это устройство как вторичное устройство к существующей учётной записи Cleona. Основное устройство должно подтвердить запрос. Оба устройства затем используют одну и ту же личность.', // uncertain:
-    'tr': 'Bu cihazı mevcut bir Cleona hesabına ikincil cihaz olarak bağlayın. Birincil cihaz isteği onaylamalıdır. Her iki cihaz daha sonra aynı kimliği paylaşır.', // uncertain:
-    'zh': '将此设备作为辅助设备关联到现有的 Cleona 账户。主设备必须确认请求。两台设备随后共享同一身份。', // uncertain:
-    'ja': 'このデバイスを既存のCleonaアカウントにセカンダリデバイスとしてリンクします。プライマリデバイスがリクエストを確認する必要があります。その後、両方のデバイスが同じIDを共有します。', // uncertain:
-    'ko': '이 기기를 기존 Cleona 계정에 보조 기기로 연결합니다. 기본 기기가 요청을 확인해야 합니다. 그 후 두 기기가 동일한 신원을 공유합니다.', // uncertain:
-    'hi': 'इस डिवाइस को मौजूदा Cleona खाते से सेकेंडरी डिवाइस के रूप में जोड़ें। प्राइमरी डिवाइस को अनुरोध की पुष्टि करनी होगी। दोनों डिवाइस फिर एक ही पहचान साझा करते हैं।', // uncertain:
-    'th': 'เชื่อมต่ออุปกรณ์นี้เป็นอุปกรณ์รองกับบัญชี Cleona ที่มีอยู่ อุปกรณ์หลักต้องยืนยันคำขอ จากนั้นอุปกรณ์ทั้งสองจะใช้ตัวตนเดียวกัน', // uncertain:
-    'vi': 'Liên kết thiết bị này làm thiết bị phụ với tài khoản Cleona hiện có. Thiết bị chính phải xác nhận yêu cầu. Sau đó cả hai thiết bị chia sẻ cùng một danh tính.', // uncertain:
-    'id': 'Tautkan perangkat ini sebagai perangkat sekunder ke akun Cleona yang ada. Perangkat utama harus mengonfirmasi permintaan. Kedua perangkat kemudian berbagi identitas yang sama.', // uncertain:
-    'ms': 'Pautkan peranti ini sebagai peranti sekunder kepada akaun Cleona sedia ada. Peranti utama mesti mengesahkan permintaan. Kedua-dua peranti kemudian berkongsi identiti yang sama.', // uncertain:
-  },
   'linked_device_request_sent': {
     'de': 'Kopplungsanfrage gesendet — warte auf Bestätigung vom Primärgerät',
     'en': 'Pairing request sent — waiting for Primary approval',
@@ -2099,320 +2066,5 @@ const Map<String, Map<String, String>> translations = {
     'vi': 'Kênh', // uncertain:
     'id': 'Saluran', // uncertain:
     'ms': 'Saluran', // uncertain:
-  },
-  'share_cleona': {
-    'de': 'Cleona teilen',
-    'en': 'Share Cleona',
-    'es': 'Compartir Cleona', // uncertain:
-    'hu': 'Cleona megosztása', // uncertain:
-    'sv': 'Dela Cleona', // uncertain:
-    'ar': 'مشاركة Cleona', // uncertain:
-    'he': 'שתף את Cleona', // uncertain:
-    'fa': 'اشتراک‌گذاری Cleona', // uncertain:
-    'fr': 'Partager Cleona', // uncertain:
-    'it': 'Condividi Cleona', // uncertain:
-    'pt': 'Compartilhar Cleona', // uncertain:
-    'nl': 'Cleona delen', // uncertain:
-    'pl': 'Udostępnij Cleona', // uncertain:
-    'ro': 'Partajează Cleona', // uncertain:
-    'cs': 'Sdílet Cleona', // uncertain:
-    'sk': 'Zdieľať Cleona', // uncertain:
-    'hr': 'Podijeli Cleona', // uncertain:
-    'bg': 'Сподели Cleona', // uncertain:
-    'el': 'Κοινοποίηση Cleona', // uncertain:
-    'da': 'Del Cleona', // uncertain:
-    'fi': 'Jaa Cleona', // uncertain:
-    'no': 'Del Cleona', // uncertain:
-    'uk': 'Поділитися Cleona', // uncertain:
-    'ru': 'Поделиться Cleona', // uncertain:
-    'tr': 'Cleona paylaş', // uncertain:
-    'zh': '分享 Cleona', // uncertain:
-    'ja': 'Cleonaを共有', // uncertain:
-    'ko': 'Cleona 공유', // uncertain:
-    'hi': 'Cleona साझा करें', // uncertain:
-    'th': 'แชร์ Cleona', // uncertain:
-    'vi': 'Chia sẻ Cleona', // uncertain:
-    'id': 'Bagikan Cleona', // uncertain:
-    'ms': 'Kongsi Cleona', // uncertain:
-  },
-  'share_cleona_download_link': {
-    'de': 'Download-Link kopieren',
-    'en': 'Copy download link',
-    'es': 'Copiar enlace de descarga', // uncertain:
-    'hu': 'Letöltési link másolása', // uncertain:
-    'sv': 'Kopiera nedladdningslänk', // uncertain:
-    'ar': 'نسخ رابط التنزيل', // uncertain:
-    'he': 'העתק קישור הורדה', // uncertain:
-    'fa': 'کپی لینک دانلود', // uncertain:
-    'fr': 'Copier le lien de téléchargement', // uncertain:
-    'it': 'Copia link di download', // uncertain:
-    'pt': 'Copiar link de download', // uncertain:
-    'nl': 'Downloadlink kopiëren', // uncertain:
-    'pl': 'Kopiuj link do pobrania', // uncertain:
-    'ro': 'Copiază linkul de descărcare', // uncertain:
-    'cs': 'Kopírovat odkaz ke stažení', // uncertain:
-    'sk': 'Kopírovať odkaz na stiahnutie', // uncertain:
-    'hr': 'Kopiraj poveznicu za preuzimanje', // uncertain:
-    'bg': 'Копирай линк за изтегляне', // uncertain:
-    'el': 'Αντιγραφή συνδέσμου λήψης', // uncertain:
-    'da': 'Kopiér downloadlink', // uncertain:
-    'fi': 'Kopioi latauslinkki', // uncertain:
-    'no': 'Kopier nedlastingslenke', // uncertain:
-    'uk': 'Копіювати посилання для завантаження', // uncertain:
-    'ru': 'Копировать ссылку для скачивания', // uncertain:
-    'tr': 'İndirme bağlantısını kopyala', // uncertain:
-    'zh': '复制下载链接', // uncertain:
-    'ja': 'ダウンロードリンクをコピー', // uncertain:
-    'ko': '다운로드 링크 복사', // uncertain:
-    'hi': 'डाउनलोड लिंक कॉपी करें', // uncertain:
-    'th': 'คัดลอกลิงก์ดาวน์โหลด', // uncertain:
-    'vi': 'Sao chép liên kết tải xuống', // uncertain:
-    'id': 'Salin tautan unduhan', // uncertain:
-    'ms': 'Salin pautan muat turun', // uncertain:
-  },
-  'share_cleona_lan_url': {
-    'de': 'LAN-Download von diesem Gerät',
-    'en': 'LAN download from this device',
-    'es': 'Descarga LAN desde este dispositivo', // uncertain:
-    'hu': 'LAN letöltés erről az eszközről', // uncertain:
-    'sv': 'LAN-nedladdning från denna enhet', // uncertain:
-    'ar': 'تنزيل عبر الشبكة المحلية من هذا الجهاز', // uncertain:
-    'he': 'הורדה מרשת מקומית ממכשיר זה', // uncertain:
-    'fa': 'دانلود از شبکه محلی از این دستگاه', // uncertain:
-    'fr': 'Téléchargement LAN depuis cet appareil', // uncertain:
-    'it': 'Download LAN da questo dispositivo', // uncertain:
-    'pt': 'Download LAN deste dispositivo', // uncertain:
-    'nl': 'LAN-download van dit apparaat', // uncertain:
-    'pl': 'Pobieranie LAN z tego urządzenia', // uncertain:
-    'ro': 'Descărcare LAN de pe acest dispozitiv', // uncertain:
-    'cs': 'Stažení z LAN z tohoto zařízení', // uncertain:
-    'sk': 'Stiahnutie z LAN z tohto zariadenia', // uncertain:
-    'hr': 'LAN preuzimanje s ovog uređaja', // uncertain:
-    'bg': 'LAN изтегляне от това устройство', // uncertain:
-    'el': 'Λήψη LAN από αυτή τη συσκευή', // uncertain:
-    'da': 'LAN-download fra denne enhed', // uncertain:
-    'fi': 'LAN-lataus tältä laitteelta', // uncertain:
-    'no': 'LAN-nedlasting fra denne enheten', // uncertain:
-    'uk': 'Завантаження з LAN з цього пристрою', // uncertain:
-    'ru': 'Скачивание по LAN с этого устройства', // uncertain:
-    'tr': 'Bu cihazdan LAN indirme', // uncertain:
-    'zh': '从此设备进行局域网下载', // uncertain:
-    'ja': 'この端末からLANダウンロード', // uncertain:
-    'ko': '이 기기에서 LAN 다운로드', // uncertain:
-    'hi': 'इस डिवाइस से LAN डाउनलोड', // uncertain:
-    'th': 'ดาวน์โหลด LAN จากอุปกรณ์นี้', // uncertain:
-    'vi': 'Tải xuống LAN từ thiết bị này', // uncertain:
-    'id': 'Unduhan LAN dari perangkat ini', // uncertain:
-    'ms': 'Muat turun LAN dari peranti ini', // uncertain:
-  },
-  'share_cleona_direct_share': {
-    'de': 'Direkt teilen',
-    'en': 'Share directly',
-    'es': 'Compartir directamente', // uncertain:
-    'hu': 'Közvetlen megosztás', // uncertain:
-    'sv': 'Dela direkt', // uncertain:
-    'ar': 'مشاركة مباشرة', // uncertain:
-    'he': 'שיתוף ישיר', // uncertain:
-    'fa': 'اشتراک‌گذاری مستقیم', // uncertain:
-    'fr': 'Partager directement', // uncertain:
-    'it': 'Condividi direttamente', // uncertain:
-    'pt': 'Compartilhar diretamente', // uncertain:
-    'nl': 'Direct delen', // uncertain:
-    'pl': 'Udostępnij bezpośrednio', // uncertain:
-    'ro': 'Partajare directă', // uncertain:
-    'cs': 'Sdílet přímo', // uncertain:
-    'sk': 'Zdieľať priamo', // uncertain:
-    'hr': 'Izravno dijeli', // uncertain:
-    'bg': 'Споделяне директно', // uncertain:
-    'el': 'Κοινοποίηση απευθείας', // uncertain:
-    'da': 'Del direkte', // uncertain:
-    'fi': 'Jaa suoraan', // uncertain:
-    'no': 'Del direkte', // uncertain:
-    'uk': 'Поділитися напряму', // uncertain:
-    'ru': 'Поделиться напрямую', // uncertain:
-    'tr': 'Doğrudan paylaş', // uncertain:
-    'zh': '直接分享', // uncertain:
-    'ja': '直接共有', // uncertain:
-    'ko': '직접 공유', // uncertain:
-    'hi': 'सीधे साझा करें', // uncertain:
-    'th': 'แชร์โดยตรง', // uncertain:
-    'vi': 'Chia sẻ trực tiếp', // uncertain:
-    'id': 'Bagikan langsung', // uncertain:
-    'ms': 'Kongsi terus', // uncertain:
-  },
-  'share_cleona_for_android': {
-    'de': 'Für Android-Geräte',
-    'en': 'For Android devices',
-    'es': 'Para dispositivos Android', // uncertain:
-    'hu': 'Android eszközökhöz', // uncertain:
-    'sv': 'För Android-enheter', // uncertain:
-    'ar': 'لأجهزة أندرويد', // uncertain:
-    'he': 'למכשירי אנדרואיד', // uncertain:
-    'fa': 'برای دستگاه‌های اندروید', // uncertain:
-    'fr': 'Pour appareils Android', // uncertain:
-    'it': 'Per dispositivi Android', // uncertain:
-    'pt': 'Para dispositivos Android', // uncertain:
-    'nl': 'Voor Android-apparaten', // uncertain:
-    'pl': 'Dla urządzeń z Androidem', // uncertain:
-    'ro': 'Pentru dispozitive Android', // uncertain:
-    'cs': 'Pro zařízení s Androidem', // uncertain:
-    'sk': 'Pre zariadenia s Androidom', // uncertain:
-    'hr': 'Za Android uređaje', // uncertain:
-    'bg': 'За Android устройства', // uncertain:
-    'el': 'Για συσκευές Android', // uncertain:
-    'da': 'Til Android-enheder', // uncertain:
-    'fi': 'Android-laitteille', // uncertain:
-    'no': 'For Android-enheter', // uncertain:
-    'uk': 'Для пристроїв Android', // uncertain:
-    'ru': 'Для устройств Android', // uncertain:
-    'tr': 'Android cihazlar için', // uncertain:
-    'zh': '适用于安卓设备', // uncertain:
-    'ja': 'Androidデバイス用', // uncertain:
-    'ko': 'Android 기기용', // uncertain:
-    'hi': 'Android डिवाइस के लिए', // uncertain:
-    'th': 'สำหรับอุปกรณ์ Android', // uncertain:
-    'vi': 'Cho thiết bị Android', // uncertain:
-    'id': 'Untuk perangkat Android', // uncertain:
-    'ms': 'Untuk peranti Android', // uncertain:
-  },
-  'share_cleona_for_desktop': {
-    'de': 'Für Windows / Linux / macOS',
-    'en': 'For Windows / Linux / macOS',
-    'es': 'Para Windows / Linux / macOS', // uncertain:
-    'hu': 'Windows / Linux / macOS rendszerekhez', // uncertain:
-    'sv': 'För Windows / Linux / macOS', // uncertain:
-    'ar': 'لأنظمة Windows / Linux / macOS', // uncertain:
-    'he': 'עבור Windows / Linux / macOS', // uncertain:
-    'fa': 'برای Windows / Linux / macOS', // uncertain:
-    'fr': 'Pour Windows / Linux / macOS', // uncertain:
-    'it': 'Per Windows / Linux / macOS', // uncertain:
-    'pt': 'Para Windows / Linux / macOS', // uncertain:
-    'nl': 'Voor Windows / Linux / macOS', // uncertain:
-    'pl': 'Dla Windows / Linux / macOS', // uncertain:
-    'ro': 'Pentru Windows / Linux / macOS', // uncertain:
-    'cs': 'Pro Windows / Linux / macOS', // uncertain:
-    'sk': 'Pre Windows / Linux / macOS', // uncertain:
-    'hr': 'Za Windows / Linux / macOS', // uncertain:
-    'bg': 'За Windows / Linux / macOS', // uncertain:
-    'el': 'Για Windows / Linux / macOS', // uncertain:
-    'da': 'Til Windows / Linux / macOS', // uncertain:
-    'fi': 'Windows / Linux / macOS -käyttöjärjestelmille', // uncertain:
-    'no': 'For Windows / Linux / macOS', // uncertain:
-    'uk': 'Для Windows / Linux / macOS', // uncertain:
-    'ru': 'Для Windows / Linux / macOS', // uncertain:
-    'tr': 'Windows / Linux / macOS için', // uncertain:
-    'zh': '适用于 Windows / Linux / macOS', // uncertain:
-    'ja': 'Windows / Linux / macOS 用', // uncertain:
-    'ko': 'Windows / Linux / macOS용', // uncertain:
-    'hi': 'Windows / Linux / macOS के लिए', // uncertain:
-    'th': 'สำหรับ Windows / Linux / macOS', // uncertain:
-    'vi': 'Cho Windows / Linux / macOS', // uncertain:
-    'id': 'Untuk Windows / Linux / macOS', // uncertain:
-    'ms': 'Untuk Windows / Linux / macOS', // uncertain:
-  },
-  'share_cleona_copy_command': {
-    'de': 'Befehl kopieren',
-    'en': 'Copy command',
-    'es': 'Copiar comando', // uncertain:
-    'hu': 'Parancs másolása', // uncertain:
-    'sv': 'Kopiera kommando', // uncertain:
-    'ar': 'نسخ الأمر', // uncertain:
-    'he': 'העתק פקודה', // uncertain:
-    'fa': 'کپی دستور', // uncertain:
-    'fr': 'Copier la commande', // uncertain:
-    'it': 'Copia comando', // uncertain:
-    'pt': 'Copiar comando', // uncertain:
-    'nl': 'Opdracht kopiëren', // uncertain:
-    'pl': 'Kopiuj polecenie', // uncertain:
-    'ro': 'Copiază comanda', // uncertain:
-    'cs': 'Kopírovat příkaz', // uncertain:
-    'sk': 'Kopírovať príkaz', // uncertain:
-    'hr': 'Kopiraj naredbu', // uncertain:
-    'bg': 'Копирай командата', // uncertain:
-    'el': 'Αντιγραφή εντολής', // uncertain:
-    'da': 'Kopiér kommando', // uncertain:
-    'fi': 'Kopioi komento', // uncertain:
-    'no': 'Kopier kommando', // uncertain:
-    'uk': 'Копіювати команду', // uncertain:
-    'ru': 'Копировать команду', // uncertain:
-    'tr': 'Komutu kopyala', // uncertain:
-    'zh': '复制命令', // uncertain:
-    'ja': 'コマンドをコピー', // uncertain:
-    'ko': '명령어 복사', // uncertain:
-    'hi': 'कमांड कॉपी करें', // uncertain:
-    'th': 'คัดลอกคำสั่ง', // uncertain:
-    'vi': 'Sao chép lệnh', // uncertain:
-    'id': 'Salin perintah', // uncertain:
-    'ms': 'Salin arahan', // uncertain:
-  },
-  'share_cleona_copy_link': {
-    'de': 'Link kopieren',
-    'en': 'Copy link',
-    'es': 'Copiar enlace', // uncertain:
-    'hu': 'Link másolása', // uncertain:
-    'sv': 'Kopiera länk', // uncertain:
-    'ar': 'نسخ الرابط', // uncertain:
-    'he': 'העתק קישור', // uncertain:
-    'fa': 'کپی لینک', // uncertain:
-    'fr': 'Copier le lien', // uncertain:
-    'it': 'Copia link', // uncertain:
-    'pt': 'Copiar link', // uncertain:
-    'nl': 'Link kopiëren', // uncertain:
-    'pl': 'Kopiuj link', // uncertain:
-    'ro': 'Copiază linkul', // uncertain:
-    'cs': 'Kopírovat odkaz', // uncertain:
-    'sk': 'Kopírovať odkaz', // uncertain:
-    'hr': 'Kopiraj poveznicu', // uncertain:
-    'bg': 'Копирай линка', // uncertain:
-    'el': 'Αντιγραφή συνδέσμου', // uncertain:
-    'da': 'Kopiér link', // uncertain:
-    'fi': 'Kopioi linkki', // uncertain:
-    'no': 'Kopier lenke', // uncertain:
-    'uk': 'Копіювати посилання', // uncertain:
-    'ru': 'Копировать ссылку', // uncertain:
-    'tr': 'Bağlantıyı kopyala', // uncertain:
-    'zh': '复制链接', // uncertain:
-    'ja': 'リンクをコピー', // uncertain:
-    'ko': '링크 복사', // uncertain:
-    'hi': 'लिंक कॉपी करें', // uncertain:
-    'th': 'คัดลอกลิงก์', // uncertain:
-    'vi': 'Sao chép liên kết', // uncertain:
-    'id': 'Salin tautan', // uncertain:
-    'ms': 'Salin pautan', // uncertain:
-  },
-  'share_cleona_http_hint': {
-    'de': 'Im Browser öffnen:',
-    'en': 'Open in browser:',
-    'es': 'Abrir en el navegador:', // uncertain:
-    'hu': 'Megnyitás böngészőben:', // uncertain:
-    'sv': 'Öppna i webbläsare:', // uncertain:
-    'ar': 'فتح في المتصفح:', // uncertain:
-    'he': 'פתח בדפדפן:', // uncertain:
-    'fa': 'باز کردن در مرورگر:', // uncertain:
-    'fr': 'Ouvrir dans le navigateur :', // uncertain:
-    'it': 'Apri nel browser:', // uncertain:
-    'pt': 'Abrir no navegador:', // uncertain:
-    'nl': 'Openen in browser:', // uncertain:
-    'pl': 'Otwórz w przeglądarce:', // uncertain:
-    'ro': 'Deschide în browser:', // uncertain:
-    'cs': 'Otevřít v prohlížeči:', // uncertain:
-    'sk': 'Otvoriť v prehliadači:', // uncertain:
-    'hr': 'Otvori u pregledniku:', // uncertain:
-    'bg': 'Отвори в браузъра:', // uncertain:
-    'el': 'Άνοιγμα στο πρόγραμμα περιήγησης:', // uncertain:
-    'da': 'Åbn i browser:', // uncertain:
-    'fi': 'Avaa selaimessa:', // uncertain:
-    'no': 'Åpne i nettleser:', // uncertain:
-    'uk': 'Відкрити у браузері:', // uncertain:
-    'ru': 'Открыть в браузере:', // uncertain:
-    'tr': 'Tarayıcıda aç:', // uncertain:
-    'zh': '在浏览器中打开：', // uncertain:
-    'ja': 'ブラウザで開く：', // uncertain:
-    'ko': '브라우저에서 열기:', // uncertain:
-    'hi': 'ब्राउज़र में खोलें:', // uncertain:
-    'th': 'เปิดในเบราว์เซอร์:', // uncertain:
-    'vi': 'Mở trong trình duyệt:', // uncertain:
-    'id': 'Buka di browser:', // uncertain:
-    'ms': 'Buka dalam pelayar:', // uncertain:
   },
 };

@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:cleona/core/update/binary_update_manager.dart' show BinaryUpdateState;
+import 'package:cleona/core/update/update_manifest.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
@@ -320,6 +323,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           // (limited)". Send/receive of user-messages is short-circuited
           // until the next restart (which re-shows the splash).
           if (service.reducedMode) const ReducedModeBanner(),
+          _SoftUpdateBanner(appState: appState, locale: locale),
           // Identity tabs
           SizedBox(
             height: 36,
@@ -2608,6 +2612,103 @@ class _DonationBannerState extends State<_DonationBanner> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _SoftUpdateBanner extends StatelessWidget {
+  final CleonaAppState appState;
+  final AppLocale locale;
+  const _SoftUpdateBanner({required this.appState, required this.locale});
+
+  @override
+  Widget build(BuildContext context) {
+    final manifest = appState.availableUpdateManifest;
+    if (manifest == null || appState.updateBannerDismissed ||
+        appState.service?.reducedMode == true) {
+      return const SizedBox.shrink();
+    }
+
+    final state = appState.updateState;
+    final progress = appState.updateProgress;
+    final cs = Theme.of(context).colorScheme;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: cs.primaryContainer,
+      child: Row(
+        children: [
+          Expanded(child: _content(state, progress, manifest, cs)),
+          if (state == BinaryUpdateState.idle || state == BinaryUpdateState.failed
+              || state == BinaryUpdateState.ready)
+            _actionButton(state, cs),
+          if (state == BinaryUpdateState.idle)
+            IconButton(
+              icon: Icon(Icons.close, size: 18, color: cs.onPrimaryContainer),
+              visualDensity: VisualDensity.compact,
+              onPressed: appState.dismissUpdateBanner,
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _content(BinaryUpdateState state, double progress,
+      UpdateManifest manifest, ColorScheme cs) {
+    switch (state) {
+      case BinaryUpdateState.idle:
+        return Text(
+          '${locale.get('update_available_title')}: v${manifest.version}',
+          style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13),
+        );
+      case BinaryUpdateState.downloading:
+      case BinaryUpdateState.assembling:
+      case BinaryUpdateState.verifying:
+      case BinaryUpdateState.checking:
+        final label = state == BinaryUpdateState.downloading
+            ? locale.get('update_downloading')
+            : state == BinaryUpdateState.assembling
+                ? locale.get('update_assembling')
+                : locale.get('update_verifying');
+        return Row(children: [
+          SizedBox(width: 80, child: LinearProgressIndicator(value: progress)),
+          const SizedBox(width: 8),
+          Text('$label ${(progress * 100).toInt()}%',
+              style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13)),
+        ]);
+      case BinaryUpdateState.ready:
+        final msg = Platform.isAndroid
+            ? locale.get('update_ready_install')
+            : locale.get('update_ready_restart');
+        return Text(msg,
+            style: TextStyle(color: cs.onPrimaryContainer, fontSize: 13));
+      case BinaryUpdateState.failed:
+        return Text(locale.get('update_failed'),
+            style: TextStyle(color: cs.error, fontSize: 13));
+    }
+  }
+
+  Widget _actionButton(BinaryUpdateState state, ColorScheme cs) {
+    if (state == BinaryUpdateState.ready) {
+      final label = Platform.isAndroid
+          ? locale.get('update_ready_install')
+          : locale.get('update_ready_restart');
+      return TextButton(
+        onPressed: appState.applyUpdate,
+        child: Text(label, style: TextStyle(color: cs.onPrimaryContainer)),
+      );
+    }
+    if (state == BinaryUpdateState.failed) {
+      return TextButton(
+        onPressed: appState.startInNetworkUpdate,
+        child: Text(locale.get('update_retry'),
+            style: TextStyle(color: cs.onPrimaryContainer)),
+      );
+    }
+    return TextButton(
+      onPressed: appState.startInNetworkUpdate,
+      child: Text(locale.get('update_download'),
+          style: TextStyle(color: cs.onPrimaryContainer)),
     );
   }
 }

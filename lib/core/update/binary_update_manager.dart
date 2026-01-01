@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -67,7 +68,9 @@ class BinaryUpdateManager {
   })  : _store = store,
         _checker = checker,
         _profileDir = profileDir,
-        _log = CLogger.get('bin-update', profileDir: profileDir);
+        _log = CLogger.get('bin-update', profileDir: profileDir) {
+    _highestSeenMonotoneSeq = _loadMonotoneSeq();
+  }
 
   BinaryUpdateState get state => _state;
   double get progress => _progress;
@@ -99,6 +102,7 @@ class BinaryUpdateManager {
       if (manifest.minMonotoneSeq != null &&
           manifest.minMonotoneSeq! > _highestSeenMonotoneSeq) {
         _highestSeenMonotoneSeq = manifest.minMonotoneSeq!;
+        _saveMonotoneSeq();
       }
 
       final tag = manifest.dhtBinaryTag?[platform];
@@ -325,6 +329,7 @@ class BinaryUpdateManager {
 
   /// Whether to use in-network updates or redirect to Play Store.
   bool shouldUseInNetworkUpdate() {
+    if (Platform.isIOS) return false;
     final source = InstallSourceDetector.cached;
     if (source == InstallSource.playStore) return false;
     return true;
@@ -363,5 +368,143 @@ class BinaryUpdateManager {
     _errorMessage = message;
     _log.error(message);
     _setState(BinaryUpdateState.failed, _progress);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Desktop binary apply + rollback
+  // ---------------------------------------------------------------------------
+
+  /// Desktop (Linux/Windows/macOS): back up the current binary and replace it
+  /// with the verified update. Writes an `update-pending.json` marker so that
+  /// the next startup can detect a fresh update and run [markUpdateHealthy]
+  /// after a grace period, or [rollback] if the app crashes immediately.
+  Future<bool> applyDesktopUpdate(String currentBinaryPath) async {
+    final verifiedPath = _verifiedBinaryPathSync();
+    if (verifiedPath == null) {
+      _log.warn('applyDesktopUpdate: no verified binary available');
+      return false;
+    }
+    try {
+      final currentFile = File(currentBinaryPath);
+      final bakPath = '$currentBinaryPath.bak';
+      if (currentFile.existsSync()) {
+        currentFile.copySync(bakPath);
+        _log.info('Backed up current binary to $bakPath');
+      }
+      File(verifiedPath).copySync(currentBinaryPath);
+      if (!Platform.isWindows) {
+        Process.runSync('chmod', ['+x', currentBinaryPath]);
+      }
+      final marker = File('$_updateDir/update-pending.json');
+      if (!marker.parent.existsSync()) marker.parent.createSync(recursive: true);
+      marker.writeAsStringSync(jsonEncode({
+        'version': _targetVersion,
+        'appliedAt': DateTime.now().toIso8601String(),
+        'previousBinary': bakPath,
+      }));
+      _log.info('Applied update v$_targetVersion — restart required');
+      return true;
+    } catch (e) {
+      _log.error('applyDesktopUpdate failed: $e');
+      return false;
+    }
+  }
+
+  String? _verifiedBinaryPathSync() {
+    if (_targetPlatform == null || _targetVersion == null) return null;
+    final path = '$_updateDir/verified/cleona-$_targetPlatform-$_targetVersion.bin';
+    return File(path).existsSync() ? path : null;
+  }
+
+  /// Called ~30s after startup if the app is running stably. Removes the
+  /// `update-pending.json` marker and deletes the `.bak` backup.
+  static void markUpdateHealthy(String? profileDir) {
+    final updateDir = '${profileDir ?? AppPaths.dataDir}/update';
+    final markerFile = File('$updateDir/update-pending.json');
+    if (!markerFile.existsSync()) return;
+    try {
+      final data = jsonDecode(markerFile.readAsStringSync()) as Map<String, dynamic>;
+      final bakPath = data['previousBinary'] as String?;
+      markerFile.deleteSync();
+      if (bakPath != null) {
+        final bak = File(bakPath);
+        if (bak.existsSync()) bak.deleteSync();
+      }
+    } catch (_) {}
+  }
+
+  /// Called at startup to check if a pending update crashed. If the marker
+  /// file exists and the app is restarting (i.e. it crashed after update),
+  /// returns the marker data so the caller can trigger [rollback].
+  static Map<String, dynamic>? checkUpdatePending(String? profileDir) {
+    final updateDir = '${profileDir ?? AppPaths.dataDir}/update';
+    final markerFile = File('$updateDir/update-pending.json');
+    if (!markerFile.existsSync()) return null;
+    try {
+      return jsonDecode(markerFile.readAsStringSync()) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Restore the `.bak` backup over the current binary. Called when a crash
+  /// is detected after an update, or manually by the user.
+  static bool rollback(String currentBinaryPath, String? profileDir) {
+    final updateDir = '${profileDir ?? AppPaths.dataDir}/update';
+    final markerFile = File('$updateDir/update-pending.json');
+    String? bakPath;
+    if (markerFile.existsSync()) {
+      try {
+        final data = jsonDecode(markerFile.readAsStringSync()) as Map<String, dynamic>;
+        bakPath = data['previousBinary'] as String?;
+      } catch (_) {}
+    }
+    bakPath ??= '$currentBinaryPath.bak';
+    final bakFile = File(bakPath);
+    if (!bakFile.existsSync()) return false;
+    try {
+      bakFile.copySync(currentBinaryPath);
+      if (!Platform.isWindows) {
+        Process.runSync('chmod', ['+x', currentBinaryPath]);
+      }
+      if (markerFile.existsSync()) markerFile.deleteSync();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Remove old verified binaries (not the current target version).
+  void cleanupOldVerifiedBinaries() {
+    try {
+      final dir = Directory('$_updateDir/verified');
+      if (!dir.existsSync()) return;
+      for (final file in dir.listSync().whereType<File>()) {
+        final name = file.path.split('/').last;
+        if (_targetVersion != null && name.contains(_targetVersion!)) continue;
+        file.deleteSync();
+      }
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Monotone sequence number persistence (downgrade protection)
+  // ---------------------------------------------------------------------------
+
+  int _loadMonotoneSeq() {
+    try {
+      final file = File('$_updateDir/monotone_seq.txt');
+      if (file.existsSync()) return int.parse(file.readAsStringSync().trim());
+    } catch (_) {}
+    return 0;
+  }
+
+  void _saveMonotoneSeq() {
+    try {
+      final dir = Directory(_updateDir);
+      if (!dir.existsSync()) dir.createSync(recursive: true);
+      File('$_updateDir/monotone_seq.txt')
+          .writeAsStringSync('$_highestSeenMonotoneSeq');
+    } catch (_) {}
   }
 }

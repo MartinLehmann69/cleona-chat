@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 import 'dart:typed_data';
 import 'package:image/image.dart' as img;
 import 'package:cleona/core/crypto/file_encryption.dart';
@@ -304,6 +305,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // node.rendezvousManager above).
   BinaryFragmentStore? _binaryFragmentStore;
   BinaryUpdateManager? _binaryUpdateManager;
+  BinaryUpdateManager? get binaryUpdateManager => _binaryUpdateManager;
   BinaryHttpServer? _binaryHttpServer;
   BinaryRendezvousManager? _binaryRendezvousManager;
   DeltaUpdateManager? _deltaUpdateManager;
@@ -460,6 +462,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// fetched via §19.6 in-network binary distribution (not just the
   /// external `manifest.downloadUrl`).
   void Function(UpdateManifest manifest, bool inNetworkAvailable)? onUpdateAvailable;
+
+  void Function(BinaryUpdateState state, double progress)? onUpdateStateChanged;
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
@@ -788,8 +792,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // other cold-starting nodes can find it.
       _binaryUpdateManager!.onUpdateReady = (version, path) {
         node.binaryHasContentToShare = true;
-        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
-        _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
+        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
+        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
+      };
+      _binaryUpdateManager!.onStateChanged = (state, progress) {
+        onUpdateStateChanged?.call(state, progress);
       };
 
       _binaryHttpServer = BinaryHttpServer(profileDir: profileDir);
@@ -815,26 +822,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         addressProvider: () => node.currentSelfAddresses()
             .map((a) => RendezvousAddress(a.ip, a.port))
             .toList(),
-        platformProvider: () => Platform.operatingSystem,
       );
       node.binaryRendezvousManager = _binaryRendezvousManager;
-      node.binaryRecordProvider = _buildBinaryAvailabilityRecord;
+      node.binaryRecordProvider = _buildBinaryAvailabilityRecords;
 
       // Arbeitsregel #5 (kein unnötiger Netzwerkverkehr): only start the
       // periodic Nostr republish if this device already holds binary/
       // fragment data worth advertising. Devices with an empty store stay
       // silent until BinaryUpdateManager.onUpdateReady flips the flag above.
-      node.binaryHasContentToShare = _binaryFragmentStore!
-              .storedVersionsSync(Platform.operatingSystem)
-              .isNotEmpty;
+      node.binaryHasContentToShare = ['android', 'linux', 'windows', 'macos', 'ios']
+              .any((p) => _binaryFragmentStore!.storedVersionsSync(p).isNotEmpty);
       if (node.binaryHasContentToShare) {
-        _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
+        _binaryRendezvousManager!.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
       }
 
       // Self-seed: encode the running binary into RS fragments so this node
       // can serve updates immediately (§19.6.2).
-      if (InstallSourceDetector.cached == InstallSource.sideload) {
-        _selfSeedCurrentBinary();
+      if (InstallSourceDetector.cached != InstallSource.playStore) {
+        await _selfSeedCurrentBinary();
       }
 
       _selfPublishManifest();
@@ -10490,20 +10495,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// `seq` are placeholders overwritten by [BinaryRendezvousManager.publish].
   /// Synchronous because [RendezvousManager]-style record providers are
   /// invoked from debounce/periodic timers, not awaited call sites.
-  BinaryAvailabilityRecord _buildBinaryAvailabilityRecord() {
-    final platform = Platform.operatingSystem;
-    final version = currentAppVersion;
+  List<BinaryAvailabilityRecord> _buildBinaryAvailabilityRecords() {
     final store = _binaryFragmentStore;
-    return BinaryAvailabilityRecord(
-      deviceId: identity.deviceNodeId,
-      platform: platform,
-      version: version,
-      addresses: const [],
-      binaryHash: '',
-      hasFullBinary: store?.hasCompleteSync(platform, version) ?? false,
-      fragmentIndices: store?.availableFragmentsSync(platform, version) ?? const [],
-      seq: 0,
-    );
+    if (store == null) return const [];
+    final version = currentAppVersion;
+    final records = <BinaryAvailabilityRecord>[];
+    for (final platform in ['android', 'linux', 'windows', 'macos', 'ios']) {
+      final fragments = store.availableFragmentsSync(platform, version);
+      final hasComplete = store.hasCompleteSync(platform, version);
+      if (fragments.isEmpty && !hasComplete) continue;
+      records.add(BinaryAvailabilityRecord(
+        deviceId: identity.deviceNodeId,
+        platform: platform,
+        version: version,
+        addresses: const [],
+        binaryHash: '',
+        hasFullBinary: hasComplete,
+        fragmentIndices: fragments,
+        seq: 0,
+      ));
+    }
+    return records;
   }
 
   /// §19.6.2 fragment-store housekeeping: drops fragments/complete binaries
@@ -10537,7 +10549,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// update download (§19.6.2). Only meaningful for sideloaded installs —
   /// Play Store builds never self-update, so seeding their own binary
   /// serves no purpose.
-  void _selfSeedCurrentBinary() {
+  Future<void> _selfSeedCurrentBinary() async {
     final platform = Platform.operatingSystem;
     final version = kCurrentAppVersion;
     final existing = _binaryFragmentStore!.storedVersionsSync(platform);
@@ -10545,32 +10557,37 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       _log.debug('[update] Already seeded $platform/$version');
       return;
     }
-    _resolveCurrentBinaryPath().then((binaryPath) {
+    try {
+      final binaryPath = await _resolveCurrentBinaryPath();
       if (binaryPath == null) return;
-      final file = File(binaryPath);
-      if (!file.existsSync()) {
+      if (!File(binaryPath).existsSync()) {
         _log.debug('[update] Binary not found at $binaryPath — skip self-seed');
         return;
       }
-      file.readAsBytes().then((data) async {
-        final count = await _binarySeeder!.seed(
-          binary: data,
-          platform: platform,
-          version: version,
-          maxFragments: Platform.isAndroid ? 2 : 8,
-        );
-        if (count > 0) {
-          _log.info('[update] Self-seeded $count fragments for $platform/$version');
-          node.binaryHasContentToShare = true;
-          _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecord);
-          _binaryRendezvousManager?.publish(_buildBinaryAvailabilityRecord());
-        }
-      }).catchError((e) {
-        _log.warn('[update] Self-seed failed: $e');
-      });
-    }).catchError((e) {
-      _log.warn('[update] Self-seed path resolution failed: $e');
-    });
+      final profileDir = _binaryFragmentStore!.profileDir;
+      final maxFragments = Platform.isAndroid ? 2 : 8;
+      final count = await _runSeedIsolate(
+          binaryPath, profileDir, platform, version, maxFragments);
+      if (count > 0) {
+        _log.info('[update] Self-seeded $count fragments for $platform/$version');
+        node.binaryHasContentToShare = true;
+        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
+        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
+      }
+    } catch (e) {
+      _log.warn('[update] Self-seed failed: $e');
+    }
+  }
+
+  static Future<int> _runSeedIsolate(String binaryPath, String profileDir,
+      String platform, String version, int maxFragments) {
+    return Isolate.run(() => _selfSeedInIsolate(
+      binaryPath: binaryPath,
+      profileDir: profileDir,
+      platform: platform,
+      version: version,
+      maxFragments: maxFragments,
+    ));
   }
 
   Future<String?> _resolveCurrentBinaryPath() async {
@@ -10585,6 +10602,67 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     return Platform.resolvedExecutable;
+  }
+
+  void selfPublishManifest() => _selfPublishManifest();
+
+  /// IPC entry: seed an external binary file into the fragment store.
+  Future<Map<String, dynamic>> seedBinaryFromFile(
+      String platform, String version, String filePath) async {
+    final store = _binaryFragmentStore;
+    if (store == null) return {'error': 'fragment store not initialized'};
+    final file = File(filePath);
+    if (!file.existsSync()) return {'error': 'file not found: $filePath'};
+    try {
+      final profileDir = store.profileDir;
+      final count = await _runSeedIsolate(filePath, profileDir, platform, version, 50);
+      if (count > 0) {
+        node.binaryHasContentToShare = true;
+        _binaryRendezvousManager?.startPeriodicRefresh(_buildBinaryAvailabilityRecords);
+        _binaryRendezvousManager?.publishAll(_buildBinaryAvailabilityRecords());
+      }
+      final binary = file.readAsBytesSync();
+      final hash = bytesToHex(SodiumFFI().sha256(binary));
+      return {'fragmentCount': count, 'hash': hash};
+    } catch (e) {
+      return {'error': '$e'};
+    }
+  }
+
+  /// IPC entry: list all seeded platforms and versions.
+  Map<String, List<String>> getSeededPlatforms() {
+    final store = _binaryFragmentStore;
+    if (store == null) return {};
+    final result = <String, List<String>>{};
+    for (final p in ['android', 'linux', 'windows', 'macos', 'ios']) {
+      final versions = store.storedVersionsSync(p);
+      if (versions.isNotEmpty) result[p] = versions;
+    }
+    return result;
+  }
+
+  /// IPC entry: reload manifest from disk and re-publish.
+  Map<String, dynamic> reloadManifest() {
+    try {
+      _selfPublishManifest();
+      final m = _latestManifest;
+      if (m == null) return {'error': 'no valid manifest found on disk'};
+      return {'version': m.version};
+    } catch (e) {
+      return {'error': '$e'};
+    }
+  }
+
+  /// IPC entry: current update state.
+  Map<String, dynamic> getUpdateStatus() {
+    final mgr = _binaryUpdateManager;
+    if (mgr == null) return {'state': 'unavailable'};
+    return {
+      'state': mgr.state.name,
+      'progress': mgr.progress,
+      if (mgr.targetVersion != null) 'targetVersion': mgr.targetVersion,
+      if (mgr.errorMessage != null) 'error': mgr.errorMessage,
+    };
   }
 
   void _selfPublishManifest() {
@@ -15184,4 +15262,44 @@ class _OutboxEntry {
         canonicalPacketB64: json['canonicalPacketB64'] as String,
         sentAtMs: json['sentAtMs'] as int? ?? DateTime.now().millisecondsSinceEpoch,
       );
+}
+
+/// Top-level entry point for [Isolate.run]: reads the binary, RS-encodes it,
+/// and stores fragments to disk — entirely off the main thread.
+///
+/// Uses raw file I/O instead of [BinaryFragmentStore]/[BinarySeeder] to avoid
+/// CLogger's Timer.periodic which is not sendable across isolate boundaries.
+Future<int> _selfSeedInIsolate({
+  required String binaryPath,
+  required String profileDir,
+  required String platform,
+  required String version,
+  required int maxFragments,
+}) async {
+  final file = File(binaryPath);
+  if (!file.existsSync()) return 0;
+  final binary = await file.readAsBytes();
+
+  final params = BinarySeeder.paramsFor(platform);
+  final rs = ReedSolomon.withParams(params.n, params.k);
+  final fragments = rs.encode(binary);
+
+  final storageDir = '$profileDir/binary-updates/$platform/$version';
+  Directory(storageDir).createSync(recursive: true);
+
+  final storeCount = maxFragments < fragments.length
+      ? maxFragments
+      : fragments.length;
+  for (var i = 0; i < storeCount; i++) {
+    File('$storageDir/fragment-${i.toString().padLeft(3, '0')}.bin')
+        .writeAsBytesSync(fragments[i]);
+  }
+  File('$storageDir/complete.bin').writeAsBytesSync(binary);
+
+  final hash = bytesToHex(SodiumFFI().sha256(binary));
+  File('$storageDir/meta.json').writeAsStringSync(
+      '{"storedAt":${DateTime.now().millisecondsSinceEpoch},'
+      '"fragmentCount":$storeCount,"binaryHash":"$hash"}');
+
+  return storeCount;
 }
