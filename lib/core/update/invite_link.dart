@@ -6,10 +6,16 @@ import 'package:cleona/core/network/peer_info.dart' show hexToBytes;
 import 'package:cleona/core/update/update_manifest.dart' show UpdateChecker;
 
 /// Invite link for initial installation (§19.6.4): bootstraps a fresh device
-/// with both the P2P ContactSeed and a maintainer-signed binary hash map, so
-/// the recipient can verify a binary obtained via any distribution channel
-/// (in-network download, physical transfer, fallback URL) without trusting
-/// the channel itself.
+/// with both the P2P ContactSeed and maintainer-signed per-platform binary
+/// hashes, so the recipient can verify a binary obtained via any distribution
+/// channel (in-network download, physical transfer, fallback URL) without
+/// trusting the channel itself.
+///
+/// Uses the same per-platform Ed25519 signatures as the UpdateManifest
+/// (`binarySignatures`): each signature covers the raw 32-byte SHA-256 hash
+/// of that platform's binary. No separate signing step required — the
+/// signatures are produced once at release time and travel through the
+/// manifest to every node.
 ///
 /// All parameters live in the URL hash fragment (`#...`), never the query
 /// string — the fragment is not sent to any server, preserving the same
@@ -21,7 +27,7 @@ class InviteLink {
   final int nodePort;
   final String contactSeed;
   final Map<String, String> binaryHashes;
-  final Uint8List maintainerSignature;
+  final Map<String, String> binarySignatures;
   final String version;
   final String? fallbackUrl;
 
@@ -30,27 +36,16 @@ class InviteLink {
     required this.nodePort,
     required this.contactSeed,
     required this.binaryHashes,
-    required this.maintainerSignature,
+    required this.binarySignatures,
     required this.version,
     this.fallbackUrl,
   });
 
-  /// Deterministic payload signed by the maintainer key: sorted
-  /// `platform:hash` lines, then the version, newline-separated.
-  static String _hashMapPayload(Map<String, String> hashes, String version) {
-    final platforms = hashes.keys.toList()..sort();
-    final lines = platforms.map((p) => '$p:${hashes[p]}').join('\n');
-    return '$lines\n$version';
-  }
-
-  String _payload() => _hashMapPayload(binaryHashes, version);
-
   /// Generate the full invite link URL.
   String toUrl() {
     final host = nodeIp.contains(':') ? '[$nodeIp]' : nodeIp;
-    final hJson = jsonEncode(binaryHashes);
-    final hParam = base64.encode(utf8.encode(hJson));
-    final mParam = base64.encode(maintainerSignature);
+    final hParam = base64.encode(utf8.encode(jsonEncode(binaryHashes)));
+    final mParam = base64.encode(utf8.encode(jsonEncode(binarySignatures)));
 
     final frag = StringBuffer();
     frag.write('s=${Uri.encodeComponent(contactSeed)}');
@@ -94,22 +89,25 @@ class InviteLink {
       final hParam = params['h'];
       final mParam = params['m'];
       final version = params['v'];
-      if (seed == null || hParam == null || mParam == null || version == null) {
+      if (seed == null || hParam == null || mParam == null ||
+          version == null) {
         return null;
       }
 
       final hJson = utf8.decode(base64.decode(hParam));
-      final decodedMap = jsonDecode(hJson) as Map<String, dynamic>;
-      final hashes = decodedMap.map((k, v) => MapEntry(k, v as String));
+      final hashMap = jsonDecode(hJson) as Map<String, dynamic>;
+      final hashes = hashMap.map((k, v) => MapEntry(k, v as String));
 
-      final signature = base64.decode(mParam);
+      final mJson = utf8.decode(base64.decode(mParam));
+      final sigMap = jsonDecode(mJson) as Map<String, dynamic>;
+      final sigs = sigMap.map((k, v) => MapEntry(k, v as String));
 
       return InviteLink(
         nodeIp: host,
         nodePort: port,
         contactSeed: seed,
         binaryHashes: hashes,
-        maintainerSignature: Uint8List.fromList(signature),
+        binarySignatures: sigs,
         version: version,
         fallbackUrl: params['f'],
       );
@@ -118,12 +116,21 @@ class InviteLink {
     }
   }
 
-  /// Verify the maintainer signature over the hash map + version.
-  bool verifySignature() {
+  /// Verify the maintainer signature for a specific platform.
+  bool verifySignatureForPlatform(String platform) {
     try {
-      final payload = Uint8List.fromList(utf8.encode(_payload()));
+      final hashHex = binaryHashes[platform];
+      final sigBase64 = binarySignatures[platform];
+      if (hashHex == null || sigBase64 == null) return false;
+
+      final hashBytes = hexToBytes(hashHex);
+      final sigBytes = base64.decode(sigBase64);
       final pubKey = hexToBytes(UpdateChecker.maintainerPublicKeyHex);
-      return SodiumFFI().verifyEd25519(payload, maintainerSignature, pubKey);
+      return SodiumFFI().verifyEd25519(
+        Uint8List.fromList(hashBytes),
+        Uint8List.fromList(sigBytes),
+        pubKey,
+      );
     } catch (_) {
       return false;
     }
@@ -131,33 +138,7 @@ class InviteLink {
 
   /// Get the expected hash for a specific platform.
   String? hashForPlatform(String platform) => binaryHashes[platform];
-}
 
-/// Creates maintainer-signed invite links (§19.6.4). Only the maintainer
-/// holds the Ed25519 secret key needed to call [create].
-class InviteLinkGenerator {
-  static InviteLink create({
-    required Uint8List maintainerSk,
-    required String contactSeed,
-    required String nodeIp,
-    required int nodePort,
-    required Map<String, String> binaryHashes,
-    required String version,
-    String? fallbackUrl,
-  }) {
-    final payload = InviteLink._hashMapPayload(binaryHashes, version);
-    final signature = SodiumFFI().signEd25519(
-      Uint8List.fromList(utf8.encode(payload)),
-      maintainerSk,
-    );
-    return InviteLink(
-      nodeIp: nodeIp,
-      nodePort: nodePort,
-      contactSeed: contactSeed,
-      binaryHashes: binaryHashes,
-      maintainerSignature: signature,
-      version: version,
-      fallbackUrl: fallbackUrl,
-    );
-  }
+  /// Get the signature for a specific platform.
+  String? signatureForPlatform(String platform) => binarySignatures[platform];
 }

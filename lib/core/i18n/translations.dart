@@ -111,6 +111,12 @@ const Map<String, Map<String, String>> translations = {
   'share': {'de': 'Teilen', 'en': 'Share', 'es': 'Compartir', 'hu': 'Megosztás', 'sv': 'Dela', 'ar': 'مشاركة', 'he': 'שיתוף', 'fa': 'اشتراک‌گذاری', 'fr': 'Partager', 'it': 'Condividi', 'pt': 'Compartilhar', 'nl': 'Delen', 'pl': 'Udostępnij', 'ro': 'Partajare', 'cs': 'Sdílet', 'sk': 'Zdieľať', 'hr': 'Podijeli', 'bg': 'Споделяне', 'el': 'Κοινοποίηση', 'da': 'Del', 'fi': 'Jaa', 'no': 'Del', 'uk': 'Поділитися', 'ru': 'Поделиться', 'tr': 'Paylaş', 'zh': '分享', 'ja': '共有', 'ko': '공유', 'hi': 'साझा करें', 'th': 'แชร์', 'vi': 'Chia sẻ', 'id': 'Bagikan', 'ms': 'Kongsi'},
   'share_via_cleona': {'de': 'In Cleona teilen', 'en': 'Share via Cleona', 'es': 'Compartir en Cleona', 'hu': 'Megosztás Cleonában', 'sv': 'Dela i Cleona', 'ar': 'مشاركة عبر Cleona', 'he': 'שיתוף ב-Cleona', 'fa': 'اشتراک‌گذاری در Cleona', 'fr': 'Partager via Cleona', 'it': 'Condividi su Cleona', 'pt': 'Compartilhar no Cleona', 'nl': 'Delen via Cleona', 'pl': 'Udostępnij w Cleona', 'ro': 'Partajare în Cleona', 'cs': 'Sdílet přes Cleona', 'sk': 'Zdieľať cez Cleona', 'hr': 'Podijeli u Cleona', 'bg': 'Споделяне в Cleona', 'el': 'Κοινοποίηση μέσω Cleona', 'da': 'Del i Cleona', 'fi': 'Jaa Cleonassa', 'no': 'Del i Cleona', 'uk': 'Поділитися в Cleona', 'ru': 'Поделиться в Cleona', 'tr': 'Cleona ile paylaş', 'zh': '通过Cleona分享', 'ja': 'Cleonaで共有', 'ko': 'Cleona로 공유', 'hi': 'Cleona में साझा करें', 'th': 'แชร์ผ่าน Cleona', 'vi': 'Chia sẻ qua Cleona', 'id': 'Bagikan via Cleona', 'ms': 'Kongsi melalui Cleona'},
   'share_external': {'de': 'Extern teilen', 'en': 'Share externally', 'es': 'Compartir externamente', 'hu': 'Külső megosztás', 'sv': 'Dela externt', 'ar': 'مشاركة خارجية', 'he': 'שיתוף חיצוני', 'fa': 'اشتراک‌گذاری خارجی', 'fr': 'Partager en externe', 'it': 'Condividi esternamente', 'pt': 'Compartilhar externamente', 'nl': 'Extern delen', 'pl': 'Udostępnij zewnętrznie', 'ro': 'Partajare externă', 'cs': 'Sdílet externě', 'sk': 'Zdieľať externe', 'hr': 'Podijeli vanjski', 'bg': 'Външно споделяне', 'el': 'Εξωτερική κοινοποίηση', 'da': 'Del eksternt', 'fi': 'Jaa ulkoisesti', 'no': 'Del eksternt', 'uk': 'Поділитися зовні', 'ru': 'Поделиться вовне', 'tr': 'Harici paylaş', 'zh': '外部分享', 'ja': '外部に共有', 'ko': '외부 공유', 'hi': 'बाहरी रूप से साझा करें', 'th': 'แชร์ภายนอก', 'vi': 'Chia sẻ bên ngoài', 'id': 'Bagikan secara eksternal', 'ms': 'Kongsi secara luaran'},
+  'share_cleona': {'de': 'Cleona teilen', 'en': 'Share Cleona', 'es': 'Compartir Cleona', 'hu': 'Cleona megosztása', 'sv': 'Dela Cleona', 'ar': 'مشاركة Cleona', 'he': 'שיתוף Cleona', 'fa': 'اشتراک‌گذاری Cleona', 'fr': 'Partager Cleona', 'it': 'Condividi Cleona', 'pt': 'Compartilhar Cleona', 'nl': 'Cleona delen', 'pl': 'Udostępnij Cleona', 'ro': 'Partajare Cleona', 'cs': 'Sdílet Cleona', 'sk': 'Zdieľať Cleona', 'hr': 'Podijeli Cleona', 'bg': 'Споделяне на Cleona', 'el': 'Κοινοποίηση Cleona', 'da': 'Del Cleona', 'fi': 'Jaa Cleona', 'no': 'Del Cleona', 'uk': 'Поділитися Cleona', 'ru': 'Поделиться Cleona', 'tr': 'Cleona paylaş', 'zh': '分享Cleona', 'ja': 'Cleonaを共有', 'ko': 'Cleona 공유', 'hi': 'Cleona साझा करें', 'th': 'แชร์ Cleona', 'vi': 'Chia sẻ Cleona', 'id': 'Bagikan Cleona', 'ms': 'Kongsi Cleona'},
+  'share_cleona_direct_share': {'de': 'APK direkt teilen', 'en': 'Share APK directly', 'es': 'Compartir APK directamente', 'hu': 'APK közvetlen megosztása', 'sv': 'Dela APK direkt', 'ar': 'مشاركة APK مباشرة', 'he': 'שיתוף APK ישירות', 'fa': 'اشتراک‌گذاری مستقیم APK', 'fr': 'Partager l\'APK directement', 'it': 'Condividi APK direttamente', 'pt': 'Compartilhar APK diretamente', 'nl': 'APK direct delen', 'pl': 'Udostępnij APK bezpośrednio', 'ro': 'Partajare APK directă', 'cs': 'Sdílet APK přímo', 'sk': 'Zdieľať APK priamo', 'hr': 'Podijeli APK izravno', 'bg': 'Споделяне на APK директно', 'el': 'Κοινοποίηση APK απευθείας', 'da': 'Del APK direkte', 'fi': 'Jaa APK suoraan', 'no': 'Del APK direkte', 'uk': 'Поділитися APK напряму', 'ru': 'Поделиться APK напрямую', 'tr': 'APK\'yı doğrudan paylaş', 'zh': '直接分享APK', 'ja': 'APKを直接共有', 'ko': 'APK 직접 공유', 'hi': 'APK सीधे साझा करें', 'th': 'แชร์ APK โดยตรง', 'vi': 'Chia sẻ APK trực tiếp', 'id': 'Bagikan APK langsung', 'ms': 'Kongsi APK secara langsung'},
+  'share_cleona_invite_hint': {'de': 'Dieser Link öffnet die Cleona-Download-Seite im Browser des Empfängers. Die App wird signiert und verifiziert heruntergeladen.', 'en': 'This link opens the Cleona download page in the recipient\'s browser. The app is downloaded with signature verification.', 'es': 'Este enlace abre la página de descarga de Cleona en el navegador del destinatario. La app se descarga con verificación de firma.', 'hu': 'Ez a link megnyitja a Cleona letöltési oldalt a címzett böngészőjében. Az alkalmazás aláírás-ellenőrzéssel töltődik le.', 'sv': 'Denna länk öppnar Cleonas nedladdningssida i mottagarens webbläsare. Appen laddas ner med signaturverifiering.', 'ar': 'يفتح هذا الرابط صفحة تحميل Cleona في متصفح المستلم. يتم تحميل التطبيق مع التحقق من التوقيع.', 'he': 'קישור זה פותח את דף ההורדה של Cleona בדפדפן הנמען. האפליקציה מורדת עם אימות חתימה.', 'fa': 'این لینک صفحه دانلود Cleona را در مرورگر گیرنده باز می‌کند. برنامه با تأیید امضا دانلود می‌شود.', 'fr': 'Ce lien ouvre la page de téléchargement Cleona dans le navigateur du destinataire. L\'application est téléchargée avec vérification de signature.', 'it': 'Questo link apre la pagina di download di Cleona nel browser del destinatario. L\'app viene scaricata con verifica della firma.', 'pt': 'Este link abre a página de download do Cleona no navegador do destinatário. O app é baixado com verificação de assinatura.', 'nl': 'Deze link opent de Cleona-downloadpagina in de browser van de ontvanger. De app wordt gedownload met handtekeningverificatie.', 'pl': 'Ten link otwiera stronę pobierania Cleona w przeglądarce odbiorcy. Aplikacja jest pobierana z weryfikacją podpisu.', 'ro': 'Acest link deschide pagina de descărcare Cleona în browserul destinatarului. Aplicația este descărcată cu verificarea semnăturii.', 'cs': 'Tento odkaz otevře stránku ke stažení Cleona v prohlížeči příjemce. Aplikace se stáhne s ověřením podpisu.', 'sk': 'Tento odkaz otvorí stránku na stiahnutie Cleona v prehliadači príjemcu. Aplikácia sa stiahne s overením podpisu.', 'hr': 'Ova poveznica otvara stranicu za preuzimanje Cleona u pregledniku primatelja. Aplikacija se preuzima s provjerom potpisa.', 'bg': 'Този линк отваря страницата за изтегляне на Cleona в браузъра на получателя. Приложението се изтегля с проверка на подписа.', 'el': 'Αυτός ο σύνδεσμος ανοίγει τη σελίδα λήψης Cleona στο πρόγραμμα περιήγησης του παραλήπτη. Η εφαρμογή λαμβάνεται με επαλήθευση υπογραφής.', 'da': 'Dette link åbner Cleona-downloadsiden i modtagerens browser. Appen downloades med signaturverificering.', 'fi': 'Tämä linkki avaa Cleonan lataussivun vastaanottajan selaimessa. Sovellus ladataan allekirjoituksen varmennuksella.', 'no': 'Denne lenken åpner Cleona-nedlastingssiden i mottakerens nettleser. Appen lastes ned med signaturverifisering.', 'uk': 'Це посилання відкриває сторінку завантаження Cleona у браузері отримувача. Додаток завантажується з перевіркою підпису.', 'ru': 'Эта ссылка открывает страницу загрузки Cleona в браузере получателя. Приложение загружается с проверкой подписи.', 'tr': 'Bu bağlantı alıcının tarayıcısında Cleona indirme sayfasını açar. Uygulama imza doğrulamasıyla indirilir.', 'zh': '此链接在收件人的浏览器中打开Cleona下载页面。应用程序通过签名验证下载。', 'ja': 'このリンクは受信者のブラウザでCleonaのダウンロードページを開きます。アプリは署名検証付きでダウンロードされます。', 'ko': '이 링크는 수신자의 브라우저에서 Cleona 다운로드 페이지를 엽니다. 앱은 서명 검증과 함께 다운로드됩니다.', 'hi': 'यह लिंक प्राप्तकर्ता के ब्राउज़र में Cleona डाउनलोड पेज खोलता है। ऐप हस्ताक्षर सत्यापन के साथ डाउनलोड होता है।', 'th': 'ลิงก์นี้เปิดหน้าดาวน์โหลด Cleona ในเบราว์เซอร์ของผู้รับ แอปจะดาวน์โหลดพร้อมการตรวจสอบลายเซ็น', 'vi': 'Liên kết này mở trang tải Cleona trong trình duyệt của người nhận. Ứng dụng được tải xuống với xác minh chữ ký.', 'id': 'Tautan ini membuka halaman unduhan Cleona di browser penerima. Aplikasi diunduh dengan verifikasi tanda tangan.', 'ms': 'Pautan ini membuka halaman muat turun Cleona dalam pelayar penerima. Aplikasi dimuat turun dengan pengesahan tandatangan.'},
+  'share_cleona_no_public_ip': {'de': 'Kein Invite-Link möglich — keine öffentliche IP-Adresse verfügbar.', 'en': 'Invite link not available — no public IP address detected.', 'es': 'Enlace de invitación no disponible — no se detectó una dirección IP pública.', 'hu': 'Meghívó link nem elérhető — nem található nyilvános IP-cím.', 'sv': 'Inbjudningslänk ej tillgänglig — ingen offentlig IP-adress hittades.', 'ar': 'رابط الدعوة غير متاح — لم يتم اكتشاف عنوان IP عام.', 'he': 'קישור הזמנה לא זמין — לא זוהתה כתובת IP ציבורית.', 'fa': 'لینک دعوت در دسترس نیست — آدرس IP عمومی شناسایی نشد.', 'fr': 'Lien d\'invitation indisponible — aucune adresse IP publique détectée.', 'it': 'Link di invito non disponibile — nessun indirizzo IP pubblico rilevato.', 'pt': 'Link de convite indisponível — nenhum endereço IP público detectado.', 'nl': 'Uitnodigingslink niet beschikbaar — geen openbaar IP-adres gedetecteerd.', 'pl': 'Link zaproszenia niedostępny — nie wykryto publicznego adresu IP.', 'ro': 'Link de invitație indisponibil — nu s-a detectat o adresă IP publică.', 'cs': 'Odkaz na pozvánku není k dispozici — nebyla zjištěna veřejná IP adresa.', 'sk': 'Odkaz na pozvánku nie je k dispozícii — nebola zistená verejná IP adresa.', 'hr': 'Pozivnica nije dostupna — nije otkrivena javna IP adresa.', 'bg': 'Линкът за покана не е наличен — не е открит публичен IP адрес.', 'el': 'Σύνδεσμος πρόσκλησης μη διαθέσιμος — δεν εντοπίστηκε δημόσια διεύθυνση IP.', 'da': 'Invitationslink ikke tilgængeligt — ingen offentlig IP-adresse fundet.', 'fi': 'Kutsulinkki ei saatavilla — julkista IP-osoitetta ei havaittu.', 'no': 'Invitasjonslenke ikke tilgjengelig — ingen offentlig IP-adresse oppdaget.', 'uk': 'Посилання-запрошення недоступне — публічну IP-адресу не виявлено.', 'ru': 'Ссылка-приглашение недоступна — публичный IP-адрес не обнаружен.', 'tr': 'Davet bağlantısı kullanılamıyor — genel IP adresi algılanmadı.', 'zh': '邀请链接不可用——未检测到公共IP地址。', 'ja': '招待リンクは利用できません — パブリックIPアドレスが検出されませんでした。', 'ko': '초대 링크를 사용할 수 없습니다 — 공용 IP 주소가 감지되지 않았습니다.', 'hi': 'आमंत्रण लिंक उपलब्ध नहीं — कोई सार्वजनिक IP पता नहीं मिला।', 'th': 'ลิงก์เชิญไม่พร้อมใช้งาน — ไม่พบที่อยู่ IP สาธารณะ', 'vi': 'Liên kết mời không khả dụng — không phát hiện địa chỉ IP công cộng.', 'id': 'Tautan undangan tidak tersedia — alamat IP publik tidak terdeteksi.', 'ms': 'Pautan jemputan tidak tersedia — alamat IP awam tidak dikesan.'},
+  'share_cleona_download_link': {'de': 'GitHub-Download-Link kopieren', 'en': 'Copy GitHub download link', 'es': 'Copiar enlace de descarga de GitHub', 'hu': 'GitHub letöltési link másolása', 'sv': 'Kopiera GitHub-nedladdningslänk', 'ar': 'نسخ رابط تحميل GitHub', 'he': 'העתק קישור הורדה מ-GitHub', 'fa': 'کپی لینک دانلود GitHub', 'fr': 'Copier le lien de téléchargement GitHub', 'it': 'Copia link di download GitHub', 'pt': 'Copiar link de download do GitHub', 'nl': 'GitHub-downloadlink kopiëren', 'pl': 'Kopiuj link pobierania z GitHub', 'ro': 'Copiază linkul de descărcare GitHub', 'cs': 'Kopírovat odkaz ke stažení z GitHub', 'sk': 'Kopírovať odkaz na stiahnutie z GitHub', 'hr': 'Kopiraj GitHub poveznicu za preuzimanje', 'bg': 'Копиране на линк за изтегляне от GitHub', 'el': 'Αντιγραφή συνδέσμου λήψης GitHub', 'da': 'Kopier GitHub-downloadlink', 'fi': 'Kopioi GitHub-latauslinkki', 'no': 'Kopier GitHub-nedlastingslenke', 'uk': 'Копіювати посилання для завантаження з GitHub', 'ru': 'Копировать ссылку для скачивания с GitHub', 'tr': 'GitHub indirme bağlantısını kopyala', 'zh': '复制GitHub下载链接', 'ja': 'GitHubダウンロードリンクをコピー', 'ko': 'GitHub 다운로드 링크 복사', 'hi': 'GitHub डाउनलोड लिंक कॉपी करें', 'th': 'คัดลอกลิงก์ดาวน์โหลด GitHub', 'vi': 'Sao chép liên kết tải GitHub', 'id': 'Salin tautan unduhan GitHub', 'ms': 'Salin pautan muat turun GitHub'},
+  'share_cleona_copy_link': {'de': 'Link kopieren', 'en': 'Copy link', 'es': 'Copiar enlace', 'hu': 'Link másolása', 'sv': 'Kopiera länk', 'ar': 'نسخ الرابط', 'he': 'העתק קישור', 'fa': 'کپی لینک', 'fr': 'Copier le lien', 'it': 'Copia link', 'pt': 'Copiar link', 'nl': 'Link kopiëren', 'pl': 'Kopiuj link', 'ro': 'Copiază linkul', 'cs': 'Kopírovat odkaz', 'sk': 'Kopírovať odkaz', 'hr': 'Kopiraj poveznicu', 'bg': 'Копиране на линк', 'el': 'Αντιγραφή συνδέσμου', 'da': 'Kopier link', 'fi': 'Kopioi linkki', 'no': 'Kopier lenke', 'uk': 'Копіювати посилання', 'ru': 'Копировать ссылку', 'tr': 'Bağlantıyı kopyala', 'zh': '复制链接', 'ja': 'リンクをコピー', 'ko': '링크 복사', 'hi': 'लिंक कॉपी करें', 'th': 'คัดลอกลิงก์', 'vi': 'Sao chép liên kết', 'id': 'Salin tautan', 'ms': 'Salin pautan'},
   'join_channel_question': {'de': 'Dem Kanal „{name}“ beitreten?', 'en': 'Join channel \"{name}\"?', 'es': '¿Unirse al canal \"{name}\"?', 'hu': 'Csatlakozás a(z) „{name}” csatornához?', 'sv': 'Gå med i kanalen \"{name}\"?', 'ar': 'الانضمام إلى القناة \"{name}\"؟', 'he': 'להצטרף לערוץ \"{name}\"?', 'fa': 'پیوستن به کانال \"{name}\"؟', 'fr': 'Rejoindre le canal « {name} » ?', 'it': 'Unirsi al canale \"{name}\"?', 'pt': 'Entrar no canal \"{name}\"?', 'nl': 'Deelnemen aan kanaal \"{name}\"?', 'pl': 'Dołączyć do kanału „{name}”?', 'ro': 'Te alături canalului „{name}”?', 'cs': 'Připojit se ke kanálu „{name}“?', 'sk': 'Pripojiť sa ku kanálu „{name}“?', 'hr': 'Pridružiti se kanalu „{name}“?', 'bg': 'Присъединяване към канал „{name}“?', 'el': 'Συμμετοχή στο κανάλι \"{name}\";', 'da': 'Deltag i kanalen \"{name}\"?', 'fi': 'Liity kanavalle \"{name}\"?', 'no': 'Bli med i kanalen \"{name}\"?', 'uk': 'Приєднатися до каналу «{name}»?', 'ru': 'Вступить в канал «{name}»?', 'tr': '\"{name}\" kanalına katıl?', 'zh': '加入频道\"{name}\"？', 'ja': 'チャンネル「{name}」に参加しますか？', 'ko': '\"{name}\" 채널에 참여하시겠습니까?', 'hi': 'क्या आप \"{name}\" चैनल से जुड़ना चाहते हैं?', 'th': 'เข้าร่วมช่อง \"{name}\" หรือไม่?', 'vi': 'Tham gia kênh \"{name}\"?', 'id': 'Gabung kanal \"{name}\"?', 'ms': 'Sertai saluran \"{name}\"?'},
   'channel_link_sent': {'de': 'Kanal-Link gesendet', 'en': 'Channel link sent', 'es': 'Enlace de canal enviado', 'hu': 'Csatornalink elküldve', 'sv': 'Kanallänk skickad', 'ar': 'تم إرسال رابط القناة', 'he': 'קישור הערוץ נשלח', 'fa': 'لینک کانال ارسال شد', 'fr': 'Lien du canal envoyé', 'it': 'Link del canale inviato', 'pt': 'Link do canal enviado', 'nl': 'Kanaallink verzonden', 'pl': 'Link do kanału wysłany', 'ro': 'Link canal trimis', 'cs': 'Odkaz na kanál odeslán', 'sk': 'Odkaz na kanál odoslaný', 'hr': 'Poveznica kanala poslana', 'bg': 'Линкът на канала е изпратен', 'el': 'Ο σύνδεσμος καναλιού εστάλη', 'da': 'Kanallink sendt', 'fi': 'Kanavan linkki lähetetty', 'no': 'Kanallenke sendt', 'uk': 'Посилання на канал надіслано', 'ru': 'Ссылка на канал отправлена', 'tr': 'Kanal bağlantısı gönderildi', 'zh': '频道链接已发送', 'ja': 'チャンネルリンクを送信しました', 'ko': '채널 링크 전송됨', 'hi': 'चैनल लिंक भेजा गया', 'th': 'ส่งลิงก์ช่องแล้ว', 'vi': 'Đã gửi liên kết kênh', 'id': 'Tautan kanal terkirim', 'ms': 'Pautan saluran dihantar'},
   'channel_joined_success': {'de': 'Dem Kanal beigetreten', 'en': 'Joined channel', 'es': 'Te uniste al canal', 'hu': 'Csatlakozás sikeres', 'sv': 'Gick med i kanalen', 'ar': 'تم الانضمام إلى القناة', 'he': 'הצטרפת לערוץ', 'fa': 'به کانال پیوستید', 'fr': 'Canal rejoint', 'it': 'Iscritto al canale', 'pt': 'Entrou no canal', 'nl': 'Deelgenomen aan kanaal', 'pl': 'Dołączono do kanału', 'ro': 'Te-ai alăturat canalului', 'cs': 'Připojeno ke kanálu', 'sk': 'Pripojené ku kanálu', 'hr': 'Pridružen kanalu', 'bg': 'Присъединен към канала', 'el': 'Συμμετοχή στο κανάλι', 'da': 'Deltager i kanalen', 'fi': 'Liitytty kanavalle', 'no': 'Ble med i kanalen', 'uk': 'Приєднано до каналу', 'ru': 'Вы вступили в канал', 'tr': 'Kanala katıldınız', 'zh': '已加入频道', 'ja': 'チャンネルに参加しました', 'ko': '채널에 참여했습니다', 'hi': 'चैनल में शामिल हुए', 'th': 'เข้าร่วมช่องแล้ว', 'vi': 'Đã tham gia kênh', 'id': 'Bergabung ke kanal', 'ms': 'Telah menyertai saluran'},
@@ -140,6 +146,63 @@ const Map<String, Map<String, String>> translations = {
   'review_enabled_label': {'de': 'Kanal-Meldungen bewerten', 'en': 'Review channel reports', 'es': 'Evaluar reportes de canales', 'hu': 'Csatornajelentések értékelése', 'sv': 'Granska kanalrapporter', 'ar': 'مراجعة بلاغات القنوات', 'he': 'סקירת דיווחים', 'fa': 'بررسی گزارش‌ها', 'fr': 'Évaluer les signalements', 'it': 'Valuta segnalazioni', 'pt': 'Avaliar denúncias', 'nl': 'Meldingen beoordelen', 'pl': 'Oceniaj zgłoszenia', 'ro': 'Evaluează rapoarte', 'cs': 'Hodnotit hlášení', 'sk': 'Hodnotiť hlásenia', 'hr': 'Pregledaj prijave', 'bg': 'Преглеждай доклади', 'el': 'Αξιολόγηση αναφορών', 'da': 'Gennemgå rapporter', 'fi': 'Arvioi ilmiantoja', 'no': 'Vurder rapporter', 'uk': 'Оцінювати скарги', 'ru': 'Оценивать жалобы', 'tr': 'Bildirimleri incele', 'zh': '审查举报', 'ja': 'レポートをレビュー', 'ko': '신고 검토', 'hi': 'रिपोर्ट समीक्षा', 'th': 'ตรวจสอบรายงาน', 'vi': 'Xem xét báo cáo', 'id': 'Tinjau laporan', 'ms': 'Semak laporan'},
   'review_enabled_subtitle': {'de': 'Als Jury-Mitglied an Moderationsentscheidungen teilnehmen', 'en': 'Participate in moderation decisions as a jury member', 'es': 'Participar en decisiones de moderación como jurado', 'hu': 'Részvétel moderációs döntésekben esküdtként', 'sv': 'Delta i modereringsbeslut som jurymedlem', 'ar': 'المشاركة في الإشراف كمحلف', 'he': 'השתתפות בהחלטות ניהול', 'fa': 'شرکت در تصمیمات به عنوان هیئت', 'fr': 'Participer comme juré', 'it': 'Partecipa come giurato', 'pt': 'Participar como jurado', 'nl': 'Deelnemen als jurylid', 'pl': 'Uczestnictwo jako juror', 'ro': 'Participă ca jurat', 'cs': 'Účast jako porotce', 'sk': 'Účasť ako porotca', 'hr': 'Sudjeluj kao žiri', 'bg': 'Участвай като жури', 'el': 'Συμμετοχή ως κριτής', 'da': 'Deltag som jury', 'fi': 'Osallistu tuomaristona', 'no': 'Delta som jury', 'uk': 'Брати участь як журі', 'ru': 'Участвовать как присяжный', 'tr': 'Jüri olarak katıl', 'zh': '作为陪审员参与', 'ja': '陪審員として参加', 'ko': '배심원으로 참여', 'hi': 'ज्यूरी के रूप में', 'th': 'เป็นคณะลูกขุน', 'vi': 'Tham gia ban giám khảo', 'id': 'Sebagai juri', 'ms': 'Sebagai ahli juri'},
 
+  // ── Channel Categories ──────────────────────────────────────────
+  'channel_category': {'de': 'Kategorie', 'en': 'Category', 'es': 'Categoría', 'hu': 'Kategória', 'sv': 'Kategori', 'ar': 'فئة', 'he': 'קטגוריה', 'fa': 'دسته‌بندی', 'fr': 'Catégorie', 'it': 'Categoria', 'pt': 'Categoria', 'nl': 'Categorie', 'pl': 'Kategoria', 'ro': 'Categorie', 'cs': 'Kategorie', 'sk': 'Kategória', 'hr': 'Kategorija', 'bg': 'Категория', 'el': 'Κατηγορία', 'da': 'Kategori', 'fi': 'Kategoria', 'no': 'Kategori', 'uk': 'Категорія', 'ru': 'Категория', 'tr': 'Kategori', 'zh': '分类', 'ja': 'カテゴリー', 'ko': '카테고리', 'hi': 'श्रेणी', 'th': 'หมวดหมู่', 'vi': 'Danh mục', 'id': 'Kategori', 'ms': 'Kategori'},
+  'channel_cat_general': {'de': 'Allgemein', 'en': 'General', 'es': 'General', 'hu': 'Általános', 'sv': 'Allmänt', 'ar': 'عام', 'he': 'כללי', 'fa': 'عمومی', 'fr': 'Général', 'it': 'Generale', 'pt': 'Geral', 'nl': 'Algemeen', 'pl': 'Ogólne', 'ro': 'General', 'cs': 'Obecné', 'sk': 'Všeobecné', 'hr': 'Općenito', 'bg': 'Общо', 'el': 'Γενικά', 'da': 'Generelt', 'fi': 'Yleinen', 'no': 'Generelt', 'uk': 'Загальне', 'ru': 'Общее', 'tr': 'Genel', 'zh': '综合', 'ja': '一般', 'ko': '일반', 'hi': 'सामान्य', 'th': 'ทั่วไป', 'vi': 'Chung', 'id': 'Umum', 'ms': 'Umum'},
+  'channel_cat_technology': {'de': 'Technologie', 'en': 'Technology', 'es': 'Tecnología', 'hu': 'Technológia', 'sv': 'Teknik', 'ar': 'تكنولوجيا', 'he': 'טכנולוגיה', 'fa': 'فناوری', 'fr': 'Technologie', 'it': 'Tecnologia', 'pt': 'Tecnologia', 'nl': 'Technologie', 'pl': 'Technologia', 'ro': 'Tehnologie', 'cs': 'Technologie', 'sk': 'Technológia', 'hr': 'Tehnologija', 'bg': 'Технология', 'el': 'Τεχνολογία', 'da': 'Teknologi', 'fi': 'Teknologia', 'no': 'Teknologi', 'uk': 'Технологія', 'ru': 'Технология', 'tr': 'Teknoloji', 'zh': '科技', 'ja': 'テクノロジー', 'ko': '기술', 'hi': 'प्रौद्योगिकी', 'th': 'เทคโนโลยี', 'vi': 'Công nghệ', 'id': 'Teknologi', 'ms': 'Teknologi'},
+  'channel_cat_news': {'de': 'Nachrichten', 'en': 'News', 'es': 'Noticias', 'hu': 'Hírek', 'sv': 'Nyheter', 'ar': 'أخبار', 'he': 'חדשות', 'fa': 'اخبار', 'fr': 'Actualités', 'it': 'Notizie', 'pt': 'Notícias', 'nl': 'Nieuws', 'pl': 'Wiadomości', 'ro': 'Știri', 'cs': 'Zprávy', 'sk': 'Správy', 'hr': 'Vijesti', 'bg': 'Новини', 'el': 'Ειδήσεις', 'da': 'Nyheder', 'fi': 'Uutiset', 'no': 'Nyheter', 'uk': 'Новини', 'ru': 'Новости', 'tr': 'Haberler', 'zh': '新闻', 'ja': 'ニュース', 'ko': '뉴스', 'hi': 'समाचार', 'th': 'ข่าว', 'vi': 'Tin tức', 'id': 'Berita', 'ms': 'Berita'},
+  'channel_cat_entertainment': {'de': 'Unterhaltung', 'en': 'Entertainment', 'es': 'Entretenimiento', 'hu': 'Szórakozás', 'sv': 'Underhållning', 'ar': 'ترفيه', 'he': 'בידור', 'fa': 'سرگرمی', 'fr': 'Divertissement', 'it': 'Intrattenimento', 'pt': 'Entretenimento', 'nl': 'Entertainment', 'pl': 'Rozrywka', 'ro': 'Divertisment', 'cs': 'Zábava', 'sk': 'Zábava', 'hr': 'Zabava', 'bg': 'Забавление', 'el': 'Ψυχαγωγία', 'da': 'Underholdning', 'fi': 'Viihde', 'no': 'Underholdning', 'uk': 'Розваги', 'ru': 'Развлечения', 'tr': 'Eğlence', 'zh': '娱乐', 'ja': 'エンタメ', 'ko': '엔터테인먼트', 'hi': 'मनोरंजन', 'th': 'บันเทิง', 'vi': 'Giải trí', 'id': 'Hiburan', 'ms': 'Hiburan'},
+  'channel_cat_gaming': {'de': 'Gaming', 'en': 'Gaming', 'es': 'Gaming', 'hu': 'Gaming', 'sv': 'Gaming', 'ar': 'Gaming', 'he': 'Gaming', 'fa': 'Gaming', 'fr': 'Gaming', 'it': 'Gaming', 'pt': 'Gaming', 'nl': 'Gaming', 'pl': 'Gaming', 'ro': 'Gaming', 'cs': 'Gaming', 'sk': 'Gaming', 'hr': 'Gaming', 'bg': 'Gaming', 'el': 'Gaming', 'da': 'Gaming', 'fi': 'Gaming', 'no': 'Gaming', 'uk': 'Gaming', 'ru': 'Gaming', 'tr': 'Gaming', 'zh': '游戏', 'ja': 'ゲーム', 'ko': '게임', 'hi': 'Gaming', 'th': 'Gaming', 'vi': 'Gaming', 'id': 'Gaming', 'ms': 'Gaming'},
+  'channel_cat_music': {'de': 'Musik & Kunst', 'en': 'Music & Arts', 'es': 'Música y Arte', 'hu': 'Zene és Művészet', 'sv': 'Musik & Konst', 'ar': 'موسيقى وفنون', 'he': 'מוזיקה ואמנות', 'fa': 'موسیقی و هنر', 'fr': 'Musique & Arts', 'it': 'Musica e Arte', 'pt': 'Música e Arte', 'nl': 'Muziek & Kunst', 'pl': 'Muzyka i Sztuka', 'ro': 'Muzică și Artă', 'cs': 'Hudba a Umění', 'sk': 'Hudba a Umenie', 'hr': 'Glazba i Umjetnost', 'bg': 'Музика и Изкуство', 'el': 'Μουσική & Τέχνη', 'da': 'Musik & Kunst', 'fi': 'Musiikki & Taide', 'no': 'Musikk & Kunst', 'uk': 'Музика та Мистецтво', 'ru': 'Музыка и Искусство', 'tr': 'Müzik ve Sanat', 'zh': '音乐与艺术', 'ja': '音楽&アート', 'ko': '음악 & 예술', 'hi': 'संगीत और कला', 'th': 'ดนตรีและศิลปะ', 'vi': 'Âm nhạc & Nghệ thuật', 'id': 'Musik & Seni', 'ms': 'Muzik & Seni'},
+  'channel_cat_sports': {'de': 'Sport', 'en': 'Sports', 'es': 'Deportes', 'hu': 'Sport', 'sv': 'Sport', 'ar': 'رياضة', 'he': 'ספורט', 'fa': 'ورزش', 'fr': 'Sports', 'it': 'Sport', 'pt': 'Esportes', 'nl': 'Sport', 'pl': 'Sport', 'ro': 'Sport', 'cs': 'Sport', 'sk': 'Šport', 'hr': 'Sport', 'bg': 'Спорт', 'el': 'Αθλητισμός', 'da': 'Sport', 'fi': 'Urheilu', 'no': 'Sport', 'uk': 'Спорт', 'ru': 'Спорт', 'tr': 'Spor', 'zh': '体育', 'ja': 'スポーツ', 'ko': '스포츠', 'hi': 'खेल', 'th': 'กีฬา', 'vi': 'Thể thao', 'id': 'Olahraga', 'ms': 'Sukan'},
+  'channel_cat_education': {'de': 'Bildung', 'en': 'Education', 'es': 'Educación', 'hu': 'Oktatás', 'sv': 'Utbildning', 'ar': 'تعليم', 'he': 'חינוך', 'fa': 'آموزش', 'fr': 'Éducation', 'it': 'Istruzione', 'pt': 'Educação', 'nl': 'Onderwijs', 'pl': 'Edukacja', 'ro': 'Educație', 'cs': 'Vzdělávání', 'sk': 'Vzdelávanie', 'hr': 'Obrazovanje', 'bg': 'Образование', 'el': 'Εκπαίδευση', 'da': 'Uddannelse', 'fi': 'Koulutus', 'no': 'Utdanning', 'uk': 'Освіта', 'ru': 'Образование', 'tr': 'Eğitim', 'zh': '教育', 'ja': '教育', 'ko': '교육', 'hi': 'शिक्षा', 'th': 'การศึกษา', 'vi': 'Giáo dục', 'id': 'Pendidikan', 'ms': 'Pendidikan'},
+  'channel_cat_finance': {'de': 'Finanzen', 'en': 'Finance', 'es': 'Finanzas', 'hu': 'Pénzügy', 'sv': 'Finans', 'ar': 'مالية', 'he': 'פיננסים', 'fa': 'مالی', 'fr': 'Finance', 'it': 'Finanza', 'pt': 'Finanças', 'nl': 'Financiën', 'pl': 'Finanse', 'ro': 'Finanțe', 'cs': 'Finance', 'sk': 'Financie', 'hr': 'Financije', 'bg': 'Финанси', 'el': 'Οικονομικά', 'da': 'Finans', 'fi': 'Talous', 'no': 'Finans', 'uk': 'Фінанси', 'ru': 'Финансы', 'tr': 'Finans', 'zh': '金融', 'ja': '金融', 'ko': '금융', 'hi': 'वित्त', 'th': 'การเงิน', 'vi': 'Tài chính', 'id': 'Keuangan', 'ms': 'Kewangan'},
+  'channel_cat_health': {'de': 'Gesundheit', 'en': 'Health', 'es': 'Salud', 'hu': 'Egészség', 'sv': 'Hälsa', 'ar': 'صحة', 'he': 'בריאות', 'fa': 'سلامت', 'fr': 'Santé', 'it': 'Salute', 'pt': 'Saúde', 'nl': 'Gezondheid', 'pl': 'Zdrowie', 'ro': 'Sănătate', 'cs': 'Zdraví', 'sk': 'Zdravie', 'hr': 'Zdravlje', 'bg': 'Здраве', 'el': 'Υγεία', 'da': 'Sundhed', 'fi': 'Terveys', 'no': 'Helse', 'uk': 'Здоровʼя', 'ru': 'Здоровье', 'tr': 'Sağlık', 'zh': '健康', 'ja': '健康', 'ko': '건강', 'hi': 'स्वास्थ्य', 'th': 'สุขภาพ', 'vi': 'Sức khỏe', 'id': 'Kesehatan', 'ms': 'Kesihatan'},
+  'channel_cat_food': {'de': 'Essen & Kochen', 'en': 'Food & Cooking', 'es': 'Comida y Cocina', 'hu': 'Étel és Főzés', 'sv': 'Mat & Matlagning', 'ar': 'طعام وطبخ', 'he': 'אוכל ובישול', 'fa': 'غذا و آشپزی', 'fr': 'Cuisine', 'it': 'Cibo e Cucina', 'pt': 'Comida e Culinária', 'nl': 'Eten & Koken', 'pl': 'Jedzenie i Gotowanie', 'ro': 'Mâncare și Gătit', 'cs': 'Jídlo a Vaření', 'sk': 'Jedlo a Varenie', 'hr': 'Hrana i Kuhanje', 'bg': 'Храна и Готвене', 'el': 'Φαγητό & Μαγειρική', 'da': 'Mad & Madlavning', 'fi': 'Ruoka & Ruoanlaitto', 'no': 'Mat & Matlaging', 'uk': 'Їжа та Кулінарія', 'ru': 'Еда и Кулинария', 'tr': 'Yemek ve Pişirme', 'zh': '美食烹饪', 'ja': 'フード&クッキング', 'ko': '음식 & 요리', 'hi': 'खाना और पाककला', 'th': 'อาหารและการทำอาหาร', 'vi': 'Ẩm thực', 'id': 'Makanan & Masak', 'ms': 'Makanan & Masakan'},
+  'channel_cat_travel': {'de': 'Reisen', 'en': 'Travel', 'es': 'Viajes', 'hu': 'Utazás', 'sv': 'Resor', 'ar': 'سفر', 'he': 'טיולים', 'fa': 'سفر', 'fr': 'Voyages', 'it': 'Viaggi', 'pt': 'Viagens', 'nl': 'Reizen', 'pl': 'Podróże', 'ro': 'Călătorii', 'cs': 'Cestování', 'sk': 'Cestovanie', 'hr': 'Putovanja', 'bg': 'Пътувания', 'el': 'Ταξίδια', 'da': 'Rejser', 'fi': 'Matkailu', 'no': 'Reiser', 'uk': 'Подорожі', 'ru': 'Путешествия', 'tr': 'Seyahat', 'zh': '旅行', 'ja': '旅行', 'ko': '여행', 'hi': 'यात्रा', 'th': 'ท่องเที่ยว', 'vi': 'Du lịch', 'id': 'Perjalanan', 'ms': 'Pelancongan'},
+  'channel_cat_humor': {'de': 'Humor', 'en': 'Humor', 'es': 'Humor', 'hu': 'Humor', 'sv': 'Humor', 'ar': 'فكاهة', 'he': 'הומור', 'fa': 'طنز', 'fr': 'Humour', 'it': 'Umorismo', 'pt': 'Humor', 'nl': 'Humor', 'pl': 'Humor', 'ro': 'Umor', 'cs': 'Humor', 'sk': 'Humor', 'hr': 'Humor', 'bg': 'Хумор', 'el': 'Χιούμορ', 'da': 'Humor', 'fi': 'Huumori', 'no': 'Humor', 'uk': 'Гумор', 'ru': 'Юмор', 'tr': 'Mizah', 'zh': '幽默', 'ja': 'ユーモア', 'ko': '유머', 'hi': 'हास्य', 'th': 'อารมณ์ขัน', 'vi': 'Hài hước', 'id': 'Humor', 'ms': 'Humor'},
+  'channel_cat_crypto': {'de': 'Krypto', 'en': 'Crypto', 'es': 'Cripto', 'hu': 'Kripto', 'sv': 'Krypto', 'ar': 'كريبتو', 'he': 'קריפטו', 'fa': 'کریپتو', 'fr': 'Crypto', 'it': 'Crypto', 'pt': 'Cripto', 'nl': 'Crypto', 'pl': 'Krypto', 'ro': 'Crypto', 'cs': 'Krypto', 'sk': 'Krypto', 'hr': 'Kripto', 'bg': 'Крипто', 'el': 'Crypto', 'da': 'Krypto', 'fi': 'Krypto', 'no': 'Krypto', 'uk': 'Крипто', 'ru': 'Крипто', 'tr': 'Kripto', 'zh': '加密货币', 'ja': '暗号通貨', 'ko': '암호화폐', 'hi': 'क्रिप्टो', 'th': 'คริปโต', 'vi': 'Crypto', 'id': 'Kripto', 'ms': 'Kripto'},
+  'channel_cat_regional': {'de': 'Regional', 'en': 'Regional', 'es': 'Regional', 'hu': 'Regionális', 'sv': 'Regionalt', 'ar': 'إقليمي', 'he': 'אזורי', 'fa': 'منطقه‌ای', 'fr': 'Régional', 'it': 'Regionale', 'pt': 'Regional', 'nl': 'Regionaal', 'pl': 'Regionalny', 'ro': 'Regional', 'cs': 'Regionální', 'sk': 'Regionálne', 'hr': 'Regionalno', 'bg': 'Регионално', 'el': 'Τοπικά', 'da': 'Regionalt', 'fi': 'Alueellinen', 'no': 'Regionalt', 'uk': 'Регіональне', 'ru': 'Региональное', 'tr': 'Bölgesel', 'zh': '地区', 'ja': '地域', 'ko': '지역', 'hi': 'क्षेत्रीय', 'th': 'ภูมิภาค', 'vi': 'Khu vực', 'id': 'Regional', 'ms': 'Serantau'},
+
+  // ── Channel Discovery ───────────────────────────────────────────
+  'channel_sort_popular': {'de': 'Beliebt', 'en': 'Popular', 'es': 'Popular', 'hu': 'Népszerű', 'sv': 'Populärt', 'ar': 'شائع', 'he': 'פופולרי', 'fa': 'محبوب', 'fr': 'Populaire', 'it': 'Popolare', 'pt': 'Popular', 'nl': 'Populair', 'pl': 'Popularne', 'ro': 'Popular', 'cs': 'Oblíbené', 'sk': 'Obľúbené', 'hr': 'Popularno', 'bg': 'Популярни', 'el': 'Δημοφιλή', 'da': 'Populært', 'fi': 'Suositut', 'no': 'Populært', 'uk': 'Популярне', 'ru': 'Популярное', 'tr': 'Popüler', 'zh': '热门', 'ja': '人気', 'ko': '인기', 'hi': 'लोकप्रिय', 'th': 'ยอดนิยม', 'vi': 'Phổ biến', 'id': 'Populer', 'ms': 'Popular'},
+  'channel_sort_newest': {'de': 'Neueste', 'en': 'Newest', 'es': 'Más nuevos', 'hu': 'Legújabb', 'sv': 'Nyaste', 'ar': 'الأحدث', 'he': 'חדשים', 'fa': 'جدیدترین', 'fr': 'Plus récents', 'it': 'Più recenti', 'pt': 'Mais novos', 'nl': 'Nieuwste', 'pl': 'Najnowsze', 'ro': 'Cele mai noi', 'cs': 'Nejnovější', 'sk': 'Najnovšie', 'hr': 'Najnovije', 'bg': 'Най-нови', 'el': 'Νεότερα', 'da': 'Nyeste', 'fi': 'Uusimmat', 'no': 'Nyeste', 'uk': 'Найновіші', 'ru': 'Новейшие', 'tr': 'En yeni', 'zh': '最新', 'ja': '最新', 'ko': '최신', 'hi': 'नवीनतम', 'th': 'ใหม่ล่าสุด', 'vi': 'Mới nhất', 'id': 'Terbaru', 'ms': 'Terbaru'},
+  'channel_sort_name': {'de': 'Name', 'en': 'Name', 'es': 'Nombre', 'hu': 'Név', 'sv': 'Namn', 'ar': 'الاسم', 'he': 'שם', 'fa': 'نام', 'fr': 'Nom', 'it': 'Nome', 'pt': 'Nome', 'nl': 'Naam', 'pl': 'Nazwa', 'ro': 'Nume', 'cs': 'Název', 'sk': 'Názov', 'hr': 'Naziv', 'bg': 'Име', 'el': 'Όνομα', 'da': 'Navn', 'fi': 'Nimi', 'no': 'Navn', 'uk': 'Назва', 'ru': 'Название', 'tr': 'Ad', 'zh': '名称', 'ja': '名前', 'ko': '이름', 'hi': 'नाम', 'th': 'ชื่อ', 'vi': 'Tên', 'id': 'Nama', 'ms': 'Nama'},
+  'channel_filter_category': {'de': 'Kategorie filtern', 'en': 'Filter by category', 'es': 'Filtrar por categoría', 'hu': 'Szűrés kategória szerint', 'sv': 'Filtrera efter kategori', 'ar': 'تصفية حسب الفئة', 'he': 'סינון לפי קטגוריה', 'fa': 'فیلتر بر اساس دسته', 'fr': 'Filtrer par catégorie', 'it': 'Filtra per categoria', 'pt': 'Filtrar por categoria', 'nl': 'Filter op categorie', 'pl': 'Filtruj wg kategorii', 'ro': 'Filtrează după categorie', 'cs': 'Filtrovat dle kategorie', 'sk': 'Filtrovať podľa kategórie', 'hr': 'Filtriraj po kategoriji', 'bg': 'Филтриране по категория', 'el': 'Φιλτράρισμα κατηγορίας', 'da': 'Filtrer efter kategori', 'fi': 'Suodata kategorian mukaan', 'no': 'Filtrer etter kategori', 'uk': 'Фільтр за категорією', 'ru': 'Фильтр по категории', 'tr': 'Kategoriye göre filtrele', 'zh': '按分类筛选', 'ja': 'カテゴリーで絞り込み', 'ko': '카테고리별 필터', 'hi': 'श्रेणी से फ़िल्टर', 'th': 'กรองตามหมวดหมู่', 'vi': 'Lọc theo danh mục', 'id': 'Filter kategori', 'ms': 'Tapis mengikut kategori'},
+  'channel_trending': {'de': 'Beliebt', 'en': 'Trending', 'es': 'Tendencia', 'hu': 'Felkapott', 'sv': 'Trendande', 'ar': 'رائج', 'he': 'טרנדי', 'fa': 'پرطرفدار', 'fr': 'Tendances', 'it': 'Di tendenza', 'pt': 'Em alta', 'nl': 'Trending', 'pl': 'Na topie', 'ro': 'Trending', 'cs': 'Trendy', 'sk': 'Trendy', 'hr': 'U trendu', 'bg': 'Актуални', 'el': 'Τάσεις', 'da': 'Trending', 'fi': 'Trendaavat', 'no': 'Trender', 'uk': 'Популярне', 'ru': 'В тренде', 'tr': 'Trend', 'zh': '热门', 'ja': 'トレンド', 'ko': '트렌딩', 'hi': 'ट्रेंडिंग', 'th': 'มาแรง', 'vi': 'Xu hướng', 'id': 'Trending', 'ms': 'Trending'},
+
+  // ── Moderation UI ───────────────────────────────────────────────
+  'jury_request_received': {'de': 'Neue Jury-Anfrage', 'en': 'New jury request', 'es': 'Nueva solicitud de jurado', 'hu': 'Új esküdtszéki kérés', 'sv': 'Ny juryförfrågan', 'ar': 'طلب تحكيم جديد', 'he': 'בקשת מושבעים חדשה', 'fa': 'درخواست هیئت جدید', 'fr': 'Nouvelle demande de jury', 'it': 'Nuova richiesta giuria', 'pt': 'Nova solicitação de júri', 'nl': 'Nieuw juryverzoek', 'pl': 'Nowa prośba jury', 'ro': 'Cerere juriu nouă', 'cs': 'Nová žádost poroty', 'sk': 'Nová žiadosť poroty', 'hr': 'Novi zahtjev žirija', 'bg': 'Нова заявка жури', 'el': 'Νέο αίτημα κριτικής', 'da': 'Ny juryforespørgsel', 'fi': 'Uusi tuomaristopyyntö', 'no': 'Ny juryforespørsel', 'uk': 'Новий запит журі', 'ru': 'Новый запрос жюри', 'tr': 'Yeni jüri talebi', 'zh': '新陪审团请求', 'ja': '新しい陪審員リクエスト', 'ko': '새 배심원 요청', 'hi': 'नया ज्यूरी अनुरोध', 'th': 'คำขอคณะลูกขุนใหม่', 'vi': 'Yêu cầu ban giám khảo mới', 'id': 'Permintaan juri baru', 'ms': 'Permintaan juri baharu'},
+  'jury_accept': {'de': 'Als Juror teilnehmen', 'en': 'Participate as juror', 'es': 'Participar como jurado', 'hu': 'Részvétel esküdtként', 'sv': 'Delta som jurymedlem', 'ar': 'المشاركة كمحلف', 'he': 'השתתף כמושבע', 'fa': 'شرکت به عنوان هیئت', 'fr': 'Participer comme juré', 'it': 'Partecipa come giurato', 'pt': 'Participar como jurado', 'nl': 'Deelnemen als jurylid', 'pl': 'Uczestniczę jako juror', 'ro': 'Participă ca jurat', 'cs': 'Účastnit se jako porotce', 'sk': 'Zúčastniť sa ako porotca', 'hr': 'Sudjeluj kao žiri', 'bg': 'Участвай като жури', 'el': 'Συμμετοχή ως κριτής', 'da': 'Deltag som jurymedlem', 'fi': 'Osallistu tuomarina', 'no': 'Delta som jurymedlem', 'uk': 'Взяти участь як журі', 'ru': 'Участвовать как присяжный', 'tr': 'Jüri olarak katıl', 'zh': '作为陪审员参与', 'ja': '陪審員として参加', 'ko': '배심원으로 참여', 'hi': 'ज्यूरी के रूप में भाग लें', 'th': 'เข้าร่วมเป็นลูกขุน', 'vi': 'Tham gia làm giám khảo', 'id': 'Ikut sebagai juri', 'ms': 'Sertai sebagai juri'},
+  'jury_decline': {'de': 'Ablehnen', 'en': 'Decline', 'es': 'Rechazar', 'hu': 'Elutasítás', 'sv': 'Avböj', 'ar': 'رفض', 'he': 'דחייה', 'fa': 'رد کردن', 'fr': 'Refuser', 'it': 'Rifiuta', 'pt': 'Recusar', 'nl': 'Weigeren', 'pl': 'Odrzuć', 'ro': 'Refuză', 'cs': 'Odmítnout', 'sk': 'Odmietnuť', 'hr': 'Odbij', 'bg': 'Откажи', 'el': 'Απόρριψη', 'da': 'Afvis', 'fi': 'Hylkää', 'no': 'Avvis', 'uk': 'Відхилити', 'ru': 'Отклонить', 'tr': 'Reddet', 'zh': '拒绝', 'ja': '辞退', 'ko': '거절', 'hi': 'अस्वीकार', 'th': 'ปฏิเสธ', 'vi': 'Từ chối', 'id': 'Tolak', 'ms': 'Tolak'},
+  'jury_evidence': {'de': 'Beweis', 'en': 'Evidence', 'es': 'Evidencia', 'hu': 'Bizonyíték', 'sv': 'Bevis', 'ar': 'دليل', 'he': 'ראיה', 'fa': 'مدرک', 'fr': 'Preuve', 'it': 'Prova', 'pt': 'Evidência', 'nl': 'Bewijs', 'pl': 'Dowód', 'ro': 'Dovadă', 'cs': 'Důkaz', 'sk': 'Dôkaz', 'hr': 'Dokaz', 'bg': 'Доказателство', 'el': 'Στοιχεία', 'da': 'Bevis', 'fi': 'Todiste', 'no': 'Bevis', 'uk': 'Доказ', 'ru': 'Доказательство', 'tr': 'Kanıt', 'zh': '证据', 'ja': '証拠', 'ko': '증거', 'hi': 'प्रमाण', 'th': 'หลักฐาน', 'vi': 'Bằng chứng', 'id': 'Bukti', 'ms': 'Bukti'},
+  'jury_vote_reason': {'de': 'Begründung (optional)', 'en': 'Reason (optional)', 'es': 'Razón (opcional)', 'hu': 'Indoklás (opcionális)', 'sv': 'Motivering (valfritt)', 'ar': 'السبب (اختياري)', 'he': 'סיבה (אופציונלי)', 'fa': 'دلیل (اختیاری)', 'fr': 'Motif (facultatif)', 'it': 'Motivo (facoltativo)', 'pt': 'Motivo (opcional)', 'nl': 'Reden (optioneel)', 'pl': 'Powód (opcjonalnie)', 'ro': 'Motiv (opțional)', 'cs': 'Důvod (volitelné)', 'sk': 'Dôvod (voliteľné)', 'hr': 'Razlog (neobavezno)', 'bg': 'Причина (по избор)', 'el': 'Λόγος (προαιρετικό)', 'da': 'Begrundelse (valgfrit)', 'fi': 'Peruste (valinnainen)', 'no': 'Begrunnelse (valgfritt)', 'uk': 'Причина (за бажанням)', 'ru': 'Причина (необязательно)', 'tr': 'Neden (isteğe bağlı)', 'zh': '理由（可选）', 'ja': '理由（任意）', 'ko': '사유 (선택)', 'hi': 'कारण (वैकल्पिक)', 'th': 'เหตุผล (ไม่บังคับ)', 'vi': 'Lý do (tùy chọn)', 'id': 'Alasan (opsional)', 'ms': 'Sebab (pilihan)'},
+  'jury_channel_name': {'de': 'Kanal', 'en': 'Channel', 'es': 'Canal', 'hu': 'Csatorna', 'sv': 'Kanal', 'ar': 'القناة', 'he': 'ערוץ', 'fa': 'کانال', 'fr': 'Chaîne', 'it': 'Canale', 'pt': 'Canal', 'nl': 'Kanaal', 'pl': 'Kanał', 'ro': 'Canal', 'cs': 'Kanál', 'sk': 'Kanál', 'hr': 'Kanal', 'bg': 'Канал', 'el': 'Κανάλι', 'da': 'Kanal', 'fi': 'Kanava', 'no': 'Kanal', 'uk': 'Канал', 'ru': 'Канал', 'tr': 'Kanal', 'zh': '频道', 'ja': 'チャンネル', 'ko': '채널', 'hi': 'चैनल', 'th': 'ช่อง', 'vi': 'Kênh', 'id': 'Kanal', 'ms': 'Saluran'},
+  'jury_vote_submitted': {'de': 'Stimme abgegeben', 'en': 'Vote submitted', 'es': 'Voto enviado', 'hu': 'Szavazat leadva', 'sv': 'Röst inskickad', 'ar': 'تم التصويت', 'he': 'ההצבעה נשלחה', 'fa': 'رأی ثبت شد', 'fr': 'Vote soumis', 'it': 'Voto inviato', 'pt': 'Voto enviado', 'nl': 'Stem ingediend', 'pl': 'Głos oddany', 'ro': 'Vot trimis', 'cs': 'Hlas odeslán', 'sk': 'Hlas odoslaný', 'hr': 'Glas poslan', 'bg': 'Гласът е подаден', 'el': 'Ψήφος υποβλήθηκε', 'da': 'Stemme afgivet', 'fi': 'Ääni annettu', 'no': 'Stemme avgitt', 'uk': 'Голос подано', 'ru': 'Голос отправлен', 'tr': 'Oy gönderildi', 'zh': '投票已提交', 'ja': '投票済み', 'ko': '투표 완료', 'hi': 'मत दर्ज', 'th': 'ส่งคะแนนแล้ว', 'vi': 'Đã bỏ phiếu', 'id': 'Suara terkirim', 'ms': 'Undi dihantar'},
+  'jury_timeout_warning': {'de': 'Jury-Abstimmung läuft ab', 'en': 'Jury vote expiring', 'es': 'Votación del jurado por vencer', 'hu': 'Esküdtszéki szavazás lejár', 'sv': 'Juryomröstning löper ut', 'ar': 'تصويت هيئة المحلفين ينتهي', 'he': 'הצבעת מושבעים פגה', 'fa': 'رأی هیئت منقضی می‌شود', 'fr': 'Vote du jury expire', 'it': 'Voto giuria in scadenza', 'pt': 'Votação do júri expirando', 'nl': 'Jurystemming verloopt', 'pl': 'Głosowanie jury wygasa', 'ro': 'Votul juriului expiră', 'cs': 'Hlasování poroty vyprší', 'sk': 'Hlasovanie poroty vyprší', 'hr': 'Glasanje žirija ističe', 'bg': 'Гласуването изтича', 'el': 'Η ψηφοφορία λήγει', 'da': 'Juryafstemning udløber', 'fi': 'Tuomariston äänestys vanhenee', 'no': 'Juryavstemning utløper', 'uk': 'Голосування журі закінчується', 'ru': 'Голосование жюри истекает', 'tr': 'Jüri oylaması sona eriyor', 'zh': '陪审团投票即将到期', 'ja': '陪審投票の期限切れ', 'ko': '배심원 투표 만료 임박', 'hi': 'ज्यूरी मतदान समाप्त हो रहा', 'th': 'การลงคะแนนลูกขุนใกล้หมดเวลา', 'vi': 'Bỏ phiếu ban giám khảo sắp hết hạn', 'id': 'Voting juri akan kedaluwarsa', 'ms': 'Undian juri akan tamat'},
+  'moderation_history': {'de': 'Moderationsverlauf', 'en': 'Moderation history', 'es': 'Historial de moderación', 'hu': 'Moderációs előzmények', 'sv': 'Modereringshistorik', 'ar': 'سجل الإشراف', 'he': 'היסטוריית ניהול', 'fa': 'تاریخچه مدیریت', 'fr': 'Historique de modération', 'it': 'Cronologia moderazione', 'pt': 'Histórico de moderação', 'nl': 'Moderatiegeschiedenis', 'pl': 'Historia moderacji', 'ro': 'Istoric moderare', 'cs': 'Historie moderace', 'sk': 'História moderácie', 'hr': 'Povijest moderiranja', 'bg': 'История на модерирането', 'el': 'Ιστορικό ελέγχου', 'da': 'Moderationshistorik', 'fi': 'Moderointihistoria', 'no': 'Modereringshistorikk', 'uk': 'Історія модерації', 'ru': 'История модерации', 'tr': 'Moderasyon geçmişi', 'zh': '审核历史', 'ja': 'モデレーション履歴', 'ko': '관리 이력', 'hi': 'मॉडरेशन इतिहास', 'th': 'ประวัติการดูแล', 'vi': 'Lịch sử kiểm duyệt', 'id': 'Riwayat moderasi', 'ms': 'Sejarah moderasi'},
+  'moderation_no_history': {'de': 'Kein Moderationsverlauf', 'en': 'No moderation history', 'es': 'Sin historial de moderación', 'hu': 'Nincs moderációs előzmény', 'sv': 'Ingen modereringshistorik', 'ar': 'لا يوجد سجل إشراف', 'he': 'אין היסטוריית ניהול', 'fa': 'بدون تاریخچه', 'fr': 'Aucun historique', 'it': 'Nessuna cronologia', 'pt': 'Sem histórico', 'nl': 'Geen moderatiegeschiedenis', 'pl': 'Brak historii moderacji', 'ro': 'Fără istoric', 'cs': 'Žádná historie', 'sk': 'Žiadna história', 'hr': 'Nema povijesti', 'bg': 'Няма история', 'el': 'Κανένα ιστορικό', 'da': 'Ingen historik', 'fi': 'Ei moderointihistoriaa', 'no': 'Ingen historikk', 'uk': 'Немає історії', 'ru': 'Нет истории', 'tr': 'Geçmiş yok', 'zh': '无审核历史', 'ja': '履歴なし', 'ko': '이력 없음', 'hi': 'कोई इतिहास नहीं', 'th': 'ไม่มีประวัติ', 'vi': 'Không có lịch sử', 'id': 'Tidak ada riwayat', 'ms': 'Tiada sejarah'},
+  'moderation_report_count': {'de': '{count} Meldungen', 'en': '{count} reports', 'es': '{count} reportes', 'hu': '{count} jelentés', 'sv': '{count} rapporter', 'ar': '{count} بلاغ', 'he': '{count} דיווחים', 'fa': '{count} گزارش', 'fr': '{count} signalements', 'it': '{count} segnalazioni', 'pt': '{count} denúncias', 'nl': '{count} meldingen', 'pl': '{count} zgłoszeń', 'ro': '{count} rapoarte', 'cs': '{count} hlášení', 'sk': '{count} hlásení', 'hr': '{count} prijava', 'bg': '{count} доклада', 'el': '{count} αναφορές', 'da': '{count} rapporter', 'fi': '{count} ilmiantoa', 'no': '{count} rapporter', 'uk': '{count} скарг', 'ru': '{count} жалоб', 'tr': '{count} bildirim', 'zh': '{count} 举报', 'ja': '{count} 件の報告', 'ko': '{count}건 신고', 'hi': '{count} रिपोर्ट', 'th': '{count} รายงาน', 'vi': '{count} báo cáo', 'id': '{count} laporan', 'ms': '{count} laporan'},
+  'moderation_active_jury': {'de': 'Laufende Jury-Verfahren', 'en': 'Active jury proceedings', 'es': 'Procesos de jurado activos', 'hu': 'Aktív esküdtszéki eljárások', 'sv': 'Aktiva juryförhandlingar', 'ar': 'إجراءات تحكيم نشطة', 'he': 'הליכי מושבעים פעילים', 'fa': 'جلسات هیئت فعال', 'fr': 'Procédures de jury actives', 'it': 'Procedimenti giuria attivi', 'pt': 'Processos de júri ativos', 'nl': 'Actieve juryprocedures', 'pl': 'Aktywne postępowania jury', 'ro': 'Proceduri juriu active', 'cs': 'Aktivní řízení poroty', 'sk': 'Aktívne konania poroty', 'hr': 'Aktivni postupci žirija', 'bg': 'Активни процедури на жури', 'el': 'Ενεργές διαδικασίες', 'da': 'Aktive jurysager', 'fi': 'Aktiiviset tuomaristokäsittelyt', 'no': 'Aktive jurysaker', 'uk': 'Активні справи журі', 'ru': 'Активные дела жюри', 'tr': 'Aktif jüri işlemleri', 'zh': '进行中的陪审程序', 'ja': '進行中の陪審手続き', 'ko': '진행 중인 배심 절차', 'hi': 'सक्रिय ज्यूरी कार्यवाही', 'th': 'กระบวนการลูกขุนที่ดำเนินอยู่', 'vi': 'Phiên xử ban giám khảo đang hoạt động', 'id': 'Proses juri aktif', 'ms': 'Prosiding juri aktif'},
+  'moderation_badge_correction': {'de': 'Badge-Korrektur', 'en': 'Badge correction', 'es': 'Corrección de insignia', 'hu': 'Jelvénykorrekció', 'sv': 'Märkeskorrigering', 'ar': 'تصحيح الشارة', 'he': 'תיקון תג', 'fa': 'اصلاح نشان', 'fr': 'Correction de badge', 'it': 'Correzione badge', 'pt': 'Correção de badge', 'nl': 'Badge-correctie', 'pl': 'Korekta odznaki', 'ro': 'Corecție insignă', 'cs': 'Oprava odznaku', 'sk': 'Oprava odznaku', 'hr': 'Korekcija značke', 'bg': 'Корекция на значка', 'el': 'Διόρθωση σήματος', 'da': 'Badge-korrektion', 'fi': 'Merkin korjaus', 'no': 'Badge-korreksjon', 'uk': 'Корекція значка', 'ru': 'Корректировка значка', 'tr': 'Rozet düzeltme', 'zh': '徽章修正', 'ja': 'バッジ修正', 'ko': '배지 수정', 'hi': 'बैज सुधार', 'th': 'แก้ไขตรา', 'vi': 'Sửa huy hiệu', 'id': 'Koreksi lencana', 'ms': 'Pembetulan lencana'},
+  'moderation_badge_correction_hint': {'de': 'Neuen Namen/Beschreibung einreichen', 'en': 'Submit new name/description', 'es': 'Enviar nuevo nombre/descripción', 'hu': 'Új név/leírás beküldése', 'sv': 'Skicka nytt namn/beskrivning', 'ar': 'إرسال اسم/وصف جديد', 'he': 'שלח שם/תיאור חדש', 'fa': 'نام/توضیح جدید ارسال کنید', 'fr': 'Soumettre nouveau nom/description', 'it': 'Invia nuovo nome/descrizione', 'pt': 'Enviar novo nome/descrição', 'nl': 'Nieuwe naam/beschrijving indienen', 'pl': 'Prześlij nową nazwę/opis', 'ro': 'Trimite nume/descriere nouă', 'cs': 'Odeslat nový název/popis', 'sk': 'Odoslať nový názov/popis', 'hr': 'Pošalji novi naziv/opis', 'bg': 'Изпрати ново име/описание', 'el': 'Υποβολή νέου ονόματος/περιγραφής', 'da': 'Indsend nyt navn/beskrivelse', 'fi': 'Lähetä uusi nimi/kuvaus', 'no': 'Send nytt navn/beskrivelse', 'uk': 'Надіслати нову назву/опис', 'ru': 'Отправить новое имя/описание', 'tr': 'Yeni ad/açıklama gönder', 'zh': '提交新名称/描述', 'ja': '新しい名前/説明を送信', 'ko': '새 이름/설명 제출', 'hi': 'नया नाम/विवरण सबमिट करें', 'th': 'ส่งชื่อ/คำอธิบายใหม่', 'vi': 'Gửi tên/mô tả mới', 'id': 'Kirim nama/deskripsi baru', 'ms': 'Hantar nama/penerangan baharu'},
+  'moderation_badge_level': {'de': 'Badge-Stufe', 'en': 'Badge level', 'es': 'Nivel de insignia', 'hu': 'Jelvényszint', 'sv': 'Märkesnivå', 'ar': 'مستوى الشارة', 'he': 'רמת תג', 'fa': 'سطح نشان', 'fr': 'Niveau de badge', 'it': 'Livello badge', 'pt': 'Nível de badge', 'nl': 'Badge-niveau', 'pl': 'Poziom odznaki', 'ro': 'Nivel insignă', 'cs': 'Úroveň odznaku', 'sk': 'Úroveň odznaku', 'hr': 'Razina značke', 'bg': 'Ниво на значка', 'el': 'Επίπεδο σήματος', 'da': 'Badge-niveau', 'fi': 'Merkkitaso', 'no': 'Badge-nivå', 'uk': 'Рівень значка', 'ru': 'Уровень значка', 'tr': 'Rozet seviyesi', 'zh': '徽章等级', 'ja': 'バッジレベル', 'ko': '배지 등급', 'hi': 'बैज स्तर', 'th': 'ระดับตรา', 'vi': 'Cấp huy hiệu', 'id': 'Level lencana', 'ms': 'Tahap lencana'},
+  'moderation_probation_until': {'de': 'Bewährung bis', 'en': 'Probation until', 'es': 'Periodo de prueba hasta', 'hu': 'Próbaidő eddig', 'sv': 'Prövotid till', 'ar': 'فترة اختبار حتى', 'he': 'תקופת ניסיון עד', 'fa': 'دوره آزمایشی تا', 'fr': 'Probation jusqu\'au', 'it': 'Prova fino al', 'pt': 'Período probatório até', 'nl': 'Proeftijd tot', 'pl': 'Okres próbny do', 'ro': 'Probațiune până la', 'cs': 'Zkušební doba do', 'sk': 'Skúšobná doba do', 'hr': 'Probacija do', 'bg': 'Изпитателен срок до', 'el': 'Δοκιμαστική περίοδος έως', 'da': 'Prøvetid til', 'fi': 'Koeaika asti', 'no': 'Prøvetid til', 'uk': 'Випробувальний термін до', 'ru': 'Испытательный срок до', 'tr': 'Deneme süresi bitiş', 'zh': '考察期至', 'ja': '試用期間', 'ko': '수습 기간', 'hi': 'परिवीक्षा अवधि तक', 'th': 'ทดลองงานถึง', 'vi': 'Thử thách đến', 'id': 'Masa percobaan hingga', 'ms': 'Percubaan sehingga'},
+
+  // ── Content Rating ──────────────────────────────────────────────
+  'age_gate_title': {'de': 'Altersbestätigung', 'en': 'Age confirmation', 'es': 'Confirmación de edad', 'hu': 'Korhatár megerősítés', 'sv': 'Åldersbekräftelse', 'ar': 'تأكيد العمر', 'he': 'אימות גיל', 'fa': 'تأیید سن', 'fr': 'Confirmation d\'âge', 'it': 'Conferma età', 'pt': 'Confirmação de idade', 'nl': 'Leeftijdsbevestiging', 'pl': 'Potwierdzenie wieku', 'ro': 'Confirmare vârstă', 'cs': 'Potvrzení věku', 'sk': 'Potvrdenie veku', 'hr': 'Potvrda dobi', 'bg': 'Потвърждение на възраст', 'el': 'Επιβεβαίωση ηλικίας', 'da': 'Aldersbekræftelse', 'fi': 'Ikävahvistus', 'no': 'Aldersbekreftelse', 'uk': 'Підтвердження віку', 'ru': 'Подтверждение возраста', 'tr': 'Yaş onayı', 'zh': '年龄确认', 'ja': '年齢確認', 'ko': '연령 확인', 'hi': 'आयु पुष्टि', 'th': 'ยืนยันอายุ', 'vi': 'Xác nhận tuổi', 'id': 'Konfirmasi usia', 'ms': 'Pengesahan umur'},
+  'age_gate_message': {'de': 'Dieser Kanal enthält nicht jugendfreie Inhalte. Bist du mindestens 18 Jahre alt?', 'en': 'This channel contains adult content. Are you at least 18 years old?', 'es': 'Este canal contiene contenido para adultos. ¿Tienes al menos 18 años?', 'hu': 'Ez a csatorna felnőtt tartalmat tartalmaz. Betöltötted a 18. életéved?', 'sv': 'Denna kanal innehåller vuxeninnehåll. Är du minst 18 år?', 'ar': 'هذه القناة تحتوي على محتوى للبالغين. هل عمرك 18 سنة على الأقل؟', 'he': 'ערוץ זה מכיל תוכן למבוגרים. האם אתה בן 18 לפחות?', 'fa': 'این کانال محتوای بزرگسالان دارد. آیا حداقل ۱۸ سال دارید؟', 'fr': 'Cette chaîne contient du contenu pour adultes. Avez-vous au moins 18 ans ?', 'it': 'Questo canale contiene contenuti per adulti. Hai almeno 18 anni?', 'pt': 'Este canal contém conteúdo adulto. Você tem pelo menos 18 anos?', 'nl': 'Dit kanaal bevat volwassen inhoud. Ben je minstens 18 jaar?', 'pl': 'Ten kanał zawiera treści dla dorosłych. Czy masz co najmniej 18 lat?', 'ro': 'Acest canal conține conținut pentru adulți. Ai cel puțin 18 ani?', 'cs': 'Tento kanál obsahuje obsah pro dospělé. Je vám alespoň 18 let?', 'sk': 'Tento kanál obsahuje obsah pre dospelých. Máte aspoň 18 rokov?', 'hr': 'Ovaj kanal sadrži sadržaj za odrasle. Imate li najmanje 18 godina?', 'bg': 'Този канал съдържа съдържание за възрастни. Навършили ли сте 18 години?', 'el': 'Αυτό το κανάλι περιέχει περιεχόμενο για ενήλικες. Είστε τουλάχιστον 18 ετών;', 'da': 'Denne kanal indeholder voksenindhold. Er du mindst 18 år?', 'fi': 'Tämä kanava sisältää aikuissisältöä. Oletko vähintään 18-vuotias?', 'no': 'Denne kanalen inneholder vokseninnhold. Er du minst 18 år?', 'uk': 'Цей канал містить контент для дорослих. Вам є 18 років?', 'ru': 'Этот канал содержит контент для взрослых. Вам есть 18 лет?', 'tr': 'Bu kanal yetişkin içerik barındırıyor. En az 18 yaşında mısınız?', 'zh': '此频道包含成人内容。你至少18岁吗？', 'ja': 'このチャンネルには成人向けコンテンツが含まれています。18歳以上ですか？', 'ko': '이 채널은 성인 콘텐츠를 포함하고 있습니다. 18세 이상입니까?', 'hi': 'इस चैनल में वयस्क सामग्री है। क्या आपकी उम्र कम से कम 18 वर्ष है?', 'th': 'ช่องนี้มีเนื้อหาสำหรับผู้ใหญ่ คุณอายุ 18 ปีขึ้นไปหรือไม่?', 'vi': 'Kênh này chứa nội dung người lớn. Bạn có ít nhất 18 tuổi không?', 'id': 'Kanal ini berisi konten dewasa. Apakah Anda berusia minimal 18 tahun?', 'ms': 'Saluran ini mengandungi kandungan dewasa. Adakah anda berumur sekurang-kurangnya 18 tahun?'},
+  'age_gate_confirm': {'de': 'Ja, ich bin über 18', 'en': 'Yes, I am over 18', 'es': 'Sí, tengo más de 18', 'hu': 'Igen, elmúltam 18', 'sv': 'Ja, jag är över 18', 'ar': 'نعم، عمري فوق 18', 'he': 'כן, אני מעל 18', 'fa': 'بله، بالای ۱۸ سالم', 'fr': 'Oui, j\'ai plus de 18 ans', 'it': 'Sì, ho più di 18 anni', 'pt': 'Sim, tenho mais de 18', 'nl': 'Ja, ik ben ouder dan 18', 'pl': 'Tak, mam ponad 18 lat', 'ro': 'Da, am peste 18 ani', 'cs': 'Ano, je mi více než 18', 'sk': 'Áno, mám viac ako 18', 'hr': 'Da, imam preko 18', 'bg': 'Да, над 18 съм', 'el': 'Ναι, είμαι άνω των 18', 'da': 'Ja, jeg er over 18', 'fi': 'Kyllä, olen yli 18', 'no': 'Ja, jeg er over 18', 'uk': 'Так, мені більше 18', 'ru': 'Да, мне больше 18', 'tr': 'Evet, 18 yaşından büyüğüm', 'zh': '是的，我已满18岁', 'ja': 'はい、18歳以上です', 'ko': '네, 18세 이상입니다', 'hi': 'हाँ, मैं 18 से ऊपर हूँ', 'th': 'ใช่ อายุเกิน 18 ปี', 'vi': 'Có, tôi trên 18 tuổi', 'id': 'Ya, saya di atas 18', 'ms': 'Ya, saya berumur lebih 18'},
+  'age_gate_cancel': {'de': 'Abbrechen', 'en': 'Cancel', 'es': 'Cancelar', 'hu': 'Mégse', 'sv': 'Avbryt', 'ar': 'إلغاء', 'he': 'ביטול', 'fa': 'لغو', 'fr': 'Annuler', 'it': 'Annulla', 'pt': 'Cancelar', 'nl': 'Annuleren', 'pl': 'Anuluj', 'ro': 'Anulare', 'cs': 'Zrušit', 'sk': 'Zrušiť', 'hr': 'Odustani', 'bg': 'Отказ', 'el': 'Ακύρωση', 'da': 'Annuller', 'fi': 'Peruuta', 'no': 'Avbryt', 'uk': 'Скасувати', 'ru': 'Отмена', 'tr': 'İptal', 'zh': '取消', 'ja': 'キャンセル', 'ko': '취소', 'hi': 'रद्द करें', 'th': 'ยกเลิก', 'vi': 'Hủy', 'id': 'Batal', 'ms': 'Batal'},
+  'channel_rating_badge_sfw': {'de': 'Jugendfrei', 'en': 'SFW', 'es': 'SFW', 'hu': 'SFW', 'sv': 'SFW', 'ar': 'SFW', 'he': 'SFW', 'fa': 'SFW', 'fr': 'SFW', 'it': 'SFW', 'pt': 'SFW', 'nl': 'SFW', 'pl': 'SFW', 'ro': 'SFW', 'cs': 'SFW', 'sk': 'SFW', 'hr': 'SFW', 'bg': 'SFW', 'el': 'SFW', 'da': 'SFW', 'fi': 'SFW', 'no': 'SFW', 'uk': 'SFW', 'ru': 'SFW', 'tr': 'SFW', 'zh': 'SFW', 'ja': 'SFW', 'ko': 'SFW', 'hi': 'SFW', 'th': 'SFW', 'vi': 'SFW', 'id': 'SFW', 'ms': 'SFW'},
+  'channel_rating_badge_nsfw': {'de': 'NSFW', 'en': 'NSFW', 'es': 'NSFW', 'hu': 'NSFW', 'sv': 'NSFW', 'ar': 'NSFW', 'he': 'NSFW', 'fa': 'NSFW', 'fr': 'NSFW', 'it': 'NSFW', 'pt': 'NSFW', 'nl': 'NSFW', 'pl': 'NSFW', 'ro': 'NSFW', 'cs': 'NSFW', 'sk': 'NSFW', 'hr': 'NSFW', 'bg': 'NSFW', 'el': 'NSFW', 'da': 'NSFW', 'fi': 'NSFW', 'no': 'NSFW', 'uk': 'NSFW', 'ru': 'NSFW', 'tr': 'NSFW', 'zh': 'NSFW', 'ja': 'NSFW', 'ko': 'NSFW', 'hi': 'NSFW', 'th': 'NSFW', 'vi': 'NSFW', 'id': 'NSFW', 'ms': 'NSFW'},
+
+  // ── Verification Levels ─────────────────────────────────────────
+  'verification_unverified': {'de': 'Nicht verifiziert', 'en': 'Unverified', 'es': 'No verificado', 'hu': 'Nem ellenőrzött', 'sv': 'Overifierad', 'ar': 'غير موثق', 'he': 'לא מאומת', 'fa': 'تأیید نشده', 'fr': 'Non vérifié', 'it': 'Non verificato', 'pt': 'Não verificado', 'nl': 'Niet geverifieerd', 'pl': 'Niezweryfikowany', 'ro': 'Neverificat', 'cs': 'Neověřený', 'sk': 'Neoverený', 'hr': 'Neovjereno', 'bg': 'Непотвърден', 'el': 'Μη επαληθευμένο', 'da': 'Ikke verificeret', 'fi': 'Vahvistamaton', 'no': 'Ikke verifisert', 'uk': 'Не підтверджено', 'ru': 'Не подтверждён', 'tr': 'Doğrulanmamış', 'zh': '未验证', 'ja': '未確認', 'ko': '미인증', 'hi': 'असत्यापित', 'th': 'ยังไม่ยืนยัน', 'vi': 'Chưa xác minh', 'id': 'Belum diverifikasi', 'ms': 'Belum disahkan'},
+  'verification_seen': {'de': 'Gesehen', 'en': 'Seen', 'es': 'Visto', 'hu': 'Látott', 'sv': 'Sedd', 'ar': 'مرئي', 'he': 'נראה', 'fa': 'دیده شده', 'fr': 'Vu', 'it': 'Visto', 'pt': 'Visto', 'nl': 'Gezien', 'pl': 'Widziany', 'ro': 'Văzut', 'cs': 'Viděn', 'sk': 'Videný', 'hr': 'Viđen', 'bg': 'Видян', 'el': 'Εμφανίστηκε', 'da': 'Set', 'fi': 'Nähty', 'no': 'Sett', 'uk': 'Бачений', 'ru': 'Виден', 'tr': 'Görüldü', 'zh': '已见', 'ja': '確認済み', 'ko': '확인됨', 'hi': 'देखा गया', 'th': 'เห็นแล้ว', 'vi': 'Đã thấy', 'id': 'Terlihat', 'ms': 'Dilihat'},
+  'verification_verified': {'de': 'Verifiziert', 'en': 'Verified', 'es': 'Verificado', 'hu': 'Ellenőrzött', 'sv': 'Verifierad', 'ar': 'موثق', 'he': 'מאומת', 'fa': 'تأیید شده', 'fr': 'Vérifié', 'it': 'Verificato', 'pt': 'Verificado', 'nl': 'Geverifieerd', 'pl': 'Zweryfikowany', 'ro': 'Verificat', 'cs': 'Ověřený', 'sk': 'Overený', 'hr': 'Ovjereno', 'bg': 'Потвърден', 'el': 'Επαληθευμένο', 'da': 'Verificeret', 'fi': 'Vahvistettu', 'no': 'Verifisert', 'uk': 'Підтверджено', 'ru': 'Подтверждён', 'tr': 'Doğrulanmış', 'zh': '已验证', 'ja': '確認済み', 'ko': '인증됨', 'hi': 'सत्यापित', 'th': 'ยืนยันแล้ว', 'vi': 'Đã xác minh', 'id': 'Terverifikasi', 'ms': 'Disahkan'},
+  'verification_trusted': {'de': 'Vertraut', 'en': 'Trusted', 'es': 'De confianza', 'hu': 'Megbízható', 'sv': 'Betrodd', 'ar': 'موثوق', 'he': 'מהימן', 'fa': 'مورد اعتماد', 'fr': 'De confiance', 'it': 'Affidabile', 'pt': 'Confiável', 'nl': 'Vertrouwd', 'pl': 'Zaufany', 'ro': 'De încredere', 'cs': 'Důvěryhodný', 'sk': 'Dôveryhodný', 'hr': 'Pouzdano', 'bg': 'Доверен', 'el': 'Αξιόπιστο', 'da': 'Betroet', 'fi': 'Luotettu', 'no': 'Klarert', 'uk': 'Довірений', 'ru': 'Доверенный', 'tr': 'Güvenilir', 'zh': '已信任', 'ja': '信頼済み', 'ko': '신뢰됨', 'hi': 'विश्वसनीय', 'th': 'เชื่อถือได้', 'vi': 'Đáng tin cậy', 'id': 'Terpercaya', 'ms': 'Dipercayai'},
+
   // ── Roles & members ───────────────────────────────────────────────
   'members_count': {'de': '{count} Mitglieder', 'en': '{count} members', 'es': '{count} miembros', 'hu': '{count} tag', 'sv': '{count} medlemmar', 'ar': '{count} عضو', 'he': '{count} חברים', 'fa': '{count} عضو', 'fr': '{count} membres', 'it': '{count} membri', 'pt': '{count} membros', 'nl': '{count} leden', 'pl': '{count} członków', 'ro': '{count} membri', 'cs': '{count} členů', 'sk': '{count} členov', 'hr': '{count} članova', 'bg': '{count} членове', 'el': '{count} μέλη', 'da': '{count} medlemmer', 'fi': '{count} jäsentä', 'no': '{count} medlemmer', 'uk': '{count} учасників', 'ru': '{count} участников', 'tr': '{count} üye', 'zh': '{count} 成员', 'ja': '{count} 人', 'ko': '{count}명', 'hi': '{count} सदस्य', 'th': '{count} สมาชิก', 'vi': '{count} thành viên', 'id': '{count} anggota', 'ms': '{count} ahli'},
   'subscribers_count': {'de': '{count} Abonnenten', 'en': '{count} subscribers', 'es': '{count} suscriptores', 'hu': '{count} feliratkozó', 'sv': '{count} prenumeranter', 'ar': '{count} مشترك', 'he': '{count} מנויים', 'fa': '{count} مشترک', 'fr': '{count} abonnés', 'it': '{count} iscritti', 'pt': '{count} assinantes', 'nl': '{count} abonnees', 'pl': '{count} subskrybentów', 'ro': '{count} abonați', 'cs': '{count} odběratelů', 'sk': '{count} odberateľov', 'hr': '{count} pretplatnika', 'bg': '{count} абонати', 'el': '{count} συνδρομητές', 'da': '{count} abonnenter', 'fi': '{count} tilaajaa', 'no': '{count} abonnenter', 'uk': '{count} підписників', 'ru': '{count} подписчиков', 'tr': '{count} abone', 'zh': '{count} 订阅者', 'ja': '{count} 人', 'ko': '{count}명', 'hi': '{count} सदस्य', 'th': '{count} ผู้ติดตาม', 'vi': '{count} người', 'id': '{count} pelanggan', 'ms': '{count} pelanggan'},
@@ -155,7 +218,7 @@ const Map<String, Map<String, String>> translations = {
 
   // ── Empty states ──────────────────────────────────────────────────
   'no_chats': {'de': 'Keine Chats', 'en': 'No chats', 'es': 'Sin chats', 'hu': 'Nincsenek csevegések', 'sv': 'Inga chattar', 'ar': 'لا محادثات', 'he': 'אין צ\'אטים', 'fa': 'چتی نیست', 'fr': 'Aucun chat', 'it': 'Nessuna chat', 'pt': 'Sem chats', 'nl': 'Geen chats', 'pl': 'Brak czatów', 'ro': 'Niciun chat', 'cs': 'Žádné chaty', 'sk': 'Žiadne chaty', 'hr': 'Nema razgovora', 'bg': 'Няма чатове', 'el': 'Δεν υπάρχουν συνομιλίες', 'da': 'Ingen chats', 'fi': 'Ei keskusteluja', 'no': 'Ingen chatter', 'uk': 'Немає чатів', 'ru': 'Нет чатов', 'tr': 'Sohbet yok', 'zh': '没有聊天', 'ja': 'チャットなし', 'ko': '채팅 없음', 'hi': 'कोई चैट नहीं', 'th': 'ไม่มีแชท', 'vi': 'Không có trò chuyện', 'id': 'Tidak ada chat', 'ms': 'Tiada sembang'},
-  'no_favorites': {'de': 'Keine Favoriten\nLanger Druck auf Chat → Favorit', 'en': 'No favorites\nLong press on chat to favorite', 'es': 'Sin favoritos\nMantén pulsado un chat para favorito', 'hu': 'Nincsenek kedvencek\nHosszú érintés a kedvencekhez', 'sv': 'Inga favoriter\nLångt tryck på chatt för favorit', 'ar': 'لا مفضلة\nاضغط مطولاً لإضافة', 'he': 'אין מועדפים\nלחיצה ארוכה להוספה', 'fa': 'علاقه‌مندی نیست\nفشار طولانی برای افزودن', 'fr': 'Pas de favoris\nAppui long pour ajouter', 'it': 'Nessun preferito\nPressione lunga per aggiungere', 'pt': 'Sem favoritos\nToque longo para favoritar', 'nl': 'Geen favorieten\nLang indrukken om toe te voegen', 'pl': 'Brak ulubionych\nDługie naciśnięcie dodaje', 'ro': 'Nicio favorită\nApăsare lungă pentru favorit', 'cs': 'Žádné oblíbené\nDlouhý stisk pro přidání', 'sk': 'Žiadne obľúbené\nDlhé stlačenie pre pridanie', 'hr': 'Nema favorita\nDugi pritisak za dodavanje', 'bg': 'Няма любими\nДълго натискане за добавяне', 'el': 'Δεν υπάρχουν αγαπημένα\nΠαρατεταμένο πάτημα', 'da': 'Ingen favoritter\nLangt tryk for favorit', 'fi': 'Ei suosikkeja\nPitkä painallus lisää', 'no': 'Ingen favoritter\nLangt trykk for favoritt', 'uk': 'Немає обраних\nДовге натискання для додавання', 'ru': 'Нет избранных\nДолгое нажатие для добавления', 'tr': 'Favori yok\nUzun basarak ekle', 'zh': '无收藏\n长按添加', 'ja': 'お気に入りなし\n長押しで追加', 'ko': '즐겨찾기 없음\n길게 눌러 추가', 'hi': 'कोई पसंदीदा नहीं\nलंबे प्रेस से जोड़ें', 'th': 'ไม่มีรายการโปรด\nกดค้างเพื่อเพิ่ม', 'vi': 'Không có yêu thích\nNhấn giữ để thêm', 'id': 'Tidak ada favorit\nTekan lama untuk tambah', 'ms': 'Tiada kegemaran\nTekan lama untuk tambah'},
+  'no_favorites': {'de': 'Keine Favoriten\nUeber ⋮-Menue als Favorit markieren', 'en': 'No favorites\nMark as favorite via ⋮ menu', 'es': 'Sin favoritos\nMarcar como favorito en menu ⋮', 'hu': 'Nincsenek kedvencek\nJeloeld kedvencnek a ⋮ menueben', 'sv': 'Inga favoriter\nMarkera som favorit via ⋮-menyn', 'ar': 'لا مفضلة\nعلّم كمفضلة عبر قائمة ⋮', 'he': 'אין מועדפים\nסמן כמועדף דרך תפריט ⋮', 'fa': 'علاقه‌مندی نیست\nاز منوی ⋮ علاقه‌مند کنید', 'fr': 'Pas de favoris\nMarquer via le menu ⋮', 'it': 'Nessun preferito\nSegna come preferito dal menu ⋮', 'pt': 'Sem favoritos\nMarcar como favorito pelo menu ⋮', 'nl': 'Geen favorieten\nMarkeer als favoriet via ⋮-menu', 'pl': 'Brak ulubionych\nOznacz jako ulubione w menu ⋮', 'ro': 'Nicio favorita\nMarcheaza ca favorit din meniul ⋮', 'cs': 'Zadne oblibene\nOznacte jako oblibene pres menu ⋮', 'sk': 'Ziadne oblubene\nOznacte ako oblubene cez menu ⋮', 'hr': 'Nema favorita\nOznaci kao favorit putem ⋮ izbornika', 'bg': 'Няма любими\nМаркирайте като любимо от меню ⋮', 'el': 'Δεν υπάρχουν αγαπημένα\nΣημείωση μέσω μενού ⋮', 'da': 'Ingen favoritter\nMarker som favorit via ⋮-menuen', 'fi': 'Ei suosikkeja\nMerkitse suosikiksi ⋮-valikosta', 'no': 'Ingen favoritter\nMerk som favoritt via ⋮-menyen', 'uk': 'Немає обраних\nПозначте як обране через меню ⋮', 'ru': 'Нет избранных\nОтметьте через меню ⋮', 'tr': 'Favori yok\n⋮ menuesuenden favori olarak isaretle', 'zh': '无收藏\n通过 ⋮ 菜单标记为收藏', 'ja': 'お気に入りなし\n⋮ メニューから追加', 'ko': '즐겨찾기 없음\n⋮ 메뉴에서 즐겨찾기 표시', 'hi': 'कोई पसंदीदा नहीं\n⋮ मेनू से पसंदीदा में जोड़ें', 'th': 'ไม่มีรายการโปรด\nทำเครื่องหมายผ่านเมนู ⋮', 'vi': 'Khong co yeu thich\nDanh dau yeu thich qua menu ⋮', 'id': 'Tidak ada favorit\nTandai favorit lewat menu ⋮', 'ms': 'Tiada kegemaran\nTanda kegemaran melalui menu ⋮'},
   'no_direct_chats': {'de': 'Keine Einzelchats', 'en': 'No direct chats', 'es': 'Sin chats directos', 'hu': 'Nincsenek közvetlen csevegések', 'sv': 'Inga direktchattar', 'ar': 'لا محادثات مباشرة', 'he': 'אין צ\'אטים ישירים', 'fa': 'چت مستقیمی نیست', 'fr': 'Pas de chats directs', 'it': 'Nessuna chat diretta', 'pt': 'Sem chats diretos', 'nl': 'Geen directe chats', 'pl': 'Brak czatów', 'ro': 'Niciun chat direct', 'cs': 'Žádné přímé chaty', 'sk': 'Žiadne priame chaty', 'hr': 'Nema izravnih razgovora', 'bg': 'Няма директни чатове', 'el': 'Δεν υπάρχουν απευθείας', 'da': 'Ingen direkte chats', 'fi': 'Ei suoria keskusteluja', 'no': 'Ingen direkte chatter', 'uk': 'Немає прямих чатів', 'ru': 'Нет прямых чатов', 'tr': 'Direkt sohbet yok', 'zh': '没有私聊', 'ja': 'ダイレクトチャットなし', 'ko': '1:1 채팅 없음', 'hi': 'कोई सीधी चैट नहीं', 'th': 'ไม่มีแชทตรง', 'vi': 'Không có trò chuyện riêng', 'id': 'Tidak ada chat langsung', 'ms': 'Tiada sembang langsung'},
   'no_messages_yet': {'de': 'Noch keine Nachrichten', 'en': 'No messages yet', 'es': 'Aún sin mensajes', 'hu': 'Még nincsenek üzenetek', 'sv': 'Inga meddelanden ännu', 'ar': 'لا رسائل بعد', 'he': 'אין הודעות עדיין', 'fa': 'هنوز پیامی نیست', 'fr': 'Pas encore de messages', 'it': 'Nessun messaggio', 'pt': 'Sem mensagens ainda', 'nl': 'Nog geen berichten', 'pl': 'Brak wiadomości', 'ro': 'Niciun mesaj', 'cs': 'Zatím žádné zprávy', 'sk': 'Zatiaľ žiadne správy', 'hr': 'Nema poruka', 'bg': 'Няма съобщения', 'el': 'Δεν υπάρχουν μηνύματα', 'da': 'Ingen beskeder endnu', 'fi': 'Ei viestejä', 'no': 'Ingen meldinger ennå', 'uk': 'Повідомлень немає', 'ru': 'Сообщений нет', 'tr': 'Henüz mesaj yok', 'zh': '暂无消息', 'ja': 'メッセージなし', 'ko': '메시지 없음', 'hi': 'अभी कोई संदेश नहीं', 'th': 'ยังไม่มีข้อความ', 'vi': 'Chưa có tin nhắn', 'id': 'Belum ada pesan', 'ms': 'Belum ada mesej'},
 
@@ -719,6 +782,24 @@ const Map<String, Map<String, String>> translations = {
   'calendar_sync_keep_external': {'de': 'Externe Version behalten', 'en': 'Keep external version', 'es': 'Mantener externa', 'fr': 'Garder la version externe', 'hu': 'Külső verzió megtartása', 'sv': 'Behåll extern version', 'ar': 'احتفظ بالنسخة الخارجية', 'he': 'שמור את הגרסה החיצונית', 'fa': 'حفظ نسخه خارجی', 'it': 'Mantieni versione esterna', 'pt': 'Manter versão externa', 'nl': 'Externe versie behouden', 'pl': 'Zachowaj wersję zewnętrzną', 'ro': 'Păstrează versiunea externă', 'cs': 'Zachovat externí verzi', 'sk': 'Zachovať externú verziu', 'hr': 'Zadrži vanjsku verziju', 'bg': 'Запази външната версия', 'el': 'Διατήρηση εξωτερικής έκδοσης', 'da': 'Behold ekstern version', 'fi': 'Säilytä ulkoinen versio', 'no': 'Behold ekstern versjon', 'uk': 'Зберегти зовнішню версію', 'ru': 'Сохранить внешнюю версию', 'tr': 'Harici sürümü koru', 'zh': '保留外部版本', 'ja': '外部版を保持', 'ko': '외부 버전 유지', 'hi': 'बाहरी संस्करण रखें', 'th': 'เก็บเวอร์ชันภายนอก', 'vi': 'Giữ phiên bản bên ngoài', 'id': 'Pertahankan versi eksternal', 'ms': 'Kekalkan versi luaran'},
   'calendar_sync_ask_on_conflict': {'de': 'Bei Konflikten fragen', 'en': 'Ask on conflicts', 'es': 'Preguntar en conflictos', 'fr': 'Demander en cas de conflit', 'hu': 'Kérdezzen konfliktus esetén', 'sv': 'Fråga vid konflikter', 'ar': 'اسأل عند التعارض', 'he': 'שאל במקרה של התנגשות', 'fa': 'در صورت تداخل بپرس', 'it': 'Chiedi in caso di conflitto', 'pt': 'Perguntar em conflitos', 'nl': 'Vragen bij conflicten', 'pl': 'Pytaj przy konfliktach', 'ro': 'Întreabă la conflicte', 'cs': 'Zeptat se při konfliktech', 'sk': 'Pýtať sa pri konfliktoch', 'hr': 'Pitaj kod sukoba', 'bg': 'Питай при конфликти', 'el': 'Ερώτηση σε διενέξεις', 'da': 'Spørg ved konflikter', 'fi': 'Kysy ristiriidoissa', 'no': 'Spør ved konflikter', 'uk': 'Питати про конфлікти', 'ru': 'Спрашивать при конфликтах', 'tr': 'Çakışmalarda sor', 'zh': '冲突时询问', 'ja': '競合時に確認', 'ko': '충돌 시 묻기', 'hi': 'टकराव पर पूछें', 'th': 'ถามเมื่อมีความขัดแย้ง', 'vi': 'Hỏi khi xung đột', 'id': 'Tanya saat konflik', 'ms': 'Tanya semasa konflik'},
   'calendar_sync_ask_on_conflict_hint': {'de': 'Pausiert die Synchronisation, wenn derselbe Termin auf beiden Seiten geändert wurde, und lässt dich entscheiden.', 'en': 'Pauses sync when the same event was changed on both sides and asks you to choose.', 'es': 'Pausa la sincronización cuando el mismo evento se modificó en ambos lados.', 'fr': 'Interrompt la synchronisation si le même événement a été modifié des deux côtés.', 'hu': 'Szünetelteti a szinkronizálást, ha ugyanazt az eseményt mindkét oldalon módosították, és megkérdezi, melyiket tartsa meg.', 'sv': 'Pausar synkroniseringen när samma händelse har ändrats på båda sidor och ber dig välja.', 'ar': 'يوقف المزامنة عند تعديل الحدث نفسه على الجانبين ويطلب منك الاختيار.', 'he': 'משהה את הסנכרון כאשר אותו אירוע שונה בשני הצדדים ומבקש ממך לבחור.', 'fa': 'وقتی همان رویداد در هر دو طرف تغییر کند، همگام‌سازی را متوقف می‌کند و از شما می‌پرسد.', 'it': 'Interrompe la sincronizzazione quando lo stesso evento è stato modificato su entrambi i lati e ti chiede di scegliere.', 'pt': 'Pausa a sincronização quando o mesmo evento foi alterado nos dois lados e pede para você escolher.', 'nl': 'Pauzeert de synchronisatie wanneer dezelfde afspraak aan beide kanten is gewijzigd en vraagt om een keuze.', 'pl': 'Wstrzymuje synchronizację, gdy to samo wydarzenie zostało zmienione po obu stronach i prosi o wybór.', 'ro': 'Întrerupe sincronizarea când același eveniment a fost modificat în ambele părți și îți cere să alegi.', 'cs': 'Pozastaví synchronizaci, když byla stejná událost změněna na obou stranách, a nechá vás rozhodnout.', 'sk': 'Pozastaví synchronizáciu, keď bola rovnaká udalosť zmenená na oboch stranách, a nechá vás rozhodnúť.', 'hr': 'Pauzira sinkronizaciju kada je isti događaj promijenjen s obje strane i traži od tebe da odabereš.', 'bg': 'Поставя синхронизацията на пауза, когато същото събитие е променено от двете страни, и пита вас.', 'el': 'Διακόπτει τον συγχρονισμό όταν το ίδιο συμβάν έχει αλλάξει και στις δύο πλευρές και σας ζητά να επιλέξετε.', 'da': 'Pauser synkroniseringen, når den samme begivenhed er ændret på begge sider, og beder dig vælge.', 'fi': 'Keskeyttää synkronoinnin, kun sama tapahtuma on muuttunut molemmilla puolilla, ja pyytää sinua valitsemaan.', 'no': 'Setter synkroniseringen på pause når den samme hendelsen er endret på begge sider, og ber deg velge.', 'uk': 'Призупиняє синхронізацію, якщо одну подію змінили з обох боків, і просить вас обрати.', 'ru': 'Приостанавливает синхронизацию, если одно событие изменено с обеих сторон, и предлагает выбрать.', 'tr': 'Aynı etkinlik her iki tarafta da değiştirildiğinde senkronizasyonu duraklatır ve seçim yapmanızı ister.', 'zh': '当同一事件在两边都被修改时暂停同步，由你选择保留哪一版。', 'ja': '同じ予定が両側で変更された場合は同期を一時停止し、どちらを残すか尋ねます。', 'ko': '같은 일정이 양쪽에서 변경되면 동기화를 일시중지하고 선택하도록 요청합니다.', 'hi': 'जब एक ही इवेंट दोनों ओर बदला गया हो, तो सिंक रोक कर आपसे चयन करने को कहता है।', 'th': 'หยุดการซิงค์ชั่วคราวเมื่อกิจกรรมเดียวกันถูกเปลี่ยนทั้งสองฝั่ง และให้คุณเลือก', 'vi': 'Tạm dừng đồng bộ khi cùng một sự kiện được thay đổi ở cả hai bên và yêu cầu bạn chọn.', 'id': 'Menjeda sinkronisasi ketika acara yang sama diubah di kedua sisi dan meminta Anda memilih.', 'ms': 'Menjeda penyegerakan apabila acara yang sama diubah di kedua-dua belah dan meminta anda memilih.'},
+
+  'calendar_sync_exchange': {'de': 'Exchange (EWS)', 'en': 'Exchange (EWS)', 'es': 'Exchange (EWS)', 'fr': 'Exchange (EWS)', 'hu': 'Exchange (EWS)', 'sv': 'Exchange (EWS)', 'ar': 'Exchange (EWS)', 'he': 'Exchange (EWS)', 'fa': 'Exchange (EWS)', 'it': 'Exchange (EWS)', 'pt': 'Exchange (EWS)', 'nl': 'Exchange (EWS)', 'pl': 'Exchange (EWS)', 'ro': 'Exchange (EWS)', 'cs': 'Exchange (EWS)', 'sk': 'Exchange (EWS)', 'hr': 'Exchange (EWS)', 'bg': 'Exchange (EWS)', 'el': 'Exchange (EWS)', 'da': 'Exchange (EWS)', 'fi': 'Exchange (EWS)', 'no': 'Exchange (EWS)', 'uk': 'Exchange (EWS)', 'ru': 'Exchange (EWS)', 'tr': 'Exchange (EWS)', 'zh': 'Exchange (EWS)', 'ja': 'Exchange (EWS)', 'ko': 'Exchange (EWS)', 'hi': 'Exchange (EWS)', 'th': 'Exchange (EWS)', 'vi': 'Exchange (EWS)', 'id': 'Exchange (EWS)', 'ms': 'Exchange (EWS)'},
+  'calendar_sync_exchange_email': {'de': 'E-Mail-Adresse', 'en': 'Email address', 'es': 'Dirección de correo', 'fr': 'Adresse e-mail', 'hu': 'E-mail-cím', 'sv': 'E-postadress', 'ar': 'عنوان البريد الإلكتروني', 'he': 'כתובת אימייל', 'fa': 'آدرس ایمیل', 'it': 'Indirizzo e-mail', 'pt': 'Endereço de e-mail', 'nl': 'E-mailadres', 'pl': 'Adres e-mail', 'ro': 'Adresă de e-mail', 'cs': 'E-mailová adresa', 'sk': 'E-mailová adresa', 'hr': 'E-mail adresa', 'bg': 'Имейл адрес', 'el': 'Διεύθυνση e-mail', 'da': 'E-mailadresse', 'fi': 'Sähköpostiosoite', 'no': 'E-postadresse', 'uk': 'Адреса електронної пошти', 'ru': 'Адрес электронной почты', 'tr': 'E-posta adresi', 'zh': '电子邮件地址', 'ja': 'メールアドレス', 'ko': '이메일 주소', 'hi': 'ईमेल पता', 'th': 'ที่อยู่อีเมล', 'vi': 'Địa chỉ email', 'id': 'Alamat email', 'ms': 'Alamat e-mel'},
+  'calendar_sync_exchange_auth_mode': {'de': 'Authentifizierung', 'en': 'Authentication', 'es': 'Autenticación', 'fr': 'Authentification', 'hu': 'Hitelesítés', 'sv': 'Autentisering', 'ar': 'المصادقة', 'he': 'אימות', 'fa': 'احراز هویت', 'it': 'Autenticazione', 'pt': 'Autenticação', 'nl': 'Authenticatie', 'pl': 'Uwierzytelnianie', 'ro': 'Autentificare', 'cs': 'Ověření', 'sk': 'Overenie', 'hr': 'Autentifikacija', 'bg': 'Удостоверяване', 'el': 'Ταυτοποίηση', 'da': 'Godkendelse', 'fi': 'Todennus', 'no': 'Autentisering', 'uk': 'Автентифікація', 'ru': 'Аутентификация', 'tr': 'Kimlik doğrulama', 'zh': '身份验证', 'ja': '認証', 'ko': '인증', 'hi': 'प्रमाणीकरण', 'th': 'การยืนยันตัวตน', 'vi': 'Xác thực', 'id': 'Autentikasi', 'ms': 'Pengesahan'},
+  'calendar_sync_exchange_oauth': {'de': 'Microsoft 365 (OAuth2)', 'en': 'Microsoft 365 (OAuth2)', 'es': 'Microsoft 365 (OAuth2)', 'fr': 'Microsoft 365 (OAuth2)', 'hu': 'Microsoft 365 (OAuth2)', 'sv': 'Microsoft 365 (OAuth2)', 'ar': 'Microsoft 365 (OAuth2)', 'he': 'Microsoft 365 (OAuth2)', 'fa': 'Microsoft 365 (OAuth2)', 'it': 'Microsoft 365 (OAuth2)', 'pt': 'Microsoft 365 (OAuth2)', 'nl': 'Microsoft 365 (OAuth2)', 'pl': 'Microsoft 365 (OAuth2)', 'ro': 'Microsoft 365 (OAuth2)', 'cs': 'Microsoft 365 (OAuth2)', 'sk': 'Microsoft 365 (OAuth2)', 'hr': 'Microsoft 365 (OAuth2)', 'bg': 'Microsoft 365 (OAuth2)', 'el': 'Microsoft 365 (OAuth2)', 'da': 'Microsoft 365 (OAuth2)', 'fi': 'Microsoft 365 (OAuth2)', 'no': 'Microsoft 365 (OAuth2)', 'uk': 'Microsoft 365 (OAuth2)', 'ru': 'Microsoft 365 (OAuth2)', 'tr': 'Microsoft 365 (OAuth2)', 'zh': 'Microsoft 365 (OAuth2)', 'ja': 'Microsoft 365 (OAuth2)', 'ko': 'Microsoft 365 (OAuth2)', 'hi': 'Microsoft 365 (OAuth2)', 'th': 'Microsoft 365 (OAuth2)', 'vi': 'Microsoft 365 (OAuth2)', 'id': 'Microsoft 365 (OAuth2)', 'ms': 'Microsoft 365 (OAuth2)'},
+  'calendar_sync_exchange_basic': {'de': 'Lokal (Benutzername/Passwort)', 'en': 'On-premise (Username/Password)', 'es': 'Local (Usuario/Contraseña)', 'fr': 'Sur site (Nom d\\\'utilisateur/Mot de passe)', 'hu': 'Helyi (Felhasználónév/Jelszó)', 'sv': 'Lokal (Användarnamn/Lösenord)', 'ar': 'محلي (اسم المستخدم/كلمة المرور)', 'he': 'מקומי (שם משתמש/סיסמה)', 'fa': 'محلی (نام‌کاربری/رمز عبور)', 'it': 'Locale (Nome utente/Password)', 'pt': 'Local (Usuário/Senha)', 'nl': 'Lokaal (Gebruikersnaam/Wachtwoord)', 'pl': 'Lokalny (Nazwa użytkownika/Hasło)', 'ro': 'Local (Utilizator/Parolă)', 'cs': 'Místní (Uživatel/Heslo)', 'sk': 'Lokálny (Meno/Heslo)', 'hr': 'Lokalno (Korisničko ime/Lozinka)', 'bg': 'Локален (Потребител/Парола)', 'el': 'Τοπικά (Χρήστης/Κωδικός)', 'da': 'Lokal (Brugernavn/Adgangskode)', 'fi': 'Paikallinen (Käyttäjänimi/Salasana)', 'no': 'Lokal (Brukernavn/Passord)', 'uk': 'Локальний (Ім\\\'я/Пароль)', 'ru': 'Локальный (Имя/Пароль)', 'tr': 'Yerinde (Kullanıcı adı/Parola)', 'zh': '本地部署（用户名/密码）', 'ja': 'オンプレミス（ユーザー名/パスワード）', 'ko': '온프레미스 (사용자 이름/비밀번호)', 'hi': 'स्थानीय (उपयोगकर्ता नाम/पासवर्ड)', 'th': 'ภายในองค์กร (ชื่อผู้ใช้/รหัสผ่าน)', 'vi': 'Tại chỗ (Tên người dùng/Mật khẩu)', 'id': 'Lokal (Nama pengguna/Kata sandi)', 'ms': 'Premis (Nama pengguna/Kata laluan)'},
+  'calendar_sync_exchange_client_id': {'de': 'Azure App Client-ID', 'en': 'Azure App Client ID', 'es': 'ID de cliente de Azure App', 'fr': 'ID client Azure App', 'hu': 'Azure App ügyfél-azonosító', 'sv': 'Azure App klient-ID', 'ar': 'معرّف عميل Azure App', 'he': 'מזהה לקוח Azure App', 'fa': 'شناسه کلاینت Azure App', 'it': 'ID client Azure App', 'pt': 'ID do cliente Azure App', 'nl': 'Azure App Client-ID', 'pl': 'ID klienta Azure App', 'ro': 'ID client Azure App', 'cs': 'ID klienta Azure App', 'sk': 'ID klienta Azure App', 'hr': 'Azure App ID klijenta', 'bg': 'Azure App клиентски ID', 'el': 'Azure App αναγνωριστικό πελάτη', 'da': 'Azure App klient-ID', 'fi': 'Azure App asiakas-ID', 'no': 'Azure App klient-ID', 'uk': 'Azure App ID клієнта', 'ru': 'Azure App ID клиента', 'tr': 'Azure App İstemci Kimliği', 'zh': 'Azure 应用客户端 ID', 'ja': 'Azure アプリ クライアント ID', 'ko': 'Azure 앱 클라이언트 ID', 'hi': 'Azure ऐप क्लाइंट ID', 'th': 'Azure App Client ID', 'vi': 'Azure App Client ID', 'id': 'Azure App Client ID', 'ms': 'Azure App Client ID'},
+  'calendar_sync_exchange_autodiscover': {'de': 'Server automatisch erkennen', 'en': 'Auto-discover server', 'es': 'Detectar servidor automáticamente', 'fr': 'Découverte automatique du serveur', 'hu': 'Szerver automatikus felismerése', 'sv': 'Upptäck server automatiskt', 'ar': 'اكتشاف الخادم تلقائيًا', 'he': 'גילוי שרת אוטומטי', 'fa': 'شناسایی خودکار سرور', 'it': 'Rilevamento automatico del server', 'pt': 'Descobrir servidor automaticamente', 'nl': 'Server automatisch detecteren', 'pl': 'Automatyczne wykrywanie serwera', 'ro': 'Descoperire automată a serverului', 'cs': 'Automatické rozpoznání serveru', 'sk': 'Automatické rozpoznanie servera', 'hr': 'Automatsko otkrivanje poslužitelja', 'bg': 'Автоматично откриване на сървъра', 'el': 'Αυτόματη ανίχνευση διακομιστή', 'da': 'Registrer server automatisk', 'fi': 'Tunnista palvelin automaattisesti', 'no': 'Oppdag server automatisk', 'uk': 'Автоматичне виявлення сервера', 'ru': 'Автообнаружение сервера', 'tr': 'Sunucuyu otomatik bul', 'zh': '自动发现服务器', 'ja': 'サーバーを自動検出', 'ko': '서버 자동 검색', 'hi': 'सर्वर स्वतः खोजें', 'th': 'ค้นหาเซิร์ฟเวอร์อัตโนมัติ', 'vi': 'Tự động phát hiện máy chủ', 'id': 'Temukan server otomatis', 'ms': 'Kesan pelayan secara automatik'},
+  'calendar_sync_exchange_autodiscover_hint': {'de': 'Exchange-Server automatisch finden', 'en': 'Automatically find your Exchange server', 'es': 'Encontrar automáticamente tu servidor Exchange', 'fr': 'Trouver automatiquement votre serveur Exchange', 'hu': 'Exchange-szerver automatikus megkeresése', 'sv': 'Hitta din Exchange-server automatiskt', 'ar': 'البحث تلقائيًا عن خادم Exchange', 'he': 'מצא את שרת ה-Exchange שלך אוטומטית', 'fa': 'سرور Exchange خود را به‌طور خودکار پیدا کنید', 'it': 'Trova automaticamente il tuo server Exchange', 'pt': 'Encontrar automaticamente o seu servidor Exchange', 'nl': 'Vind automatisch je Exchange-server', 'pl': 'Automatycznie znajdź swój serwer Exchange', 'ro': 'Găsește automat serverul Exchange', 'cs': 'Automaticky najít váš Exchange server', 'sk': 'Automaticky nájsť váš Exchange server', 'hr': 'Automatski pronađi tvoj Exchange poslužitelj', 'bg': 'Автоматично намери вашия Exchange сървър', 'el': 'Αυτόματη εύρεση του διακομιστή Exchange', 'da': 'Find automatisk din Exchange-server', 'fi': 'Etsi Exchange-palvelimesi automaattisesti', 'no': 'Finn Exchange-serveren din automatisk', 'uk': 'Автоматично знайти ваш сервер Exchange', 'ru': 'Автоматически найти ваш сервер Exchange', 'tr': 'Exchange sunucunuzu otomatik olarak bulun', 'zh': '自动查找您的 Exchange 服务器', 'ja': 'Exchange サーバーを自動検出します', 'ko': 'Exchange 서버를 자동으로 찾습니다', 'hi': 'अपना Exchange सर्वर स्वचालित रूप से खोजें', 'th': 'ค้นหาเซิร์ฟเวอร์ Exchange ของคุณอัตโนมัติ', 'vi': 'Tự động tìm máy chủ Exchange của bạn', 'id': 'Temukan server Exchange Anda secara otomatis', 'ms': 'Cari pelayan Exchange anda secara automatik'},
+  'calendar_sync_exchange_server_url': {'de': 'EWS-Server-URL', 'en': 'EWS Server URL', 'es': 'URL del servidor EWS', 'fr': 'URL du serveur EWS', 'hu': 'EWS szerver URL', 'sv': 'EWS-server-URL', 'ar': 'عنوان خادم EWS', 'he': 'כתובת שרת EWS', 'fa': 'آدرس سرور EWS', 'it': 'URL del server EWS', 'pt': 'URL do servidor EWS', 'nl': 'EWS-server-URL', 'pl': 'Adres URL serwera EWS', 'ro': 'URL server EWS', 'cs': 'URL serveru EWS', 'sk': 'URL servera EWS', 'hr': 'URL EWS poslužitelja', 'bg': 'URL на EWS сървъра', 'el': 'URL διακομιστή EWS', 'da': 'EWS-server-URL', 'fi': 'EWS-palvelimen URL', 'no': 'EWS-server-URL', 'uk': 'URL сервера EWS', 'ru': 'URL сервера EWS', 'tr': 'EWS Sunucu URL\\\'si', 'zh': 'EWS 服务器 URL', 'ja': 'EWS サーバー URL', 'ko': 'EWS 서버 URL', 'hi': 'EWS सर्वर URL', 'th': 'URL เซิร์ฟเวอร์ EWS', 'vi': 'URL máy chủ EWS', 'id': 'URL server EWS', 'ms': 'URL pelayan EWS'},
+  'calendar_sync_exchange_opening_browser': {'de': 'Browser wird für Microsoft-Anmeldung geöffnet…', 'en': 'Opening browser for Microsoft sign-in…', 'es': 'Abriendo navegador para el inicio de sesión de Microsoft…', 'fr': 'Ouverture du navigateur pour la connexion Microsoft…', 'hu': 'Böngésző megnyitása a Microsoft-bejelentkezéshez…', 'sv': 'Öppnar webbläsaren för Microsoft-inloggning…', 'ar': 'جاري فتح المتصفح لتسجيل الدخول إلى Microsoft…', 'he': 'פותח דפדפן להתחברות ל-Microsoft…', 'fa': 'در حال باز کردن مرورگر برای ورود به Microsoft…', 'it': 'Apertura del browser per l\\\'accesso a Microsoft…', 'pt': 'Abrindo navegador para login da Microsoft…', 'nl': 'Browser wordt geopend voor Microsoft-aanmelding…', 'pl': 'Otwieranie przeglądarki do logowania Microsoft…', 'ro': 'Se deschide browserul pentru autentificare Microsoft…', 'cs': 'Otevírá se prohlížeč pro přihlášení k Microsoftu…', 'sk': 'Otvára sa prehliadač na prihlásenie do Microsoftu…', 'hr': 'Otvaranje preglednika za Microsoft prijavu…', 'bg': 'Отваряне на браузър за вход в Microsoft…', 'el': 'Άνοιγμα προγράμματος περιήγησης για σύνδεση Microsoft…', 'da': 'Åbner browser til Microsoft-login…', 'fi': 'Avataan selain Microsoft-kirjautumista varten…', 'no': 'Åpner nettleser for Microsoft-pålogging…', 'uk': 'Відкриваю браузер для входу в Microsoft…', 'ru': 'Открываю браузер для входа в Microsoft…', 'tr': 'Microsoft oturumu için tarayıcı açılıyor…', 'zh': '正在打开浏览器进行 Microsoft 登录…', 'ja': 'Microsoft サインインのためにブラウザを開いています…', 'ko': 'Microsoft 로그인을 위해 브라우저를 여는 중…', 'hi': 'Microsoft साइन-इन के लिए ब्राउज़र खोल रहा है…', 'th': 'กำลังเปิดเบราว์เซอร์สำหรับการลงชื่อเข้า Microsoft…', 'vi': 'Đang mở trình duyệt để đăng nhập Microsoft…', 'id': 'Membuka browser untuk masuk Microsoft…', 'ms': 'Membuka pelayar untuk log masuk Microsoft…'},
+  'calendar_sync_caldav_discover_network': {'de': 'Im Netzwerk suchen', 'en': 'Discover on network', 'es': 'Buscar en la red', 'fr': 'Découvrir sur le réseau', 'hu': 'Keresés a hálózaton', 'sv': 'Sök i nätverket', 'ar': 'البحث في الشبكة', 'he': 'גלה ברשת', 'fa': 'جستجو در شبکه', 'it': 'Cerca nella rete', 'pt': 'Procurar na rede', 'nl': 'Zoeken op netwerk', 'pl': 'Szukaj w sieci', 'ro': 'Descoperă în rețea', 'cs': 'Hledat v síti', 'sk': 'Hľadať v sieti', 'hr': 'Otkrij na mreži', 'bg': 'Търси в мрежата', 'el': 'Ανακάλυψη στο δίκτυο', 'da': 'Søg på netværket', 'fi': 'Etsi verkosta', 'no': 'Søk i nettverket', 'uk': 'Пошук у мережі', 'ru': 'Поиск в сети', 'tr': 'Ağda keşfet', 'zh': '在网络中搜索', 'ja': 'ネットワークで検出', 'ko': '네트워크에서 검색', 'hi': 'नेटवर्क पर खोजें', 'th': 'ค้นหาในเครือข่าย', 'vi': 'Tìm trên mạng', 'id': 'Cari di jaringan', 'ms': 'Cari dalam rangkaian'},
+  'calendar_sync_caldav_discover_hint': {'de': 'CalDAV-Server im lokalen Netzwerk suchen (Nextcloud, Synology, Radicale, Baikal)', 'en': 'Search for CalDAV servers on your local network (Nextcloud, Synology, Radicale, Baikal)', 'es': 'Buscar servidores CalDAV en tu red local (Nextcloud, Synology, Radicale, Baikal)', 'fr': 'Rechercher des serveurs CalDAV sur votre réseau local (Nextcloud, Synology, Radicale, Baikal)', 'hu': 'CalDAV-szerverek keresése a helyi hálózaton (Nextcloud, Synology, Radicale, Baikal)', 'sv': 'Sök efter CalDAV-servrar i ditt lokala nätverk (Nextcloud, Synology, Radicale, Baikal)', 'ar': 'البحث عن خوادم CalDAV في شبكتك المحلية (Nextcloud، Synology، Radicale، Baikal)', 'he': 'חפש שרתי CalDAV ברשת המקומית שלך (Nextcloud, Synology, Radicale, Baikal)', 'fa': 'جستجوی سرورهای CalDAV در شبکه محلی (Nextcloud، Synology، Radicale، Baikal)', 'it': 'Cerca server CalDAV nella tua rete locale (Nextcloud, Synology, Radicale, Baikal)', 'pt': 'Procurar servidores CalDAV na sua rede local (Nextcloud, Synology, Radicale, Baikal)', 'nl': 'Zoek naar CalDAV-servers in je lokale netwerk (Nextcloud, Synology, Radicale, Baikal)', 'pl': 'Szukaj serwerów CalDAV w sieci lokalnej (Nextcloud, Synology, Radicale, Baikal)', 'ro': 'Caută servere CalDAV în rețeaua locală (Nextcloud, Synology, Radicale, Baikal)', 'cs': 'Hledat CalDAV servery v místní síti (Nextcloud, Synology, Radicale, Baikal)', 'sk': 'Hľadať CalDAV servery v lokálnej sieti (Nextcloud, Synology, Radicale, Baikal)', 'hr': 'Traži CalDAV poslužitelje na lokalnoj mreži (Nextcloud, Synology, Radicale, Baikal)', 'bg': 'Търсене на CalDAV сървъри в локалната мрежа (Nextcloud, Synology, Radicale, Baikal)', 'el': 'Αναζήτηση διακομιστών CalDAV στο τοπικό δίκτυο (Nextcloud, Synology, Radicale, Baikal)', 'da': 'Søg efter CalDAV-servere på dit lokale netværk (Nextcloud, Synology, Radicale, Baikal)', 'fi': 'Etsi CalDAV-palvelimia lähiverkostasi (Nextcloud, Synology, Radicale, Baikal)', 'no': 'Søk etter CalDAV-servere på lokalnettverket (Nextcloud, Synology, Radicale, Baikal)', 'uk': 'Пошук серверів CalDAV у локальній мережі (Nextcloud, Synology, Radicale, Baikal)', 'ru': 'Поиск серверов CalDAV в локальной сети (Nextcloud, Synology, Radicale, Baikal)', 'tr': 'Yerel ağınızda CalDAV sunucularını arayın (Nextcloud, Synology, Radicale, Baikal)', 'zh': '在本地网络中搜索 CalDAV 服务器（Nextcloud、Synology、Radicale、Baikal）', 'ja': 'ローカルネットワークで CalDAV サーバーを検索（Nextcloud、Synology、Radicale、Baikal）', 'ko': '로컬 네트워크에서 CalDAV 서버 검색 (Nextcloud, Synology, Radicale, Baikal)', 'hi': 'अपने स्थानीय नेटवर्क पर CalDAV सर्वर खोजें (Nextcloud, Synology, Radicale, Baikal)', 'th': 'ค้นหาเซิร์ฟเวอร์ CalDAV ในเครือข่ายท้องถิ่นของคุณ (Nextcloud, Synology, Radicale, Baikal)', 'vi': 'Tìm máy chủ CalDAV trên mạng cục bộ (Nextcloud, Synology, Radicale, Baikal)', 'id': 'Cari server CalDAV di jaringan lokal (Nextcloud, Synology, Radicale, Baikal)', 'ms': 'Cari pelayan CalDAV dalam rangkaian tempatan (Nextcloud, Synology, Radicale, Baikal)'},
+  'calendar_sync_caldav_discovering': {'de': 'Suche nach CalDAV-Servern…', 'en': 'Searching for CalDAV servers…', 'es': 'Buscando servidores CalDAV…', 'fr': 'Recherche de serveurs CalDAV…', 'hu': 'CalDAV-szerverek keresése…', 'sv': 'Söker efter CalDAV-servrar…', 'ar': 'جاري البحث عن خوادم CalDAV…', 'he': 'מחפש שרתי CalDAV…', 'fa': 'در حال جستجوی سرورهای CalDAV…', 'it': 'Ricerca server CalDAV…', 'pt': 'Procurando servidores CalDAV…', 'nl': 'Zoeken naar CalDAV-servers…', 'pl': 'Szukanie serwerów CalDAV…', 'ro': 'Se caută servere CalDAV…', 'cs': 'Hledání CalDAV serverů…', 'sk': 'Hľadanie CalDAV serverov…', 'hr': 'Traženje CalDAV poslužitelja…', 'bg': 'Търсене на CalDAV сървъри…', 'el': 'Αναζήτηση διακομιστών CalDAV…', 'da': 'Søger efter CalDAV-servere…', 'fi': 'Etsitään CalDAV-palvelimia…', 'no': 'Søker etter CalDAV-servere…', 'uk': 'Пошук серверів CalDAV…', 'ru': 'Поиск серверов CalDAV…', 'tr': 'CalDAV sunucuları aranıyor…', 'zh': '正在搜索 CalDAV 服务器…', 'ja': 'CalDAV サーバーを検索中…', 'ko': 'CalDAV 서버 검색 중…', 'hi': 'CalDAV सर्वर खोज रहा है…', 'th': 'กำลังค้นหาเซิร์ฟเวอร์ CalDAV…', 'vi': 'Đang tìm kiếm máy chủ CalDAV…', 'id': 'Mencari server CalDAV…', 'ms': 'Mencari pelayan CalDAV…'},
+  'calendar_sync_caldav_no_servers_found': {'de': 'Keine CalDAV-Server im lokalen Netzwerk gefunden.', 'en': 'No CalDAV servers found on the local network.', 'es': 'No se encontraron servidores CalDAV en la red local.', 'fr': 'Aucun serveur CalDAV trouvé sur le réseau local.', 'hu': 'Nem található CalDAV-szerver a helyi hálózaton.', 'sv': 'Inga CalDAV-servrar hittades i det lokala nätverket.', 'ar': 'لم يُعثر على خوادم CalDAV في الشبكة المحلية.', 'he': 'לא נמצאו שרתי CalDAV ברשת המקומית.', 'fa': 'سرور CalDAV در شبکه محلی یافت نشد.', 'it': 'Nessun server CalDAV trovato nella rete locale.', 'pt': 'Nenhum servidor CalDAV encontrado na rede local.', 'nl': 'Geen CalDAV-servers gevonden in het lokale netwerk.', 'pl': 'Nie znaleziono serwerów CalDAV w sieci lokalnej.', 'ro': 'Niciun server CalDAV găsit în rețeaua locală.', 'cs': 'V místní síti nebyly nalezeny žádné CalDAV servery.', 'sk': 'V lokálnej sieti sa nenašli žiadne CalDAV servery.', 'hr': 'Nisu pronađeni CalDAV poslužitelji na lokalnoj mreži.', 'bg': 'Не са намерени CalDAV сървъри в локалната мрежа.', 'el': 'Δεν βρέθηκαν διακομιστές CalDAV στο τοπικό δίκτυο.', 'da': 'Ingen CalDAV-servere fundet på det lokale netværk.', 'fi': 'CalDAV-palvelimia ei löytynyt lähiverkosta.', 'no': 'Ingen CalDAV-servere funnet på det lokale nettverket.', 'uk': 'Сервери CalDAV не знайдено в локальній мережі.', 'ru': 'Серверы CalDAV не найдены в локальной сети.', 'tr': 'Yerel ağda CalDAV sunucusu bulunamadı.', 'zh': '在本地网络中未找到 CalDAV 服务器。', 'ja': 'ローカルネットワークに CalDAV サーバーが見つかりませんでした。', 'ko': '로컬 네트워크에서 CalDAV 서버를 찾을 수 없습니다.', 'hi': 'स्थानीय नेटवर्क पर कोई CalDAV सर्वर नहीं मिला।', 'th': 'ไม่พบเซิร์ฟเวอร์ CalDAV ในเครือข่ายท้องถิ่น', 'vi': 'Không tìm thấy máy chủ CalDAV trên mạng cục bộ.', 'id': 'Tidak ditemukan server CalDAV di jaringan lokal.', 'ms': 'Tiada pelayan CalDAV ditemui dalam rangkaian tempatan.'},
+  'calendar_sync_caldav_found_servers': {'de': 'Gefundene Server:', 'en': 'Found servers:', 'es': 'Servidores encontrados:', 'fr': 'Serveurs trouvés :', 'hu': 'Talált szerverek:', 'sv': 'Hittade servrar:', 'ar': 'الخوادم الموجودة:', 'he': 'שרתים שנמצאו:', 'fa': 'سرورهای یافت‌شده:', 'it': 'Server trovati:', 'pt': 'Servidores encontrados:', 'nl': 'Gevonden servers:', 'pl': 'Znalezione serwery:', 'ro': 'Servere găsite:', 'cs': 'Nalezené servery:', 'sk': 'Nájdené servery:', 'hr': 'Pronađeni poslužitelji:', 'bg': 'Намерени сървъри:', 'el': 'Βρέθηκαν διακομιστές:', 'da': 'Fundne servere:', 'fi': 'Löydetyt palvelimet:', 'no': 'Funnet servere:', 'uk': 'Знайдені сервери:', 'ru': 'Найденные серверы:', 'tr': 'Bulunan sunucular:', 'zh': '已找到的服务器：', 'ja': '見つかったサーバー：', 'ko': '발견된 서버:', 'hi': 'मिले सर्वर:', 'th': 'เซิร์ฟเวอร์ที่พบ:', 'vi': 'Máy chủ tìm thấy:', 'id': 'Server ditemukan:', 'ms': 'Pelayan ditemui:'},
+  'calendar_sync_interval': {'de': 'Sync-Intervall', 'en': 'Sync interval', 'es': 'Intervalo de sincronización', 'fr': 'Intervalle de synchronisation', 'hu': 'Szinkronizálási időköz', 'sv': 'Synkintervall', 'ar': 'فاصل المزامنة', 'he': 'מרווח סנכרון', 'fa': 'فاصله همگام‌سازی', 'it': 'Intervallo di sincronizzazione', 'pt': 'Intervalo de sincronização', 'nl': 'Synchronisatie-interval', 'pl': 'Interwał synchronizacji', 'ro': 'Interval de sincronizare', 'cs': 'Interval synchronizace', 'sk': 'Interval synchronizácie', 'hr': 'Interval sinkronizacije', 'bg': 'Интервал на синхронизация', 'el': 'Διάστημα συγχρονισμού', 'da': 'Synkroniseringsinterval', 'fi': 'Synkronointiväli', 'no': 'Synkroniseringsintervall', 'uk': 'Інтервал синхронізації', 'ru': 'Интервал синхронизации', 'tr': 'Senkronizasyon aralığı', 'zh': '同步间隔', 'ja': '同期間隔', 'ko': '동기화 간격', 'hi': 'सिंक अंतराल', 'th': 'ช่วงเวลาซิงค์', 'vi': 'Khoảng cách đồng bộ', 'id': 'Interval sinkronisasi', 'ms': 'Selang penyegerakan'},
+  'calendar_sync_interval_minutes': {'de': '{minutes} Minuten', 'en': '{minutes} minutes', 'es': '{minutes} minutos', 'fr': '{minutes} minutes', 'hu': '{minutes} perc', 'sv': '{minutes} minuter', 'ar': '{minutes} دقيقة', 'he': '{minutes} דקות', 'fa': '{minutes} دقیقه', 'it': '{minutes} minuti', 'pt': '{minutes} minutos', 'nl': '{minutes} minuten', 'pl': '{minutes} minut', 'ro': '{minutes} minute', 'cs': '{minutes} minut', 'sk': '{minutes} minút', 'hr': '{minutes} minuta', 'bg': '{minutes} минути', 'el': '{minutes} λεπτά', 'da': '{minutes} minutter', 'fi': '{minutes} minuuttia', 'no': '{minutes} minutter', 'uk': '{minutes} хвилин', 'ru': '{minutes} минут', 'tr': '{minutes} dakika', 'zh': '{minutes} 分钟', 'ja': '{minutes} 分', 'ko': '{minutes}분', 'hi': '{minutes} मिनट', 'th': '{minutes} นาที', 'vi': '{minutes} phút', 'id': '{minutes} menit', 'ms': '{minutes} minit'},
   'calendar_sync_pending_conflict_title': {'de': 'Sync-Konflikt', 'en': 'Sync conflict', 'es': 'Conflicto de sincronización', 'fr': 'Conflit de synchronisation', 'hu': 'Szinkron-konfliktus', 'sv': 'Synkkonflikt', 'ar': 'تعارض في المزامنة', 'he': 'התנגשות סנכרון', 'fa': 'تداخل همگام‌سازی', 'it': 'Conflitto di sincronizzazione', 'pt': 'Conflito de sincronização', 'nl': 'Synchronisatieconflict', 'pl': 'Konflikt synchronizacji', 'ro': 'Conflict de sincronizare', 'cs': 'Konflikt synchronizace', 'sk': 'Konflikt synchronizácie', 'hr': 'Sukob sinkronizacije', 'bg': 'Конфликт при синхронизация', 'el': 'Διένεξη συγχρονισμού', 'da': 'Synkroniseringskonflikt', 'fi': 'Synkronointiristiriita', 'no': 'Synkroniseringskonflikt', 'uk': 'Конфлікт синхронізації', 'ru': 'Конфликт синхронизации', 'tr': 'Senkronizasyon çakışması', 'zh': '同步冲突', 'ja': '同期の競合', 'ko': '동기화 충돌', 'hi': 'सिंक टकराव', 'th': 'ความขัดแย้งในการซิงค์', 'vi': 'Xung đột đồng bộ', 'id': 'Konflik sinkronisasi', 'ms': 'Konflik penyegerakan'},
 
   // Polls & Voting (§24)
@@ -2104,4 +2185,1211 @@ const Map<String, Map<String, String>> translations = {
     'id': 'Saluran', // uncertain:
     'ms': 'Saluran', // uncertain:
   },
+
+
+  // ── Group Calls (Phase 3c) ──────────────────────────────────────────
+  'group_call_incoming': {
+    'de': 'Eingehender Gruppenanruf...', 'en': 'Incoming group call...', 'es': 'Llamada grupal entrante...', 'hu': 'Bejovo csoportos hivas...', 'sv': 'Inkommande gruppsamtal...', // uncertain: hu
+    'ar': 'مكالمة جماعية واردة...', 'he': 'שיחה קבוצית נכנסת...', 'fa': 'تماس گروهی ورودی...',
+    'fr': 'Appel de groupe entrant...', 'it': 'Chiamata di gruppo in arrivo...', 'pt': 'Chamada em grupo recebida...', 'nl': 'Inkomend groepsgesprek...',
+    'pl': 'Przychodzace polaczenie grupowe...', 'ro': 'Apel de grup primit...', 'cs': 'Prichozi skupinovy hovor...', 'sk': 'Prichadzajuci skupinovy hovor...', // uncertain: pl,ro,cs,sk
+    'hr': 'Dolazeci grupni poziv...', 'bg': 'Vhodyashto grupovo obazhdane...', 'el': 'Eiserchoumeni omadiki klisi...', // uncertain: hr,bg,el
+    'da': 'Indgaaende gruppeopkald...', 'fi': 'Saapuva ryhmapuhelu...', 'no': 'Innkommende gruppeanrop...',
+    'uk': 'Vkhidnyi hrupovyi vyklyk...', 'ru': 'Vkhodyashchij gruppovoj zvonok...', 'tr': 'Gelen grup aramasi...', // uncertain: uk,ru
+    'zh': '来电群组通话...', 'ja': 'グループ通話の着信...', 'ko': '수신 그룹 통화...',
+    'hi': 'आने वाली समूह कॉल...', 'th': 'สายเรียกเข้ากลุ่ม...',
+    'vi': 'Cuoc goi nhom den...', 'id': 'Panggilan grup masuk...', 'ms': 'Panggilan kumpulan masuk...', // uncertain: vi
+  },
+  'group_call_waiting': {
+    'de': 'Warte auf Teilnehmer...', 'en': 'Waiting for participants...', 'es': 'Esperando participantes...', 'hu': 'Resztvevokre varunk...', 'sv': 'Vantar pa deltagare...', // uncertain: hu
+    'ar': 'في انتظار المشاركين...', 'he': 'ממתין למשתתפים...', 'fa': 'در انتظار شرکت‌کنندگان...',
+    'fr': 'En attente de participants...', 'it': 'In attesa di partecipanti...', 'pt': 'Aguardando participantes...', 'nl': 'Wachten op deelnemers...',
+    'pl': 'Oczekiwanie na uczestnikow...', 'ro': 'Se asteapta participanti...', 'cs': 'Cekani na ucastniky...', 'sk': 'Cakanie na ucastnikov...', // uncertain: pl,ro,cs,sk
+    'hr': 'Cekanje sudionika...', 'bg': 'Izchakvane na uchastnitsi...', 'el': 'Anamoni gia symmetechontes...', // uncertain: hr,bg,el
+    'da': 'Venter paa deltagere...', 'fi': 'Odotetaan osallistujia...', 'no': 'Venter paa deltakere...',
+    'uk': 'Ochikuvannya uchasnykiv...', 'ru': 'Ozhidanie uchastnikov...', 'tr': 'Katilimcilar bekleniyor...', // uncertain: uk,ru,tr
+    'zh': '等待参与者...', 'ja': '参加者を待っています...', 'ko': '참가자를 기다리는 중...',
+    'hi': 'प्रतिभागियों की प्रतीक्षा...', 'th': 'กำลังรอผู้เข้าร่วม...',
+    'vi': 'Dang cho nguoi tham gia...', 'id': 'Menunggu peserta...', 'ms': 'Menunggu peserta...', // uncertain: vi
+  },
+  'group_call_no_participants': {
+    'de': 'Keine Teilnehmer', 'en': 'No participants', 'es': 'Sin participantes', 'hu': 'Nincsenek resztvevok', 'sv': 'Inga deltagare', // uncertain: hu
+    'ar': 'لا يوجد مشاركون', 'he': 'אין משתתפים', 'fa': 'بدون شرکت‌کننده',
+    'fr': 'Aucun participant', 'it': 'Nessun partecipante', 'pt': 'Sem participantes', 'nl': 'Geen deelnemers',
+    'pl': 'Brak uczestnikow', 'ro': 'Fara participanti', 'cs': 'Zadni ucastnici', 'sk': 'Ziadni ucastnici', // uncertain: pl,ro,cs,sk
+    'hr': 'Nema sudionika', 'bg': 'Nyama uchastnitsi', 'el': 'Den yparkhoun symmetekhontes', // uncertain: hr,bg,el
+    'da': 'Ingen deltagere', 'fi': 'Ei osallistujia', 'no': 'Ingen deltakere',
+    'uk': 'Nemaye uchasnykiv', 'ru': 'Net uchastnikov', 'tr': 'Katilimci yok', // uncertain: uk,ru,tr
+    'zh': '没有参与者', 'ja': '参加者がいません', 'ko': '참가자 없음',
+    'hi': 'कोई प्रतिभागी नहीं', 'th': 'ไม่มีผู้เข้าร่วม',
+    'vi': 'Khong co nguoi tham gia', 'id': 'Tidak ada peserta', 'ms': 'Tiada peserta', // uncertain: vi
+  },
+  'group_call_participants_count': {
+    'de': '{count} Teilnehmer', 'en': '{count} participants', 'es': '{count} participantes', 'hu': '{count} resztvevo', 'sv': '{count} deltagare', // uncertain: hu
+    'ar': '{count} مشاركين', 'he': '{count} משתתפים', 'fa': '{count} شرکت‌کننده',
+    'fr': '{count} participants', 'it': '{count} partecipanti', 'pt': '{count} participantes', 'nl': '{count} deelnemers',
+    'pl': '{count} uczestnikow', 'ro': '{count} participanti', 'cs': '{count} ucastniku', 'sk': '{count} ucastnikov', // uncertain: pl,ro,cs,sk
+    'hr': '{count} sudionika', 'bg': '{count} uchastnitsi', 'el': '{count} symmetekhontes', // uncertain: hr,bg,el
+    'da': '{count} deltagere', 'fi': '{count} osallistujaa', 'no': '{count} deltakere',
+    'uk': '{count} uchasnykiv', 'ru': '{count} uchastnikov', 'tr': '{count} katilimci', // uncertain: uk,ru,tr
+    'zh': '{count} 个参与者', 'ja': '{count} 人の参加者', 'ko': '참가자 {count}명',
+    'hi': '{count} प्रतिभागी', 'th': '{count} ผู้เข้าร่วม',
+    'vi': '{count} nguoi tham gia', 'id': '{count} peserta', 'ms': '{count} peserta', // uncertain: vi
+  },
+  'group_call_microphone': {
+    'de': 'Mikrofon', 'en': 'Microphone', 'es': 'Microfono', 'hu': 'Mikrofon', 'sv': 'Mikrofon',
+    'ar': 'ميكروفون', 'he': 'מיקרופון', 'fa': 'میکروفن',
+    'fr': 'Microphone', 'it': 'Microfono', 'pt': 'Microfone', 'nl': 'Microfoon',
+    'pl': 'Mikrofon', 'ro': 'Microfon', 'cs': 'Mikrofon', 'sk': 'Mikrofon',
+    'hr': 'Mikrofon', 'bg': 'Mikrofon', 'el': 'Mikrofono', // uncertain: el
+    'da': 'Mikrofon', 'fi': 'Mikrofoni', 'no': 'Mikrofon',
+    'uk': 'Mikrofon', 'ru': 'Mikrofon', 'tr': 'Mikrofon',
+    'zh': '麦克风', 'ja': 'マイク', 'ko': '마이크',
+    'hi': 'माइक्रोफोन', 'th': 'ไมโครโฟน',
+    'vi': 'Micro', 'id': 'Mikrofon', 'ms': 'Mikrofon',
+  },
+  'group_call_muted': {
+    'de': 'Stumm', 'en': 'Muted', 'es': 'Silenciado', 'hu': 'Nemitva', 'sv': 'Tystad', // uncertain: hu
+    'ar': 'كتم الصوت', 'he': 'מושתק', 'fa': 'بی‌صدا',
+    'fr': 'Muet', 'it': 'Silenziato', 'pt': 'Mudo', 'nl': 'Gedempt',
+    'pl': 'Wyciszony', 'ro': 'Dezactivat', 'cs': 'Ztlumeno', 'sk': 'Stlmene', // uncertain: pl,ro,cs,sk
+    'hr': 'Utisano', 'bg': 'Zaglusheno', 'el': 'Se siopi', // uncertain: hr,bg,el
+    'da': 'Lydloes', 'fi': 'Mykistetty', 'no': 'Dempet', // uncertain: da
+    'uk': 'Vymkneno', 'ru': 'Bez zvuka', 'tr': 'Sessiz', // uncertain: uk,ru
+    'zh': '已静音', 'ja': 'ミュート', 'ko': '음소거',
+    'hi': 'म्यूट', 'th': 'ปิดเสียง',
+    'vi': 'Tat tieng', 'id': 'Bisukan', 'ms': 'Bisu', // uncertain: vi
+  },
+  'group_call_video_on': {
+    'de': 'Video', 'en': 'Video', 'es': 'Video', 'hu': 'Video', 'sv': 'Video',
+    'ar': 'فيديو', 'he': 'וידאו', 'fa': 'ویدئو',
+    'fr': 'Video', 'it': 'Video', 'pt': 'Video', 'nl': 'Video',
+    'pl': 'Wideo', 'ro': 'Video', 'cs': 'Video', 'sk': 'Video',
+    'hr': 'Video', 'bg': 'Video', 'el': 'Vinteo', // uncertain: el
+    'da': 'Video', 'fi': 'Video', 'no': 'Video',
+    'uk': 'Video', 'ru': 'Video', 'tr': 'Video',
+    'zh': '视频', 'ja': 'ビデオ', 'ko': '비디오',
+    'hi': 'वीडियो', 'th': 'วิดีโอ',
+    'vi': 'Video', 'id': 'Video', 'ms': 'Video',
+  },
+  'group_call_video_off': {
+    'de': 'Video aus', 'en': 'Video off', 'es': 'Video apagado', 'hu': 'Video ki', 'sv': 'Video av', // uncertain: hu
+    'ar': 'إيقاف الفيديو', 'he': 'וידאו כבוי', 'fa': 'ویدئو خاموش',
+    'fr': 'Video desactive', 'it': 'Video spento', 'pt': 'Video desligado', 'nl': 'Video uit',
+    'pl': 'Wideo wylaczone', 'ro': 'Video oprit', 'cs': 'Video vypnuto', 'sk': 'Video vypnute', // uncertain: pl,ro,cs,sk
+    'hr': 'Video iskljucen', 'bg': 'Video izklyucheno', 'el': 'Vinteo anenergoe', // uncertain: hr,bg,el
+    'da': 'Video slukket', 'fi': 'Video pois', 'no': 'Video av', // uncertain: da,fi
+    'uk': 'Video vymkneno', 'ru': 'Video vyklyucheno', 'tr': 'Video kapali', // uncertain: uk,ru
+    'zh': '视频关闭', 'ja': 'ビデオオフ', 'ko': '비디오 꼔',
+    'hi': 'वीडियो बंद', 'th': 'ปิดวิดีโอ',
+    'vi': 'Tat video', 'id': 'Video mati', 'ms': 'Video mati', // uncertain: vi
+  },
+  'group_call_speaker': {
+    'de': 'Lautsprecher', 'en': 'Speaker', 'es': 'Altavoz', 'hu': 'Hangszoro', 'sv': 'Hoegtalare', // uncertain: hu
+    'ar': 'مكبر الصوت', 'he': 'רמקול', 'fa': 'بلندگو',
+    'fr': 'Haut-parleur', 'it': 'Altoparlante', 'pt': 'Alto-falante', 'nl': 'Luidspreker',
+    'pl': 'Glosnik', 'ro': 'Difuzor', 'cs': 'Reproduktor', 'sk': 'Reproduktor', // uncertain: pl,ro
+    'hr': 'Zvucnik', 'bg': 'Visokogovoritel', 'el': 'Ikhio', // uncertain: bg,el
+    'da': 'Hoejttaler', 'fi': 'Kaiutin', 'no': 'Hoyttaler', // uncertain: da
+    'uk': 'Huchnomovets', 'ru': 'Dinamik', 'tr': 'Hoparlor', // uncertain: uk,ru,tr
+    'zh': '扬声器', 'ja': 'スピーカー', 'ko': '스피커',
+    'hi': 'स्पीकर', 'th': 'ลำโพง',
+    'vi': 'Loa', 'id': 'Speaker', 'ms': 'Pembesar suara',
+  },
+  'group_call_health': {
+    'de': 'Verbindungsqualitaet', 'en': 'Connection quality', 'es': 'Calidad de conexion', 'hu': 'Kapcsolat minosege', 'sv': 'Anslutningskvalitet', // uncertain: hu
+    'ar': 'جودة الاتصال', 'he': 'איכות חיבור', 'fa': 'کیفیت اتصال',
+    'fr': 'Qualite de connexion', 'it': 'Qualita della connessione', 'pt': 'Qualidade da conexao', 'nl': 'Verbindingskwaliteit',
+    'pl': 'Jakosc polaczenia', 'ro': 'Calitatea conexiunii', 'cs': 'Kvalita pripojeni', 'sk': 'Kvalita pripojenia', // uncertain: pl,ro,cs,sk
+    'hr': 'Kvaliteta veze', 'bg': 'Kachestvo na vrazkata', 'el': 'Poiotita syndesis', // uncertain: hr,bg,el
+    'da': 'Forbindelseskvalitet', 'fi': 'Yhteyslaatu', 'no': 'Tilkoblingskvalitet', // uncertain: da,fi,no
+    'uk': 'Yakist ziednannya', 'ru': 'Kachestvo soedineniya', 'tr': 'Baglanti kalitesi', // uncertain: uk,ru,tr
+    'zh': '连接质量', 'ja': '接続品質', 'ko': '연결 품질',
+    'hi': 'कनेक्शन गुणवत्ता', 'th': 'คุณภาพการเชื่อมต่อ',
+    'vi': 'Chat luong ket noi', 'id': 'Kualitas koneksi', 'ms': 'Kualiti sambungan', // uncertain: vi
+  },
+  'group_call_full': {
+    'de': 'Gruppenanruf ist voll', 'en': 'Group call is full', 'es': 'La llamada grupal esta llena', 'hu': 'A csoporthivas megtelt', 'sv': 'Gruppsamtalet ar fullt', // uncertain: hu
+    'ar': 'المكالمة الجماعية ممتلئة', 'he': 'שיחה קבוצית מלאה', 'fa': 'تماس گروهی پر است',
+    'fr': "L'appel de groupe est complet", 'it': 'La chiamata di gruppo e al completo', 'pt': 'A chamada em grupo esta cheia', 'nl': 'Groepsgesprek is vol',
+    'pl': 'Polaczenie grupowe jest pelne', 'ro': 'Apelul de grup este plin', 'cs': 'Skupinovy hovor je plny', 'sk': 'Skupinovy hovor je plny', // uncertain: pl,ro,cs,sk
+    'hr': 'Grupni poziv je pun', 'bg': 'Grupovoto obazhdane e pylno', 'el': 'I omadiki klisi einai gemati', // uncertain: hr,bg,el
+    'da': 'Gruppeopkaldet er fuldt', 'fi': 'Ryhmapuhelu on taysi', 'no': 'Gruppeanropet er fullt', // uncertain: da,fi,no
+    'uk': 'Hrupovyi vyklyk zapovnenyi', 'ru': 'Gruppovoj zvonok zapolnen', 'tr': 'Grup aramasi dolu', // uncertain: uk,ru,tr
+    'zh': '群组通话已满', 'ja': 'グループ通話が満員です', 'ko': '그룹 통화가 가득 찼습니다',
+    'hi': 'समूह कॉल भरी हुई है', 'th': 'สายกลุ่มเต็มแล้ว',
+    'vi': 'Cuoc goi nhom da day', 'id': 'Panggilan grup penuh', 'ms': 'Panggilan kumpulan penuh', // uncertain: vi
+  },
+
+  // ── In-Call Collaboration (§10.5) ─────────────────────────────────
+  // uncertain: all non-de/en translations are machine-generated
+  'collab_whiteboard': {'de': 'Whiteboard', 'en': 'Whiteboard', 'es': 'Pizarra', 'hu': 'Rajztabla', 'sv': 'Whiteboard', 'ar': 'سبورة', 'he': 'לוח לבן', 'fa': 'تخته سفید', 'fr': 'Tableau blanc', 'it': 'Lavagna', 'pt': 'Quadro branco', 'nl': 'Whiteboard', 'pl': 'Tablica', 'ro': 'Tabla alba', 'cs': 'Tabule', 'sk': 'Tabula', 'hr': 'Bijela ploca', 'bg': 'Бяла дъска', 'el': 'Πίνακας', 'da': 'Whiteboard', 'fi': 'Valkotaulu', 'no': 'Tavle', 'uk': 'Дошка', 'ru': 'Доска', 'tr': 'Beyaz tahta', 'zh': '白板', 'ja': 'ホワイトボード', 'ko': '화이트보드', 'hi': 'व्हाइटबोर्ड', 'th': 'กระดานขาว', 'vi': 'Bang trang', 'id': 'Papan tulis', 'ms': 'Papan putih'},
+  'collab_chat': {'de': 'Anruf-Chat', 'en': 'Call Chat', 'es': 'Chat en llamada', 'hu': 'Hivas cseveges', 'sv': 'Samtalschatt', 'ar': 'دردشة المكالمة', 'he': "צ'אט שיחה", 'fa': 'چت تماس', 'fr': "Chat d'appel", 'it': 'Chat chiamata', 'pt': 'Chat da chamada', 'nl': 'Gesprekschat', 'pl': 'Czat rozmowy', 'ro': 'Chat apel', 'cs': 'Chat hovoru', 'sk': 'Chat hovoru', 'hr': 'Chat poziva', 'bg': 'Чат на обаждане', 'el': 'Συνομιλία κλήσης', 'da': 'Opkaldschat', 'fi': 'Puhelun chat', 'no': 'Samtalechat', 'uk': 'Чат дзвінка', 'ru': 'Чат звонка', 'tr': 'Arama sohbeti', 'zh': '通话聊天', 'ja': '通話チャット', 'ko': '통화 채팅', 'hi': 'कॉल चैट', 'th': 'แชทในสาย', 'vi': 'Tro chuyen cuoc goi', 'id': 'Chat panggilan', 'ms': 'Sembang panggilan'},
+  'collab_files': {'de': 'Geteilte Dateien', 'en': 'Shared Files', 'es': 'Archivos compartidos', 'hu': 'Megosztott fajlok', 'sv': 'Delade filer', 'ar': 'ملفات مشتركة', 'he': 'קבצים משותפים', 'fa': 'فایل‌های اشتراکی', 'fr': 'Fichiers partages', 'it': 'File condivisi', 'pt': 'Arquivos compartilhados', 'nl': 'Gedeelde bestanden', 'pl': 'Udostepnione pliki', 'ro': 'Fisiere partajate', 'cs': 'Sdilene soubory', 'sk': 'Zdielane subory', 'hr': 'Dijeljene datoteke', 'bg': 'Споделени файлове', 'el': 'Κοινά αρχεία', 'da': 'Delte filer', 'fi': 'Jaetut tiedostot', 'no': 'Delte filer', 'uk': 'Спільні файли', 'ru': 'Общие файлы', 'tr': 'Paylasilan dosyalar', 'zh': '共享文件', 'ja': '共有ファイル', 'ko': '공유 파일', 'hi': 'साझा फ़ाइलें', 'th': 'ไฟล์ที่แชร์', 'vi': 'Tep chia se', 'id': 'File bersama', 'ms': 'Fail dikongsi'},
+  'collab_participants': {'de': 'Teilnehmer', 'en': 'Participants', 'es': 'Participantes', 'hu': 'Resztvevok', 'sv': 'Deltagare', 'ar': 'المشاركون', 'he': 'משתתפים', 'fa': 'شرکت‌کنندگان', 'fr': 'Participants', 'it': 'Partecipanti', 'pt': 'Participantes', 'nl': 'Deelnemers', 'pl': 'Uczestnicy', 'ro': 'Participanti', 'cs': 'Ucastnici', 'sk': 'Ucastnici', 'hr': 'Sudionici', 'bg': 'Участници', 'el': 'Συμμετέχοντες', 'da': 'Deltagere', 'fi': 'Osallistujat', 'no': 'Deltakere', 'uk': 'Учасники', 'ru': 'Участники', 'tr': 'Katilimcilar', 'zh': '参与者', 'ja': '参加者', 'ko': '참가자', 'hi': 'प्रतिभागी', 'th': 'ผู้เข้าร่วม', 'vi': 'Nguoi tham gia', 'id': 'Peserta', 'ms': 'Peserta'},
+  'collab_share_file': {'de': 'Datei teilen', 'en': 'Share File', 'es': 'Compartir archivo', 'hu': 'Fajl megosztasa', 'sv': 'Dela fil', 'ar': 'مشاركة ملف', 'he': 'שיתוף קובץ', 'fa': 'اشتراک فایل', 'fr': 'Partager un fichier', 'it': 'Condividi file', 'pt': 'Compartilhar arquivo', 'nl': 'Bestand delen', 'pl': 'Udostepnij plik', 'ro': 'Partajeaza fisier', 'cs': 'Sdilet soubor', 'sk': 'Zdielat subor', 'hr': 'Podijeli datoteku', 'bg': 'Сподели файл', 'el': 'Κοινή χρήση αρχείου', 'da': 'Del fil', 'fi': 'Jaa tiedosto', 'no': 'Del fil', 'uk': 'Поділитися файлом', 'ru': 'Поделиться файлом', 'tr': 'Dosya paylas', 'zh': '共享文件', 'ja': 'ファイルを共有', 'ko': '파일 공유', 'hi': 'फ़ाइल साझा करें', 'th': 'แชร์ไฟล์', 'vi': 'Chia se tep', 'id': 'Bagikan file', 'ms': 'Kongsi fail'},
+  'collab_paste_clipboard': {'de': 'In Anruf einfuegen', 'en': 'Paste to Call', 'es': 'Pegar en llamada', 'hu': 'Beillesztes hivasba', 'sv': 'Klistra in i samtal', 'ar': 'لصق في المكالمة', 'he': 'הדבקה לשיחה', 'fa': 'چسباندن در تماس', 'fr': "Coller dans l'appel", 'it': 'Incolla nella chiamata', 'pt': 'Colar na chamada', 'nl': 'Plakken in gesprek', 'pl': 'Wklej do rozmowy', 'ro': 'Lipeste in apel', 'cs': 'Vlozit do hovoru', 'sk': 'Vlozit do hovoru', 'hr': 'Zalijepi u poziv', 'bg': 'Постави в обаждане', 'el': 'Επικόλληση στην κλήση', 'da': 'Indsaet i opkald', 'fi': 'Liita puheluun', 'no': 'Lim inn i samtale', 'uk': 'Вставити в дзвінок', 'ru': 'Вставить в звонок', 'tr': 'Aramaya yapistir', 'zh': '粘贴到通话', 'ja': '通話に貼り付け', 'ko': '통화에 붙여넣기', 'hi': 'कॉल में चिपकाएं', 'th': 'วางในสาย', 'vi': 'Dan vao cuoc goi', 'id': 'Tempel ke panggilan', 'ms': 'Tampal ke panggilan'},
+  'collab_no_files': {'de': 'Keine Dateien geteilt', 'en': 'No files shared', 'es': 'Sin archivos compartidos', 'hu': 'Nincsenek megosztott fajlok', 'sv': 'Inga delade filer', 'ar': 'لا توجد ملفات مشتركة', 'he': 'אין קבצים משותפים', 'fa': 'فایلی به اشتراک گذاشته نشده', 'fr': 'Aucun fichier partage', 'it': 'Nessun file condiviso', 'pt': 'Nenhum arquivo compartilhado', 'nl': 'Geen gedeelde bestanden', 'pl': 'Brak udostepnionych plikow', 'ro': 'Niciun fisier partajat', 'cs': 'Zadne sdilene soubory', 'sk': 'Ziadne zdielane subory', 'hr': 'Nema dijeljenih datoteka', 'bg': 'Няма споделени файлове', 'el': 'Κανένα κοινό αρχείο', 'da': 'Ingen delte filer', 'fi': 'Ei jaettuja tiedostoja', 'no': 'Ingen delte filer', 'uk': 'Немає спільних файлів', 'ru': 'Нет общих файлов', 'tr': 'Paylasilan dosya yok', 'zh': '没有共享文件', 'ja': '共有ファイルなし', 'ko': '공유된 파일 없음', 'hi': 'कोई साझा फ़ाइल नहीं', 'th': 'ไม่มีไฟล์ที่แชร์', 'vi': 'Chua co tep chia se', 'id': 'Belum ada file bersama', 'ms': 'Tiada fail dikongsi'},
+  'collab_no_messages': {'de': 'Noch keine Nachrichten', 'en': 'No messages yet', 'es': 'Aun sin mensajes', 'hu': 'Meg nincsenek uzenetek', 'sv': 'Inga meddelanden annu', 'ar': 'لا توجد رسائل بعد', 'he': 'אין הודעות עדיין', 'fa': 'هنوز پیامی نیست', 'fr': "Aucun message pour l'instant", 'it': 'Nessun messaggio ancora', 'pt': 'Nenhuma mensagem ainda', 'nl': 'Nog geen berichten', 'pl': 'Brak wiadomosci', 'ro': 'Niciun mesaj inca', 'cs': 'Zatim zadne zpravy', 'sk': 'Zatial ziadne spravy', 'hr': 'Jos nema poruka', 'bg': 'Все още няма съобщения', 'el': 'Κανένα μήνυμα ακόμα', 'da': 'Ingen beskeder endnu', 'fi': 'Ei viesteja viela', 'no': 'Ingen meldinger enna', 'uk': 'Повідомлень ще немає', 'ru': 'Сообщений пока нет', 'tr': 'Henuz mesaj yok', 'zh': '暂无消息', 'ja': 'メッセージなし', 'ko': '아직 메시지 없음', 'hi': 'अभी कोई संदेश नहीं', 'th': 'ยังไม่มีข้อความ', 'vi': 'Chua co tin nhan', 'id': 'Belum ada pesan', 'ms': 'Belum ada mesej'},
+  'collab_screen_share': {'de': 'Bildschirm teilen', 'en': 'Screen Share', 'es': 'Compartir pantalla', 'hu': 'Kepernyomegosztaas', 'sv': 'Dela skarm', 'ar': 'مشاركة الشاشة', 'he': 'שיתוף מסך', 'fa': 'اشتراک صفحه', 'fr': "Partage d'ecran", 'it': 'Condivisione schermo', 'pt': 'Compartilhar tela', 'nl': 'Scherm delen', 'pl': 'Udostepnij ekran', 'ro': 'Partajare ecran', 'cs': 'Sdileni obrazovky', 'sk': 'Zdielanie obrazovky', 'hr': 'Dijeljenje zaslona', 'bg': 'Споделяне на екран', 'el': 'Κοινή χρήση οθόνης', 'da': 'Del skaerm', 'fi': 'Jaa naytto', 'no': 'Del skjerm', 'uk': 'Демонстрація екрана', 'ru': 'Демонстрация экрана', 'tr': 'Ekran paylasimi', 'zh': '共享屏幕', 'ja': '画面共有', 'ko': '화면 공유', 'hi': 'स्क्रीन साझा करें', 'th': 'แชร์หน้าจอ', 'vi': 'Chia se man hinh', 'id': 'Bagikan layar', 'ms': 'Kongsi skrin'},
+  'collab_stop_sharing': {'de': 'Teilen beenden', 'en': 'Stop Sharing', 'es': 'Dejar de compartir', 'hu': 'Megosztaas leallitasa', 'sv': 'Sluta dela', 'ar': 'إيقاف المشاركة', 'he': 'הפסק שיתוף', 'fa': 'توقف اشتراک', 'fr': 'Arreter le partage', 'it': 'Interrompi condivisione', 'pt': 'Parar compartilhamento', 'nl': 'Delen stoppen', 'pl': 'Zatrzymaj udostepnianie', 'ro': 'Opreste partajarea', 'cs': 'Zastavit sdileni', 'sk': 'Zastavit zdielanie', 'hr': 'Zaustavi dijeljenje', 'bg': 'Спри споделянето', 'el': 'Διακοπή κοινής χρήσης', 'da': 'Stop deling', 'fi': 'Lopeta jakaminen', 'no': 'Stopp deling', 'uk': 'Припинити демонстрацію', 'ru': 'Прекратить демонстрацию', 'tr': 'Paylasimi durdur', 'zh': '停止共享', 'ja': '共有を停止', 'ko': '공유 중지', 'hi': 'साझाकरण बंद करें', 'th': 'หยุดแชร์', 'vi': 'Dung chia se', 'id': 'Hentikan berbagi', 'ms': 'Berhenti kongsi'},
+  'collab_file_too_large': {'de': 'Datei zu gross (max. 50 MB)', 'en': 'File too large (max 50 MB)', 'es': 'Archivo demasiado grande (max. 50 MB)', 'hu': 'A fajl tul nagy (max. 50 MB)', 'sv': 'Filen ar for stor (max 50 MB)', 'ar': 'الملف كبير جدًا (الحد 50 ميغا)', 'he': 'הקובץ גדול מדי (מקס. 50 מ"ב)', 'fa': 'فایل خیلی بزرگ است (حداکثر 50 مگابایت)', 'fr': 'Fichier trop volumineux (max 50 Mo)', 'it': 'File troppo grande (max 50 MB)', 'pt': 'Arquivo muito grande (max. 50 MB)', 'nl': 'Bestand te groot (max 50 MB)', 'pl': 'Plik za duzy (maks. 50 MB)', 'ro': 'Fisier prea mare (max 50 MB)', 'cs': 'Soubor prilis velky (max 50 MB)', 'sk': 'Subor prilis velky (max 50 MB)', 'hr': 'Datoteka prevelika (maks. 50 MB)', 'bg': 'Файлът е твърде голям (макс. 50 MB)', 'el': 'Αρχείο πολύ μεγάλο (μέγ. 50 MB)', 'da': 'Filen er for stor (maks. 50 MB)', 'fi': 'Tiedosto liian suuri (maks. 50 Mt)', 'no': 'Filen er for stor (maks. 50 MB)', 'uk': 'Файл завеликий (макс. 50 МБ)', 'ru': 'Файл слишком большой (макс. 50 МБ)', 'tr': 'Dosya cok buyuk (maks. 50 MB)', 'zh': '文件过大（最大 50 MB）', 'ja': 'ファイルが大きすぎます（最大 50 MB）', 'ko': '파일이 너무 큽니다 (최대 50 MB)', 'hi': 'फ़ाइल बहुत बड़ी (अधिकतम 50 MB)', 'th': 'ไฟล์ใหญ่เกินไป (สูงสุด 50 MB)', 'vi': 'Tep qua lon (toi da 50 MB)', 'id': 'File terlalu besar (maks. 50 MB)', 'ms': 'Fail terlalu besar (maks. 50 MB)'},
+  'collab_max_files': {'de': 'Maximum erreicht', 'en': 'Maximum files reached', 'es': 'Maximo de archivos alcanzado', 'hu': 'Maximum fajlok elerve', 'sv': 'Maximalt antal filer natt', 'ar': 'تم بلوغ الحد الأقصى للملفات', 'he': 'הגעת למקסימום קבצים', 'fa': 'حداکثر فایل‌ها رسید', 'fr': 'Nombre maximum de fichiers atteint', 'it': 'Numero massimo di file raggiunto', 'pt': 'Maximo de arquivos atingido', 'nl': 'Maximum bestanden bereikt', 'pl': 'Osiagnieto maksymalna liczbe plikow', 'ro': 'Numar maxim de fisiere atins', 'cs': 'Dosazen maximalni pocet souboru', 'sk': 'Dosiahnuty maximalny pocet suborov', 'hr': 'Dosegnut maksimalan broj datoteka', 'bg': 'Достигнат максимален брой файлове', 'el': 'Μέγιστος αριθμός αρχείων', 'da': 'Maksimalt antal filer naet', 'fi': 'Tiedostojen enimmaaismaara saavutettu', 'no': 'Maksimalt antall filer nadd', 'uk': 'Досягнуто максимум файлів', 'ru': 'Достигнут максимум файлов', 'tr': 'Maksimum dosya sayisina ulasildi', 'zh': '已达文件数上限', 'ja': 'ファイル数の上限に達しました', 'ko': '최대 파일 수에 도달', 'hi': 'अधिकतम फ़ाइलें पहुंच गई', 'th': 'ถึงจำนวนไฟล์สูงสุดแล้ว', 'vi': 'Da dat so tep toi da', 'id': 'Jumlah file maksimum tercapai', 'ms': 'Had maksimum fail dicapai'},
+  'collab_export_png': {'de': 'Als PNG exportieren', 'en': 'Export as PNG', 'es': 'Exportar como PNG', 'hu': 'Exportalas PNG-kent', 'sv': 'Exportera som PNG', 'ar': 'تصدير كـ PNG', 'he': 'ייצוא כ-PNG', 'fa': 'صادرات به PNG', 'fr': 'Exporter en PNG', 'it': 'Esporta come PNG', 'pt': 'Exportar como PNG', 'nl': 'Exporteren als PNG', 'pl': 'Eksportuj jako PNG', 'ro': 'Exporta ca PNG', 'cs': 'Exportovat jako PNG', 'sk': 'Exportovat ako PNG', 'hr': 'Izvezi kao PNG', 'bg': 'Експортирай като PNG', 'el': 'Εξαγωγή ως PNG', 'da': 'Eksporter som PNG', 'fi': 'Vie PNG-muodossa', 'no': 'Eksporter som PNG', 'uk': 'Експортувати як PNG', 'ru': 'Экспорт в PNG', 'tr': 'PNG olarak disa aktar', 'zh': '导出为 PNG', 'ja': 'PNGとしてエクスポート', 'ko': 'PNG로 내보내기', 'hi': 'PNG के रूप में निर्यात', 'th': 'ส่งออกเป็น PNG', 'vi': 'Xuat duoi dang PNG', 'id': 'Ekspor sebagai PNG', 'ms': 'Eksport sebagai PNG'},
+  'collab_add_page': {'de': 'Seite hinzufuegen', 'en': 'Add Page', 'es': 'Anadir pagina', 'hu': 'Oldal hozzaadasa', 'sv': 'Lagg till sida', 'ar': 'إضافة صفحة', 'he': 'הוספת עמוד', 'fa': 'افزودن صفحه', 'fr': 'Ajouter une page', 'it': 'Aggiungi pagina', 'pt': 'Adicionar pagina', 'nl': 'Pagina toevoegen', 'pl': 'Dodaj strone', 'ro': 'Adauga pagina', 'cs': 'Pridat stranku', 'sk': 'Pridat stranku', 'hr': 'Dodaj stranicu', 'bg': 'Добави страница', 'el': 'Προσθήκη σελίδας', 'da': 'Tilfoej side', 'fi': 'Lisaa sivu', 'no': 'Legg til side', 'uk': 'Додати сторінку', 'ru': 'Добавить страницу', 'tr': 'Sayfa ekle', 'zh': '添加页面', 'ja': 'ページを追加', 'ko': '페이지 추가', 'hi': 'पृष्ठ जोड़ें', 'th': 'เพิ่มหน้า', 'vi': 'Them trang', 'id': 'Tambah halaman', 'ms': 'Tambah halaman'},
+  'collab_clear_all': {'de': 'Alles loeschen', 'en': 'Clear All', 'es': 'Borrar todo', 'hu': 'Osszes torlese', 'sv': 'Rensa allt', 'ar': 'مسح الكل', 'he': 'נקה הכל', 'fa': 'پاک کردن همه', 'fr': 'Tout effacer', 'it': 'Cancella tutto', 'pt': 'Limpar tudo', 'nl': 'Alles wissen', 'pl': 'Wyczysc wszystko', 'ro': 'Sterge tot', 'cs': 'Vymazat vse', 'sk': 'Vymazat vsetko', 'hr': 'Obrisi sve', 'bg': 'Изчисти всичко', 'el': 'Εκκαθάριση όλων', 'da': 'Ryd alt', 'fi': 'Tyhjenna kaikki', 'no': 'Fjern alt', 'uk': 'Очистити все', 'ru': 'Очистить всё', 'tr': 'Tumunu temizle', 'zh': '全部清除', 'ja': 'すべてクリア', 'ko': '모두 지우기', 'hi': 'सब हटाएं', 'th': 'ล้างทั้งหมด', 'vi': 'Xoa tat ca', 'id': 'Hapus semua', 'ms': 'Padam semua'},
+
+  // ── Multi-Interface Send (Architecture §23.2) ──────────────────────
+  'multi_interface_title': {'de': 'Multi-Interface', 'en': 'Multi-Interface', 'es': 'Multi-Interfaz', 'hu': 'Multi-Interfész', 'sv': 'Multi-gränssnitt', 'ar': 'واجهات متعددة', 'he': 'ממשקים מרובים', 'fa': 'چند رابط', 'fr': 'Multi-Interface', 'it': 'Multi-Interfaccia', 'pt': 'Multi-Interface', 'nl': 'Multi-Interface', 'pl': 'Multi-Interfejs', 'ro': 'Multi-Interfață', 'cs': 'Multi-Rozhraní', 'sk': 'Multi-Rozhranie', 'hr': 'Multi-Sučelje', 'bg': 'Мулти-Интерфейс', 'el': 'Πολλαπλή Διεπαφή', 'da': 'Multi-grænseflade', 'fi': 'Moni-liitäntä', 'no': 'Multi-grensesnitt', 'uk': 'Мульти-інтерфейс', 'ru': 'Мульти-интерфейс', 'tr': 'Çoklu Arayüz', 'zh': '多接口', 'ja': 'マルチインターフェース', 'ko': '다중 인터페이스', 'hi': 'मल्टी-इंटरफ़ेस', 'th': 'หลายอินเทอร์เฟซ', 'vi': 'Đa giao diện', 'id': 'Multi-Antarmuka', 'ms': 'Pelbagai Antara Muka'},
+  'multi_interface_help': {
+    'de': 'Nachrichten gleichzeitig ueber WiFi und Mobilfunk senden, um die Zuverlaessigkeit zu erhoehen.',
+    'en': 'Send messages over WiFi and cellular simultaneously to increase reliability.',
+    'es': 'Enviar mensajes por WiFi y datos móviles simultáneamente para mayor fiabilidad.', // uncertain:
+    'hu': 'Üzenetek küldése WiFi-n és mobilhálózaton egyszerre a megbízhatóság növelése érdekében.', // uncertain:
+    'sv': 'Skicka meddelanden via WiFi och mobilnät samtidigt för ökad tillförlitlighet.', // uncertain:
+    'ar': 'إرسال الرسائل عبر WiFi والشبكة الخلوية في وقت واحد لزيادة الموثوقية.', // uncertain:
+    'he': 'שליחת הודעות דרך WiFi וסלולר במקביל להגברת האמינות.', // uncertain:
+    'fa': 'ارسال پیام‌ها همزمان از طریق WiFi و شبکه سلولی برای افزایش قابلیت اطمینان.', // uncertain:
+    'fr': 'Envoyer les messages via WiFi et réseau mobile simultanément pour plus de fiabilité.', // uncertain:
+    'it': 'Invia messaggi tramite WiFi e rete mobile contemporaneamente per maggiore affidabilità.', // uncertain:
+    'pt': 'Enviar mensagens por WiFi e dados móveis simultaneamente para maior confiabilidade.', // uncertain:
+    'nl': 'Berichten gelijktijdig via WiFi en mobiel netwerk verzenden voor hogere betrouwbaarheid.', // uncertain:
+    'pl': 'Wysyłaj wiadomości jednocześnie przez WiFi i sieć komórkową, aby zwiększyć niezawodność.', // uncertain:
+    'ro': 'Trimite mesaje prin WiFi și rețea mobilă simultan pentru fiabilitate crescută.', // uncertain:
+    'cs': 'Odesílejte zprávy přes WiFi a mobilní síť současně pro vyšší spolehlivost.', // uncertain:
+    'sk': 'Odosielať správy cez WiFi a mobilnú sieť súčasne pre vyššiu spoľahlivosť.', // uncertain:
+    'hr': 'Šalji poruke istovremeno putem WiFi-a i mobilne mreže za veću pouzdanost.', // uncertain:
+    'bg': 'Изпращайте съобщения едновременно чрез WiFi и мобилна мрежа за по-висока надеждност.', // uncertain:
+    'el': 'Αποστολή μηνυμάτων μέσω WiFi και κινητού δικτύου ταυτόχρονα για μεγαλύτερη αξιοπιστία.', // uncertain:
+    'da': 'Send beskeder via WiFi og mobilnetværk samtidigt for øget pålidelighed.', // uncertain:
+    'fi': 'Lähetä viestejä WiFin ja mobiiliverkon kautta samanaikaisesti luotettavuuden parantamiseksi.', // uncertain:
+    'no': 'Send meldinger via WiFi og mobilnettverk samtidig for økt pålitelighet.', // uncertain:
+    'uk': 'Надсилайте повідомлення через WiFi та мобільну мережу одночасно для підвищення надійності.', // uncertain:
+    'ru': 'Отправляйте сообщения через WiFi и мобильную сеть одновременно для повышения надёжности.', // uncertain:
+    'tr': 'Güvenilirliği artırmak için mesajları WiFi ve mobil ağ üzerinden aynı anda gönderin.', // uncertain:
+    'zh': '同时通过 WiFi 和移动网络发送消息以提高可靠性。', // uncertain:
+    'ja': '信頼性を高めるため、WiFi とモバイルネットワークで同時に送信します。', // uncertain:
+    'ko': '안정성을 높이기 위해 WiFi와 모바일 네트워크를 통해 동시에 메시지를 전송합니다.', // uncertain:
+    'hi': 'विश्वसनीयता बढ़ाने के लिए WiFi और मोबाइल नेटवर्क से एक साथ संदेश भेजें।', // uncertain:
+    'th': 'ส่งข้อความผ่าน WiFi และเครือข่ายมือถือพร้อมกันเพื่อเพิ่มความน่าเชื่อถือ', // uncertain:
+    'vi': 'Gửi tin nhắn đồng thời qua WiFi và mạng di động để tăng độ tin cậy.', // uncertain:
+    'id': 'Kirim pesan melalui WiFi dan jaringan seluler secara bersamaan untuk meningkatkan keandalan.', // uncertain:
+    'ms': 'Hantar mesej melalui WiFi dan rangkaian selular serentak untuk meningkatkan kebolehpercayaan.', // uncertain:
+  },
+  'multi_interface_off': {'de': 'Aus', 'en': 'Off', 'es': 'Desactivado', 'hu': 'Ki', 'sv': 'Av', 'ar': 'إيقاف', 'he': 'כבוי', 'fa': 'خاموش', 'fr': 'Désactivé', 'it': 'Disattivato', 'pt': 'Desligado', 'nl': 'Uit', 'pl': 'Wyłączony', 'ro': 'Dezactivat', 'cs': 'Vypnuto', 'sk': 'Vypnuté', 'hr': 'Isključeno', 'bg': 'Изключено', 'el': 'Απενεργοποιημένο', 'da': 'Fra', 'fi': 'Pois', 'no': 'Av', 'uk': 'Вимкнено', 'ru': 'Выключено', 'tr': 'Kapalı', 'zh': '关闭', 'ja': 'オフ', 'ko': '꺼짐', 'hi': 'बंद', 'th': 'ปิด', 'vi': 'Tắt', 'id': 'Mati', 'ms': 'Mati'},
+  'multi_interface_on': {'de': 'Alle Interfaces', 'en': 'All interfaces', 'es': 'Todas las interfaces', 'hu': 'Minden interfész', 'sv': 'Alla gränssnitt', 'ar': 'جميع الواجهات', 'he': 'כל הממשקים', 'fa': 'همه رابط‌ها', 'fr': 'Toutes les interfaces', 'it': 'Tutte le interfacce', 'pt': 'Todas as interfaces', 'nl': 'Alle interfaces', 'pl': 'Wszystkie interfejsy', 'ro': 'Toate interfețele', 'cs': 'Všechna rozhraní', 'sk': 'Všetky rozhrania', 'hr': 'Sva sučelja', 'bg': 'Всички интерфейси', 'el': 'Όλες οι διεπαφές', 'da': 'Alle grænseflader', 'fi': 'Kaikki liitännät', 'no': 'Alle grensesnitt', 'uk': 'Всі інтерфейси', 'ru': 'Все интерфейсы', 'tr': 'Tüm arayüzler', 'zh': '所有接口', 'ja': 'すべてのインターフェース', 'ko': '모든 인터페이스', 'hi': 'सभी इंटरफ़ेस', 'th': 'ทุกอินเทอร์เฟซ', 'vi': 'Tất cả giao diện', 'id': 'Semua antarmuka', 'ms': 'Semua antara muka'},
+  'multi_interface_auto': {'de': 'Automatisch', 'en': 'Automatic', 'es': 'Automático', 'hu': 'Automatikus', 'sv': 'Automatiskt', 'ar': 'تلقائي', 'he': 'אוטומטי', 'fa': 'خودکار', 'fr': 'Automatique', 'it': 'Automatico', 'pt': 'Automático', 'nl': 'Automatisch', 'pl': 'Automatyczny', 'ro': 'Automat', 'cs': 'Automaticky', 'sk': 'Automaticky', 'hr': 'Automatski', 'bg': 'Автоматично', 'el': 'Αυτόματο', 'da': 'Automatisk', 'fi': 'Automaattinen', 'no': 'Automatisk', 'uk': 'Автоматично', 'ru': 'Автоматически', 'tr': 'Otomatik', 'zh': '自动', 'ja': '自動', 'ko': '자동', 'hi': 'स्वचालित', 'th': 'อัตโนมัติ', 'vi': 'Tự động', 'id': 'Otomatis', 'ms': 'Automatik'},
+  'multi_interface_off_desc': {
+    'de': 'Standard. Ein einzelner Socket, spart Akku und Daten.',
+    'en': 'Default. Single socket, saves battery and data.',
+    'es': 'Por defecto. Socket único, ahorra batería y datos.', // uncertain:
+    'hu': 'Alapértelmezett. Egyetlen socket, kíméli az akkumulátort és az adatot.', // uncertain:
+    'sv': 'Standard. En enda socket, sparar batteri och data.', // uncertain:
+    'ar': 'افتراضي. مقبس واحد، يوفر البطارية والبيانات.', // uncertain:
+    'he': 'ברירת מחדל. שקע יחיד, חוסך סוללה ונתונים.', // uncertain:
+    'fa': 'پیش‌فرض. یک سوکت، صرفه‌جویی در باتری و داده.', // uncertain:
+    'fr': 'Par défaut. Socket unique, économise batterie et données.', // uncertain:
+    'it': 'Predefinito. Socket singolo, risparmia batteria e dati.', // uncertain:
+    'pt': 'Padrão. Socket único, economiza bateria e dados.', // uncertain:
+    'nl': 'Standaard. Enkele socket, bespaart batterij en data.', // uncertain:
+    'pl': 'Domyślnie. Jeden socket, oszczędza baterię i dane.', // uncertain:
+    'ro': 'Implicit. Socket unic, economisește baterie și date.', // uncertain:
+    'cs': 'Výchozí. Jeden socket, šetří baterii a data.', // uncertain:
+    'sk': 'Predvolené. Jeden socket, šetrí batériu a dáta.', // uncertain:
+    'hr': 'Zadano. Jedan socket, štedi bateriju i podatke.', // uncertain:
+    'bg': 'По подразбиране. Един сокет, пести батерия и данни.', // uncertain:
+    'el': 'Προεπιλογή. Ενιαίο socket, εξοικονομεί μπαταρία και δεδομένα.', // uncertain:
+    'da': 'Standard. En enkelt socket, sparer batteri og data.', // uncertain:
+    'fi': 'Oletus. Yksi yhteys, säästää akkua ja dataa.', // uncertain:
+    'no': 'Standard. Én socket, sparer batteri og data.', // uncertain:
+    'uk': 'За замовчуванням. Один сокет, економить батарею та дані.', // uncertain:
+    'ru': 'По умолчанию. Один сокет, экономит батарею и трафик.', // uncertain:
+    'tr': 'Varsayılan. Tek soket, pil ve veri tasarrufu sağlar.', // uncertain:
+    'zh': '默认。单一套接字，节省电量和流量。', // uncertain:
+    'ja': 'デフォルト。シングルソケット、バッテリーとデータを節約。', // uncertain:
+    'ko': '기본값. 단일 소켓, 배터리와 데이터를 절약합니다.', // uncertain:
+    'hi': 'डिफ़ॉल्ट। एकल सॉकेट, बैटरी और डेटा बचाता है।', // uncertain:
+    'th': 'ค่าเริ่มต้น ซ็อกเก็ตเดียว ประหยัดแบตเตอรีและข้อมูล', // uncertain:
+    'vi': 'Mặc định. Một socket duy nhất, tiết kiệm pin và dữ liệu.', // uncertain:
+    'id': 'Bawaan. Satu socket, hemat baterai dan data.', // uncertain:
+    'ms': 'Lalai. Satu soket, menjimatkan bateri dan data.', // uncertain:
+  },
+  'multi_interface_on_desc': {
+    'de': 'Jedes Paket wird ueber alle Interfaces gesendet. Maximale Zuverlaessigkeit.',
+    'en': 'Every packet is sent over all interfaces. Maximum reliability.',
+    'es': 'Cada paquete se envía por todas las interfaces. Máxima fiabilidad.', // uncertain:
+    'hu': 'Minden csomag minden interfészen keresztül küldésre kerül. Maximális megbízhatóság.', // uncertain:
+    'sv': 'Varje paket skickas via alla gränssnitt. Maximal tillförlitlighet.', // uncertain:
+    'ar': 'يتم إرسال كل حزمة عبر جميع الواجهات. أقصى موثوقية.', // uncertain:
+    'he': 'כל חבילה נשלחת דרך כל הממשקים. אמינות מרבית.', // uncertain:
+    'fa': 'هر بسته از طریق تمام رابط‌ها ارسال می‌شود. حداکثر قابلیت اطمینان.', // uncertain:
+    'fr': 'Chaque paquet est envoyé via toutes les interfaces. Fiabilité maximale.', // uncertain:
+    'it': 'Ogni pacchetto viene inviato su tutte le interfacce. Massima affidabilità.', // uncertain:
+    'pt': 'Cada pacote é enviado por todas as interfaces. Máxima confiabilidade.', // uncertain:
+    'nl': 'Elk pakket wordt via alle interfaces verzonden. Maximale betrouwbaarheid.', // uncertain:
+    'pl': 'Każdy pakiet jest wysyłany przez wszystkie interfejsy. Maksymalna niezawodność.', // uncertain:
+    'ro': 'Fiecare pachet este trimis prin toate interfețele. Fiabilitate maximă.', // uncertain:
+    'cs': 'Každý paket se odesílá přes všechna rozhraní. Maximální spolehlivost.', // uncertain:
+    'sk': 'Každý paket sa odosiela cez všetky rozhrania. Maximálna spoľahlivosť.', // uncertain:
+    'hr': 'Svaki paket se šalje putem svih sučelja. Maksimalna pouzdanost.', // uncertain:
+    'bg': 'Всеки пакет се изпраща през всички интерфейси. Максимална надеждност.', // uncertain:
+    'el': 'Κάθε πακέτο αποστέλλεται μέσω όλων των διεπαφών. Μέγιστη αξιοπιστία.', // uncertain:
+    'da': 'Hver pakke sendes via alle grænseflader. Maksimal pålidelighed.', // uncertain:
+    'fi': 'Jokainen paketti lähetetään kaikkien liitäntöjen kautta. Maksimaalinen luotettavuus.', // uncertain:
+    'no': 'Hver pakke sendes via alle grensesnitt. Maksimal pålitelighet.', // uncertain:
+    'uk': 'Кожен пакет надсилається через усі інтерфейси. Максимальна надійність.', // uncertain:
+    'ru': 'Каждый пакет отправляется через все интерфейсы. Максимальная надёжность.', // uncertain:
+    'tr': 'Her paket tüm arayüzler üzerinden gönderilir. Maksimum güvenilirlik.', // uncertain:
+    'zh': '每个数据包通过所有接口发送。最大可靠性。', // uncertain:
+    'ja': 'すべてのインターフェースでパケットを送信。最大の信頼性。', // uncertain:
+    'ko': '모든 인터페이스를 통해 패킷을 전송합니다. 최대 안정성.', // uncertain:
+    'hi': 'हर पैकेट सभी इंटरफ़ेस पर भेजा जाता है। अधिकतम विश्वसनीयता।', // uncertain:
+    'th': 'ส่งทุกแพ็กเก็ตผ่านทุกอินเทอร์เฟซ ความน่าเชื่อถือสูงสุด', // uncertain:
+    'vi': 'Mỗi gói tin được gửi qua tất cả giao diện. Độ tin cậy tối đa.', // uncertain:
+    'id': 'Setiap paket dikirim melalui semua antarmuka. Keandalan maksimum.', // uncertain:
+    'ms': 'Setiap paket dihantar melalui semua antara muka. Kebolehpercayaan maksimum.', // uncertain:
+  },
+  'multi_interface_auto_desc': {
+    'de': 'WiFi bevorzugt. Mobilfunk nur bei Wiederholung oder hoher Prioritaet.',
+    'en': 'WiFi preferred. Cellular only for retransmits or high priority.',
+    'es': 'WiFi preferido. Datos móviles solo para reenvíos o alta prioridad.', // uncertain:
+    'hu': 'WiFi előnyben részesítve. Mobilhálózat csak újraküldéshez vagy magas prioritáshoz.', // uncertain:
+    'sv': 'WiFi föredras. Mobilnät bara vid omsändning eller hög prioritet.', // uncertain:
+    'ar': 'WiFi مفضل. الشبكة الخلوية فقط لإعادة الإرسال أو الأولوية العالية.', // uncertain:
+    'he': 'WiFi מועדף. סלולר רק לשידורים חוזרים או עדיפות גבוהה.', // uncertain:
+    'fa': 'WiFi ترجیحی. سلولی فقط برای ارسال مجدد یا اولویت بالا.', // uncertain:
+    'fr': 'WiFi préféré. Réseau mobile uniquement pour les retransmissions ou haute priorité.', // uncertain:
+    'it': 'WiFi preferito. Rete mobile solo per ritrasmissioni o alta priorità.', // uncertain:
+    'pt': 'WiFi preferido. Dados móveis apenas para retransmissões ou alta prioridade.', // uncertain:
+    'nl': 'WiFi voorkeur. Mobiel netwerk alleen voor herhalingen of hoge prioriteit.', // uncertain:
+    'pl': 'WiFi preferowane. Sieć komórkowa tylko do ponownych transmisji lub wysokiego priorytetu.', // uncertain:
+    'ro': 'WiFi preferat. Rețea mobilă doar pentru retransmisii sau prioritate ridicată.', // uncertain:
+    'cs': 'WiFi preferováno. Mobilní síť pouze pro opakované přenosy nebo vysokou prioritu.', // uncertain:
+    'sk': 'WiFi preferované. Mobilná sieť len pre opakované prenosy alebo vysokú prioritu.', // uncertain:
+    'hr': 'WiFi preferiran. Mobilna mreža samo za ponovne prijenose ili visoki prioritet.', // uncertain:
+    'bg': 'WiFi предпочитан. Мобилна мрежа само за повторни предавания или висок приоритет.', // uncertain:
+    'el': 'Προτίμηση WiFi. Κινητό δίκτυο μόνο για επανεκπομπές ή υψηλή προτεραιότητα.', // uncertain:
+    'da': 'WiFi foretrukket. Mobilnetværk kun for gensendelser eller høj prioritet.', // uncertain:
+    'fi': 'WiFi ensisijainen. Mobiiliverkko vain uudelleenlähetyksiin tai korkean prioriteetin viesteihin.', // uncertain:
+    'no': 'WiFi foretrukket. Mobilnettverk kun for gjenoverføringer eller høy prioritet.', // uncertain:
+    'uk': 'WiFi пріоритетний. Мобільна мережа лише для повторних передач або високого пріоритету.', // uncertain:
+    'ru': 'WiFi предпочтителен. Мобильная сеть только для повторных передач или высокого приоритета.', // uncertain:
+    'tr': 'WiFi tercih edilir. Mobil ağ yalnızca yeniden iletimler veya yüksek öncelik için.', // uncertain:
+    'zh': 'WiFi 优先。移动网络仅用于重传或高优先级。', // uncertain:
+    'ja': 'WiFi 優先。再送信または高優先度のみモバイルネットワークを使用。', // uncertain:
+    'ko': 'WiFi 우선. 재전송 또는 높은 우선순위에서만 모바일 네트워크 사용.', // uncertain:
+    'hi': 'WiFi प्राथमिकता। पुनः प्रेषण या उच्च प्राथमिकता के लिए ही मोबाइल नेटवर्क।', // uncertain:
+    'th': 'WiFi เป็นหลัก เครือข่ายมือถือเฉพาะสำหรับการส่งซ้ำหรือความสำคัญสูง', // uncertain:
+    'vi': 'WiFi ưu tiên. Mạng di động chỉ dùng cho gửi lại hoặc ưu tiên cao.', // uncertain:
+    'id': 'WiFi diutamakan. Jaringan seluler hanya untuk pengiriman ulang atau prioritas tinggi.', // uncertain:
+    'ms': 'WiFi diutamakan. Rangkaian selular hanya untuk penghantaran semula atau keutamaan tinggi.', // uncertain:
+  },
+
+  // -- Performance Profile (Architecture section 23.2) --
+  'section_performance': {
+    'de': 'Leistung', 'en': 'Performance',
+    'es': 'Rendimiento', // uncertain:
+    'hu': 'Teljesitmeny', // uncertain:
+    'sv': 'Prestanda', // uncertain:
+    'ar': 'الأداء', // uncertain:
+    'he': 'ביצועים', // uncertain:
+    'fa': 'عملکرد', // uncertain:
+    'fr': 'Performance', // uncertain:
+    'it': 'Prestazioni', // uncertain:
+    'pt': 'Desempenho', // uncertain:
+    'nl': 'Prestatie', // uncertain:
+    'pl': 'Wydajnosc', // uncertain:
+    'ro': 'Performanta', // uncertain:
+    'cs': 'Vykon', // uncertain:
+    'sk': 'Vykon', // uncertain:
+    'hr': 'Performanse', // uncertain:
+    'bg': 'Производителност', // uncertain:
+    'el': 'Απόδοση', // uncertain:
+    'da': 'Ydelse', // uncertain:
+    'fi': 'Suorituskyky', // uncertain:
+    'no': 'Ytelse', // uncertain:
+    'uk': 'Продуктивність', // uncertain:
+    'ru': 'Производительность', // uncertain:
+    'tr': 'Performans', // uncertain:
+    'zh': '性能', // uncertain:
+    'ja': 'パフォーマンス', // uncertain:
+    'ko': '성능', // uncertain:
+    'hi': 'प्रदर्शन', // uncertain:
+    'th': 'ประสิทธิภาพ', // uncertain:
+    'vi': 'Hieu suat', // uncertain:
+    'id': 'Performa', // uncertain:
+    'ms': 'Prestasi', // uncertain:
+  },
+  'performance_title': {
+    'de': 'Leistungsprofil', 'en': 'Performance Profile',
+    'es': 'Perfil de rendimiento', // uncertain:
+    'hu': 'Teljesitmenyprofil', // uncertain:
+    'sv': 'Prestandaprofil', // uncertain:
+    'ar': 'ملف الأداء', // uncertain:
+    'he': 'פרופיל ביצועים', // uncertain:
+    'fa': 'پروفایل عملکرد', // uncertain:
+    'fr': 'Profil de performance', // uncertain:
+    'it': 'Profilo prestazioni', // uncertain:
+    'pt': 'Perfil de desempenho', // uncertain:
+    'nl': 'Prestatieprofiel', // uncertain:
+    'pl': 'Profil wydajnosci', // uncertain:
+    'ro': 'Profil performanta', // uncertain:
+    'cs': 'Profil vykonu', // uncertain:
+    'sk': 'Profil vykonu', // uncertain:
+    'hr': 'Profil performansi', // uncertain:
+    'bg': 'Профил на производителност', // uncertain:
+    'el': 'Προφίλ απόδοσης', // uncertain:
+    'da': 'Ydelsesprofil', // uncertain:
+    'fi': 'Suorituskykyprofiili', // uncertain:
+    'no': 'Ytelsesprofil', // uncertain:
+    'uk': 'Профіль продуктивності', // uncertain:
+    'ru': 'Профиль производительности', // uncertain:
+    'tr': 'Performans profili', // uncertain:
+    'zh': '性能概况', // uncertain:
+    'ja': 'パフォーマンスプロファイル', // uncertain:
+    'ko': '성능 프로필', // uncertain:
+    'hi': 'प्रदर्शन प्रोहाइल', // uncertain:
+    'th': 'โปรไฟล์ประสิทธิภาพ', // uncertain:
+    'vi': 'Ho so hieu suat', // uncertain:
+    'id': 'Profil performa', // uncertain:
+    'ms': 'Profil prestasi', // uncertain:
+  },
+  'performance_subtitle': {
+    'de': 'KEM, Datenbank, Rendering', 'en': 'KEM, Database, Rendering',
+    'es': 'KEM, Base de datos, Renderizado', // uncertain:
+    'hu': 'KEM, Adatbazis, Rendereles', // uncertain:
+    'sv': 'KEM, Databas, Rendering', // uncertain:
+    'ar': 'KEM، قاعدة البيانات، العرض', // uncertain:
+    'he': 'KEM, מסד נתונים, רינדור', // uncertain:
+    'fa': 'KEM، پایگاه داده، رندر', // uncertain:
+    'fr': 'KEM, Base de donnees, Rendu', // uncertain:
+    'it': 'KEM, Database, Rendering', // uncertain:
+    'pt': 'KEM, Banco de dados, Renderizacao', // uncertain:
+    'nl': 'KEM, Database, Rendering', // uncertain:
+    'pl': 'KEM, Baza danych, Renderowanie', // uncertain:
+    'ro': 'KEM, Baza de date, Randare', // uncertain:
+    'cs': 'KEM, Databaze, Vykreslovani', // uncertain:
+    'sk': 'KEM, Databaza, Vykreslovanie', // uncertain:
+    'hr': 'KEM, Baza podataka, Renderiranje', // uncertain:
+    'bg': 'KEM, База данни, Рендиране', // uncertain:
+    'el': 'KEM, Βάση δεδομένων, Απεικόνιση', // uncertain:
+    'da': 'KEM, Database, Rendering', // uncertain:
+    'fi': 'KEM, Tietokanta, Renderointi', // uncertain:
+    'no': 'KEM, Database, Rendering', // uncertain:
+    'uk': 'KEM, База даних, Рендеринг', // uncertain:
+    'ru': 'KEM, База данных, Рендеринг', // uncertain:
+    'tr': 'KEM, Veritabani, Isleme', // uncertain:
+    'zh': 'KEM、数据库、渲染', // uncertain:
+    'ja': 'KEM、データベース、レンダリング', // uncertain:
+    'ko': 'KEM, 데이터베이스, 렌더링', // uncertain:
+    'hi': 'KEM, डेटाबेस, रेंडरिंग', // uncertain:
+    'th': 'KEM, ฐานข้อมูล, การเรนเดอร์', // uncertain:
+    'vi': 'KEM, Co so du lieu, Ket xuat', // uncertain:
+    'id': 'KEM, Basis data, Rendering', // uncertain:
+    'ms': 'KEM, Pangkalan data, Pemaparan', // uncertain:
+  },
+  'perf_kem_section': {
+    'de': 'KEM-Verschluesselung', 'en': 'KEM Encryption',
+    'es': 'Cifrado KEM', // uncertain:
+    'hu': 'KEM titkositas', // uncertain:
+    'sv': 'KEM-kryptering', // uncertain:
+    'ar': 'تشفير KEM', // uncertain:
+    'he': 'הצפנת KEM', // uncertain:
+    'fa': 'رمزنگاری KEM', // uncertain:
+    'fr': 'Chiffrement KEM', // uncertain:
+    'it': 'Crittografia KEM', // uncertain:
+    'pt': 'Criptografia KEM', // uncertain:
+    'nl': 'KEM-versleuteling', // uncertain:
+    'pl': 'Szyfrowanie KEM', // uncertain:
+    'ro': 'Criptare KEM', // uncertain:
+    'cs': 'KEM sifrovani', // uncertain:
+    'sk': 'KEM sifrovanie', // uncertain:
+    'hr': 'KEM enkripcija', // uncertain:
+    'bg': 'KEM криптиране', // uncertain:
+    'el': 'Κρυπτογράφηση KEM', // uncertain:
+    'da': 'KEM-kryptering', // uncertain:
+    'fi': 'KEM-salaus', // uncertain:
+    'no': 'KEM-kryptering', // uncertain:
+    'uk': 'KEM шифрування', // uncertain:
+    'ru': 'KEM шифрование', // uncertain:
+    'tr': 'KEM sifreleme', // uncertain:
+    'zh': 'KEM 加密', // uncertain:
+    'ja': 'KEM 暗号化', // uncertain:
+    'ko': 'KEM 암호화', // uncertain:
+    'hi': 'KEM एन्क्रिप्शन', // uncertain:
+    'th': 'การเข้ารหัส KEM', // uncertain:
+    'vi': 'Ma hoa KEM', // uncertain:
+    'id': 'Enkripsi KEM', // uncertain:
+    'ms': 'Penyulitan KEM', // uncertain:
+  },
+  'perf_encrypt_ops': {
+    'de': 'Verschluesselung', 'en': 'Encryption',
+    'es': 'Cifrado', // uncertain:
+    'hu': 'Titkositas', // uncertain:
+    'sv': 'Kryptering', // uncertain:
+    'ar': 'تشفير', // uncertain:
+    'he': 'הצפנה', // uncertain:
+    'fa': 'رمزنگاری', // uncertain:
+    'fr': 'Chiffrement', // uncertain:
+    'it': 'Crittografia', // uncertain:
+    'pt': 'Criptografia', // uncertain:
+    'nl': 'Versleuteling', // uncertain:
+    'pl': 'Szyfrowanie', // uncertain:
+    'ro': 'Criptare', // uncertain:
+    'cs': 'Sifrovani', // uncertain:
+    'sk': 'Sifrovanie', // uncertain:
+    'hr': 'Enkripcija', // uncertain:
+    'bg': 'Криптиране', // uncertain:
+    'el': 'Κρυπτογράφηση', // uncertain:
+    'da': 'Kryptering', // uncertain:
+    'fi': 'Salaus', // uncertain:
+    'no': 'Kryptering', // uncertain:
+    'uk': 'Шифрування', // uncertain:
+    'ru': 'Шифрование', // uncertain:
+    'tr': 'Sifreleme', // uncertain:
+    'zh': '加密', // uncertain:
+    'ja': '暗号化', // uncertain:
+    'ko': '암호화', // uncertain:
+    'hi': 'एन्क्रिप्शन', // uncertain:
+    'th': 'การเข้ารหัส', // uncertain:
+    'vi': 'Ma hoa', // uncertain:
+    'id': 'Enkripsi', // uncertain:
+    'ms': 'Penyulitan', // uncertain:
+  },
+  'perf_decrypt_ops': {
+    'de': 'Entschluesselung', 'en': 'Decryption',
+    'es': 'Descifrado', // uncertain:
+    'hu': 'Visszafejtes', // uncertain:
+    'sv': 'Dekryptering', // uncertain:
+    'ar': 'فك التشفير', // uncertain:
+    'he': 'פענוח', // uncertain:
+    'fa': 'رمزگشایی', // uncertain:
+    'fr': 'Dechiffrement', // uncertain:
+    'it': 'Decrittografia', // uncertain:
+    'pt': 'Descriptografia', // uncertain:
+    'nl': 'Ontsleuteling', // uncertain:
+    'pl': 'Deszyfrowanie', // uncertain:
+    'ro': 'Decriptare', // uncertain:
+    'cs': 'Desifrovani', // uncertain:
+    'sk': 'Desifrovanie', // uncertain:
+    'hr': 'Dekripcija', // uncertain:
+    'bg': 'Декриптиране', // uncertain:
+    'el': 'Αποκρυπτογράφηση', // uncertain:
+    'da': 'Dekryptering', // uncertain:
+    'fi': 'Salauksen purku', // uncertain:
+    'no': 'Dekryptering', // uncertain:
+    'uk': 'Розшифрування', // uncertain:
+    'ru': 'Расшифрование', // uncertain:
+    'tr': 'Sifre cozme', // uncertain:
+    'zh': '解密', // uncertain:
+    'ja': '復号', // uncertain:
+    'ko': '복호화', // uncertain:
+    'hi': 'डिक्रिप्शन', // uncertain:
+    'th': 'การถอดรหัส', // uncertain:
+    'vi': 'Giai ma', // uncertain:
+    'id': 'Dekripsi', // uncertain:
+    'ms': 'Penyahsulitan', // uncertain:
+  },
+  'perf_x25519_ops': {
+    'de': 'X25519 DH', 'en': 'X25519 DH',
+    'es': 'X25519 DH', 'hu': 'X25519 DH', 'sv': 'X25519 DH',
+    'ar': 'X25519 DH', 'he': 'X25519 DH', 'fa': 'X25519 DH',
+    'fr': 'X25519 DH', 'it': 'X25519 DH', 'pt': 'X25519 DH',
+    'nl': 'X25519 DH', 'pl': 'X25519 DH', 'ro': 'X25519 DH',
+    'cs': 'X25519 DH', 'sk': 'X25519 DH', 'hr': 'X25519 DH',
+    'bg': 'X25519 DH', 'el': 'X25519 DH', 'da': 'X25519 DH',
+    'fi': 'X25519 DH', 'no': 'X25519 DH', 'uk': 'X25519 DH',
+    'ru': 'X25519 DH', 'tr': 'X25519 DH', 'zh': 'X25519 DH',
+    'ja': 'X25519 DH', 'ko': 'X25519 DH', 'hi': 'X25519 DH',
+    'th': 'X25519 DH', 'vi': 'X25519 DH', 'id': 'X25519 DH',
+    'ms': 'X25519 DH',
+  },
+  'perf_mlkem_encaps_ops': {
+    'de': 'ML-KEM Kapselung', 'en': 'ML-KEM Encapsulation',
+    'es': 'ML-KEM Encapsulation', 'hu': 'ML-KEM Encapsulation',
+    'sv': 'ML-KEM Encapsulation', 'ar': 'ML-KEM Encapsulation',
+    'he': 'ML-KEM Encapsulation', 'fa': 'ML-KEM Encapsulation',
+    'fr': 'ML-KEM Encapsulation', 'it': 'ML-KEM Encapsulation',
+    'pt': 'ML-KEM Encapsulation', 'nl': 'ML-KEM Encapsulation',
+    'pl': 'ML-KEM Encapsulation', 'ro': 'ML-KEM Encapsulation',
+    'cs': 'ML-KEM Encapsulation', 'sk': 'ML-KEM Encapsulation',
+    'hr': 'ML-KEM Encapsulation', 'bg': 'ML-KEM Encapsulation',
+    'el': 'ML-KEM Encapsulation', 'da': 'ML-KEM Encapsulation',
+    'fi': 'ML-KEM Encapsulation', 'no': 'ML-KEM Encapsulation',
+    'uk': 'ML-KEM Encapsulation', 'ru': 'ML-KEM Encapsulation',
+    'tr': 'ML-KEM Encapsulation', 'zh': 'ML-KEM Encapsulation',
+    'ja': 'ML-KEM Encapsulation', 'ko': 'ML-KEM Encapsulation',
+    'hi': 'ML-KEM Encapsulation', 'th': 'ML-KEM Encapsulation',
+    'vi': 'ML-KEM Encapsulation', 'id': 'ML-KEM Encapsulation',
+    'ms': 'ML-KEM Encapsulation',
+  },
+  'perf_mlkem_decaps_ops': {
+    'de': 'ML-KEM Entkapselung', 'en': 'ML-KEM Decapsulation',
+    'es': 'ML-KEM Decapsulation', 'hu': 'ML-KEM Decapsulation',
+    'sv': 'ML-KEM Decapsulation', 'ar': 'ML-KEM Decapsulation',
+    'he': 'ML-KEM Decapsulation', 'fa': 'ML-KEM Decapsulation',
+    'fr': 'ML-KEM Decapsulation', 'it': 'ML-KEM Decapsulation',
+    'pt': 'ML-KEM Decapsulation', 'nl': 'ML-KEM Decapsulation',
+    'pl': 'ML-KEM Decapsulation', 'ro': 'ML-KEM Decapsulation',
+    'cs': 'ML-KEM Decapsulation', 'sk': 'ML-KEM Decapsulation',
+    'hr': 'ML-KEM Decapsulation', 'bg': 'ML-KEM Decapsulation',
+    'el': 'ML-KEM Decapsulation', 'da': 'ML-KEM Decapsulation',
+    'fi': 'ML-KEM Decapsulation', 'no': 'ML-KEM Decapsulation',
+    'uk': 'ML-KEM Decapsulation', 'ru': 'ML-KEM Decapsulation',
+    'tr': 'ML-KEM Decapsulation', 'zh': 'ML-KEM Decapsulation',
+    'ja': 'ML-KEM Decapsulation', 'ko': 'ML-KEM Decapsulation',
+    'hi': 'ML-KEM Decapsulation', 'th': 'ML-KEM Decapsulation',
+    'vi': 'ML-KEM Decapsulation', 'id': 'ML-KEM Decapsulation',
+    'ms': 'ML-KEM Decapsulation',
+  },
+  'perf_ops_per_sec': {
+    'de': 'Ops/s', 'en': 'ops/s',
+    'es': 'ops/s', 'hu': 'ops/s', 'sv': 'ops/s',
+    'ar': 'ops/s', 'he': 'ops/s', 'fa': 'ops/s',
+    'fr': 'ops/s', 'it': 'ops/s', 'pt': 'ops/s',
+    'nl': 'ops/s', 'pl': 'ops/s', 'ro': 'ops/s',
+    'cs': 'ops/s', 'sk': 'ops/s', 'hr': 'ops/s',
+    'bg': 'ops/s', 'el': 'ops/s', 'da': 'ops/s',
+    'fi': 'ops/s', 'no': 'ops/s', 'uk': 'ops/s',
+    'ru': 'ops/s', 'tr': 'ops/s', 'zh': 'ops/s',
+    'ja': 'ops/s', 'ko': 'ops/s', 'hi': 'ops/s',
+    'th': 'ops/s', 'vi': 'ops/s', 'id': 'ops/s',
+    'ms': 'ops/s',
+  },
+  'perf_avg_ms': {
+    'de': 'ms/Op', 'en': 'ms/op',
+    'es': 'ms/op', 'hu': 'ms/op', 'sv': 'ms/op',
+    'ar': 'ms/op', 'he': 'ms/op', 'fa': 'ms/op',
+    'fr': 'ms/op', 'it': 'ms/op', 'pt': 'ms/op',
+    'nl': 'ms/op', 'pl': 'ms/op', 'ro': 'ms/op',
+    'cs': 'ms/op', 'sk': 'ms/op', 'hr': 'ms/op',
+    'bg': 'ms/op', 'el': 'ms/op', 'da': 'ms/op',
+    'fi': 'ms/op', 'no': 'ms/op', 'uk': 'ms/op',
+    'ru': 'ms/op', 'tr': 'ms/op', 'zh': 'ms/op',
+    'ja': 'ms/op', 'ko': 'ms/op', 'hi': 'ms/op',
+    'th': 'ms/op', 'vi': 'ms/op', 'id': 'ms/op',
+    'ms': 'ms/op',
+  },
+  'perf_db_section': {
+    'de': 'Datenbank', 'en': 'Database',
+    'es': 'Base de datos', // uncertain:
+    'hu': 'Adatbazis', // uncertain:
+    'sv': 'Databas', // uncertain:
+    'ar': 'قاعدة البيانات', // uncertain:
+    'he': 'מסד נתונים', // uncertain:
+    'fa': 'پایگاه داده', // uncertain:
+    'fr': 'Base de donnees', // uncertain:
+    'it': 'Database', // uncertain:
+    'pt': 'Banco de dados', // uncertain:
+    'nl': 'Database', // uncertain:
+    'pl': 'Baza danych', // uncertain:
+    'ro': 'Baza de date', // uncertain:
+    'cs': 'Databaze', // uncertain:
+    'sk': 'Databaza', // uncertain:
+    'hr': 'Baza podataka', // uncertain:
+    'bg': 'База данни', // uncertain:
+    'el': 'Βάση δεδομένων', // uncertain:
+    'da': 'Database', // uncertain:
+    'fi': 'Tietokanta', // uncertain:
+    'no': 'Database', // uncertain:
+    'uk': 'База даних', // uncertain:
+    'ru': 'База данных', // uncertain:
+    'tr': 'Veritabani', // uncertain:
+    'zh': '数据库', // uncertain:
+    'ja': 'データベース', // uncertain:
+    'ko': '데이터베이스', // uncertain:
+    'hi': 'डेटाबेस', // uncertain:
+    'th': 'ฐานข้อมูล', // uncertain:
+    'vi': 'Co so du lieu', // uncertain:
+    'id': 'Basis data', // uncertain:
+    'ms': 'Pangkalan data', // uncertain:
+  },
+  'perf_db_message_count': {
+    'de': 'Nachrichten gesamt', 'en': 'Total Messages',
+    'es': 'Total de mensajes', // uncertain:
+    'hu': 'Osszes uzenet', // uncertain:
+    'sv': 'Totalt antal meddelanden', // uncertain:
+    'ar': 'إجمالي الرسائل', // uncertain:
+    'he': 'סה"כ הודעות', // uncertain:
+    'fa': 'مجموع پیام‌ها', // uncertain:
+    'fr': 'Total des messages', // uncertain:
+    'it': 'Messaggi totali', // uncertain:
+    'pt': 'Total de mensagens', // uncertain:
+    'nl': 'Totaal berichten', // uncertain:
+    'pl': 'Laczna liczba wiadomosci', // uncertain:
+    'ro': 'Total mesaje', // uncertain:
+    'cs': 'Celkem zprav', // uncertain:
+    'sk': 'Celkom sprav', // uncertain:
+    'hr': 'Ukupno poruka', // uncertain:
+    'bg': 'Общо съобщения', // uncertain:
+    'el': 'Σύνολο μηνυμάτων', // uncertain:
+    'da': 'Beskeder i alt', // uncertain:
+    'fi': 'Viesteja yhteensa', // uncertain:
+    'no': 'Totalt antall meldinger', // uncertain:
+    'uk': 'Всього повідомлень', // uncertain:
+    'ru': 'Всего сообщений', // uncertain:
+    'tr': 'Toplam mesaj', // uncertain:
+    'zh': '消息总数', // uncertain:
+    'ja': 'メッセージ合計', // uncertain:
+    'ko': '전체 메시지', // uncertain:
+    'hi': 'कुल संदेश', // uncertain:
+    'th': 'ข้อความทั้งหมด', // uncertain:
+    'vi': 'Tong tin nhan', // uncertain:
+    'id': 'Total pesan', // uncertain:
+    'ms': 'Jumlah mesej', // uncertain:
+  },
+  'perf_db_conversation_count': {
+    'de': 'Konversationen', 'en': 'Conversations',
+    'es': 'Conversaciones', // uncertain:
+    'hu': 'Beszelgetesek', // uncertain:
+    'sv': 'Konversationer', // uncertain:
+    'ar': 'المحادثات', // uncertain:
+    'he': 'שיחות', // uncertain:
+    'fa': 'مکالمات', // uncertain:
+    'fr': 'Conversations', // uncertain:
+    'it': 'Conversazioni', // uncertain:
+    'pt': 'Conversas', // uncertain:
+    'nl': 'Conversaties', // uncertain:
+    'pl': 'Konwersacje', // uncertain:
+    'ro': 'Conversatii', // uncertain:
+    'cs': 'Konverzace', // uncertain:
+    'sk': 'Konverzacie', // uncertain:
+    'hr': 'Razgovori', // uncertain:
+    'bg': 'Разговори', // uncertain:
+    'el': 'Συνομιλίες', // uncertain:
+    'da': 'Samtaler', // uncertain:
+    'fi': 'Keskustelut', // uncertain:
+    'no': 'Samtaler', // uncertain:
+    'uk': 'Розмови', // uncertain:
+    'ru': 'Разговоры', // uncertain:
+    'tr': 'Konusmalar', // uncertain:
+    'zh': '对话', // uncertain:
+    'ja': '会話', // uncertain:
+    'ko': '대화', // uncertain:
+    'hi': 'बातचीत', // uncertain:
+    'th': 'การสนทนา', // uncertain:
+    'vi': 'Cuoc tro chuyen', // uncertain:
+    'id': 'Percakapan', // uncertain:
+    'ms': 'Perbualan', // uncertain:
+  },
+  'perf_db_largest_conv': {
+    'de': 'Groesste Konversation', 'en': 'Largest Conversation',
+    'es': 'Mayor conversacion', // uncertain:
+    'hu': 'Legnagyobb beszelgetes', // uncertain:
+    'sv': 'Storsta konversation', // uncertain:
+    'ar': 'أكبر محادثة', // uncertain:
+    'he': 'השיחה הגדולה ביותר', // uncertain:
+    'fa': 'بزرگترین مکالمه', // uncertain:
+    'fr': 'Plus grande conversation', // uncertain:
+    'it': 'Conversazione piu grande', // uncertain:
+    'pt': 'Maior conversa', // uncertain:
+    'nl': 'Grootste conversatie', // uncertain:
+    'pl': 'Najwieksza konwersacja', // uncertain:
+    'ro': 'Cea mai mare conversatie', // uncertain:
+    'cs': 'Nejvetsi konverzace', // uncertain:
+    'sk': 'Najvacsia konverzacia', // uncertain:
+    'hr': 'Najveci razgovor', // uncertain:
+    'bg': 'Най-голям разговор', // uncertain:
+    'el': 'Μεγαλύτερη συνομιλία', // uncertain:
+    'da': 'Storste samtale', // uncertain:
+    'fi': 'Suurin keskustelu', // uncertain:
+    'no': 'Storste samtale', // uncertain:
+    'uk': 'Найбільша розмова', // uncertain:
+    'ru': 'Крупнейший разговор', // uncertain:
+    'tr': 'En buyuk konusma', // uncertain:
+    'zh': '最大对话', // uncertain:
+    'ja': '最大の会話', // uncertain:
+    'ko': '가장 큰 대화', // uncertain:
+    'hi': 'सबसे बड़ी बातचीत', // uncertain:
+    'th': 'การสนทนาที่ใหญ่ที่สุด', // uncertain:
+    'vi': 'Cuoc tro chuyen lon nhat', // uncertain:
+    'id': 'Percakapan terbesar', // uncertain:
+    'ms': 'Perbualan terbesar', // uncertain:
+  },
+  'perf_db_messages_label': {
+    'de': 'Nachrichten', 'en': 'messages',
+    'es': 'mensajes', // uncertain:
+    'hu': 'uzenet', // uncertain:
+    'sv': 'meddelanden', // uncertain:
+    'ar': 'رسائل', // uncertain:
+    'he': 'הודעות', // uncertain:
+    'fa': 'پیام', // uncertain:
+    'fr': 'messages', // uncertain:
+    'it': 'messaggi', // uncertain:
+    'pt': 'mensagens', // uncertain:
+    'nl': 'berichten', // uncertain:
+    'pl': 'wiadomosci', // uncertain:
+    'ro': 'mesaje', // uncertain:
+    'cs': 'zprav', // uncertain:
+    'sk': 'sprav', // uncertain:
+    'hr': 'poruka', // uncertain:
+    'bg': 'съобщения', // uncertain:
+    'el': 'μηνύματα', // uncertain:
+    'da': 'beskeder', // uncertain:
+    'fi': 'viestia', // uncertain:
+    'no': 'meldinger', // uncertain:
+    'uk': 'повідомлень', // uncertain:
+    'ru': 'сообщений', // uncertain:
+    'tr': 'mesaj', // uncertain:
+    'zh': '条消息', // uncertain:
+    'ja': '件のメッセージ', // uncertain:
+    'ko': '개 메시지', // uncertain:
+    'hi': 'संदेश', // uncertain:
+    'th': 'ข้อความ', // uncertain:
+    'vi': 'tin nhan', // uncertain:
+    'id': 'pesan', // uncertain:
+    'ms': 'mesej', // uncertain:
+  },
+  'perf_ui_section': {
+    'de': 'UI-Rendering', 'en': 'UI Rendering',
+    'es': 'Renderizado UI', // uncertain:
+    'hu': 'UI rendereles', // uncertain:
+    'sv': 'UI-rendering', // uncertain:
+    'ar': 'عرض الواجهة', // uncertain:
+    'he': 'רינדור ממשק', // uncertain:
+    'fa': 'رندر رابط کاربری', // uncertain:
+    'fr': 'Rendu UI', // uncertain:
+    'it': 'Rendering UI', // uncertain:
+    'pt': 'Renderizacao UI', // uncertain:
+    'nl': 'UI-rendering', // uncertain:
+    'pl': 'Renderowanie UI', // uncertain:
+    'ro': 'Randare UI', // uncertain:
+    'cs': 'Vykreslovani UI', // uncertain:
+    'sk': 'Vykreslovanie UI', // uncertain:
+    'hr': 'UI renderiranje', // uncertain:
+    'bg': 'UI рендиране', // uncertain:
+    'el': 'Απεικόνιση UI', // uncertain:
+    'da': 'UI-rendering', // uncertain:
+    'fi': 'UI-renderointi', // uncertain:
+    'no': 'UI-rendering', // uncertain:
+    'uk': 'Рендеринг UI', // uncertain:
+    'ru': 'Рендеринг UI', // uncertain:
+    'tr': 'UI isleme', // uncertain:
+    'zh': 'UI 渲染', // uncertain:
+    'ja': 'UI レンダリング', // uncertain:
+    'ko': 'UI 렌더링', // uncertain:
+    'hi': 'UI रेंडरिंग', // uncertain:
+    'th': 'การเรนเดอร์ UI', // uncertain:
+    'vi': 'Ket xuat giao dien', // uncertain:
+    'id': 'Rendering UI', // uncertain:
+    'ms': 'Pemaparan UI', // uncertain:
+  },
+  'perf_ui_frame_time': {
+    'de': 'Frame-Bauzeit', 'en': 'Frame Build Time',
+    'es': 'Tiempo de fotograma', // uncertain:
+    'hu': 'Kepkocka-epitesi ido', // uncertain:
+    'sv': 'Bilduppbyggnadstid', // uncertain:
+    'ar': 'وقت بناء الإطار', // uncertain:
+    'he': 'זמן בניית מסגרת', // uncertain:
+    'fa': 'زمان ساخت فریم', // uncertain:
+    'fr': 'Temps de construction', // uncertain:
+    'it': 'Tempo di costruzione', // uncertain:
+    'pt': 'Tempo de construcao', // uncertain:
+    'nl': 'Frame-bouwtijd', // uncertain:
+    'pl': 'Czas budowy klatki', // uncertain:
+    'ro': 'Timp constructie cadru', // uncertain:
+    'cs': 'Cas sestaveni snimku', // uncertain:
+    'sk': 'Cas zostavenia snimky', // uncertain:
+    'hr': 'Vrijeme izgradnje okvira', // uncertain:
+    'bg': 'Време за изграждане', // uncertain:
+    'el': 'Χρόνος κατασκευής', // uncertain:
+    'da': 'Frame-opbygningstid', // uncertain:
+    'fi': 'Ruudun rakennusaika', // uncertain:
+    'no': 'Rammebyggetid', // uncertain:
+    'uk': 'Час побудови кадру', // uncertain:
+    'ru': 'Время построения кадра', // uncertain:
+    'tr': 'Kare olusturma suresi', // uncertain:
+    'zh': '帧构建时间', // uncertain:
+    'ja': 'フレーム構築時間', // uncertain:
+    'ko': '프레임 빌드 시간', // uncertain:
+    'hi': 'फ्रेम निर्माण समय', // uncertain:
+    'th': 'เวลาสร้างเฟรม', // uncertain:
+    'vi': 'Thoi gian xay dung khung', // uncertain:
+    'id': 'Waktu bangun bingkai', // uncertain:
+    'ms': 'Masa pembinaan bingkai', // uncertain:
+  },
+  'perf_run_benchmark': {
+    'de': 'Benchmark starten', 'en': 'Run Benchmark',
+    'es': 'Iniciar benchmark', // uncertain:
+    'hu': 'Benchmark inditasa', // uncertain:
+    'sv': 'Kor benchmark', // uncertain:
+    'ar': 'تشغيل الاختبار', // uncertain:
+    'he': 'הפעל מבחן', // uncertain:
+    'fa': 'اجرای بنچمارک', // uncertain:
+    'fr': 'Lancer le benchmark', // uncertain:
+    'it': 'Avvia benchmark', // uncertain:
+    'pt': 'Executar benchmark', // uncertain:
+    'nl': 'Benchmark starten', // uncertain:
+    'pl': 'Uruchom benchmark', // uncertain:
+    'ro': 'Ruleaza benchmark', // uncertain:
+    'cs': 'Spustit benchmark', // uncertain:
+    'sk': 'Spustit benchmark', // uncertain:
+    'hr': 'Pokreni benchmark', // uncertain:
+    'bg': 'Стартиране на бенчмарк', // uncertain:
+    'el': 'Εκτέλεση benchmark', // uncertain:
+    'da': 'Kor benchmark', // uncertain:
+    'fi': 'Suorita vertailutesti', // uncertain:
+    'no': 'Kjor benchmark', // uncertain:
+    'uk': 'Запустити тест', // uncertain:
+    'ru': 'Запустить тест', // uncertain:
+    'tr': 'Benchmark calistir', // uncertain:
+    'zh': '运行基准测试', // uncertain:
+    'ja': 'ベンチマーク実行', // uncertain:
+    'ko': '벤치마크 실행', // uncertain:
+    'hi': 'बेंचमार्क चलाएं', // uncertain:
+    'th': 'รันเบนช์มาร์ก', // uncertain:
+    'vi': 'Chay kiem tra hieu suat', // uncertain:
+    'id': 'Jalankan benchmark', // uncertain:
+    'ms': 'Jalankan penanda aras', // uncertain:
+  },
+  'perf_running': {
+    'de': 'Laeuft...', 'en': 'Running...',
+    'es': 'Ejecutando...', // uncertain:
+    'hu': 'Fut...', // uncertain:
+    'sv': 'Kor...', // uncertain:
+    'ar': 'جارٍ...', // uncertain:
+    'he': 'רץ...', // uncertain:
+    'fa': 'در حال اجرا...', // uncertain:
+    'fr': 'En cours...', // uncertain:
+    'it': 'In esecuzione...', // uncertain:
+    'pt': 'Executando...', // uncertain:
+    'nl': 'Bezig...', // uncertain:
+    'pl': 'Uruchomione...', // uncertain:
+    'ro': 'Se executa...', // uncertain:
+    'cs': 'Bezi...', // uncertain:
+    'sk': 'Bezi...', // uncertain:
+    'hr': 'Izvrsava se...', // uncertain:
+    'bg': 'Изпълнява се...', // uncertain:
+    'el': 'Εκτελείται...', // uncertain:
+    'da': 'Korer...', // uncertain:
+    'fi': 'Suoritetaan...', // uncertain:
+    'no': 'Kjorer...', // uncertain:
+    'uk': 'Виконується...', // uncertain:
+    'ru': 'Выполняется...', // uncertain:
+    'tr': 'Calisiyor...', // uncertain:
+    'zh': '运行中...', // uncertain:
+    'ja': '実行中...', // uncertain:
+    'ko': '실행 중...', // uncertain:
+    'hi': 'चल रहा है...', // uncertain:
+    'th': 'กำลังทำงาน...', // uncertain:
+    'vi': 'Dang chay...', // uncertain:
+    'id': 'Berjalan...', // uncertain:
+    'ms': 'Sedang berjalan...', // uncertain:
+  },
+  'perf_not_run': {
+    'de': 'Noch nicht ausgefuehrt', 'en': 'Not yet run',
+    'es': 'Aun no ejecutado', // uncertain:
+    'hu': 'Meg nem futtatva', // uncertain:
+    'sv': 'Annu inte kord', // uncertain:
+    'ar': 'لم يتم التشغيل بعد', // uncertain:
+    'he': 'טרם הופעל', // uncertain:
+    'fa': 'هنوز اجرا نشده', // uncertain:
+    'fr': 'Pas encore execute', // uncertain:
+    'it': 'Non ancora eseguito', // uncertain:
+    'pt': 'Ainda nao executado', // uncertain:
+    'nl': 'Nog niet uitgevoerd', // uncertain:
+    'pl': 'Jeszcze nie uruchomiono', // uncertain:
+    'ro': 'Inca neexecutat', // uncertain:
+    'cs': 'Dosud nespusteno', // uncertain:
+    'sk': 'Este nespustene', // uncertain:
+    'hr': 'Jos nije pokrenuto', // uncertain:
+    'bg': 'Все още не е изпълнено', // uncertain:
+    'el': 'Δεν εκτελέστηκε ακόμα', // uncertain:
+    'da': 'Endnu ikke kort', // uncertain:
+    'fi': 'Ei viela suoritettu', // uncertain:
+    'no': 'Ikke kjort enna', // uncertain:
+    'uk': 'Ще не запущено', // uncertain:
+    'ru': 'Ещё не запущено', // uncertain:
+    'tr': 'Henuz calistirilmadi', // uncertain:
+    'zh': '尚未运行', // uncertain:
+    'ja': '未実行', // uncertain:
+    'ko': '아직 실행되지 않음', // uncertain:
+    'hi': 'अभी तक नहीं चलाया', // uncertain:
+    'th': 'ยังไม่ได้รัน', // uncertain:
+    'vi': 'Chua chay', // uncertain:
+    'id': 'Belum dijalankan', // uncertain:
+    'ms': 'Belum dijalankan', // uncertain:
+  },
+  'perf_iterations': {
+    'de': 'Iterationen', 'en': 'Iterations',
+    'es': 'Iteraciones', // uncertain:
+    'hu': 'Iteraciok', // uncertain:
+    'sv': 'Iterationer', // uncertain:
+    'ar': 'التكرارات', // uncertain:
+    'he': 'איטרציות', // uncertain:
+    'fa': 'تکرارها', // uncertain:
+    'fr': 'Iterations', // uncertain:
+    'it': 'Iterazioni', // uncertain:
+    'pt': 'Iteracoes', // uncertain:
+    'nl': 'Iteraties', // uncertain:
+    'pl': 'Iteracje', // uncertain:
+    'ro': 'Iteratii', // uncertain:
+    'cs': 'Iterace', // uncertain:
+    'sk': 'Iteracie', // uncertain:
+    'hr': 'Iteracije', // uncertain:
+    'bg': 'Итерации', // uncertain:
+    'el': 'Επαναλήψεις', // uncertain:
+    'da': 'Iterationer', // uncertain:
+    'fi': 'Iteraatiot', // uncertain:
+    'no': 'Iterasjoner', // uncertain:
+    'uk': 'Ітерації', // uncertain:
+    'ru': 'Итерации', // uncertain:
+    'tr': 'Yinelemeler', // uncertain:
+    'zh': '迭代次数', // uncertain:
+    'ja': '反復回数', // uncertain:
+    'ko': '반복 횟수', // uncertain:
+    'hi': 'पुनरावृत्तियाँ', // uncertain:
+    'th': 'การวนซ้ำ', // uncertain:
+    'vi': 'So lan lap', // uncertain:
+    'id': 'Iterasi', // uncertain:
+    'ms': 'Lelaran', // uncertain:
+  },
+
+  // ── Security Hardening (§23.2) ────────────────────────────────────
+  'section_security': {
+    'de': 'Sicherheit',
+    'en': 'Security',
+    'es': 'Seguridad', // uncertain:
+    'hu': 'Biztonság', // uncertain:
+    'sv': 'Säkerhet', // uncertain:
+    'ar': 'الأمان', // uncertain:
+    'he': 'אבטחה', // uncertain:
+    'fa': 'امنیت', // uncertain:
+    'fr': 'Sécurité', // uncertain:
+    'it': 'Sicurezza', // uncertain:
+    'pt': 'Segurança', // uncertain:
+    'nl': 'Beveiliging', // uncertain:
+    'pl': 'Bezpieczeństwo', // uncertain:
+    'ro': 'Securitate', // uncertain:
+    'cs': 'Zabezpečení', // uncertain:
+    'sk': 'Zabezpečenie', // uncertain:
+    'hr': 'Sigurnost', // uncertain:
+    'bg': 'Сигурност', // uncertain:
+    'el': 'Ασφάλεια', // uncertain:
+    'da': 'Sikkerhed', // uncertain:
+    'fi': 'Turvallisuus', // uncertain:
+    'no': 'Sikkerhet', // uncertain:
+    'uk': 'Безпека', // uncertain:
+    'ru': 'Безопасность', // uncertain:
+    'tr': 'Güvenlik', // uncertain:
+    'zh': '安全', // uncertain:
+    'ja': 'セキュリティ', // uncertain:
+    'ko': '보안', // uncertain:
+    'hi': 'सुरक्षा', // uncertain:
+    'th': 'ความปลอดภัย', // uncertain:
+    'vi': 'Bảo mật', // uncertain:
+    'id': 'Keamanan', // uncertain:
+    'ms': 'Keselamatan', // uncertain:
+  },
+  'security_hardening_title': {
+    'de': 'Sicherheitshärtung',
+    'en': 'Security Hardening',
+    'es': 'Endurecimiento de seguridad', // uncertain:
+    'hu': 'Biztonsági megerősítés', // uncertain:
+    'sv': 'Säkerhetshärdning', // uncertain:
+    'ar': 'تعزيز الأمان', // uncertain:
+    'he': 'הקשחת אבטחה', // uncertain:
+    'fa': 'تقویت امنیت', // uncertain:
+    'fr': 'Durcissement sécurité', // uncertain:
+    'it': 'Rafforzamento sicurezza', // uncertain:
+    'pt': 'Endurecimento de segurança', // uncertain:
+    'nl': 'Beveiligingsharding', // uncertain:
+    'pl': 'Wzmocnienie zabezpieczeń', // uncertain:
+    'ro': 'Întărire securitate', // uncertain:
+    'cs': 'Posílení zabezpečení', // uncertain:
+    'sk': 'Posilnenie zabezpečenia', // uncertain:
+    'hr': 'Ojačanje sigurnosti', // uncertain:
+    'bg': 'Укрепване на сигурността', // uncertain:
+    'el': 'Ενίσχυση ασφάλειας', // uncertain:
+    'da': 'Sikkerhedshærdning', // uncertain:
+    'fi': 'Turvallisuuden koventaminen', // uncertain:
+    'no': 'Sikkerhetsherdning', // uncertain:
+    'uk': 'Зміцнення безпеки', // uncertain:
+    'ru': 'Усиление безопасности', // uncertain:
+    'tr': 'Güvenlik sertleştirme', // uncertain:
+    'zh': '安全加固', // uncertain:
+    'ja': 'セキュリティ強化', // uncertain:
+    'ko': '보안 강화', // uncertain:
+    'hi': 'सुरक्षा सुदृढ़ीकरण', // uncertain:
+    'th': 'การเสริมความปลอดภัย', // uncertain:
+    'vi': 'Tăng cường bảo mật', // uncertain:
+    'id': 'Pengerasan keamanan', // uncertain:
+    'ms': 'Pengukuhan keselamatan', // uncertain:
+  },
+  'security_hardening_subtitle': {
+    'de': 'Constant-Time-Vergleiche, Speicherbereinigung, Post-Quanten-Kryptografie',
+    'en': 'Constant-time comparisons, memory zeroing, post-quantum cryptography',
+    'es': 'Comparaciones en tiempo constante, limpieza de memoria, criptografía poscuántica', // uncertain:
+    'hu': 'Konstans idejű összehasonlítások, memóriatörlés, posztkvantum kriptográfia', // uncertain:
+    'sv': 'Konstanttidsjämförelser, minnesrensning, postkvantumkryptografi', // uncertain:
+    'ar': 'مقارنات بزمن ثابت، مسح الذاكرة، تشفير ما بعد الكم', // uncertain:
+    'he': 'השוואות בזמן קבוע, מחיקת זיכרון, הצפנה פוסט-קוונטית', // uncertain:
+    'fa': 'مقایسه‌های زمان ثابت، پاکسازی حافظه، رمزنگاری پساکوانتومی', // uncertain:
+    'fr': 'Comparaisons en temps constant, nettoyage mémoire, cryptographie post-quantique', // uncertain:
+    'it': 'Confronti a tempo costante, azzeramento memoria, crittografia post-quantistica', // uncertain:
+    'pt': 'Comparações em tempo constante, limpeza de memória, criptografia pós-quântica', // uncertain:
+    'nl': 'Constante-tijdvergelijkingen, geheugenreiniging, postquantumcryptografie', // uncertain:
+    'pl': 'Porównania w stałym czasie, zerowanie pamięci, kryptografia postkwantowa', // uncertain:
+    'ro': 'Comparații în timp constant, ștergere memorie, criptografie post-cuantică', // uncertain:
+    'cs': 'Porovnání v konstantním čase, mazání paměti, postkvantová kryptografie', // uncertain:
+    'sk': 'Porovnania v konštantnom čase, mazanie pamäte, postkvantová kryptografia', // uncertain:
+    'hr': 'Usporedbe u konstantnom vremenu, brisanje memorije, postkvantnaa kriptografija', // uncertain:
+    'bg': 'Сравнения с постоянно време, изчистване на паметта, постквантова криптография', // uncertain:
+    'el': 'Συγκρίσεις σταθερού χρόνου, μηδενισμός μνήμης, μετα-κβαντική κρυπτογραφία', // uncertain:
+    'da': 'Konstanttidssammenligninger, hukommelsessletning, postkvantekryptografi', // uncertain:
+    'fi': 'Vakioaikaiset vertailut, muistin nollaus, kvanttijälkeinen kryptografia', // uncertain:
+    'no': 'Konstanttidssammenligninger, minnessletting, postkvantekryptografi', // uncertain:
+    'uk': 'Порівняння з постійним часом, очищення пам\'яті, постквантова криптографія', // uncertain:
+    'ru': 'Сравнения с постоянным временем, очистка памяти, постквантовая криптография', // uncertain:
+    'tr': 'Sabit zamanlı karşılaştırmalar, bellek temizleme, kuantum sonrası kriptografi', // uncertain:
+    'zh': '常量时间比较、内存清零、后量子密码学', // uncertain:
+    'ja': '定数時間比較、メモリゼロ化、ポスト量子暗号', // uncertain:
+    'ko': '상수 시간 비교, 메모리 제로화, 포스트 양자 암호', // uncertain:
+    'hi': 'स्थिर-समय तुलना, स्मृति शून्यीकरण, पोस्ट-क्वांटम क्रिप्टोग्राफी', // uncertain:
+    'th': 'การเปรียบเทียบเวลาคงที่ การล้างหน่วยความจำ การเข้ารหัสโพสต์ควอนตัม', // uncertain:
+    'vi': 'So sánh thời gian hằng, xóa bộ nhớ, mật mã hậu lượng tử', // uncertain:
+    'id': 'Perbandingan waktu konstan, penghapusan memori, kriptografi pasca-kuantum', // uncertain:
+    'ms': 'Perbandingan masa tetap, penghapusan memori, kriptografi pasca-kuantum', // uncertain:
+  },
+  'security_constant_time': {
+    'de': 'Constant-Time-Vergleiche',
+    'en': 'Constant-time comparisons',
+    'es': 'Comparaciones en tiempo constante', // uncertain:
+    'hu': 'Konstans idejű összehasonlítások', // uncertain:
+    'sv': 'Konstanttidsjämförelser', // uncertain:
+    'ar': 'مقارنات بزمن ثابت', // uncertain:
+    'he': 'השוואות בזמן קבוע', // uncertain:
+    'fa': 'مقایسه‌های زمان ثابت', // uncertain:
+    'fr': 'Comparaisons en temps constant', // uncertain:
+    'it': 'Confronti a tempo costante', // uncertain:
+    'pt': 'Comparações em tempo constante', // uncertain:
+    'nl': 'Constante-tijdvergelijkingen', // uncertain:
+    'pl': 'Porównania w stałym czasie', // uncertain:
+    'ro': 'Comparații în timp constant', // uncertain:
+    'cs': 'Porovnání v konstantním čase', // uncertain:
+    'sk': 'Porovnania v konštantnom čase', // uncertain:
+    'hr': 'Usporedbe u konstantnom vremenu', // uncertain:
+    'bg': 'Сравнения с постоянно време', // uncertain:
+    'el': 'Συγκρίσεις σταθερού χρόνου', // uncertain:
+    'da': 'Konstanttidssammenligninger', // uncertain:
+    'fi': 'Vakioaikaiset vertailut', // uncertain:
+    'no': 'Konstanttidssammenligninger', // uncertain:
+    'uk': 'Порівняння з постійним часом', // uncertain:
+    'ru': 'Сравнения с постоянным временем', // uncertain:
+    'tr': 'Sabit zamanlı karşılaştırmalar', // uncertain:
+    'zh': '常量时间比较', // uncertain:
+    'ja': '定数時間比較', // uncertain:
+    'ko': '상수 시간 비교', // uncertain:
+    'hi': 'स्थिर-समय तुलना', // uncertain:
+    'th': 'การเปรียบเทียบเวลาคงที่', // uncertain:
+    'vi': 'So sánh thời gian hằng', // uncertain:
+    'id': 'Perbandingan waktu konstan', // uncertain:
+    'ms': 'Perbandingan masa tetap', // uncertain:
+  },
+  'security_memory_zeroing': {
+    'de': 'Speicherbereinigung',
+    'en': 'Key material zeroing',
+    'es': 'Limpieza de material de clave', // uncertain:
+    'hu': 'Kulcsanyag törlése', // uncertain:
+    'sv': 'Nyckelradering', // uncertain:
+    'ar': 'مسح مادة المفتاح', // uncertain:
+    'he': 'מחיקת חומר מפתח', // uncertain:
+    'fa': 'پاکسازی مواد کلید', // uncertain:
+    'fr': 'Nettoyage des clés', // uncertain:
+    'it': 'Azzeramento materiale chiave', // uncertain:
+    'pt': 'Limpeza de material de chave', // uncertain:
+    'nl': 'Sleutelmateriaal wissen', // uncertain:
+    'pl': 'Zerowanie materiału klucza', // uncertain:
+    'ro': 'Ștergere material cheie', // uncertain:
+    'cs': 'Mazání klíčového materiálu', // uncertain:
+    'sk': 'Mazanie kľúčového materiálu', // uncertain:
+    'hr': 'Brisanje ključnog materijala', // uncertain:
+    'bg': 'Изчистване на ключов материал', // uncertain:
+    'el': 'Μηδενισμός υλικού κλειδιών', // uncertain:
+    'da': 'Sletning af nøglemateriale', // uncertain:
+    'fi': 'Avainmateriaalin nollaus', // uncertain:
+    'no': 'Sletting av nøkkelmateriale', // uncertain:
+    'uk': 'Очищення ключового матеріалу', // uncertain:
+    'ru': 'Очистка ключевого материала', // uncertain:
+    'tr': 'Anahtar malzemesini silme', // uncertain:
+    'zh': '密钥材料清零', // uncertain:
+    'ja': '鍵素材のゼロ化', // uncertain:
+    'ko': '키 자료 제로화', // uncertain:
+    'hi': 'कुंजी सामग्री शून्यीकरण', // uncertain:
+    'th': 'การล้างวัสดุกุญแจ', // uncertain:
+    'vi': 'Xóa vật liệu khóa', // uncertain:
+    'id': 'Penghapusan material kunci', // uncertain:
+    'ms': 'Penghapusan bahan kunci', // uncertain:
+  },
+  'security_pq_crypto': {
+    'de': 'Post-Quanten-Kryptografie',
+    'en': 'Post-quantum cryptography',
+    'es': 'Criptografía poscuántica', // uncertain:
+    'hu': 'Posztkvantum kriptográfia', // uncertain:
+    'sv': 'Postkvantumkryptografi', // uncertain:
+    'ar': 'تشفير ما بعد الكم', // uncertain:
+    'he': 'הצפנה פוסט-קוונטית', // uncertain:
+    'fa': 'رمزنگاری پساکوانتومی', // uncertain:
+    'fr': 'Cryptographie post-quantique', // uncertain:
+    'it': 'Crittografia post-quantistica', // uncertain:
+    'pt': 'Criptografia pós-quântica', // uncertain:
+    'nl': 'Postquantumcryptografie', // uncertain:
+    'pl': 'Kryptografia postkwantowa', // uncertain:
+    'ro': 'Criptografie post-cuantică', // uncertain:
+    'cs': 'Postkvantová kryptografie', // uncertain:
+    'sk': 'Postkvantová kryptografia', // uncertain:
+    'hr': 'Postkvantna kriptografija', // uncertain:
+    'bg': 'Постквантова криптография', // uncertain:
+    'el': 'Μετα-κβαντική κρυπτογραφία', // uncertain:
+    'da': 'Postkvantekryptografi', // uncertain:
+    'fi': 'Kvanttijälkeinen kryptografia', // uncertain:
+    'no': 'Postkvantekryptografi', // uncertain:
+    'uk': 'Постквантова криптографія', // uncertain:
+    'ru': 'Постквантовая криптография', // uncertain:
+    'tr': 'Kuantum sonrası kriptografi', // uncertain:
+    'zh': '后量子密码学', // uncertain:
+    'ja': 'ポスト量子暗号', // uncertain:
+    'ko': '포스트 양자 암호', // uncertain:
+    'hi': 'पोस्ट-क्वांटम क्रिप्टोग्राफी', // uncertain:
+    'th': 'การเข้ารหัสโพสต์ควอนตัม', // uncertain:
+    'vi': 'Mật mã hậu lượng tử', // uncertain:
+    'id': 'Kriptografi pasca-kuantum', // uncertain:
+    'ms': 'Kriptografi pasca-kuantum', // uncertain:
+  },
+  'security_enabled': {
+    'de': 'Aktiv',
+    'en': 'Active',
+    'es': 'Activo', // uncertain:
+    'hu': 'Aktív', // uncertain:
+    'sv': 'Aktiv', // uncertain:
+    'ar': 'نشط', // uncertain:
+    'he': 'פעיל', // uncertain:
+    'fa': 'فعال', // uncertain:
+    'fr': 'Actif', // uncertain:
+    'it': 'Attivo', // uncertain:
+    'pt': 'Ativo', // uncertain:
+    'nl': 'Actief', // uncertain:
+    'pl': 'Aktywne', // uncertain:
+    'ro': 'Activ', // uncertain:
+    'cs': 'Aktivní', // uncertain:
+    'sk': 'Aktívne', // uncertain:
+    'hr': 'Aktivno', // uncertain:
+    'bg': 'Активно', // uncertain:
+    'el': 'Ενεργό', // uncertain:
+    'da': 'Aktiv', // uncertain:
+    'fi': 'Aktiivinen', // uncertain:
+    'no': 'Aktiv', // uncertain:
+    'uk': 'Активно', // uncertain:
+    'ru': 'Активно', // uncertain:
+    'tr': 'Etkin', // uncertain:
+    'zh': '已启用', // uncertain:
+    'ja': '有効', // uncertain:
+    'ko': '활성', // uncertain:
+    'hi': 'सक्रिय', // uncertain:
+    'th': 'ใช้งานอยู่', // uncertain:
+    'vi': 'Đang hoạt động', // uncertain:
+    'id': 'Aktif', // uncertain:
+    'ms': 'Aktif', // uncertain:
+  },
+
 };

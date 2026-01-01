@@ -2,6 +2,10 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:cleona/core/calls/group_call_session.dart';
+import 'package:cleona/core/calls/collaboration/whiteboard_manager.dart';
+import 'package:cleona/core/calls/collaboration/call_chat_manager.dart';
+import 'package:cleona/core/calls/collaboration/call_file_manager.dart';
+import 'package:cleona/core/calls/collaboration/screen_share_manager.dart';
 import 'package:cleona/core/calls/lan_multicast.dart';
 import 'package:cleona/core/calls/media_relay.dart';
 import 'package:cleona/core/calls/rtt_measurement.dart';
@@ -136,10 +140,10 @@ class GroupCallManager {
 
     _currentGroupCall = session;
     _ensureOwnSendKey(session); // §10.2.1 per-sender media key
+    _initCollaboration(session); // §10.5 in-call collaboration
 
     // Send CALL_INVITE to each member (KEM-encrypted individually, fan-out
     // to all of each member's authorized devices via sendToUser).
-    // TODO(v3-sub-message): swap to `CallInviteV3` once defined.
     final invite = proto.CallInvite()
       ..callId = callId
       ..isGroupCall = true
@@ -182,7 +186,6 @@ class GroupCallManager {
     );
 
     // Send CALL_ANSWER to initiator (multi-device fan-out via sendToUser).
-    // TODO(v3-sub-message): swap to `CallAnswerV3` once defined.
     final answer = proto.CallAnswer()..callId = session.callId;
     await sendViaUser?.call(
       hexToBytes(session.initiatorHex),
@@ -191,6 +194,7 @@ class GroupCallManager {
     );
 
     _setupRttAndHealth(session);
+    _initCollaboration(session); // §10.5 in-call collaboration
     // §10.2.1: announce our send_key to everyone already joined (the
     // initiator, plus any earlier joiners). They reciprocate via the handler.
     await _announceSendKeyToAllJoined(session);
@@ -205,7 +209,6 @@ class GroupCallManager {
 
     session.state = GroupCallState.ended;
 
-    // TODO(v3-sub-message): swap to `CallRejectV3` once defined.
     final reject = proto.CallReject()
       ..callId = session.callId
       ..reason = reason;
@@ -231,10 +234,25 @@ class GroupCallManager {
     _unregisterLiveMediaDevice(session, nodeIdHex);
     _log.info('Participant left: ${nodeIdHex.substring(0, 8)}');
 
-    // Rebuild tree (member left) — initiator only.
-    if (session.state == GroupCallState.inCall && session.isInitiator) {
+    // Rebuild tree (member left) — owner only.
+    if (session.state == GroupCallState.inCall && session.isOwner(identity.userIdHex)) {
       session.tree.removeParticipant(nodeIdHex);
       _broadcastTreeUpdate(session);
+    }
+
+    // Owner transfer: if the departing participant was the tree owner,
+    // elect a new owner deterministically (lowest lexicographic joined id).
+    if (nodeIdHex == session.ownerHex) {
+      final joined = session.joinedParticipantIds..sort();
+      if (joined.isNotEmpty) {
+        final newOwner = joined.first;
+        _log.info('Owner transfer: ${nodeIdHex.substring(0, 8)} -> '
+            '${newOwner.substring(0, 8)}');
+        session.ownerHex = newOwner;
+        if (newOwner == identity.userIdHex) {
+          _rebuildTree(session);
+        }
+      }
     }
 
     // End call if less than 2 participants remain, else apply forward secrecy.
@@ -327,7 +345,6 @@ class GroupCallManager {
     if (session == null) return;
 
     // Notify all joined participants via setup-path sendToUser fan-out.
-    // TODO(v3-sub-message): swap to `GroupCallLeaveV3` once defined.
     final leave = proto.GroupCallLeave()..callId = session.callId;
     final payload = leave.writeToBuffer();
 
@@ -344,6 +361,43 @@ class GroupCallManager {
     _log.info('Left group call: ${session.callIdHex.substring(0, 8)}');
   }
 
+  /// Attempt to rejoin a group call after connection loss.
+  /// Sends CALL_REJOIN to all joined participants, re-announces send key.
+  Future<void> rejoinGroupCall() async {
+    final session = _currentGroupCall;
+    if (session == null) return;
+    if (session.state == GroupCallState.ended) return;
+
+    // Mark self as joined again
+    session.state = GroupCallState.inCall;
+    final self = session.participants[identity.userIdHex];
+    if (self != null) {
+      self.state = ParticipantState.joined;
+      self.joinedAt = DateTime.now();
+    }
+
+    // Send CALL_REJOIN to all joined participants
+    final rejoin = proto.CallRejoin()..callId = session.callId;
+    final payload = rejoin.writeToBuffer();
+    for (final pId in session.joinedParticipantIds) {
+      if (pId == identity.userIdHex) continue;
+      await sendViaUser?.call(
+        hexToBytes(pId),
+        proto.MessageTypeV3.MTV3_CALL_REJOIN,
+        payload,
+      );
+    }
+
+    // Re-announce our send key (no global rotation -- authorized set unchanged)
+    session.announcedSendKeyTo.clear();
+    await _announceSendKeyToAllJoined(session);
+
+    // Restart RTT and health monitoring
+    _setupRttAndHealth(session);
+
+    _log.info('Rejoined group call: ${session.callIdHex.substring(0, 8)}');
+  }
+
   void _endCall(GroupCallSession session) {
     session.state = GroupCallState.ended;
     onGroupCallEnded?.call(session.toGroupCallInfo());
@@ -358,6 +412,11 @@ class GroupCallManager {
     _treeRebuildDebounce?.cancel();
     _treeRebuildDebounce = null;
     _currentGroupCall?.relay?.clear();
+    // §10.5 Collaboration cleanup
+    _currentGroupCall?.whiteboard?.dispose();
+    _currentGroupCall?.callChat?.dispose();
+    _currentGroupCall?.fileManager?.dispose();
+    _currentGroupCall?.screenShare?.dispose();
     final session = _currentGroupCall;
     if (session != null) _unregisterAllLiveMediaDevices(session);
     _currentGroupCall = null;
@@ -367,7 +426,7 @@ class GroupCallManager {
   // ── Tree Construction (initiator only) ──────────────────────────────
 
   void _rebuildTree(GroupCallSession session) {
-    if (!session.isInitiator) return;
+    if (!session.isOwner(identity.userIdHex)) return;
 
     final participants = session.joinedParticipantIds;
     if (participants.length < 2) return;
@@ -418,7 +477,7 @@ class GroupCallManager {
         onParticipantChanged?.call(crashedHex, ParticipantState.crashed);
         _participantRouteCache.remove(crashedHex);
         _log.info('Participant crashed: ${crashedHex.substring(0, 8)}');
-        if (session.isInitiator) {
+        if (session.isOwner(identity.userIdHex)) {
           session.tree.handleCrash(crashedHex);
           _broadcastTreeUpdate(session);
           // No key rotation on crash (per architecture)
@@ -428,7 +487,7 @@ class GroupCallManager {
   }
 
   Future<void> _broadcastTreeUpdate(GroupCallSession session) async {
-    if (!session.isInitiator) return;
+    if (!session.isOwner(identity.userIdHex)) return;
     session.tree.version++;
 
     final nodeList = session.tree.toNodeList();
@@ -451,7 +510,7 @@ class GroupCallManager {
 
     // Tree update is live-media-class (per-call ephemeral, AMBIG-A3 = DEVICE
     // — high frequency on dynamic membership). Send via sendToDevice over
-    // the per-call cached route. TODO(v3-sub-message): `CallTreeUpdateV3`.
+    // the per-call cached route.
     final payload = update.writeToBuffer();
     for (final pId in session.joinedParticipantIds) {
       if (pId == identity.userIdHex) continue;
@@ -489,7 +548,6 @@ class GroupCallManager {
     for (final pId in session.joinedParticipantIds) {
       if (pId == identity.userIdHex) continue;
       final ts = session.rtt!.createPing(pId);
-      // TODO(v3-sub-message): swap to `CallRttPingV3` once defined.
       final ping = proto.CallRttPing()
         ..callId = session.callId
         ..timestampUs = Int64(ts);
@@ -659,6 +717,23 @@ class GroupCallManager {
     final participant = session.participants[senderHex];
     if (participant == null) return;
 
+    // Enforce participant limit (Phase 3c): reject if we are already at max.
+    final currentJoined = session.joinedParticipantIds.length;
+    if (currentJoined >= maxParticipants) {
+      _log.info('Group call full ($currentJoined/$maxParticipants), '
+          'rejecting ${senderHex.substring(0, 8)}');
+      participant.state = ParticipantState.left;
+      final reject = proto.CallReject()
+        ..callId = session.callId
+        ..reason = 'full';
+      sendViaUser?.call(
+        hexToBytes(senderHex),
+        proto.MessageTypeV3.MTV3_CALL_REJECT,
+        reject.writeToBuffer(),
+      );
+      return;
+    }
+
     participant.state = ParticipantState.joined;
     participant.joinedAt = DateTime.now();
     onParticipantChanged?.call(senderHex, ParticipantState.joined);
@@ -784,7 +859,7 @@ class GroupCallManager {
     _log.info('Participant rejoined V3: ${senderHex.substring(0, 8)} '
         '(device=${bytesToHex(senderDeviceId).substring(0, 8)}, no global rotation)');
 
-    if (session.isInitiator) {
+    if (session.isOwner(identity.userIdHex)) {
       _scheduleTreeRebuild(session);
     }
     // §10.2.1: re-announce our send_key to the rejoiner (they re-announce
@@ -797,7 +872,7 @@ class GroupCallManager {
   ///
   /// Live-class frame per §10.4.5 (high-frequency on dynamic membership) —
   /// no zstd / no ML-DSA on the wire; receive-side parses + applies the
-  /// new tree directly. Only accepts updates from the call's initiator.
+  /// new tree directly. Only accepts updates from the current tree owner.
   void handleCallTreeUpdateV3(
     proto.ApplicationFrameV3 frame,
     Uint8List senderDeviceId,
@@ -816,7 +891,7 @@ class GroupCallManager {
     if (!_callIdMatches(session.callId, update.callId)) return;
 
     final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-    if (senderHex != session.initiatorHex) return;
+    if (senderHex != session.ownerHex) return;
 
     if (update.version <= session.tree.version) return;
 
@@ -1032,7 +1107,6 @@ class GroupCallManager {
         return;
       }
 
-      // TODO(v3-sub-message): swap to `CallRejectV3` once defined.
       final reject = proto.CallReject()
         ..callId = invite.callId
         ..reason = reason;
@@ -1252,11 +1326,206 @@ class GroupCallManager {
     }
   }
 
+  /// Maximum number of participants in a group call (Phase 3c Full Mesh MVP).
+  static const int maxParticipants = 8;
+
+  /// Update a participant's audio level (called from CallService when
+  /// AudioMixer reports levels).
+  void updateParticipantAudioLevel(String nodeIdHex, double level) {
+    final session = _currentGroupCall;
+    if (session == null) return;
+    final participant = session.participants[nodeIdHex];
+    if (participant == null) return;
+    participant.audioLevel = level;
+  }
+
+  /// Update a participant's mute state (inferred from sustained silence).
+  void updateParticipantMuteState(String nodeIdHex, bool isMuted) {
+    final session = _currentGroupCall;
+    if (session == null) return;
+    final participant = session.participants[nodeIdHex];
+    if (participant == null) return;
+    participant.isMuted = isMuted;
+  }
+
   bool _callIdMatches(Uint8List a, List<int> b) {
     if (a.length != b.length) return false;
     for (var i = 0; i < a.length; i++) {
       if (a[i] != b[i]) return false;
     }
     return true;
+  }
+
+  // ── §10.5 In-Call Collaboration ───────────────────────────────────
+
+  /// UI callbacks for collaboration state changes.
+  void Function()? onCollaborationChanged;
+
+  /// Initialize all collaboration managers for a call session.
+  void _initCollaboration(GroupCallSession session) {
+    final profileDir = _log.profileDir ?? '';
+
+    session.whiteboard = WhiteboardManager(
+      ownUserIdHex: identity.userIdHex,
+      ownDisplayName: identity.displayName,
+      profileDir: profileDir,
+    );
+    session.whiteboard!.onSendToAll = (type, payload) {
+      _sendCollaborationToAll(session, type, payload);
+    };
+
+    session.callChat = CallChatManager(
+      ownUserIdHex: identity.userIdHex,
+      ownDisplayName: identity.displayName,
+      profileDir: profileDir,
+    );
+    session.callChat!.onSendToAll = (type, payload) {
+      _sendCollaborationToAll(session, type, payload);
+    };
+
+    session.fileManager = CallFileManager(
+      ownUserIdHex: identity.userIdHex,
+      ownDisplayName: identity.displayName,
+      profileDir: profileDir,
+    );
+    session.fileManager!.onSendToAll = (type, payload) {
+      _sendCollaborationToAll(session, type, payload);
+    };
+
+    session.screenShare = ScreenShareManager(
+      ownUserIdHex: identity.userIdHex,
+      profileDir: profileDir,
+    );
+    session.screenShare!.onSendToAll = (type, payload) {
+      _sendCollaborationToAll(session, type, payload);
+    };
+
+    _log.info('Collaboration managers initialized');
+  }
+
+  /// Send collaboration data to all joined participants via live-media path.
+  void _sendCollaborationToAll(
+    GroupCallSession session,
+    proto.MessageTypeV3 type,
+    Uint8List payload,
+  ) {
+    for (final pId in session.joinedParticipantIds) {
+      if (pId == identity.userIdHex) continue;
+      _sendLiveMediaToParticipant(pId, type, payload);
+    }
+  }
+
+  /// V3 receive-handler for MTV3_WHITEBOARD_STROKE.
+  void handleWhiteboardStrokeV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.whiteboard == null) return;
+
+    try {
+      final stroke = proto.WhiteboardStroke.fromBuffer(frame.payload);
+      session.whiteboard!.handleRemoteStroke(stroke);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('Whiteboard stroke parse error: $e');
+    }
+  }
+
+  /// V3 receive-handler for MTV3_WHITEBOARD_PAGE.
+  void handleWhiteboardPageV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.whiteboard == null) return;
+
+    try {
+      final page = proto.WhiteboardPage.fromBuffer(frame.payload);
+      session.whiteboard!.handleRemotePage(page);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('Whiteboard page parse error: $e');
+    }
+  }
+
+  /// V3 receive-handler for MTV3_CALL_CHAT.
+  void handleCallChatV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.callChat == null) return;
+
+    try {
+      final msg = proto.CallChatMessage.fromBuffer(frame.payload);
+      session.callChat!.handleRemoteMessage(msg);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('Call chat parse error: $e');
+    }
+  }
+
+  /// V3 receive-handler for MTV3_FILE_EXCHANGE.
+  void handleFileExchangeV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.fileManager == null) return;
+
+    try {
+      final share = proto.CallFileShare.fromBuffer(frame.payload);
+      session.fileManager!.handleRemoteFileShare(share);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('File exchange parse error: $e');
+    }
+  }
+
+  /// V3 receive-handler for MTV3_CLIPBOARD_EXCHANGE.
+  void handleClipboardExchangeV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.fileManager == null) return;
+
+    try {
+      final exchange = proto.CallClipboardExchange.fromBuffer(frame.payload);
+      session.fileManager!.handleRemoteClipboard(exchange);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('Clipboard exchange parse error: $e');
+    }
+  }
+
+  /// V3 receive-handler for MTV3_SCREEN_SHARE_FRAME.
+  void handleScreenShareV3(
+    proto.ApplicationFrameV3 frame,
+    Uint8List senderDeviceId,
+    SenderIdentitySnapshot? snapshot,
+  ) {
+    final session = _currentGroupCall;
+    if (session == null || session.state != GroupCallState.inCall) return;
+    if (session.screenShare == null) return;
+
+    try {
+      final control = proto.ScreenShareControl.fromBuffer(frame.payload);
+      session.screenShare!.handleRemoteControl(control);
+      onCollaborationChanged?.call();
+    } catch (e) {
+      _log.debug('Screen share control parse error: $e');
+    }
   }
 }

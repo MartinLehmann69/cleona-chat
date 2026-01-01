@@ -377,6 +377,7 @@ class ChannelModerationService {
         channelIdHex: channelIdHex,
         name: channel.name,
         language: channel.language,
+        category: channel.category,
         isAdult: channel.isAdult,
         description: channel.description,
         subscriberCount: channel.members.length,

@@ -234,6 +234,13 @@ jobs:
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 
+      - name: Run smoke tests
+        continue-on-error: true
+        run: |
+          dart test test/smoke/ --reporter expanded \
+            --exclude-tags=needs-native \
+            || echo "::warning::Some smoke tests failed"
+
       - name: Diagnose Runner binary symbols
         if: always()
         run: |

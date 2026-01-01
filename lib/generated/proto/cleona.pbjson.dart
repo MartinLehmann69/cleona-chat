@@ -2453,6 +2453,109 @@ final $typed_data.Uint8List groupCallSenderKeyDescriptor = $convert.base64Decode
     '9ub2RlX2lkGAIgASgMUgxzZW5kZXJOb2RlSWQSGQoIc2VuZF9rZXkYAyABKAxSB3NlbmRLZXkS'
     'HwoLa2V5X3ZlcnNpb24YBCABKA1SCmtleVZlcnNpb24=');
 
+@$core.Deprecated('Use whiteboardStrokeDescriptor instead')
+const WhiteboardStroke$json = {
+  '1': 'WhiteboardStroke',
+  '2': [
+    {'1': 'stroke_id', '3': 1, '4': 1, '5': 12, '10': 'strokeId'},
+    {'1': 'author_id', '3': 2, '4': 1, '5': 12, '10': 'authorId'},
+    {'1': 'author_name', '3': 3, '4': 1, '5': 9, '10': 'authorName'},
+    {'1': 'tool', '3': 4, '4': 1, '5': 5, '10': 'tool'},
+    {'1': 'color', '3': 5, '4': 1, '5': 5, '10': 'color'},
+    {'1': 'stroke_width', '3': 6, '4': 1, '5': 2, '10': 'strokeWidth'},
+    {'1': 'points', '3': 7, '4': 3, '5': 2, '10': 'points'},
+    {'1': 'text', '3': 8, '4': 1, '5': 9, '10': 'text'},
+    {'1': 'shape_type', '3': 9, '4': 1, '5': 5, '10': 'shapeType'},
+    {'1': 'timestamp', '3': 10, '4': 1, '5': 3, '10': 'timestamp'},
+    {'1': 'action_type', '3': 11, '4': 1, '5': 5, '10': 'actionType'},
+    {'1': 'page_index', '3': 12, '4': 1, '5': 5, '10': 'pageIndex'},
+  ],
+};
+
+/// Descriptor for `WhiteboardStroke`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List whiteboardStrokeDescriptor = $convert.base64Decode('');
+
+@$core.Deprecated('Use whiteboardPageDescriptor instead')
+const WhiteboardPage$json = {
+  '1': 'WhiteboardPage',
+  '2': [
+    {'1': 'action', '3': 1, '4': 1, '5': 5, '10': 'action'},
+    {'1': 'page_index', '3': 2, '4': 1, '5': 5, '10': 'pageIndex'},
+    {'1': 'total_pages', '3': 3, '4': 1, '5': 5, '10': 'totalPages'},
+    {'1': 'strokes', '3': 4, '4': 3, '5': 11, '6': '.cleona.WhiteboardStroke', '10': 'strokes'},
+    {'1': 'requester_id', '3': 5, '4': 1, '5': 12, '10': 'requesterId'},
+  ],
+};
+
+/// Descriptor for `WhiteboardPage`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List whiteboardPageDescriptor = $convert.base64Decode('');
+
+@$core.Deprecated('Use callFileShareDescriptor instead')
+const CallFileShare$json = {
+  '1': 'CallFileShare',
+  '2': [
+    {'1': 'file_id', '3': 1, '4': 1, '5': 12, '10': 'fileId'},
+    {'1': 'file_name', '3': 2, '4': 1, '5': 9, '10': 'fileName'},
+    {'1': 'file_size', '3': 3, '4': 1, '5': 3, '10': 'fileSize'},
+    {'1': 'mime_type', '3': 4, '4': 1, '5': 9, '10': 'mimeType'},
+    {'1': 'thumbnail_data', '3': 5, '4': 1, '5': 12, '10': 'thumbnailData'},
+    {'1': 'shared_by', '3': 6, '4': 1, '5': 12, '10': 'sharedBy'},
+    {'1': 'shared_by_name', '3': 7, '4': 1, '5': 9, '10': 'sharedByName'},
+    {'1': 'action', '3': 8, '4': 1, '5': 5, '10': 'action'},
+  ],
+};
+
+/// Descriptor for `CallFileShare`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List callFileShareDescriptor = $convert.base64Decode('');
+
+@$core.Deprecated('Use callClipboardExchangeDescriptor instead')
+const CallClipboardExchange$json = {
+  '1': 'CallClipboardExchange',
+  '2': [
+    {'1': 'sender_id', '3': 1, '4': 1, '5': 12, '10': 'senderId'},
+    {'1': 'sender_name', '3': 2, '4': 1, '5': 9, '10': 'senderName'},
+    {'1': 'text_content', '3': 3, '4': 1, '5': 9, '10': 'textContent'},
+    {'1': 'image_data', '3': 4, '4': 1, '5': 12, '10': 'imageData'},
+    {'1': 'content_type', '3': 5, '4': 1, '5': 9, '10': 'contentType'},
+    {'1': 'timestamp', '3': 6, '4': 1, '5': 3, '10': 'timestamp'},
+  ],
+};
+
+/// Descriptor for `CallClipboardExchange`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List callClipboardExchangeDescriptor = $convert.base64Decode('');
+
+@$core.Deprecated('Use screenShareControlDescriptor instead')
+const ScreenShareControl$json = {
+  '1': 'ScreenShareControl',
+  '2': [
+    {'1': 'is_sharing', '3': 1, '4': 1, '5': 8, '10': 'isSharing'},
+    {'1': 'width', '3': 2, '4': 1, '5': 5, '10': 'width'},
+    {'1': 'height', '3': 3, '4': 1, '5': 5, '10': 'height'},
+    {'1': 'fps', '3': 4, '4': 1, '5': 5, '10': 'fps'},
+    {'1': 'optimize_for_text', '3': 5, '4': 1, '5': 8, '10': 'optimizeForText'},
+    {'1': 'sharer_id', '3': 6, '4': 1, '5': 12, '10': 'sharerId'},
+  ],
+};
+
+/// Descriptor for `ScreenShareControl`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List screenShareControlDescriptor = $convert.base64Decode('');
+
+@$core.Deprecated('Use callChatMessageDescriptor instead')
+const CallChatMessage$json = {
+  '1': 'CallChatMessage',
+  '2': [
+    {'1': 'message_id', '3': 1, '4': 1, '5': 12, '10': 'messageId'},
+    {'1': 'sender_id', '3': 2, '4': 1, '5': 12, '10': 'senderId'},
+    {'1': 'sender_name', '3': 3, '4': 1, '5': 9, '10': 'senderName'},
+    {'1': 'text', '3': 4, '4': 1, '5': 9, '10': 'text'},
+    {'1': 'timestamp', '3': 5, '4': 1, '5': 3, '10': 'timestamp'},
+    {'1': 'reply_to_id', '3': 6, '4': 1, '5': 12, '10': 'replyToId'},
+  ],
+};
+
+/// Descriptor for `CallChatMessage`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List callChatMessageDescriptor = $convert.base64Decode('');
+
 @$core.Deprecated('Use voicePayloadDescriptor instead')
 const VoicePayload$json = {
   '1': 'VoicePayload',

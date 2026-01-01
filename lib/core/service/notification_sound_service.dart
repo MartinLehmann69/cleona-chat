@@ -325,6 +325,20 @@ class NotificationSoundService {
     await _playOnce('connected.ogg');
   }
 
+  /// Play short tone when a participant joins a group call.
+  /// Reuses connected.ogg — a dedicated sound file can be added later.
+  Future<void> playParticipantJoined() async {
+    if (!_settings.soundEnabled) return;
+    await _playOnce('connected.ogg');
+  }
+
+  /// Play short tone when a participant leaves a group call.
+  /// Reuses connected.ogg — a dedicated sound file can be added later.
+  Future<void> playParticipantLeft() async {
+    if (!_settings.soundEnabled) return;
+    await _playOnce('connected.ogg');
+  }
+
   /// Preview a ringtone (for settings UI).
   Future<void> previewRingtone(Ringtone ringtone) async {
     _log.debug('previewRingtone: ${ringtone.name} → ${ringtone.filename}');

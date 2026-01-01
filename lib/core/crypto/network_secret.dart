@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 
@@ -204,7 +205,7 @@ class NetworkSecret {
       Uint8List secretBytes, Uint8List tag, Uint8List payload) {
     final expected =
         _truncate(_computeHmacFull(secretBytes, payload), networkTagLength);
-    return _ctEquals(tag, expected);
+    return constantTimeEquals(tag, expected);
   }
 
   /// Compute full 32-byte HMAC-SHA256 with a specific secret. Internal — most
@@ -232,18 +233,8 @@ class NetworkSecret {
     final expected =
         _truncate(_computeHmacFull(secretBytes, payload), hmacPrefixLength);
     if (hmacBytes.length < hmacPrefixLength) return false;
-    return _ctEquals(
+    return constantTimeEquals(
         Uint8List.fromList(hmacBytes.sublist(0, hmacPrefixLength)), expected);
-  }
-
-  /// Constant-time equality on equal-length Uint8Lists.
-  static bool _ctEquals(Uint8List a, Uint8List b) {
-    if (a.length != b.length) return false;
-    var diff = 0;
-    for (var i = 0; i < a.length; i++) {
-      diff |= a[i] ^ b[i];
-    }
-    return diff == 0;
   }
 
   /// Prepend 8-byte HMAC to a packet payload.

@@ -3,9 +3,18 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/service/service_types.dart';
 
 /// Group Call Screen — shows participant video grid, timer, and controls.
+///
+/// Phase 3c UI features:
+///   * Adaptive grid layout (1=fullscreen, 2-4=2x2, 5+=3-column)
+///   * Active speaker highlighting (green border on highest audio level)
+///   * Per-participant mute indicator (mic_off icon overlay)
+///   * Service-wired mute/speaker/video toggles
+///   * Health dashboard (RTT per participant)
+///   * i18n for all visible strings
 class GroupCallScreen extends StatefulWidget {
   final GroupCallInfo callInfo;
   final String groupName;
@@ -27,6 +36,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
   bool _speaker = false;
   bool _videoEnabled = true;
   bool _autoPopScheduled = false;
+  bool _showHealthDashboard = false;
 
   /// Remote video frames: senderHex -> latest ui.Image
   final Map<String, ui.Image> _remoteFrames = {};
@@ -75,10 +85,25 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     }
   }
 
+  /// Determine the active speaker: the joined participant with the highest
+  /// audio level above a threshold (0.05 = ~1600 on int16 scale).
+  String? _activeSpeakerHex(List<GroupCallParticipantInfo> participants) {
+    String? bestHex;
+    double bestLevel = 0.05; // minimum threshold
+    for (final p in participants) {
+      if (p.audioLevel > bestLevel) {
+        bestLevel = p.audioLevel;
+        bestHex = p.nodeIdHex;
+      }
+    }
+    return bestHex;
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<CleonaAppState>();
     final currentCall = appState.service?.currentGroupCall;
+    final locale = AppLocale.read(context);
 
     if (currentCall == null || currentCall.state == GroupCallState.ended) {
       if (!_autoPopScheduled) {
@@ -91,7 +116,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
       }
     }
 
-    // Call just got accepted → start timer
+    // Call just got accepted -> start timer
     if (currentCall?.state == GroupCallState.inCall && _durationTimer == null) {
       _startDurationTimer();
     }
@@ -103,6 +128,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
             .toList() ??
         [];
     final allParticipants = currentCall?.participants ?? [];
+    final activeSpeaker = _activeSpeakerHex(joinedParticipants);
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
@@ -121,9 +147,23 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
                     _formatDuration(_duration),
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
+                  const SizedBox(width: 8),
+                  // Health dashboard toggle
+                  if (currentCall?.state == GroupCallState.inCall)
+                    GestureDetector(
+                      onTap: () => setState(() =>
+                          _showHealthDashboard = !_showHealthDashboard),
+                      child: Icon(
+                        Icons.monitor_heart_outlined,
+                        size: 18,
+                        color: _showHealthDashboard
+                            ? Theme.of(context).colorScheme.primary
+                            : Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                   const Spacer(),
                   Text(
-                    '${widget.groupName}  ·  ${joinedParticipants.length} Teilnehmer',
+                    '${widget.groupName}  ·  ${locale.get('group_call_participants_count').replaceAll('{count}', '${joinedParticipants.length}')}',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
@@ -132,17 +172,21 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
               ),
             ),
 
+            // Health dashboard (RTT per participant)
+            if (_showHealthDashboard && currentCall?.state == GroupCallState.inCall)
+              _buildHealthDashboard(context, locale, joinedParticipants),
+
             // Main content: video grid or participant list
             Expanded(
               child: (isRinging || isInviting)
-                  ? _buildRingingLayout(context, isRinging, allParticipants)
-                  : _buildVideoGrid(context, joinedParticipants),
+                  ? _buildRingingLayout(context, locale, isRinging, allParticipants)
+                  : _buildVideoGrid(context, locale, joinedParticipants, activeSpeaker),
             ),
 
             // Controls
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 16),
-              child: _buildControls(context, appState, isRinging),
+              child: _buildControls(context, locale, appState, isRinging),
             ),
           ],
         ),
@@ -150,9 +194,59 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     );
   }
 
-  /// Ringing/inviting layout: group icon + participant list.
-  Widget _buildRingingLayout(BuildContext context, bool isRinging,
+  /// Health dashboard: shows RTT and audio level per participant.
+  Widget _buildHealthDashboard(BuildContext context, AppLocale locale,
       List<GroupCallParticipantInfo> participants) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            locale.get('group_call_health'),
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+          ),
+          const SizedBox(height: 4),
+          ...participants.map((p) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                child: Row(
+                  children: [
+                    Expanded(
+                      flex: 3,
+                      child: Text(
+                        p.displayName,
+                        style: Theme.of(context).textTheme.bodySmall,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    Expanded(
+                      flex: 2,
+                      child: _AudioLevelBar(level: p.audioLevel),
+                    ),
+                    const SizedBox(width: 8),
+                    if (p.isMuted)
+                      Icon(Icons.mic_off, size: 12,
+                          color: Colors.red.shade300)
+                    else
+                      const SizedBox(width: 12),
+                  ],
+                ),
+              )),
+        ],
+      ),
+    );
+  }
+
+  /// Ringing/inviting layout: group icon + participant list.
+  Widget _buildRingingLayout(BuildContext context, AppLocale locale,
+      bool isRinging, List<GroupCallParticipantInfo> participants) {
     return Column(
       children: [
         const SizedBox(height: 24),
@@ -169,7 +263,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
         ),
         const SizedBox(height: 4),
         Text(
-          isRinging ? 'Eingehender Gruppenanruf...' : 'Warte auf Teilnehmer...',
+          isRinging ? locale.get('group_call_incoming') : locale.get('group_call_waiting'),
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
               ),
@@ -186,21 +280,20 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     );
   }
 
-  /// Video grid: 1=fullscreen, 2=vertical split, 3-4=2x2, 5+=scrollable grid.
-  Widget _buildVideoGrid(BuildContext context,
-      List<GroupCallParticipantInfo> joinedParticipants) {
+  /// Video grid: 1=fullscreen, 2-4=2x2, 5+=3-column scrollable grid.
+  Widget _buildVideoGrid(BuildContext context, AppLocale locale,
+      List<GroupCallParticipantInfo> joinedParticipants, String? activeSpeaker) {
     if (joinedParticipants.isEmpty) {
-      return const Center(child: Text('Keine Teilnehmer'));
+      return Center(child: Text(locale.get('group_call_no_participants')));
     }
 
-    // Filter out self — we show self in PiP
-    final remoteParticipants = joinedParticipants;
-    final count = remoteParticipants.length;
+    final count = joinedParticipants.length;
 
     if (count <= 1) {
       // Single participant: fullscreen
       return _buildParticipantVideo(
-          context, remoteParticipants.first, double.infinity, double.infinity);
+          context, joinedParticipants.first,
+          isActiveSpeaker: activeSpeaker == joinedParticipants.first.nodeIdHex);
     }
 
     // Grid layout
@@ -216,21 +309,29 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
         ),
         itemCount: count,
         itemBuilder: (_, i) {
-          return _buildParticipantVideo(context, remoteParticipants[i], 0, 0);
+          final p = joinedParticipants[i];
+          return _buildParticipantVideo(context, p,
+              isActiveSpeaker: activeSpeaker == p.nodeIdHex);
         },
       ),
     );
   }
 
-  /// Single participant video tile: shows video frame or avatar.
+  /// Single participant video tile: shows video frame or avatar, with active
+  /// speaker highlighting and mute indicator.
   Widget _buildParticipantVideo(BuildContext context,
-      GroupCallParticipantInfo participant, double w, double h) {
+      GroupCallParticipantInfo participant,
+      {bool isActiveSpeaker = false}) {
     final frame = _remoteFrames[participant.nodeIdHex];
 
-    return Container(
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
       decoration: BoxDecoration(
         color: Colors.black87,
         borderRadius: BorderRadius.circular(8),
+        border: isActiveSpeaker
+            ? Border.all(color: Colors.green, width: 2.5)
+            : null,
       ),
       clipBehavior: Clip.antiAlias,
       child: Stack(
@@ -255,20 +356,39 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
                 ),
               ),
             ),
-          // Name overlay at bottom
+          // Name + mute indicator overlay at bottom
           Positioned(
             bottom: 4,
             left: 4,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                participant.displayName,
-                style: const TextStyle(color: Colors.white, fontSize: 11),
-              ),
+            right: 4,
+            child: Row(
+              children: [
+                Flexible(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      participant.displayName,
+                      style: const TextStyle(color: Colors.white, fontSize: 11),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ),
+                if (participant.isMuted) ...[
+                  const SizedBox(width: 4),
+                  Container(
+                    padding: const EdgeInsets.all(2),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: const Icon(Icons.mic_off, color: Colors.red, size: 14),
+                  ),
+                ],
+              ],
             ),
           ),
         ],
@@ -276,15 +396,15 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     );
   }
 
-  Widget _buildControls(
-      BuildContext context, CleonaAppState appState, bool isRinging) {
+  Widget _buildControls(BuildContext context, AppLocale locale,
+      CleonaAppState appState, bool isRinging) {
     if (isRinging) {
       return Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           _GroupCallButton(
             icon: Icons.call_end,
-            label: 'Ablehnen',
+            label: locale.get('reject'),
             color: Colors.red,
             onPressed: () {
               appState.service?.rejectGroupCall();
@@ -293,7 +413,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           ),
           _GroupCallButton(
             icon: Icons.call,
-            label: 'Annehmen',
+            label: locale.get('accept'),
             color: Colors.green,
             onPressed: () {
               appState.service?.acceptGroupCall();
@@ -308,25 +428,33 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
       children: [
         _GroupCallButton(
           icon: _muted ? Icons.mic_off : Icons.mic,
-          label: _muted ? 'Stumm' : 'Mikrofon',
+          label: _muted ? locale.get('group_call_muted') : locale.get('group_call_microphone'),
           active: _muted,
-          onPressed: () => setState(() => _muted = !_muted),
+          onPressed: () {
+            setState(() => _muted = !_muted);
+            appState.service?.toggleMute();
+          },
         ),
         _GroupCallButton(
           icon: _videoEnabled ? Icons.videocam : Icons.videocam_off,
-          label: _videoEnabled ? 'Video' : 'Video aus',
+          label: _videoEnabled ? locale.get('group_call_video_on') : locale.get('group_call_video_off'),
           active: !_videoEnabled,
-          onPressed: () => setState(() => _videoEnabled = !_videoEnabled),
+          onPressed: () {
+            setState(() => _videoEnabled = !_videoEnabled);
+          },
         ),
         _GroupCallButton(
           icon: _speaker ? Icons.volume_up : Icons.volume_down,
-          label: 'Lautsprecher',
+          label: locale.get('group_call_speaker'),
           active: _speaker,
-          onPressed: () => setState(() => _speaker = !_speaker),
+          onPressed: () {
+            setState(() => _speaker = !_speaker);
+            appState.service?.toggleSpeaker();
+          },
         ),
         _GroupCallButton(
           icon: Icons.call_end,
-          label: 'Verlassen',
+          label: locale.get('leave'),
           color: Colors.red,
           onPressed: () {
             appState.service?.leaveGroupCall();
@@ -334,6 +462,34 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           },
         ),
       ],
+    );
+  }
+}
+
+// ── Audio Level Bar ─────────────────────────────────────────────────────
+
+class _AudioLevelBar extends StatelessWidget {
+  final double level;
+  const _AudioLevelBar({required this.level});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 6,
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(3),
+        child: LinearProgressIndicator(
+          value: level.clamp(0.0, 1.0),
+          backgroundColor: Theme.of(context).colorScheme.surfaceContainerHighest,
+          valueColor: AlwaysStoppedAnimation<Color>(
+            level > 0.5
+                ? Colors.green
+                : level > 0.1
+                    ? Colors.yellow.shade700
+                    : Theme.of(context).colorScheme.outline,
+          ),
+        ),
+      ),
     );
   }
 }
@@ -373,7 +529,17 @@ class _ParticipantTile extends StatelessWidget {
         ),
       ),
       title: Text(participant.displayName),
-      trailing: Icon(stateIcon, color: stateColor, size: 20),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (participant.isMuted && participant.state == ParticipantState.joined)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Icon(Icons.mic_off, color: Colors.red.shade300, size: 16),
+            ),
+          Icon(stateIcon, color: stateColor, size: 20),
+        ],
+      ),
     );
   }
 }

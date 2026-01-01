@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/calendar/sync/android_calendar_bridge.dart';
+import 'package:cleona/core/calendar/sync/caldav_discovery.dart';
 import 'package:cleona/core/calendar/sync/in_process_bridge.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
@@ -177,6 +178,7 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
     final locale = AppLocale.of(context);
     final caldavConfigured = _status['caldavConfigured'] == true;
     final googleConfigured = _status['googleConfigured'] == true;
+    final exchangeConfigured = _status['exchangeConfigured'] == true;
     final lastSyncMs = (_status['lastSyncMs'] as num?)?.toInt() ?? 0;
     final lastSyncOk = _status['lastSyncOk'] == true;
     final errorText = _status['lastError'] as String?;
@@ -245,7 +247,7 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
                               IconButton(
                                 icon: const Icon(Icons.sync),
                                 tooltip: locale.get('calendar_sync_trigger_now'),
-                                onPressed: (caldavConfigured || googleConfigured)
+                                onPressed: (caldavConfigured || googleConfigured || exchangeConfigured)
                                     ? _syncNow
                                     : null,
                               ),
@@ -278,6 +280,10 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
                   if (!_isOnAndroid) ...[
                     const SizedBox(height: 16),
                     _buildGoogleSection(locale, googleConfigured),
+                  ],
+                  if (!_isOnAndroid) ...[
+                    const SizedBox(height: 16),
+                    _buildExchangeSection(locale, exchangeConfigured),
                   ],
                   const SizedBox(height: 16),
                   _buildLocalIcsSection(locale),
@@ -789,6 +795,90 @@ class _CalendarSyncScreenState extends State<CalendarSyncScreen> {
       ),
     );
   }
+
+  Widget _buildExchangeSection(AppLocale locale, bool configured) {
+    final exchange = _status['exchange'] as Map?;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.business),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(locale.get('calendar_sync_exchange'),
+                      style: Theme.of(context).textTheme.titleMedium),
+                ),
+                Text(
+                  configured
+                      ? locale.get('calendar_sync_configured')
+                      : locale.get('calendar_sync_not_configured'),
+                  style: TextStyle(
+                    color: configured
+                        ? Colors.green
+                        : Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+            if (configured && exchange != null) ...[
+              const SizedBox(height: 8),
+              Text('${exchange['email']} (${exchange['authMode']})',
+                  style: Theme.of(context).textTheme.bodySmall),
+              Text('${locale.get('calendar_sync_direction')}: '
+                  '${_directionLabel(exchange['direction'] as String?, locale)}',
+                  style: Theme.of(context).textTheme.bodySmall),
+            ],
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                if (configured)
+                  TextButton.icon(
+                    icon: const Icon(Icons.link_off),
+                    label: Text(locale.get('calendar_sync_disconnect')),
+                    onPressed: _removeExchange,
+                  ),
+                FilledButton.icon(
+                  icon: const Icon(Icons.settings),
+                  label: Text(configured
+                      ? locale.get('calendar_edit_event')
+                      : locale.get('calendar_sync_connect')),
+                  onPressed: () => _openExchangeDialog(
+                      initial: configured
+                          ? (exchange?.cast<String, dynamic>() ?? {})
+                          : null),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _removeExchange() async {
+    final ipc = _ipc;
+    if (ipc == null) return;
+    try {
+      await ipc.removeExchangeSync();
+    } catch (_) {/* ignore */}
+    if (mounted) _refreshStatus();
+  }
+
+  void _openExchangeDialog({Map<String, dynamic>? initial}) {
+    showDialog(
+      context: context,
+      builder: (_) => _ExchangeDialog(
+        ipc: _ipc,
+        initial: initial,
+        onDone: _refreshStatus,
+      ),
+    );
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -820,6 +910,8 @@ class _CaldavDialogState extends State<_CaldavDialog> {
   String? _selectedCalendarUrl;
   bool _busy = false;
   String? _error;
+  bool _discovering = false;
+  List<DiscoveredCalDAVServer>? _discoveredServers;
 
   @override
   void initState() {
@@ -856,6 +948,28 @@ class _CaldavDialogState extends State<_CaldavDialog> {
     _user.dispose();
     _pw.dispose();
     super.dispose();
+  }
+
+  Future<void> _discoverOnNetwork() async {
+    setState(() {
+      _discovering = true;
+      _discoveredServers = null;
+      _error = null;
+    });
+    try {
+      final servers = await CalDAVDiscovery.discover();
+      if (!mounted) return;
+      setState(() {
+        _discovering = false;
+        _discoveredServers = servers;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _discovering = false;
+        _error = '$e';
+      });
+    }
   }
 
   Future<void> _discover() async {
@@ -931,6 +1045,111 @@ class _CaldavDialogState extends State<_CaldavDialog> {
                 ),
                 keyboardType: TextInputType.url,
               ),
+              const SizedBox(height: 4),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: _discovering
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 16, height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              locale.get('calendar_sync_caldav_discovering'),
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ],
+                        ),
+                      )
+                    : TextButton.icon(
+                        onPressed: _busy ? null : _discoverOnNetwork,
+                        icon: const Icon(Icons.wifi_find, size: 18),
+                        label: Text(
+                          locale.get('calendar_sync_caldav_discover_network'),
+                        ),
+                      ),
+              ),
+              if (_discoveredServers != null && _discoveredServers!.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    locale.get('calendar_sync_caldav_no_servers_found'),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.outline,
+                        ),
+                  ),
+                ),
+              if (_discoveredServers != null && _discoveredServers!.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        locale.get('calendar_sync_caldav_found_servers'),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                      ),
+                      const SizedBox(height: 4),
+                      for (final server in _discoveredServers!)
+                        InkWell(
+                          onTap: () {
+                            _server.text = server.url;
+                            setState(() => _discoveredServers = null);
+                          },
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 4),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  server.secure
+                                      ? Icons.lock
+                                      : Icons.lock_open,
+                                  size: 16,
+                                  color: server.secure
+                                      ? Theme.of(context).colorScheme.primary
+                                      : Theme.of(context).colorScheme.error,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      Text(
+                                        server.name,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodyMedium,
+                                      ),
+                                      Text(
+                                        server.url,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .bodySmall
+                                            ?.copyWith(
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .outline,
+                                            ),
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
               if (_showHttpWarning)
                 Padding(
                   padding: const EdgeInsets.only(top: 8),
@@ -1161,6 +1380,260 @@ class _GoogleDialogState extends State<_GoogleDialog> {
           icon: const Icon(Icons.login),
           label: Text(locale.get('calendar_sync_google_signin')),
           onPressed: _busy || _clientId.text.trim().isEmpty ? null : _signIn,
+        ),
+      ],
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Exchange (EWS) setup dialog
+// ════════════════════════════════════════════════════════════════════
+
+class _ExchangeDialog extends StatefulWidget {
+  final dynamic ipc;
+  final Map<String, dynamic>? initial;
+  final VoidCallback onDone;
+
+  const _ExchangeDialog({
+    required this.ipc,
+    required this.initial,
+    required this.onDone,
+  });
+
+  @override
+  State<_ExchangeDialog> createState() => _ExchangeDialogState();
+}
+
+class _ExchangeDialogState extends State<_ExchangeDialog> {
+  final _email = TextEditingController();
+  final _serverUrl = TextEditingController();
+  final _user = TextEditingController();
+  final _pw = TextEditingController();
+  final _clientId = TextEditingController();
+  String _direction = 'bidirectional';
+  bool _useOAuth = true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.initial != null) {
+      _email.text = widget.initial!['email'] as String? ?? '';
+      _serverUrl.text = widget.initial!['serverUrl'] as String? ?? '';
+      _direction = widget.initial!['direction'] as String? ?? 'bidirectional';
+      _useOAuth = widget.initial!['authMode'] == 'oauth2';
+    }
+  }
+
+  @override
+  void dispose() {
+    _email.dispose();
+    _serverUrl.dispose();
+    _user.dispose();
+    _pw.dispose();
+    _clientId.dispose();
+    super.dispose();
+  }
+
+  Future<void> _autodiscover() async {
+    final ipc = widget.ipc;
+    if (ipc == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final url = await ipc.ewsAutodiscover(email: _email.text.trim());
+      if (!mounted) return;
+      setState(() {
+        _serverUrl.text = url;
+        _busy = false;
+      });
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = '$e';
+      });
+    }
+  }
+
+  Future<void> _save() async {
+    final ipc = widget.ipc;
+    if (ipc == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      if (_useOAuth) {
+        // OAuth2: start browser-based consent flow.
+        final authUrl = await ipc.startExchangeOauth(
+          clientId: _clientId.text.trim(),
+          email: _email.text.trim(),
+          direction: _direction,
+        );
+        // Open system browser for user consent. The daemon will configure
+        // EWS automatically once the user completes the OAuth flow.
+        if (await canLaunchUrl(Uri.parse(authUrl))) {
+          await launchUrl(Uri.parse(authUrl),
+              mode: LaunchMode.externalApplication);
+        }
+        if (!mounted) return;
+        Navigator.pop(context);
+        widget.onDone();
+      } else {
+        // Basic auth: configure directly.
+        await ipc.configureExchange(
+          serverUrl: _serverUrl.text.trim(),
+          email: _email.text.trim(),
+          username: _user.text.trim(),
+          password: _pw.text,
+          direction: _direction,
+        );
+        if (!mounted) return;
+        Navigator.pop(context);
+        widget.onDone();
+      }
+    } catch (e) {
+      setState(() {
+        _busy = false;
+        _error = '$e';
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    return AlertDialog(
+      title: Text(locale.get('calendar_sync_exchange')),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _email,
+                decoration: InputDecoration(
+                  labelText: locale.get('calendar_sync_exchange_email'),
+                  hintText: 'user@company.com',
+                ),
+                keyboardType: TextInputType.emailAddress,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _serverUrl,
+                      decoration: InputDecoration(
+                        labelText: locale.get('calendar_sync_exchange_server_url'),
+                        hintText: 'https://outlook.office365.com/EWS/Exchange.asmx',
+                      ),
+                      keyboardType: TextInputType.url,
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.search),
+                    tooltip: locale.get('calendar_sync_exchange_autodiscover'),
+                    onPressed: _busy || _email.text.trim().isEmpty
+                        ? null
+                        : _autodiscover,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<bool>(
+                value: _useOAuth,
+                decoration: InputDecoration(
+                    labelText: locale.get('calendar_sync_exchange_auth_mode')),
+                items: [
+                  DropdownMenuItem(
+                    value: true,
+                    child: Text(locale.get('calendar_sync_exchange_oauth')),
+                  ),
+                  DropdownMenuItem(
+                    value: false,
+                    child: Text(locale.get('calendar_sync_exchange_basic')),
+                  ),
+                ],
+                onChanged: (v) => setState(() => _useOAuth = v ?? true),
+              ),
+              if (_useOAuth) ...[
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _clientId,
+                  decoration: InputDecoration(
+                    labelText: locale.get('calendar_sync_exchange_client_id'),
+                    hintText: 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+                  ),
+                ),
+              ] else ...[
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _user,
+                  decoration: InputDecoration(
+                      labelText: locale.get('calendar_sync_username')),
+                ),
+                TextField(
+                  controller: _pw,
+                  decoration: InputDecoration(
+                      labelText: locale.get('calendar_sync_password')),
+                  obscureText: true,
+                ),
+              ],
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                initialValue: _direction,
+                decoration: InputDecoration(
+                    labelText: locale.get('calendar_sync_direction')),
+                items: [
+                  DropdownMenuItem(
+                    value: 'bidirectional',
+                    child: Text(
+                        locale.get('calendar_sync_direction_bidirectional')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'import',
+                    child:
+                        Text(locale.get('calendar_sync_direction_import')),
+                  ),
+                  DropdownMenuItem(
+                    value: 'export',
+                    child:
+                        Text(locale.get('calendar_sync_direction_export')),
+                  ),
+                ],
+                onChanged: (v) =>
+                    setState(() => _direction = v ?? 'bidirectional'),
+              ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(_error!,
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.error)),
+                ),
+              if (_busy)
+                const Padding(
+                  padding: EdgeInsets.only(top: 8),
+                  child: LinearProgressIndicator(),
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.pop(context),
+          child: Text(locale.get('cancel')),
+        ),
+        FilledButton(
+          onPressed: _busy || _email.text.trim().isEmpty ? null : _save,
+          child: Text(locale.get('save')),
         ),
       ],
     );

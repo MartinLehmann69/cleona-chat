@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceManager;
 import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
 import 'package:cleona/core/network/peer_reputation.dart' show PeerReputation;
 import 'package:cleona/core/service/cleona_service.dart';
@@ -15,6 +17,7 @@ import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
+import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/network/peer_rescue_bundle.dart';
 
@@ -28,21 +31,6 @@ class _ClientState {
   bool authenticated;
 
   _ClientState({required this.socket, required this.activeIdentityId, this.authenticated = true});
-}
-
-/// Timing-safe string comparison — prevents an attacker on the loopback
-/// from deriving the auth token char-by-char via response-time measurement.
-bool _constantTimeEquals(String a, String b) {
-  final ab = utf8.encode(a);
-  final bb = utf8.encode(b);
-  final len = ab.length > bb.length ? ab.length : bb.length;
-  var diff = ab.length ^ bb.length;
-  for (var i = 0; i < len; i++) {
-    final av = i < ab.length ? ab[i] : 0;
-    final bv = i < bb.length ? bb[i] : 0;
-    diff |= av ^ bv;
-  }
-  return diff == 0;
 }
 
 /// IPC server: listens on a Unix Domain Socket (Linux) or TCP loopback
@@ -554,6 +542,33 @@ class IpcServer {
       ));
     };
 
+    // §19.6: push update availability to GUI (desktop: daemon detects, GUI shows banner)
+    final originalOnUpdateAvailable = service.onUpdateAvailable;
+    service.onUpdateAvailable = (manifest, inNetworkAvailable) {
+      originalOnUpdateAvailable?.call(manifest, inNetworkAvailable);
+      _broadcastEvent(IpcEvent(
+        event: 'update_available',
+        data: {
+          'manifest': manifest.toJson(),
+          'inNetworkAvailable': inNetworkAvailable,
+        },
+        identityId: identityId,
+      ));
+    };
+
+    final originalOnUpdateStateChanged = service.onUpdateStateChanged;
+    service.onUpdateStateChanged = (state, progress) {
+      originalOnUpdateStateChanged?.call(state, progress);
+      _broadcastEvent(IpcEvent(
+        event: 'update_state_changed',
+        data: {
+          'state': state.index,
+          'progress': progress,
+        },
+        identityId: identityId,
+      ));
+    };
+
     // §7.1 Linked-Device: push event when a pairing request arrives
     final originalOnDevicePairRequest = service.onDevicePairRequest;
     service.onDevicePairRequest = (requestingDeviceIdHex) {
@@ -637,7 +652,7 @@ class IpcServer {
     if (!client.authenticated) {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
-        if (json['type'] == 'auth' && json['token'] is String && _constantTimeEquals(json['token'] as String, _authToken!)) {
+        if (json['type'] == 'auth' && json['token'] is String && constantTimeStringEquals(json['token'] as String, _authToken!)) {
           client.authenticated = true;
           _log.info('IPC client authenticated');
           return;
@@ -1446,10 +1461,12 @@ class IpcServer {
           final chIsPublic = req.params['isPublic'] as bool? ?? false;
           final chIsAdult = req.params['isAdult'] as bool? ?? true;
           final chLanguage = req.params['language'] as String? ?? 'de';
+          final chCategory = req.params['category'] as String? ?? 'general';
           final chDescription = req.params['description'] as String?;
           final chPicture = req.params['pictureBase64'] as String?;
           final channelIdHex = await service.createChannel(chName, subscriberIds,
             isPublic: chIsPublic, isAdult: chIsAdult, language: chLanguage,
+            category: chCategory,
             description: chDescription, pictureBase64: chPicture);
           _sendResponse(client, IpcResponse(
             id: req.id,
@@ -1824,6 +1841,17 @@ class IpcServer {
             break;
           }
           msService.updateMediaSettings(MediaSettings.fromJson(req.params));
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'set_multi_interface_mode':
+          final miService = _resolveService(client, req);
+          if (miService == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final mode = MultiInterfaceManager.modeFromString(req.params['mode'] as String?);
+          await miService.setMultiInterfaceMode(mode);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 
@@ -2490,6 +2518,10 @@ class IpcServer {
         case 'calendar_sync_remove_caldav':
         case 'calendar_sync_google_oauth_start':
         case 'calendar_sync_remove_google':
+        case 'calendar_sync_configure_exchange':
+        case 'calendar_sync_exchange_oauth_start':
+        case 'calendar_sync_remove_exchange':
+        case 'calendar_sync_ews_autodiscover':
         case 'calendar_sync_configure_local_ics':
         case 'calendar_sync_remove_local_ics':
         case 'calendar_sync_list_conflicts':
@@ -3243,6 +3275,98 @@ class IpcServer {
           }
           service.calendarSyncService.removeGoogle();
           _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'calendar_sync_configure_exchange':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final cfgJson = req.params['config'] as Map<String, dynamic>?;
+          if (cfgJson == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: config'));
+            break;
+          }
+          try {
+            final cfg = EWSConfig.fromJson(cfgJson);
+            await service.calendarSyncService.configureEWS(cfg);
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'status': service.calendarSyncService.publicStatusJson(),
+            }));
+          } catch (e) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_configure_exchange: $e'));
+          }
+          break;
+
+        case 'calendar_sync_exchange_oauth_start':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final ewsClientId = req.params['clientId'] as String?;
+          final ewsEmail = req.params['email'] as String?;
+          final ewsDirection = req.params['direction'] as String? ?? 'bidirectional';
+          if (ewsClientId == null || ewsClientId.isEmpty || ewsEmail == null || ewsEmail.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing params: clientId, email'));
+            break;
+          }
+          try {
+            final handle = await EWSClient.startOAuthFlow(
+              clientId: ewsClientId,
+              email: ewsEmail,
+              direction: CalendarSyncDirectionX.parse(ewsDirection),
+            );
+            final serviceRef = service;
+            unawaited(handle.waitForCompletion.then((cfg) {
+              serviceRef.calendarSyncService.configureEWS(cfg);
+              _broadcastEvent(IpcEvent(
+                event: 'calendar_sync_exchange_connected',
+                identityId: serviceRef.identity.userIdHex,
+                data: {'email': cfg.email},
+              ));
+            }).catchError((e) {
+              _log.warn('Exchange OAuth failed: $e');
+              _broadcastEvent(IpcEvent(
+                event: 'calendar_sync_exchange_error',
+                identityId: serviceRef.identity.userIdHex,
+                data: {'error': '$e'},
+              ));
+            }));
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'authUrl': handle.authUrl,
+              'port': handle.port,
+            }));
+          } catch (e) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'calendar_sync_exchange_oauth_start: $e'));
+          }
+          break;
+
+        case 'calendar_sync_remove_exchange':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          service.calendarSyncService.removeEWS();
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'calendar_sync_ews_autodiscover':
+          final ewsDiscoverEmail = req.params['email'] as String?;
+          if (ewsDiscoverEmail == null || ewsDiscoverEmail.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: email'));
+            break;
+          }
+          try {
+            final serverUrl = await EWSClient.autodiscover(ewsDiscoverEmail);
+            _sendResponse(client, IpcResponse(id: req.id, success: true, data: {
+              'serverUrl': serverUrl,
+            }));
+          } catch (e) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'ews_autodiscover: $e'));
+          }
           break;
 
         case 'calendar_sync_configure_local_ics':

@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a14ba9551a06, 2026-07-09). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:b664c3da0eb8, 2026-07-11). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1079,7 +1079,7 @@ Every user holds a **User-Sig-Keypair** that carries the authenticity of the Use
 
 **Key generation**: derived from the 24-word recovery seed via HD-Wallet-Derivation (§3.6).
 
-**Key rotation**: User-Keys do not rotate in normal operation. There are two explicit compromise responses: **(a) Hard re-identity** — new seed → new UserID, contacts re-verify (§7.4a); **(b) Emergency Key Rotation / Soft re-key** (§7.4b / §26.6.2) — new seed and new keys under the **same** UserID, authorized by a dual-signed old→new continuity proof, propagated to the user's own devices via Twin-Sync and to contacts via `KEY_ROTATION_BROADCAST`. The UserID is a stable anchor (§3.1); the dual-sig chain is the only sanctioned way to change user keys without abandoning the identity. Verification-level retention on re-verification: §3.9. (ContactSeed coherence after rotation is solved via the founding-pubkey seed field, §8.1.1 / SR-2. The rotation-**authorization** weakness — the old key alone authorizes, SR-1 — remains tracked in the security review.)
+**Key rotation**: User-Sig-Keys (Ed25519, ML-DSA-65) do not rotate in normal operation. **KEM keys (X25519 + ML-KEM-768) rotate automatically every 7 days** (`identity.needsRotation()`, checked on startup and every 6 h). The old KEM private keys are retained for 7 days after rotation (`previousX25519Sk`, `previousMlKemSk`). During this grace period, the receiver tries KEM-decap with the current keys first; on `kemDecapFailed` it retries with the previous keys, so messages from senders who have not yet received the `KEY_ROTATION` broadcast are still decrypted. After 7 days, `discardPreviousKeysIfExpired()` wipes the old keys. The broadcast is an ApplicationFrame `KEY_ROTATION` (single-sig, KEM-only) sent to all accepted contacts; contacts that transition to `accepted` while a rotation is pending receive the broadcast at accept time. See also the wire-layer note after §7.4b. There are two explicit compromise responses for the **full identity**: **(a) Hard re-identity** — new seed → new UserID, contacts re-verify (§7.4a); **(b) Emergency Key Rotation / Soft re-key** (§7.4b / §26.6.2) — new seed and new keys under the **same** UserID, authorized by a dual-signed old→new continuity proof, propagated to the user's own devices via Twin-Sync and to contacts via `KEY_ROTATION_BROADCAST`. The UserID is a stable anchor (§3.1); the dual-sig chain is the only sanctioned way to change user keys without abandoning the identity. Verification-level retention on re-verification: §3.9. (ContactSeed coherence after rotation is solved via the founding-pubkey seed field, §8.1.1 / SR-2. The rotation-**authorization** weakness — the old key alone authorizes, SR-1 — remains tracked in the security review.)
 
 ### 3.5 Device Identity Sigs (Ed25519+ML-DSA-65 hybrid)
 
@@ -1237,6 +1237,8 @@ files/.cleona/                                (Android, in app-private storage)
 **Memory hygiene**:
 - libsodium `sodium_mlock` prevents swap-out of the keys
 - private keys and intermediate KEM session material (DH shared secret, KEM shared secret, IKM, derived message key) are actively overwritten with `sodium_memzero` / `fillRange(0)` after use — in both `encrypt()` and `decrypt()` paths of `PerMessageKem`
+- `SecureMemory` utilities (`secure_memory.dart`): `SecureMemory.zero()` for Dart `Uint8List`, `zeroNative()` for FFI `Pointer<Uint8>`, `SecureKeyHolder` for RAII-style automatic zeroing on dispose. Applied to 9 OQS key locations in `oqs_ffi.dart` via `_zeroAndFree`.
+- **Constant-time comparison** (`constant_time.dart`): XOR-accumulation comparison function with `@SecAudited` annotation, replacing inline `!=` comparisons in security-critical paths (linkable ring signature key image check, network secret HMAC verification, IPC auth token check, CalDAV server auth). Prevents timing side-channel leakage.
 - pubkeys live in normal heap (no secret)
 
 **Secret-Rotation** (§13.2): network_secret may be rotated by the maintainer. The daemon holds a dual-secret window during the transition phase.
@@ -3285,7 +3287,7 @@ Two flavors with distinct wire-paths:
 
 Both flavors are **hard cuts** in user-perception terms — no Twin-Sync of old conversations to the new identity, no automatic migration. Variant (b) preserves the UserID but still requires the Inner Dual-Sig as the only authentication subject; receivers MUST NOT accept a key-rotation without inner dual-sig verification regardless of `senderIdentitySnapshot.outerSigStatus`.
 
-Note on periodic KEM-only rotation: `MessageType.KEY_ROTATION` (single-sig in body, KEM keys only) remains an ApplicationFrame because Ed25519/ML-DSA do not change — Outer Device-Sig-Verify and Inner User-Sig-Verify both function regularly.
+**Periodic KEM-only rotation (V3.1.134+):** KEM keys (X25519 + ML-KEM-768) rotate automatically every 7 days (§3.3). `MessageType.KEY_ROTATION` (single-sig in body, KEM keys only) remains an ApplicationFrame because Ed25519/ML-DSA do not change — Outer Device-Sig-Verify and Inner User-Sig-Verify both function regularly. The broadcast is sent to all accepted contacts at rotation time. **Previous-key fallback:** for 7 days after rotation, the receiver retains the old KEM private keys and attempts KEM-decap with them when decap with the current keys fails (`kemDecapFailed`). This covers the window where contacts have not yet received or processed the `KEY_ROTATION` broadcast — without the fallback, messages from those contacts would be silently dropped. **Accept-time broadcast:** when a contact transitions to `accepted` while previous KEM keys exist (indicating a recent rotation), a `KEY_ROTATION` broadcast is sent to the newly accepted contact alongside the CR_RESPONSE, ensuring the contact learns the current KEM public keys even if the original rotation broadcast could not reach them (e.g. because the contact was not yet accepted at rotation time).
 
 ### 7.5 Device Co-Authorization for Key Rotation
 
@@ -3906,13 +3908,19 @@ Public, openly discoverable broadcast channels with decentralized content modera
 
 #### 9.2.1 Channel Discovery & Index
 
-Public channels are listed in a **compressed DHT index** (~200–300 bytes per channel). Users discover channels via a searchable "Suche" tab (default on first app start). The index stores: name, language, content rating (adult/general), description snippet, subscriber count, Bad Badge status (level + timestamps for badge set and correction submitted).
+Public channels are listed in a **compressed DHT index** (~200–300 bytes per channel). Users discover channels via a searchable "Suche" tab (default on first app start). The index stores: name, language, content rating (adult/general), description snippet, subscriber count, Bad Badge status (level + timestamps for badge set and correction submitted), category.
+
+**Channel categories (15):** general, technology, news, entertainment, gaming, music, sports, education, finance, health, food, travel, humor, crypto, regional. Categories are set at creation time and stored in the DHT index entry. The search UI displays category filter chips above the results list, allowing users to narrow discovery by topic.
+
+**Search and sort:** The channel search supports three sort modes: popular (by subscriber count, descending), newest (by creation date), and name (alphabetical). Sort mode and active category filters are combined.
+
+**NSFW age-gate:** Channels marked as not safe for minors (§9.2.2) show an additional age-gate confirmation dialog before the channel content is displayed. This is a defence-in-depth measure on top of the search-level filtering.
 
 **Channel-URI sharing (V3.1.130+):** In addition to DHT search, channels can be shared via `cleona://channel/<channelIdHex>?n=<encodedName>` links. The link can be forwarded within Cleona (sent as a text message to any contact, group, or channel — rendered inline as a tappable invite card with "Join" button) or shared externally via the OS share sheet (Signal, WhatsApp, email, etc.). External links open the app via deep link (Android `ACTION_VIEW` intent-filter, iOS `CFBundleURLSchemes`) and show a join confirmation dialog. The join flow uses the existing `joinPublicChannel` path: ChannelIndex lookup → local subscription → `CHANNEL_JOIN_REQUEST` to the channel owner. Unlike ContactSeed URIs, channel URIs carry no cryptographic material — the channel's identity and membership are resolved entirely via the DHT-backed ChannelIndex.
 
 **Uniqueness:** Channel names are globally unique via `SHA-256("channel-name:" + lowercase(name))` as DHT key. First-come-first-served with squatting protection (identity must be 7+ days old).
 
-**Channel creation fields:** Name (required, unique), Language (required: DE/EN/ES/HU/SV/multi), Public/Private toggle. Optional: image, description. For public channels, a "Not safe for minors" toggle appears (default ON — must be explicitly disabled to allow minors).
+**Channel creation fields:** Name (required, unique), Language (required: DE/EN/ES/HU/SV/multi), Category (required, one of 15 categories), Public/Private toggle. Optional: image, description. For public channels, a "Not safe for minors" toggle appears (default ON — must be explicitly disabled to allow minors).
 
 **Replication:** Each channel entry is stored on the 10 DHT nodes closest to its DHT key (standard Kademlia replication). Since entries are small (~300 bytes), simple replication is used rather than erasure coding. Channel updates (subscriber count changes, Bad Badge updates, tombstone markers) are propagated via gossip: each node storing a channel entry sends periodic updates (once per hour) to the 10 closest nodes. Tombstone entries (deleted channels) are replicated for 30 days before removal.
 
@@ -3992,6 +4000,8 @@ Test presets with drastically shortened values exist for automated E2E testing �
 **Juror Selection.** The initiator builds the eligible pool from its accepted contacts, excluding: (a) the initiator itself, (b) members/subscribers of the reported channel (independence), (c) reporters for this channel (conflict of interest). From this pool, `JurorRecord`s are constructed (keyed by `SHA-256("juror" || ed25519Pk)`) and the XOR-closest to the selection point `H` (§9.3.1a) are selected. The `eligibilitySnapshotHash` — a hash of all candidate record IDs — is computed as an audit trail and embedded in both the jury request and the final verdict.
 
 **Jury Request.** A `JuryRequestMsg` is sent to each selected juror via `MTV3_CHANNEL_JURY_VOTE` (KEM-encrypted ApplicationFrame). The request contains: `juryId`, `channelId`, `reportId`, `category`, evidence post IDs, report description, `channelName`, `channelLanguage`, `epochDay`, `juryRound`, `eligibilitySnapshotHash`. The KEX Gate (§8.2) admits jury requests via the context-proof exception — the juror-selection ticket (§9.3.1a) serves as the context proof.
+
+**Jury UI.** When a jury request arrives, the node displays a notification banner in the channel list ("Jury-Anfrage: review pending"). Tapping it opens a vote dialog showing the evidence (reported posts, channel description, reporter text), an optional reason text field, and four actions: Decline (opt out), Abstain, Reject (no action), Approve (apply consequence). The channel info dialog displays ContentRating chips (SFW/NSFW, Public, Language) and a Bad Badge warning banner with color-coded severity (orange for levels 1–2, red for level 3). A "Report" button opens a category-selection dialog with 6 report categories from §9.3.1.
 
 **Juror Response.** Each juror reviews the evidence and responds with a `JuryVoteMsg` via the same `MTV3_CHANNEL_JURY_VOTE` type: `juryId`, `reportId`, `vote` (approve/reject/abstain), `reason`, hybrid signatures (Ed25519 + ML-DSA) over the canonical verdict core hash (§9.3.1a), `epochDay`, `juryRound`. Both signatures are required for the vote to count toward quorum in Phase 2 (§9.3.1a mixed-net rollout).
 
@@ -4459,6 +4469,16 @@ Rotation is edge-triggered by authorized-set changes only — O(N²) signed anno
 
 **Rejoin after crash:** The rejoining participant sends a `CALL_REJOIN` `ApplicationFrame` and re-announces its `send_key` (new version) to all active participants; each active participant re-announces its own `send_key` to the rejoiner. No global rotation — the authorized set did not change.
 
+**Participant limit:** Group calls enforce a maximum of 8 concurrent participants. Join attempts beyond this limit are rejected with a `CallReject` carrying reason `'full'`. The theoretical scaling limits (50 video / 100+ audio) in §10.2.2 remain as architectural ceilings; the enforced limit is a UX and quality decision that may be raised as the overlay tree matures.
+
+**Owner transfer on departure:** When the group call owner (initiator) leaves, ownership transfers deterministically to the participant with the lowest lexicographic node-ID among the remaining joined set. The new owner inherits tree-management responsibilities (`_rebuildTree`, `_broadcastTreeUpdate`). All participants arrive at the same result independently without coordination.
+
+**Active speaker detection:** The call UI highlights the current speaker with a green border around their video/audio tile. Detection is based on peak audio level per participant (computed in `AudioMixer._mixAndPlay`) exceeding a threshold of 0.05. No manual push-to-talk is required.
+
+**Participant indicator tones:** Join and leave events produce audible tones via `NotificationSoundService` (`playParticipantJoined` / `playParticipantLeft`), keeping participants aware of membership changes without visual attention.
+
+**Health dashboard:** The call UI includes a toggleable per-participant health display (monitor_heart icon) showing real-time audio level bars and mute indicators. This enables participants to diagnose audio issues (silent mic, excessive background noise) without verbal troubleshooting.
+
 #### 10.2.2 Overlay Multicast Tree
 
 P2P group calls use a combination of **LAN IPv6 Multicast** and an **Overlay Multicast Tree** for efficient media distribution without a central server.
@@ -4567,7 +4587,7 @@ Each `CallSession` therefore caches the resolved `PeerInfo` and selected device 
 
 ### 10.5 In-Call Collaboration
 
-**Status:** planned, not implemented in v3.0 (design preview).
+**Status:** partially implemented. Whiteboard (§10.5.2), Call Chat (§10.5.3.2), File Exchange (§10.5.3), and Screen Share signaling (§10.5.4) are implemented. Remote Control (§10.5.4.4) remains planned. Screen frame transport (PipeWire/MediaProjection platform capture) is not yet implemented — screen sharing currently handles start/stop signaling and quality negotiation only.
 
 Group calls (§10.2) can be enhanced with real-time collaboration features: shared whiteboard, file/clipboard exchange, and screen sharing. All collaboration data is encrypted with the active call key (§10.1.1) and distributed via the Overlay Multicast Tree (§10.2.2).
 
@@ -4796,16 +4816,14 @@ All collaboration data (whiteboard strokes, shared files, screen frames, call ch
 
 The following ApplicationFrame types carry in-call collaboration payloads. All travel inside an Inner-Frame encrypted with the active call key, then are wrapped in the Outer-Frame and distributed via the Overlay Multicast Tree.
 
-| ApplicationFrame Type | Description |
-|-----------------------|-------------|
-| `WHITEBOARD_STROKE` | Real-time stroke data (begin, points, end) |
-| `WHITEBOARD_ACTION` | Clear, undo, redo, page navigation |
-| `WHITEBOARD_SNAPSHOT` | Full state for late joiners |
-| `CALL_FILE_SHARE` | File announcement (metadata + optional thumbnail) |
-| `CALL_FILE_REQUEST` | Request to download a shared file |
-| `CALL_CHAT_MESSAGE` | Ephemeral in-call text message |
-| `SCREEN_SHARE_START` | Announce screen sharing started (with resolution info) |
-| `SCREEN_SHARE_STOP` | Announce screen sharing stopped |
+| ApplicationFrame Type | Enum | Description |
+|-----------------------|------|-------------|
+| `WHITEBOARD_STROKE` | 210 | Real-time stroke data (begin, points, end) |
+| `WHITEBOARD_PAGE` | 211 | Page management (add, switch, snapshot for late join) |
+| `FILE_EXCHANGE` | 212 | File announce/request/download (50 MB limit) |
+| `CLIPBOARD_EXCHANGE` | 213 | Clipboard content sharing (text or image) |
+| `SCREEN_SHARE_FRAME` | 214 | Screen share signaling (start/stop/quality presets) |
+| `CALL_CHAT` | 215 | Ephemeral in-call text message (NOT persisted) |
 
 All frames are encrypted with the call key and distributed via the Overlay Multicast Tree.
 
@@ -5123,6 +5141,8 @@ Calendar events are stored in the encrypted SQLite database (§3.8) in a dedicat
 
 **External sync (§11.2.1–§11.2.4) implemented:**
 - `CalDAVClient` (pure-Dart RFC 4791, Basic over HTTPS, no external deps).
+- CalDAV Bonjour/mDNS discovery (`_caldav._tcp`, `_caldavs._tcp`) with heuristic paths for Nextcloud, Synology, Radicale, Baikal.
+- `EwsClient` (pure-Dart, SOAP/XML, Autodiscover v1 XML + v2 JSON, OAuth2+PKCE for M365, Basic for on-premise Exchange).
 - `GoogleCalendarClient` (OAuth2 Loopback + PKCE per RFC 8252/7636, incremental `syncToken` deltas with 410-resync fallback).
 - `CalendarSyncService` orchestrator (two-phase pull→push, per-identity opt-in, encrypted config + state).
 
@@ -5181,9 +5201,13 @@ Cleona Calendar (local, encrypted)
   │
   ├── CalDAV Adapter ──► Thunderbird / Nextcloud / any CalDAV server
   │     (iCal export/import, RFC 5545)
+  │     Bonjour/mDNS discovery (_caldav._tcp, _caldavs._tcp)
+  │
+  ├── EWS Adapter ──► Exchange / Microsoft 365
+  │     (SOAP/XML, Autodiscover v1+v2, OAuth2+PKCE / Basic auth)
   │
   └── Google Calendar Adapter ──► Google Calendar API (OAuth2)
-        (REST API, push notifications via FCM)
+        (REST API, adaptive polling)
 ```
 
 **Privacy considerations:**
@@ -5195,6 +5219,7 @@ Cleona Calendar (local, encrypted)
 #### 11.2.2 CalDAV Sync (Thunderbird, Nextcloud, etc.)
 
 - Standard CalDAV protocol (RFC 4791) with iCal data format (RFC 5545).
+- **Bonjour/mDNS discovery:** The daemon discovers CalDAV servers on the local network via DNS-SD multicast queries for `_caldav._tcp` and `_caldavs._tcp` service types (multicast to 224.0.0.251:5353). Discovered servers are offered in the settings UI via a "Discover on network" button. Additionally, heuristic well-known paths are probed for Nextcloud (`/remote.php/dav`), Synology (`/caldav`), Radicale (`/`), and Baikal (`/dav.php`).
 - The Cleona daemon acts as a CalDAV client, periodically syncing with the configured CalDAV server.
 - RRULE, VTODO, VALARM are mapped 1:1 to Cleona's internal model.
 - Conflict resolution: Last-write-wins with conflict notification to the user.
@@ -7236,14 +7261,14 @@ An existing user (Alice) generates a link containing everything a new user (Bob)
 **Link format (HTTP, works in any browser):**
 
 ```
-http://<node-ip>:<port>/cleona#s=<ContactSeed>&h=<BinaryHashMap>&m=<MaintainerSig>&v=<Version>
+http://<node-ip>:<port>/cleona#s=<ContactSeed>&h=<BinaryHashMap>&m=<BinarySignatures>&v=<Version>
 ```
 
 | Parameter | Content | Purpose |
 |---|---|---|
 | `s` | ContactSeed (Base64) | Alice becomes Bob's first peer (existing §8.1.1 mechanism) |
-| `h` | SHA-256 hashes per platform (compressed, Base64) | Bob can verify the downloaded binary |
-| `m` | Ed25519 maintainer signature over the hash map | Proves that the hashes come from the maintainer |
+| `h` | SHA-256 hashes per platform (JSON map, Base64) | Bob can verify the downloaded binary |
+| `m` | Per-platform Ed25519 maintainer signatures (JSON map, Base64) | Each signature covers the raw 32-byte SHA-256 hash of that platform's binary — same signatures as `UpdateManifest.binarySignatures` |
 | `v` | Version number | Platform detection + version assignment |
 | `f` | Fallback URL (optional) | GitHub Release etc. as external fallback |
 
@@ -7457,7 +7482,7 @@ For environments where network-based distribution is compromised or unavailable.
 | HTTP Fragment Client | `BinaryFetchClient` (`lib/core/update/binary_fetch_client.dart`) | `fetch()` |
 | Bootstrap Web App (§19.6.6) | `BootstrapWebApp` (`lib/core/update/bootstrap_web_app.dart`) | `html()` — self-contained HTML+JS assembler (Reed-Solomon + Ed25519 verification client-side) |
 | Install Source (§19.6.4) | `InstallSourceDetector` (`lib/core/update/install_source.dart`) | `detect()`, `cached` — Play Store vs. sideload update routing |
-| Invite Links (§19.6.4) | `InviteLink`/`InviteLinkGenerator` (`lib/core/update/invite_link.dart`), `InviteLinkService` (`lib/core/update/invite_link_service.dart`) | `InviteLinkGenerator.create()`, `InviteLink.fromUrl()`/`verifySignature()`, `createInviteLink()`, `publishInviteScopedRecord()` |
+| Invite Links (§19.6.4) | `InviteLink` (`lib/core/update/invite_link.dart`), `InviteLinkService` (`lib/core/update/invite_link_service.dart`) | `InviteLink()`/`InviteLink.fromUrl()`/`verifySignatureForPlatform()`, `createInviteLink()`, `publishInviteScopedRecord()` |
 | Physical Transfer (§19.6.7) | `PhysicalTransferHelper` (`lib/core/update/physical_transfer_helper.dart`) | `exportBinary()`, `exportFragment()`, `importAndVerifyBinary()`, `lanTransferUrl()` |
 | Binary Rendezvous (§19.6.5) | `BinaryRendezvousManager`/`BinaryAvailabilityRecord` (`lib/core/network/rendezvous/binary_rendezvous_manager.dart`) | `publish()`, `resolve()`, `resolveAll()` |
 | HKDF Derivations (§19.6.5) | `rendezvous_secret.dart` (`lib/core/network/rendezvous/`) | `computeBinaryTag()`, `deriveBinaryKey()`, `deriveBinaryNostrSecretKey()`, `deriveInviteBinaryKey()` |
@@ -7623,7 +7648,7 @@ macOS verwendet im Gegensatz zu iOS normale dynamische Bibliotheken (`.dylib`). 
 
 Der GitHub-Actions-Workflow `.github/workflows/ios-build.yml` baut iOS und macOS auf einem `macos-14` Runner.
 
-Die iOS-Pipeline: Native Bibliotheken kompilieren und mergen → XCFrameworks als Artifact hochladen → `flutter build ipa` → Code-Signierung (Apple Development Zertifikat, manuelles Provisioning Profile) → IPA als Artifact hochladen.
+Die iOS-Pipeline: Native Bibliotheken kompilieren und mergen → XCFrameworks als Artifact hochladen → `flutter build ipa` → Code-Signierung (Apple Development Zertifikat, manuelles Provisioning Profile) → IPA als Artifact hochladen. Nach dem Build laeuft ein Smoke-Test-Schritt (`dart test test/smoke/ --exclude-tags=needs-native`, `continue-on-error: true`), der die pure-Dart-Logik (JSON-Roundtrips, State-Machine-Tests, Enum-Validierung) auf dem macOS-Runner validiert. Tests mit FFI-Abhaengigkeiten werden uebersprungen, blockieren aber nicht den Build.
 
 Die macOS-Pipeline (parallel): Native dylibs bauen → `flutter build macos` → Daemon kompilieren → App-Bundle zusammenbauen → Code-Signierung → DMG erstellen → Notarisierung ueber App Store Connect API.
 
@@ -7721,35 +7746,41 @@ Concrete items to be addressed post-V3.0 — not part of V3.0, but deliberately 
 - BGProcessing tasks for mailbox polling
 - Static linking of all native libs
 
-**Multi-Interface Send** (V3.x — spec from 2026-04-30 exists as a draft):
-- Per-peer multi-path over Wi-Fi + cellular in parallel
-- Sockets list instead of XOR
-- Per-interface ACK tracking
-- Address tagging with `local_interface` enum
-- Architectural decision pending (battery, data consumption, default setting)
+**Multi-Interface Send** (V3.x — implemented):
+- `MultiInterfaceManager`: per-interface UDP sockets, best-path selection
+- 3 modes: off (default), on (all interfaces), auto (WiFi preferred, cellular for retransmits)
+- Per-interface ACK tracking, cost-based selection (wifi=1, ethernet=2, cellular=10)
+- Transport integration, settings UI, IPC (`set_multi_interface_mode`)
 
-**In-Call Collaboration** (V3.x phase 2 — spec in §10.5):
-- Whiteboard, file exchange, screen sharing, remote control
-- Currently documented as "planned"; implementation outstanding
+**In-Call Collaboration** (V3.x — partially implemented, spec in §10.5):
+- Whiteboard, call chat, file exchange, screen share signaling: implemented
+- Remote control (§10.5.4.4): still planned
+- Screen frame transport (PipeWire/MediaProjection): not yet implemented
 
-**Public-channel mass adoption** (V3.x or V4.0):
-- Decentralized moderation (§9.3) is designed but little field-tested
-- Anti-Sybil (§9.4) needs real channel sizes for validation
-- ContentRating workflow (§9.2.2) requires UI polishing
+**Public-channel mass adoption** (V3.x — UI implemented):
+- 15 channel categories with filter chips in search (general, technology, news, entertainment, gaming, music, sports, education, finance, health, food, travel, humor, crypto, regional)
+- Channel search: sort by popular/newest/name, category filter
+- NSFW age-gate confirmation dialog for adult-rated channels
+- Jury UI: notification banner, vote dialog (decline/abstain/reject/approve), report dialog
+- Decentralized moderation (§9.3) and Anti-Sybil (§9.4) remain designed but little field-tested at scale
 
-**Calendar External Sync extensions** (V3.x):
-- Deliberately NOT 2-way Android sync (see §11.2.8 ADR)
-- Possible new sync targets: CalDAV discovery via Bonjour, EWS (Exchange Web Services)
+**Calendar External Sync extensions** (V3.x — implemented):
+- CalDAV Bonjour/mDNS discovery (`_caldav._tcp`, `_caldavs._tcp`), heuristic paths for Nextcloud/Synology/Radicale/Baikal
+- EWS Client: pure Dart, SOAP/XML, Autodiscover v1 (XML) + v2 (JSON), OAuth2+PKCE for M365, Basic auth for on-premise Exchange
+- Sync UI with Exchange card, discover-on-network button
+- Deliberately NOT 2-way Android sync (see §11.2.8 ADR) — unchanged
 
-**Performance profile**:
-- KEM decryption throughput on mobile (currently ~1000 frames/s, target ~5000)
-- DB read latency on large conversations (>10k messages)
-- UI render performance on low-end Android (jank-free on 4-core ARMv8)
+**Performance profile** (partially implemented):
+- KEM Benchmark utility (encrypt/decrypt/DH/encaps/decaps throughput measurement)
+- Performance Screen in settings (KEM ops/s, DB stats, UI frame timing with color coding)
+- `RepaintBoundary` on `MessageBubble` for render isolation
+- Remaining: DB read latency profiling on large conversations, low-end Android jank audit
 
-**Sec-hardening backlog**:
-- Sig-verify constant-time audit (side-channel protection)
-- Memory-leak detection for private keys
-- Threat-model extension by network-observer class (leads to onion activation)
+**Sec-hardening backlog** (partially implemented):
+- Constant-time comparison: `constant_time.dart` (XOR-accumulation, `@SecAudited` annotation), applied to linkable_ring_signature, network_secret, cleona_service, ipc_server, caldav_server
+- Secure memory zeroing: `secure_memory.dart` (`SecureMemory.zero`/`zeroNative`/`SecureKeyHolder`), `oqs_ffi.dart` `_zeroAndFree` on 9 key locations
+- Threat model: `docs/THREAT_MODEL.md` (network-observer capabilities, metadata leakage analysis)
+- Remaining: memory-leak detection tooling, onion-routing activation decision
 
 The roadmap is planned in the project memory with concrete sessions/sprints — this spec only links the architectural end goals.
 
@@ -8067,7 +8098,7 @@ enum MessageType {
   POLL_SNAPSHOT              = 204;
   POLL_REVOKE                = 205;
 
-  // ── In-Call Collaboration (§10.5, planned) ────────────────
+  // ── In-Call Collaboration (§10.5) ───────────────────────────
   WHITEBOARD_STROKE          = 210;
   WHITEBOARD_PAGE            = 211;
   FILE_EXCHANGE              = 212;

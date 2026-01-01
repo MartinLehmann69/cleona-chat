@@ -150,17 +150,23 @@ class GroupCallParticipantInfo {
   final String nodeIdHex;
   final String displayName;
   final ParticipantState state;
+  final bool isMuted;
+  final double audioLevel;
 
   GroupCallParticipantInfo({
     required this.nodeIdHex,
     required this.displayName,
     required this.state,
+    this.isMuted = false,
+    this.audioLevel = 0.0,
   });
 
   Map<String, dynamic> toJson() => {
         'nodeIdHex': nodeIdHex,
         'displayName': displayName,
         'state': state.index,
+        'isMuted': isMuted,
+        'audioLevel': audioLevel,
       };
 
   static GroupCallParticipantInfo fromJson(Map<String, dynamic> json) =>
@@ -168,6 +174,8 @@ class GroupCallParticipantInfo {
         nodeIdHex: json['nodeIdHex'] as String,
         displayName: json['displayName'] as String? ?? '',
         state: ParticipantState.values[json['state'] as int? ?? 0],
+        isMuted: json['isMuted'] as bool? ?? false,
+        audioLevel: (json['audioLevel'] as num?)?.toDouble() ?? 0.0,
       );
 }
 
@@ -720,6 +728,8 @@ class ChannelInfo {
   bool isAdult;
   /// Primary language (de/en/es/hu/sv/multi).
   String language;
+  /// Channel category (e.g. 'general', 'tech', 'news', 'music', 'gaming').
+  String category;
   /// Bad Badge level (0=none, 1=questionable, 2=repeatedlyMisleading, 3=permanent).
   int badBadgeLevel;
   /// Timestamp when bad badge was assigned (for probation tracking).
@@ -753,6 +763,7 @@ class ChannelInfo {
     this.isPublic = false,
     this.isAdult = true,
     this.language = 'de',
+    this.category = 'general',
     this.badBadgeLevel = 0,
     this.badBadgeSince,
     this.correctionSubmitted = false,
@@ -777,6 +788,7 @@ class ChannelInfo {
         if (isPublic) 'isPublic': true,
         if (isAdult) 'isAdult': true,
         'language': language,
+        if (category != 'general') 'category': category,
         if (badBadgeLevel > 0) 'badBadgeLevel': badBadgeLevel,
         if (badBadgeSince != null) 'badBadgeSince': badBadgeSince!.millisecondsSinceEpoch,
         if (correctionSubmitted) 'correctionSubmitted': true,
@@ -808,6 +820,7 @@ class ChannelInfo {
       isPublic: json['isPublic'] as bool? ?? false,
       isAdult: json['isAdult'] as bool? ?? false,
       language: json['language'] as String? ?? 'de',
+      category: json['category'] as String? ?? 'general',
       badBadgeLevel: json['badBadgeLevel'] as int? ?? 0,
       badBadgeSince: json['badBadgeSince'] != null
           ? DateTime.fromMillisecondsSinceEpoch(json['badBadgeSince'] as int)
@@ -833,6 +846,7 @@ class ChannelIndexEntry {
   final String channelIdHex;
   final String name;
   final String language;
+  final String category;
   final bool isAdult;
   final String? description;
   final int subscriberCount;
@@ -846,6 +860,7 @@ class ChannelIndexEntry {
     required this.channelIdHex,
     required this.name,
     required this.language,
+    this.category = 'general',
     this.isAdult = true,
     this.description,
     this.subscriberCount = 0,
@@ -860,6 +875,7 @@ class ChannelIndexEntry {
         'id': channelIdHex,
         'n': name,
         'l': language,
+        if (category != 'general') 'cat': category,
         if (isAdult) 'a': true,
         if (description != null && description!.isNotEmpty) 'd': description,
         's': subscriberCount,
@@ -874,6 +890,7 @@ class ChannelIndexEntry {
         channelIdHex: json['id'] as String? ?? '',
         name: json['n'] as String? ?? '',
         language: json['l'] as String? ?? 'de',
+        category: json['cat'] as String? ?? 'general',
         isAdult: json['a'] as bool? ?? false,
         description: json['d'] as String?,
         subscriberCount: json['s'] as int? ?? 0,

@@ -131,6 +131,9 @@ class AudioMixer {
   // Per-peer jitter buffers
   final Map<String, JitterBuffer> _peerBuffers = {};
 
+  // Per-peer audio levels for active speaker detection
+  final Map<String, double> _peerAudioLevels = {};
+
   // cleona_audio shim
   late final AudioEngineShim _shim;
   Pointer<CleonaAudioEngine>? _engine;
@@ -149,6 +152,9 @@ class AudioMixer {
   bool _running = false;
   bool _muted = false;
   bool _speakerEnabled = true;
+
+  /// Current audio levels per peer (0.0-1.0) for active speaker detection.
+  Map<String, double> get peerAudioLevels => Map.unmodifiable(_peerAudioLevels);
 
   // Callback: encrypted audio frame ready to send
   void Function(Uint8List encryptedFrame)? onAudioFrame;
@@ -321,12 +327,24 @@ class AudioMixer {
     if (!_running || _engine == null || _playbackPcmPtr == null) return;
     if (!_speakerEnabled) return;
 
-    // Drain one frame from each peer's buffer
+    // Drain one frame from each peer's buffer and compute audio levels
     final pcmFrames = <Uint8List>[];
     for (final entry in _peerBuffers.entries) {
       final frame = entry.value.pop();
       if (frame != null) {
         pcmFrames.add(frame.data);
+        // Compute peak audio level: max absolute sample value / 32768.0
+        final byteData = ByteData.sublistView(frame.data);
+        var peak = 0;
+        final sampleCount = frame.data.length ~/ 2;
+        for (var i = 0; i < sampleCount; i++) {
+          final sample = byteData.getInt16(i * 2, Endian.little).abs();
+          if (sample > peak) peak = sample;
+        }
+        _peerAudioLevels[entry.key] =
+            (peak / 32768.0).clamp(0.0, 1.0);
+      } else {
+        _peerAudioLevels[entry.key] = 0.0;
       }
     }
 
@@ -379,6 +397,7 @@ class AudioMixer {
   /// Remove a peer (left/crashed).
   void removePeer(String nodeIdHex) {
     _peerBuffers.remove(nodeIdHex);
+    _peerAudioLevels.remove(nodeIdHex);
   }
 
   /// Stop everything.
@@ -418,6 +437,7 @@ class AudioMixer {
     }
 
     _peerBuffers.clear();
+    _peerAudioLevels.clear();
     _log.info('AudioMixer stopped');
   }
 

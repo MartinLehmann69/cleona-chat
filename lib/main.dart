@@ -1296,9 +1296,24 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     });
     _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
       debugPrint('[connectivity] Change: $results');
+      final prevResults = _connectivityResults;
       _connectivityResults = results;
       notifyListeners();
       if (!_isInitialized) return;
+
+      // Detect connectivity TYPE change (WiFi<->Mobile). When the transport
+      // type changes, the OS switches interfaces and old UDP sockets become
+      // dead — even when the local IP list looks unchanged (race / dual-stack).
+      // force=true bypasses the IP-unchanged guard in onNetworkChanged().
+      final hadWifi = prevResults.contains(ConnectivityResult.wifi) ||
+          prevResults.contains(ConnectivityResult.ethernet);
+      final hasMobileNow = results.contains(ConnectivityResult.mobile);
+      final hadMobile = prevResults.contains(ConnectivityResult.mobile);
+      final hasWifiNow = results.contains(ConnectivityResult.wifi) ||
+          results.contains(ConnectivityResult.ethernet);
+      final typeChanged = (hadWifi && !hasWifiNow && hasMobileNow) ||
+          (hadMobile && !hasMobileNow && hasWifiNow);
+
       // P4: debounce rapid connectivity events (Hotel-WLAN, captive portals).
       // Without this, each event fires onNetworkChanged() immediately —
       // concurrent runs corrupt peer/route state.
@@ -1308,7 +1323,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _networkChangeRunning = true;
         try {
           if (_inProcessNode != null) {
-            await _inProcessNode!.onNetworkChanged();
+            await _inProcessNode!.onNetworkChanged(force: typeChanged);
             for (final service in _inProcessServices.values) {
               service.onNetworkChanged(triggerNodeReset: false);
             }
@@ -1346,10 +1361,23 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         ipcClient.onCallEnded = (_) => notifyListeners();
         ipcClient.onCallAccepted = (_) => notifyListeners();
         ipcClient.onCallRejected = (call, reason) => notifyListeners();
+        ipcClient.onJuryRequestReceived = (_) => notifyListeners();
         ipcClient.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
         ipcClient.onGroupCallStarted = (_) => notifyListeners();
         ipcClient.onGroupCallEnded = (_) => notifyListeners();
         ipcClient.onGuiAction = (data) => _handleGuiAction(data);
+        // §19.6: Desktop update notification from daemon via IPC
+        ipcClient.onUpdateAvailable = (manifest, inNetworkAvailable) {
+          _availableUpdateManifest = manifest;
+          _availableUpdateInNetwork = inNetworkAvailable;
+          _updateBannerDismissed = false;
+          notifyListeners();
+        };
+        ipcClient.onUpdateStateChanged = (state, progress) {
+          _updateState = state;
+          _updateProgress = progress;
+          notifyListeners();
+        };
         ipcClient.onDaemonDied = () {
           debugPrint('[main] Daemon process gone — logging crash info before exit');
           _logDaemonCrash();
@@ -1929,6 +1957,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onCallEnded = (_) => notifyListeners();
     service.onCallAccepted = (_) => notifyListeners();
     service.onCallRejected = (call, reason) => notifyListeners();
+    service.onJuryRequestReceived = (_) => notifyListeners();
     service.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
     service.onGroupCallStarted = (_) => notifyListeners();
     service.onGroupCallEnded = (_) => notifyListeners();
@@ -2317,7 +2346,6 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         break;
 
       case 'tap_archive_placeholder':
-      case 'long_press_media_message':
       case 'open_chat_menu':
       case 'open_batch_retrieval':
         // Stub actions: will be wired up later with full UI integration

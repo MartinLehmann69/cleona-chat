@@ -10579,6 +10579,812 @@ class GroupCallSenderKey extends $pb.GeneratedMessage {
   void clearKeyVersion() => clearField(4);
 }
 
+class WhiteboardStroke extends $pb.GeneratedMessage {
+  factory WhiteboardStroke({
+    $core.List<$core.int>? strokeId,
+    $core.List<$core.int>? authorId,
+    $core.String? authorName,
+    $core.int? tool,
+    $core.int? color,
+    $core.double? strokeWidth,
+    $core.Iterable<$core.double>? points,
+    $core.String? text,
+    $core.int? shapeType,
+    $fixnum.Int64? timestamp,
+    $core.int? actionType,
+    $core.int? pageIndex,
+  }) {
+    final $result = create();
+    if (strokeId != null) {
+      $result.strokeId = strokeId;
+    }
+    if (authorId != null) {
+      $result.authorId = authorId;
+    }
+    if (authorName != null) {
+      $result.authorName = authorName;
+    }
+    if (tool != null) {
+      $result.tool = tool;
+    }
+    if (color != null) {
+      $result.color = color;
+    }
+    if (strokeWidth != null) {
+      $result.strokeWidth = strokeWidth;
+    }
+    if (points != null) {
+      $result.points.addAll(points);
+    }
+    if (text != null) {
+      $result.text = text;
+    }
+    if (shapeType != null) {
+      $result.shapeType = shapeType;
+    }
+    if (timestamp != null) {
+      $result.timestamp = timestamp;
+    }
+    if (actionType != null) {
+      $result.actionType = actionType;
+    }
+    if (pageIndex != null) {
+      $result.pageIndex = pageIndex;
+    }
+    return $result;
+  }
+  WhiteboardStroke._() : super();
+  factory WhiteboardStroke.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory WhiteboardStroke.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'WhiteboardStroke', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'strokeId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'authorId', $pb.PbFieldType.OY)
+    ..aOS(3, _omitFieldNames ? '' : 'authorName')
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'tool', $pb.PbFieldType.O3)
+    ..a<$core.int>(5, _omitFieldNames ? '' : 'color', $pb.PbFieldType.O3)
+    ..a<$core.double>(6, _omitFieldNames ? '' : 'strokeWidth', $pb.PbFieldType.OF)
+    ..p<$core.double>(7, _omitFieldNames ? '' : 'points', $pb.PbFieldType.KF)
+    ..aOS(8, _omitFieldNames ? '' : 'text')
+    ..a<$core.int>(9, _omitFieldNames ? '' : 'shapeType', $pb.PbFieldType.O3)
+    ..aInt64(10, _omitFieldNames ? '' : 'timestamp')
+    ..a<$core.int>(11, _omitFieldNames ? '' : 'actionType', $pb.PbFieldType.O3)
+    ..a<$core.int>(12, _omitFieldNames ? '' : 'pageIndex', $pb.PbFieldType.O3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  WhiteboardStroke clone() => WhiteboardStroke()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  WhiteboardStroke copyWith(void Function(WhiteboardStroke) updates) => super.copyWith((message) => updates(message as WhiteboardStroke)) as WhiteboardStroke;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WhiteboardStroke create() => WhiteboardStroke._();
+  WhiteboardStroke createEmptyInstance() => create();
+  static $pb.PbList<WhiteboardStroke> createRepeated() => $pb.PbList<WhiteboardStroke>();
+  @$core.pragma('dart2js:noInline')
+  static WhiteboardStroke getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<WhiteboardStroke>(create);
+  static WhiteboardStroke? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get strokeId => $_getN(0);
+  @$pb.TagNumber(1)
+  set strokeId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasStrokeId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearStrokeId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get authorId => $_getN(1);
+  @$pb.TagNumber(2)
+  set authorId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasAuthorId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearAuthorId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get authorName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set authorName($core.String v) { $_setString(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasAuthorName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearAuthorName() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get tool => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set tool($core.int v) { $_setSignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTool() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTool() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.int get color => $_getIZ(4);
+  @$pb.TagNumber(5)
+  set color($core.int v) { $_setSignedInt32(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasColor() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearColor() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.double get strokeWidth => $_getN(5);
+  @$pb.TagNumber(6)
+  set strokeWidth($core.double v) { $_setFloat(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasStrokeWidth() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearStrokeWidth() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.double> get points => $_getList(6);
+
+  @$pb.TagNumber(8)
+  $core.String get text => $_getSZ(7);
+  @$pb.TagNumber(8)
+  set text($core.String v) { $_setString(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasText() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearText() => clearField(8);
+
+  @$pb.TagNumber(9)
+  $core.int get shapeType => $_getIZ(8);
+  @$pb.TagNumber(9)
+  set shapeType($core.int v) { $_setSignedInt32(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasShapeType() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearShapeType() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $fixnum.Int64 get timestamp => $_getI64(9);
+  @$pb.TagNumber(10)
+  set timestamp($fixnum.Int64 v) { $_setInt64(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasTimestamp() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearTimestamp() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.int get actionType => $_getIZ(10);
+  @$pb.TagNumber(11)
+  set actionType($core.int v) { $_setSignedInt32(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasActionType() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearActionType() => clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.int get pageIndex => $_getIZ(11);
+  @$pb.TagNumber(12)
+  set pageIndex($core.int v) { $_setSignedInt32(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasPageIndex() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearPageIndex() => clearField(12);
+}
+
+class WhiteboardPage extends $pb.GeneratedMessage {
+  factory WhiteboardPage({
+    $core.int? action,
+    $core.int? pageIndex,
+    $core.int? totalPages,
+    $core.Iterable<WhiteboardStroke>? strokes,
+    $core.List<$core.int>? requesterId,
+  }) {
+    final $result = create();
+    if (action != null) {
+      $result.action = action;
+    }
+    if (pageIndex != null) {
+      $result.pageIndex = pageIndex;
+    }
+    if (totalPages != null) {
+      $result.totalPages = totalPages;
+    }
+    if (strokes != null) {
+      $result.strokes.addAll(strokes);
+    }
+    if (requesterId != null) {
+      $result.requesterId = requesterId;
+    }
+    return $result;
+  }
+  WhiteboardPage._() : super();
+  factory WhiteboardPage.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory WhiteboardPage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'WhiteboardPage', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.int>(1, _omitFieldNames ? '' : 'action', $pb.PbFieldType.O3)
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'pageIndex', $pb.PbFieldType.O3)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'totalPages', $pb.PbFieldType.O3)
+    ..pc<WhiteboardStroke>(4, _omitFieldNames ? '' : 'strokes', $pb.PbFieldType.PM, subBuilder: WhiteboardStroke.create)
+    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'requesterId', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  WhiteboardPage clone() => WhiteboardPage()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  WhiteboardPage copyWith(void Function(WhiteboardPage) updates) => super.copyWith((message) => updates(message as WhiteboardPage)) as WhiteboardPage;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static WhiteboardPage create() => WhiteboardPage._();
+  WhiteboardPage createEmptyInstance() => create();
+  static $pb.PbList<WhiteboardPage> createRepeated() => $pb.PbList<WhiteboardPage>();
+  @$core.pragma('dart2js:noInline')
+  static WhiteboardPage getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<WhiteboardPage>(create);
+  static WhiteboardPage? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.int get action => $_getIZ(0);
+  @$pb.TagNumber(1)
+  set action($core.int v) { $_setSignedInt32(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasAction() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearAction() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get pageIndex => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set pageIndex($core.int v) { $_setSignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasPageIndex() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearPageIndex() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get totalPages => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set totalPages($core.int v) { $_setSignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTotalPages() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTotalPages() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<WhiteboardStroke> get strokes => $_getList(3);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.int> get requesterId => $_getN(4);
+  @$pb.TagNumber(5)
+  set requesterId($core.List<$core.int> v) { $_setBytes(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasRequesterId() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearRequesterId() => clearField(5);
+}
+
+class CallFileShare extends $pb.GeneratedMessage {
+  factory CallFileShare({
+    $core.List<$core.int>? fileId,
+    $core.String? fileName,
+    $fixnum.Int64? fileSize,
+    $core.String? mimeType,
+    $core.List<$core.int>? thumbnailData,
+    $core.List<$core.int>? sharedBy,
+    $core.String? sharedByName,
+    $core.int? action,
+  }) {
+    final $result = create();
+    if (fileId != null) {
+      $result.fileId = fileId;
+    }
+    if (fileName != null) {
+      $result.fileName = fileName;
+    }
+    if (fileSize != null) {
+      $result.fileSize = fileSize;
+    }
+    if (mimeType != null) {
+      $result.mimeType = mimeType;
+    }
+    if (thumbnailData != null) {
+      $result.thumbnailData = thumbnailData;
+    }
+    if (sharedBy != null) {
+      $result.sharedBy = sharedBy;
+    }
+    if (sharedByName != null) {
+      $result.sharedByName = sharedByName;
+    }
+    if (action != null) {
+      $result.action = action;
+    }
+    return $result;
+  }
+  CallFileShare._() : super();
+  factory CallFileShare.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CallFileShare.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CallFileShare', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'fileId', $pb.PbFieldType.OY)
+    ..aOS(2, _omitFieldNames ? '' : 'fileName')
+    ..aInt64(3, _omitFieldNames ? '' : 'fileSize')
+    ..aOS(4, _omitFieldNames ? '' : 'mimeType')
+    ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'thumbnailData', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'sharedBy', $pb.PbFieldType.OY)
+    ..aOS(7, _omitFieldNames ? '' : 'sharedByName')
+    ..a<$core.int>(8, _omitFieldNames ? '' : 'action', $pb.PbFieldType.O3)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CallFileShare clone() => CallFileShare()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CallFileShare copyWith(void Function(CallFileShare) updates) => super.copyWith((message) => updates(message as CallFileShare)) as CallFileShare;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallFileShare create() => CallFileShare._();
+  CallFileShare createEmptyInstance() => create();
+  static $pb.PbList<CallFileShare> createRepeated() => $pb.PbList<CallFileShare>();
+  @$core.pragma('dart2js:noInline')
+  static CallFileShare getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CallFileShare>(create);
+  static CallFileShare? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get fileId => $_getN(0);
+  @$pb.TagNumber(1)
+  set fileId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasFileId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearFileId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get fileName => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set fileName($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasFileName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearFileName() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $fixnum.Int64 get fileSize => $_getI64(2);
+  @$pb.TagNumber(3)
+  set fileSize($fixnum.Int64 v) { $_setInt64(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasFileSize() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearFileSize() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get mimeType => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set mimeType($core.String v) { $_setString(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasMimeType() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearMimeType() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.List<$core.int> get thumbnailData => $_getN(4);
+  @$pb.TagNumber(5)
+  set thumbnailData($core.List<$core.int> v) { $_setBytes(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasThumbnailData() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearThumbnailData() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get sharedBy => $_getN(5);
+  @$pb.TagNumber(6)
+  set sharedBy($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasSharedBy() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSharedBy() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.String get sharedByName => $_getSZ(6);
+  @$pb.TagNumber(7)
+  set sharedByName($core.String v) { $_setString(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasSharedByName() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearSharedByName() => clearField(7);
+
+  @$pb.TagNumber(8)
+  $core.int get action => $_getIZ(7);
+  @$pb.TagNumber(8)
+  set action($core.int v) { $_setSignedInt32(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasAction() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearAction() => clearField(8);
+}
+
+class CallClipboardExchange extends $pb.GeneratedMessage {
+  factory CallClipboardExchange({
+    $core.List<$core.int>? senderId,
+    $core.String? senderName,
+    $core.String? textContent,
+    $core.List<$core.int>? imageData,
+    $core.String? contentType,
+    $fixnum.Int64? timestamp,
+  }) {
+    final $result = create();
+    if (senderId != null) {
+      $result.senderId = senderId;
+    }
+    if (senderName != null) {
+      $result.senderName = senderName;
+    }
+    if (textContent != null) {
+      $result.textContent = textContent;
+    }
+    if (imageData != null) {
+      $result.imageData = imageData;
+    }
+    if (contentType != null) {
+      $result.contentType = contentType;
+    }
+    if (timestamp != null) {
+      $result.timestamp = timestamp;
+    }
+    return $result;
+  }
+  CallClipboardExchange._() : super();
+  factory CallClipboardExchange.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CallClipboardExchange.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CallClipboardExchange', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
+    ..aOS(2, _omitFieldNames ? '' : 'senderName')
+    ..aOS(3, _omitFieldNames ? '' : 'textContent')
+    ..a<$core.List<$core.int>>(4, _omitFieldNames ? '' : 'imageData', $pb.PbFieldType.OY)
+    ..aOS(5, _omitFieldNames ? '' : 'contentType')
+    ..aInt64(6, _omitFieldNames ? '' : 'timestamp')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CallClipboardExchange clone() => CallClipboardExchange()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CallClipboardExchange copyWith(void Function(CallClipboardExchange) updates) => super.copyWith((message) => updates(message as CallClipboardExchange)) as CallClipboardExchange;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallClipboardExchange create() => CallClipboardExchange._();
+  CallClipboardExchange createEmptyInstance() => create();
+  static $pb.PbList<CallClipboardExchange> createRepeated() => $pb.PbList<CallClipboardExchange>();
+  @$core.pragma('dart2js:noInline')
+  static CallClipboardExchange getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CallClipboardExchange>(create);
+  static CallClipboardExchange? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get senderId => $_getN(0);
+  @$pb.TagNumber(1)
+  set senderId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasSenderId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearSenderId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.String get senderName => $_getSZ(1);
+  @$pb.TagNumber(2)
+  set senderName($core.String v) { $_setString(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSenderName() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSenderName() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get textContent => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set textContent($core.String v) { $_setString(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTextContent() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTextContent() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.List<$core.int> get imageData => $_getN(3);
+  @$pb.TagNumber(4)
+  set imageData($core.List<$core.int> v) { $_setBytes(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasImageData() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearImageData() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.String get contentType => $_getSZ(4);
+  @$pb.TagNumber(5)
+  set contentType($core.String v) { $_setString(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasContentType() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearContentType() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get timestamp => $_getI64(5);
+  @$pb.TagNumber(6)
+  set timestamp($fixnum.Int64 v) { $_setInt64(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasTimestamp() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearTimestamp() => clearField(6);
+}
+
+class ScreenShareControl extends $pb.GeneratedMessage {
+  factory ScreenShareControl({
+    $core.bool? isSharing,
+    $core.int? width,
+    $core.int? height,
+    $core.int? fps,
+    $core.bool? optimizeForText,
+    $core.List<$core.int>? sharerId,
+  }) {
+    final $result = create();
+    if (isSharing != null) {
+      $result.isSharing = isSharing;
+    }
+    if (width != null) {
+      $result.width = width;
+    }
+    if (height != null) {
+      $result.height = height;
+    }
+    if (fps != null) {
+      $result.fps = fps;
+    }
+    if (optimizeForText != null) {
+      $result.optimizeForText = optimizeForText;
+    }
+    if (sharerId != null) {
+      $result.sharerId = sharerId;
+    }
+    return $result;
+  }
+  ScreenShareControl._() : super();
+  factory ScreenShareControl.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory ScreenShareControl.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'ScreenShareControl', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..aOB(1, _omitFieldNames ? '' : 'isSharing')
+    ..a<$core.int>(2, _omitFieldNames ? '' : 'width', $pb.PbFieldType.O3)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'height', $pb.PbFieldType.O3)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'fps', $pb.PbFieldType.O3)
+    ..aOB(5, _omitFieldNames ? '' : 'optimizeForText')
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'sharerId', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  ScreenShareControl clone() => ScreenShareControl()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  ScreenShareControl copyWith(void Function(ScreenShareControl) updates) => super.copyWith((message) => updates(message as ScreenShareControl)) as ScreenShareControl;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static ScreenShareControl create() => ScreenShareControl._();
+  ScreenShareControl createEmptyInstance() => create();
+  static $pb.PbList<ScreenShareControl> createRepeated() => $pb.PbList<ScreenShareControl>();
+  @$core.pragma('dart2js:noInline')
+  static ScreenShareControl getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<ScreenShareControl>(create);
+  static ScreenShareControl? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.bool get isSharing => $_getBF(0);
+  @$pb.TagNumber(1)
+  set isSharing($core.bool v) { $_setBool(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasIsSharing() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearIsSharing() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.int get width => $_getIZ(1);
+  @$pb.TagNumber(2)
+  set width($core.int v) { $_setSignedInt32(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasWidth() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearWidth() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.int get height => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set height($core.int v) { $_setSignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasHeight() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearHeight() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get fps => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set fps($core.int v) { $_setSignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasFps() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearFps() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $core.bool get optimizeForText => $_getBF(4);
+  @$pb.TagNumber(5)
+  set optimizeForText($core.bool v) { $_setBool(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasOptimizeForText() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearOptimizeForText() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get sharerId => $_getN(5);
+  @$pb.TagNumber(6)
+  set sharerId($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasSharerId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearSharerId() => clearField(6);
+}
+
+class CallChatMessage extends $pb.GeneratedMessage {
+  factory CallChatMessage({
+    $core.List<$core.int>? messageId,
+    $core.List<$core.int>? senderId,
+    $core.String? senderName,
+    $core.String? text,
+    $fixnum.Int64? timestamp,
+    $core.List<$core.int>? replyToId,
+  }) {
+    final $result = create();
+    if (messageId != null) {
+      $result.messageId = messageId;
+    }
+    if (senderId != null) {
+      $result.senderId = senderId;
+    }
+    if (senderName != null) {
+      $result.senderName = senderName;
+    }
+    if (text != null) {
+      $result.text = text;
+    }
+    if (timestamp != null) {
+      $result.timestamp = timestamp;
+    }
+    if (replyToId != null) {
+      $result.replyToId = replyToId;
+    }
+    return $result;
+  }
+  CallChatMessage._() : super();
+  factory CallChatMessage.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory CallChatMessage.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'CallChatMessage', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
+    ..aOS(3, _omitFieldNames ? '' : 'senderName')
+    ..aOS(4, _omitFieldNames ? '' : 'text')
+    ..aInt64(5, _omitFieldNames ? '' : 'timestamp')
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'replyToId', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  CallChatMessage clone() => CallChatMessage()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  CallChatMessage copyWith(void Function(CallChatMessage) updates) => super.copyWith((message) => updates(message as CallChatMessage)) as CallChatMessage;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static CallChatMessage create() => CallChatMessage._();
+  CallChatMessage createEmptyInstance() => create();
+  static $pb.PbList<CallChatMessage> createRepeated() => $pb.PbList<CallChatMessage>();
+  @$core.pragma('dart2js:noInline')
+  static CallChatMessage getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<CallChatMessage>(create);
+  static CallChatMessage? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get messageId => $_getN(0);
+  @$pb.TagNumber(1)
+  set messageId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasMessageId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearMessageId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get senderId => $_getN(1);
+  @$pb.TagNumber(2)
+  set senderId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasSenderId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearSenderId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.String get senderName => $_getSZ(2);
+  @$pb.TagNumber(3)
+  set senderName($core.String v) { $_setString(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasSenderName() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearSenderName() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.String get text => $_getSZ(3);
+  @$pb.TagNumber(4)
+  set text($core.String v) { $_setString(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasText() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearText() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get timestamp => $_getI64(4);
+  @$pb.TagNumber(5)
+  set timestamp($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasTimestamp() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearTimestamp() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get replyToId => $_getN(5);
+  @$pb.TagNumber(6)
+  set replyToId($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasReplyToId() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearReplyToId() => clearField(6);
+}
+
 class VoicePayload extends $pb.GeneratedMessage {
   factory VoicePayload({
     $core.List<$core.int>? audioData,

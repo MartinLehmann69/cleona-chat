@@ -986,6 +986,81 @@ message GroupCallSenderKey {
   uint32 key_version = 4;         // Monotonic per-sender version for rotation
 }
 
+// ── In-Call Collaboration (§10.5) ───────────────────────────────────
+
+// Whiteboard stroke data — real-time streaming via Overlay Multicast Tree.
+// MTV3_WHITEBOARD_STROKE = 210
+message WhiteboardStroke {
+  bytes stroke_id = 1;              // 16-Byte unique stroke identifier
+  bytes author_id = 2;              // 32 bytes — stroke author's user-id
+  string author_name = 3;           // Display name of author
+  int32 tool = 4;                   // WhiteboardTool enum: 0=PEN,1=HIGHLIGHTER,2=ERASER,3=TEXT,4=SHAPE,5=LASER
+  int32 color = 5;                  // ARGB color value
+  float stroke_width = 6;           // Stroke width in logical pixels
+  repeated float points = 7;        // x,y pairs flattened [x0,y0,x1,y1,...]
+  string text = 8;                  // TEXT tool only: text content
+  int32 shape_type = 9;             // SHAPE tool only: 0=RECTANGLE,1=CIRCLE,2=LINE,3=ARROW
+  int64 timestamp = 10;             // Unix millis
+  int32 action_type = 11;           // 0=STROKE_DATA,1=BEGIN,2=POINTS,3=END,4=CLEAR_ALL,5=UNDO,6=REDO
+  int32 page_index = 12;            // Target page index
+}
+
+// Whiteboard page management — add/switch pages, snapshot for late joiners.
+// MTV3_WHITEBOARD_PAGE = 211
+message WhiteboardPage {
+  int32 action = 1;                 // 0=ADD_PAGE,1=SWITCH_PAGE,2=SNAPSHOT_REQUEST,3=SNAPSHOT_RESPONSE
+  int32 page_index = 2;             // Target page index
+  int32 total_pages = 3;            // Total number of pages
+  repeated WhiteboardStroke strokes = 4;  // Full snapshot of strokes (SNAPSHOT_RESPONSE only)
+  bytes requester_id = 5;           // Who requested the snapshot (SNAPSHOT_REQUEST only)
+}
+
+// File sharing within a call — metadata announcement via Overlay Multicast Tree.
+// MTV3_FILE_EXCHANGE = 212
+message CallFileShare {
+  bytes file_id = 1;                // 16-Byte unique file identifier
+  string file_name = 2;             // Original filename
+  int64 file_size = 3;              // File size in bytes (max 50 MB)
+  string mime_type = 4;             // MIME type
+  bytes thumbnail_data = 5;         // Optional JPEG thumbnail (<64 KB)
+  bytes shared_by = 6;              // 32 bytes — sharer's user-id
+  string shared_by_name = 7;        // Sharer's display name
+  int32 action = 8;                 // 0=ANNOUNCE,1=REQUEST_DOWNLOAD,2=DOWNLOAD_READY
+}
+
+// Clipboard exchange within a call.
+// MTV3_CLIPBOARD_EXCHANGE = 213
+message CallClipboardExchange {
+  bytes sender_id = 1;              // 32 bytes — sender's user-id
+  string sender_name = 2;           // Sender's display name
+  string text_content = 3;          // Text clipboard content (if text)
+  bytes image_data = 4;             // Image clipboard content (if image, JPEG/PNG)
+  string content_type = 5;          // "text" or "image"
+  int64 timestamp = 6;              // Unix millis
+}
+
+// Screen share control — start/stop/quality negotiation.
+// MTV3_SCREEN_SHARE_FRAME = 214
+message ScreenShareControl {
+  bool is_sharing = 1;              // true=start, false=stop
+  int32 width = 2;                  // Capture width
+  int32 height = 3;                 // Capture height
+  int32 fps = 4;                    // Target FPS
+  bool optimize_for_text = 5;       // Crisp text mode (2 FPS)
+  bytes sharer_id = 6;              // 32 bytes — who is sharing
+}
+
+// Ephemeral in-call chat message — NOT persisted after call ends.
+// MTV3_CALL_CHAT = 215
+message CallChatMessage {
+  bytes message_id = 1;             // 16-Byte unique message identifier
+  bytes sender_id = 2;              // 32 bytes — sender's user-id
+  string sender_name = 3;           // Sender's display name
+  string text = 4;                  // Message text
+  int64 timestamp = 5;              // Unix millis
+  bytes reply_to_id = 6;            // Optional: message_id of replied-to message
+}
+
 // ── Voice Transcription (Source-Side) ────────────────────────────────
 
 message VoicePayload {

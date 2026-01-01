@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/secure_memory.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:meta/meta.dart';
@@ -137,13 +138,8 @@ class PerMessageKem {
       version: version,
     );
 
-    // 7. Zero all intermediate key material
-    for (var i = 0; i < ephX25519Sk.length; i++) { ephX25519Sk[i] = 0; }
-    for (var i = 0; i < ephEd25519.secretKey.length; i++) { ephEd25519.secretKey[i] = 0; }
-    for (var i = 0; i < dhSecret.length; i++) { dhSecret[i] = 0; }
-    for (var i = 0; i < kemSecret.length; i++) { kemSecret[i] = 0; }
-    for (var i = 0; i < ikm.length; i++) { ikm[i] = 0; }
-    for (var i = 0; i < msgKey.length; i++) { msgKey[i] = 0; }
+    // 7. Zero all intermediate key material (Sec-hardening)
+    SecureMemory.zeroAll([ephX25519Sk, ephEd25519.secretKey, dhSecret, kemSecret, ikm, msgKey]);
 
     return (header, ciphertext);
   }
@@ -185,11 +181,8 @@ class PerMessageKem {
     final nonce = kemHeader.aesNonce;
     final plaintext = _sodium.aesGcmDecrypt(ciphertext, msgKey, nonce);
 
-    // 5. Zero all intermediate key material
-    for (var i = 0; i < dhSecret.length; i++) { dhSecret[i] = 0; }
-    for (var i = 0; i < kemSecret.length; i++) { kemSecret[i] = 0; }
-    for (var i = 0; i < ikm.length; i++) { ikm[i] = 0; }
-    for (var i = 0; i < msgKey.length; i++) { msgKey[i] = 0; }
+    // 5. Zero all intermediate key material (Sec-hardening)
+    SecureMemory.zeroAll([dhSecret, kemSecret, ikm, msgKey]);
 
     return plaintext;
   }

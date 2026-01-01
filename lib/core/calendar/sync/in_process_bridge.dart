@@ -23,6 +23,7 @@ import 'dart:async';
 
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
 import 'package:cleona/core/calendar/sync/calendar_sync_service.dart';
+import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 
@@ -141,6 +142,47 @@ class InProcessCalendarSyncBridge {
 
   Future<void> removeGoogleSync() async {
     _sync.removeGoogle();
+  }
+
+  // ── Exchange (EWS) ──────────────────────────────────────────────
+
+  Future<Map<String, dynamic>> configureExchange({
+    required String serverUrl,
+    required String email,
+    required String username,
+    required String password,
+    String direction = 'bidirectional',
+  }) async {
+    await _sync.configureEWS(EWSConfig(
+      serverUrl: serverUrl,
+      email: email,
+      username: username,
+      password: password,
+      direction: CalendarSyncDirectionX.parse(direction),
+    ));
+    return _sync.publicStatusJson();
+  }
+
+  Future<String> startExchangeOauth({
+    required String clientId,
+    required String email,
+    String direction = 'bidirectional',
+  }) async {
+    // Same issue as Google: OAuth loopback is Desktop-only.
+    throw UnsupportedError(
+      'Exchange OAuth uses a localhost-loopback flow which is not '
+      'available on Android. Use Basic auth (on-premise) on Android, '
+      'or run Cleona on Desktop for Microsoft 365 OAuth.',
+    );
+  }
+
+  Future<void> removeExchangeSync() async {
+    _sync.removeEWS();
+  }
+
+  Future<String> ewsAutodiscover({required String email}) async {
+    final url = await EWSClient.autodiscover(email);
+    return url;
   }
 
   // ── Local ICS bridge ─────────────────────────────────────────────

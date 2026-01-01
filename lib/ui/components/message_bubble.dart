@@ -13,11 +13,9 @@ class MessageBubble extends StatelessWidget {
   final String? replyTo;
   final List<String> reactions;
   final VoidCallback? onTap;
-  final VoidCallback? onLongPress;
   /// Opens the message-actions menu (reply/react/copy/edit/delete/...).
   /// Architecture §18.6.2: every actionable bubble shows a 3-dot icon in the
-  /// top-right corner. Long-press is a secondary gesture, not the primary
-  /// affordance.
+  /// top-right corner.
   final VoidCallback? onActionsPressed;
 
   /// When true, an active per-chat disappearing-message timer applies to this
@@ -38,7 +36,6 @@ class MessageBubble extends StatelessWidget {
     this.replyTo,
     this.reactions = const [],
     this.onTap,
-    this.onLongPress,
     this.onActionsPressed,
     this.expiryActive = false,
     this.membershipMismatch = false,
@@ -228,7 +225,6 @@ class MessageBubble extends StatelessWidget {
 
     final bubble = GestureDetector(
       onTap: onTap,
-      onLongPress: onLongPress,
       child: bubbleContainer,
     );
 
@@ -261,14 +257,19 @@ class MessageBubble extends StatelessWidget {
           )
         : bubble;
 
-    return Align(
-      alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: tokens.spacing.md,
-          vertical: tokens.spacing.xs,
+    // RepaintBoundary: each bubble is an independent repaint island so that
+    // e.g. a typing-indicator or delivery-receipt update on one message does
+    // not repaint every visible bubble in the ListView (Architecture §23.2).
+    return RepaintBoundary(
+      child: Align(
+        alignment: isOwn ? Alignment.centerRight : Alignment.centerLeft,
+        child: Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: tokens.spacing.md,
+            vertical: tokens.spacing.xs,
+          ),
+          child: bubbleWithActions,
         ),
-        child: bubbleWithActions,
       ),
     );
   }

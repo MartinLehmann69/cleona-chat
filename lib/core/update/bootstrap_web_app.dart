@@ -651,9 +651,11 @@ async function ed25519SelfTest() {
 }
 
 // ============================================================================
-// Invite link (§19.6.4) — hash-fragment parsing and the exact signed payload
-// format from lib/core/update/invite_link.dart (InviteLink._hashMapPayload):
-// sorted "platform:hash" lines, newline-joined, then the version.
+// Invite link (§19.6.4) — hash-fragment parsing.
+// The `m` parameter carries per-platform Ed25519 signatures (JSON map of
+// platform -> base64 signature). Each signature covers the raw 32-byte
+// SHA-256 hash of that platform's binary — same format as UpdateManifest
+// binarySignatures. No combined hash-map payload.
 // ============================================================================
 
 var PARAMS = {};
@@ -672,12 +674,6 @@ function parseHashParams() {
     try { out[key] = decodeURIComponent(raw); } catch (e) { out[key] = raw; }
   });
   return out;
-}
-
-function hashMapPayload(hashes, version) {
-  var platforms = Object.keys(hashes).sort();
-  var lines = platforms.map(function (p) { return p + ':' + hashes[p]; }).join('\n');
-  return lines + '\n' + version;
 }
 
 // ============================================================================
@@ -1011,18 +1007,26 @@ async function startForPlatform(platform) {
   $('detail-hash').textContent = expectedHash;
 
   setStatus('Verifying invite link signature…');
-  var signatureBytes;
+  var binarySignatures;
   try {
-    signatureBytes = base64ToBytes(PARAMS.m);
+    binarySignatures = JSON.parse(bytesToUtf8(base64ToBytes(PARAMS.m)));
   } catch (e) {
-    showBanner('err', 'The invite link signature is malformed.');
+    showBanner('err', 'The invite link signatures are malformed.');
     setAction('Cannot continue', null, false);
     return;
   }
 
-  var payload = utf8ToBytes(hashMapPayload(binaryHashes, PARAMS.v));
+  var platformSigBase64 = binarySignatures[platform];
+  if (!platformSigBase64) {
+    showBanner('err', 'This invite link does not include a signature for "' + platform + '".');
+    setAction('Cannot continue', null, false);
+    return;
+  }
+
+  var signatureBytes = base64ToBytes(platformSigBase64);
+  var hashBytes = hexToBytes(expectedHash);
   var pubKeyBytes = hexToBytes(MAINTAINER_PUBLIC_KEY_HEX);
-  var sigOk = await ed25519Verify(payload, signatureBytes, pubKeyBytes);
+  var sigOk = await ed25519Verify(hashBytes, signatureBytes, pubKeyBytes);
   if (!sigOk) {
     showBanner('err', 'Maintainer signature verification FAILED. This invite link may be forged — do not install anything from it.');
     setStatus('Signature verification failed');

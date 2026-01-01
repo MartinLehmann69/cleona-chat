@@ -445,6 +445,54 @@ enum BadBadgeLevel {
   permanent,
 }
 
+/// Channel topic categories for discovery.
+enum ChannelCategory {
+  /// General / uncategorized.
+  general,
+
+  /// Technology & Science.
+  technology,
+
+  /// News & Politics.
+  news,
+
+  /// Entertainment & Media.
+  entertainment,
+
+  /// Gaming.
+  gaming,
+
+  /// Music & Arts.
+  music,
+
+  /// Sports & Fitness.
+  sports,
+
+  /// Education & Learning.
+  education,
+
+  /// Business & Finance.
+  finance,
+
+  /// Health & Wellness.
+  health,
+
+  /// Food & Cooking.
+  food,
+
+  /// Travel & Geography.
+  travel,
+
+  /// Humor & Memes.
+  humor,
+
+  /// Crypto & Blockchain.
+  crypto,
+
+  /// Regional / Local.
+  regional,
+}
+
 /// Determines the consequence of a successful jury decision.
 JuryConsequence consequenceForCategory(ReportCategory category) {
   switch (category) {

@@ -19,7 +19,9 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_transport.dart';
+import 'package:cleona/core/network/multi_interface.dart';
 import 'package:cleona/ui/screens/device_management_screen.dart';
+import 'package:cleona/ui/screens/performance_screen.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/form_group.dart';
 import 'package:cleona/ui/components/section_card.dart';
@@ -172,6 +174,53 @@ class SettingsScreen extends StatelessWidget {
     showDialog(
       context: context,
       builder: (ctx) => _SeedPhraseDialog(words: words),
+    );
+  }
+
+  String _multiInterfaceModeLabel(AppLocale locale, MultiInterfaceMode mode) {
+    switch (mode) {
+      case MultiInterfaceMode.off:
+        return locale.get('multi_interface_off');
+      case MultiInterfaceMode.on:
+        return locale.get('multi_interface_on');
+      case MultiInterfaceMode.auto:
+        return locale.get('multi_interface_auto');
+    }
+  }
+
+  void _showMultiInterfaceModeDialog(BuildContext context) {
+    final locale = AppLocale.read(context);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(locale.get('multi_interface_title')),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(locale.get('multi_interface_help')),
+            const SizedBox(height: 16),
+            for (final mode in MultiInterfaceMode.values)
+              RadioListTile<MultiInterfaceMode>(
+                value: mode,
+                groupValue: service.multiInterfaceMode,
+                title: Text(_multiInterfaceModeLabel(locale, mode)),
+                subtitle: Text(locale.get('multi_interface_${mode.name}_desc')),
+                onChanged: (v) {
+                  if (v != null) {
+                    service.setMultiInterfaceMode(v);
+                    Navigator.of(ctx).pop();
+                  }
+                },
+              ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(locale.get('cancel')),
+          ),
+        ],
+      ),
     );
   }
 
@@ -360,6 +409,50 @@ class SettingsScreen extends StatelessWidget {
                   context,
                   MaterialPageRoute(builder: (_) => TranscriptionSettingsScreen(service: service)),
                 ),
+              ),
+            ],
+          ),
+
+          FormGroup(
+            title: locale.get('multi_interface_title'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.wifi),
+                title: _titleWithHelp(context, 'multi_interface_title', 'multi_interface_help'),
+                subtitle: Text(_multiInterfaceModeLabel(locale, service.multiInterfaceMode)),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showMultiInterfaceModeDialog(context),
+              ),
+            ],
+          ),
+
+          FormGroup(
+            title: locale.get('section_performance'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.speed),
+                title: Text(locale.get('performance_title')),
+                subtitle: Text(locale.get('performance_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => PerformanceScreen(service: service)),
+                ),
+              ),
+            ],
+          ),
+
+          FormGroup(
+            title: locale.get('section_security'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.shield_outlined),
+                title: Text(locale.get('security_hardening_title')),
+                subtitle: Text(locale.get('security_hardening_subtitle'), maxLines: 2, overflow: TextOverflow.ellipsis),
+                trailing: const Icon(Icons.verified, color: Colors.green),
               ),
             ],
           ),

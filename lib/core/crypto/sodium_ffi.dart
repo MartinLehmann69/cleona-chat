@@ -1303,4 +1303,22 @@ class SodiumFFI {
     padded.setRange(0, 32, a);
     return ed25519ScalarReduce(padded);
   }
+
+  // =========================================================================
+  // Memory management (Sec-hardening)
+  // =========================================================================
+
+  /// Zero [length] bytes at [ptr] via libsodium's sodium_memzero.
+  ///
+  /// Unlike a plain memset or Dart loop, sodium_memzero is guaranteed not
+  /// to be optimized away by the compiler -- it uses volatile writes or
+  /// platform-specific barriers. Use this for all native-allocated key
+  /// material in finally blocks.
+  ///
+  /// Exposed publicly for [SecureMemory.zeroNative] and any FFI caller
+  /// outside this file that holds key material in native memory.
+  void memzero(Pointer<Uint8> ptr, int length) {
+    if (length <= 0) return;
+    _sodiumMemzero(ptr.cast(), length);
+  }
 }

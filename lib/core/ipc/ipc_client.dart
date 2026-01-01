@@ -11,10 +11,13 @@ import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
+import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceMode, MultiInterfaceManager;
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
 import 'package:cleona/core/node/identity_context.dart';
+import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/core/update/binary_update_manager.dart' show BinaryUpdateState;
 
 /// IPC client that connects to the cleona-daemon via Unix Domain Socket.
 /// Implements ICleonaService so the GUI can use it transparently.
@@ -604,6 +607,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final pairDeviceHex = event.data['deviceIdHex'] as String? ?? '';
         onDevicePairRequest?.call(pairDeviceHex);
         break;
+      case 'update_available':
+        final manifestData = event.data['manifest'] as Map<String, dynamic>?;
+        final inNetwork = event.data['inNetworkAvailable'] as bool? ?? false;
+        if (manifestData != null) {
+          final manifest = UpdateManifest.fromJson(manifestData);
+          if (manifest != null) {
+            onUpdateAvailable?.call(manifest, inNetwork);
+          }
+        }
+        break;
+      case 'update_state_changed':
+        final stateIdx = event.data['state'] as int? ?? 0;
+        final progress = (event.data['progress'] as num?)?.toDouble() ?? 0.0;
+        if (stateIdx >= 0 && stateIdx < BinaryUpdateState.values.length) {
+          onUpdateStateChanged?.call(BinaryUpdateState.values[stateIdx], progress);
+        }
+        break;
     }
   }
 
@@ -646,6 +666,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     if (ms != null) _mediaSettings = MediaSettings.fromJson(ms);
     final lps = state['linkPreviewSettings'] as Map<String, dynamic>?;
     if (lps != null) _linkPreviewSettings = LinkPreviewSettings.fromJson(lps);
+    final mim = state['multiInterfaceMode'] as String?;
+    if (mim != null) _multiInterfaceMode = MultiInterfaceManager.modeFromString(mim);
     final ns = state['notificationSettings'] as Map<String, dynamic>?;
     if (ns != null) _notificationSoundService.updateSettings(NotificationSettings.fromJson(ns));
 
@@ -1323,6 +1345,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     bool isPublic = false,
     bool isAdult = true,
     String language = 'de',
+    String category = 'general',
     String? description,
     String? pictureBase64,
   }) async {
@@ -1332,6 +1355,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       'isPublic': isPublic,
       'isAdult': isAdult,
       'language': language,
+      if (category != 'general') 'category': category,
       'description': ?description,
       'pictureBase64': ?pictureBase64,
     });
@@ -1605,6 +1629,9 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   bool get serveBinaryUpdates => true;
 
   @override
+  String? generateInviteLinkUrl() => null;
+
+  @override
   Future<bool> setPort(int newPort) async {
     final resp = await _sendRequest('set_port', params: {'port': newPort});
     if (resp.success) {
@@ -1626,6 +1653,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   void updateLinkPreviewSettings(LinkPreviewSettings settings) {
     _linkPreviewSettings = settings;
     _sendRequest('update_link_preview_settings', params: settings.toJson());
+    onStateChanged?.call();
+  }
+
+  // ── Multi-Interface Send (Architecture §23.2) ────────────────────
+
+  MultiInterfaceMode _multiInterfaceMode = MultiInterfaceMode.off;
+
+  @override
+  MultiInterfaceMode get multiInterfaceMode => _multiInterfaceMode;
+
+  @override
+  Future<void> setMultiInterfaceMode(MultiInterfaceMode mode) async {
+    _multiInterfaceMode = mode;
+    _sendRequest('set_multi_interface_mode', params: {'mode': MultiInterfaceManager.modeToString(mode)});
     onStateChanged?.call();
   }
 
@@ -2075,6 +2116,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   void Function()? onDevicesUpdated;
   @override
   void Function(String deviceIdHex)? onDevicePairRequest;
+
+  // §19.6: Update availability (daemon→GUI via IPC)
+  void Function(UpdateManifest manifest, bool inNetworkAvailable)? onUpdateAvailable;
+  void Function(BinaryUpdateState state, double progress)? onUpdateStateChanged;
 
   @override
   void renameDevice(String deviceId, String newName) {
@@ -2546,6 +2591,60 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   Future<void> removeGoogleSync() async {
     final resp = await _sendRequest('calendar_sync_remove_google');
     if (!resp.success) throw Exception(resp.error ?? 'remove failed');
+  }
+
+  // ── Exchange (EWS) sync ───────────────────────────────────────────
+
+  /// Configure Exchange sync with Basic auth (on-premise).
+  Future<Map<String, dynamic>> configureExchange({
+    required String serverUrl,
+    required String email,
+    required String username,
+    required String password,
+    String direction = 'bidirectional',
+  }) async {
+    final resp = await _sendRequest('calendar_sync_configure_exchange', params: {
+      'config': <String, dynamic>{
+        'serverUrl': serverUrl,
+        'email': email,
+        'username': username,
+        'password': password,
+        'direction': direction,
+      },
+    });
+    if (!resp.success) throw Exception(resp.error ?? 'configure failed');
+    return (resp.data['status'] as Map?)?.cast<String, dynamic>() ?? {};
+  }
+
+  /// Begin Exchange OAuth2 consent flow (Microsoft 365). Returns the auth
+  /// URL to open in the system browser.
+  Future<String> startExchangeOauth({
+    required String clientId,
+    required String email,
+    String direction = 'bidirectional',
+  }) async {
+    final resp = await _sendRequest('calendar_sync_exchange_oauth_start', params: {
+      'clientId': clientId,
+      'email': email,
+      'direction': direction,
+    });
+    if (!resp.success) throw Exception(resp.error ?? 'oauth start failed');
+    return resp.data['authUrl'] as String;
+  }
+
+  /// Remove Exchange sync configuration for the active identity.
+  Future<void> removeExchangeSync() async {
+    final resp = await _sendRequest('calendar_sync_remove_exchange');
+    if (!resp.success) throw Exception(resp.error ?? 'remove failed');
+  }
+
+  /// Run EWS Autodiscover for the given email to find the server URL.
+  Future<String> ewsAutodiscover({required String email}) async {
+    final resp = await _sendRequest('calendar_sync_ews_autodiscover', params: {
+      'email': email,
+    });
+    if (!resp.success) throw Exception(resp.error ?? 'autodiscover failed');
+    return resp.data['serverUrl'] as String;
   }
 
   /// Tell the daemon whether the calendar UI is in the foreground. Switches

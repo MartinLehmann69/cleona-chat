@@ -1,4 +1,4 @@
-/// Types for external calendar sync (CalDAV + Google Calendar).
+/// Types for external calendar sync (CalDAV + Google + Exchange + local ICS).
 ///
 /// Per §23.8 — external sync is opt-in per identity. Config + state are
 /// persisted encrypted in the identity profile directory.
@@ -7,6 +7,7 @@ library;
 enum CalendarSyncProvider {
   caldav,
   google,
+  exchange,
   localIcs,
 }
 
@@ -212,6 +213,88 @@ class LocalIcsConfig {
       };
 }
 
+/// Configuration for a Microsoft Exchange (EWS) account.
+///
+/// Supports two auth modes:
+/// - **OAuth2** for Microsoft 365: set [clientId] and [refreshToken].
+///   The access token is refreshed automatically.
+/// - **Basic auth** for on-premise Exchange: set [username] and [password].
+///   Leave [clientId] null.
+class EWSConfig {
+  /// EWS endpoint URL, e.g.
+  /// `https://outlook.office365.com/EWS/Exchange.asmx`
+  /// or discovered via Autodiscover.
+  final String serverUrl;
+  /// User's email address (used for Autodiscover and display).
+  final String email;
+  /// OAuth2 client ID (Azure App Registration). Null = Basic auth.
+  final String? clientId;
+  /// OAuth2 refresh token — long-lived credential.
+  final String? refreshToken;
+  /// OAuth2 access token — short-lived, refreshed as needed.
+  String accessToken;
+  /// Unix ms when the access token expires.
+  int accessTokenExpiresAt;
+  /// Username for Basic/NTLM auth (on-premise Exchange).
+  final String? username;
+  /// Password for Basic/NTLM auth. Stored encrypted on disk.
+  final String? password;
+  final CalendarSyncDirection direction;
+  /// If true, queue conflicts for user resolution instead of last-write-wins.
+  final bool askOnConflict;
+
+  EWSConfig({
+    required this.serverUrl,
+    required this.email,
+    this.clientId,
+    this.refreshToken,
+    this.accessToken = '',
+    this.accessTokenExpiresAt = 0,
+    this.username,
+    this.password,
+    this.direction = CalendarSyncDirection.bidirectional,
+    this.askOnConflict = false,
+  });
+
+  /// True when OAuth2 is the auth mechanism (Microsoft 365).
+  bool get isOAuth => clientId != null && clientId!.isNotEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'serverUrl': serverUrl,
+        'email': email,
+        if (clientId != null) 'clientId': clientId,
+        if (refreshToken != null) 'refreshToken': refreshToken,
+        'accessToken': accessToken,
+        'accessTokenExpiresAt': accessTokenExpiresAt,
+        if (username != null) 'username': username,
+        if (password != null) 'password': password,
+        'direction': direction.wire,
+        'askOnConflict': askOnConflict,
+      };
+
+  static EWSConfig fromJson(Map<String, dynamic> json) => EWSConfig(
+        serverUrl: json['serverUrl'] as String? ?? '',
+        email: json['email'] as String? ?? '',
+        clientId: json['clientId'] as String?,
+        refreshToken: json['refreshToken'] as String?,
+        accessToken: json['accessToken'] as String? ?? '',
+        accessTokenExpiresAt: json['accessTokenExpiresAt'] as int? ?? 0,
+        username: json['username'] as String?,
+        password: json['password'] as String?,
+        direction: CalendarSyncDirectionX.parse(json['direction'] as String?),
+        askOnConflict: json['askOnConflict'] as bool? ?? false,
+      );
+
+  /// Redacted form for status display (no tokens/passwords).
+  Map<String, dynamic> toPublicJson() => {
+        'serverUrl': serverUrl,
+        'email': email,
+        'authMode': isOAuth ? 'oauth2' : 'basic',
+        'direction': direction.wire,
+        'askOnConflict': askOnConflict,
+      };
+}
+
 /// A recorded conflict between local and external versions of the same event.
 ///
 /// Stored in the sync state so the user can inspect and, if desired, restore
@@ -221,7 +304,7 @@ class LocalIcsConfig {
 class SyncConflict {
   final String id;
   final String eventId;
-  final String source;        // "caldav" | "google" | "localIcs"
+  final String source;        // "caldav" | "google" | "exchange" | "localIcs"
   final String winner;        // "local" | "external"
   final int detectedAtMs;
   final String? title;        // for display convenience
@@ -347,10 +430,11 @@ class SyncedEventRef {
       );
 }
 
-/// Aggregate sync status for an identity (CalDAV + Google + local ICS).
+/// Aggregate sync status for an identity (CalDAV + Google + Exchange + local ICS).
 class SyncStatus {
   final bool caldavConfigured;
   final bool googleConfigured;
+  final bool exchangeConfigured;
   final bool localIcsConfigured;
   final int lastSyncMs;         // 0 if never synced
   final bool lastSyncOk;
@@ -362,6 +446,7 @@ class SyncStatus {
   SyncStatus({
     this.caldavConfigured = false,
     this.googleConfigured = false,
+    this.exchangeConfigured = false,
     this.localIcsConfigured = false,
     this.lastSyncMs = 0,
     this.lastSyncOk = true,
@@ -374,6 +459,7 @@ class SyncStatus {
   Map<String, dynamic> toJson() => {
         'caldavConfigured': caldavConfigured,
         'googleConfigured': googleConfigured,
+        'exchangeConfigured': exchangeConfigured,
         'localIcsConfigured': localIcsConfigured,
         'lastSyncMs': lastSyncMs,
         'lastSyncOk': lastSyncOk,

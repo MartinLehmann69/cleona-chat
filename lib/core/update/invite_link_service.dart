@@ -1,11 +1,15 @@
 /// Higher-level service for creating and managing invite links (§19.6.4).
 ///
-/// Bridges the low-level [InviteLink]/[InviteLinkGenerator] model (URL
-/// generation/parsing, Ed25519 signature verification) with the running
-/// node's state (public addresses, current version, binary hashes), and
-/// manages invite-scoped Nostr binary-availability records (§19.6.5) so the
-/// invited user can discover binary sources even after the inviter's IP
-/// changes.
+/// Bridges the [InviteLink] model (URL generation/parsing, per-platform
+/// Ed25519 signature verification) with the running node's state (public
+/// addresses, current version, binary hashes/signatures from the
+/// UpdateManifest), and manages invite-scoped Nostr binary-availability
+/// records (§19.6.5) so the invited user can discover binary sources even
+/// after the inviter's IP changes.
+///
+/// No maintainer secret key required at runtime — the per-platform
+/// signatures travel through the signed UpdateManifest from the release
+/// build to every node.
 library;
 
 import 'dart:async';
@@ -35,7 +39,7 @@ const Duration kInviteBinaryTtl = Duration(hours: 72);
 /// Higher-level service for creating invite links (§19.6.4).
 ///
 /// Coordinates between the running node's state (addresses, version,
-/// binary hashes) and the [InviteLinkGenerator] to produce ready-to-share
+/// binary hashes/signatures from the manifest) to produce ready-to-share
 /// invite links. Also manages invite-scoped Nostr records (§19.6.5)
 /// so that the invited user can discover binary sources even after the
 /// inviter's IP changes.
@@ -47,20 +51,18 @@ class InviteLinkService {
 
   /// Generate an invite link using the current node state.
   ///
-  /// [maintainerSk] — Ed25519 secret key for signing the hash map.
   /// [contactSeed] — the ContactSeed to embed (existing §8.1.1 mechanism).
   /// [nodeAddresses] — current node's public addresses (IP:port pairs).
   /// [currentVersion] — app version string.
-  /// [binaryHashes] — per-platform SHA-256 hashes of current binaries.
+  /// [binaryHashes] — per-platform SHA-256 hashes from the UpdateManifest.
+  /// [binarySignatures] — per-platform Ed25519 signatures from the manifest.
   /// [fallbackUrl] — optional external download URL (e.g., GitHub Release).
-  ///
-  /// Returns the invite link URL as a string, ready for sharing.
   String createInviteLink({
-    required Uint8List maintainerSk,
     required String contactSeed,
     required List<EndpointAddress> nodeAddresses,
     required String currentVersion,
     required Map<String, String> binaryHashes,
+    required Map<String, String> binarySignatures,
     String? fallbackUrl,
   }) {
     final address = bestPublicAddress(nodeAddresses);
@@ -70,12 +72,12 @@ class InviteLinkService {
           '${nodeAddresses.length} candidate(s)');
     }
 
-    final link = InviteLinkGenerator.create(
-      maintainerSk: maintainerSk,
-      contactSeed: contactSeed,
+    final link = InviteLink(
       nodeIp: address.ip,
       nodePort: address.port,
+      contactSeed: contactSeed,
       binaryHashes: binaryHashes,
+      binarySignatures: binarySignatures,
       version: currentVersion,
       fallbackUrl: fallbackUrl,
     );

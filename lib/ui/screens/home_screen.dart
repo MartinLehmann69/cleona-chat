@@ -507,7 +507,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     var isPublic = false;
     var isAdult = true; // Default: NSFW ON (must be explicitly disabled)
     var language = 'de';
+    var category = 'general';
     final languages = ['de', 'en', 'es', 'hu', 'sv', 'multi'];
+    const categories = [
+      'general', 'technology', 'news', 'entertainment', 'gaming',
+      'music', 'sports', 'education', 'finance', 'health',
+      'food', 'travel', 'humor', 'crypto', 'regional',
+    ];
 
     showDialog(
       context: context,
@@ -554,6 +560,22 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     onChanged: (v) => setDialogState(() => language = v ?? 'de'),
                   ),
                   const SizedBox(height: 8),
+                  // Category selector (only for public channels)
+                  if (isPublic)
+                    DropdownButtonFormField<String>(
+                      value: category,
+                      decoration: InputDecoration(
+                        labelText: locale.get('channel_category'),
+                        border: const OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                      items: categories.map((c) => DropdownMenuItem(
+                        value: c,
+                        child: Text(locale.get('channel_cat_$c')),
+                      )).toList(),
+                      onChanged: (v) => setDialogState(() => category = v ?? 'general'),
+                    ),
+                  if (isPublic) const SizedBox(height: 8),
                   // Public/Private toggle
                   SwitchListTile(
                     title: Text(locale.get('channel_public_toggle')),
@@ -620,6 +642,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                         isPublic: isPublic,
                         isAdult: isAdult,
                         language: language,
+                        category: isPublic ? category : 'general',
                         description: desc.isNotEmpty ? desc : null,
                       );
                     },
@@ -877,8 +900,40 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
           ch.members[myNodeId]?.role == 'admin');
     }).toList();
 
+    // Pending jury requests banner
+    final pendingJury = widget.service.pendingJuryRequests;
+
     return Column(
       children: [
+        if (pendingJury.isNotEmpty)
+          Material(
+            color: Theme.of(context).colorScheme.tertiaryContainer,
+            child: InkWell(
+              onTap: () => _showJuryVoteDialog(context, pendingJury.first, widget.service, locale),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.gavel, size: 18,
+                        color: Theme.of(context).colorScheme.onTertiaryContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        '${locale.get('jury_request_received')} (${pendingJury.length})',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: Theme.of(context).colorScheme.onTertiaryContainer,
+                        ),
+                      ),
+                    ),
+                    Icon(Icons.chevron_right, size: 18,
+                        color: Theme.of(context).colorScheme.onTertiaryContainer),
+                  ],
+                ),
+              ),
+            ),
+          ),
         Builder(builder: (ctx) {
           final character = Theme.of(ctx).character;
           final isPhoto = character.surfaceRenderMode == SurfaceRenderMode.photo;
@@ -928,6 +983,137 @@ class _ChannelTabViewState extends State<_ChannelTabView> with SingleTickerProvi
       ],
     );
   }
+
+  void _showJuryVoteDialog(BuildContext context, JuryRequest request,
+      ICleonaService service, AppLocale locale) {
+    final categories = [
+      locale.get('report_cat_nsfw'),
+      locale.get('report_cat_false'),
+      locale.get('report_cat_drugs'),
+      locale.get('report_cat_weapons'),
+      locale.get('report_cat_csam'),
+      locale.get('report_cat_other'),
+    ];
+    final categoryLabel = request.category.index < categories.length
+        ? categories[request.category.index]
+        : '?';
+    final reasonController = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(children: [
+          const Icon(Icons.gavel, size: 22),
+          const SizedBox(width: 8),
+          Expanded(child: Text(locale.get('jury_request_title'))),
+        ]),
+        content: SizedBox(
+          width: 320,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Channel name
+                Text('${locale.get('jury_channel_name')}: ${request.channelName}',
+                    style: const TextStyle(fontWeight: FontWeight.w500)),
+                const SizedBox(height: 4),
+                // Report category
+                Text('${locale.get('report_category')}: $categoryLabel',
+                    style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(height: 12),
+                // Evidence section
+                Text(locale.get('jury_evidence'),
+                    style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 4),
+                if (request.evidencePostIds.isNotEmpty)
+                  ...request.evidencePostIds.map((id) => Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text('Post: ${id.substring(0, 16)}...',
+                          style: const TextStyle(fontSize: 12, fontFamily: 'monospace')),
+                    ),
+                  ))
+                else
+                  Text('--', style: Theme.of(context).textTheme.bodySmall),
+                const SizedBox(height: 12),
+                // Reason text field
+                TextField(
+                  controller: reasonController,
+                  maxLines: 2,
+                  decoration: InputDecoration(
+                    labelText: locale.get('jury_vote_reason'),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(locale.get('jury_decline')),
+          ),
+          OutlinedButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await service.submitJuryVote(
+                request.juryId, request.reportId, 2, // abstain
+                reason: reasonController.text.trim().isNotEmpty
+                    ? reasonController.text.trim() : null,
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+                );
+              }
+            },
+            child: Text(locale.get('jury_vote_abstain')),
+          ),
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await service.submitJuryVote(
+                request.juryId, request.reportId, 1, // reject
+                reason: reasonController.text.trim().isNotEmpty
+                    ? reasonController.text.trim() : null,
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+                );
+              }
+            },
+            child: Text(locale.get('jury_vote_reject')),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.pop(ctx);
+              await service.submitJuryVote(
+                request.juryId, request.reportId, 0, // approve
+                reason: reasonController.text.trim().isNotEmpty
+                    ? reasonController.text.trim() : null,
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text(locale.get('jury_vote_submitted'))),
+                );
+              }
+            },
+            child: Text(locale.get('jury_vote_approve')),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// Search view for discovering public channels.
@@ -944,6 +1130,14 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
   List<ChannelIndexEntry> _results = [];
   bool _includeAdult = false;
   String? _filterLanguage;
+  String _sortMode = 'popular';
+  String? _filterCategory;
+
+  static const _categoryNames = [
+    'general', 'technology', 'news', 'entertainment', 'gaming',
+    'music', 'sports', 'education', 'finance', 'health',
+    'food', 'travel', 'humor', 'crypto', 'regional',
+  ];
 
   @override
   void initState() {
@@ -958,12 +1152,32 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
   }
 
   void _doSearch() async {
-    final results = await widget.service.searchPublicChannels(
+    var results = await widget.service.searchPublicChannels(
       query: _searchController.text.trim().isEmpty ? null : _searchController.text.trim(),
       language: _filterLanguage,
       includeAdult: _includeAdult,
     );
+    // Client-side category filter
+    if (_filterCategory != null) {
+      results = results.where((e) => e.category == _filterCategory).toList();
+    }
+    // Client-side sort
+    switch (_sortMode) {
+      case 'popular':
+        results.sort((a, b) => b.subscriberCount.compareTo(a.subscriberCount));
+        break;
+      case 'newest':
+        results.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+        break;
+      case 'name':
+        results.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        break;
+    }
     if (mounted) setState(() => _results = results);
+  }
+
+  String _categoryLabel(String cat, AppLocale locale) {
+    return locale.get('channel_cat_$cat');
   }
 
   @override
@@ -992,45 +1206,124 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
               ),
               const SizedBox(width: 4),
               IconButton(
-                icon: const Icon(Icons.filter_list, size: 20),
-                tooltip: locale.get('channel_language'),
+                icon: Badge(
+                  isLabelVisible: _filterCategory != null || _filterLanguage != null,
+                  smallSize: 8,
+                  child: const Icon(Icons.filter_list, size: 20),
+                ),
+                tooltip: locale.get('channel_filter_category'),
                 onPressed: () {
                   showModalBottomSheet(
                     context: context,
+                    isScrollControlled: true,
                     builder: (ctx) => StatefulBuilder(
-                      builder: (ctx, setSheetState) => Padding(
-                        padding: const EdgeInsets.all(16),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(locale.get('channel_language'),
-                                style: Theme.of(ctx).textTheme.titleMedium),
-                            Wrap(
-                              spacing: 8,
-                              children: [null, 'de', 'en', 'es', 'hu', 'sv', 'multi'].map((l) {
-                                return ChoiceChip(
-                                  label: Text(l == null ? 'Alle' : l == 'multi' ? locale.get('language_multi') : l.toUpperCase()),
-                                  selected: _filterLanguage == l,
-                                  onSelected: (_) {
-                                    setSheetState(() => _filterLanguage = l);
-                                    setState(() => _filterLanguage = l);
-                                    _doSearch();
-                                  },
-                                );
-                              }).toList(),
-                            ),
-                            const SizedBox(height: 8),
-                            SwitchListTile(
-                              title: Text(locale.get('channel_nsfw_toggle')),
-                              value: _includeAdult,
-                              onChanged: (v) {
-                                setSheetState(() => _includeAdult = v);
-                                setState(() => _includeAdult = v);
-                                _doSearch();
-                              },
-                            ),
-                          ],
+                      builder: (ctx, setSheetState) => DraggableScrollableSheet(
+                        expand: false,
+                        initialChildSize: 0.6,
+                        minChildSize: 0.3,
+                        maxChildSize: 0.85,
+                        builder: (ctx, scrollController) => SingleChildScrollView(
+                          controller: scrollController,
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              // Sort mode
+                              Text(locale.get('channel_sort_popular'),
+                                  style: Theme.of(ctx).textTheme.titleSmall),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 8,
+                                children: [
+                                  ChoiceChip(
+                                    label: Text(locale.get('channel_sort_popular')),
+                                    selected: _sortMode == 'popular',
+                                    onSelected: (_) {
+                                      setSheetState(() => _sortMode = 'popular');
+                                      setState(() => _sortMode = 'popular');
+                                      _doSearch();
+                                    },
+                                  ),
+                                  ChoiceChip(
+                                    label: Text(locale.get('channel_sort_newest')),
+                                    selected: _sortMode == 'newest',
+                                    onSelected: (_) {
+                                      setSheetState(() => _sortMode = 'newest');
+                                      setState(() => _sortMode = 'newest');
+                                      _doSearch();
+                                    },
+                                  ),
+                                  ChoiceChip(
+                                    label: Text(locale.get('channel_sort_name')),
+                                    selected: _sortMode == 'name',
+                                    onSelected: (_) {
+                                      setSheetState(() => _sortMode = 'name');
+                                      setState(() => _sortMode = 'name');
+                                      _doSearch();
+                                    },
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              // Category filter
+                              Text(locale.get('channel_filter_category'),
+                                  style: Theme.of(ctx).textTheme.titleSmall),
+                              const SizedBox(height: 4),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 4,
+                                children: [
+                                  ChoiceChip(
+                                    label: const Text('Alle'),
+                                    selected: _filterCategory == null,
+                                    onSelected: (_) {
+                                      setSheetState(() => _filterCategory = null);
+                                      setState(() => _filterCategory = null);
+                                      _doSearch();
+                                    },
+                                  ),
+                                  ..._categoryNames.map((cat) => ChoiceChip(
+                                    label: Text(_categoryLabel(cat, locale)),
+                                    selected: _filterCategory == cat,
+                                    onSelected: (_) {
+                                      setSheetState(() => _filterCategory = cat);
+                                      setState(() => _filterCategory = cat);
+                                      _doSearch();
+                                    },
+                                  )),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              // Language filter
+                              Text(locale.get('channel_language'),
+                                  style: Theme.of(ctx).textTheme.titleSmall),
+                              Wrap(
+                                spacing: 8,
+                                children: [null, 'de', 'en', 'es', 'hu', 'sv', 'multi'].map((l) {
+                                  return ChoiceChip(
+                                    label: Text(l == null ? 'Alle' : l == 'multi' ? locale.get('language_multi') : l.toUpperCase()),
+                                    selected: _filterLanguage == l,
+                                    onSelected: (_) {
+                                      setSheetState(() => _filterLanguage = l);
+                                      setState(() => _filterLanguage = l);
+                                      _doSearch();
+                                    },
+                                  );
+                                }).toList(),
+                              ),
+                              const SizedBox(height: 8),
+                              SwitchListTile(
+                                title: Text(locale.get('channel_nsfw_toggle')),
+                                value: _includeAdult,
+                                onChanged: (v) {
+                                  setSheetState(() => _includeAdult = v);
+                                  setState(() => _includeAdult = v);
+                                  _doSearch();
+                                },
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -1065,6 +1358,20 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
                           const SizedBox(width: 4),
                           Text(entry.language.toUpperCase(),
                               style: TextStyle(fontSize: 10, color: colorScheme.onSurfaceVariant)),
+                          if (entry.category != 'general') ...[
+                            const SizedBox(width: 4),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                              decoration: BoxDecoration(
+                                color: colorScheme.secondaryContainer,
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                _categoryLabel(entry.category, locale),
+                                style: TextStyle(fontSize: 9, color: colorScheme.onSecondaryContainer),
+                              ),
+                            ),
+                          ],
                           if (entry.badBadgeLevel > 0) ...[
                             const SizedBox(width: 4),
                             Icon(Icons.warning, size: 14,
@@ -1082,6 +1389,27 @@ class _ChannelSearchViewState extends State<_ChannelSearchView> {
                           ? const Icon(Icons.check, color: Colors.green)
                           : FilledButton.tonal(
                               onPressed: () async {
+                                // Age gate for NSFW channels
+                                if (entry.isAdult) {
+                                  final confirmed = await showDialog<bool>(
+                                    context: context,
+                                    builder: (ctx) => AlertDialog(
+                                      title: Text(locale.get('age_gate_title')),
+                                      content: Text(locale.get('age_gate_message')),
+                                      actions: [
+                                        TextButton(
+                                          onPressed: () => Navigator.pop(ctx, false),
+                                          child: Text(locale.get('cancel')),
+                                        ),
+                                        FilledButton(
+                                          onPressed: () => Navigator.pop(ctx, true),
+                                          child: Text(locale.get('age_gate_confirm')),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                  if (confirmed != true) return;
+                                }
                                 await widget.service.joinPublicChannel(entry.channelIdHex);
                                 _doSearch();
                               },

@@ -2,6 +2,10 @@ import 'dart:typed_data';
 import 'package:cleona/core/calls/overlay_tree.dart';
 import 'package:cleona/core/calls/media_relay.dart';
 import 'package:cleona/core/calls/rtt_measurement.dart';
+import 'package:cleona/core/calls/collaboration/whiteboard_manager.dart';
+import 'package:cleona/core/calls/collaboration/call_chat_manager.dart';
+import 'package:cleona/core/calls/collaboration/call_file_manager.dart';
+import 'package:cleona/core/calls/collaboration/screen_share_manager.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/core/service/service_types.dart';
 
@@ -12,6 +16,8 @@ class GroupCallParticipant {
   ParticipantState state;
   DateTime? joinedAt;
   int framesReceived;
+  bool isMuted;
+  double audioLevel;
 
   GroupCallParticipant({
     required this.nodeIdHex,
@@ -19,6 +25,8 @@ class GroupCallParticipant {
     this.state = ParticipantState.invited,
     this.joinedAt,
     this.framesReceived = 0,
+    this.isMuted = false,
+    this.audioLevel = 0.0,
   });
 }
 
@@ -55,6 +63,18 @@ class GroupCallSession {
   /// userId-hex) — lets reciprocation avoid re-announcing on every inbound key.
   final Set<String> announcedSendKeyTo = {};
 
+  /// Nullable override for tree ownership (initially null = use initiatorHex).
+  String? _ownerHex;
+
+  /// Current tree owner (falls back to initiatorHex if not overridden).
+  String get ownerHex => _ownerHex ?? initiatorHex;
+
+  /// Set a new tree owner.
+  set ownerHex(String hex) => _ownerHex = hex;
+
+  /// Check if a given ID is the current owner.
+  bool isOwner(String myHex) => ownerHex == myHex;
+
   /// §13.1.2 exemption #4: participant userId-hex -> device id registered
   /// with [CleonaNode.registerLiveMediaPeer] for this session's live-media
   /// PoW exemption. Tracked per-participant (not a flat `Set<Uint8List>`) so
@@ -82,6 +102,20 @@ class GroupCallSession {
 
   /// Monotonic video sequence number.
   int get nextVideoSeqNum => _videoSeqNum++;
+
+  // ── In-Call Collaboration (§10.5) ────────────────────────────────
+
+  /// Whiteboard manager — initialized when collaboration starts.
+  WhiteboardManager? whiteboard;
+
+  /// Call chat manager — ephemeral in-call messaging.
+  CallChatManager? callChat;
+
+  /// File sharing manager.
+  CallFileManager? fileManager;
+
+  /// Screen share manager.
+  ScreenShareManager? screenShare;
 
   /// Set once the receive-side live-media fast path (Architecture §10.3,
   /// F-C) has logged its "active" line for this group call — prevents
@@ -123,6 +157,8 @@ class GroupCallSession {
                   nodeIdHex: p.nodeIdHex,
                   displayName: p.displayName,
                   state: p.state,
+                  isMuted: p.isMuted,
+                  audioLevel: p.audioLevel,
                 ))
             .toList(),
         totalFramesSent: totalFramesSent,

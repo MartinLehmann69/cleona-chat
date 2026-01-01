@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/calendar/sync/caldav_client.dart';
+import 'package:cleona/core/calendar/sync/ews_client.dart';
 import 'package:cleona/core/calendar/sync/google_calendar_client.dart';
 import 'package:cleona/core/calendar/sync/local_ics_publisher.dart';
 import 'package:cleona/core/calendar/sync/sync_types.dart';
@@ -13,9 +14,10 @@ import 'package:cleona/core/service/service_types.dart';
 
 /// Per-identity calendar sync orchestrator.
 ///
-/// Each identity owns at most one [CalDAVConfig] and one [GoogleCalendarConfig].
-/// On start(), a periodic timer drives [syncAll]. Configs and per-event
-/// sync refs are persisted encrypted under the identity's profile directory.
+/// Each identity owns at most one of [CalDAVConfig], [GoogleCalendarConfig],
+/// [EWSConfig], and [LocalIcsConfig]. On start(), a periodic timer drives
+/// [syncAll]. Configs and per-event sync refs are persisted encrypted under
+/// the identity's profile directory.
 class CalendarSyncService {
   final String profileDir;
   final String identityId;
@@ -37,6 +39,7 @@ class CalendarSyncService {
 
   CalDAVConfig? _caldav;
   GoogleCalendarConfig? _google;
+  EWSConfig? _ews;
   LocalIcsConfig? _localIcs;
   late LocalIcsPublisher _icsPublisher;
 
@@ -44,6 +47,8 @@ class CalendarSyncService {
   final Map<String, SyncedEventRef> _caldavRefs = {};
   /// eventId → SyncedEventRef for Google.
   final Map<String, SyncedEventRef> _googleRefs = {};
+  /// eventId → SyncedEventRef for Exchange (EWS).
+  final Map<String, SyncedEventRef> _ewsRefs = {};
   /// Google incremental sync token (per calendar).
   String? _googleSyncToken;
 
@@ -94,6 +99,8 @@ class CalendarSyncService {
         if (caldavRaw != null) _caldav = CalDAVConfig.fromJson(caldavRaw);
         final googleRaw = cfgJson['google'] as Map<String, dynamic>?;
         if (googleRaw != null) _google = GoogleCalendarConfig.fromJson(googleRaw);
+        final ewsRaw = cfgJson['exchange'] as Map<String, dynamic>?;
+        if (ewsRaw != null) _ews = EWSConfig.fromJson(ewsRaw);
         final icsRaw = cfgJson['localIcs'] as Map<String, dynamic>?;
         if (icsRaw != null) _localIcs = LocalIcsConfig.fromJson(icsRaw);
       }
@@ -107,6 +114,11 @@ class CalendarSyncService {
         final googleRefs = stateJson['googleRefs'] as Map<String, dynamic>? ?? {};
         for (final e in googleRefs.entries) {
           _googleRefs[e.key] =
+              SyncedEventRef.fromJson(e.value as Map<String, dynamic>);
+        }
+        final ewsRefs = stateJson['ewsRefs'] as Map<String, dynamic>? ?? {};
+        for (final e in ewsRefs.entries) {
+          _ewsRefs[e.key] =
               SyncedEventRef.fromJson(e.value as Map<String, dynamic>);
         }
         _googleSyncToken = stateJson['googleSyncToken'] as String?;
@@ -135,8 +147,9 @@ class CalendarSyncService {
         }
       }
       _log.info('Sync state loaded: caldav=${_caldav != null} '
-          'google=${_google != null} localIcs=${_localIcs != null} '
-          'refs=${_caldavRefs.length}+${_googleRefs.length} '
+          'google=${_google != null} exchange=${_ews != null} '
+          'localIcs=${_localIcs != null} '
+          'refs=${_caldavRefs.length}+${_googleRefs.length}+${_ewsRefs.length} '
           'conflicts=${_conflicts.length}+${_pendingConflicts.length}pending');
     } catch (e) {
       _log.warn('Failed to load sync state: $e');
@@ -147,6 +160,7 @@ class CalendarSyncService {
     final json = <String, dynamic>{};
     if (_caldav != null) json['caldav'] = _caldav!.toJson();
     if (_google != null) json['google'] = _google!.toJson();
+    if (_ews != null) json['exchange'] = _ews!.toJson();
     if (_localIcs != null) json['localIcs'] = _localIcs!.toJson();
     fileEnc.writeJsonFile('$profileDir/calendar_sync_config.json', json);
   }
@@ -155,6 +169,7 @@ class CalendarSyncService {
     final json = <String, dynamic>{
       'caldavRefs': _caldavRefs.map((k, v) => MapEntry(k, v.toJson())),
       'googleRefs': _googleRefs.map((k, v) => MapEntry(k, v.toJson())),
+      'ewsRefs': _ewsRefs.map((k, v) => MapEntry(k, v.toJson())),
       if (_googleSyncToken != null) 'googleSyncToken': _googleSyncToken,
       'lastSyncMs': _lastSyncMs,
       'lastSyncOk': _lastSyncOk,
@@ -195,7 +210,7 @@ class CalendarSyncService {
     _log.info('Calendar sync interval → ${interval.inMinutes}min '
         '(${foreground ? "foreground" : "background"})');
     _restartTimer();
-    if (foreground && (_caldav != null || _google != null)) {
+    if (foreground && (_caldav != null || _google != null || _ews != null)) {
       unawaited(syncAll());
     }
   }
@@ -203,7 +218,7 @@ class CalendarSyncService {
   void _restartTimer() {
     _timer?.cancel();
     _timer = Timer.periodic(interval, (_) {
-      if (_caldav == null && _google == null) return;
+      if (_caldav == null && _google == null && _ews == null) return;
       unawaited(syncAll());
     });
   }
@@ -271,6 +286,38 @@ class CalendarSyncService {
     _google = null;
     _googleRefs.clear();
     _googleSyncToken = null;
+    _saveConfig();
+    _saveState();
+  }
+
+  EWSConfig? get ewsConfig => _ews;
+
+  /// Configure Exchange (EWS) sync. Validates the endpoint by issuing
+  /// a FindItem probe. Throws [EWSException] on auth/connectivity failure.
+  Future<void> configureEWS(EWSConfig config) async {
+    final client = EWSClient(config);
+    try {
+      // Probe — a lightweight FindItem confirms auth + endpoint.
+      await client.ensureAccessToken();
+      final now = DateTime.now();
+      await client.findItems(
+        rangeStart: now.subtract(const Duration(days: 1)),
+        rangeEnd: now.add(const Duration(days: 1)),
+      );
+      _log.info('EWS endpoint validated: ${config.serverUrl}');
+      // Persist refreshed tokens if OAuth.
+      _ews = client.config;
+    } finally {
+      client.close();
+    }
+    _ewsRefs.clear();
+    _saveConfig();
+    _saveState();
+  }
+
+  void removeEWS() {
+    _ews = null;
+    _ewsRefs.clear();
     _saveConfig();
     _saveState();
   }
@@ -396,11 +443,13 @@ class CalendarSyncService {
   SyncStatus get status => SyncStatus(
         caldavConfigured: _caldav != null,
         googleConfigured: _google != null,
+        exchangeConfigured: _ews != null,
         localIcsConfigured: _localIcs != null,
         lastSyncMs: _lastSyncMs,
         lastSyncOk: _lastSyncOk,
         lastError: _lastError,
-        syncedEventCount: _caldavRefs.length + _googleRefs.length,
+        syncedEventCount:
+            _caldavRefs.length + _googleRefs.length + _ewsRefs.length,
         conflictsResolved: _conflicts.length,
         pendingConflicts: _pendingConflicts.length,
       );
@@ -410,6 +459,7 @@ class CalendarSyncService {
         ...status.toJson(),
         if (_caldav != null) 'caldav': _caldav!.toPublicJson(),
         if (_google != null) 'google': _google!.toPublicJson(),
+        if (_ews != null) 'exchange': _ews!.toPublicJson(),
         if (_localIcs != null) 'localIcs': _localIcs!.toPublicJson(),
       };
 
@@ -440,6 +490,15 @@ class CalendarSyncService {
         } catch (e) {
           _log.warn('Google sync failed: $e');
           merged.errors.add('google: $e');
+        }
+      }
+      if (_ews != null) {
+        try {
+          final r = await _syncEWS();
+          _mergeResult(merged, r);
+        } catch (e) {
+          _log.warn('Exchange sync failed: $e');
+          merged.errors.add('exchange: $e');
         }
       }
       if (_localIcs != null) {
@@ -1013,13 +1072,254 @@ class CalendarSyncService {
     return '$normalized$segment';
   }
 
+  // ── Exchange (EWS) sync ────────────────────────────────────────────
+
+  Future<SyncResult> _syncEWS() async {
+    final cfg = _ews!;
+    final client = EWSClient(cfg);
+    final result = SyncResult();
+    try {
+      await client.ensureAccessToken();
+      // Persist refreshed tokens if changed.
+      _ews = client.config;
+      _saveConfig();
+
+      // Pull phase — fetch calendar items from Exchange.
+      if (cfg.direction != CalendarSyncDirection.export) {
+        await _ewsPullPhase(client, result);
+      }
+
+      // Push phase — send local changes to Exchange.
+      if (cfg.direction != CalendarSyncDirection.import_) {
+        await _ewsPushPhase(client, result);
+      }
+    } finally {
+      client.close();
+    }
+    return result;
+  }
+
+  Future<void> _ewsPullPhase(EWSClient client, SyncResult result) async {
+    final now = DateTime.now();
+    final start = now.subtract(const Duration(days: 730));
+    final end = now.add(const Duration(days: 730));
+
+    final items = await client.findItems(rangeStart: start, rangeEnd: end);
+
+    // Build set of server item IDs for delete detection.
+    final serverItemIds = <String>{};
+
+    for (final item in items) {
+      final itemId = item.itemId;
+      if (itemId == null || itemId.isEmpty) continue;
+      serverItemIds.add(itemId);
+
+      // Find local event by external ID.
+      String? localEventId;
+      for (final entry in _ewsRefs.entries) {
+        if (entry.value.externalId == itemId) {
+          localEventId = entry.key;
+          break;
+        }
+      }
+
+      final ref = localEventId != null ? _ewsRefs[localEventId] : null;
+      // Skip unchanged items (same changeKey = same version).
+      if (ref != null && ref.etag == item.changeKey) continue;
+
+      // Fetch full details if we only got summary from FindItem.
+      final fullItem = await client.getItem(itemId);
+      final event = _ewsItemToCleona(fullItem);
+      if (event == null) continue;
+
+      if (localEventId != null) {
+        final existing = calendar.events[localEventId];
+        if (existing != null && existing.updatedAt > event.updatedAt) {
+          if (_ews?.askOnConflict == true) {
+            _queuePending(PendingConflict(
+              id: 'exchange:$localEventId:${DateTime.now().millisecondsSinceEpoch}',
+              eventId: localEventId,
+              source: 'exchange',
+              localEvent: existing.toJson(),
+              externalEvent: event.toJson(),
+              detectedAtMs: DateTime.now().millisecondsSinceEpoch,
+            ));
+            continue;
+          }
+          _recordConflict(SyncConflict(
+            id: 'exchange:$localEventId:${DateTime.now().millisecondsSinceEpoch}',
+            eventId: localEventId,
+            source: 'exchange',
+            winner: 'local',
+            detectedAtMs: DateTime.now().millisecondsSinceEpoch,
+            title: existing.title,
+            losingEvent: event.toJson(),
+          ));
+          result.conflictsResolved++;
+          continue;
+        }
+        if (existing != null && existing.updatedAt < event.updatedAt) {
+          _recordConflict(SyncConflict(
+            id: 'exchange:$localEventId:${DateTime.now().millisecondsSinceEpoch}',
+            eventId: localEventId,
+            source: 'exchange',
+            winner: 'external',
+            detectedAtMs: DateTime.now().millisecondsSinceEpoch,
+            title: event.title,
+            losingEvent: existing.toJson(),
+          ));
+        }
+      }
+
+      final eventId = localEventId ?? event.eventId;
+      final effective = CalendarEvent.fromJson({
+        ...event.toJson(),
+        'eventId': eventId,
+        'identityId': identityId,
+      });
+
+      final existed = calendar.events.containsKey(eventId);
+      calendar.events[eventId] = effective;
+      if (existed) {
+        result.pulledUpdated++;
+      } else {
+        result.pulledNew++;
+      }
+      _ewsRefs[eventId] = SyncedEventRef(
+        eventId: eventId,
+        externalId: itemId,
+        etag: fullItem.changeKey ?? '',
+        lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+        lastLocalUpdatedMs: effective.updatedAt,
+      );
+    }
+    calendar.save();
+
+    // Detect server-side deletes.
+    final toForget = <String>[];
+    for (final entry in _ewsRefs.entries) {
+      if (!serverItemIds.contains(entry.value.externalId)) {
+        final local = calendar.events[entry.key];
+        if (local != null &&
+            local.updatedAt > entry.value.lastLocalUpdatedMs + 1000) {
+          continue; // Local edit since last sync — will be re-pushed.
+        }
+        calendar.deleteEvent(entry.key);
+        result.pulledDeleted++;
+        toForget.add(entry.key);
+      }
+    }
+    for (final id in toForget) {
+      _ewsRefs.remove(id);
+    }
+  }
+
+  Future<void> _ewsPushPhase(EWSClient client, SyncResult result) async {
+    for (final event in calendar.events.values.toList()) {
+      if (event.cancelled) continue;
+      final ref = _ewsRefs[event.eventId];
+      final ewsItem = _cleonaEventToEWS(event);
+      if (ref == null) {
+        // New — create on Exchange.
+        try {
+          final created = await client.createItem(ewsItem);
+          _ewsRefs[event.eventId] = SyncedEventRef(
+            eventId: event.eventId,
+            externalId: created.itemId ?? '',
+            etag: created.changeKey ?? '',
+            lastSeenMs: DateTime.now().millisecondsSinceEpoch,
+            lastLocalUpdatedMs: event.updatedAt,
+          );
+          result.pushedNew++;
+        } catch (e) {
+          result.errors.add('exchange create ${event.eventId}: $e');
+        }
+      } else if (event.updatedAt > ref.lastLocalUpdatedMs) {
+        // Updated locally — push to Exchange.
+        try {
+          final updated = await client.updateItem(
+            ewsItem.copyWith(
+              itemId: ref.externalId,
+              changeKey: ref.etag,
+            ),
+          );
+          ref.etag = updated.changeKey ?? ref.etag;
+          ref.lastSeenMs = DateTime.now().millisecondsSinceEpoch;
+          ref.lastLocalUpdatedMs = event.updatedAt;
+          result.pushedUpdated++;
+        } catch (e) {
+          result.errors.add('exchange update ${event.eventId}: $e');
+        }
+      }
+    }
+
+    // Delete events removed locally.
+    final removedRefs = <String>[];
+    for (final entry in _ewsRefs.entries.toList()) {
+      if (!calendar.events.containsKey(entry.key)) {
+        try {
+          await client.deleteItem(entry.value.externalId);
+          removedRefs.add(entry.key);
+          result.pushedDeleted++;
+        } catch (e) {
+          result.errors.add('exchange delete ${entry.key}: $e');
+        }
+      }
+    }
+    for (final id in removedRefs) {
+      _ewsRefs.remove(id);
+    }
+  }
+
+  // ── EWS item conversion ──────────────────────────────────────────
+
+  CalendarEvent? _ewsItemToCleona(EWSCalendarItem item) {
+    if (item.subject == null || item.subject!.isEmpty) return null;
+    final startMs = item.start?.millisecondsSinceEpoch;
+    if (startMs == null) return null;
+    final endMs = item.end?.millisecondsSinceEpoch ?? startMs + 3600000;
+    final updatedAt = item.lastModifiedTime?.millisecondsSinceEpoch ??
+        DateTime.now().millisecondsSinceEpoch;
+
+    return CalendarEvent(
+      eventId: 'ews-${(item.itemId ?? '').hashCode.toRadixString(16)}-$startMs',
+      identityId: identityId,
+      title: item.subject!,
+      description: item.body,
+      location: item.location,
+      startTime: startMs,
+      endTime: endMs,
+      allDay: item.isAllDay ?? false,
+      timeZone: 'UTC',
+      createdBy: identityId,
+      updatedAt: updatedAt,
+    );
+  }
+
+  EWSCalendarItem _cleonaEventToEWS(CalendarEvent event) {
+    return EWSCalendarItem(
+      itemId: '',
+      changeKey: '',
+      subject: event.title,
+      body: event.description,
+      location: event.location,
+      start: DateTime.fromMillisecondsSinceEpoch(event.startTime, isUtc: true),
+      end: DateTime.fromMillisecondsSinceEpoch(event.endTime, isUtc: true),
+      isAllDay: event.allDay,
+      lastModifiedTime:
+          DateTime.fromMillisecondsSinceEpoch(event.updatedAt, isUtc: true),
+    );
+  }
+
   /// Diagnostic dump for the status IPC.
   String debugDump() => jsonEncode({
         'caldav': _caldav?.toPublicJson(),
         'google': _google?.toPublicJson(),
+        'exchange': _ews?.toPublicJson(),
         'localIcs': _localIcs?.toPublicJson(),
         'caldavRefs': _caldavRefs.length,
         'googleRefs': _googleRefs.length,
+        'ewsRefs': _ewsRefs.length,
         'googleSyncToken': _googleSyncToken,
         'lastSyncMs': _lastSyncMs,
         'conflicts': _conflicts.length,

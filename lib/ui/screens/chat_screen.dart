@@ -1750,6 +1750,98 @@ class _ChatScreenState extends State<ChatScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
+                  // Content rating & channel info
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 4,
+                    children: [
+                      Chip(
+                        avatar: Icon(
+                          currentChannel.isAdult ? Icons.eighteen_up_rating : Icons.check_circle,
+                          size: 16,
+                          color: currentChannel.isAdult ? Colors.red : Colors.green,
+                        ),
+                        label: Text(currentChannel.isAdult
+                            ? locale.get('channel_rating_badge_nsfw')
+                            : locale.get('channel_rating_badge_sfw')),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      if (currentChannel.isPublic)
+                        Chip(
+                          avatar: const Icon(Icons.public, size: 16),
+                          label: Text(locale.get('channel_public')),
+                          materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          visualDensity: VisualDensity.compact,
+                        ),
+                      Chip(
+                        avatar: const Icon(Icons.language, size: 16),
+                        label: Text(currentChannel.language.toUpperCase()),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // Bad Badge warning
+                  if (currentChannel.badBadgeLevel > 0) ...[
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: currentChannel.badBadgeLevel >= 3
+                            ? Colors.red.shade50
+                            : Colors.orange.shade50,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: currentChannel.badBadgeLevel >= 3
+                              ? Colors.red.shade200
+                              : Colors.orange.shade200,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(Icons.warning_amber,
+                              color: currentChannel.badBadgeLevel >= 3
+                                  ? Colors.red
+                                  : Colors.orange,
+                              size: 20),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              '${locale.get('moderation_badge_level')}: ${currentChannel.badBadgeLevel == 1 ? locale.get('bad_badge_questionable') : currentChannel.badBadgeLevel == 2 ? locale.get('bad_badge_misleading') : locale.get('bad_badge_permanent')}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: currentChannel.badBadgeLevel >= 3
+                                    ? Colors.red.shade800
+                                    : Colors.orange.shade800,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  if (currentChannel.description != null && currentChannel.description!.isNotEmpty) ...[
+                    Text(currentChannel.description!,
+                        style: Theme.of(context).textTheme.bodySmall),
+                    const SizedBox(height: 8),
+                  ],
+                  if (!isOwner && currentChannel.isPublic)
+                    TextButton.icon(
+                      icon: const Icon(Icons.flag, size: 16, color: Colors.orange),
+                      label: Text(locale.get('report_channel'),
+                          style: const TextStyle(fontSize: 12)),
+                      style: TextButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 32),
+                      ),
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        _showReportChannelDialog(context, service, widget.conversationId);
+                      },
+                    ),
+                  const Divider(),
                   Text(locale.tr('members_count', {'count': '${currentChannel.members.length}'}),
                       style: Theme.of(context).textTheme.titleSmall),
                   const SizedBox(height: 8),
@@ -1924,6 +2016,70 @@ class _ChatScreenState extends State<ChatScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+
+  void _showReportChannelDialog(BuildContext context, ICleonaService? service, String channelId) {
+    if (service == null) return;
+    final locale = AppLocale.read(context);
+    int selectedCategory = 0;
+    final categories = [
+      locale.get('report_cat_nsfw'),
+      locale.get('report_cat_false'),
+      locale.get('report_cat_drugs'),
+      locale.get('report_cat_weapons'),
+      locale.get('report_cat_csam'),
+      locale.get('report_cat_other'),
+    ];
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(locale.get('report_channel')),
+          content: SizedBox(
+            width: 300,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(locale.get('report_category'),
+                    style: Theme.of(context).textTheme.titleSmall),
+                const SizedBox(height: 8),
+                ...List.generate(categories.length, (i) =>
+                  RadioListTile<int>(
+                    title: Text(categories[i], style: const TextStyle(fontSize: 14)),
+                    value: i,
+                    groupValue: selectedCategory,
+                    dense: true,
+                    onChanged: (v) => setDialogState(() => selectedCategory = v ?? 0),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: Text(locale.get('cancel')),
+            ),
+            FilledButton(
+              onPressed: () async {
+                Navigator.pop(ctx);
+                final ok = await service.reportChannel(channelId, selectedCategory, []);
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text(ok
+                        ? locale.get('report_submitted')
+                        : locale.get('report_limit_reached'))),
+                  );
+                }
+              },
+              child: Text(locale.get('send')),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -3038,9 +3194,6 @@ class _MessageBubbleState extends State<_MessageBubble> {
 
   bool get _hasMenu => _canEdit || _canDelete || _canForward || _canSaveMedia || _canCopyText || _canReply || _canReact || _canResend;
 
-  /// Shows the full action menu (reply / react / copy / save / forward / edit / delete)
-  /// as a modal bottom sheet. Called from long-press on the MessageBubble path so that
-  /// simple-text messages expose the same actions as the inline 3-dot PopupMenuButton.
   void _showMessageActions(BuildContext context) {
     if (!_hasMenu) return;
     final locale = AppLocale.read(context);
@@ -3152,22 +3305,34 @@ class _MessageBubbleState extends State<_MessageBubble> {
       );
     }
 
-    // System channel posts: render crash reports and duplicates as cards.
-    // §9.5.7 D2 (S119): long-press opens the action sheet — its delete
-    // entry retracts own posts (author-signed RETRACT tombstone). The card
-    // renders its own Text widgets (no SelectableText), so there is no
-    // gesture collision with the A1 selectable-text work.
     if (isSystemChannel && !deleted && message.text.startsWith('{')) {
       final ts = '${message.timestamp.hour.toString().padLeft(2, '0')}:${message.timestamp.minute.toString().padLeft(2, '0')}';
-      return GestureDetector(
-        onLongPress: _hasMenu ? () => _showMessageActions(context) : null,
-        child: SystemChannelPost(
-          text: message.text,
-          isOutgoing: isOutgoing,
-          timestamp: ts,
-          frTally: widget.frTally,
-          onVote: widget.onFrVote,
-        ),
+      final post = SystemChannelPost(
+        text: message.text,
+        isOutgoing: isOutgoing,
+        timestamp: ts,
+        frTally: widget.frTally,
+        onVote: widget.onFrVote,
+      );
+      if (!_hasMenu) return post;
+      final colorScheme = Theme.of(context).colorScheme;
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          post,
+          Positioned(
+            top: 0,
+            right: 0,
+            child: InkWell(
+              onTap: () => _showMessageActions(context),
+              customBorder: const CircleBorder(),
+              child: Padding(
+                padding: const EdgeInsets.all(4),
+                child: Icon(Icons.more_vert, size: 16, color: colorScheme.outline),
+              ),
+            ),
+          ),
+        ],
       );
     }
 
@@ -3200,9 +3365,6 @@ class _MessageBubbleState extends State<_MessageBubble> {
         expiryActive: chatConfig?.expiryDurationMs != null,
         membershipMismatch: message.membershipMismatch,
         onActionsPressed: _hasMenu
-            ? () => _showMessageActions(context)
-            : null,
-        onLongPress: _hasMenu
             ? () => _showMessageActions(context)
             : null,
       );
@@ -3504,12 +3666,9 @@ class _MessageBubbleState extends State<_MessageBubble> {
       );
     }
 
-    return GestureDetector(
-      onLongPress: () => _showMessageActions(context),
-      child: Align(
-        alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-        child: bubble,
-      ),
+    return Align(
+      alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+      child: bubble,
     );
   }
 

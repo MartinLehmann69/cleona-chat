@@ -2650,13 +2650,15 @@ class CleonaNode {
           }
         }
 
-        // §4.6 IPv6-First: skip IPv4 keepalive if the peer has a global
-        // IPv6 address. IPv6 is end-to-end routable without NAT pinholes;
-        // the phone can always re-establish via IPv6 on demand.
+        // §4.6 IPv6-First: on Desktop, skip IPv4 keepalive if the peer has
+        // a global IPv6 (no NAT pinhole needed). On Mobile (Android/iOS),
+        // ALWAYS register — the keepalive doubles as dead-network detector.
+        // Without it, onAllPeersFailed never fires after WiFi->Mobile and
+        // the phone stays at 0 peers for hours.
         final hasGlobalIpv6 = peer.allConnectionTargets().any((a) =>
             a.ip.contains(':') && !a.ip.toLowerCase().startsWith('fe80:') &&
             !a.ip.toLowerCase().startsWith('fd'));
-        if (!hasGlobalIpv6) {
+        if (!hasGlobalIpv6 || Platform.isAndroid || Platform.isIOS) {
           for (final addr in peer.allConnectionTargets()) {
             if (addr.ip.isEmpty || addr.port <= 0) continue;
             if (!_needsKeepalive(addr.ip)) continue;
@@ -4562,13 +4564,14 @@ class CleonaNode {
 
     if (isUdp && isAuthoritative && ip.isNotEmpty && _needsKeepalive(ip) &&
         port > 0) {
-      // §4.6 IPv6-First: skip IPv4 keepalive if this peer has a global
-      // IPv6 address (reachable without NAT pinhole maintenance).
+      // §4.6 IPv6-First: on Desktop, skip IPv4 keepalive if this peer has
+      // a global IPv6 (no NAT pinhole needed). On Mobile, ALWAYS register —
+      // keepalive is the dead-network detector that triggers force-recovery.
       final peerInfo = routingTable.getPeer(peerId);
       final hasGlobalIpv6 = peerInfo != null && peerInfo.allConnectionTargets().any((a) =>
           a.ip.contains(':') && !a.ip.toLowerCase().startsWith('fe80:') &&
           !a.ip.toLowerCase().startsWith('fd'));
-      if (!hasGlobalIpv6) {
+      if (!hasGlobalIpv6 || Platform.isAndroid || Platform.isIOS) {
         udpKeepalive.register(bytesToHex(peerId), ip, port, peerId);
       }
     }
@@ -4968,6 +4971,45 @@ class CleonaNode {
     // 15-min maintenance tick never resets an in-flight backoff.
     if (routingTable.peerCount == 0 && _isolatedNodeRetryTimer == null) {
       _armIsolatedNodeTimer();
+    }
+
+    // Safety net: if peers exist in the routing table but NONE are confirmed
+    // (all unreachable), the phone is effectively isolated — yet the
+    // isolated-node timer won't arm (peerCount > 0) and the zero-peer
+    // recovery timer only starts from onNetworkChanged(). Re-bootstrap
+    // immediately and arm the zero-peer recovery loop.
+    if (routingTable.peerCount > 0 && _confirmedPeers.isEmpty &&
+        _zeroPeerRecoveryTimer == null) {
+      _log.info('Maintenance: 0 confirmed peers with ${routingTable.peerCount} '
+          'in RT — triggering recovery cascade');
+      for (final peer in routingTable.allPeers) {
+        for (final addr in peer.addresses) {
+          addr.consecutiveFailures = 0;
+        }
+      }
+      _kademliaBootstrap();
+      _startDiscoveryCascade();
+      _zeroPeerRecoveryTimer?.cancel();
+      _zeroPeerRecoveryTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+        if (!_running) { timer.cancel(); return; }
+        if (_outboundRecentlyConfirmed) {
+          _log.info('Zero-peer recovery (maintenance): outbound confirmed — stopping');
+          timer.cancel();
+          _zeroPeerRecoveryTimer = null;
+          return;
+        }
+        _log.info('Zero-peer recovery (maintenance): still 0 confirmed — re-bootstrap');
+        for (final peer in routingTable.allPeers) {
+          for (final addr in peer.addresses) {
+            addr.consecutiveFailures = 0;
+          }
+        }
+        PeerAddress.networkChangeGraceUntil =
+            DateTime.now().add(const Duration(seconds: 10));
+        udpKeepalive.resetUnconfirmed();
+        _kademliaBootstrap();
+        _startDiscoveryCascade();
+      });
     }
 
     // Cross-subnet discovery (§4.10): if no peer on a different /24 is known,

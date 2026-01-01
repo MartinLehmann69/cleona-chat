@@ -240,6 +240,13 @@ class OqsFFI {
 
   bool _initialized = false;
 
+  /// Sec-hardening: zero native key material before freeing.
+  /// Uses SodiumFFI's public memzero which wraps sodium_memzero.
+  void _zeroAndFree(Pointer<Uint8> ptr, int length) {
+    SodiumFFI().memzero(ptr, length);
+    calloc.free(ptr);
+  }
+
   // Cached OQS context handles — allocated once, reused across calls.
   // Thread-safe: Dart is single-threaded per isolate.
   Pointer<Void> _cachedKem = nullptr;
@@ -351,8 +358,9 @@ class OqsFFI {
         secretKey: _copyToUint8List(sk, mlKemSecretKeyLength),
       );
     } finally {
+      // Sec-hardening: zero secret key before freeing native memory.
+      _zeroAndFree(sk, mlKemSecretKeyLength);
       calloc.free(pk);
-      calloc.free(sk);
     }
   }
 
@@ -387,8 +395,9 @@ class OqsFFI {
         secretKey: _copyToUint8List(sk, mlKemSecretKeyLength),
       );
     } finally {
+      // Sec-hardening: zero secret key before freeing native memory.
+      _zeroAndFree(sk, mlKemSecretKeyLength);
       calloc.free(pk);
-      calloc.free(sk);
       _restoreSystemDrbg();
     }
   }
@@ -423,8 +432,9 @@ class OqsFFI {
         sharedSecret: _copyToUint8List(ss, mlKemSharedSecretLength),
       );
     } finally {
+      // Sec-hardening: zero shared secret before freeing native memory.
+      _zeroAndFree(ss, mlKemSharedSecretLength);
       calloc.free(ct);
-      calloc.free(ss);
       calloc.free(pkNative);
     }
   }
@@ -460,9 +470,10 @@ class OqsFFI {
 
       return _copyToUint8List(ss, mlKemSharedSecretLength);
     } finally {
-      calloc.free(ss);
+      // Sec-hardening: zero shared secret and secret key copy before freeing.
+      _zeroAndFree(ss, mlKemSharedSecretLength);
+      _zeroAndFree(skNative, secretKey.length);
       calloc.free(ctNative);
-      calloc.free(skNative);
     }
   }
 
@@ -490,8 +501,9 @@ class OqsFFI {
         secretKey: _copyToUint8List(sk, mlDsaSecretKeyLength),
       );
     } finally {
+      // Sec-hardening: zero secret key before freeing native memory.
+      _zeroAndFree(sk, mlDsaSecretKeyLength);
       calloc.free(pk);
-      calloc.free(sk);
     }
   }
 
@@ -560,8 +572,9 @@ class OqsFFI {
         secretKey: _copyToUint8List(sk, mlDsaSecretKeyLength),
       );
     } finally {
+      // Sec-hardening: zero secret key before freeing native memory.
+      _zeroAndFree(sk, mlDsaSecretKeyLength);
       calloc.free(pk);
-      calloc.free(sk);
       _restoreSystemDrbg();
     }
   }
@@ -570,6 +583,10 @@ class OqsFFI {
     final sysAlg = 'system'.toNativeUtf8();
     _randSwitch(sysAlg);
     calloc.free(sysAlg);
+    // Sec-hardening: zero the seed buffer before replacing it.
+    for (var i = 0; i < _derandSeed.length; i++) {
+      _derandSeed[i] = 0;
+    }
     _derandSeed = Uint8List(0);
     _derandOffset = 0;
   }
@@ -608,10 +625,11 @@ class OqsFFI {
       final actualLen = sigLen.value;
       return _copyToUint8List(sigBuf, actualLen);
     } finally {
+      // Sec-hardening: zero secret key copy before freeing native memory.
+      _zeroAndFree(skNative, secretKey.length);
       calloc.free(sigBuf);
       calloc.free(sigLen);
       calloc.free(msgNative);
-      calloc.free(skNative);
     }
   }
 

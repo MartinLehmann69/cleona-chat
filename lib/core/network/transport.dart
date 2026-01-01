@@ -4,6 +4,7 @@ import 'dart:math' show min;
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/multi_interface.dart';
 import 'package:cleona/core/network/native_udp_sender.dart';
 import 'package:cleona/core/network/ios_udp_sender.dart';
 import 'package:cleona/core/network/udp_fragmenter.dart';
@@ -271,6 +272,12 @@ class Transport {
   /// on iOS (errno 64/65). Uses the SAME fd as the Dart socket — no second
   /// socket, no §4.5.2 dual-socket risk.
   IosUdpSender? _iosUdpSender;
+
+  // ── Multi-Interface Send (Architecture §23.2) ─────────────────────
+  /// Per-interface socket manager for multi-path sending over WiFi +
+  /// cellular in parallel. Null when mode is [MultiInterfaceMode.off]
+  /// (the default — saves battery/data).
+  MultiInterfaceManager? _multiIfaceManager;
 
   // ── iOS Native Receive ─────────────────────────────────────────────
   // Dart's RawDatagramSocket on iOS has proven defects in BOTH directions:
@@ -1838,6 +1845,8 @@ class Transport {
           _log.warn('iOS native sendto() reattach failed: $e');
         }
       }
+      // Multi-interface: refresh per-interface sockets after reconnect
+      unawaited(refreshMultiInterface());
       _log.info('UDP sockets reconnected on port $port');
     } catch (e) {
       _log.warn('UDP socket reconnect failed: $e');
@@ -1962,6 +1971,8 @@ class Transport {
     _udpSocket6?.close();
     _udpSocket6 = null;
     stopMobileFallback();
+    _multiIfaceManager?.closeAll();
+    _multiIfaceManager = null;
     await _tlsServer?.close();
     _tlsServer = null;
     await _tlsServer6?.close();
@@ -2022,6 +2033,118 @@ class Transport {
 
   /// Whether IPv6 transport is available.
   bool get hasIpv6 => _udpSocket6 != null;
+
+  // ── Multi-Interface Send (Architecture §23.2) ─────────────────────
+
+  /// Current multi-interface mode. Returns [MultiInterfaceMode.off] when
+  /// the manager is not initialized.
+  MultiInterfaceMode get multiInterfaceMode =>
+      _multiIfaceManager?.mode ?? MultiInterfaceMode.off;
+
+  /// Whether multi-interface sockets are actively bound and ready.
+  bool get isMultiInterfaceActive => _multiIfaceManager?.isActive ?? false;
+
+  /// Active per-interface sockets (empty when mode is off or no manager).
+  List<InterfaceSocket> get multiInterfaceSockets =>
+      _multiIfaceManager?.sockets ?? const [];
+
+  /// Set the multi-interface mode. Creates the manager on first non-off
+  /// call; destroys it when switched back to off. Safe to call at any time.
+  Future<void> setMultiInterfaceMode(MultiInterfaceMode mode) async {
+    if (mode == MultiInterfaceMode.off) {
+      _multiIfaceManager?.closeAll();
+      _multiIfaceManager = null;
+      _log.info('Multi-interface: disabled');
+      return;
+    }
+    if (_multiIfaceManager == null) {
+      _multiIfaceManager = MultiInterfaceManager(
+        port: port,
+        mode: mode,
+        profileDir: _profileDir,
+      );
+      _multiIfaceManager!.onDatagram = (datagram, iface) {
+        _lastUdpReceiveMs = DateTime.now().millisecondsSinceEpoch;
+        _processUdpDatagram(datagram);
+      };
+    } else {
+      _multiIfaceManager!.mode = mode;
+    }
+    await _multiIfaceManager!.refresh();
+  }
+
+  /// Refresh multi-interface sockets (e.g. after network change).
+  /// No-op if mode is off or manager not initialized.
+  Future<void> refreshMultiInterface() async {
+    if (_multiIfaceManager == null) return;
+    if (_multiIfaceManager!.mode == MultiInterfaceMode.off) return;
+    await _multiIfaceManager!.refresh();
+  }
+
+  /// Send a serialized packet via multi-interface (§23.2).
+  ///
+  /// Behavior depends on mode:
+  ///   - [on]:   send on ALL interfaces simultaneously
+  ///   - [auto]: send on best interface only (caller uses [sendUdpMultiAll]
+  ///             for retransmits)
+  ///   - [off]:  falls through to false (caller uses normal sendUdp)
+  ///
+  /// Returns true if at least one interface succeeded.
+  bool sendUdpMultiBest(
+    Uint8List data,
+    InternetAddress address,
+    int destPort,
+  ) {
+    final mgr = _multiIfaceManager;
+    if (mgr == null || !mgr.isActive) return false;
+
+    if (mgr.mode == MultiInterfaceMode.on) {
+      // Parallel on all interfaces
+      return mgr.sendAll(data, address, destPort);
+    }
+
+    // Auto or fallback: send on cheapest interface
+    final sent = mgr.sendBest(data, address, destPort);
+    return sent > 0;
+  }
+
+  /// Send a serialized packet on ALL active interfaces (§23.2).
+  /// Used for retransmits and high-priority messages in [auto] mode.
+  /// Returns true if at least one interface succeeded.
+  bool sendUdpMultiAll(
+    Uint8List data,
+    InternetAddress address,
+    int destPort,
+  ) {
+    final mgr = _multiIfaceManager;
+    if (mgr == null || !mgr.isActive) return false;
+    return mgr.sendAll(data, address, destPort);
+  }
+
+  /// Record an ACK on the interface that delivered to [peerAddress].
+  /// Used for per-interface ACK tracking (§23.2).
+  void recordMultiInterfaceAck(LocalInterface iface) {
+    final mgr = _multiIfaceManager;
+    if (mgr == null) return;
+    for (final s in mgr.sockets) {
+      if (s.interfaceInfo.type == iface) {
+        s.recordAck();
+        return;
+      }
+    }
+  }
+
+  /// Record an ACK failure on a specific interface.
+  void recordMultiInterfaceFailure(LocalInterface iface) {
+    final mgr = _multiIfaceManager;
+    if (mgr == null) return;
+    for (final s in mgr.sockets) {
+      if (s.interfaceInfo.type == iface) {
+        s.recordFailure();
+        return;
+      }
+    }
+  }
 }
 
 /// TLS-bulk capability tristate for one destination — see Spec §5.3.

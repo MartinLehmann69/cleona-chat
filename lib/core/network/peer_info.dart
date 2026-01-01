@@ -2,6 +2,7 @@ import 'dart:io' show InternetAddress;
 import 'dart:math' show exp;
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
+import 'package:cleona/core/network/multi_interface.dart' show LocalInterface;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 
@@ -19,6 +20,12 @@ class PeerAddress {
   int failCount;
   /// Consecutive failures since last success (for exponential backoff).
   int consecutiveFailures;
+
+  /// 23.2 Multi-Interface Send: which local interface was used to reach
+  /// this address. Null = unknown / single-socket mode (default).
+  /// Set when a packet is successfully delivered via a specific interface;
+  /// used by per-interface ACK tracking to attribute delivery success.
+  LocalInterface? localInterface;
 
   /// Set when an inbound packet is received FROM this ip:port. Proves
   /// bidirectional reachability — the NAT mapping is live in both directions.
@@ -45,6 +52,7 @@ class PeerAddress {
     this.consecutiveFailures = 0,
     this.lastReceivedAt,
     this.stableSince,
+    this.localInterface,
   });
 
   /// Base delay for exponential backoff (doubles each failure).

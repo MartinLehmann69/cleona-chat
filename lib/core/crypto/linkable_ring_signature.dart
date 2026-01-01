@@ -23,6 +23,7 @@
 library;
 
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 
 /// Fixed sizes per signature slot: 32-byte c_i || 32-byte r_i.
@@ -77,7 +78,7 @@ class LinkableRingSignature {
     // Locate signer index in the ring.
     var signerIndex = -1;
     for (var i = 0; i < ringMembers.length; i++) {
-      if (_bytesEqual(ringMembers[i], signerPk)) {
+      if (constantTimeEquals(ringMembers[i], signerPk)) {
         signerIndex = i;
         break;
       }
@@ -228,7 +229,7 @@ class LinkableRingSignature {
     for (var i = 0; i < n; i++) {
       summed = sodium.ed25519ScalarAdd(summed, cs[i]);
     }
-    return _bytesEqual(summed, cSum);
+    return constantTimeEquals(summed, cSum);
   }
 
   // ── internals ─────────────────────────────────────────────────────────
@@ -287,12 +288,4 @@ class LinkableRingSignature {
     return b;
   }
 
-  static bool _bytesEqual(Uint8List a, Uint8List b) {
-    if (a.length != b.length) return false;
-    var diff = 0;
-    for (var i = 0; i < a.length; i++) {
-      diff |= a[i] ^ b[i];
-    }
-    return diff == 0;
-  }
 }

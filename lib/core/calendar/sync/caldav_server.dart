@@ -41,6 +41,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:cleona/core/crypto/constant_time.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/ical_engine.dart';
 import 'package:cleona/core/network/clogger.dart';
@@ -238,24 +239,9 @@ class CalDAVServer {
     if (colon < 0) return null;
     final user = decoded.substring(0, colon);
     final pass = decoded.substring(colon + 1);
-    if (!_constantTimeEquals(pass, _token!)) return null;
+    if (!constantTimeStringEquals(pass, _token!)) return null;
     if (!_byShortId.containsKey(user)) return null;
     return user;
-  }
-
-  /// Timing-safe string comparison — prevents an attacker on the loopback
-  /// from deriving the token char-by-char via response-time measurement.
-  static bool _constantTimeEquals(String a, String b) {
-    final ab = utf8.encode(a);
-    final bb = utf8.encode(b);
-    final len = ab.length > bb.length ? ab.length : bb.length;
-    var diff = ab.length ^ bb.length;
-    for (var i = 0; i < len; i++) {
-      final av = i < ab.length ? ab[i] : 0;
-      final bv = i < bb.length ? bb[i] : 0;
-      diff |= av ^ bv;
-    }
-    return diff == 0;
   }
 
   /// True iff the client's Host header names a loopback destination.

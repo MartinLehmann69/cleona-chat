@@ -32,6 +32,7 @@ class CallService {
   AudioMixer? _audioMixer;
   dynamic _groupVideoEngine;
   GroupVideoReceiver? _groupVideoReceiver;
+  Timer? _audioLevelTimer;
 
   // 1:1 video (§ F-B). `dynamic` because the concrete VideoEngine lives in
   // video_engine.dart, which pulls in dart:ui — call_service.dart must stay
@@ -148,8 +149,13 @@ class CallService {
       onStateChanged?.call();
     };
     groupCallManager.onParticipantChanged = (hex, state) {
-      if (state == ParticipantState.left ||
+      if (state == ParticipantState.joined) {
+        // Participant indicator tone: join beep
+        try { notificationSound.playParticipantJoined(); } catch (_) {}
+      } else if (state == ParticipantState.left ||
           state == ParticipantState.crashed) {
+        // Participant indicator tone: leave beep
+        try { notificationSound.playParticipantLeft(); } catch (_) {}
         _audioMixer?.removePeer(hex);
         _groupVideoReceiver?.removePeer(hex);
       }
@@ -249,6 +255,15 @@ class CallService {
     await groupCallManager.leaveGroupCall();
   }
 
+  Future<void> rejoinGroupCall() async {
+    await groupCallManager.rejoinGroupCall();
+    final session = groupCallManager.currentGroupCall;
+    if (session != null && session.state == GroupCallState.inCall) {
+      await _startAudioMixer(session);
+      await _startGroupVideo(session);
+    }
+  }
+
   Future<void> _startAudioMixer(GroupCallSession session) async {
     if (Platform.isAndroid) {
       final granted = await AudioPermissions.requestRecordAudio();
@@ -273,12 +288,26 @@ class CallService {
         groupCallManager.sendGroupAudioFrame(encryptedFrame);
       };
       await _audioMixer!.start();
+      // Poll audio levels at 4 Hz for active speaker detection + mute inference.
+      _audioLevelTimer?.cancel();
+      _audioLevelTimer = Timer.periodic(const Duration(milliseconds: 250), (_) {
+        final mixer = _audioMixer;
+        if (mixer == null || !mixer.isRunning) return;
+        final levels = mixer.peerAudioLevels;
+        for (final entry in levels.entries) {
+          groupCallManager.updateParticipantAudioLevel(entry.key, entry.value);
+          // Infer mute: sustained silence (level < 0.001) across consecutive polls.
+          groupCallManager.updateParticipantMuteState(entry.key, entry.value < 0.001);
+        }
+      });
     } catch (e) {
       _log.error('Audio mixer start failed: $e');
     }
   }
 
   void _stopAudioMixer() {
+    _audioLevelTimer?.cancel();
+    _audioLevelTimer = null;
     try {
       _audioMixer?.stop();
     } catch (e) {
@@ -802,19 +831,40 @@ class CallService {
     groupCallManager.handleCallTreeUpdateV3(f, sd, s);
   }
 
-  // §10.5 In-Call Collaboration (planned stubs)
+  // ── §10.5 In-Call Collaboration ─────────────────────────────────────
+
   void handleWhiteboardStrokeV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleWhiteboardStrokeV3(f, sd, s);
+  }
+
   void handleWhiteboardPageV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleWhiteboardPageV3(f, sd, s);
+  }
+
   void handleFileExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleFileExchangeV3(f, sd, s);
+  }
+
   void handleClipboardExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleClipboardExchangeV3(f, sd, s);
+  }
+
   void handleScreenShareFrameV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleScreenShareV3(f, sd, s);
+  }
+
   void handleCallChatV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    groupCallManager.handleCallChatV3(f, sd, s);
+  }
+
   void handleRemoteControlInputV3(proto.ApplicationFrameV3 f, Uint8List sd,
-      SenderIdentitySnapshot s) {}
+      SenderIdentitySnapshot s) {
+    // Remote control not yet implemented (§10.5.4 planned)
+  }
 }

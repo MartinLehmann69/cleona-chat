@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'package:cleona/core/channels/system_channels.dart';
+import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceMode;
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder;
@@ -100,6 +101,7 @@ abstract class ICleonaService {
     bool isPublic = false,
     bool isAdult = true,
     String language = 'de',
+    String category = 'general',
     String? description,
     String? pictureBase64,
   });
@@ -316,7 +318,17 @@ abstract class ICleonaService {
   LinkPreviewSettings get linkPreviewSettings;
   void updateLinkPreviewSettings(LinkPreviewSettings settings);
 
+  // Multi-interface send (Architecture §23.2)
+  MultiInterfaceMode get multiInterfaceMode;
+  Future<void> setMultiInterfaceMode(MultiInterfaceMode mode);
+
   bool get serveBinaryUpdates => true;
+
+  /// Generate an invite link URL for sharing the app (§19.6.4).
+  /// Returns the full `http://<public-ip>:<port>/cleona#...` URL with
+  /// per-platform hashes and maintainer signatures from the UpdateManifest,
+  /// or null if no public IP or no manifest is available yet.
+  String? generateInviteLinkUrl();
 
   // NFC Contact Exchange: crypto keys + sign/verify
   Uint8List? get ed25519PublicKey;
