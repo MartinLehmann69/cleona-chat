@@ -153,6 +153,8 @@ final class _NativeConfig extends Struct {
   external int maxFrameBytes;
   @Int32()
   external int keyframeIntervalFrames;
+  @Int32()
+  external int direction;
 }
 
 final class _NativeReport extends Struct {
@@ -228,6 +230,29 @@ typedef _ReconfigureDart = int Function(
 /// The backend may negotiate every field **down** and never up. Always read the
 /// negotiated result back from [VideoPipeline.negotiated] rather than assuming
 /// the request was granted.
+/// Whether a session both sends and receives, or only receives (Erratum 7).
+///
+/// [duplex] is the default and the pre-erratum meaning. [decodeOnly] is what a
+/// group call opens for every *remote* stream: it builds no camera and no
+/// encoder, so it succeeds on a machine that has a decoder but no webcam —
+/// a participant must not lose the ability to SEE the others merely because it
+/// cannot BE seen.
+enum VideoDirection {
+  duplex(0),
+  decodeOnly(1);
+
+  const VideoDirection(this.id);
+
+  final int id;
+
+  static VideoDirection? fromId(int id) {
+    for (final d in VideoDirection.values) {
+      if (d.id == id) return d;
+    }
+    return null;
+  }
+}
+
 class VideoConfig {
   const VideoConfig({
     this.codec = VideoCodec.h264,
@@ -237,6 +262,7 @@ class VideoConfig {
     required this.targetBitrateKbps,
     required this.maxFrameBytes,
     this.keyframeIntervalFrames = 0,
+    this.direction = VideoDirection.duplex,
   });
 
   /// Preferred codec. If the backend has no hardware for it, it negotiates
@@ -267,6 +293,16 @@ class VideoConfig {
   /// Upper bound on the frames between keyframes. 0 = backend default.
   final int keyframeIntervalFrames;
 
+  /// Erratum 7. Fixed at [VideoPipeline.open]: a session opened to decode
+  /// cannot grow a camera, so [VideoPipeline.reconfigure] rejects a change.
+  ///
+  /// Every other field keeps its validity rules under
+  /// [VideoDirection.decodeOnly] — the erratum deliberately does not fork the
+  /// validation path. Geometry and codec stay meaningful (the decoder and the
+  /// texture are sized from them); the rate fields are simply unused by an
+  /// encoder that was never created.
+  final VideoDirection direction;
+
   VideoConfig copyWith({
     VideoCodec? codec,
     int? width,
@@ -275,6 +311,7 @@ class VideoConfig {
     int? targetBitrateKbps,
     int? maxFrameBytes,
     int? keyframeIntervalFrames,
+    VideoDirection? direction,
   }) {
     return VideoConfig(
       codec: codec ?? this.codec,
@@ -285,13 +322,14 @@ class VideoConfig {
       maxFrameBytes: maxFrameBytes ?? this.maxFrameBytes,
       keyframeIntervalFrames:
           keyframeIntervalFrames ?? this.keyframeIntervalFrames,
+      direction: direction ?? this.direction,
     );
   }
 
   @override
   String toString() => 'VideoConfig(${codec.name} ${width}x$height@$fps '
       '${targetBitrateKbps}kbps maxFrame=$maxFrameBytes '
-      'kfInterval=$keyframeIntervalFrames)';
+      'kfInterval=$keyframeIntervalFrames dir=${direction.name})';
 }
 
 /// One encoded frame on its way to the wire. No pixels — I10.
@@ -751,7 +789,8 @@ class VideoPipeline {
       ..fps = c.fps
       ..targetBitrateKbps = c.targetBitrateKbps
       ..maxFrameBytes = c.maxFrameBytes
-      ..keyframeIntervalFrames = c.keyframeIntervalFrames;
+      ..keyframeIntervalFrames = c.keyframeIntervalFrames
+      ..direction = c.direction.id;
   }
 
   static VideoConfig _readConfig(Pointer<_NativeConfig> p) {
@@ -764,6 +803,7 @@ class VideoPipeline {
       targetBitrateKbps: n.targetBitrateKbps,
       maxFrameBytes: n.maxFrameBytes,
       keyframeIntervalFrames: n.keyframeIntervalFrames,
+      direction: VideoDirection.fromId(n.direction) ?? VideoDirection.duplex,
     );
   }
 
@@ -867,6 +907,13 @@ class VideoPipeline {
   VideoReconfigureOutcome reconfigure(VideoConfig config) {
     _ensureOpen();
     _validate(config);
+    // Erratum 7: direction is fixed at open(). The backend answers ERR_INVALID
+    // too, but a caller bug deserves a sentence rather than an error number.
+    if (config.direction != _negotiated.direction) {
+      throw VideoPipelineException(
+          'reconfigure cannot change the direction of a session: opened as '
+          '${_negotiated.direction.name}, asked for ${config.direction.name}');
+    }
 
     final f = _lib._lib
         .lookupFunction<_ReconfigureNative, _ReconfigureDart>('cleona_video_reconfigure');

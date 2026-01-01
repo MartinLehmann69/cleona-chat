@@ -34,9 +34,7 @@ import 'package:cleona/ui/screens/qr_contact_screen.dart';
 import 'package:flutter/services.dart';
 import 'dart:async';
 import 'dart:ui' show PlatformDispatcher;
-import 'dart:ui' as ui;
 import 'package:cleona/core/calls/video_engine.dart';
-import 'package:cleona/core/calls/video_capture_android.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
 import 'package:cleona/core/platform/window_show.dart';
@@ -509,15 +507,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _hasProfile = false;
   String? _initError;
 
-  /// § F-B: 1:1 video call frame delivery. Registered by the active
-  /// [CallScreen] (didChangeDependencies/dispose) rather than routed through
-  /// [notifyListeners] — frames arrive at ~15-30fps and a full ChangeNotifier
-  /// rebuild of the whole widget tree per frame would be wasteful. Only
-  /// wired for in-process platforms (Android/iOS/macOS-no-daemon); Linux/
-  /// Windows run the daemon in a separate process with no frame-streaming
-  /// IPC (out of scope for this pass — see CleonaAppState._wireServiceCallbacks).
-  void Function(ui.Image image)? onRemoteVideoFrame;
-  void Function(ui.Image image)? onLocalVideoFrame;
+  /// V2.3: texture-based video delivery. [CallScreen] registers a callback
+  /// that receives the remote peer's texture id (non-null = video active,
+  /// null = video stopped). No longer per-frame — the texture is valid for
+  /// the pipeline's lifetime; the native backend renders into it continuously.
+  void Function(int? textureId)? onRemoteVideoTextureChanged;
 
   /// Non-null while a second (or later) identity is being created.
   /// Set before PQ keygen starts so the IdentityTabBar can show
@@ -2160,15 +2154,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     };
 
-    // § F-B: 1:1 + group video engine factory. Only wired here — for
-    // in-process services (Android/iOS/macOS-no-daemon) — because it needs
-    // dart:ui (VideoEngine) and, on Android, package:flutter/services.dart
-    // (VideoCaptureAndroid MethodChannel), neither of which call_service.dart
-    // may import (it's part of the daemon's dependency graph via
-    // CleonaService — see service_daemon.dart). Linux/
-    // Windows run CleonaService inside the separate daemon process, which
-    // never calls _wireServiceCallbacks, so createVideoEngine stays null
-    // there — CallService already degrades to audio-only when it is.
+    // V2.3: video engine factory. No longer needs dart:ui — VideoEngine uses
+    // VideoPipeline (V0.3), so the daemon can load it too. Desktop video
+    // calls are no longer silently audio-only.
     service.createVideoEngine = (sharedSecret, onFrame) =>
         _createVideoEngine(sharedSecret, onFrame);
 
@@ -2245,100 +2233,33 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  /// § F-B: constructs the [VideoEngine] behind [CleonaService.createVideoEngine]
-  /// (used for both 1:1 and group calls — the factory signature is shared).
-  /// Capture strategy per platform:
-  /// - Android + iOS: no isolate. [VideoCaptureAndroid] (platform-neutral
-  ///   `chat.cleona/camera` MethodChannel — CameraXHandler.kt on Android,
-  ///   CameraHandler.swift on iOS; see the [VideoCaptureIOS] alias) feeds
-  ///   I420 frames into the engine via [VideoEngine.feedExternalFrame]
-  ///   on the main isolate.
-  /// - Linux/macOS (in-process fallback): the existing isolate-based V4L2
-  ///   capture stub (synthetic gray frames — not fixed in this pass).
-  /// Any VpxFFI/native-lib failure degrades to audio-only (VideoEngine.start
-  /// returns false; onFrame/onDecodedFrame simply never fire) — never crashes.
+  /// V2.3: constructs the [VideoEngine] behind [CleonaService.createVideoEngine].
+  /// No dart:ui, no Isolate, no pixel conversions — the native backend
+  /// (VideoPipeline V0.3) handles capture, H.264 encode/decode, and renders
+  /// into a texture that Flutter's Texture widget displays directly (I10).
   dynamic _createVideoEngine(
       Uint8List sharedSecret, void Function(Uint8List) onFrame) {
-    final useIsolate = !(Platform.isAndroid || Platform.isIOS);
-    final engine = VideoEngine(
-      sharedSecret: sharedSecret,
-      useIsolateCapture: useIsolate,
-    );
+    final engine = VideoEngine(sharedSecret: sharedSecret);
     engine.onVideoFrame = onFrame;
-    // Ownership: whichever CallScreen is currently registered via
-    // [onRemoteVideoFrame] owns disposal of the image it receives (it
-    // already disposes-before-replace and disposes-on-unmount — see
-    // call_screen.dart updateRemoteFrame/dispose). If no CallScreen is
-    // registered (race at call start, or the user navigated away without
-    // hanging up), dispose immediately here instead of leaking a GPU
-    // texture per decoded frame.
-    engine.onDecodedFrame = (image) {
-      final cb = onRemoteVideoFrame;
-      if (cb != null) {
-        cb(image);
-      } else {
-        image.dispose();
-      }
+
+    engine.onVideoShutdown = (reason, detail) {
+      debugPrint('[video] shutdown: $detail');
+      onRemoteVideoTextureChanged?.call(null);
+    };
+
+    engine.onCaptureStop = () {
+      onRemoteVideoTextureChanged?.call(null);
     };
 
     unawaited(engine.start().then((ok) {
       if (!ok) {
-        debugPrint('[video] VideoEngine.start() failed (codec/native lib '
-            'unavailable) — this call continues audio-only');
+        debugPrint('[video] VideoEngine.start() failed — audio-only');
+        return;
       }
+      onRemoteVideoTextureChanged?.call(engine.textureId);
     }));
 
-    if (Platform.isAndroid || Platform.isIOS) {
-      // Same Dart wrapper for both: the `chat.cleona/camera` MethodChannel
-      // contract is identical (CameraXHandler.kt / CameraHandler.swift).
-      final cam = VideoCaptureAndroid();
-      cam.onFrame = (i420, w, h, rotation) {
-        final (rotated, rw, rh) = VideoEngine.rotateI420(i420, w, h, rotation);
-        engine.feedExternalFrame(rotated, rw, rh);
-        final mirrored = VideoEngine.mirrorI420Horizontal(rotated, rw, rh);
-        _updateLocalVideoPreview(mirrored, rw, rh);
-      };
-      engine.onSwitchCameraRequested = () => cam.switchCamera();
-      engine.onCaptureStop = () {
-        unawaited(cam.stop());
-        cam.dispose();
-      };
-      unawaited(() async {
-        final granted = await cam.requestPermission();
-        if (!granted) {
-          debugPrint('[video] CAMERA permission denied — this call sends '
-              'no outgoing video (still receives/decodes the peer\'s)');
-          return;
-        }
-        final started = await cam.start(
-          width: engine.preset.width,
-          height: engine.preset.height,
-        );
-        if (!started) {
-          debugPrint('[video] Camera capture failed to start');
-        }
-      }());
-    }
-
     return engine;
-  }
-
-  /// Converts a raw captured I420 frame (local preview, pre-encode) to a
-  /// [ui.Image] and forwards it to the active [CallScreen] via
-  /// [onLocalVideoFrame]. Mirrors [VideoEngine]'s own I420→RGBA conversion
-  /// (group video / remote decode) for consistency. Same single-owner
-  /// disposal contract as [_createVideoEngine]'s onDecodedFrame above.
-  void _updateLocalVideoPreview(Uint8List i420, int width, int height) {
-    final rgba = VideoEngine.i420ToRgba(i420, width, height);
-    ui.decodeImageFromPixels(rgba, width, height, ui.PixelFormat.rgba8888,
-        (ui.Image image) {
-      final cb = onLocalVideoFrame;
-      if (cb != null) {
-        cb(image);
-      } else {
-        image.dispose();
-      }
-    });
   }
 
   /// Decode audio to WAV via Android MediaCodec MethodChannel.

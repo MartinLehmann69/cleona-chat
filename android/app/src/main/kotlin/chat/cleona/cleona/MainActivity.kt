@@ -54,7 +54,6 @@ class MainActivity : FlutterActivity() {
     private val CALL_CHANNEL_ID = "cleona_calls"
     private val CALL_NOTIFICATION_ID = 42001
     private val NOTIFICATION_PERMISSION_CODE = 1001
-    private var cameraHandler: CameraXHandler? = null
 
     // ─────────────────────────────────────────────────────────────────────
     // Session behaviour (V1.10, docs/SPEC_VOICE_VIDEO_REWORK.md §7 "V1.10",
@@ -137,11 +136,11 @@ class MainActivity : FlutterActivity() {
         // here even before scripts/build-android-libs.sh ships the library.
         VoiceSession.install(applicationContext)
 
-        // Camera channel for video calls (Phase 3b)
-        cameraHandler = CameraXHandler(
-            this,
-            MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CameraXHandler.CHANNEL_NAME)
-        )
+        // No camera MethodChannel any more (V3.1): the `chat.cleona/camera`
+        // contract existed for the superseded Dart-side capture path
+        // (video_capture_android.dart -> CameraXHandler.kt). Capture now lives
+        // below the video ABI in VideoSession.kt, where the frames never enter
+        // Dart at all (invariant I10, §10.6).
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
@@ -204,20 +203,12 @@ class MainActivity : FlutterActivity() {
                         }
                     }.start()
                 }
-                // Read-only AEC/NS introspection (S281). Pure diagnostics —
-                // never enables/disables an effect. See AudioDiagnostics.kt
-                // for what this can and cannot observe.
-                "getAudioDiagnostics" -> {
-                    val probe = call.argument<Boolean>("probe") ?: true
-                    Thread {
-                        val map: Map<String, Any?> = try {
-                            AudioDiagnostics.collect(applicationContext, probe)
-                        } catch (e: Exception) {
-                            mapOf("error" to "${e.javaClass.simpleName}:${e.message}")
-                        }
-                        runOnUiThread { result.success(map) }
-                    }.start()
-                }
+                // "getAudioDiagnostics" was removed with the superseded audio
+                // stack (V3.1). It introspected the AEC/NS effects that
+                // libcleona_audio attached to a miniaudio capture stream; the
+                // native OS voice session reports the same properties in-band
+                // through cleona_voice_get_report (I11), where the answer comes
+                // from the layer that actually owns the effects.
                 else -> result.notImplemented()
             }
         }

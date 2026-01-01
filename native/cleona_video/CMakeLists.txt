@@ -32,6 +32,17 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(CLEONA_VIDEO_BUILD_MOCK  "Build the hardware-free mock backend" ON)
 option(CLEONA_VIDEO_BUILD_SMOKE "Build the V0.3 smoke program"         ON)
 option(CLEONA_VIDEO_STATIC      "Build static instead of shared (iOS)" OFF)
+# Default ON so a platform build is unchanged. OFF configures the hardware-free
+# half of this tree only — mock, smoke and the conformance harness.
+#
+# Why it exists: the platform subdirectories hard-require their vendor SDKs at
+# CONFIGURE time (linux/CMakeLists.txt:46 pkg_check_modules(... libva)), so on
+# a machine without them the whole tree fails to configure and even the mock —
+# which needs no hardware by definition — cannot be built. That made the Dart
+# smoke coverage (test/smoke/smoke_video_calls.dart, which loads
+# build/cleona_video/libcleona_video_mock.so) unreachable on any box without a
+# VAAPI toolchain, which is exactly the kind of box that runs it.
+option(CLEONA_VIDEO_BUILD_PLATFORM "Build the platform backends (needs their SDKs)" ON)
 
 # Warnings are on and stay on. Lowering them to make a build go green is
 # explicitly out of bounds for this package.
@@ -113,8 +124,13 @@ endif()
 # cleona_video_add_conformance_test() is already defined (mirrors
 # native/cleona_voice/CMakeLists.txt's identical loop).
 # ---------------------------------------------------------------------------
-foreach(_plat linux android apple windows)
-  if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_plat}/CMakeLists.txt")
-    add_subdirectory(${_plat})
-  endif()
-endforeach()
+if(CLEONA_VIDEO_BUILD_PLATFORM)
+  foreach(_plat linux android apple windows)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${_plat}/CMakeLists.txt")
+      add_subdirectory(${_plat})
+    endif()
+  endforeach()
+else()
+  message(STATUS "cleona_video: platform backends skipped "
+                 "(-DCLEONA_VIDEO_BUILD_PLATFORM=OFF) — mock/smoke/test only")
+endif()

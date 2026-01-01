@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
@@ -34,9 +33,8 @@ class _CallScreenState extends State<CallScreen> {
   bool _userInitiatedPop = false;
   bool _autoPopScheduled = false;
 
-  // Video frames (set by VideoEngine callbacks via CleonaAppState)
-  ui.Image? _remoteVideoFrame;
-  ui.Image? _localVideoFrame;
+  // Remote video texture (set by VideoEngine callback via CleonaAppState)
+  int? _remoteTextureId;
 
   // Cached so dispose() can unregister without a context lookup (Provider
   // reads are unreliable once the element starts unmounting).
@@ -72,9 +70,8 @@ class _CallScreenState extends State<CallScreen> {
       _appStateRef = appState;
       // § F-B: only one CallScreen is ever active for a 1:1 call, so a
       // direct callback registration (rather than a broadcast stream) is
-      // sufficient — see main.dart CleonaAppState.onRemoteVideoFrame docs.
-      appState.onRemoteVideoFrame = updateRemoteFrame;
-      appState.onLocalVideoFrame = updateLocalFrame;
+      // sufficient — see main.dart CleonaAppState.onRemoteVideoTextureChanged docs.
+      appState.onRemoteVideoTextureChanged = _onRemoteTextureChanged;
       _wirePeerVideoState(appState.service);
     }
   }
@@ -131,11 +128,8 @@ class _CallScreenState extends State<CallScreen> {
       // tear-off expressions even though they aren't `identical` — only
       // clear if we're still the registered screen (guards against a
       // newer CallScreen having already taken over registration).
-      if (appState.onRemoteVideoFrame == updateRemoteFrame) {
-        appState.onRemoteVideoFrame = null;
-      }
-      if (appState.onLocalVideoFrame == updateLocalFrame) {
-        appState.onLocalVideoFrame = null;
+      if (appState.onRemoteVideoTextureChanged == _onRemoteTextureChanged) {
+        appState.onRemoteVideoTextureChanged = null;
       }
     }
     if (_voiceCapableService != null &&
@@ -144,8 +138,6 @@ class _CallScreenState extends State<CallScreen> {
       _voiceCapableService!.onPeerCallMediaStateChanged = null;
     }
     _durationTimer?.cancel();
-    _remoteVideoFrame?.dispose();
-    _localVideoFrame?.dispose();
     super.dispose();
   }
 
@@ -208,11 +200,8 @@ class _CallScreenState extends State<CallScreen> {
           Positioned.fill(
             child: (_peerVideoState != null && !_peerVideoState!.sendingVideo)
                 ? PeerVideoOffOverlay(reason: _peerVideoState!.videoOffReason)
-                : (_remoteVideoFrame != null
-                    ? RawImage(
-                        image: _remoteVideoFrame,
-                        fit: BoxFit.contain,
-                      )
+                : (_remoteTextureId != null
+                    ? Texture(textureId: _remoteTextureId!)
                     : Center(
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
@@ -282,18 +271,13 @@ class _CallScreenState extends State<CallScreen> {
                   border: Border.all(color: Colors.white24, width: 1),
                 ),
                 clipBehavior: Clip.antiAlias,
-                child: _localVideoFrame != null && _videoEnabled
-                    ? RawImage(
-                        image: _localVideoFrame,
-                        fit: BoxFit.cover,
-                      )
-                    : Center(
-                        child: Icon(
-                          _videoEnabled ? Icons.videocam : Icons.videocam_off,
-                          color: Colors.white54,
-                          size: 32,
-                        ),
-                      ),
+                child: Center(
+                  child: Icon(
+                    _videoEnabled ? Icons.videocam : Icons.videocam_off,
+                    color: Colors.white54,
+                    size: 32,
+                  ),
+                ),
               ),
             ),
           ),
@@ -527,22 +511,11 @@ class _CallScreenState extends State<CallScreen> {
     });
   }
 
-  /// Called externally to update the remote video frame.
-  void updateRemoteFrame(ui.Image frame) {
+  /// Called externally when the remote video texture changes.
+  void _onRemoteTextureChanged(int? textureId) {
     if (mounted) {
       setState(() {
-        _remoteVideoFrame?.dispose();
-        _remoteVideoFrame = frame;
-      });
-    }
-  }
-
-  /// Called externally to update the local preview frame.
-  void updateLocalFrame(ui.Image frame) {
-    if (mounted) {
-      setState(() {
-        _localVideoFrame?.dispose();
-        _localVideoFrame = frame;
+        _remoteTextureId = textureId;
       });
     }
   }

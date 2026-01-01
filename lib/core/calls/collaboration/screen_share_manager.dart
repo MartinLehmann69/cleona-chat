@@ -4,67 +4,83 @@ import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex, hexToBytes;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
-/// Screen share quality presets (Architecture S10.5.4).
+/// Screen share quality presets (Architecture §10.5.4).
+///
+/// Each preset maps to a [VideoConfig] pushed into the active VideoPipeline
+/// via `reconfigure()`. The pipeline's hardware H.264 encoder scales the
+/// capture to fit.
 class ScreenSharePreset {
   final int width;
   final int height;
   final int fps;
+  final int bitrateKbps;
   final String label;
 
-  const ScreenSharePreset(this.width, this.height, this.fps, this.label);
+  const ScreenSharePreset(
+      this.width, this.height, this.fps, this.bitrateKbps, this.label);
 
-  /// >2Mbps: 1080p@15fps
-  static const high = ScreenSharePreset(1920, 1080, 15, '1080p');
+  /// >2 Mbps: 1080p@15 fps
+  static const high = ScreenSharePreset(1920, 1080, 15, 2500, '1080p');
 
-  /// 1-2Mbps: 720p@10fps
-  static const medium = ScreenSharePreset(1280, 720, 10, '720p');
+  /// 1–2 Mbps: 720p@10 fps
+  static const medium = ScreenSharePreset(1280, 720, 10, 1500, '720p');
 
-  /// 500K-1M: 540p@5fps
-  static const low = ScreenSharePreset(960, 540, 5, '540p');
+  /// 500K–1M: 540p@5 fps
+  static const low = ScreenSharePreset(960, 540, 5, 800, '540p');
 
-  /// <500K: 360p@3fps
-  static const minimal = ScreenSharePreset(640, 360, 3, '360p');
+  /// <500K: 360p@3 fps
+  static const minimal = ScreenSharePreset(640, 360, 3, 400, '360p');
 
-  /// Text-optimized: very crisp but 2 FPS
-  static const textOptimized = ScreenSharePreset(1920, 1080, 2, 'Text');
+  /// Text-optimized: crisp 1080p at 2 fps — maximum sharpness for code,
+  /// documents and slides at minimal bandwidth.
+  static const textOptimized =
+      ScreenSharePreset(1920, 1080, 2, 1000, 'Text');
 }
 
-/// Manages screen sharing state and control (Architecture S10.5.4).
+/// Manages screen sharing state, signaling and pipeline integration
+/// (Architecture §10.5.4).
 ///
+/// Screen sharing reuses the video pipeline (H.264, §10.6): when the local
+/// user starts sharing, the active VideoPipeline is reconfigured with a
+/// [ScreenSharePreset] (lower FPS, potentially higher resolution for text).
+/// The encoded frames travel over the same transport as camera video — no
+/// separate message type, no separate encryption.
+///
+/// The signaling layer ([ScreenShareControl]) tells participants that the
+/// video they receive is now a screen rather than a camera, so the UI can
+/// adjust (full-screen layout, text-optimised rendering).
+///
+/// Platform capture sources (native ABI extension, not yet in cleona_video.h):
 /// - Linux: PipeWire / XDG Desktop Portal (org.freedesktop.portal.ScreenCast)
 /// - Android: MediaProjection API
-/// - Reuses video pipeline (VP8, Overlay Multicast Tree)
-/// - Adaptive quality based on bandwidth
+/// - Windows: Windows.Graphics.Capture
+/// - iOS/macOS: ReplayKit
 class ScreenShareManager {
   final String ownUserIdHex;
   final String profileDir;
   final CLogger _log;
 
-  /// Whether we are currently sharing our screen.
   bool isSharing = false;
-
-  /// Who is currently sharing (null if nobody).
   String? activeSharerHex;
   String? activeSharerName;
 
-  /// Current share quality preset.
   ScreenSharePreset currentPreset = ScreenSharePreset.high;
-
-  /// Whether "optimize for text" is enabled.
   bool optimizeForText = false;
 
-  /// Callback to send control messages.
   void Function(proto.MessageTypeV3 type, Uint8List payload)? onSendToAll;
-
-  /// UI callback when screen share state changes.
   void Function()? onShareStateChanged;
+
+  /// Called when screen share starts, stops, or the quality preset changes.
+  /// The caller (typically the collaboration wiring in [GroupCallManager])
+  /// uses this to push a new VideoConfig into the active VideoPipeline.
+  /// `null` means sharing stopped — restore camera defaults.
+  void Function(ScreenSharePreset? preset)? onReconfigurePipeline;
 
   ScreenShareManager({
     required this.ownUserIdHex,
     required this.profileDir,
   }) : _log = CLogger.get('screen-share', profileDir: profileDir);
 
-  /// Start sharing our screen.
   void startSharing({bool textOptimized = false}) {
     if (activeSharerHex != null && activeSharerHex != ownUserIdHex) {
       _log.warn('Someone else is already sharing');
@@ -91,11 +107,12 @@ class ScreenShareManager {
       control.writeToBuffer(),
     );
 
+    onReconfigurePipeline?.call(currentPreset);
     onShareStateChanged?.call();
-    _log.info('Screen share started: ${currentPreset.label}');
+    _log.info('Screen share started: ${currentPreset.label} '
+        '(${currentPreset.width}x${currentPreset.height}@${currentPreset.fps})');
   }
 
-  /// Stop sharing our screen.
   void stopSharing() {
     if (!isSharing) return;
 
@@ -112,11 +129,11 @@ class ScreenShareManager {
       control.writeToBuffer(),
     );
 
+    onReconfigurePipeline?.call(null);
     onShareStateChanged?.call();
     _log.info('Screen share stopped');
   }
 
-  /// Adjust quality based on available bandwidth.
   void adjustQuality(int bandwidthBps) {
     if (!isSharing) return;
 
@@ -136,14 +153,14 @@ class ScreenShareManager {
     if (newPreset.width != currentPreset.width ||
         newPreset.fps != currentPreset.fps) {
       currentPreset = newPreset;
-      _log.info('Screen share quality: ${newPreset.label}');
+      onReconfigurePipeline?.call(newPreset);
+      _log.info('Screen share quality adjusted: ${newPreset.label}');
     }
   }
 
-  /// Handle incoming screen share control from a remote participant.
   void handleRemoteControl(proto.ScreenShareControl control) {
     final sharerHex = bytesToHex(Uint8List.fromList(control.sharerId));
-    if (sharerHex == ownUserIdHex) return; // Ignore own echo
+    if (sharerHex == ownUserIdHex) return;
 
     if (control.isSharing) {
       activeSharerHex = sharerHex;
@@ -161,10 +178,7 @@ class ScreenShareManager {
     onShareStateChanged?.call();
   }
 
-  /// Check if someone is sharing their screen.
   bool get hasActiveShare => activeSharerHex != null;
-
-  /// Check if WE are the active sharer.
   bool get isOwnShare => activeSharerHex == ownUserIdHex;
 
   void dispose() {

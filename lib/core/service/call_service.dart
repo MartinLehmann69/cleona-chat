@@ -1,8 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:cleona/core/calls/audio_engine.dart';
 import 'package:cleona/core/calls/audio_mixer.dart';
+import 'package:cleona/core/calls/collaboration/screen_share_manager.dart';
+import 'package:cleona/core/calls/jitter_buffer.dart';
+import 'package:cleona/core/calls/voice_codec.dart';
+import 'package:cleona/core/calls/voice_session.dart';
 import 'package:cleona/core/calls/audio_permissions.dart';
 import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/foreground_service.dart';
@@ -28,7 +31,17 @@ class CallService {
   late final CallManager callManager;
   late final GroupCallManager groupCallManager;
 
-  AudioEngine? _audioEngine;
+  VoiceSession? _voiceSession;
+  VoiceCodec? _captureCodec;
+  VoiceCodec? _playbackCodec;
+  SodiumFFI? _voiceSodium;
+  Uint8List? _voiceSharedSecret;
+  Timer? _captureTimer;
+  Int16List? _captureBuf;
+  JitterBuffer? _jitterBuffer;
+  int _captureSeqNum = 0;
+  bool _speakerEnabled = true;
+
   AudioMixer? _audioMixer;
   dynamic _groupVideoEngine;
   GroupVideoReceiver? _groupVideoReceiver;
@@ -53,8 +66,11 @@ class CallService {
   void Function(GroupCallInfo info)? onGroupCallEnded;
   void Function(Uint8List serializedVideoFrame)? onVideoFrameReceived;
   void Function()? onKeyframeRequested;
-  void Function(String senderHex, Uint8List i420, int width, int height)?
-      onGroupVideoI420Frame;
+  /// A group participant's video became renderable under [textureId], or is
+  /// gone again when it is null. Replaces the superseded `onGroupVideoI420Frame`:
+  /// pixels no longer cross the video ABI (I10), so what the UI gets is an
+  /// opaque texture id for a Flutter `Texture` widget.
+  void Function(String senderHex, int? textureId)? onGroupVideoTexture;
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
       createVideoEngine;
   void Function()? onStateChanged;
@@ -63,6 +79,17 @@ class CallService {
   void Function(bool speaker)? onSetCallAudioModeAndroid;
   void Function()? onResetCallAudioModeAndroid;
   void Function(String reason)? onVideoUnavailable;
+
+  /// §10.4 / E5 — an inbound CALL_INVITE was refused because the caller runs
+  /// a build that does not speak the new voice stack.
+  ///
+  /// Arguments: caller user-id hex, the advertised `major * 1000 + minor`
+  /// (0 when the build predates the field), and the wire reason code
+  /// [rejectReasonIncompatibleVersion]. The UI turns the code into text via
+  /// the i18n key `call_rejected_incompatible_version`; the raw version is
+  /// passed so a support view can show what the other side actually claimed.
+  void Function(String callerUserIdHex, int callerAppMajorMinor, String reason)?
+      onIncompatibleCallRejected;
 
   CallService(this._ctx, {required this.notificationSound, required CLogger log})
       : _log = log;
@@ -74,6 +101,7 @@ class CallService {
       contacts: _ctx.contacts,
       profileDir: _ctx.profileDir,
     );
+    callManager.callerAppMajorMinor = minCallerAppMajorMinor;
     callManager.sendViaUser = (recipientUserId, type, payload, {outLegs}) =>
         _ctx.sendToUser(
           recipientUserId: recipientUserId,
@@ -87,19 +115,19 @@ class CallService {
       onStateChanged?.call();
     };
     callManager.onCallAccepted = (session) {
-      _startAudioEngine(session);
+      _startVoiceSession(session);
       _startVideoEngine(session);
       onCallAccepted?.call(session.toCallInfo());
       onStateChanged?.call();
     };
     callManager.onCallRejected = (session, reason) {
-      _stopAudioEngine();
+      _stopVoiceSession();
       _stopVideoEngine();
       onCallRejected?.call(session.toCallInfo(), reason);
       onStateChanged?.call();
     };
     callManager.onCallEnded = (session) {
-      _stopAudioEngine();
+      _stopVoiceSession();
       _stopVideoEngine();
       onCallEnded?.call(session.toCallInfo());
       onStateChanged?.call();
@@ -173,6 +201,9 @@ class CallService {
       _audioMixer?.setPeerSendKey(senderUserHex, key);
       _groupVideoReceiver?.setPeerSendKey(senderUserHex, key);
     };
+    groupCallManager.onScreenSharePresetChanged = (preset) {
+      _applyScreenSharePreset(preset);
+    };
   }
 
   Future<void> dispose() async {
@@ -220,27 +251,33 @@ class CallService {
 
   bool get isMuted {
     if (_audioMixer != null) return _audioMixer!.isMuted;
-    return _audioEngine?.isMuted ?? false;
+    return _voiceSession?.micMuted ?? false;
   }
 
   void toggleMute() {
     if (_audioMixer != null) {
       _audioMixer!.muted = !_audioMixer!.isMuted;
-    } else if (_audioEngine != null) {
-      _audioEngine!.muted = !_audioEngine!.isMuted;
+    } else if (_voiceSession != null) {
+      _voiceSession!.micMuted = !_voiceSession!.micMuted;
     }
   }
 
   bool get isSpeakerEnabled {
     if (_audioMixer != null) return _audioMixer!.isSpeakerEnabled;
-    return _audioEngine?.isSpeakerEnabled ?? true;
+    return _speakerEnabled;
   }
 
   void toggleSpeaker() {
     if (_audioMixer != null) {
       _audioMixer!.speakerEnabled = !_audioMixer!.isSpeakerEnabled;
-    } else if (_audioEngine != null) {
-      _audioEngine!.speakerEnabled = !_audioEngine!.isSpeakerEnabled;
+    } else if (_voiceSession != null) {
+      _speakerEnabled = !_speakerEnabled;
+      final route =
+          _speakerEnabled ? VoiceRoute.speaker : VoiceRoute.earpiece;
+      final rc = _voiceSession!.setRoute(route);
+      if (rc < 0) {
+        _log.debug('setRoute(${route.logName}) returned $rc');
+      }
     }
   }
 
@@ -301,7 +338,7 @@ class CallService {
       _audioMixer!.onSpeakerToggle = (speaker) {
         onSetCallAudioModeAndroid?.call(speaker);
       };
-      // Mode before stream-open — see _startAudioEngine for the rationale.
+      // Mode before stream-open — see _startVoiceSession for the rationale.
       onSetCallAudioModeAndroid?.call(true);
       await _audioMixer!.start();
       // Poll audio levels at 4 Hz for active speaker detection + mute inference.
@@ -366,9 +403,29 @@ class CallService {
     );
     session.peerSendKeys
         .forEach((hex, k) => _groupVideoReceiver!.setPeerSendKey(hex, k.key));
-    _groupVideoReceiver!.onDecodedI420 = (senderHex, i420, w, h) {
-      onGroupVideoI420Frame?.call(senderHex, i420, w, h);
+    _groupVideoReceiver!.onPeerTexture = (senderHex, textureId) {
+      onGroupVideoTexture?.call(senderHex, textureId);
     };
+    // A peer's decoder that has lost its keyframe cannot recover on its own —
+    // asking the sender is signalling, which the video ABI deliberately does
+    // not do. Reuses the 1:1 keyframe request path.
+    _groupVideoReceiver!.onKeyframeNeeded = (_) => onKeyframeRequested?.call();
+  }
+
+  void _applyScreenSharePreset(ScreenSharePreset? preset) {
+    final engine = _groupVideoEngine;
+    if (engine == null) return;
+
+    try {
+      if (preset != null) {
+        (engine as dynamic).reconfigureForScreenShare(
+            preset.width, preset.height, preset.fps, preset.bitrateKbps);
+      } else {
+        (engine as dynamic).restoreCameraDefaults();
+      }
+    } catch (e) {
+      _log.debug('Screen share reconfigure skipped (engine has no support): $e');
+    }
   }
 
   void _stopGroupVideo() {
@@ -380,9 +437,9 @@ class CallService {
     _groupVideoReceiver = null;
   }
 
-  // ── Audio Engine (1:1) ────────────────────────────────────────────
+  // ── Voice Session (1:1) ───────────────────────────────────────────
 
-  Future<void> _startAudioEngine(CallSession session) async {
+  Future<void> _startVoiceSession(CallSession session) async {
     if (Platform.isAndroid) {
       final granted = await AudioPermissions.requestRecordAudio();
       if (!granted) {
@@ -395,34 +452,86 @@ class CallService {
     }
     if (session.sharedSecret == null) return;
     try {
-      _audioEngine = AudioEngine(
-        sharedSecret: session.sharedSecret!,
-        profileDir: _ctx.profileDir,
-      );
-      _audioEngine!.onAudioFrame = (encryptedFrame) {
-        _sendAudioFrame(session, encryptedFrame);
-      };
-      _audioEngine!.onSpeakerToggle = (speaker) {
-        onSetCallAudioModeAndroid?.call(speaker);
-      };
-      // MODE_IN_COMMUNICATION must be active *before* the streams are opened
-      // — Android picks the route and the HAL effect chain at stream-open
-      // time, so switching the mode afterwards leaves the already-open
-      // streams on the mode that was active when they were created.
+      final lib = VoiceNativeLibrary.platform();
+      final voiceSession = VoiceSession.open(library: lib);
+      final format = voiceSession.format;
+
+      _voiceSession = voiceSession;
+      _captureCodec = VoiceCodec.fromFormat(format);
+      _playbackCodec = VoiceCodec.fromFormat(format);
+      _voiceSodium = SodiumFFI();
+      _voiceSharedSecret = session.sharedSecret!;
+      _captureBuf = Int16List(format.frameSamples);
+      _jitterBuffer = JitterBuffer(bufferDepth: 2, maxBufferSize: 6);
+      _captureSeqNum = 0;
+      _speakerEnabled = true;
+
       onSetCallAudioModeAndroid?.call(true);
-      await _audioEngine!.start();
+      voiceSession.start();
+
+      _captureTimer =
+          Timer.periodic(const Duration(milliseconds: 5), (_) {
+        _captureAndSend(session);
+      });
+
+      _log.info('Voice session started (rate=${format.sampleRate}, '
+          'channels=${format.channels}, frame=${format.frameSamples})');
     } catch (e) {
-      _log.error('Audio engine start failed: $e');
+      _log.error('Voice session start failed: $e');
+      _stopVoiceSession();
     }
   }
 
-  void _stopAudioEngine() {
+  void _captureAndSend(CallSession session) {
+    final vs = _voiceSession;
+    if (vs == null) return;
+
+    final status = vs.readCaptureFrameInto(_captureBuf!, timeoutMs: 0);
+    if (status != VoiceCaptureStatus.frame) return;
+
     try {
-      _audioEngine?.stop();
+      final pcmBytes = _captureBuf!.buffer.asUint8List(
+          _captureBuf!.offsetInBytes, _captureBuf!.lengthInBytes);
+      final opusData = _captureCodec!.encode(pcmBytes);
+
+      final nonce = _voiceSodium!.generateNonce();
+      final encrypted =
+          _voiceSodium!.aesGcmEncrypt(opusData, _voiceSharedSecret!, nonce);
+
+      final packet = BytesBuilder(copy: false);
+      final seqBuf = ByteData(4);
+      seqBuf.setUint32(0, _captureSeqNum++, Endian.big);
+      packet.add(Uint8List.view(seqBuf.buffer));
+      packet.add(nonce);
+      packet.add(encrypted);
+
+      _sendAudioFrame(session, packet.toBytes());
     } catch (e) {
-      _log.warn('AudioEngine stop threw (swallowed): $e');
+      _log.debug('Capture encode/encrypt failed: $e');
     }
-    _audioEngine = null;
+  }
+
+  void _stopVoiceSession() {
+    _captureTimer?.cancel();
+    _captureTimer = null;
+
+    try {
+      _voiceSession?.stop();
+      _voiceSession?.close();
+    } catch (e) {
+      _log.warn('VoiceSession stop/close threw (swallowed): $e');
+    }
+
+    _voiceSession = null;
+    _captureCodec?.dispose();
+    _captureCodec = null;
+    _playbackCodec?.dispose();
+    _playbackCodec = null;
+    _voiceSodium = null;
+    _voiceSharedSecret = null;
+    _captureBuf = null;
+    _jitterBuffer = null;
+
     onResetCallAudioModeAndroid?.call();
     if (Platform.isAndroid) {
       ForegroundServiceControl.demoteAfterCall();
@@ -432,7 +541,7 @@ class CallService {
   // ── Video Engine (1:1) ────────────────────────────────────────────
 
   /// Starts the 1:1 video pipeline for a video call once it reaches
-  /// [CallState.inCall] (mirrors [_startAudioEngine], called from the same
+  /// [CallState.inCall] (mirrors [_startVoiceSession], called from the same
   /// `onCallAccepted` hook so both caller-on-answer and callee-on-accept
   /// wire up identically). No-op for audio-only calls or when no video
   /// engine factory has been injected (daemon builds without a
@@ -518,7 +627,7 @@ class CallService {
   /// frames/sec) NOR through the per-recipient KEM inner
   /// ([V3FrameCodec.buildAndEncryptInner]): [encryptedFrame] is already
   /// AES-256-GCM-encrypted under the call's negotiated `sharedSecret` by
-  /// [AudioEngine], which already provides confidentiality and per-frame
+  /// the caller's VoiceSession+VoiceCodec chain, which provides confidentiality and per-frame
   /// authenticity. Wrapping it again in a KEM + ML-DSA inner sig (~4.4 KB)
   /// is pure overhead — the field-measured bug this fixes (5,472 B/frame,
   /// 5 UDP fragments) instead of the ~470 B architecture target.
@@ -587,8 +696,19 @@ class CallService {
     //                   it in `_unackedPacketsToPeer` would trip the §5.10.4
     //                   Mesh-Refresh threshold (6) within ~120 ms of call
     //                   audio and spray every frame over 5 relay neighbors.
+    // `messageType` — §10.3.1 / I8 + I9 (package V1.11). The type cannot be
+    //                   reconstructed further down the stack: the inner frame
+    //                   of an ordinary message is KEM ciphertext, and
+    //                   `paced`/`expectsReply` are no substitute — call
+    //                   *signalling* is sent unpaced and unacknowledged too,
+    //                   but is a normal message that must keep TLS escalation
+    //                   and NACK retry. Passing it here is what takes live
+    //                   media out of both (`CleonaNode.isLiveMediaType`) and
+    //                   onto the CFRL framing with FEC parity instead of
+    //                   retransmit. Without it the mechanism V1.11 built is
+    //                   present but never reached.
     unawaited(_ctx.node.sendToDevice(outer, peerDeviceId,
-        paced: false, expectsReply: false));
+        paced: false, expectsReply: false, messageType: messageType));
   }
 
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
@@ -699,6 +819,77 @@ class CallService {
 
   // ── V3 Handlers ─────────────────────────────────────────────────
 
+  // ── §10.4 / Erratum E5: Versionsgate auf CALL_INVITE ────────────────
+
+  /// Wire reason code sent in [proto.CallReject.reason] when an invite is
+  /// refused by the version gate.
+  ///
+  /// A stable code, not a sentence: `call_service.dart` is daemon-safe and
+  /// must not import `dart:ui`, so it cannot localise — and localising on
+  /// the sender would ship the CALLEE's language to the CALLER. The UI maps
+  /// this code onto the i18n key `call_rejected_incompatible_version`,
+  /// which carries all 34 locales.
+  static const String rejectReasonIncompatibleVersion =
+      'incompatible_version';
+
+  /// Lowest `major * 1000 + minor` that speaks the new voice stack (3.2.0).
+  ///
+  /// Deliberately a threshold on the WHOLE version, not `minor >= 2`.
+  /// Architecture §10.4:4898 words the rule as `minor >= 2`, and that
+  /// wording has a rollover defect: version 4.0.0 has minor 0, so `0 >= 2`
+  /// is false and a 4.0 client — which speaks the NEWER stack — would be
+  /// turned away with a factual claim about it that is untrue. `v % 1000 >= 2`
+  /// inherits the same defect. Decided by the project owner on 2026-07-30;
+  /// `BUILD_REQUEST_V1.12.md` ("Entscheidung des Projektinhabers") is the
+  /// authoritative wording until V3.3 corrects §10.4, which owns that file.
+  static const int minCallerAppMajorMinor = 3002;
+
+  /// Whether a caller advertising [callerAppMajorMinor] speaks the new
+  /// voice stack.
+  ///
+  /// `0` — the proto3 default for an absent field — is NOT "unknown, so
+  /// probably fine". It is defined to mean "sender older than 3.2.0" and is
+  /// refused: a build predating the field cannot set it, and letting it
+  /// through would restore exactly the silent failure the gate exists to
+  /// remove.
+  static bool isCompatibleCallerVersion(int callerAppMajorMinor) =>
+      callerAppMajorMinor >= minCallerAppMajorMinor;
+
+  /// Refuse an invite from an incompatible build.
+  ///
+  /// Mirrors [CallManager.rejectCall]'s wire signal, but deliberately does
+  /// not go through it: no [CallSession] is ever created for this invite, so
+  /// there is nothing to tear down, and `rejectCall` would no-op on a null
+  /// `_currentCall`. Local teardown first, wire signal best-effort second —
+  /// same ordering as the rest of the call teardown paths.
+  void _rejectIncompatibleCallInvite(
+      proto.CallInvite invite, proto.ApplicationFrameV3 f) {
+    final senderHex = bytesToHex(Uint8List.fromList(f.senderUserId));
+    _log.warn('CALL_INVITE rejected — incompatible caller version '
+        '${invite.callerAppMajorMinor} (need >= $minCallerAppMajorMinor) '
+        'from ${senderHex.substring(0, 8)} (§10.4 / E5)');
+
+    // Surface it locally too. The callee gets no ringtone and no call entry,
+    // so without this the refusal would be invisible on THIS device as well
+    // — the same silent failure, just on the other end.
+    onIncompatibleCallRejected?.call(
+        senderHex, invite.callerAppMajorMinor, rejectReasonIncompatibleVersion);
+
+    try {
+      final reject = proto.CallReject()
+        ..callId = invite.callId
+        ..reason = rejectReasonIncompatibleVersion;
+      unawaited(_ctx.sendToUser(
+        recipientUserId: Uint8List.fromList(f.senderUserId),
+        messageType: proto.MessageTypeV3.MTV3_CALL_REJECT,
+        payload: reject.writeToBuffer(),
+        skipL3: true,
+      ));
+    } catch (e) {
+      _log.warn('Incompatible-version reject signal failed to send: $e');
+    }
+  }
+
   void handleCallInviteV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
     final ageMs = DateTime.now().millisecondsSinceEpoch - f.timestampMs.toInt();
@@ -713,6 +904,16 @@ class CallService {
       invite = proto.CallInvite.fromBuffer(f.payload);
     } catch (e) {
       _log.warn('CALL_INVITE V3: payload parse failed: $e');
+      return;
+    }
+    // §10.4 / Erratum E5 — version gate. A call between an old and a new
+    // voice stack must be rejected EXPLICITLY, with a reason the user can
+    // see: "never allowed to fail silently, which would reproduce exactly
+    // the field symptoms this rewrite removes". Checked before anything
+    // rings, so an incompatible caller never produces a call the callee
+    // could pick up into silence.
+    if (!isCompatibleCallerVersion(invite.callerAppMajorMinor)) {
+      _rejectIncompatibleCallInvite(invite, f);
       return;
     }
     if (invite.isGroupCall) {
@@ -780,10 +981,47 @@ class CallService {
 
   void handleCallAudioV3(proto.ApplicationFrameV3 f, Uint8List sd,
       SenderIdentitySnapshot s) {
-    final engine = _audioEngine;
-    if (engine == null || !engine.isRunning) return;
+    if (_voiceSession == null || _voiceSodium == null) return;
     callManager.currentCall?.framesReceived++;
-    engine.playFrame(Uint8List.fromList(f.payload));
+
+    final payload = Uint8List.fromList(f.payload);
+    if (payload.length < 16 + cryptoAeadAes256GcmABytes) return;
+
+    final seqNum =
+        ByteData.sublistView(payload, 0, 4).getUint32(0, Endian.big);
+    final nonce = Uint8List.sublistView(payload, 4, 16);
+    final ciphertext = Uint8List.sublistView(payload, 16);
+
+    final Uint8List opusData;
+    try {
+      opusData =
+          _voiceSodium!.aesGcmDecrypt(ciphertext, _voiceSharedSecret!, nonce);
+    } catch (e) {
+      _log.debug('Audio frame decrypt failed: $e');
+      return;
+    }
+
+    _jitterBuffer!.push(AudioFrame(seqNum: seqNum, data: opusData));
+    _drainPlayback();
+  }
+
+  void _drainPlayback() {
+    final vs = _voiceSession;
+    final codec = _playbackCodec;
+    if (vs == null || codec == null) return;
+
+    for (var frame = _jitterBuffer?.pop();
+        frame != null;
+        frame = _jitterBuffer?.pop()) {
+      try {
+        final pcmBytes = codec.decode(frame.data);
+        final pcm16 = Int16List.view(
+            pcmBytes.buffer, pcmBytes.offsetInBytes, pcmBytes.length ~/ 2);
+        vs.writePlaybackFrame(pcm16);
+      } catch (e) {
+        _log.debug('Audio decode/playback failed: $e');
+      }
+    }
   }
 
   void handleCallVideoV3(proto.ApplicationFrameV3 f, Uint8List sd,

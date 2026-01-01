@@ -152,6 +152,7 @@ struct cleona_video_session {
     v4l2_capture_t* capture;
     v4l2_capture_info_t capture_info;   /* native camera format */
     int32_t capture_enabled;
+    int32_t decode_only;          /* Erratum 7 */
     int32_t camera_paths_n;
     char    camera_paths[8][V4L2_CAPTURE_PATH_CAP];
     int32_t camera_index;
@@ -253,6 +254,13 @@ static int32_t cvl_negotiate(const cleona_video_config_t* cfg,
     if (cfg->target_bitrate_kbps <= 0) return CLEONA_VIDEO_ERR_INVALID;
     if (cfg->max_frame_bytes <= 0) return CLEONA_VIDEO_ERR_INVALID;
     if (cfg->keyframe_interval_frames < 0) return CLEONA_VIDEO_ERR_INVALID;
+    /* Erratum 7: unbekannte Richtung ist ein Aufruferfehler und wird hier mit
+     * den uebrigen Feldpruefungen entschieden, damit sie nie als
+     * ERR_RATE_UNACHIEVABLE erscheint (Erratum 6b Fall 1). */
+    if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
+        cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY) {
+        return CLEONA_VIDEO_ERR_INVALID;
+    }
 
     int32_t codec = cfg->codec;
     if (codec <= 0) {
@@ -305,6 +313,11 @@ static int32_t cvl_negotiate(const cleona_video_config_t* cfg,
     out->max_frame_bytes = cfg->max_frame_bytes;   /* never raised */
     out->keyframe_interval_frames =
         cfg->keyframe_interval_frames > 0 ? cfg->keyframe_interval_frames : fps * 2;
+    /* Erratum 7: durchgereicht, nie ausgehandelt. Ohne diese Zeile stuende in
+     * out->direction der uninitialisierte Wert des Aufrufer-Structs -- was
+     * sowohl den Echo-Check als auch jeden spaeteren Richtungsvergleich in
+     * reconfigure() gegen Muell laufen liesse. */
+    out->direction = cfg->direction;
     if (out_qp) *out_qp = qp;
     return CLEONA_VIDEO_OK;
 }
@@ -382,14 +395,32 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
 
     if (!cfg) { cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_INVALID); return NULL; }
 
-    pthread_mutex_lock(&g_session_guard);
-    if (g_session_active) {
-        pthread_mutex_unlock(&g_session_guard);
-        cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
+    /* Erratum 7: die Richtung wird VOR dem Guard geprueft. Sonst antwortet
+     * eine Decode-only-Anfrage mit ERR_BACKEND ("Instanz belegt") statt mit
+     * einer Aussage ueber sich selbst -- gemessen am Konformitaetslauf V32. */
+    if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
+        cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY) {
+        cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_INVALID);
         return NULL;
     }
-    g_session_active = 1;
-    pthread_mutex_unlock(&g_session_guard);
+    const int32_t decode_only = (cfg->direction == CLEONA_VIDEO_DIR_DECODE_ONLY);
+
+    /* Der Guard schuetzt die EINE Kamera und den EINEN VAAPI-Encode-Kontext.
+     * Eine Decode-only-Session erwirbt beides nicht, also darf sie nicht
+     * daran scheitern: docs/CALLS.md zeigt drei Remote-Kacheln plus die
+     * lokale gleichzeitig, das sind drei parallele Decoder auf einem Geraet.
+     * Ein prozessweiter Einzel-Session-Guard kann diesen Bildschirm nicht
+     * darstellen. */
+    if (!decode_only) {
+        pthread_mutex_lock(&g_session_guard);
+        if (g_session_active) {
+            pthread_mutex_unlock(&g_session_guard);
+            cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
+            return NULL;
+        }
+        g_session_active = 1;
+        pthread_mutex_unlock(&g_session_guard);
+    }
 
     cleona_video_session_t* s = (cleona_video_session_t*)calloc(1, sizeof(*s));
     if (!s) {
@@ -398,27 +429,36 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
     }
     pthread_mutex_init(&s->lock, NULL);
     s->current_qp = CVL_DEFAULT_QP;
+    s->decode_only = decode_only;
 
     /* ---- camera enumeration + open (this determines the native ceiling
      * negotiate() clamps against) ---- */
-    s->camera_paths_n = v4l2_capture_enumerate(s->camera_paths, 8);
-    if (s->camera_paths_n <= 0) {
-        cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_UNSUPPORTED);
-        goto fail_early;
-    }
-    int32_t no_yuyv = 0;
-    s->capture = v4l2_capture_open(s->camera_paths[0], &no_yuyv, &s->capture_info);
-    if (!s->capture) {
-        cvl_write_open_error(out_negotiated,
-                             no_yuyv ? CLEONA_VIDEO_ERR_UNSUPPORTED : CLEONA_VIDEO_ERR_BACKEND);
-        goto fail_early;
+    if (!decode_only) {
+        s->camera_paths_n = v4l2_capture_enumerate(s->camera_paths, 8);
+        if (s->camera_paths_n <= 0) {
+            cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_UNSUPPORTED);
+            goto fail_early;
+        }
+        int32_t no_yuyv = 0;
+        s->capture = v4l2_capture_open(s->camera_paths[0], &no_yuyv, &s->capture_info);
+        if (!s->capture) {
+            cvl_write_open_error(out_negotiated,
+                                 no_yuyv ? CLEONA_VIDEO_ERR_UNSUPPORTED : CLEONA_VIDEO_ERR_BACKEND);
+            goto fail_early;
+        }
     }
 
-    /* ---- negotiate against the camera's native size ---- */
+    /* ---- negotiate: gegen die native Kameragroesse, oder -- ohne Kamera --
+     * gegen die angefragte Geometrie. Die Decode-only-Session hat keinen
+     * Sensor, der eine Obergrenze setzen koennte; Geometrie und Codec bleiben
+     * trotzdem bedeutsam, weil Decoder und Textur daraus dimensioniert
+     * werden (Erratum 7). ---- */
     cleona_video_config_t accepted;
     int32_t qp = CVL_DEFAULT_QP;
-    int32_t nrc = cvl_negotiate(cfg, s->capture_info.width, s->capture_info.height,
-                                s->capture_info.fps, &qp, &accepted);
+    int32_t nrc = decode_only
+        ? cvl_negotiate(cfg, cfg->width, cfg->height, cfg->fps, &qp, &accepted)
+        : cvl_negotiate(cfg, s->capture_info.width, s->capture_info.height,
+                        s->capture_info.fps, &qp, &accepted);
     if (nrc != CLEONA_VIDEO_OK) {
         cvl_write_open_error(out_negotiated, nrc);
         goto fail_after_capture;
@@ -443,8 +483,14 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
             if (vaInitialize(dpy, &major, &minor) != VA_STATUS_SUCCESS) { close(fd); continue; }
 
             VAConfigAttrib probe = { .type = VAConfigAttribRTFormat };
+            /* Erratum 7: ERR_UNSUPPORTED heisst fuer eine Decode-only-Anfrage
+             * "kein DECODE-Pfad". Auf den Encoder zu pruefen wuerde eine Karte
+             * verwerfen, die dekodieren kann, und dem Aufrufer den falschen
+             * Grund nennen. */
             VAStatus qst = vaGetConfigAttributes(dpy, VAProfileH264ConstrainedBaseline,
-                                                 VAEntrypointEncSliceLP, &probe, 1);
+                                                 decode_only ? VAEntrypointVLD
+                                                             : VAEntrypointEncSliceLP,
+                                                 &probe, 1);
             if (qst == VA_STATUS_SUCCESS && probe.value != VA_ATTRIB_NOT_SUPPORTED) {
                 s->drm_fd = fd;
                 s->dpy = dpy;
@@ -462,7 +508,7 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
 
     /* ---- encode config: CQP is the only rate-control mode this SoC
      * exposes at the LP entrypoint (file doc) ---- */
-    {
+    if (!decode_only) {
         VAConfigAttrib attribs[2] = {
             { .type = VAConfigAttribRTFormat, .value = VA_RT_FORMAT_YUV420 },
             { .type = VAConfigAttribRateControl, .value = VA_RC_CQP },
@@ -472,11 +518,11 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
             cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
             goto fail_after_display;
         }
-    }
-    if (cvl_create_enc_context_locked(s, s->cfg.width, s->cfg.height) != 0) {
-        vaDestroyConfig(s->dpy, s->enc_config);
-        cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
-        goto fail_after_display;
+        if (cvl_create_enc_context_locked(s, s->cfg.width, s->cfg.height) != 0) {
+            vaDestroyConfig(s->dpy, s->enc_config);
+            cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
+            goto fail_after_display;
+        }
     }
 
     /* ---- decode config: created eagerly at the negotiated geometry so the
@@ -486,22 +532,28 @@ CLEONA_VIDEO_API cleona_video_session_t* cleona_video_open(
         VAConfigAttrib attrib = { .type = VAConfigAttribRTFormat, .value = VA_RT_FORMAT_YUV420 };
         if (vaCreateConfig(s->dpy, VAProfileH264ConstrainedBaseline, VAEntrypointVLD,
                            &attrib, 1, &s->dec_config) != VA_STATUS_SUCCESS) {
-            cvl_destroy_enc_context_locked(s);
-            vaDestroyConfig(s->dpy, s->enc_config);
+            if (!decode_only) {
+                cvl_destroy_enc_context_locked(s);
+                vaDestroyConfig(s->dpy, s->enc_config);
+            }
             cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
             goto fail_after_display;
         }
     }
     if (cvl_create_dec_context_locked(s, s->cfg.width, s->cfg.height) != 0) {
         vaDestroyConfig(s->dpy, s->dec_config);
-        cvl_destroy_enc_context_locked(s);
-        vaDestroyConfig(s->dpy, s->enc_config);
+        if (!decode_only) {
+            cvl_destroy_enc_context_locked(s);
+            vaDestroyConfig(s->dpy, s->enc_config);
+        }
         cvl_write_open_error(out_negotiated, CLEONA_VIDEO_ERR_BACKEND);
         goto fail_after_display;
     }
 
     s->state = ST_OPEN;
-    s->capture_enabled = 1;
+    /* Erratum 7: nie eine Kamera gehabt. Das ist der Zustand, keine
+     * Nutzer-Stummschaltung -- set_capture_enabled kann ihn nicht aufheben. */
+    s->capture_enabled = decode_only ? 0 : 1;
     s->awaiting_keyframe = 1;
 
     if (out_negotiated) *out_negotiated = s->cfg;
@@ -516,9 +568,14 @@ fail_early:
     pthread_mutex_destroy(&s->lock);
     free(s);
 fail_no_session:
-    pthread_mutex_lock(&g_session_guard);
-    g_session_active = 0;
-    pthread_mutex_unlock(&g_session_guard);
+    /* Nur freigeben, was genommen wurde -- eine gescheiterte Decode-only-
+     * Session haelt den Guard nie und duerfte eine laufende Duplex-Session
+     * sonst mitreissen. */
+    if (!decode_only) {
+        pthread_mutex_lock(&g_session_guard);
+        g_session_active = 0;
+        pthread_mutex_unlock(&g_session_guard);
+    }
     return NULL;
 }
 
@@ -536,7 +593,17 @@ CLEONA_VIDEO_API int32_t cleona_video_reconfigure(cleona_video_session_t* s,
 
     cleona_video_config_t accepted;
     int32_t qp = s->current_qp;
-    int32_t rc = cvl_negotiate(cfg, s->capture_info.width, s->capture_info.height,
+    /* Erratum 7: eine Session, die zum Dekodieren geoeffnet wurde, waechst
+     * keine Kamera. Vor negotiate(), damit die Session -- wie bei jedem
+     * anderen gescheiterten reconfigure -- unberuehrt bleibt. */
+    if (cfg->direction != s->cfg.direction) {
+        pthread_mutex_unlock(&s->lock);
+        return CLEONA_VIDEO_ERR_INVALID;
+    }
+
+    int32_t rc = s->decode_only
+        ? cvl_negotiate(cfg, cfg->width, cfg->height, cfg->fps, &qp, &accepted)
+        : cvl_negotiate(cfg, s->capture_info.width, s->capture_info.height,
                                s->capture_info.fps, &qp, &accepted);
     if (rc != CLEONA_VIDEO_OK) {
         /* Side-effect free on failure -- Erratum 1. */
@@ -601,6 +668,7 @@ CLEONA_VIDEO_API void cleona_video_stop(cleona_video_session_t* s) {
 
 CLEONA_VIDEO_API void cleona_video_close(cleona_video_session_t* s) {
     if (!s) return;
+    const int32_t was_decode_only = s->decode_only;
     cleona_video_stop(s);
 
     pthread_mutex_lock(&s->lock);
@@ -618,9 +686,15 @@ CLEONA_VIDEO_API void cleona_video_close(cleona_video_session_t* s) {
     pthread_mutex_destroy(&s->lock);
     free(s);
 
-    pthread_mutex_lock(&g_session_guard);
-    g_session_active = 0;
-    pthread_mutex_unlock(&g_session_guard);
+    /* Erratum 7: nur die Duplex-Session haelt den Guard. Eine geschlossene
+     * Decode-only-Session darf ihn nicht freigeben -- sonst koennte eine
+     * parallel laufende Duplex-Session anschliessend ein zweites Mal
+     * geoeffnet werden, und zwei Sessions teilten sich eine Kamera. */
+    if (!was_decode_only) {
+        pthread_mutex_lock(&g_session_guard);
+        g_session_active = 0;
+        pthread_mutex_unlock(&g_session_guard);
+    }
 }
 
 /* ==========================================================================
@@ -938,6 +1012,11 @@ CLEONA_VIDEO_API int32_t cleona_video_read_encoded(cleona_video_session_t* s,
     for (;;) {
         pthread_mutex_lock(&s->lock);
         if (s->state != ST_RUNNING) { pthread_mutex_unlock(&s->lock); return CLEONA_VIDEO_READ_CLOSED; }
+        /* Erratum 7: kein Encoder, also kann nie ein Frame kommen -- aber die
+         * Session laeuft, deshalb TIMEOUT und nicht READ_CLOSED. Vor der
+         * Warteschleife, weil ein blockierender Read (timeout_ms < 0) sonst
+         * auf etwas wartet, das nicht eintreten kann. */
+        if (s->decode_only) { pthread_mutex_unlock(&s->lock); return CLEONA_VIDEO_READ_TIMEOUT; }
 
         int32_t size = 0, flags = 0;
         int64_t pts = 0;
@@ -1283,6 +1362,9 @@ CLEONA_VIDEO_API int32_t cleona_video_request_keyframe(cleona_video_session_t* s
     if (!s) return CLEONA_VIDEO_ERR_INVALID;
     pthread_mutex_lock(&s->lock);
     if (s->state != ST_RUNNING) { pthread_mutex_unlock(&s->lock); return CLEONA_VIDEO_ERR_STATE; }
+    /* Erratum 7: fragt UNSEREN Encoder, den eine Decode-only-Session nicht
+     * hat. Den Peer um ein Keyframe zu bitten ist Signalisierung. */
+    if (s->decode_only) { pthread_mutex_unlock(&s->lock); return CLEONA_VIDEO_ERR_UNSUPPORTED; }
     s->force_keyframe = 1;
     pthread_mutex_unlock(&s->lock);
     return CLEONA_VIDEO_OK;
@@ -1291,6 +1373,9 @@ CLEONA_VIDEO_API int32_t cleona_video_request_keyframe(cleona_video_session_t* s
 CLEONA_VIDEO_API void cleona_video_set_capture_enabled(cleona_video_session_t* s, int32_t on) {
     if (!s) return;
     pthread_mutex_lock(&s->lock);
+    /* Erratum 7: angenommen und ignoriert. Ein Aufrufer, der N Sessions
+     * gleich behandelt, darf diese eine nicht gesondert behandeln muessen. */
+    if (s->decode_only) { pthread_mutex_unlock(&s->lock); return; }
     int32_t want = on ? 1 : 0;
     if (want && !s->capture_enabled) {
         /* The peer's decoder has been starved; a P-frame now would be
@@ -1305,7 +1390,8 @@ CLEONA_VIDEO_API int32_t cleona_video_switch_camera(cleona_video_session_t* s) {
     if (!s) return CLEONA_VIDEO_ERR_INVALID;
     pthread_mutex_lock(&s->lock);
     if (s->state != ST_RUNNING) { pthread_mutex_unlock(&s->lock); return CLEONA_VIDEO_ERR_STATE; }
-    if (s->camera_paths_n < 2) {
+    /* Erratum 7: eine Decode-only-Session hat ueberhaupt keine Kamera. */
+    if (s->decode_only || s->camera_paths_n < 2) {
         /* This dev machine (and most laptops) has exactly one physical
          * camera -- legitimate per the ABI (cleona_video.h: "ERR_UNSUPPORTED
          * (only one camera, or no camera concept)"). */
@@ -1341,13 +1427,17 @@ CLEONA_VIDEO_API void cleona_video_get_report(cleona_video_session_t* s, cleona_
      * them at open() time on the real GPU device. If either creation had
      * failed, open() itself would have failed and there would be no report
      * to read. */
-    out->hardware_encode = CLEONA_VIDEO_HW_YES;
+    /* Erratum 7: bei einer Decode-only-Session ist das Fehlen des Encoders
+     * BEKANNT, nicht unbestimmt -- HW_NO, nie HW_NOT_DETERMINABLE. */
+    out->hardware_encode = s->decode_only ? CLEONA_VIDEO_HW_NO : CLEONA_VIDEO_HW_YES;
     out->hardware_decode = CLEONA_VIDEO_HW_YES;
     out->negotiated_width = s->cfg.width;
     out->negotiated_height = s->cfg.height;
     out->negotiated_fps = s->cfg.fps;
-    out->capture_backend = CLEONA_VIDEO_BACKEND_LINUX_V4L2;
-    out->encode_backend = CLEONA_VIDEO_BACKEND_LINUX_VAAPI;
+    out->capture_backend = s->decode_only ? CLEONA_VIDEO_BACKEND_NONE
+                                          : CLEONA_VIDEO_BACKEND_LINUX_V4L2;
+    out->encode_backend = s->decode_only ? CLEONA_VIDEO_BACKEND_NONE
+                                         : CLEONA_VIDEO_BACKEND_LINUX_VAAPI;
     out->frames_captured = s->frames_captured;
     out->frames_encoded = s->frames_encoded;
     out->frames_dropped_oversize = s->frames_dropped_oversize;

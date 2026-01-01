@@ -143,13 +143,28 @@ import kotlin.math.min
  * phase-1 refusal never reaches the camera at all. The two codes are kept
  * apart by data flow, not by a check that could be forgotten at a call site.
  */
+/**
+ * Erratum 7 — the camera-side constructor arguments are nullable.
+ *
+ * A DECODE_ONLY session acquires no camera at all, so there is no
+ * [CameraManager], no camera id and no camera [HandlerThread] to hand it. They
+ * are not "optional dependencies" in the usual sense: they are exactly the
+ * things this direction is defined by NOT having. Every use site below is
+ * inside a `!decodeOnly` branch or null-safe, and [decodeOnly] — not a null
+ * check — is what the control functions decide on, so the intent stays
+ * readable instead of being inferred from a missing object.
+ */
 class VideoSession private constructor(
-    private val cameraManager: CameraManager,
+    private val cameraManager: CameraManager?,
     initialCameraId: String,
-    private val cameraThread: HandlerThread,
-    private val cameraHandler: Handler,
+    private val cameraThread: HandlerThread?,
+    private val cameraHandler: Handler?,
     initialNegotiated: VConfig,
 ) {
+    /** Erratum 7: fixed at open(), never renegotiated. A session opened to
+     *  decode cannot grow a camera — [reconfigure] rejects a direction flip. */
+    private val decodeOnly: Boolean = initialNegotiated.direction == VAbi.DIR_DECODE_ONLY
+
     /** The currently active camera. Mutable because [switchCamera] changes it;
      *  every call site below reads this field rather than the constructor
      *  argument, or a post-switch reconfigure() would silently reopen the
@@ -178,7 +193,9 @@ class VideoSession private constructor(
     private var decodeInThread: Thread? = null
     @Volatile private var generation = 0
 
-    @Volatile private var captureEnabled = true
+    /** Erratum 7: a decode-only session never had a camera. That is its state,
+     *  not a user mute — [setCaptureEnabled] cannot lift it. */
+    @Volatile private var captureEnabled = !decodeOnly
 
     /** Single flag meaning "issue `PARAMETER_KEY_REQUEST_SYNC_FRAME` before the
      *  next produced frame". This is a REQUEST, not a label: whether a frame
@@ -213,13 +230,19 @@ class VideoSession private constructor(
     private val framesDroppedOversize = AtomicLong(0)
     private val framesDecoded = AtomicLong(0)
     private val decodeFailures = AtomicLong(0)
-    @Volatile private var hardwareEncode = VAbi.HW_NOT_DETERMINABLE
+    // Erratum 7: with no encoder, its absence is KNOWN, not undetermined —
+    // HW_NO and BACKEND_NONE, never HW_NOT_DETERMINABLE. configureEncoder()
+    // is the only writer of these two and never runs for a decode-only
+    // session, so the values set here are final.
+    @Volatile private var hardwareEncode =
+        if (decodeOnly) VAbi.HW_NO else VAbi.HW_NOT_DETERMINABLE
     @Volatile private var hardwareDecode = VAbi.HW_NOT_DETERMINABLE
-    @Volatile private var encodeBackendId = VAbi.BACKEND_ANDROID_MEDIACODEC
+    @Volatile private var encodeBackendId =
+        if (decodeOnly) VAbi.BACKEND_NONE else VAbi.BACKEND_ANDROID_MEDIACODEC
     @Volatile private var decodeBackendId = VAbi.BACKEND_ANDROID_MEDIACODEC
 
     // ─── the encoded-frame output ring, drained by readEncoded() ───────────
-    private val outputRing = FrameRing(OUTPUT_RING_CAPACITY)
+    private val outputRing = VideoFrameRing(OUTPUT_RING_CAPACITY)
     // Held across an ERR_BUFFER_TOO_SMALL so the caller can retry with a
     // bigger buffer without losing the frame -- same contract the mock and
     // the JNI-facing struct field documentation both describe.
@@ -230,11 +253,17 @@ class VideoSession private constructor(
     @Volatile private var awaitingKeyframe = true
 
     private var cameraIndex = 0
-    private lateinit var cameraIds: List<String>
+    /** Erratum 7: not `lateinit` any more. A decode-only session never
+     *  enumerates cameras, and a `lateinit` read would then throw
+     *  `UninitializedPropertyAccessException` straight through JNI instead of
+     *  returning the ERR_UNSUPPORTED the ABI promises. */
+    private var cameraIds: List<String> = emptyList()
 
     init {
-        cameraIds = listCameraIds(cameraManager)
-        cameraIndex = cameraIds.indexOf(cameraId).coerceAtLeast(0)
+        if (cameraManager != null) {
+            cameraIds = listCameraIds(cameraManager)
+            cameraIndex = cameraIds.indexOf(cameraId).coerceAtLeast(0)
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -243,17 +272,17 @@ class VideoSession private constructor(
 
     /** `cleona_video_start`. */
     fun start(): Int = lock.withLock {
-        if (state == ST_CLOSED) return Abi.ERR_STATE
-        if (state == ST_RUNNING) return Abi.ERR_STATE
+        if (state == ST_CLOSED) return VErr.ERR_STATE
+        if (state == ST_RUNNING) return VErr.ERR_STATE
         val gen = ++generation
         val rc = openCameraAndPipeline(negotiated)
-        if (rc != Abi.OK) {
+        if (rc != VErr.OK) {
             teardownPipelineLocked()
             return rc
         }
         state = ST_RUNNING
         launchDataThreadsLocked(gen)
-        return Abi.OK
+        return VErr.OK
     }
 
     /** Resets per-run state and launches the three data-path threads against
@@ -286,9 +315,16 @@ class VideoSession private constructor(
         pendingTooSmall = null
         inputQueue.reset()
 
-        encodeThread = Thread({ encodeLoop(gen) }, "cleona-video-encode").apply {
-            priority = Thread.MAX_PRIORITY
-            start()
+        // Erratum 7: no camera and no encoder, so there is nothing for the
+        // encode thread to drive. encodeLoop() would return immediately on its
+        // `val codec = encoder ?: return`, but a group call with three remote
+        // tiles (docs/CALLS.md) would still have started three threads to do
+        // nothing. stop() joins these null-safely.
+        if (!decodeOnly) {
+            encodeThread = Thread({ encodeLoop(gen) }, "cleona-video-encode").apply {
+                priority = Thread.MAX_PRIORITY
+                start()
+            }
         }
         decodeOutThread = Thread({ decodeOutLoop(gen) }, "cleona-video-decode-out").apply {
             start()
@@ -330,7 +366,7 @@ class VideoSession private constructor(
             textureEntry = null
             runCatching { headlessTexture?.release() }
             headlessTexture = null
-            runCatching { cameraThread.quitSafely() }
+            runCatching { cameraThread?.quitSafely() }
         }
     }
 
@@ -343,16 +379,25 @@ class VideoSession private constructor(
      *  the ABI defines reconfigure's failure channel as the return code, not
      *  the out array (unlike open()'s Erratum 6b in-band channel). */
     fun reconfigure(cfg: IntArray, out: IntArray): Int = lock.withLock {
-        if (state == ST_CLOSED) return Abi.ERR_STATE
-        val req = VConfig.fromInts(cfg) ?: return Abi.ERR_INVALID
-        if (!req.isValid()) return Abi.ERR_INVALID
+        if (state == ST_CLOSED) return VErr.ERR_STATE
+        val req = VConfig.fromInts(cfg) ?: return VErr.ERR_INVALID
+        if (!req.isValid()) return VErr.ERR_INVALID
+        // Erratum 7: the direction is fixed at open() — a session opened to
+        // decode cannot grow a camera. Checked before anything else touches
+        // hardware, so a refused reconfigure leaves the session untouched like
+        // every other one (Erratum 1, side-effect freedom).
+        if (req.direction != negotiated.direction) return VErr.ERR_INVALID
 
         // PHASE 1 discipline applies here exactly as in openSession(): decide
         // achievability from characteristics + arithmetic only, before
         // touching any hardware. See the class doc's "one trap" section.
-        val chars = runCatching { cameraManager.getCameraCharacteristics(cameraId) }
-            .getOrNull() ?: return Abi.ERR_BACKEND
-        val preset = choosePreset(chars, req) ?: return Abi.ERR_RATE_UNACHIEVABLE
+        val preset = if (decodeOnly) {
+            chooseDecodeOnlyPreset(req) ?: return VErr.ERR_RATE_UNACHIEVABLE
+        } else {
+            val chars = runCatching { cameraManager!!.getCameraCharacteristics(cameraId) }
+                .getOrNull() ?: return VErr.ERR_BACKEND
+            choosePreset(chars, req) ?: return VErr.ERR_RATE_UNACHIEVABLE
+        }
 
         val geometryChanged = preset.width != negotiated.width || preset.height != negotiated.height
         val next = negotiated.copy(
@@ -376,7 +421,7 @@ class VideoSession private constructor(
                 val gen = ++generation
                 teardownPipelineLocked()
                 val rc = openCameraAndPipeline(next)
-                if (rc != Abi.OK) {
+                if (rc != VErr.OK) {
                     // Side-effect free on failure (cleona_video.h): fall back
                     // to the previous configuration rather than leaving the
                     // session half-torn-down. openCameraAndPipeline() closes
@@ -384,7 +429,7 @@ class VideoSession private constructor(
                     // non-OK code (see its own doc), so there is nothing left
                     // to tear down before retrying with the old config.
                     val fallbackRc = openCameraAndPipeline(negotiated)
-                    if (fallbackRc == Abi.OK) {
+                    if (fallbackRc == VErr.OK) {
                         // The old encode/decode threads already exited (their
                         // captured `gen` no longer matches `generation`,
                         // bumped above) -- new ones are required, or
@@ -405,7 +450,7 @@ class VideoSession private constructor(
                     })
                 }.onFailure {
                     Log.w(TAG, "setParameters(VIDEO_BITRATE) failed", it)
-                    return Abi.ERR_BACKEND
+                    return VErr.ERR_BACKEND
                 }
                 // A frame already encoded under the previous ceiling and
                 // still pending is discarded if it no longer fits the NEW
@@ -425,7 +470,7 @@ class VideoSession private constructor(
 
         negotiated = next
         writeCfgInto(out, next)
-        return Abi.OK
+        return VErr.OK
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -436,17 +481,23 @@ class VideoSession private constructor(
      *  the JNI facade with `NewDirectByteBuffer` fresh on every call -- see
      *  `cleona_video_android.c`'s file header for why nothing is cached here. */
     fun readEncoded(buf: ByteBuffer, bufCap: Int, timeoutMs: Int, outMeta: IntArray, outPts: LongArray): Int {
-        if (state != ST_RUNNING) return Abi.ERR_STATE
+        if (state != ST_RUNNING) return VErr.ERR_STATE
+        // Erratum 7: no encoder, so a frame can never arrive -- but the session
+        // is running, so this is a TIMEOUT and not READ_CLOSED/ERR_STATE.
+        // Before the ring, because a blocking read (timeoutMs < 0) would
+        // otherwise wait forever on something that cannot happen. After the
+        // state check, so a stopped session still reports ERR_STATE.
+        if (decodeOnly) return VErr.READ_TIMEOUT
 
         val frame = pendingTooSmall ?: run {
-            val f = outputRing.take(timeoutMs.toLong()) ?: return if (state != ST_RUNNING) Abi.ERR_STATE else Abi.READ_TIMEOUT
+            val f = outputRing.take(timeoutMs.toLong()) ?: return if (state != ST_RUNNING) VErr.ERR_STATE else VErr.READ_TIMEOUT
             f
         }
         if (frame.data.size > bufCap) {
             pendingTooSmall = frame
             outMeta[0] = frame.data.size
             outMeta[1] = frame.flags
-            return Abi.ERR_BUFFER_TOO_SMALL
+            return VErr.ERR_BUFFER_TOO_SMALL
         }
         pendingTooSmall = null
         buf.clear()
@@ -454,14 +505,14 @@ class VideoSession private constructor(
         outMeta[0] = frame.data.size
         outMeta[1] = frame.flags
         outPts[0] = frame.ptsUs
-        return Abi.READ_FRAME
+        return VErr.READ_FRAME
     }
 
     /** `cleona_video_submit_encoded`. Never blocks: valid input is handed to
      *  [inputQueue] and drained by [decodeInLoop]; invalid input is rejected
      *  synchronously. */
     fun submitEncoded(buf: ByteBuffer, size: Int, flags: Int): Int {
-        if (state != ST_RUNNING) return Abi.ERR_STATE
+        if (state != ST_RUNNING) return VErr.ERR_STATE
         val data = ByteArray(size)
         buf.rewind()
         buf.get(data, 0, size)
@@ -474,7 +525,7 @@ class VideoSession private constructor(
             // ERR_DECODE rather than feeding a hardware decoder garbage that
             // might hang or crash it.
             decodeFailures.incrementAndGet()
-            return Abi.ERR_DECODE
+            return VErr.ERR_DECODE
         }
         val isKeyframe = (flags and VAbi.FLAG_KEYFRAME) != 0
         val bitstreamIsIdr = nalType == NAL_TYPE_IDR || nalType == NAL_TYPE_SPS
@@ -483,11 +534,11 @@ class VideoSession private constructor(
             // decoder a lie is worse than refusing it (cleona_video.h,
             // submit_encoded doc).
             decodeFailures.incrementAndGet()
-            return Abi.ERR_DECODE
+            return VErr.ERR_DECODE
         }
 
         if (awaitingKeyframe && !isKeyframe) {
-            return Abi.SUBMIT_AWAITING_KEYFRAME
+            return VErr.SUBMIT_AWAITING_KEYFRAME
         }
         if (isKeyframe) awaitingKeyframe = false
 
@@ -529,7 +580,7 @@ class VideoSession private constructor(
                     ib?.clear()
                     ib?.put(data)
                     d.queueInputBuffer(idx, 0, data.size, 0, bufferFlags)
-                    return Abi.SUBMIT_ACCEPTED
+                    return VErr.SUBMIT_ACCEPTED
                 } catch (e: Exception) {
                     Log.w(TAG, "direct queueInputBuffer failed, falling back to the queue", e)
                     // Falls through -- the buffer index above is abandoned;
@@ -549,25 +600,28 @@ class VideoSession private constructor(
             // since it was accepted-in-principle but never reached the
             // decoder.
             decodeFailures.incrementAndGet()
-            return Abi.ERR_DECODE
+            return VErr.ERR_DECODE
         }
-        return Abi.SUBMIT_ACCEPTED
+        return VErr.SUBMIT_ACCEPTED
     }
 
     /** `cleona_video_get_texture_id`. */
     fun getTextureId(out: LongArray): Int {
-        if (state != ST_RUNNING) return Abi.ERR_STATE
-        val id = textureEntry?.id() ?: headlessTexture?.id ?: return Abi.ERR_UNSUPPORTED
+        if (state != ST_RUNNING) return VErr.ERR_STATE
+        val id = textureEntry?.id() ?: headlessTexture?.id ?: return VErr.ERR_UNSUPPORTED
         out[0] = id
-        return Abi.OK
+        return VErr.OK
     }
 
     /** `cleona_video_request_keyframe`. Idempotent, collapses into the next
      *  produced frame (cleona_video.h). */
     fun requestKeyframe(): Int {
-        if (state != ST_RUNNING) return Abi.ERR_STATE
+        if (state != ST_RUNNING) return VErr.ERR_STATE
+        // Erratum 7: this asks OUR encoder, and a decode-only session has none.
+        // Asking the PEER for a keyframe is signalling, not this ABI.
+        if (decodeOnly) return VErr.ERR_UNSUPPORTED
         pendingSyncFrameRequest = true
-        return Abi.OK
+        return VErr.OK
     }
 
     /** `cleona_video_set_capture_enabled` — I12, the only video mute in this
@@ -576,6 +630,10 @@ class VideoSession private constructor(
      *  picture keeps running (cleona_video.h). */
     fun setCaptureEnabled(on: Boolean) = lock.withLock {
         if (state != ST_RUNNING) return
+        // Erratum 7: accepted and ignored. Capture is already off and cannot be
+        // switched on. A caller driving N sessions uniformly must not have to
+        // special-case this one.
+        if (decodeOnly) return
         if (on == captureEnabled) return
         if (on) {
             runCatching {
@@ -596,8 +654,11 @@ class VideoSession private constructor(
      *  no renegotiation is needed -- only the camera device and capture
      *  session restart; encoder, decoder and their threads are untouched. */
     fun switchCamera(): Int = lock.withLock {
-        if (state != ST_RUNNING) return Abi.ERR_STATE
-        if (cameraIds.size < 2) return Abi.ERR_UNSUPPORTED
+        if (state != ST_RUNNING) return VErr.ERR_STATE
+        // Erratum 7: a decode-only session has no camera at all. Explicit
+        // rather than relying on cameraIds being empty, so the intent is in the
+        // code instead of in a counter.
+        if (decodeOnly || cameraIds.size < 2) return VErr.ERR_UNSUPPORTED
         val nextIndex = (cameraIndex + 1) % cameraIds.size
         val nextId = cameraIds[nextIndex]
         val previousId = cameraId
@@ -613,16 +674,16 @@ class VideoSession private constructor(
             cameraId = previousId
             openCameraDeviceBlocking(cameraId)?.let { cameraDevice = it }
             rebuildCaptureSessionBlocking(negotiated)
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
         cameraDevice = opened
         cameraIndex = nextIndex
         val rc = rebuildCaptureSessionBlocking(negotiated)
-        if (rc != Abi.OK) return rc
+        if (rc != VErr.OK) return rc
         pendingSyncFrameRequest = true
         outputRing.reset()
         pendingTooSmall = null
-        return Abi.OK
+        return VErr.OK
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -639,7 +700,10 @@ class VideoSession private constructor(
         ints[5] = neg.fps
         // See the class doc: CAMERAX is the closest defined id for a Camera2
         // capture path, a disclosed deviation, not a guess about hardware.
-        ints[6] = VAbi.BACKEND_ANDROID_CAMERAX
+        // Erratum 7: with no capture path there is no backend to name.
+        // hardwareEncode/encodeBackendId already carry HW_NO/BACKEND_NONE from
+        // construction, since configureEncoder() never runs for this direction.
+        ints[6] = if (decodeOnly) VAbi.BACKEND_NONE else VAbi.BACKEND_ANDROID_CAMERAX
         ints[7] = encodeBackendId
         longs[0] = framesCaptured.get()
         longs[1] = framesEncoded.get()
@@ -661,21 +725,30 @@ class VideoSession private constructor(
      *  encoder + decoder for [cfg]. Caller holds [lock]. Every return path is
      *  annotated with WHY it chose the code it did (V1.14 briefing §3). */
     private fun openCameraAndPipeline(cfg: VConfig): Int {
+        // Erratum 7: a decode-only session builds neither camera nor encoder,
+        // and open() must not fail because either is missing. What remains is
+        // exactly the decode path — configureDecoder() also acquires the
+        // texture the decoder renders into (acquireDecodeSurfaceLocked), so
+        // this single call is the complete decode-only pipeline. Skipping
+        // rebuildCaptureSessionBlocking() is not optional: it returns
+        // ERR_BACKEND outright without a cameraDevice and an encoder surface.
+        if (decodeOnly) return configureDecoder(cfg)
+
         val device = openCameraDeviceBlocking(cameraId)
-            ?: return Abi.ERR_BACKEND // reason logged in openCameraDeviceBlocking;
+            ?: return VErr.ERR_BACKEND // reason logged in openCameraDeviceBlocking;
         // every branch there is a device condition (busy / disconnected /
         // service error / permission), never a bandwidth condition -- phase 1
         // already proved a preset fits before this function was ever called.
         cameraDevice = device
 
         val encRc = configureEncoder(cfg)
-        if (encRc != Abi.OK) {
+        if (encRc != VErr.OK) {
             device.close()
             cameraDevice = null
             return encRc
         }
         val decRc = configureDecoder(cfg)
-        if (decRc != Abi.OK) {
+        if (decRc != VErr.OK) {
             releaseEncoderLocked()
             device.close()
             cameraDevice = null
@@ -704,11 +777,21 @@ class VideoSession private constructor(
             Log.e(TAG, "CAMERA permission not granted")
             return null
         }
+        // Erratum 7: a decode-only session has no CameraManager. It never
+        // reaches this function -- openCameraAndPipeline() returns before it
+        // and switchCamera() refuses with ERR_UNSUPPORTED -- so this is a
+        // guard against a future caller, not a live path. Returning null (the
+        // documented "device condition" answer) rather than `!!` keeps that
+        // hypothetical bug a logged ERR_BACKEND instead of a crash in JNI.
+        val manager = cameraManager ?: run {
+            Log.e(TAG, "openCameraDeviceBlocking on a decode-only session")
+            return null
+        }
         val latch = CountDownLatch(1)
         var result: CameraDevice? = null
         var errorReason = "none"
         try {
-            cameraManager.openCamera(id, object : CameraDevice.StateCallback() {
+            manager.openCamera(id, object : CameraDevice.StateCallback() {
                 override fun onOpened(camera: CameraDevice) {
                     result = camera
                     latch.countDown()
@@ -775,7 +858,7 @@ class VideoSession private constructor(
         }
         val (name, hw) = findCodecFor(format, encoder = true) ?: run {
             Log.e(TAG, "no H.264 encoder available at all")
-            return Abi.ERR_UNSUPPORTED
+            return VErr.ERR_UNSUPPORTED
         }
         // BITRATE_MODE_CBR gives the hardware rate controller a tighter
         // instantaneous budget than VBR, which helps -- but does not
@@ -795,7 +878,7 @@ class VideoSession private constructor(
             MediaCodec.createByCodecName(name)
         } catch (e: Exception) {
             Log.e(TAG, "MediaCodec.createByCodecName($name) failed", e)
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -805,11 +888,11 @@ class VideoSession private constructor(
             encoderInputSurface = surface
             hardwareEncode = hw
             encodeBackendId = VAbi.BACKEND_ANDROID_MEDIACODEC
-            return Abi.OK
+            return VErr.OK
         } catch (e: Exception) {
             Log.e(TAG, "encoder configure/start failed for $name", e)
             runCatching { codec.release() }
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
     }
 
@@ -817,18 +900,18 @@ class VideoSession private constructor(
         val surface = acquireDecodeSurfaceLocked() ?: run {
             Log.e(TAG, "no decode surface available (no TextureRegistry installed and " +
                 "the headless EGL fallback failed)")
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
         val format = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, cfg.width, cfg.height)
         val (name, hw) = findCodecFor(format, encoder = false) ?: run {
             Log.e(TAG, "no H.264 decoder available at all")
-            return Abi.ERR_UNSUPPORTED
+            return VErr.ERR_UNSUPPORTED
         }
         val codec = try {
             MediaCodec.createByCodecName(name)
         } catch (e: Exception) {
             Log.e(TAG, "MediaCodec.createByCodecName($name) failed", e)
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
         try {
             codec.configure(format, surface, null, 0)
@@ -837,11 +920,11 @@ class VideoSession private constructor(
             decoderSurface = surface
             hardwareDecode = hw
             decodeBackendId = VAbi.BACKEND_ANDROID_MEDIACODEC
-            return Abi.OK
+            return VErr.OK
         } catch (e: Exception) {
             Log.e(TAG, "decoder configure/start failed for $name", e)
             runCatching { codec.release() }
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
     }
 
@@ -863,8 +946,8 @@ class VideoSession private constructor(
     }
 
     private fun rebuildCaptureSessionBlocking(cfg: VConfig): Int {
-        val device = cameraDevice ?: return Abi.ERR_BACKEND
-        val surface = encoderInputSurface ?: return Abi.ERR_BACKEND
+        val device = cameraDevice ?: return VErr.ERR_BACKEND
+        val surface = encoderInputSurface ?: return VErr.ERR_BACKEND
         val latch = CountDownLatch(1)
         var ok = false
         try {
@@ -884,13 +967,13 @@ class VideoSession private constructor(
             }, cameraHandler)
         } catch (e: Exception) {
             Log.e(TAG, "createCaptureSession threw", e)
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
         if (!latch.await(CAMERA_OPEN_TIMEOUT_MS, TimeUnit.MILLISECONDS) || !ok) {
             Log.e(TAG, "capture session did not configure within ${CAMERA_OPEN_TIMEOUT_MS}ms")
-            return Abi.ERR_BACKEND
+            return VErr.ERR_BACKEND
         }
-        return Abi.OK
+        return VErr.OK
     }
 
     private fun buildCaptureRequest(): CaptureRequest {
@@ -898,7 +981,7 @@ class VideoSession private constructor(
         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
         builder.addTarget(encoderInputSurface!!)
         builder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
-        val chars = runCatching { cameraManager.getCameraCharacteristics(cameraId) }.getOrNull()
+        val chars = runCatching { cameraManager?.getCameraCharacteristics(cameraId) }.getOrNull()
         val ranges = chars?.get(
             android.hardware.camera2.CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
         )?.toList().orEmpty()
@@ -1236,6 +1319,31 @@ class VideoSession private constructor(
             return null
         }
 
+        /**
+         * Erratum 7 — the camera-free counterpart of [choosePreset].
+         *
+         * A decode-only session has no sensor that could cap the geometry, so
+         * the requested width/height/fps stand as-is; they remain meaningful
+         * because the decoder and the texture are sized from them. What does
+         * NOT change is the rate arithmetic: the erratum keeps the encode-side
+         * fields' validity rules intact precisely so open() and reconfigure()
+         * cannot disagree about the same configuration (Erratum 6b case 1).
+         * The bitrate ladder is therefore walked exactly as in [choosePreset],
+         * just with an area ratio of 1.0 — `null` still means
+         * ERR_RATE_UNACHIEVABLE. This mirrors the Linux backend, which runs its
+         * one negotiate() against `cfg->width/height/fps` when decode-only.
+         */
+        private fun chooseDecodeOnlyPreset(req: VConfig): Preset? {
+            for (mult in BITRATE_STEPS) {
+                val bitrateKbps = max(MIN_BITRATE_KBPS, (req.targetBitrateKbps * mult).toInt())
+                val estimate = estimateWorstCaseKeyframeBytes(bitrateKbps, req.fps)
+                if (estimate <= req.maxFrameBytes * CEILING_SAFETY_MARGIN) {
+                    return Preset(req.width, req.height, req.fps, bitrateKbps)
+                }
+            }
+            return null
+        }
+
         // ─── install / library loading ──────────────────────────────────
 
         @Volatile private var appContext: Context? = null
@@ -1279,10 +1387,10 @@ class VideoSession private constructor(
          *  VoiceSession.kt's `abiConstants()`). */
         @JvmStatic
         fun abiConstants(): IntArray = intArrayOf(
-            Abi.OK, Abi.ERR_INVALID, Abi.ERR_STATE, Abi.ERR_UNSUPPORTED, Abi.ERR_BACKEND,
-            Abi.ERR_BUFFER_TOO_SMALL, Abi.ERR_DECODE, Abi.ERR_RATE_UNACHIEVABLE,
-            Abi.READ_FRAME, Abi.READ_TIMEOUT,
-            Abi.SUBMIT_ACCEPTED, Abi.SUBMIT_AWAITING_KEYFRAME,
+            VErr.OK, VErr.ERR_INVALID, VErr.ERR_STATE, VErr.ERR_UNSUPPORTED, VErr.ERR_BACKEND,
+            VErr.ERR_BUFFER_TOO_SMALL, VErr.ERR_DECODE, VErr.ERR_RATE_UNACHIEVABLE,
+            VErr.READ_FRAME, VErr.READ_TIMEOUT,
+            VErr.SUBMIT_ACCEPTED, VErr.SUBMIT_AWAITING_KEYFRAME,
             VAbi.FLAG_KEYFRAME,
             VAbi.CODEC_H264, VAbi.CODEC_HEVC, VAbi.CODEC_AV1, VAbi.CODEC_VP9,
             VAbi.HW_NO, VAbi.HW_YES, VAbi.HW_NOT_DETERMINABLE,
@@ -1309,18 +1417,49 @@ class VideoSession private constructor(
                 return null
             }
 
-            val req = VConfig.fromInts(cfgInts) ?: return fail(Abi.ERR_INVALID)
-            if (!req.isValid()) return fail(Abi.ERR_INVALID)
+            val req = VConfig.fromInts(cfgInts) ?: return fail(VErr.ERR_INVALID)
+            if (!req.isValid()) return fail(VErr.ERR_INVALID)
+
+            // Erratum 7: a decode-only session acquires no camera, so none of
+            // the camera work below applies to it -- and none of it may be
+            // allowed to fail it either. A device with no camera at all is
+            // exactly the case the erratum exists for: the participant could
+            // otherwise not SEE the others merely because it cannot BE seen.
+            // The decoder and its texture are built later, in start() ->
+            // openCameraAndPipeline(), which for this direction reduces to
+            // configureDecoder() alone.
+            if (req.direction == VAbi.DIR_DECODE_ONLY) {
+                val preset = chooseDecodeOnlyPreset(req)
+                if (preset == null) {
+                    Log.i(TAG, "no achievable rate fits maxFrameBytes=${req.maxFrameBytes} " +
+                        "at ${req.fps} fps (decode-only) -- ERR_RATE_UNACHIEVABLE")
+                    return fail(VErr.ERR_RATE_UNACHIEVABLE)
+                }
+                val negotiated = VConfig(
+                    codec = VAbi.CODEC_H264,
+                    width = preset.width, height = preset.height, fps = preset.fps,
+                    targetBitrateKbps = preset.bitrateKbps,
+                    maxFrameBytes = req.maxFrameBytes,
+                    keyframeIntervalFrames =
+                        if (req.keyframeIntervalFrames > 0) req.keyframeIntervalFrames
+                        else preset.fps * 2,
+                    direction = req.direction,   // echoed, never renegotiated (Erratum 7)
+                )
+                writeCfgInto(out, negotiated)
+                // No CameraManager, no camera id, no camera HandlerThread --
+                // see the constructor's Erratum 7 note.
+                return VideoSession(null, "", null, null, negotiated)
+            }
 
             val ctx = appContext ?: run {
                 Log.e(TAG, "VideoSession.install(context, registry) was never called")
-                return fail(Abi.ERR_BACKEND)
+                return fail(VErr.ERR_BACKEND)
             }
             val manager = try {
                 ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager
             } catch (e: Exception) {
                 Log.e(TAG, "no CameraManager", e)
-                return fail(Abi.ERR_BACKEND)
+                return fail(VErr.ERR_BACKEND)
             }
             val ids = listCameraIds(manager)
             if (ids.isEmpty()) {
@@ -1329,7 +1468,7 @@ class VideoSession private constructor(
                 // structurally never confusable with ERR_RATE_UNACHIEVABLE:
                 // this branch runs before choosePreset() is even reachable.
                 Log.e(TAG, "no cameras on this device")
-                return fail(Abi.ERR_UNSUPPORTED)
+                return fail(VErr.ERR_UNSUPPORTED)
             }
             val cameraId = ids[0]
 
@@ -1342,14 +1481,14 @@ class VideoSession private constructor(
                 manager.getCameraCharacteristics(cameraId)
             } catch (e: CameraAccessException) {
                 Log.e(TAG, "getCameraCharacteristics failed", e)
-                return fail(Abi.ERR_BACKEND)
+                return fail(VErr.ERR_BACKEND)
             }
             val preset = choosePreset(chars, req)
             if (preset == null) {
                 Log.i(TAG, "no achievable preset fits maxFrameBytes=${req.maxFrameBytes} " +
                     "for ${req.width}x${req.height}@${req.fps} (link too slow) -- " +
                     "ERR_RATE_UNACHIEVABLE, no camera was opened")
-                return fail(Abi.ERR_RATE_UNACHIEVABLE)
+                return fail(VErr.ERR_RATE_UNACHIEVABLE)
             }
 
             val negotiated = VConfig(
@@ -1358,6 +1497,7 @@ class VideoSession private constructor(
                 targetBitrateKbps = preset.bitrateKbps,
                 maxFrameBytes = req.maxFrameBytes,
                 keyframeIntervalFrames = if (req.keyframeIntervalFrames > 0) req.keyframeIntervalFrames else preset.fps * 2,
+                direction = req.direction,   // echoed, never renegotiated (Erratum 7)
             )
 
             // ── PHASE 2 begins only now: the first hardware object this
@@ -1440,11 +1580,17 @@ class VideoSession private constructor(
 }
 
 // ═════════════════════════════════════════════════════════════════════════
-// ABI constants mirrored from native/cleona_video/cleona_video.h. Checked
+// Return codes mirrored from native/cleona_video/cleona_video.h. Checked
 // against the header at JNI_OnLoad via VideoSession.Companion.abiConstants();
 // the facade refuses to bind if they drift apart.
+//
+// NOT named `Abi`: VoiceSession.kt declares a top-level `internal object Abi`
+// in this same package with DIFFERENT values for the same names (its
+// ERR_UNSUPPORTED is -11, this one's is -3). Two of them is a Kotlin
+// redeclaration error, and the version that compiled would have been chosen
+// by accident.
 // ═════════════════════════════════════════════════════════════════════════
-internal object Abi {
+internal object VErr {
     const val OK = 0
     const val ERR_INVALID = -1
     const val ERR_STATE = -2
@@ -1477,6 +1623,10 @@ internal object VAbi {
     const val BACKEND_MOCK = 1
     const val BACKEND_ANDROID_CAMERAX = 2
     const val BACKEND_ANDROID_MEDIACODEC = 3
+
+    /** Session direction — Erratum 7. */
+    const val DIR_DUPLEX = 0
+    const val DIR_DECODE_ONLY = 1
 }
 
 /**
@@ -1519,10 +1669,16 @@ private data class VConfig(
     val targetBitrateKbps: Int,
     val maxFrameBytes: Int,
     val keyframeIntervalFrames: Int,
+    /** CLEONA_VIDEO_DIR_* — Erratum 7. 0 = duplex, the pre-erratum meaning. */
+    val direction: Int,
 ) {
     fun isValid(): Boolean =
         width > 0 && height > 0 && fps > 0 && targetBitrateKbps > 0 &&
             maxFrameBytes > 0 && keyframeIntervalFrames >= 0 &&
+            // Erratum 7: an unknown direction is a caller bug, decided with
+            // the other field checks so it can never surface as
+            // ERR_RATE_UNACHIEVABLE.
+            (direction == VAbi.DIR_DUPLEX || direction == VAbi.DIR_DECODE_ONLY) &&
             // codec <= 0 means "no preference" (treated as H264 downstream);
             // an unknown POSITIVE value is a caller bug that must fail closed
             // (cleona_video.h: "An unknown positive value makes
@@ -1533,8 +1689,8 @@ private data class VConfig(
         const val MFB_INDEX = 5
 
         fun fromInts(a: IntArray): VConfig? {
-            if (a.size != 7) return null
-            return VConfig(a[0], a[1], a[2], a[3], a[4], a[5], a[6])
+            if (a.size != 8) return null
+            return VConfig(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7])
         }
     }
 }
@@ -1542,6 +1698,7 @@ private data class VConfig(
 private fun writeCfgInto(out: IntArray, c: VConfig) {
     out[0] = c.codec; out[1] = c.width; out[2] = c.height; out[3] = c.fps
     out[4] = c.targetBitrateKbps; out[5] = c.maxFrameBytes; out[6] = c.keyframeIntervalFrames
+    out[7] = c.direction
 }
 
 /** One achievable encoder step from the preset ladder (Phase 1). */
@@ -1553,7 +1710,7 @@ private data class Preset(val width: Int, val height: Int, val fps: Int, val bit
 // here since frames are variable-length byte arrays, so this ring holds
 // EncodedFrame objects directly rather than recycled fixed-size slots).
 // ═════════════════════════════════════════════════════════════════════════
-private class FrameRing(private val capacity: Int) {
+private class VideoFrameRing(private val capacity: Int) {
     private val lock = ReentrantLock()
     private val notEmpty = lock.newCondition()
     private val queue = ArrayDeque<EncodedFrame>(capacity)
@@ -1604,7 +1761,7 @@ private class FrameRing(private val capacity: Int) {
 }
 
 /** Bounded queue feeding the decoder input side. Same block-with-deadline
- *  shape as [FrameRing]; see its doc for the `closed` flag's purpose. */
+ *  shape as [VideoFrameRing]; see its doc for the `closed` flag's purpose. */
 private class InputQueue(private val capacity: Int) {
     data class Item(val data: ByteArray, val flags: Int)
 

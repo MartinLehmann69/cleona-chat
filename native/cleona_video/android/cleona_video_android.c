@@ -77,7 +77,7 @@
  * That order is also the ABI's in-band error channel (Erratum 6b): index 5
  * doubles as the error code on a failed open()/reconfigure(). One offsets
  * table, no duplication of field order anywhere else in this file. */
-#define CFG_INTS 7
+#define CFG_INTS 8   /* +direction, Erratum 7 */
 #define CFG_MFB_INDEX 5
 
 _Static_assert(offsetof(cleona_video_config_t, max_frame_bytes) ==
@@ -311,6 +311,7 @@ static void cfg_to_jint(const cleona_video_config_t* c, jint out[CFG_INTS]) {
     out[4] = c->target_bitrate_kbps;
     out[5] = c->max_frame_bytes;
     out[6] = c->keyframe_interval_frames;
+    out[7] = c->direction;                       /* Erratum 7 */
 }
 
 static void jint_to_cfg(const jint in[CFG_INTS], cleona_video_config_t* c) {
@@ -321,6 +322,7 @@ static void jint_to_cfg(const jint in[CFG_INTS], cleona_video_config_t* c) {
     c->target_bitrate_kbps     = (int32_t)in[4];
     c->max_frame_bytes         = (int32_t)in[5];
     c->keyframe_interval_frames = (int32_t)in[6];
+    c->direction               = (int32_t)in[7];  /* Erratum 7 */
 }
 
 /* Erratum 6b: on failure, zero the struct and put the negative error code

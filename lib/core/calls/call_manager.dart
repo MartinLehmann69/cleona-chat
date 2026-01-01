@@ -119,6 +119,12 @@ class CallManager {
   /// Ringing timeout in seconds (auto-hangup if not answered).
   static const int ringingTimeoutSec = 60;
 
+  /// `major * 1000 + minor` for the current build. Set on outgoing
+  /// CALL_INVITE so the receiver's E5 version gate can reject incompatible
+  /// builds before anything rings.
+  int _callerAppMajorMinor = 0;
+  set callerAppMajorMinor(int v) => _callerAppMajorMinor = v;
+
   // Callbacks for UI
   void Function(CallSession call)? onIncomingCall;
   void Function(CallSession call)? onCallAccepted;
@@ -196,7 +202,8 @@ class CallManager {
     final invite = proto.CallInvite()
       ..callId = callId
       ..callerEphX25519Pk = ephKp.publicKey
-      ..isVideo = video;
+      ..isVideo = video
+      ..callerAppMajorMinor = _callerAppMajorMinor;
     if (kemCt != null) {
       invite.callerKemCiphertext = kemCt;
     }

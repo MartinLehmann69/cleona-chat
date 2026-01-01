@@ -212,7 +212,7 @@ jobs:
           ls -lh ios/CleonaNative/libcleona_all_device.a
           ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
           echo "=== Key FFI symbols in archive ==="
-          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create|cleona_vpx_encoder_create' | head -10
+          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_voice_open|cleona_video_open' | head -10
           echo "=== Pods xcconfig check ==="
           grep -r "EXPORTED_SYMBOLS_FILE\|exported_symbols\|DEAD_CODE" ios/Pods/Target\ Support\ Files/Pods-Runner/ 2>/dev/null | head -5
           echo "=== Runner pbxproj EXPORTED_SYMBOLS ==="
@@ -329,7 +329,7 @@ jobs:
           if [ -n "$RUNNER" ]; then
             echo "Binary: $RUNNER ($(ls -lh "$RUNNER" | awk '{print $5}'))"
             echo "=== Exported symbols (nm -gU): FFI entry points ==="
-            nm -gU "$RUNNER" 2>/dev/null | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create|cleona_vpx_encoder_create' | head -10
+            nm -gU "$RUNNER" 2>/dev/null | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_voice_open|cleona_video_open' | head -10
             echo "=== Total exported symbol count ==="
             nm -gU "$RUNNER" 2>/dev/null | wc -l
             echo "=== STRIP_STYLE in build settings ==="
@@ -473,7 +473,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install build tools
-        run: brew install cmake ninja autoconf automake libtool pkg-config libvpx
+        run: brew install cmake ninja autoconf automake libtool pkg-config
 
       - name: Cache native lib sources
         # Skipped in RELEASE mode — see the iOS cache step above.
@@ -552,8 +552,8 @@ jobs:
             cp "$f" "$FRAMEWORKS/"
           done
 
-          if [ ! -f "$FRAMEWORKS/cleona_audio.dylib" ]; then
-            echo "::error::cleona_audio.dylib missing from Contents/Frameworks — calls would have no audio"
+          if [ ! -f "$FRAMEWORKS/libcleona_voice.dylib" ]; then
+            echo "::error::libcleona_voice.dylib missing from Contents/Frameworks — calls would have no audio"
             exit 1
           fi
 

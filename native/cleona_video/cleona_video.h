@@ -137,6 +137,9 @@
  *   3. CLEONA_VIDEO_ERR_UNSUPPORTED        this device has no capture or encode
  *      path at all. A property of the device, not of the call and not of the
  *      link: degrade to audio-only and do not retry on a better connection.
+ *      For a DECODE_ONLY request (Erratum 7) this means no DECODE path — a
+ *      missing camera or encoder is then not a reason to fail — or a backend
+ *      that does not implement DECODE_ONLY yet.
  *   4. CLEONA_VIDEO_ERR_BACKEND            the configuration was fine and the
  *      device is capable, but this attempt failed (allocation, camera busy,
  *      codec init refused). Retryable in principle.
@@ -146,12 +149,84 @@
  * platform packages do not invent four different answers for them.
  *
  * ---------------------------------------------------------------------------
+ * ERRATUM 7 (project owner, 2026-07-31) — A SESSION MAY BE DECODE-ONLY
+ * ---------------------------------------------------------------------------
+ * WHY THIS EXISTS. The session paragraph below says groups use "one session
+ * per remote stream; the capture side of the additional sessions is left
+ * disabled". That presumes open() succeeded, and open() fails with
+ * ERR_UNSUPPORTED on a device with "no capture or encode path at all"
+ * (case 3 of Erratum 6b). On a machine with a decoder but no camera — a Linux
+ * or Windows desktop without a webcam, a headless daemon — every one of those
+ * additional sessions therefore fails to open, and the participant cannot SEE
+ * the others merely because it cannot BE seen. Nothing in §10.6 asks for that
+ * coupling; it is an accident of a single-direction assumption in open().
+ *
+ * The fix is one new field with a zero default, so nothing that compiles today
+ * changes behaviour:
+ *
+ *     cleona_video_config_t::direction
+ *       CLEONA_VIDEO_DIR_DUPLEX      (0) capture+encode AND decode+render
+ *       CLEONA_VIDEO_DIR_DECODE_ONLY (1) decode+render only; no camera, no
+ *                                        encoder, and open() must not require
+ *                                        either to exist
+ *
+ * WHAT DECODE_ONLY CHANGES — and deliberately nothing else:
+ *
+ *   open()                 ERR_UNSUPPORTED now means "no DECODE path on this
+ *                          device". A missing camera or encoder is NOT a
+ *                          reason to fail. Everything else about open() is
+ *                          unchanged, INCLUDING Erratum 6b: max_frame_bytes is
+ *                          still the in-band error channel and is still > 0 on
+ *                          success.
+ *   the encode-side fields width, height, fps, target_bitrate_kbps,
+ *                          max_frame_bytes and keyframe_interval_frames keep
+ *                          their validity rules UNCHANGED. They must still be
+ *                          well-formed and are still echoed in out_negotiated.
+ *                          This is the deliberate choice: relaxing them would
+ *                          fork the validation path in five backends and make
+ *                          open() and reconfigure() disagree, which Erratum 6b
+ *                          case 1 exists to prevent. geometry and codec remain
+ *                          meaningful (the decoder and the texture are sized
+ *                          from them); the rate fields are simply not used by
+ *                          an encoder that was never created.
+ *   read_encoded()         returns CLEONA_VIDEO_READ_TIMEOUT for the lifetime
+ *                          of the session. There is no encoder, so there is
+ *                          never a frame — but the session is running, so this
+ *                          is a timeout and NOT READ_CLOSED/ERR_STATE.
+ *   set_capture_enabled()  accepted and ignored; capture is already off and
+ *                          cannot be switched on. Not an error: a caller that
+ *                          drives N sessions uniformly must not have to
+ *                          special-case this one.
+ *   request_keyframe()     ERR_UNSUPPORTED (returns false in Dart). It asks
+ *                          OUR encoder, and there is none. Asking the PEER for
+ *                          a keyframe is signalling, not this ABI.
+ *   switch_camera()        ERR_UNSUPPORTED.
+ *   report()               encode_backend = CLEONA_VIDEO_BACKEND_NONE,
+ *                          hardware_encode = CLEONA_VIDEO_HW_NO, and
+ *                          frames_captured / frames_encoded /
+ *                          frames_dropped_oversize stay 0 forever. The decode
+ *                          side reports normally. HW_NOT_DETERMINABLE is wrong
+ *                          here — the absence of an encoder is known, not
+ *                          undetermined.
+ *   submit_encoded(), get_texture_id(), start(), stop(), close(),
+ *   reconfigure()          unchanged in every respect.
+ *
+ * ACCEPTANCE. A backend that does not implement DECODE_ONLY fails open() with
+ * ERR_UNSUPPORTED for it — fail closed, never silently duplex. That is a
+ * legal intermediate state, not an acceptance-ready one: a backend is
+ * acceptance-ready only once it opens a decode-only session on a device with
+ * no camera.
+ *
+ * ---------------------------------------------------------------------------
  * OWN VIDEO ON/OFF (I12)
  * ---------------------------------------------------------------------------
  * cleona_video_set_capture_enabled() switches off *our own* capture and
  * encode. There is no call in this ABI that stops the peer from sending, and
  * none may be added. Switching the peer's video off is deliberately not
  * provided (§10.6, "Own video on/off").
+ *
+ * A DECODE_ONLY session (Erratum 7) has no own video to switch: the call is
+ * accepted and ignored there. It remains the only video mute in either case.
  *
  * ---------------------------------------------------------------------------
  * VERIFICATION REPORT (I11)
@@ -213,8 +288,9 @@ extern "C" {
  * ========================================================================== */
 
 /* One session owns one capture+encode path and one decode+render path for one
- * call. Groups use one session per remote stream; the capture side of the
- * additional sessions is left disabled. */
+ * call. Groups use one session per remote stream; the additional sessions are
+ * opened with direction = CLEONA_VIDEO_DIR_DECODE_ONLY (Erratum 7), which is
+ * what makes them work on a device that has a decoder but no camera. */
 typedef struct cleona_video_session cleona_video_session_t;
 
 /* ==========================================================================
@@ -328,6 +404,15 @@ typedef struct cleona_video_session cleona_video_session_t;
 #define CLEONA_VIDEO_BACKEND_LINUX_V4L2_M2M      11
 
 /* ==========================================================================
+ * Session direction — cleona_video_config_t::direction (Erratum 7)
+ * ==========================================================================
+ * Zero is duplex so that a zero-initialised config keeps the pre-erratum
+ * meaning. See the Erratum 7 section at the top of this header for the exact
+ * per-function obligations. */
+#define CLEONA_VIDEO_DIR_DUPLEX      0
+#define CLEONA_VIDEO_DIR_DECODE_ONLY 1
+
+/* ==========================================================================
  * Tri-state for the hardware_* report fields (I11)
  * ========================================================================== */
 #define CLEONA_VIDEO_HW_NO               0
@@ -417,6 +502,24 @@ typedef struct {
      * Negative is invalid. Note this is an upper bound on the interval, not a
      * schedule: cleona_video_request_keyframe may insert one at any time. */
     int32_t keyframe_interval_frames;
+
+    /* CLEONA_VIDEO_DIR_* — Erratum 7. Appended at the end of the struct with
+     * 0 (DUPLEX) as the pre-erratum meaning, so a zero-initialised config and
+     * every call written before the erratum behave exactly as they did.
+     *
+     * DECODE_ONLY builds no camera and no encoder; open() must then not fail
+     * merely because the device has neither. Every other field keeps its
+     * validity rules — see Erratum 7 for why the validation path is
+     * deliberately NOT forked here.
+     *
+     * An unknown value makes open() and reconfigure() fail with ERR_INVALID:
+     * a caller bug, decided together with the other field checks and therefore
+     * before ERR_RATE_UNACHIEVABLE (Erratum 6b, case 1).
+     *
+     * Not changeable by reconfigure(): a session that was opened to decode
+     * cannot grow a camera. reconfigure() with a different direction than the
+     * session was opened with returns ERR_INVALID. */
+    int32_t direction;
 } cleona_video_config_t;
 
 /* ==========================================================================
@@ -497,7 +600,8 @@ typedef struct {
  *   ERR_RATE_UNACHIEVABLE  the config is well-formed but no supported step fits
  *                          cfg->max_frame_bytes. The link, not the caller —
  *                          this is the branch that shows the user a reason.
- *   ERR_UNSUPPORTED        no capture/encode path on this device at all.
+ *   ERR_UNSUPPORTED        no capture/encode path on this device at all; for a
+ *                          DECODE_ONLY request, no decode path (Erratum 7).
  *   ERR_BACKEND            capable device, this attempt failed. Retryable.
  *
  * On SUCCESS out_negotiated->max_frame_bytes is always > 0, so a caller tests

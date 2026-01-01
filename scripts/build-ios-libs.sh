@@ -3,7 +3,7 @@
 # build-ios-libs.sh — Build native libraries for iOS
 #
 # Builds libsodium, liboqs, libzstd, liberasurecode, libopus, whisper.cpp,
-# libcleona_audio, libvpx and libcleona_vpx as STATIC libraries (.a) for iOS.
+# as STATIC libraries (.a) for iOS.
 #
 # iOS does not allow loading custom dynamic libraries — all native code must
 # be statically linked into the app binary. Flutter's dart:ffi then accesses
@@ -54,10 +54,7 @@ LIBOQS_VERSION="0.15.0"
 LIBZSTD_VERSION="1.5.6"
 LIBERASURECODE_VERSION="1.6.2"
 LIBOPUS_VERSION="1.5.2"
-WHISPER_VERSION="v1.8.4"  # muss zu jniLibs/XCFrameworks passen — siehe build-android-libs.sh
-LIBVPX_VERSION="1.14.0"
-
-NPROC="$(sysctl -n hw.ncpu)"
+WHISPER_VERSION="v1.8.4"  NPROC="$(sysctl -n hw.ncpu)"
 
 # macOS Homebrew names libtool as glibtool to avoid conflict with Apple's
 # libtool. Autotools scripts (autogen.sh) look for libtoolize which is
@@ -340,65 +337,6 @@ build_cleona_pow() {
     cd "$PROJECT_DIR"
 }
 
-build_cleona_audio() {
-    local platform="$1"
-    echo "── libcleona_audio ($platform) ────────────────────────────────"
-    setup_env "$platform"
-    local src="$PROJECT_DIR/native/cleona_audio"
-    local build="$BUILD_DIR/cleona_audio"
-    rm -rf "$build" && mkdir -p "$build" && cd "$build"
-
-    cmake -GNinja \
-        -DCMAKE_SYSTEM_NAME=iOS \
-        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
-        -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
-        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCLEONA_IOS_STATIC=ON \
-        "$src"
-    ninja -j"$NPROC"
-    mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
-    cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
-
-    # speexdsp MUST be shipped separately (S280).
-    #
-    # The comment here previously claimed that CMake's Ninja generator embeds
-    # the speexdsp objects into libcleona_audio.a automatically. That is wrong
-    # for a STATIC target: native/cleona_audio/CMakeLists.txt:12-13 builds
-    # cleona_audio as STATIC under CLEONA_IOS_STATIC, and for static targets
-    # target_link_libraries() only records a usage requirement — it does not
-    # copy any objects into the archive. The vendored speexdsp is a STATIC
-    # target of its own (vendor/speexdsp/CMakeLists.txt:12, pulled in via
-    # add_subdirectory as "speexdsp_build") and therefore never ended up
-    # anywhere in the merge.
-    #
-    # Consequence: the runner link failed on _speex_echo_state_init,
-    # _speex_preprocess_run and six others. Only noticed on the first
-    # cache-free iOS build (v3.1.158), because until then the prefix cache
-    # served a tree from 2026-07-07.
-    #
-    # cleona_audio/lib is already on the merge subdir list, so it is enough to
-    # drop the archive there — no change to that list needed.
-    SPEEX_A=$(find . -name 'libspeexdsp.a' -type f | head -1)
-    if [ -z "$SPEEX_A" ]; then
-        echo "  [!] libspeexdsp.a not found — runner link would fail on _speex_*"
-        exit 1
-    fi
-    cp "$SPEEX_A" "$INSTALL_DIR/cleona_audio/lib/"
-    echo "  speexdsp: $SPEEX_A -> cleona_audio/lib/"
-
-    # Verify fail-closed instead of assuming — it was exactly the assumption
-    # above that survived for months.
-    if ! nm -g "$INSTALL_DIR/cleona_audio/lib/libspeexdsp.a" 2>/dev/null \
-         | grep -q '_speex_echo_state_init'; then
-        echo "  [!] libspeexdsp.a does not define _speex_echo_state_init"
-        exit 1
-    fi
-
-    cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
-    cd "$PROJECT_DIR"
-}
-
 # Dart FFI bridge to whisper.cpp (S280).
 #
 # native/whisper_wrapper.c provides whisper_full_from_ptr() plus the setters
@@ -449,97 +387,6 @@ build_whisper_wrapper() {
     cd "$PROJECT_DIR"
 }
 
-build_libvpx() {
-    local platform="$1"
-    echo "── libvpx ($platform) ─────────────────────────────────────────"
-    setup_env "$platform"
-    local src="$BUILD_DIR/libvpx"
-    if [ ! -d "$src" ]; then
-        git clone --depth 1 --branch "v$LIBVPX_VERSION" \
-            https://github.com/webmproject/libvpx.git "$src"
-    fi
-    cd "$src"
-    make distclean 2>/dev/null || true
-
-    # libvpx does NOT use CMake/autotools-style --host=; it has its own
-    # configure with --target=<isa>-<os>-<cc>. The target string selects
-    # codec ISA features (NEON) AND — for the darwin/iphonesimulator
-    # cases — makes configure append its own -isysroot/-miphoneos-
-    # version-min flags on top of the CC/CFLAGS/LDFLAGS this script
-    # already exports via setup_env. Verified against libvpx's
-    # build/make/configure.sh (v1.14.0):
-    #
-    #   - Device (iphoneos): arm64-darwin-gcc
-    #     Listed in configure's all_platforms whitelist. Matches the
-    #     `arm*-darwin-*` case, which resolves the iphoneos SDK itself
-    #     via `xcrun --sdk iphoneos` (redundant with, but consistent
-    #     with, our own -isysroot).
-    #
-    #   - Simulator: --force-target=arm64-iphonesimulator-gcc
-    #     NOT in configure's all_platforms whitelist — libvpx only
-    #     pre-registers x86/x86_64 iphonesimulator variants (predates
-    #     Apple Silicon simulators). --force-target sets the toolchain
-    #     AND enables the force_toolchain feature (configure.sh:601-603),
-    #     which bypasses the whitelist check
-    #     (`is_in ... || enabled force_toolchain`, configure.sh:827).
-    #     NB: `--force-toolchain` is only the internal feature name, NOT
-    #     a CLI option — passing it aborts with "Unknown option" (CI run
-    #     28697167082). The toolchain string still matches the
-    #     `*-iphonesimulator-*` case in configure.sh's target-parsing,
-    #     which correctly resolves the iphonesimulator SDK. Using
-    #     arm64-darwin-gcc for the simulator instead would be wrong: it
-    #     hits the `arm*-darwin-*` case, which appends an *iphoneos*
-    #     -isysroot AFTER ours, silently pointing the simulator build at
-    #     the wrong SDK (last -isysroot wins).
-    local target_flag="--target=arm64-darwin-gcc"
-    if [ "$platform" = "iphonesimulator" ]; then
-        target_flag="--force-target=arm64-iphonesimulator-gcc"
-    fi
-
-    # VP8-only: vpx_shim.c (native/vpx_shim.c) only calls vpx_codec_vp8_cx/
-    # vpx_codec_vp8_dx and the codec-agnostic vpx_codec_* / vpx_img_*
-    # entry points — no VP9 symbols are used. --disable-vp9 keeps the
-    # build lean. --disable-webm-io/--disable-libyuv are already the
-    # default (off); listed explicitly for documentation.
-    ./configure \
-        "$target_flag" \
-        --prefix="$INSTALL_DIR/vpx" \
-        --disable-examples \
-        --disable-tools \
-        --disable-docs \
-        --disable-unit-tests \
-        --disable-install-bins \
-        --disable-install-docs \
-        --disable-vp9 \
-        --enable-vp8 \
-        --enable-static \
-        --disable-shared \
-        --disable-webm-io \
-        --disable-libyuv
-    make -j"$NPROC"
-    make install
-    cd "$PROJECT_DIR"
-}
-
-build_cleona_vpx() {
-    local platform="$1"
-    echo "── libcleona_vpx ($platform) ────────────────────────────────────"
-    setup_env "$platform"
-    local src="$PROJECT_DIR/native/vpx_shim.c"
-    mkdir -p "$INSTALL_DIR/cleona_vpx/lib"
-
-    # vpx_shim.c has no CMakeLists (unlike cleona_audio) — it is a single
-    # translation unit with no external headers beyond libc/dlfcn (it
-    # treats libvpx structs as opaque byte buffers rather than #include-ing
-    # vpx headers), so a direct clang -c + ar via the CC/AR this script
-    # already resolves in setup_env is simpler than adding build machinery.
-    # shellcheck disable=SC2086
-    "$CC" $CFLAGS -c "$src" -o "$BUILD_DIR/vpx_shim.o"
-    rm -f "$INSTALL_DIR/cleona_vpx/lib/libcleona_vpx.a"
-    "$AR" rcs "$INSTALL_DIR/cleona_vpx/lib/libcleona_vpx.a" "$BUILD_DIR/vpx_shim.o"
-    cd "$PROJECT_DIR"
-}
-
 build_cleona_voice() {
     local platform="$1"
     echo "── libcleona_voice (VoiceProcessingIO) ($platform) ─────────────"
@@ -571,7 +418,7 @@ PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_audio cleona_pow vpx cleona_vpx cleona_voice)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -593,10 +440,7 @@ for platform in "${PLATFORMS[@]}"; do
             # deshalb im selben Ziel gebaut — so greift auch
             # `build-ios-libs.sh whisper`.
             whisper)       build_whisper "$platform"; build_whisper_wrapper "$platform" ;;
-            cleona_audio)  build_cleona_audio "$platform" ;;
             cleona_pow)    build_cleona_pow "$platform" ;;
-            vpx)           build_libvpx "$platform" ;;
-            cleona_vpx)    build_cleona_vpx "$platform" ;;
             cleona_voice)  build_cleona_voice "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
@@ -646,10 +490,7 @@ for t in "${WANTED[@]}"; do
                     make_xcfw "$local_name" whisper "$ggml_lib" ""
             done
             ;;
-        cleona_audio)  make_xcfw libcleona_audio cleona_audio libcleona_audio.a include ;;
         cleona_pow)    make_xcfw libcleona_pow cleona_pow libcleona_pow.a ;;
-        vpx)           make_xcfw libvpx vpx libvpx.a include ;;
-        cleona_vpx)    make_xcfw libcleona_vpx cleona_vpx libcleona_vpx.a ;;
         cleona_voice)  make_xcfw CleonaVoice cleona_voice libcleona_voice.a include ;;
     esac
 done
@@ -702,7 +543,7 @@ for platform_tag in device simulator; do
     _index="$_symdir/index"
     : > "$_index"
 
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib cleona_pow/lib vpx/lib cleona_vpx/lib cleona_voice/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_pow/lib cleona_voice/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             _slug="$(echo "$a" | tr -c 'A-Za-z0-9' '_')"

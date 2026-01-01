@@ -289,6 +289,15 @@ static int32_t negotiate(const cleona_video_config_t* cfg,
     if (cfg->target_bitrate_kbps <= 0) return CLEONA_VIDEO_ERR_INVALID;
     if (cfg->max_frame_bytes <= 0) return CLEONA_VIDEO_ERR_INVALID;
     if (cfg->keyframe_interval_frames < 0) return CLEONA_VIDEO_ERR_INVALID;
+    /* Erratum 7: an unknown direction is a caller bug, decided here with the
+     * other field checks so it can never be reported as
+     * ERR_RATE_UNACHIEVABLE (Erratum 6b, case 1). Note the encode-side fields
+     * above are validated identically for DECODE_ONLY — the erratum
+     * deliberately does not fork the validation path. */
+    if (cfg->direction != CLEONA_VIDEO_DIR_DUPLEX &&
+        cfg->direction != CLEONA_VIDEO_DIR_DECODE_ONLY) {
+        return CLEONA_VIDEO_ERR_INVALID;
+    }
 
     int32_t codec = cfg->codec;
     if (codec <= 0) {
@@ -335,6 +344,7 @@ static int32_t negotiate(const cleona_video_config_t* cfg,
     out->keyframe_interval_frames =
         cfg->keyframe_interval_frames > 0 ? cfg->keyframe_interval_frames
                                           : fps * 2;      /* backend default */
+    out->direction               = cfg->direction;        /* echoed, never changed */
     return CLEONA_VIDEO_OK;
 }
 
@@ -399,7 +409,10 @@ cleona_video_session_t* cleona_video_open(const cleona_video_config_t* cfg,
     s->knob_hw_decode          = CLEONA_VIDEO_HW_NO;
     s->knob_min_bitrate_kbps   = CLEONA_VIDEO_MOCK_DEFAULT_MIN_BITRATE_KBPS;
 
-    s->capture_enabled   = 1;
+    /* Erratum 7: a DECODE_ONLY session never had a camera to enable. This is
+     * the state, not a user-visible mute — set_capture_enabled cannot turn it
+     * back on. */
+    s->capture_enabled   = (accepted.direction == CLEONA_VIDEO_DIR_DECODE_ONLY) ? 0 : 1;
     s->awaiting_keyframe = 1;
     s->last_decoded_index = -1;
 
@@ -416,6 +429,15 @@ int32_t cleona_video_reconfigure(cleona_video_session_t* s,
     if (s->state == ST_CLOSED) {
         cv_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_STATE;
+    }
+
+    /* Erratum 7: direction is fixed at open(). A session opened to decode
+     * cannot grow a camera, so a mismatch is a caller bug and not a
+     * negotiation outcome. Checked before negotiate() so the session is left
+     * untouched, as every other failing reconfigure() leaves it. */
+    if (cfg->direction != s->cfg.direction) {
+        cv_unlock(&s->lock);
+        return CLEONA_VIDEO_ERR_INVALID;
     }
 
     cleona_video_config_t accepted;
@@ -586,6 +608,16 @@ int32_t cleona_video_read_encoded(cleona_video_session_t* s,
             return CLEONA_VIDEO_READ_CLOSED;
         }
 
+        /* Erratum 7: a DECODE_ONLY session has no encoder, so a frame can
+         * never arrive. Answered immediately and as READ_TIMEOUT — the session
+         * is running, so READ_CLOSED would be a lie. The short-circuit is
+         * before the pacing loop on purpose: a blocking read (timeout_ms < 0)
+         * would otherwise wait for something that cannot happen. */
+        if (s->cfg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY) {
+            cv_unlock(&s->lock);
+            return CLEONA_VIDEO_READ_TIMEOUT;
+        }
+
         if (s->has_pending) {
             if (s->pending_size > buf_cap) {
                 /* Frame stays pending: the caller can retry with a bigger
@@ -709,6 +741,12 @@ int32_t cleona_video_request_keyframe(cleona_video_session_t* s) {
         cv_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_STATE;
     }
+    /* Erratum 7: this asks OUR encoder, and a DECODE_ONLY session has none.
+     * Getting the PEER to send a keyframe is signalling, not this ABI. */
+    if (s->cfg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY) {
+        cv_unlock(&s->lock);
+        return CLEONA_VIDEO_ERR_UNSUPPORTED;
+    }
     s->force_keyframe = 1;
     cv_unlock(&s->lock);
     return CLEONA_VIDEO_OK;
@@ -717,6 +755,13 @@ int32_t cleona_video_request_keyframe(cleona_video_session_t* s) {
 void cleona_video_set_capture_enabled(cleona_video_session_t* s, int32_t on) {
     if (!s) return;
     cv_lock(&s->lock);
+    /* Erratum 7: accepted and ignored on a DECODE_ONLY session. A caller that
+     * drives N sessions uniformly must not have to special-case this one, and
+     * capture cannot be switched on for a camera that was never opened. */
+    if (s->cfg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY) {
+        cv_unlock(&s->lock);
+        return;
+    }
     int32_t want = on ? 1 : 0;
     if (want && !s->capture_enabled) {
         /* The peer's decoder has been starved; a P-frame now would be
@@ -738,7 +783,9 @@ int32_t cleona_video_switch_camera(cleona_video_session_t* s) {
         cv_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_STATE;
     }
-    if (s->knob_camera_count < 2) {
+    /* Erratum 7: no camera at all on a DECODE_ONLY session. */
+    if (s->cfg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY ||
+        s->knob_camera_count < 2) {
         cv_unlock(&s->lock);
         return CLEONA_VIDEO_ERR_UNSUPPORTED;
     }
@@ -759,14 +806,21 @@ void cleona_video_get_report(cleona_video_session_t* s, cleona_video_report_t* o
         return;
     }
     cv_lock(&s->lock);
+    const int32_t decode_only =
+        (s->cfg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY);
     out->codec_in_use            = s->cfg.codec;
-    out->hardware_encode         = s->knob_hw_encode;
+    /* Erratum 7: on a DECODE_ONLY session the absence of an encoder is known,
+     * not undetermined — HW_NO, never HW_NOT_DETERMINABLE. */
+    out->hardware_encode         = decode_only ? CLEONA_VIDEO_HW_NO
+                                               : s->knob_hw_encode;
     out->hardware_decode         = s->knob_hw_decode;
     out->negotiated_width        = s->cfg.width;
     out->negotiated_height       = s->cfg.height;
     out->negotiated_fps          = s->cfg.fps;
-    out->capture_backend         = CLEONA_VIDEO_BACKEND_MOCK;
-    out->encode_backend          = CLEONA_VIDEO_BACKEND_MOCK;
+    out->capture_backend         = decode_only ? CLEONA_VIDEO_BACKEND_NONE
+                                               : CLEONA_VIDEO_BACKEND_MOCK;
+    out->encode_backend          = decode_only ? CLEONA_VIDEO_BACKEND_NONE
+                                               : CLEONA_VIDEO_BACKEND_MOCK;
     out->frames_captured         = s->frames_captured;
     out->frames_encoded          = s->frames_encoded;
     out->frames_dropped_oversize = s->frames_dropped_oversize;

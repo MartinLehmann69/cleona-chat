@@ -1,150 +1,44 @@
-// ignore_for_file: constant_identifier_names
 import 'dart:async';
-import 'dart:ffi';
-import 'dart:isolate';
 import 'dart:typed_data';
 
-import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
+import 'package:cleona/core/calls/voice_codec.dart';
+import 'package:cleona/core/calls/voice_session.dart';
 import 'package:cleona/core/network/clogger.dart';
-import 'package:cleona/core/calls/audio_engine_shim.dart';
-
-// ── Audio Constants ──────────────────────────────────────────────────────
-
-const int _sampleRate = 16000;
-const int _channels = 1;
-const int _frameDurationMs = 20;
-const int _samplesPerFrame =
-    _sampleRate * _channels * _frameDurationMs ~/ 1000; // 320
-const int _frameSize = _samplesPerFrame * 2; // 640 bytes
-
-// ── Capture Isolate ──────────────────────────────────────────────────────
-
-class _MixerCaptureInit {
-  final SendPort frameSendPort;
-  final Uint8List callKey;
-  final int engineAddress;
-  _MixerCaptureInit(this.frameSendPort, this.callKey, this.engineAddress);
-}
-
-enum _MixerCaptureCommand { mute, unmute, stop }
-
-void _mixerCaptureIsolateEntry(_MixerCaptureInit init) {
-  final commandPort = ReceivePort();
-  final frameSendPort = init.frameSendPort;
-  frameSendPort.send(commandPort.sendPort);
-
-  final shim = AudioEngineShim.load();
-  final engine =
-      Pointer<CleonaAudioEngine>.fromAddress(init.engineAddress);
-  if (engine.address == 0) {
-    frameSendPort.send(null);
-    commandPort.close();
-    return;
-  }
-
-  final sodium = SodiumFFI();
-  var callKey = init.callKey;
-
-  frameSendPort.send(true);
-
-  var running = true;
-  var muted = false;
-  var seqNum = 0;
-
-  commandPort.listen((message) {
-    if (message == _MixerCaptureCommand.stop) {
-      running = false;
-    } else if (message == _MixerCaptureCommand.mute) {
-      muted = true;
-      shim.setMute(engine, true);
-    } else if (message == _MixerCaptureCommand.unmute) {
-      muted = false;
-      shim.setMute(engine, false);
-    } else if (message is Uint8List) {
-      callKey = message;
-    }
-  });
-
-  final pcmPtr = calloc<Int16>(_samplesPerFrame);
-
-  while (running) {
-    final r = shim.captureRead(engine, pcmPtr, 100);
-    if (r == -1) break;
-    if (r == 0) continue;
-
-    if (!muted) {
-      final pcmData = Uint8List.fromList(
-          pcmPtr.cast<Uint8>().asTypedList(_frameSize));
-      final seqBytes = Uint8List(4);
-      ByteData.sublistView(seqBytes).setUint32(0, seqNum++, Endian.big);
-      final nonce = sodium.generateNonce();
-      final ciphertext = sodium.aesGcmEncrypt(pcmData, callKey, nonce);
-
-      final packet = Uint8List(4 + 12 + ciphertext.length);
-      packet.setAll(0, seqBytes);
-      packet.setAll(4, nonce);
-      packet.setAll(16, ciphertext);
-      frameSendPort.send(packet);
-    }
-  }
-
-  calloc.free(pcmPtr);
-}
-
-// ── AudioMixer ───────────────────────────────────────────────────────────
 
 /// Mixes audio from multiple group call participants for playback.
 ///
-/// Each peer has its own JitterBuffer. Incoming encrypted frames are decrypted,
-/// PCM samples are summed with int16 clamping, and the mixed result is played
-/// via the cross-platform cleona_audio shim (miniaudio + speex AEC/NS).
-///
-/// Also owns a capture isolate for microphone input (same pattern as AudioEngine
-/// but encrypts with the shared group call key).
+/// Each peer has its own [JitterBuffer] and [VoiceCodec] decoder. Incoming
+/// encrypted Opus frames are decrypted, decoded to PCM, mixed by sample-wise
+/// addition with int16 clamping, and written to a single [VoiceSession] for
+/// playback. Capture runs on a 5ms polling timer in the main isolate.
 class AudioMixer {
-  // §10.2.1 per-sender media keys. `_ownSendKey` (secret to us) encrypts our
-  // outgoing frames; `_peerSendKeys` maps an authenticated sender userId-hex to
-  // their announced key and decrypts THEIR frames.
   Uint8List _ownSendKey;
   int _ownSendKeyVersion;
   final Map<String, Uint8List> _peerSendKeys = {};
   final CLogger _log;
   final SodiumFFI _sodium = SodiumFFI();
 
-  // Per-peer jitter buffers
   final Map<String, JitterBuffer> _peerBuffers = {};
-
-  // Per-peer audio levels for active speaker detection
+  final Map<String, VoiceCodec> _peerDecoders = {};
   final Map<String, double> _peerAudioLevels = {};
 
-  // cleona_audio shim
-  late final AudioEngineShim _shim;
-  Pointer<CleonaAudioEngine>? _engine;
-  Pointer<Int16>? _playbackPcmPtr;
+  VoiceSession? _voiceSession;
+  VoiceCodec? _captureCodec;
+  Int16List? _captureBuf;
 
-  // Capture isolate
-  Isolate? _captureIsolate;
-  SendPort? _captureCommandPort;
-  ReceivePort? _frameReceivePort;
-  StreamSubscription? _frameSubscription;
-
-  // Mix timer (20ms)
+  Timer? _captureTimer;
   Timer? _mixTimer;
 
-  // State
   bool _running = false;
   bool _muted = false;
   bool _speakerEnabled = true;
+  int _captureSeqNum = 0;
 
-  /// Current audio levels per peer (0.0-1.0) for active speaker detection.
   Map<String, double> get peerAudioLevels => Map.unmodifiable(_peerAudioLevels);
 
-  // Callback: encrypted audio frame ready to send
   void Function(Uint8List encryptedFrame)? onAudioFrame;
-
-  // Callback: speaker routing changed (for Android AudioManager)
   void Function(bool speaker)? onSpeakerToggle;
 
   AudioMixer({
@@ -153,153 +47,102 @@ class AudioMixer {
     int ownSendKeyVersion = 1,
   })  : _ownSendKey = ownSendKey,
         _ownSendKeyVersion = ownSendKeyVersion,
-        _log = CLogger.get('group-audio', profileDir: profileDir) {
-    _shim = AudioEngineShim.load();
-  }
+        _log = CLogger.get('group-audio', profileDir: profileDir);
 
-  /// Register an authenticated peer's secret media key (decrypt side).
   void setPeerSendKey(String senderUserHex, Uint8List key) {
     _peerSendKeys[senderUserHex] = key;
   }
 
-  /// Start capture isolate, playback, and mix timer.
   Future<bool> start() async {
     if (_running) return true;
 
-    _engine = _shim.create(
-      sampleRate: _sampleRate,
-      channels: _channels,
-      frameSamples: _samplesPerFrame,
-      ringCapacityFrames: 8,
-    );
-    if (_engine == null || _engine!.address == 0) {
-      _log.error('cleona_audio_create failed (mixer)');
+    try {
+      final lib = VoiceNativeLibrary.platform();
+      _voiceSession = VoiceSession.open(library: lib);
+      final format = _voiceSession!.format;
+
+      _captureCodec = VoiceCodec.fromFormat(format);
+      _captureBuf = Int16List(format.frameSamples);
+      _captureSeqNum = 0;
+
+      _voiceSession!.start();
+
+      _captureTimer = Timer.periodic(
+        const Duration(milliseconds: 5),
+        (_) => _captureAndSend(),
+      );
+
+      final frameDurationMs =
+          format.frameSamples * 1000 ~/ (format.sampleRate * format.channels);
+      _mixTimer = Timer.periodic(
+        Duration(milliseconds: frameDurationMs),
+        (_) => _mixAndPlay(),
+      );
+
+      _running = true;
+      _log.info('AudioMixer started (VoiceSession, rate=${format.sampleRate}, '
+          'frame=${format.frameSamples})');
+      return true;
+    } catch (e) {
+      _log.error('AudioMixer start failed: $e');
+      stop();
       return false;
     }
-    final startRc = _shim.startDirected(_engine!, 0);
-    if (startRc != 0) {
-      _log.error('cleona_audio_start failed (mixer): rc=$startRc');
-      _shim.destroy(_engine!);
-      _engine = null;
-      return false;
-    }
-    _playbackPcmPtr = calloc<Int16>(_samplesPerFrame);
-
-    final captureOk = await _startCaptureIsolate();
-    if (!captureOk) {
-      _log.error('Mixer capture isolate failed to start');
-      _shim.stop(_engine!);
-      _shim.destroy(_engine!);
-      _engine = null;
-      calloc.free(_playbackPcmPtr!);
-      _playbackPcmPtr = null;
-      return false;
-    }
-
-    _mixTimer = Timer.periodic(
-      const Duration(milliseconds: _frameDurationMs),
-      (_) => _mixAndPlay(),
-    );
-
-    _running = true;
-    _log.info('AudioMixer started (cross-platform shim)');
-    return true;
   }
 
-  Future<bool> _startCaptureIsolate() async {
-    _frameReceivePort = ReceivePort();
-    final init = _MixerCaptureInit(
-        _frameReceivePort!.sendPort, _ownSendKey, _engine!.address);
+  void _captureAndSend() {
+    final vs = _voiceSession;
+    if (vs == null) return;
 
-    // Two-stage handshake (see audio_engine.dart 2026-04-26 fix): SendPort,
-    // then ready-flag, then audio frames.
-    final commandPortCompleter = Completer<SendPort>();
-    final readyCompleter = Completer<bool>();
-
-    _frameSubscription = _frameReceivePort!.listen((message) {
-      if (!commandPortCompleter.isCompleted) {
-        if (message is SendPort) {
-          commandPortCompleter.complete(message);
-        } else {
-          commandPortCompleter.completeError(
-              StateError('mixer capture isolate did not send command port'));
-        }
-        return;
-      }
-      if (!readyCompleter.isCompleted) {
-        readyCompleter.complete(message == true);
-        return;
-      }
-      if (message is Uint8List) {
-        onAudioFrame?.call(message);
-      }
-    });
-
-    _captureIsolate =
-        await Isolate.spawn(_mixerCaptureIsolateEntry, init);
+    final status = vs.readCaptureFrameInto(_captureBuf!, timeoutMs: 0);
+    if (status != VoiceCaptureStatus.frame) return;
+    if (_muted) return;
 
     try {
-      _captureCommandPort = await commandPortCompleter.future
-          .timeout(const Duration(seconds: 5));
-    } catch (_) {
-      _captureIsolate?.kill();
-      _captureIsolate = null;
-      _frameSubscription?.cancel();
-      _frameReceivePort?.close();
-      return false;
+      final pcmBytes = _captureBuf!.buffer.asUint8List(
+          _captureBuf!.offsetInBytes, _captureBuf!.lengthInBytes);
+      final opusData = _captureCodec!.encode(pcmBytes);
+
+      final nonce = _sodium.generateNonce();
+      final encrypted = _sodium.aesGcmEncrypt(opusData, _ownSendKey, nonce);
+
+      final packet = BytesBuilder(copy: false);
+      final seqBuf = ByteData(4);
+      seqBuf.setUint32(0, _captureSeqNum++, Endian.big);
+      packet.add(Uint8List.view(seqBuf.buffer));
+      packet.add(nonce);
+      packet.add(encrypted);
+
+      onAudioFrame?.call(packet.toBytes());
+    } catch (e) {
+      _log.debug('Mixer capture encode/encrypt failed: $e');
     }
-
-    final ok = await readyCompleter.future.timeout(
-      const Duration(seconds: 5),
-      onTimeout: () => false,
-    );
-
-    if (!ok) {
-      _captureIsolate?.kill();
-      _captureIsolate = null;
-      _frameSubscription?.cancel();
-      _frameReceivePort?.close();
-      return false;
-    }
-
-    if (_muted) {
-      _captureCommandPort?.send(_MixerCaptureCommand.mute);
-    }
-
-    return true;
   }
 
-  /// Add an incoming encrypted audio frame from a peer.
   void addFrame(String senderNodeIdHex, Uint8List encryptedAudio) {
     if (!_running) return;
 
-    final pcm = _decryptFrame(encryptedAudio, senderNodeIdHex);
-    if (pcm == null) return;
+    final opusData = _decryptFrame(encryptedAudio, senderNodeIdHex);
+    if (opusData == null) return;
 
-    // Extract sequence number from the packet
     final seqNum =
         ByteData.sublistView(encryptedAudio).getUint32(0, Endian.big);
 
-    // Get or create peer's JitterBuffer
     final buffer = _peerBuffers.putIfAbsent(
       senderNodeIdHex,
       () => JitterBuffer(bufferDepth: 5, maxBufferSize: 20),
     );
 
-    buffer.push(AudioFrame(seqNum: seqNum, data: pcm));
+    buffer.push(AudioFrame(seqNum: seqNum, data: opusData));
   }
 
-  /// Decrypt an audio frame using the sender's own secret key (§10.2.1).
-  /// A frame whose sender key we have not yet learned is dropped (the signed
-  /// announcement lands sub-second at join). AES-GCM auth means a frame that
-  /// decrypts under sender X's key genuinely came from X — a co-participant
-  /// without X's secret key cannot forge it.
   Uint8List? _decryptFrame(Uint8List packet, String senderUserHex) {
     if (packet.length < 16 + cryptoAeadAes256GcmABytes) return null;
 
     final key = _peerSendKeys[senderUserHex];
     if (key == null) {
-      _log.debug('Audio drop: no send_key yet for ${senderUserHex.substring(0, 8)}');
+      _log.debug(
+          'Audio drop: no send_key yet for ${senderUserHex.substring(0, 8)}');
       return null;
     }
     try {
@@ -312,27 +155,38 @@ class AudioMixer {
     }
   }
 
-  /// Mix all peer streams and play (called every 20ms).
-  void _mixAndPlay() {
-    if (!_running || _engine == null || _playbackPcmPtr == null) return;
-    if (!_speakerEnabled) return;
+  VoiceCodec _getOrCreateDecoder(String peerHex) {
+    return _peerDecoders.putIfAbsent(
+      peerHex,
+      () => VoiceCodec.fromFormat(_voiceSession!.format),
+    );
+  }
 
-    // Drain one frame from each peer's buffer and compute audio levels
-    final pcmFrames = <Uint8List>[];
+  void _mixAndPlay() {
+    if (!_running || _voiceSession == null) return;
+
+    final pcmFrames = <Int16List>[];
     for (final entry in _peerBuffers.entries) {
       final frame = entry.value.pop();
       if (frame != null) {
-        pcmFrames.add(frame.data);
-        // Compute peak audio level: max absolute sample value / 32768.0
-        final byteData = ByteData.sublistView(frame.data);
-        var peak = 0;
-        final sampleCount = frame.data.length ~/ 2;
-        for (var i = 0; i < sampleCount; i++) {
-          final sample = byteData.getInt16(i * 2, Endian.little).abs();
-          if (sample > peak) peak = sample;
+        try {
+          final decoder = _getOrCreateDecoder(entry.key);
+          final pcmBytes = decoder.decode(frame.data);
+          final pcm16 = Int16List.view(
+              pcmBytes.buffer, pcmBytes.offsetInBytes, pcmBytes.length ~/ 2);
+          pcmFrames.add(pcm16);
+
+          var peak = 0;
+          for (var i = 0; i < pcm16.length; i++) {
+            final abs = pcm16[i].abs();
+            if (abs > peak) peak = abs;
+          }
+          _peerAudioLevels[entry.key] = (peak / 32768.0).clamp(0.0, 1.0);
+        } catch (e) {
+          _log.debug(
+              'Opus decode failed for ${entry.key.substring(0, 8)}: $e');
+          _peerAudioLevels[entry.key] = 0.0;
         }
-        _peerAudioLevels[entry.key] =
-            (peak / 32768.0).clamp(0.0, 1.0);
       } else {
         _peerAudioLevels[entry.key] = 0.0;
       }
@@ -340,32 +194,43 @@ class AudioMixer {
 
     if (pcmFrames.isEmpty) return;
 
-    // Mix and play
-    final mixed = mixPcm(pcmFrames);
-    if (mixed.length != _frameSize) return;
-
-    final byteView = _playbackPcmPtr!.cast<Uint8>().asTypedList(_frameSize);
-    byteView.setAll(0, mixed);
-    _shim.playbackWrite(_engine!, _playbackPcmPtr!, _samplesPerFrame);
+    final mixed = _mixPcmInt16(pcmFrames);
+    _voiceSession!.writePlaybackFrame(mixed);
   }
 
-  /// Mix N PCM buffers (16-bit mono) into one by sample-wise addition
-  /// with clamping to [-32768, 32767].
+  static Int16List _mixPcmInt16(List<Int16List> frames) {
+    if (frames.length == 1) return Int16List.fromList(frames.first);
+
+    final len = frames.first.length;
+    final result = Int16List(len);
+    for (var i = 0; i < len; i++) {
+      var sum = 0;
+      for (final f in frames) {
+        if (i < f.length) sum += f[i];
+      }
+      if (sum > 32767) sum = 32767;
+      if (sum < -32768) sum = -32768;
+      result[i] = sum;
+    }
+    return result;
+  }
+
   static Uint8List mixPcm(List<Uint8List> pcmBuffers) {
-    if (pcmBuffers.isEmpty) return Uint8List(_frameSize);
+    if (pcmBuffers.isEmpty) return Uint8List(640);
     if (pcmBuffers.length == 1) return Uint8List.fromList(pcmBuffers.first);
 
-    final result = Uint8List(_frameSize);
+    final frameSize = pcmBuffers.first.length;
+    final samplesPerFrame = frameSize ~/ 2;
+    final result = Uint8List(frameSize);
     final resultView = ByteData.sublistView(result);
 
-    for (var i = 0; i < _samplesPerFrame; i++) {
+    for (var i = 0; i < samplesPerFrame; i++) {
       var sum = 0;
       for (final pcm in pcmBuffers) {
         if (pcm.length >= (i + 1) * 2) {
           sum += ByteData.sublistView(pcm).getInt16(i * 2, Endian.little);
         }
       }
-      // Clamp to int16 range
       if (sum > 32767) sum = 32767;
       if (sum < -32768) sum = -32768;
       resultView.setInt16(i * 2, sum, Endian.little);
@@ -374,66 +239,44 @@ class AudioMixer {
     return result;
   }
 
-  /// Update OUR own send key after rotation (§10.2.1). Switches the encrypt
-  /// side (capture isolate) to the new key.
   void updateOwnSendKey(Uint8List newKey, int version) {
-    if (version <= _ownSendKeyVersion) return; // Ignore old versions
+    if (version <= _ownSendKeyVersion) return;
     _ownSendKey = newKey;
     _ownSendKeyVersion = version;
-    _captureCommandPort?.send(Uint8List.fromList(newKey));
     _log.info('Own send_key updated to version $version');
   }
 
-  /// Remove a peer (left/crashed).
   void removePeer(String nodeIdHex) {
     _peerBuffers.remove(nodeIdHex);
     _peerAudioLevels.remove(nodeIdHex);
+    _peerDecoders.remove(nodeIdHex)?.dispose();
   }
 
-  /// Stop everything.
   void stop() {
     if (!_running) return;
     _running = false;
 
+    _captureTimer?.cancel();
+    _captureTimer = null;
     _mixTimer?.cancel();
     _mixTimer = null;
 
-    _frameSubscription?.cancel();
-    _frameSubscription = null;
-
-    _captureCommandPort?.send(_MixerCaptureCommand.stop);
-
-    if (_engine != null) {
-      try {
-        _shim.stop(_engine!);
-      } catch (e) {
-        _log.warn('cleona_audio stop threw (mixer): $e');
-      }
+    try {
+      _voiceSession?.stop();
+      _voiceSession?.close();
+    } catch (e) {
+      _log.warn('VoiceSession stop/close threw (mixer): $e');
     }
+    _voiceSession = null;
 
-    _captureIsolate?.kill(priority: Isolate.beforeNextEvent);
-    _captureIsolate = null;
-    _captureCommandPort = null;
-    _frameReceivePort?.close();
-    _frameReceivePort = null;
+    _captureCodec?.dispose();
+    _captureCodec = null;
+    _captureBuf = null;
 
-    if (_engine != null) {
-      try {
-        _shim.destroy(_engine!);
-      } catch (e) {
-        _log.warn('cleona_audio destroy threw (mixer): $e');
-      }
-      _engine = null;
+    for (final decoder in _peerDecoders.values) {
+      decoder.dispose();
     }
-    if (_playbackPcmPtr != null) {
-      try {
-        calloc.free(_playbackPcmPtr!);
-      } catch (e) {
-        _log.warn('calloc.free(_playbackPcmPtr) threw (mixer): $e');
-      }
-      _playbackPcmPtr = null;
-    }
-
+    _peerDecoders.clear();
     _peerBuffers.clear();
     _peerAudioLevels.clear();
     _log.info('AudioMixer stopped');
@@ -444,8 +287,6 @@ class AudioMixer {
   bool get isMuted => _muted;
   set muted(bool value) {
     _muted = value;
-    _captureCommandPort?.send(
-        value ? _MixerCaptureCommand.mute : _MixerCaptureCommand.unmute);
     _log.info('Microphone ${value ? "muted" : "unmuted"}');
   }
 
@@ -453,6 +294,13 @@ class AudioMixer {
   set speakerEnabled(bool value) {
     _speakerEnabled = value;
     onSpeakerToggle?.call(value);
+    if (_voiceSession != null) {
+      final route = value ? VoiceRoute.speaker : VoiceRoute.earpiece;
+      final rc = _voiceSession!.setRoute(route);
+      if (rc < 0) {
+        _log.debug('setRoute(${route.logName}) returned $rc');
+      }
+    }
     _log.info('Speaker ${value ? "enabled" : "disabled"}');
   }
 }

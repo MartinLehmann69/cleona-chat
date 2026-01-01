@@ -15,7 +15,7 @@
 # Two failure classes exist and only a directory check catches both:
 #   * inputs (libsodium/liboqs/libzstd) — verified at configure time as well,
 #     but a POST_BUILD copy can still fail afterwards
-#   * outputs (cleona_net/cleona_audio/cleona_pow) — the target may be dropped
+#   * outputs (cleona_net/cleona_pow) — the target may be dropped
 #     from the MSBuild solution filter, or copy_if_different may hit a file lock
 #     from a still-running cleona.exe. Exactly how cleona_pow.dll was absent
 #     from every Windows build until S281.
@@ -61,7 +61,7 @@ if(_missing)
     "\n"
     "Inputs (libsodium/liboqs/libzstd) come from the provisioned package or\n"
     "windows/runner/ — provision them with windows/provision-<lib>.ps1.\n"
-    "Outputs (cleona_net/cleona_audio/cleona_pow) are built from native/ —\n"
+    "Outputs (cleona_net/cleona_pow) are built from native/ —\n"
     "check that the target was built and that its POST_BUILD copy succeeded\n"
     "(a running cleona.exe locks the destination file).\n"
     "\n"

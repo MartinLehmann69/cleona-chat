@@ -1118,7 +1118,124 @@ int main(int argc, char** argv) {
     /* ==================================================================== *
      * V30 — teardown
      * ==================================================================== */
+    /* ==================================================================== *
+     * V32, V33, V34 — Erratum 7: a session may be decode-only.
+     * ====================================================================
+     * A group call opens one session PER REMOTE STREAM and the extra ones
+     * carry no camera (cleona_video.h, session paragraph + Erratum 7). Two
+     * things are checked, and the first one is the important one: a backend
+     * that has not implemented the direction yet must FAIL CLOSED. Quietly
+     * opening a duplex session instead would acquire a camera nobody asked
+     * for and report an encoder that will never produce a frame — the caller
+     * cannot tell that apart from a working decode-only session until the
+     * picture never arrives.
+     *
+     * The docs' own requirement this serves: docs/CALLS.md's group-video
+     * layout shows three remote tiles plus the local one at once, i.e. three
+     * concurrent decoders on one device. A backend limited to a single
+     * session cannot render that screen.
+     */
+    ch_section("decode-only sessions (Erratum 7)");
+    {
+        cleona_video_config_t rx_req =
+            make_cfg(CLEONA_VIDEO_CODEC_H264, REQ_W, REQ_H, REQ_FPS, REQ_KBPS,
+                     REQ_MFB, 30);
+        rx_req.direction = CLEONA_VIDEO_DIR_DECODE_ONLY;
+
+        cleona_video_config_t rx_neg;
+        memset(&rx_neg, 0, sizeof(rx_neg));
+        cleona_video_session_t* rx = CVID.open(&rx_req, &rx_neg);
+
+        if (rx == NULL) {
+            /* Legal intermediate state, named as such by the erratum — but it
+             * has to be the RIGHT refusal. ERR_UNSUPPORTED says "this device
+             * or this backend has no such path"; anything else would send the
+             * caller down a retry or a user-facing bandwidth message. */
+            ch_check("V32", "a backend without decode-only support fails "
+                            "closed with ERR_UNSUPPORTED",
+                     rx_neg.max_frame_bytes == CLEONA_VIDEO_ERR_UNSUPPORTED,
+                     "open error code = %d (expected %d)",
+                     rx_neg.max_frame_bytes, CLEONA_VIDEO_ERR_UNSUPPORTED);
+            ch_note("V33", "decode-only not implemented by this backend",
+                    "group video cannot render remote streams here -- see "
+                    "docs/CALLS.md group layout");
+        } else {
+            /* Erratum 6b is unchanged for this direction: success still means
+             * max_frame_bytes > 0, so the two cases stay distinguishable. */
+            ch_check("V32", "decode-only open succeeds and echoes the "
+                            "direction, Erratum 6b intact",
+                     rx_neg.direction == CLEONA_VIDEO_DIR_DECODE_ONLY &&
+                         rx_neg.max_frame_bytes > 0,
+                     "direction=%d max_frame_bytes=%d",
+                     rx_neg.direction, rx_neg.max_frame_bytes);
+
+            int32_t rx_start = CVID.start(rx);
+            int32_t rx_sz = 0, rx_fl = 0;
+            int64_t rx_pt = 0;
+            /* No encoder, so no frame can ever arrive -- but the session is
+             * running, so this is a TIMEOUT and never READ_CLOSED. A blocking
+             * read would hang here, which is why the ABI names the answer. */
+            int32_t rx_read = CVID.read_encoded(rx, g_buf, g_mfb, &rx_sz,
+                                                &rx_fl, &rx_pt, 10);
+            int32_t rx_kf = CVID.request_keyframe(rx);
+            int32_t rx_cam = CVID.switch_camera(rx);
+            /* Accepted and ignored: a caller driving N sessions uniformly must
+             * not have to special-case this one. */
+            CVID.set_capture_enabled(rx, 0);
+            CVID.set_capture_enabled(rx, 1);
+
+            cleona_video_report_t rxr;
+            memset(&rxr, 0, sizeof(rxr));
+            CVID.get_report(rx, &rxr);
+
+            ch_check("V33", "decode-only: read times out, encoder controls "
+                            "report unsupported, report shows no encoder",
+                     rx_start == CLEONA_VIDEO_OK &&
+                         rx_read == CLEONA_VIDEO_READ_TIMEOUT &&
+                         rx_kf == CLEONA_VIDEO_ERR_UNSUPPORTED &&
+                         rx_cam == CLEONA_VIDEO_ERR_UNSUPPORTED &&
+                         rxr.encode_backend == CLEONA_VIDEO_BACKEND_NONE &&
+                         rxr.hardware_encode == CLEONA_VIDEO_HW_NO &&
+                         rxr.frames_encoded == 0,
+                     "start=%d read=%d keyframe=%d camera=%d encode_backend=%d "
+                     "hw_encode=%d encoded=%lld",
+                     rx_start, rx_read, rx_kf, rx_cam, rxr.encode_backend,
+                     rxr.hardware_encode, (long long)rxr.frames_encoded);
+
+            /* Direction is fixed at open: a session opened to decode cannot
+             * grow a camera. */
+            cleona_video_config_t flip = rx_req;
+            flip.direction = CLEONA_VIDEO_DIR_DUPLEX;
+            cleona_video_config_t flip_out;
+            memset(&flip_out, 0, sizeof(flip_out));
+            ch_check("V34", "reconfigure cannot change a session's direction",
+                     CVID.reconfigure(rx, &flip, &flip_out) ==
+                         CLEONA_VIDEO_ERR_INVALID,
+                     "a decode-only session must not become duplex");
+
+            CVID.stop(rx);
+            CVID.close(rx);
+        }
+    }
+
     ch_section("teardown");
+
+    /* V30 asks whether stop() PRESERVES the counters. Its baseline must
+     * therefore be read immediately before the stop. It used to compare
+     * against `rf`, snapshotted ~190 lines earlier at the end of the frame
+     * checks -- but `s` is still RUNNING throughout everything in between, so
+     * its encoder keeps advancing frames_encoded and any wall-clock time spent
+     * there made the comparison fail for a reason that has nothing to do with
+     * stop(). That stayed invisible only as long as the decode-only section
+     * above did nothing: before Erratum 7 was implemented, open() refused
+     * immediately and the block cost ~0 ms. Once a backend actually supports
+     * the direction, the same block opens, starts, reads and closes real
+     * sessions -- measured on Android (emulator-5554): V30 failed with
+     * "encoded kept=52" against a stale baseline while every other field it
+     * asserts was correct. */
+    cleona_video_report_t rbefore_stop;
+    memset(&rbefore_stop, 0, sizeof(rbefore_stop));
+    CVID.get_report(s, &rbefore_stop);
 
     CVID.stop(s);
     int32_t r_after_stop = CVID.read_encoded(s, g_buf, g_mfb, &sz, &fl, &pt, 10);
@@ -1136,10 +1253,21 @@ int main(int argc, char** argv) {
              r_after_stop == CLEONA_VIDEO_READ_CLOSED &&
              r_kf_stop == CLEONA_VIDEO_ERR_STATE &&
              r_sub_stop == CLEONA_VIDEO_ERR_STATE &&
-             rstop.frames_encoded == rf.frames_encoded &&
+             /* ">=", nicht "==": die Zusage heisst "stop() setzt die Zaehler
+              * nicht zurueck". Gleichheit waere gegen einen laufenden Encoder
+              * gar nicht zusicherbar -- zwischen dem Lesen des Ankers und dem
+              * Lock in stop() liegt immer ein Fenster, in dem der Encode-Thread
+              * noch einen Frame abliefern darf. Gemessen auf emulator-5554:
+              * dieselbe Pruefung fiel in einem Lauf mit kept=58 durch und ging
+              * im naechsten mit before=56 kept=56 durch, ohne Codeaenderung
+              * dazwischen. Ein Backend, das die Zaehler wirklich verliert,
+              * faellt weiterhin durch (0 >= 56 ist falsch). */
+             rstop.frames_encoded >= rbefore_stop.frames_encoded &&
              r_restart == CLEONA_VIDEO_OK,
-             "read=%d keyframe=%d submit=%d encoded kept=%lld restart=%d",
+             "read=%d keyframe=%d submit=%d encoded before=%lld kept=%lld "
+             "restart=%d",
              r_after_stop, r_kf_stop, r_sub_stop,
+             (long long)rbefore_stop.frames_encoded,
              (long long)rstop.frames_encoded, r_restart);
 
     CVID.stop(s);

@@ -39,19 +39,6 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
 
-# === cleona_audio shim (cleona_audio.dll) ===
-# Built from native/cleona_audio/, copied next to cleona.exe so DynamicLibrary
-# can load it for FFI calls (audio_engine_shim.dart looks for "cleona_audio.dll"
-# in the same directory as the executable).
-add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_audio" "${CMAKE_BINARY_DIR}/cleona_audio_build")
-add_dependencies(${BINARY_NAME} cleona_audio)
-add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:cleona_audio>
-            $<TARGET_FILE_DIR:${BINARY_NAME}>
-    COMMENT "Copying cleona_audio.dll into Windows bundle"
-)
-
 # === cleona_net shim (cleona_net.dll) ===
 # Direct-syscall UDP send-path — see Cleona_Chat_Architecture_v3_0.md §4.5.2.
 # Built from native/cleona_net/, copied next to cleona.exe so DynamicLibrary
@@ -253,7 +240,7 @@ endforeach()
 
 # Post-build completeness check over the finished bundle. The three above are
 # inputs and already verified at configure time, but their POST_BUILD copy can
-# still fail; cleona_net, cleona_audio and cleona_pow are build OUTPUTS whose
+# still fail; cleona_net and cleona_pow are build OUTPUTS whose
 # copy can fail for a second reason (target dropped from the MSBuild solution
 # filter, destination locked by a running cleona.exe). Inspecting the directory
 # is the only place that catches both classes. Comma-separated on purpose: a
@@ -261,7 +248,7 @@ endforeach()
 add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   COMMAND ${CMAKE_COMMAND}
           -DBUNDLE_DIR=$<TARGET_FILE_DIR:${BINARY_NAME}>
-          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_audio.dll,cleona_pow.dll,cleona_voice.dll,cleona_video.dll
+          -DEXPECTED_DLLS=libsodium.dll,liboqs.dll,libzstd.dll,opus.dll,cleona_net.dll,cleona_pow.dll,cleona_voice.dll,cleona_video.dll
           -P "${CMAKE_CURRENT_SOURCE_DIR}/../verify_bundle_dlls.cmake"
   COMMENT "Verifying native DLLs in the Windows bundle"
   VERBATIM

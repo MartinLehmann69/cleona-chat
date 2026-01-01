@@ -689,7 +689,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Forward whatever was buffered on the plain fields below (set by
     // callers that ran before startService, e.g. main.dart's
     // _wireServiceCallbacks) to the now-constructed CallService.
-    _calls.onGroupVideoI420Frame = _bufferedOnGroupVideoI420Frame;
+    _calls.onGroupVideoTexture = _bufferedOnGroupVideoTexture;
     _calls.createVideoEngine = _bufferedCreateVideoEngine;
     _calls.onVideoFrameReceived = _bufferedOnVideoFrameReceived;
     _calls.onKeyframeRequested = _bufferedOnKeyframeRequested;
@@ -7404,14 +7404,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // `createVideoEngine`) before `await service.startService()` runs, which
   // would otherwise throw LateInitializationError. The buffered value is
   // handed to `_calls` in startService (see there) once it exists.
-  void Function(String senderHex, Uint8List i420, int width, int height)?
-      _bufferedOnGroupVideoI420Frame;
-  void Function(String senderHex, Uint8List i420, int width, int height)?
-      get onGroupVideoI420Frame => _bufferedOnGroupVideoI420Frame;
-  set onGroupVideoI420Frame(
-      void Function(String, Uint8List, int, int)? v) {
-    _bufferedOnGroupVideoI420Frame = v;
-    if (_callsReady) _calls.onGroupVideoI420Frame = v;
+  void Function(String senderHex, int? textureId)? _bufferedOnGroupVideoTexture;
+  void Function(String senderHex, int? textureId)? get onGroupVideoTexture =>
+      _bufferedOnGroupVideoTexture;
+  set onGroupVideoTexture(void Function(String, int?)? v) {
+    _bufferedOnGroupVideoTexture = v;
+    if (_callsReady) _calls.onGroupVideoTexture = v;
   }
 
   dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?

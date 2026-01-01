@@ -1370,6 +1370,10 @@ class GroupCallManager {
   /// UI callbacks for collaboration state changes.
   void Function()? onCollaborationChanged;
 
+  /// Fired when screen share starts, stops, or changes quality preset.
+  /// `null` preset = stopped (restore camera defaults).
+  void Function(ScreenSharePreset? preset)? onScreenSharePresetChanged;
+
   /// Initialize all collaboration managers for a call session.
   void _initCollaboration(GroupCallSession session) {
     final profileDir = _log.profileDir ?? '';
@@ -1407,6 +1411,9 @@ class GroupCallManager {
     );
     session.screenShare!.onSendToAll = (type, payload) {
       _sendCollaborationToAll(session, type, payload);
+    };
+    session.screenShare!.onReconfigurePipeline = (preset) {
+      onScreenSharePresetChanged?.call(preset);
     };
 
     _log.info('Collaboration managers initialized');

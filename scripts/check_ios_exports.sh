@@ -24,7 +24,7 @@ fi
 
 # Files that contain platform-specific FFI bindings NOT relevant for iOS.
 # These load Win32 APIs, Linux GTK/appindicator, V4L2, or Windows-only shims.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|android_udp_sender\.dart|video_capture_linux\.dart|dpapi_ffi\.dart"
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|android_udp_sender\.dart|dpapi_ffi\.dart"
 
 # Symbols this gate deliberately does NOT require in the exports file.
 # Currently empty, and the bar for adding one is high.
@@ -89,7 +89,7 @@ for sym in $SYMBOLS; do
     continue
   fi
 
-  # Check wildcard match (e.g. _cleona_audio_* matches _cleona_audio_create)
+  # Check wildcard match (e.g. _cleona_voice_* matches _cleona_voice_open)
   matched=0
   while IFS= read -r line; do
     prefix="${line%\*}"

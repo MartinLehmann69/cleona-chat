@@ -57,16 +57,9 @@ pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
-# === cleona_audio shim (libcleona_audio.so) ===
-# Built from native/cleona_audio/, installed into bundle/lib/ for FFI loading.
-# Note: the install(TARGETS) directive lives further down (after the bundle
-# REMOVE_RECURSE block), so the .so survives Flutter's bundle wipe.
-add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_audio" "${CMAKE_BINARY_DIR}/cleona_audio_build")
-
 # === cleona_net shim (libcleona_net.so) ===
 # Direct-syscall UDP send-path — see Cleona_Chat_Architecture_v3_0.md §4.5.2.
-# Same install pattern as cleona_audio: built here, installed below into
-# bundle/lib/ after the Flutter bundle wipe.
+# Built here, installed below into bundle/lib/ after the Flutter bundle wipe.
 add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_net" "${CMAKE_BINARY_DIR}/cleona_net_build")
 
 # === libopus (audio codec, V1.8/V1.9) ===
@@ -113,7 +106,7 @@ set_target_properties(opus PROPERTIES PUBLIC_HEADER "")
 
 # === cleona_voice (libcleona_voice.so) — V1.1, PipeWire ===
 # Built from native/cleona_voice/, installed into bundle/lib/ for FFI loading.
-# Same install pattern as cleona_audio/cleona_net: the install(TARGETS)
+# Same install pattern as cleona_net: the install(TARGETS)
 # directive lives further down, after the bundle REMOVE_RECURSE block.
 # CLEONA_VOICE_BUILD_MOCK is intentionally left at its default (ON): Check 15
 # (scripts/preflight.sh) only forbids REFERENCING the mock target from a
@@ -140,7 +133,7 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_voice" "${CMAKE_BINARY_DI
 # cleona_voice above:
 #   video (V1.13, VA-API/V4L2 M2M): add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_video" "${CMAKE_BINARY_DIR}/cleona_video_build")
 #                            install the `cleona_video` target (NOT `cleona_video_mock`)
-#                            into ${INSTALL_BUNDLE_LIB_DIR}, same pattern as cleona_audio/cleona_net below.
+#                            into ${INSTALL_BUNDLE_LIB_DIR}, same pattern as cleona_net below.
 # See native/cleona_video/BUILD_REQUEST.md §2 for the exact snippet and the
 # CMake options (CLEONA_VIDEO_BUILD_MOCK / BUILD_SMOKE) a production build
 # must turn OFF.
@@ -182,20 +175,16 @@ set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
-# cleona_audio shim — install after the bundle wipe above so the .so lands in
+# cleona_net shim — installed after the bundle wipe above so the .so lands in
 # bundle/lib/ next to libapp.so (RPATH $ORIGIN/lib resolves it for FFI).
-install(TARGETS cleona_audio LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
-  COMPONENT Runtime)
-
-# cleona_net shim — same install pattern as cleona_audio.
 install(TARGETS cleona_net LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
-# libopus — same install pattern as cleona_audio/cleona_net.
+# libopus — same install pattern as cleona_net.
 install(TARGETS opus LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
-# cleona_voice — same install pattern as cleona_audio/cleona_net.
+# cleona_voice — same install pattern as cleona_net.
 install(TARGETS cleona_voice LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 

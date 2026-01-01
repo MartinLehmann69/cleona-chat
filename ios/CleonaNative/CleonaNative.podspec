@@ -2,7 +2,7 @@
 # CleonaNative — prebuilt native C libraries for Cleona Chat.
 #
 # All native libs (libsodium, liboqs, libzstd, liberasurecode, libopus,
-# whisper.cpp, libcleona_audio) are merged into a single static archive
+# whisper.cpp, libcleona_voice) are merged into a single static archive
 # by scripts/build-ios-libs.sh. The merged archive is force-loaded so
 # that dart:ffi can find symbols via DynamicLibrary.process().
 #

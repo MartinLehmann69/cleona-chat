@@ -1,443 +1,302 @@
-/// Video engine for 1:1 video calls.
+/// V2.3 video engine — the integration layer between [VideoPipeline] (V0.3),
+/// [VideoRateController] (V1.17), AES-256-GCM encryption ([SodiumFFI]), and
+/// the dynamic-dispatch surface that [CallService] already uses.
 ///
-/// Manages the video pipeline:
-/// - Capture: V4L2 → I420 → VP8 encode → AES-256-GCM encrypt → send callback
-/// - Receive: encrypted data → decrypt → VP8 decode → I420 → RGBA → display callback
+/// ## What changed (the "replaced" in V2.3's spec entry)
 ///
-/// Capture runs in a separate Isolate to avoid blocking the main thread.
-/// The shared AES-256-GCM key is the same as for audio (negotiated at call start).
+/// The superseded file imported `dart:ui`, `vpx_ffi.dart`, ran an Isolate for
+/// capture, and did five per-frame pixel conversions on the Dart heap (I420
+/// rotation, mirroring, two I420→RGBA conversions, `decodeImageFromPixels`).
+/// This file does none of that:
+///
+///   * **No `dart:ui`** — the daemon can load this file, so desktop video calls
+///     are no longer silently audio-only (`main.dart:2163-2171` comment is gone).
+///   * **No VpxFFI** — capture, H.264 encode and decode happen inside the
+///     platform backend loaded by [VideoPipeline] (V0.3, I10).
+///   * **No Isolate for capture** — the native backend runs its own thread;
+///     Dart polls [VideoPipeline.readEncoded] with timeout 0 on a Timer.
+///   * **No pixel conversions** — [textureId] is an opaque int for a Flutter
+///     `Texture` widget; no `ui.Image`, no RGBA, no `decodeImageFromPixels`.
+///   * **Adaptive bitrate** — [VideoRateController] replaces the hard-coded
+///     `VideoPreset.medium` (`video_engine.dart:268` in the old file).
+///
+/// ## Dynamic dispatch surface (call_service.dart compatibility)
+///
+/// [CallService] accesses the engine via `dynamic` — no import, no type.
+/// Every public member name the old engine had that call_service.dart touches
+/// is preserved:
+///
+///   [start], [stop], [processReceivedFrame], [forceKeyframe], [muted] (set),
+///   [switchCamera], [isRunning], [isMuted], [onVideoFrame], [onKeyframeNeeded],
+///   [onCaptureStop], [updateKey].
+///
+/// New: [textureId], [onVideoShutdown], [report].
+///
+/// Removed: `onDecodedFrame(ui.Image)`, `onDecodedI420`, `feedExternalFrame`,
+/// `onSwitchCameraRequested`, `i420ToRgba`, `rotateI420`,
+/// `mirrorI420Horizontal`, `useIsolateCapture`, `preset` — none of these
+/// exist on the new engine. Dynamic access from call_service.dart catches
+/// NoSuchMethodError silently, so removal is safe.
 library;
 
 import 'dart:async';
-import 'dart:isolate';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 
+import 'package:cleona/core/calls/bandwidth_estimator.dart';
+import 'package:cleona/core/calls/video_pipeline.dart';
 import 'package:cleona/core/calls/video_preset.dart';
-import 'package:cleona/core/calls/vpx_ffi.dart';
+import 'package:cleona/core/calls/video_rate_control.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/udp_fragmenter.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
 export 'package:cleona/core/calls/video_preset.dart';
+export 'package:cleona/core/calls/video_pipeline.dart'
+    show
+        VideoReport,
+        VideoOpenOutcome,
+        VideoOpenAccepted,
+        VideoOpenRateUnachievable,
+        VideoLibraryNotAvailable,
+        VideoPipelineException;
+export 'package:cleona/core/calls/video_rate_control.dart'
+    show
+        VideoRateShutdownReason,
+        VideoRateControlShutdown,
+        VideoOpenShutdown,
+        videoOpenShutdownFor;
 
-// ── Capture Isolate Messages ─────────────────────────────────────────
-
-class _CaptureInit {
-  final SendPort frameSendPort;
-  final Uint8List sharedSecret;
-  final String cameraDevice;
-  final int width;
-  final int height;
-  final int fps;
-  final int bitrateKbps;
-  final int keyframeInterval;
-
-  _CaptureInit({
-    required this.frameSendPort,
-    required this.sharedSecret,
-    required this.cameraDevice,
-    required this.width,
-    required this.height,
-    required this.fps,
-    required this.bitrateKbps,
-    required this.keyframeInterval,
-  });
-}
-
-enum _CaptureCommand { stop, forceKeyframe, mute, unmute }
-
-// ── Capture Isolate Entry Point ──────────────────────────────────────
-
-/// Runs in a separate isolate. Captures camera frames, encodes with VP8,
-/// encrypts with AES-256-GCM, and sends serialized VideoFrame protos back.
-///
-/// See audio_engine.dart 2026-04-26 fix: ReceivePort isn't sendable across
-/// Isolate.spawn, so the child creates its own command RX and ships its
-/// SendPort back as the first wire message; ready-flag follows.
-void _captureIsolateEntry(_CaptureInit init) {
-  final commandPort = ReceivePort();
-  final frameSendPort = init.frameSendPort;
-  frameSendPort.send(commandPort.sendPort);
-
-  // Each isolate needs its own FFI instances
-  VpxFFI? vpx;
-  SodiumFFI? sodium;
-
-  try {
-    vpx = VpxFFI(
-      width: init.width,
-      height: init.height,
-      bitrateKbps: init.bitrateKbps,
-      fps: init.fps,
-      keyframeInterval: init.keyframeInterval,
-    );
-    sodium = SodiumFFI();
-  } catch (e) {
-    frameSendPort.send(null); // signal failure
-    commandPort.close();
-    return;
-  }
-
-  // Open camera via V4L2 shim (FFI — must load in this isolate)
-  // We load the shim dynamically here since the isolate is a separate thread.
-  late final dynamic camera;
-  try {
-    camera = _IsolateCameraCapture(init.cameraDevice, init.width, init.height, init.fps);
-    camera.start();
-  } catch (e) {
-    vpx.dispose();
-    frameSendPort.send(null); // signal failure
-    commandPort.close();
-    return;
-  }
-
-  frameSendPort.send(true); // signal success
-
-  var running = true;
-  var muted = false;
-  var forceNextKeyframe = false;
-  var seqNum = 0;
-  // §10.2.1: our own secret media key. Mutable so a Uint8List command rotates
-  // it mid-call (forward secrecy on membership shrink).
-  var sharedSecret = init.sharedSecret;
-
-  // Listen for commands
-  commandPort.listen((msg) {
-    if (msg == _CaptureCommand.stop) {
-      running = false;
-    } else if (msg == _CaptureCommand.forceKeyframe) {
-      forceNextKeyframe = true;
-    } else if (msg == _CaptureCommand.mute) {
-      muted = true;
-    } else if (msg == _CaptureCommand.unmute) {
-      muted = false;
-    } else if (msg is Uint8List) {
-      sharedSecret = msg;
-    }
-  });
-
-  // Capture loop
-  final frameDurationUs = 1000000 ~/ init.fps;
-
-  while (running) {
-    final startUs = DateTime.now().microsecondsSinceEpoch;
-
-    // Grab frame from camera
-    final i420Frame = camera.grabI420Frame();
-    if (i420Frame == null || muted) {
-      // No frame or muted — sleep for one frame period
-      final elapsed = DateTime.now().microsecondsSinceEpoch - startUs;
-      final sleepUs = frameDurationUs - elapsed;
-      if (sleepUs > 0) {
-        // Busy-wait is not ideal but Isolate has no microsleep
-        final endTime = DateTime.now().microsecondsSinceEpoch + sleepUs;
-        while (DateTime.now().microsecondsSinceEpoch < endTime) {}
-      }
-      continue;
-    }
-
-    // Encode with VP8
-    final forceKf = forceNextKeyframe;
-    forceNextKeyframe = false;
-    final encoded = vpx.encode(i420Frame, forceKeyframe: forceKf);
-    if (encoded == null) continue;
-
-    // Encrypt with AES-256-GCM
-    final nonce = sodium.generateNonce(); // 12 bytes
-    final encrypted = sodium.aesGcmEncrypt(encoded.data, sharedSecret, nonce);
-
-    // Build VideoFrame proto
-    final videoFrame = proto.VideoFrame()
-      ..sequenceNumber = seqNum++
-      ..flags = (encoded.isKeyframe ? 0x01 : 0)
-      ..width = init.width
-      ..height = init.height
-      ..nonce = nonce
-      ..encryptedData = encrypted
-      ..timestampMs = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
-
-    // Send serialized proto back to main isolate
-    frameSendPort.send(videoFrame.writeToBuffer());
-
-    // Frame rate control
-    final elapsed = DateTime.now().microsecondsSinceEpoch - startUs;
-    final sleepUs = frameDurationUs - elapsed;
-    if (sleepUs > 1000) {
-      // Busy-wait for sub-millisecond precision
-      final endTime = DateTime.now().microsecondsSinceEpoch + sleepUs;
-      while (DateTime.now().microsecondsSinceEpoch < endTime) {}
-    }
-  }
-
-  // Cleanup
-  camera.stop();
-  camera.close();
-  vpx.dispose();
-}
-
-/// Minimal camera wrapper for use inside the capture isolate.
-/// Loads libcleona_v4l2.so independently (each isolate needs its own FFI handle).
-class _IsolateCameraCapture {
-  final int width;
-  final int height;
-  bool _started = false;
-
-  _IsolateCameraCapture(String device, this.width, this.height, int fps);
-
-  void start() {
-    // Load the V4L2 shim — this is a simplified in-isolate loader.
-    // The full VideoCaptureLinux class can't be used because it may
-    // reference main-isolate state. We use raw FFI calls instead.
-    _started = true;
-  }
-
-  Uint8List? grabI420Frame() {
-    // Stub: returns synthetic gray frames. Real V4L2 capture is in
-    // video_capture_linux.dart but not yet wired into the isolate.
-    if (!_started) return null;
-    final i420Size = width * height * 3 ~/ 2;
-    final frame = Uint8List(i420Size);
-    // Gray frame: Y=128, U=128, V=128
-    frame.fillRange(0, width * height, 128);
-    frame.fillRange(width * height, i420Size, 128);
-    return frame;
-  }
-
-  void stop() { _started = false; }
-  void close() {}
-}
-
-// ── VideoEngine ──────────────────────────────────────────────────────
-
-/// Manages video capture, encoding, decoding, and display for a video call.
 class VideoEngine {
-  final Uint8List sharedSecret; // 32 bytes AES-256-GCM key
+  VideoEngine({
+    required Uint8List sharedSecret,
+    CLogger? log,
+  })  : _sharedSecret = Uint8List.fromList(sharedSecret),
+        _log = log ?? CLogger('VideoEngine');
+
+  Uint8List _sharedSecret;
   final CLogger _log;
-  final SodiumFFI _sodium;
+  SodiumFFI? _sodium;
 
-  // Capture isolate
-  Isolate? _captureIsolate;
-  SendPort? _captureCommandPort;
-  ReceivePort? _frameReceivePort;
+  VideoPipeline? _pipeline;
+  VideoRateController? _rateController;
+  Timer? _readTimer;
+  Timer? _rateControlTimer;
 
-  // Decoder (runs in main isolate — decoding is fast enough)
-  VpxFFI? _decoder;
-
-  // State
   bool _running = false;
   bool _muted = false;
-  final VideoPreset _preset;
-  final String _cameraDevice;
+  int _seqNum = 0;
 
-  /// When true (default), capture runs in a background isolate driving a
-  /// (currently stubbed) V4L2 camera — the desktop/Linux path. When false,
-  /// no isolate is spawned; the platform layer feeds already-captured I420
-  /// frames in via [feedExternalFrame] (e.g. Android CameraX MethodChannel).
-  /// In external mode encode and decode share the single [_decoder]
-  /// VpxFFI instance (full-duplex, one native codec pair per 1:1 call).
-  final bool useIsolateCapture;
-
-  /// Called when an encrypted video frame is ready to send to the peer.
-  void Function(Uint8List serializedVideoFrame)? onVideoFrame;
-
-  /// Called when a decoded video frame (RGBA) is ready for display.
-  void Function(ui.Image image)? onDecodedFrame;
-
-  /// Called when a decoded I420 frame is available (for testing/alternative rendering).
-  void Function(Uint8List i420Data, int width, int height)? onDecodedI420;
-
-  /// Receive-side: fired when we cannot decode the incoming stream (no
-  /// keyframe seen yet, or repeated decode failures) so the caller should
-  /// ask the peer for a fresh keyframe (§ sendKeyframeRequest).
-  void Function()? onKeyframeNeeded;
-
-  /// External-capture hooks (Android CameraX today). Wired by whatever
-  /// created this engine with [useIsolateCapture] == false. No-ops on
-  /// platforms without a capture integration (e.g. iOS today).
-  void Function()? onCaptureStop;
-  Future<bool> Function()? onSwitchCameraRequested;
-
-  bool _forceKeyframeExternal = false;
-  int _externalSeqNum = 0;
   bool _hasSeenKeyframe = false;
   int _consecutiveDecodeFailures = 0;
 
-  VideoEngine({
-    required this.sharedSecret,
-    VideoPreset preset = VideoPreset.medium,
-    String cameraDevice = '/dev/video0',
-    this.useIsolateCapture = true,
-    CLogger? log,
-  })  : _log = log ?? CLogger('VideoEngine'),
-        _sodium = SodiumFFI(),
-        _preset = preset,
-        _cameraDevice = cameraDevice;
+  // ── Callbacks — same names call_service.dart sets via dynamic dispatch ──
+
+  /// Encrypted+serialized VideoFrame proto, ready for the wire.
+  void Function(Uint8List serializedVideoFrame)? onVideoFrame;
+
+  /// Peer needs a keyframe (stream desync, mid-call join).
+  void Function()? onKeyframeNeeded;
+
+  /// Capture stopped (cleanup hook for platform layer).
+  void Function()? onCaptureStop;
+
+  /// Video shut down due to insufficient bandwidth (Erratum E1).
+  /// [reason] maps 1:1 to `CallVideoOffReason.bandwidthInsufficient` (V1.12).
+  void Function(VideoRateShutdownReason reason, String detail)? onVideoShutdown;
+
+  // ── Getters ────────────────────────────────────────────────────────────
 
   bool get isRunning => _running;
   bool get isMuted => _muted;
-  VideoPreset get preset => _preset;
 
-  /// Start video capture and encoding.
+  /// Texture ID for the remote peer's decoded video — an opaque int for a
+  /// Flutter `Texture` widget. Null when the backend has no texture path or
+  /// the session is not running.
+  int? get textureId => _pipeline?.textureId;
+
+  /// The verification report (I11). Null before [start].
+  VideoReport? get report {
+    try {
+      return _pipeline?.report();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// The bandwidth estimator, exposed so the caller (V2.1) can feed it
+  /// network stats (`recordSent`, `recordLost`, `updateRtt`).
+  BandwidthEstimator? get estimator => _rateController?.estimator;
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
+
   Future<bool> start() async {
     if (_running) return true;
 
-    // Create the VP8 codec pair (encoder + decoder). If libvpx / the shim
-    // isn't loadable (e.g. stale .so in an old APK), fail soft —
-    // the caller treats `false` as "continue the call audio-only".
     try {
-      _decoder = VpxFFI(
-        width: _preset.width,
-        height: _preset.height,
-        bitrateKbps: _preset.bitrateKbps,
-        fps: _preset.fps,
-      );
+      _sodium = SodiumFFI();
     } catch (e) {
-      _log.warn('VP8 codec unavailable — video disabled, call continues audio-only: $e');
+      _log.warn('SodiumFFI unavailable — video disabled: $e');
       return false;
     }
 
-    if (!useIsolateCapture) {
-      // External capture mode: no isolate. Encode (via feedExternalFrame)
-      // and decode (via processReceivedFrame) both use `_decoder`.
-      _running = true;
-      _log.info('Video engine started (external capture, ${_preset.label})');
-      return true;
-    }
-
-    // Start capture isolate (two-stage handshake — see audio_engine.dart
-    // 2026-04-26 fix: child sends back its command SendPort first, then
-    // ready-flag, then video frame protos).
-    _frameReceivePort = ReceivePort();
-    final commandPortCompleter = Completer<SendPort>();
-    final readyCompleter = Completer<bool>();
-    late StreamSubscription sub;
-    sub = _frameReceivePort!.listen((msg) {
-      if (!commandPortCompleter.isCompleted) {
-        if (msg is SendPort) {
-          commandPortCompleter.complete(msg);
-        } else {
-          commandPortCompleter.completeError(
-              StateError('video capture isolate did not send command port'));
-        }
-        return;
-      }
-      if (!readyCompleter.isCompleted) {
-        if (msg == true) {
-          readyCompleter.complete(true);
-          sub.cancel();
-          _startFrameListener();
-        } else if (msg == null) {
-          readyCompleter.complete(false);
-          sub.cancel();
-        }
-      }
-    });
-
-    try {
-      _captureIsolate = await Isolate.spawn(
-        _captureIsolateEntry,
-        _CaptureInit(
-          frameSendPort: _frameReceivePort!.sendPort,
-          sharedSecret: sharedSecret,
-          cameraDevice: _cameraDevice,
-          width: _preset.width,
-          height: _preset.height,
-          fps: _preset.fps,
-          bitrateKbps: _preset.bitrateKbps,
-          keyframeInterval: _preset.fps * 2, // keyframe every 2 seconds
-        ),
-      );
-    } catch (e) {
-      _log.error('Failed to spawn capture isolate: $e');
-      _decoder?.dispose();
-      _decoder = null;
-      return false;
-    }
-
-    try {
-      _captureCommandPort = await commandPortCompleter.future
-          .timeout(const Duration(seconds: 5));
-    } catch (_) {
-      _log.error('Capture isolate did not hand back command port');
-      stop();
-      return false;
-    }
-
-    final success = await readyCompleter.future.timeout(
-      const Duration(seconds: 5),
-      onTimeout: () => false,
+    final ceiling = UdpFragmenter.liveMediaMaxFrameBytes;
+    final config = VideoConfig(
+      width: VideoPreset.medium.width,
+      height: VideoPreset.medium.height,
+      fps: VideoPreset.medium.fps,
+      targetBitrateKbps: VideoPreset.medium.bitrateKbps,
+      maxFrameBytes: ceiling,
     );
 
-    if (!success) {
-      _log.error('Capture isolate failed to initialize');
-      stop();
+    final VideoOpenOutcome outcome;
+    try {
+      outcome = VideoPipeline.open(config);
+    } on VideoLibraryNotAvailable catch (e) {
+      _log.warn('No video backend: $e');
+      return false;
+    } on VideoPipelineException catch (e) {
+      _log.warn('Video pipeline open failed: $e');
+      return false;
+    }
+
+    switch (outcome) {
+      case VideoOpenAccepted(:final pipeline):
+        _pipeline = pipeline;
+      case VideoOpenRateUnachievable():
+        final shutdown = videoOpenShutdownFor(outcome);
+        if (shutdown != null) {
+          onVideoShutdown?.call(shutdown.reason, shutdown.detail);
+        }
+        _log.info('Video open: rate unachievable at ceiling=$ceiling');
+        return false;
+    }
+
+    _rateController = VideoRateController(pipeline: _pipeline!);
+
+    try {
+      _pipeline!.start();
+    } catch (e) {
+      _log.warn('Video pipeline start failed: $e');
+      _pipeline!.close();
+      _pipeline = null;
+      _rateController = null;
       return false;
     }
 
     _running = true;
-    _log.info('Video engine started (${_preset.label}, ${_preset.bitrateKbps}kbps)');
+    _startReadLoop();
+    _startRateControlLoop();
+
+    _log.info('Video engine started (H.264, ceiling=$ceiling, '
+        'negotiated=${_pipeline!.negotiated})');
     return true;
   }
 
-  void _startFrameListener() {
-    _frameReceivePort?.listen((msg) {
-      if (msg is Uint8List) {
-        // Encrypted video frame from capture isolate
-        onVideoFrame?.call(msg);
-      }
+  void stop() {
+    if (!_running && _pipeline == null) return;
+    _running = false;
+
+    _readTimer?.cancel();
+    _readTimer = null;
+    _rateControlTimer?.cancel();
+    _rateControlTimer = null;
+
+    try {
+      onCaptureStop?.call();
+    } catch (e) {
+      _log.warn('onCaptureStop threw: $e');
+    }
+
+    try {
+      _pipeline?.stop();
+      _pipeline?.close();
+    } catch (e) {
+      _log.warn('Video pipeline close threw: $e');
+    }
+    _pipeline = null;
+    _rateController = null;
+    _hasSeenKeyframe = false;
+    _consecutiveDecodeFailures = 0;
+
+    _log.info('Video engine stopped');
+  }
+
+  // ── Outbound: capture → readEncoded → encrypt → onVideoFrame ──────────
+
+  void _startReadLoop() {
+    _readTimer = Timer.periodic(const Duration(milliseconds: 5), (_) {
+      if (!_running || _muted) return;
+      _readAndSend();
     });
   }
 
-  /// Process an incoming encrypted video frame from the peer.
+  void _readAndSend() {
+    final pipeline = _pipeline;
+    if (pipeline == null) return;
+
+    try {
+      final frame = pipeline.readEncoded(timeoutMs: 0);
+      if (frame == null) return;
+
+      final nonce = _sodium!.generateNonce();
+      final encrypted =
+          _sodium!.aesGcmEncrypt(frame.data, _sharedSecret, nonce);
+
+      final videoFrame = proto.VideoFrame()
+        ..sequenceNumber = _seqNum++
+        ..flags = frame.flags
+        ..width = pipeline.negotiated.width
+        ..height = pipeline.negotiated.height
+        ..nonce = nonce
+        ..encryptedData = encrypted
+        ..timestampMs = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
+
+      onVideoFrame?.call(videoFrame.writeToBuffer());
+      _rateController?.estimator.recordSent();
+    } catch (e) {
+      _log.debug('readAndSend error: $e');
+    }
+  }
+
+  // ── Inbound: decrypt → submitEncoded → native decoder → texture ───────
+
   void processReceivedFrame(Uint8List serializedFrame) {
-    if (!_running || _decoder == null) return;
+    if (!_running || _pipeline == null) return;
 
     try {
       final videoFrame = proto.VideoFrame.fromBuffer(serializedFrame);
-      final isKeyframe = (videoFrame.flags & 0x01) != 0;
+      final isKeyframe = (videoFrame.flags & kVideoFlagKeyframe) != 0;
 
-      // Mid-stream join: a P-frame arriving before we've ever seen a
-      // keyframe cannot be decoded meaningfully. Drop it and ask the
-      // sender for a fresh keyframe (rate-limited implicitly — we only
-      // fire once per "waiting for keyframe" episode, see below).
       if (!_hasSeenKeyframe && !isKeyframe) {
         onKeyframeNeeded?.call();
         return;
       }
 
-      // Decrypt
       final Uint8List decrypted;
       try {
-        decrypted = _sodium.aesGcmDecrypt(
+        decrypted = _sodium!.aesGcmDecrypt(
           Uint8List.fromList(videoFrame.encryptedData),
-          sharedSecret,
+          _sharedSecret,
           Uint8List.fromList(videoFrame.nonce),
         );
       } catch (_) {
-        _log.debug('Video frame decrypt failed (seq=${videoFrame.sequenceNumber})');
+        _log.debug(
+            'Video frame decrypt failed (seq=${videoFrame.sequenceNumber})');
         return;
       }
 
-      // Decode VP8 → I420
-      final decoded = _decoder!.decode(decrypted);
-      if (decoded == null) {
-        _registerDecodeFailure();
-        return;
-      }
-
-      _hasSeenKeyframe = true;
-      _consecutiveDecodeFailures = 0;
-
-      // Notify I420 listener (for testing)
-      onDecodedI420?.call(decoded.i420Data, decoded.width, decoded.height);
-
-      // Convert I420 → RGBA for Flutter display
-      if (onDecodedFrame != null) {
-        _i420ToRgbaImage(decoded.i420Data, decoded.width, decoded.height)
-            .then((image) {
-          if (image != null) onDecodedFrame?.call(image);
-        });
+      final result =
+          _pipeline!.submitEncoded(decrypted, isKeyframe: isKeyframe);
+      switch (result) {
+        case VideoSubmitResult.accepted:
+          _hasSeenKeyframe = true;
+          _consecutiveDecodeFailures = 0;
+          _rateController?.estimator.recordReceived();
+        case VideoSubmitResult.awaitingKeyframe:
+          onKeyframeNeeded?.call();
+        case VideoSubmitResult.decodeError:
+          _registerDecodeFailure();
       }
     } catch (e) {
       _registerDecodeFailure();
@@ -445,8 +304,6 @@ class VideoEngine {
     }
   }
 
-  /// After a few consecutive decode failures, assume the stream desynced
-  /// (e.g. a dropped keyframe) and ask the sender for a new one.
   void _registerDecodeFailure() {
     _consecutiveDecodeFailures++;
     if (_consecutiveDecodeFailures >= 3) {
@@ -456,284 +313,98 @@ class VideoEngine {
     }
   }
 
-  /// Feed an externally-captured I420 frame (e.g. Android CameraX via
-  /// MethodChannel, running on the main isolate) into the VP8 encoder +
-  /// AES-256-GCM encryption path. No-op in isolate-capture mode, while not
-  /// running, or while muted.
-  void feedExternalFrame(Uint8List i420Data, int width, int height) {
-    if (useIsolateCapture || !_running || _decoder == null || _muted) return;
-    try {
-      final forceKf = _forceKeyframeExternal;
-      _forceKeyframeExternal = false;
-      final encoded = _decoder!.encode(i420Data, forceKeyframe: forceKf);
-      if (encoded == null) return;
+  // ── Rate control ──────────────────────────────────────────────────────
 
-      final nonce = _sodium.generateNonce();
-      final encrypted = _sodium.aesGcmEncrypt(encoded.data, sharedSecret, nonce);
+  void _startRateControlLoop() {
+    _rateControlTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_running) return;
+      _tickRateControl();
+    });
+  }
 
-      final videoFrame = proto.VideoFrame()
-        ..sequenceNumber = _externalSeqNum++
-        ..flags = (encoded.isKeyframe ? 0x01 : 0)
-        ..width = width
-        ..height = height
-        ..nonce = nonce
-        ..encryptedData = encrypted
-        ..timestampMs = DateTime.now().millisecondsSinceEpoch & 0xFFFFFFFF;
+  void _tickRateControl() {
+    final controller = _rateController;
+    if (controller == null) return;
 
-      onVideoFrame?.call(videoFrame.writeToBuffer());
-    } catch (e) {
-      _log.debug('External frame encode failed: $e');
+    final outcome = controller.evaluateAndApply();
+    switch (outcome) {
+      case VideoRateControlUnchanged(:final estimate):
+        if (estimate.needsKeyframe) _pipeline?.requestKeyframe();
+      case VideoRateControlStepped(:final quality, :final estimate):
+        _log.debug('Video rate stepped to $quality');
+        if (estimate.needsKeyframe) _pipeline?.requestKeyframe();
+      case VideoRateControlShutdown(:final reason, :final detail):
+        _log.info('Video rate shutdown: $detail');
+        _muted = true;
+        _pipeline?.captureEnabled = false;
+        onVideoShutdown?.call(reason, detail);
     }
   }
 
-  /// Ask the platform capture layer to switch cameras (Android front/back).
-  /// Returns false with a debug log on platforms without a capture hook.
+  // ── Control surface (call_service.dart dynamic dispatch) ──────────────
+
+  void forceKeyframe() {
+    _pipeline?.requestKeyframe();
+  }
+
+  set muted(bool value) {
+    _muted = value;
+    _pipeline?.captureEnabled = !value;
+  }
+
   Future<bool> switchCamera() async {
-    final hook = onSwitchCameraRequested;
-    if (hook == null) {
-      _log.debug('switchCamera: no capture hook on this platform — no-op');
-      return false;
-    }
     try {
-      return await hook();
+      return _pipeline?.switchCamera() ?? false;
     } catch (e) {
       _log.warn('switchCamera failed: $e');
       return false;
     }
   }
 
-  /// Convert I420 YUV data to a Flutter ui.Image (RGBA8888).
-  static Future<ui.Image?> _i420ToRgbaImage(
-      Uint8List i420, int width, int height) async {
-    final rgba = i420ToRgba(i420, width, height);
-
-    final completer = Completer<ui.Image?>();
-    ui.decodeImageFromPixels(
-      rgba,
-      width,
-      height,
-      ui.PixelFormat.rgba8888,
-      (ui.Image img) => completer.complete(img),
-    );
-    return completer.future;
-  }
-
-  /// Convert I420 (YUV 4:2:0) to RGBA8888.
-  /// Exported for testing.
-  static Uint8List i420ToRgba(Uint8List i420, int width, int height) {
-    final ySize = width * height;
-    final uvSize = ySize ~/ 4;
-    final rgba = Uint8List(width * height * 4);
-
-    for (var row = 0; row < height; row++) {
-      for (var col = 0; col < width; col++) {
-        final yIdx = row * width + col;
-        final uvIdx = (row ~/ 2) * (width ~/ 2) + (col ~/ 2);
-
-        final y = i420[yIdx] - 16;
-        final u = i420[ySize + uvIdx] - 128;
-        final v = i420[ySize + uvSize + uvIdx] - 128;
-
-        // ITU-R BT.601 conversion
-        var r = ((298 * y + 409 * v + 128) >> 8).clamp(0, 255);
-        var g = ((298 * y - 100 * u - 208 * v + 128) >> 8).clamp(0, 255);
-        var b = ((298 * y + 516 * u + 128) >> 8).clamp(0, 255);
-
-        final rgbaIdx = (row * width + col) * 4;
-        rgba[rgbaIdx] = r;
-        rgba[rgbaIdx + 1] = g;
-        rgba[rgbaIdx + 2] = b;
-        rgba[rgbaIdx + 3] = 255; // alpha
-      }
-    }
-    return rgba;
-  }
-
-  /// Rotate an I420 frame by [degrees] (0/90/180/270, clockwise) to correct
-  /// for CameraX sensor orientation. Returns the (possibly reshaped) buffer
-  /// plus its new width/height — 90/270 swap width and height.
-  static (Uint8List, int, int) rotateI420(
-      Uint8List i420, int width, int height, int degrees) {
-    if (degrees == 0 || degrees == 360) return (i420, width, height);
-
-    final ySize = width * height;
-    final uvWidth = width ~/ 2;
-    final uvHeight = height ~/ 2;
-    final uvSize = uvWidth * uvHeight;
-
-    if (degrees == 180) {
-      final out = Uint8List(i420.length);
-      // Y plane: reverse all pixels
-      for (var i = 0; i < ySize; i++) {
-        out[i] = i420[ySize - 1 - i];
-      }
-      // U plane
-      for (var i = 0; i < uvSize; i++) {
-        out[ySize + i] = i420[ySize + uvSize - 1 - i];
-      }
-      // V plane
-      for (var i = 0; i < uvSize; i++) {
-        out[ySize + uvSize + i] = i420[ySize + 2 * uvSize - 1 - i];
-      }
-      return (out, width, height);
-    }
-
-    // 90° CW or 270° CW
-    final newWidth = height;
-    final newHeight = width;
-    final newUvWidth = newWidth ~/ 2;
-    final newYSize = newWidth * newHeight;
-    final newUvSize = newUvWidth * (newHeight ~/ 2);
-    final out = Uint8List(newYSize + 2 * newUvSize);
-
-    if (degrees == 90) {
-      // Y plane: 90° CW
-      for (var y = 0; y < height; y++) {
-        for (var x = 0; x < width; x++) {
-          out[x * newWidth + (height - 1 - y)] = i420[y * width + x];
-        }
-      }
-      // U plane
-      for (var y = 0; y < uvHeight; y++) {
-        for (var x = 0; x < uvWidth; x++) {
-          out[newYSize + x * newUvWidth + (uvHeight - 1 - y)] =
-              i420[ySize + y * uvWidth + x];
-        }
-      }
-      // V plane
-      for (var y = 0; y < uvHeight; y++) {
-        for (var x = 0; x < uvWidth; x++) {
-          out[newYSize + newUvSize + x * newUvWidth + (uvHeight - 1 - y)] =
-              i420[ySize + uvSize + y * uvWidth + x];
-        }
-      }
-    } else {
-      // 270° CW (= 90° CCW)
-      for (var y = 0; y < height; y++) {
-        for (var x = 0; x < width; x++) {
-          out[(width - 1 - x) * newWidth + y] = i420[y * width + x];
-        }
-      }
-      for (var y = 0; y < uvHeight; y++) {
-        for (var x = 0; x < uvWidth; x++) {
-          out[newYSize + (uvWidth - 1 - x) * newUvWidth + y] =
-              i420[ySize + y * uvWidth + x];
-        }
-      }
-      for (var y = 0; y < uvHeight; y++) {
-        for (var x = 0; x < uvWidth; x++) {
-          out[newYSize + newUvSize + (uvWidth - 1 - x) * newUvWidth + y] =
-              i420[ySize + uvSize + y * uvWidth + x];
-        }
-      }
-    }
-
-    return (out, newWidth, newHeight);
-  }
-
-  /// Mirror an I420 frame horizontally (selfie-view flip for the front
-  /// camera's local preview — NOT applied to the frame that is actually
-  /// sent to the remote peer).
-  static Uint8List mirrorI420Horizontal(Uint8List i420, int width, int height) {
-    final out = Uint8List(i420.length);
-    final ySize = width * height;
-    final uvWidth = width ~/ 2;
-    final uvHeight = height ~/ 2;
-    final uvSize = uvWidth * uvHeight;
-
-    // Y plane
-    for (var y = 0; y < height; y++) {
-      for (var x = 0; x < width; x++) {
-        out[y * width + (width - 1 - x)] = i420[y * width + x];
-      }
-    }
-    // U plane
-    for (var y = 0; y < uvHeight; y++) {
-      for (var x = 0; x < uvWidth; x++) {
-        out[ySize + y * uvWidth + (uvWidth - 1 - x)] =
-            i420[ySize + y * uvWidth + x];
-      }
-    }
-    // V plane
-    for (var y = 0; y < uvHeight; y++) {
-      for (var x = 0; x < uvWidth; x++) {
-        out[ySize + uvSize + y * uvWidth + (uvWidth - 1 - x)] =
-            i420[ySize + uvSize + y * uvWidth + x];
-      }
-    }
-
-    return out;
-  }
-
-  /// Force next captured frame to be a keyframe (sender side — e.g. after
-  /// a peer's [MTV3_CALL_KEYFRAME_REQUEST]).
-  void forceKeyframe() {
-    if (useIsolateCapture) {
-      _captureCommandPort?.send(_CaptureCommand.forceKeyframe);
-    } else {
-      _forceKeyframeExternal = true;
-    }
-  }
-
-  /// §10.2.1: switch the capture isolate to a rotated own send_key. Used by
-  /// group calls on forward-secrecy rotation (membership shrink).
   void updateKey(Uint8List newKey) {
-    _captureCommandPort?.send(Uint8List.fromList(newKey));
+    _sharedSecret = Uint8List.fromList(newKey);
   }
 
-  /// Mute/unmute video capture (sends black frames when muted in isolate
-  /// mode; simply stops encoding+sending in external-capture mode).
-  set muted(bool value) {
-    _muted = value;
-    if (useIsolateCapture) {
-      _captureCommandPort
-          ?.send(value ? _CaptureCommand.mute : _CaptureCommand.unmute);
-    }
-  }
+  void reconfigureForScreenShare(
+      int width, int height, int fps, int bitrateKbps) {
+    final pipeline = _pipeline;
+    if (pipeline == null) return;
 
-  /// Stop video engine and release resources.
-  void stop() {
-    if (!_running && _captureIsolate == null) return;
-    _running = false;
-
-    if (!useIsolateCapture) {
-      try {
-        onCaptureStop?.call();
-      } catch (e) {
-        _log.warn('onCaptureStop threw: $e');
-      }
-      try {
-        _decoder?.dispose();
-      } catch (e) {
-        _log.warn('VP8 codec dispose threw: $e');
-      }
-      _decoder = null;
-      _log.info('Video engine stopped');
-      return;
-    }
-
-    _captureCommandPort?.send(_CaptureCommand.stop);
-
-    final iso = _captureIsolate;
-    _captureIsolate = null;
-    _captureCommandPort = null;
-
-    if (iso != null) {
-      Future.delayed(const Duration(milliseconds: 200), () {
-        iso.kill(priority: Isolate.immediate);
-      });
-    }
-
-    _frameReceivePort?.close();
-    _frameReceivePort = null;
+    final config = VideoConfig(
+      width: width,
+      height: height,
+      fps: fps,
+      targetBitrateKbps: bitrateKbps,
+      maxFrameBytes: pipeline.negotiated.maxFrameBytes,
+    );
 
     try {
-      _decoder?.dispose();
-    } catch (e) {
-      _log.warn('VP8 decoder dispose threw: $e');
+      pipeline.reconfigure(config);
+      _log.info('Reconfigured for screen share: '
+          '${width}x$height@${fps}fps ${bitrateKbps}kbps');
+    } on VideoPipelineException catch (e) {
+      _log.warn('Screen share reconfigure failed: $e');
     }
-    _decoder = null;
+  }
 
-    _log.info('Video engine stopped');
+  void restoreCameraDefaults() {
+    final pipeline = _pipeline;
+    if (pipeline == null) return;
+
+    final config = VideoConfig(
+      width: VideoPreset.medium.width,
+      height: VideoPreset.medium.height,
+      fps: VideoPreset.medium.fps,
+      targetBitrateKbps: VideoPreset.medium.bitrateKbps,
+      maxFrameBytes: pipeline.negotiated.maxFrameBytes,
+    );
+
+    try {
+      pipeline.reconfigure(config);
+      _rateController = VideoRateController(pipeline: pipeline);
+      _log.info('Restored camera defaults');
+    } on VideoPipelineException catch (e) {
+      _log.warn('Camera restore reconfigure failed: $e');
+    }
   }
 }

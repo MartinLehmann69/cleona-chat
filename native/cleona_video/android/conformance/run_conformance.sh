@@ -157,10 +157,27 @@ cp "$SCRIPT_DIR/runner/ConformanceRunner.kt" "$STAGE/kotlin/ConformanceRunner.kt
 
 # The platform-loop patch described in the file header -- verbatim from
 # native/cleona_video/test/BUILD_REQUEST.md §1, applied to the STAGED tree
-# only. `android/CMakeLists.txt` is the only platform directory this stage
-# needs (V1.13/V1.15/V1.16 do not exist as directories yet, so the loop is
-# inert for the other three names).
-cat >> "$STAGE/cleona_video/CMakeLists.txt" <<'EOF'
+# only.
+#
+# The patch is now CONDITIONAL, and both reasons the original unconditional
+# version gave for being safe have since expired:
+#
+#   1. The header said "native/cleona_video/CMakeLists.txt does not (yet) add a
+#      platform-subdirectory loop". It does -- the build owner landed it, which
+#      is exactly the "real fix" the header pointed at.
+#   2. It said the loop is "inert for the other three names" because
+#      linux/apple/windows did not exist as directories. All three exist now.
+#
+# Appending unconditionally therefore ran the loop twice and CMake refused the
+# configure outright ("The binary directory ... is already used to build a
+# source directory") for android, apple AND windows -- i.e. the whole Android
+# conformance route was dead, every variant, not just the negative controls.
+# Detected here rather than deleted outright so this script still works against
+# an older checkout that predates the loop.
+if grep -q 'foreach(_plat linux android apple windows)' "$STAGE/cleona_video/CMakeLists.txt"; then
+    echo "staging  : platform loop already present upstream -- interim patch not needed"
+else
+    cat >> "$STAGE/cleona_video/CMakeLists.txt" <<'EOF'
 
 # --- interim patch applied ONLY to the staged copy by
 # native/cleona_video/android/conformance/run_conformance.sh (V1.14).
@@ -172,7 +189,8 @@ foreach(_plat linux android apple windows)
   endif()
 endforeach()
 EOF
-echo "staging  : appended the platform loop from test/BUILD_REQUEST.md §1 (staged copy only)"
+    echo "staging  : appended the platform loop from test/BUILD_REQUEST.md §1 (staged copy only)"
+fi
 
 # `sed -i` succeeds on a pattern that matches nothing, which would silently
 # produce a "negative control" that sabotages nothing at all. Every patch is
@@ -200,7 +218,7 @@ case "$VARIANT" in
         # unachievable synthetic case (mfb=1, conformance.c V1b) is
         # reproducible without hardware, so that is what flips.
         patch_file "$STAGE/kotlin/VideoSession.kt" \
-            's|return fail(Abi.ERR_RATE_UNACHIEVABLE)|return fail(Abi.ERR_BACKEND)|' \
+            's|return fail(VErr.ERR_RATE_UNACHIEVABLE)|return fail(VErr.ERR_BACKEND)|' \
             "openSession() reports ERR_BACKEND instead of ERR_RATE_UNACHIEVABLE for an unmeetable ceiling" ;;
     short-frame)
         patch_file "$STAGE/kotlin/VideoSession.kt" \
