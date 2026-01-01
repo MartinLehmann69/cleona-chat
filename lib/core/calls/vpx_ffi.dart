@@ -129,7 +129,9 @@ class VpxFFI {
       }
     }
     if (_lib == null) {
-      final suffix = Platform.isMacOS ? 'dylib' : (Platform.isWindows ? 'dll' : 'so');
+      final suffix = (Platform.isMacOS || Platform.isIOS)
+          ? 'dylib'
+          : (Platform.isWindows ? 'dll' : 'so');
       throw VpxNotAvailableException(
           'libcleona_vpx.$suffix not found. Build: cd native && '
           'gcc -shared -fPIC -O2 -o libcleona_vpx.$suffix vpx_shim.c -ldl');
@@ -327,7 +329,7 @@ class VpxFFI {
     final lastSep = exe.lastIndexOf(sep);
     final exeDir = lastSep > 0 ? exe.substring(0, lastSep) : '.';
 
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isIOS) {
       return [
         'libcleona_vpx.dylib',
         '$exeDir/libcleona_vpx.dylib',

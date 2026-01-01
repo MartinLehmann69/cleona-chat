@@ -57,6 +57,12 @@ pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
+# === cleona_audio shim (libcleona_audio.so) ===
+# Built from native/cleona_audio/, installed into bundle/lib/ for FFI loading.
+# Note: the install(TARGETS) directive lives further down (after the bundle
+# REMOVE_RECURSE block), so the .so survives Flutter's bundle wipe.
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_audio" "${CMAKE_BINARY_DIR}/cleona_audio_build")
+
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
 
@@ -92,6 +98,11 @@ set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}/lib")
 
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
+  COMPONENT Runtime)
+
+# cleona_audio shim — install after the bundle wipe above so the .so lands in
+# bundle/lib/ next to libapp.so (RPATH $ORIGIN/lib resolves it for FFI).
+install(TARGETS cleona_audio LIBRARY DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"

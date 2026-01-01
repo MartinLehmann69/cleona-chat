@@ -42,6 +42,13 @@ abstract class ICleonaService {
   int get fragmentCount;
   bool get isRunning;
   String get displayName;
+  /// True when the user clicked "Open anyway (limited)" on the
+  /// [UpdateRequiredScreen] splash. While active, all user-message send/edit/
+  /// delete paths short-circuit and incoming user messages are silently
+  /// dropped. Per-session, not persisted; every restart re-shows the splash.
+  /// IpcClient defaults to false (the daemon manages reducedMode locally and
+  /// the GUI sets it before IPC handshake — sec-h5 §8.2 / T11).
+  bool get reducedMode;
 
   List<ContactInfo> get acceptedContacts;
   List<ContactInfo> get pendingContacts;
@@ -108,6 +115,13 @@ abstract class ICleonaService {
   Future<bool> rejectConfigProposal(String conversationId);
   Future<UiMessage?> forwardMessage(String sourceConversationId, String messageId, String targetConversationId);
   void markConversationRead(String conversationId);
+  /// Track which conversation the user is currently viewing in the foreground.
+  /// Used to suppress in-app notifications for messages in the active chat.
+  /// Pass null when no chat is open.
+  void setActiveConversationId(String? conversationId);
+  /// Track whether the app is in the foreground (AppLifecycleState.resumed).
+  /// Combined with setActiveConversationId to gate notification suppression.
+  void setAppResumed(bool isResumed);
   void sendTypingIndicator(String conversationId);
   void toggleFavorite(String conversationId);
   Future<bool> setProfilePicture(String? base64Jpeg);

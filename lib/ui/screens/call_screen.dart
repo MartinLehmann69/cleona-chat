@@ -27,6 +27,9 @@ class _CallScreenState extends State<CallScreen> {
   bool _speaker = false;
   bool _videoEnabled = true;
   bool _frontCamera = true;
+  // Verhindert Double-Pop: wenn der User „Auflegen" drückt, popped der Button-Handler;
+  // der Auto-Pop in build() darf dann nicht zusätzlich poppen.
+  bool _userInitiatedPop = false;
 
   // Video frames (set by VideoEngine callbacks via CleonaAppState)
   ui.Image? _remoteVideoFrame;
@@ -70,7 +73,7 @@ class _CallScreenState extends State<CallScreen> {
     // Call ended while screen is open
     if (currentCall == null || currentCall.state == CallState.ended) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) Navigator.of(context).pop();
+        if (mounted && !_userInitiatedPop) Navigator.of(context).pop();
       });
     }
 
@@ -228,9 +231,11 @@ class _CallScreenState extends State<CallScreen> {
                       icon: Icons.call_end,
                       label: 'Auflegen',
                       color: Colors.red,
-                      onPressed: () {
-                        appState.service?.hangup();
-                        Navigator.of(context).pop();
+                      onPressed: () async {
+                        _userInitiatedPop = true;
+                        await appState.service?.hangup();
+                        if (!mounted) return;
+                        Navigator.of(this.context).pop();
                       },
                     ),
                   ],
@@ -356,9 +361,11 @@ class _CallScreenState extends State<CallScreen> {
                 label: 'Auflegen',
                 color: Colors.red,
                 size: 72,
-                onPressed: () {
-                  appState.service?.hangup();
-                  Navigator.of(context).pop();
+                onPressed: () async {
+                  _userInitiatedPop = true;
+                  await appState.service?.hangup();
+                  if (!mounted) return;
+                  Navigator.of(this.context).pop();
                 },
               ),
             ],

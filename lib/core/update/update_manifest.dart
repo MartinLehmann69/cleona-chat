@@ -27,6 +27,14 @@ class UpdateManifest {
   /// Ed25519 signature over the manifest payload.
   final Uint8List signature;
 
+  /// NEW (V3.1.72): if set, clients with `appVersion < minRequiredVersion` are hard-blocked.
+  /// Null on legacy manifests.
+  final String? minRequiredVersion;
+
+  /// NEW (V3.1.72): i18n key for the hard-block reason text.
+  /// Null on legacy manifests.
+  final String? minRequiredReason;
+
   UpdateManifest({
     required this.version,
     required this.downloadUrl,
@@ -34,11 +42,20 @@ class UpdateManifest {
     required this.changelog,
     required this.timestamp,
     required this.signature,
+    this.minRequiredVersion,
+    this.minRequiredReason,
   });
 
-  /// The payload that gets signed: "version\ndownloadUrl\narchiveHash\nchangelog\ntimestamp".
-  String get signedPayload =>
-      '$version\n$downloadUrl\n$archiveHash\n$changelog\n$timestamp';
+  /// Payload to sign. Legacy format (no new fields) preserved when both new
+  /// fields are null — keeps old manifests verifiable. When new fields are
+  /// set, they are appended to the payload.
+  String get signedPayload {
+    final base = '$version\n$downloadUrl\n$archiveHash\n$changelog\n$timestamp';
+    if (minRequiredVersion == null && minRequiredReason == null) {
+      return base;
+    }
+    return '$base\n${minRequiredVersion ?? ''}\n${minRequiredReason ?? ''}';
+  }
 
   /// Verify the manifest signature against the maintainer public key.
   bool verify(Uint8List maintainerPublicKey) {
@@ -51,14 +68,19 @@ class UpdateManifest {
   }
 
   /// Serialize to JSON for DHT storage.
-  Map<String, dynamic> toJson() => {
-        'v': version,
-        'url': downloadUrl,
-        'hash': archiveHash,
-        'log': changelog,
-        'ts': timestamp,
-        'sig': base64Encode(signature),
-      };
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{
+      'v': version,
+      'url': downloadUrl,
+      'hash': archiveHash,
+      'log': changelog,
+      'ts': timestamp,
+      'sig': base64Encode(signature),
+    };
+    if (minRequiredVersion != null) json['minReq'] = minRequiredVersion;
+    if (minRequiredReason != null) json['minReqReason'] = minRequiredReason;
+    return json;
+  }
 
   /// Deserialize from DHT JSON.
   static UpdateManifest? fromJson(Map<String, dynamic> json) {
@@ -70,6 +92,8 @@ class UpdateManifest {
         changelog: json['log'] as String,
         timestamp: json['ts'] as int,
         signature: base64Decode(json['sig'] as String),
+        minRequiredVersion: json['minReq'] as String?,
+        minRequiredReason: json['minReqReason'] as String?,
       );
     } catch (e) {
       return null;
@@ -84,7 +108,7 @@ class UpdateManifest {
   }
 
   @override
-  String toString() => 'UpdateManifest(v$version, $downloadUrl, ts=$timestamp)';
+  String toString() => 'UpdateManifest(v$version, $downloadUrl, ts=$timestamp, minReq=$minRequiredVersion)';
 }
 
 /// Checks for updates via DHT.
@@ -131,6 +155,21 @@ class UpdateChecker {
       if (mv[i] < cv[i]) return false;
     }
     return false; // equal
+  }
+
+  /// Hard-block check (Sec H-5 V3.1.72): true if the manifest specifies a
+  /// minRequiredVersion AND the current app version is older.
+  bool isHardBlocked(UpdateManifest manifest, String currentVersion) {
+    final minReq = manifest.minRequiredVersion;
+    if (minReq == null) return false;
+    final mv = _parseVersion(minReq);
+    final cv = _parseVersion(currentVersion);
+    if (mv == null || cv == null) return false;
+    for (var i = 0; i < 3; i++) {
+      if (cv[i] < mv[i]) return true;
+      if (cv[i] > mv[i]) return false;
+    }
+    return false;  // equal → not blocked
   }
 
   List<int>? _parseVersion(String version) {

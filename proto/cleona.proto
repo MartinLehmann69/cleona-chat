@@ -188,6 +188,14 @@ enum MessageType {
   POLL_VOTE_ANONYMOUS = 150;
   POLL_VOTE_REVOKE = 151;
 
+  // 2D-DHT Identity Resolution (§2.2.4)
+  IDENTITY_AUTH_PUBLISH = 152;
+  IDENTITY_AUTH_RETRIEVE = 153;
+  IDENTITY_AUTH_RESPONSE = 154;
+  IDENTITY_LIVE_PUBLISH = 155;
+  IDENTITY_LIVE_RETRIEVE = 156;
+  IDENTITY_LIVE_RESPONSE = 157;
+
   // Overlay Multicast Tree (Phase 3d)
   CALL_RTT_PING = 37;
   CALL_RTT_PONG = 38;
@@ -264,6 +272,7 @@ message PerMessageKem {
   bytes ephemeral_x25519_pk = 1;   // 32 bytes
   bytes ml_kem_ciphertext = 2;     // 1088 bytes
   bytes aes_nonce = 3;             // 12 bytes
+  uint32 version = 4;              // KEM version. proto3-default = 0 (pre-rollout sender, dropped by v2-only receivers).
 }
 
 // ── Peer Information ───────────────────────────────────────────────────
@@ -1299,4 +1308,36 @@ message PollVoteRevokeMsg {
   bytes ring_signature = 3;
   repeated bytes ring_members = 4;
   int64 revoked_at = 5;
+}
+
+// ── 2D-DHT Identity Resolution (§2.2.4) ──────────────────────────────
+
+message AuthManifestProto {
+  bytes user_id = 1;
+  repeated bytes authorized_device_node_ids = 2;
+  int32 ttl_seconds = 3;
+  int64 sequence_number = 4;
+  int64 published_at_ms = 5;
+  bytes ed25519_sig = 6;
+  bytes ml_dsa_sig = 7;
+}
+
+message LivenessRecordProto {
+  bytes user_id = 1;
+  bytes device_node_id = 2;
+  repeated PeerAddressProto addresses = 3;
+  int32 ttl_seconds = 4;
+  int64 sequence_number = 5;
+  int64 published_at_ms = 6;
+  bytes ed25519_sig = 7;
+}
+
+message IdentityAuthRetrieveRequest {
+  bytes user_id = 1;
+  int64 minimum_seq = 2;
+}
+
+message IdentityLiveRetrieveRequest {
+  bytes user_id = 1;
+  bytes device_node_id = 2;
 }

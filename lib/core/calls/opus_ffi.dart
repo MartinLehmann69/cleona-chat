@@ -139,7 +139,10 @@ class OpusFFI {
   }
 
   static List<String> _libSearchPaths() {
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isIOS) {
+      // iOS: Embedded Framework via DynamicLibrary.process() würde sauberer
+      // sein; bis das Pod-Setup steht, nutzen wir die gleichen .dylib-Namen
+      // wie macOS (failt zur Runtime falls nicht gebaut).
       return const [
         'libopus.dylib',
         'libopus.0.dylib',

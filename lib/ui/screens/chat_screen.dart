@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -20,6 +21,8 @@ import 'package:cleona/ui/screens/call_screen.dart';
 import 'package:cleona/ui/screens/group_call_screen.dart';
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
+import 'package:cleona/ui/theme/character_profile.dart';
+import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/message_bubble.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -27,6 +30,19 @@ import 'package:cleona/core/media/clipboard_helper.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/ui/components/poll_card.dart';
 import 'package:cleona/ui/screens/poll_editor_screen.dart';
+
+/// Defensive base64 decode for image fields persisted in conversations.
+/// Wraps base64Decode's FormatException — invalid input returns null and the
+/// caller can fall back to a placeholder. Image-codec errors (valid base64,
+/// invalid image bytes) are still caught by Image.memory's errorBuilder. #R2.
+Uint8List? _safeBase64Decode(String? input) {
+  if (input == null || input.isEmpty) return null;
+  try {
+    return base64Decode(input);
+  } catch (_) {
+    return null;
+  }
+}
 
 class ChatScreen extends StatefulWidget {
   final String conversationId;
@@ -106,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted) return;
       _cachedService = context.read<CleonaAppState>().service;
       _cachedService?.markConversationRead(widget.conversationId);
+      _cachedService?.setActiveConversationId(widget.conversationId);
     });
   }
 
@@ -141,6 +158,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    _cachedService?.setActiveConversationId(null);
     _textController.removeListener(_onTextChanged);
     _textController.dispose();
     _searchTextController.dispose();
@@ -1853,9 +1871,17 @@ class _ChatScreenState extends State<ChatScreen> {
     Widget? previewWidget;
     if (content.isImage) {
       if (content.data != null) {
-        previewWidget = Image.memory(content.data!, fit: BoxFit.contain);
+        previewWidget = Image.memory(
+          content.data!,
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 48),
+        );
       } else if (content.filePath != null) {
-        previewWidget = Image.file(File(content.filePath!), fit: BoxFit.contain);
+        previewWidget = Image.file(
+          File(content.filePath!),
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 48),
+        );
       }
     }
 
@@ -2082,7 +2108,11 @@ class _AudioPlayerWidget extends StatefulWidget {
 }
 
 class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
-  final _player = AudioPlayer();
+  // just_audio has no Linux/Windows desktop backend — registering a player
+  // there throws MissingPluginException on every call. Skip the platform-
+  // channel calls on those platforms and render an "unsupported" hint.
+  static final bool _supported = Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+  late final AudioPlayer? _player = _supported ? AudioPlayer() : null;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
   bool _playing = false;
@@ -2090,18 +2120,20 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
   @override
   void initState() {
     super.initState();
-    _player.setFilePath(widget.filePath).then((duration) {
+    final player = _player;
+    if (player == null) return;
+    player.setFilePath(widget.filePath).then((duration) {
       if (mounted && duration != null) setState(() => _duration = duration);
-    });
-    _player.positionStream.listen((p) {
+    }).catchError((_) {});
+    player.positionStream.listen((p) {
       if (mounted) setState(() => _position = p);
     });
-    _player.playerStateStream.listen((state) {
+    player.playerStateStream.listen((state) {
       if (mounted) {
         setState(() => _playing = state.playing);
         if (state.processingState == ProcessingState.completed) {
-          _player.seek(Duration.zero);
-          _player.pause();
+          player.seek(Duration.zero);
+          player.pause();
         }
       }
     });
@@ -2109,7 +2141,7 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
 
   @override
   void dispose() {
-    _player.dispose();
+    _player?.dispose();
     super.dispose();
   }
 
@@ -2129,7 +2161,9 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
           IconButton(
             icon: Icon(_playing ? Icons.pause_circle_filled : Icons.play_circle_filled, size: 36),
             color: colorScheme.primary,
-            onPressed: () => _playing ? _player.pause() : _player.play(),
+            onPressed: _player == null
+                ? null
+                : () => _playing ? _player.pause() : _player.play(),
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints(),
           ),
@@ -2149,9 +2183,11 @@ class _AudioPlayerWidgetState extends State<_AudioPlayerWidget> {
                     value: _duration.inMilliseconds > 0
                         ? _position.inMilliseconds / _duration.inMilliseconds
                         : 0,
-                    onChanged: (v) => _player.seek(Duration(
-                      milliseconds: (v * _duration.inMilliseconds).round(),
-                    )),
+                    onChanged: _player == null
+                        ? null
+                        : (v) => _player.seek(Duration(
+                              milliseconds: (v * _duration.inMilliseconds).round(),
+                            )),
                   ),
                 ),
                 Padding(
@@ -2198,7 +2234,10 @@ class _ImageViewer extends StatelessWidget {
         child: InteractiveViewer(
           minScale: 0.5,
           maxScale: 5.0,
-          child: Image.file(File(filePath)),
+          child: Image.file(
+            File(filePath),
+            errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 96),
+          ),
         ),
       ),
     );
@@ -2383,36 +2422,44 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    return Align(
-      alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 2),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.75,
-          ),
-          decoration: BoxDecoration(
-            color: isSearchHighlight
-                ? colorScheme.tertiaryContainer
-                : isEditing
-                    ? colorScheme.primaryContainer.withValues(alpha: 0.6)
-                    : deleted
-                        ? colorScheme.surfaceContainerHighest.withValues(alpha: 0.5)
-                        : isOutgoing
-                            ? colorScheme.primaryContainer
-                            : colorScheme.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(_activeSkinRadius(context)),
-            border: isSearchHighlight
-                ? Border.all(color: colorScheme.tertiary, width: 2)
-                : isEditing
-                    ? Border.all(color: colorScheme.primary, width: 1.5)
-                    : _activeSkinBorderWidth(context) > 0
-                        ? Border.all(color: colorScheme.outline.withValues(alpha: 0.3), width: _activeSkinBorderWidth(context))
-                        : null,
-            boxShadow: _activeSkinElevation(context) > 0
-                ? [BoxShadow(color: colorScheme.shadow.withValues(alpha: 0.1), blurRadius: _activeSkinElevation(context) * 2, offset: Offset(0, _activeSkinElevation(context)))]
-                : null,
-          ),
+    // #U4: same frosted-glass treatment as MessageBubble — keep media/reply/
+    // forwarded/edit bubbles transparent so the photo-skin hero asset shows
+    // through. Without this only simple text bubbles got the blur.
+    final useBlur = Theme.of(context).character.surfaceRenderMode == SurfaceRenderMode.photo;
+    final bubbleRadius = BorderRadius.circular(_activeSkinRadius(context));
+    final baseColor = isSearchHighlight
+        ? colorScheme.tertiaryContainer
+        : isEditing
+            ? colorScheme.primaryContainer.withValues(alpha: 0.6)
+            : deleted
+                ? colorScheme.surfaceContainerHighest.withValues(alpha: 0.5)
+                : isOutgoing
+                    ? colorScheme.primaryContainer
+                    : colorScheme.surfaceContainerHighest;
+    final bubbleColor = useBlur && !isSearchHighlight && !isEditing && !deleted
+        ? baseColor.withValues(alpha: isOutgoing ? 0.78 : 0.55)
+        : baseColor;
+
+    Widget bubble = Container(
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.75,
+        ),
+        decoration: BoxDecoration(
+          color: bubbleColor,
+          borderRadius: useBlur ? null : bubbleRadius,
+          border: isSearchHighlight
+              ? Border.all(color: colorScheme.tertiary, width: 2)
+              : isEditing
+                  ? Border.all(color: colorScheme.primary, width: 1.5)
+                  : _activeSkinBorderWidth(context) > 0
+                      ? Border.all(color: colorScheme.outline.withValues(alpha: 0.3), width: _activeSkinBorderWidth(context))
+                      : null,
+          boxShadow: !useBlur && _activeSkinElevation(context) > 0
+              ? [BoxShadow(color: colorScheme.shadow.withValues(alpha: 0.1), blurRadius: _activeSkinElevation(context) * 2, offset: Offset(0, _activeSkinElevation(context)))]
+              : null,
+        ),
           child: Stack(
             children: [
               if (_hasMenu)
@@ -2599,7 +2646,21 @@ class _MessageBubble extends StatelessWidget {
           ),
           ],
         ),
-      ),
+    );
+
+    if (useBlur) {
+      bubble = ClipRRect(
+        borderRadius: bubbleRadius,
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+          child: bubble,
+        ),
+      );
+    }
+
+    return Align(
+      alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+      child: bubble,
     );
   }
 
@@ -2659,11 +2720,11 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             // Thumbnail
-            if (message.linkPreviewThumbnailBase64 != null)
+            if (_safeBase64Decode(message.linkPreviewThumbnailBase64) case final tb?)
               ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 150, maxWidth: double.infinity),
                 child: Image.memory(
-                  base64Decode(message.linkPreviewThumbnailBase64!),
+                  tb,
                   width: double.infinity,
                   fit: BoxFit.cover,
                   errorBuilder: (_, _, _) => const SizedBox.shrink(),
@@ -2832,12 +2893,12 @@ class _MessageBubble extends StatelessWidget {
             errorBuilder: (_, _, _) => const Icon(Icons.broken_image, size: 48),
           ),
         );
-      } else if (message.thumbnailBase64 != null) {
+      } else if (_safeBase64Decode(message.thumbnailBase64) case final tb?) {
         // Show thumbnail
         imageWidget = ClipRRect(
           borderRadius: BorderRadius.circular(8),
           child: Image.memory(
-            base64Decode(message.thumbnailBase64!),
+            tb,
             width: 200,
             fit: BoxFit.cover,
             errorBuilder: (_, _, _) => const Icon(Icons.image, size: 48),

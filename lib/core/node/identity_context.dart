@@ -50,6 +50,69 @@ class IdentityContext {
   /// Device UUID (16 bytes, generated once per device, persisted).
   late Uint8List deviceUuid;
 
+  // ── 2D-DHT Identity Resolution: persistierte seq-Counter ──────────
+  // Plan: docs/superpowers/plans/2026-04-26-2d-dht-identity-resolution.md (Task 4)
+  // Persistiert in `<profileDir>/identity_resolution.json[.enc]`.
+  // Auth-Seq und Liveness-Seq sind bewusst getrennt (verschiedene TTLs / Update-Frequenzen).
+  int _authManifestSeq = 0;
+  int _livenessSeq = 0;
+  Uint8List? _lastAuthManifestContentHash;
+
+  int get authManifestSeq => _authManifestSeq;
+  int get livenessSeq => _livenessSeq;
+  Uint8List? get lastAuthManifestContentHash => _lastAuthManifestContentHash;
+
+  int bumpAuthManifestSeq() => ++_authManifestSeq;
+  int bumpLivenessSeq() => ++_livenessSeq;
+
+  void setLastAuthManifestContentHash(Uint8List hash) {
+    _lastAuthManifestContentHash = hash;
+  }
+
+  /// Disk-Corruption-Recovery: wenn persistedSeq=0 (z.B. nach Datei-Verlust)
+  /// und ein Network-Probe einen hoeheren Wert findet, springen wir auf
+  /// max(persisted, probed) + 100. Safety-Margin verhindert dass alte
+  /// stored Records den frischen Owner-Publish blockieren
+  /// ("incoming.seq <= stored.seq -> drop"). Persistierung fire-and-forget.
+  /// Plan: Task 12 Step 12.3.
+  int recoverAuthSeq(int probedSeq) {
+    _authManifestSeq =
+        (probedSeq > _authManifestSeq ? probedSeq : _authManifestSeq) + 100;
+    // fire-and-forget — Fehler beim Schreiben sind tolerierbar (naechster
+    // bump+persist-Zyklus deckt das ab); waere blocking ungewollt waehrend
+    // einer Network-Resolution.
+    persistIdentityResolutionState();
+    return _authManifestSeq;
+  }
+
+  /// Persistiert die seq-Counter + last-content-hash verschluesselt nach
+  /// `<profileDir>/identity_resolution.json` (FileEncryption nutzt den
+  /// daemon-weiten `<_baseDir>/db.key`).
+  Future<void> persistIdentityResolutionState() async {
+    final fileEnc = FileEncryption(baseDir: _baseDir);
+    Directory(profileDir).createSync(recursive: true);
+    fileEnc.writeJsonFile('$profileDir/identity_resolution.json', {
+      'authManifestSeq': _authManifestSeq,
+      'livenessSeq': _livenessSeq,
+      'lastAuthManifestContentHash': _lastAuthManifestContentHash != null
+          ? bytesToHex(_lastAuthManifestContentHash!)
+          : null,
+    });
+  }
+
+  /// Laedt die persistierten seq-Counter beim Identity-Init. Erstes Run:
+  /// Datei fehlt -> Defaults bleiben 0.
+  Future<void> _loadIdentityResolutionState() async {
+    final fileEnc = FileEncryption(baseDir: _baseDir);
+    final data = fileEnc.readJsonFile('$profileDir/identity_resolution.json');
+    if (data == null) return;
+    _authManifestSeq = (data['authManifestSeq'] as int?) ?? 0;
+    _livenessSeq = (data['livenessSeq'] as int?) ?? 0;
+    final hashHex = data['lastAuthManifestContentHash'] as String?;
+    _lastAuthManifestContentHash =
+        hashHex != null ? hexToBytes(hashHex) : null;
+  }
+
   /// Legacy alias: returns userId (backward compat for identity comparisons).
   /// 50+ places in the codebase compare identity.nodeId with contact IDs,
   /// group member IDs, etc. — all of these are identity operations, not routing.
@@ -148,6 +211,10 @@ class IdentityContext {
 
     _log.info('Identity "$displayName" User-ID: ${userIdHex.substring(0, 16)}... '
         'Device-Node-ID: ${deviceNodeIdHex.substring(0, 16)}...');
+
+    // 2D-DHT Identity Resolution: persistierte seq-Counter wiederherstellen
+    // (Datei fehlt beim ersten Start -> Defaults bleiben 0).
+    await _loadIdentityResolutionState();
   }
 
   Future<void> _generateKeysAsync() async {
@@ -317,7 +384,7 @@ class IdentityContext {
     // Compress payload if beneficial (>= 64 bytes)
     Uint8List effectivePayload = payload;
     var compression = proto.CompressionType.NONE;
-    if (compress && payload.length >= 64) {
+    if (compress && payload.length >= 64 && !_isEphemeralMediaType(type)) {
       try {
         final compressed = ZstdCompression.instance.compress(payload);
         if (compressed.length < payload.length) {
@@ -349,7 +416,8 @@ class IdentityContext {
     envelope.signatureEd25519 = sodium.signEd25519(dataToSign, ed25519SecretKey);
 
     // Sign with ML-DSA (skip for infrastructure messages — inner payload already has dual signatures)
-    if (!_isInfrastructureType(type)) {
+    // Also skip for ephemeral media frames (CALL_AUDIO/CALL_VIDEO) — see _isEphemeralMediaType.
+    if (!_isInfrastructureType(type) && !_isEphemeralMediaType(type)) {
       final oqs = OqsFFI();
       envelope.signatureMlDsa = oqs.mlDsaSign(dataToSign, mlDsaSecretKey);
     }
@@ -385,6 +453,28 @@ class IdentityContext {
       case proto.MessageType.HOLE_PUNCH_NOTIFY:
       case proto.MessageType.HOLE_PUNCH_PING:
       case proto.MessageType.HOLE_PUNCH_PONG:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// Ephemeral media types — Live-Stream-Frames (Audio/Video) im aktiven Call.
+  /// Authentifizierung läuft über den Call-Setup-Handshake (CALL_INVITE/ANSWER
+  /// mit voller Hybrid-Signatur + KEM-Etablierung von callKey). Pro-Frame
+  /// AES-GCM mit callKey + Ed25519-Signatur reichen für Authentizität +
+  /// Identitätsbeweis. ML-DSA pro Frame ist redundant: callKey ist bereits
+  /// post-quantum sicher etabliert, jeder Frame mit callKey damit auch.
+  /// Skip spart 500 µs CPU + 3.3 KB Wire-Bytes pro Frame, kritisch für
+  /// Mobilfunk-Delivery wo UDP-Fragmente verloren gehen.
+  ///
+  /// Audit (2026-04-25): Receiver-Side `mlDsaVerify` wird heute nirgendwo
+  /// aufgerufen (siehe grep "mlDsaVerify" in lib/) — dieser Skip ist also
+  /// auch ohne symmetrischen Receiver-Update sicher.
+  static bool _isEphemeralMediaType(proto.MessageType type) {
+    switch (type) {
+      case proto.MessageType.CALL_AUDIO:
+      case proto.MessageType.CALL_VIDEO:
         return true;
       default:
         return false;

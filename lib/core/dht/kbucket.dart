@@ -151,8 +151,23 @@ class RoutingTable {
   /// linear fallback in the accessors below.
   final Map<String, List<PeerInfo>> _byUserIdHex = {};
 
+  /// Listeners notified when a NEW peer (previously unknown deviceNodeId)
+  /// is added to the table. Refresh of an existing entry does NOT fire.
+  /// Used by §2.2.4 IdentityPublisher to wake parked cold-start retries.
+  final List<void Function(PeerInfo)> _onPeerAddedListeners = [];
+
   RoutingTable(this.ownNodeId) {
     _localNodeIds.add(_bytesToHex(ownNodeId));
+  }
+
+  /// Register a listener invoked once per newly added peer (not on refresh).
+  void addOnPeerAddedListener(void Function(PeerInfo) cb) {
+    _onPeerAddedListeners.add(cb);
+  }
+
+  /// Remove a previously registered listener.
+  void removeOnPeerAddedListener(void Function(PeerInfo) cb) {
+    _onPeerAddedListeners.remove(cb);
   }
 
   /// Register a local node ID (identity) so it won't be added to the table.
@@ -191,6 +206,7 @@ class RoutingTable {
     // with a new PeerInfo object carrying a different userId).
     final existing = getPeer(peer.nodeId);
     final existingUserHex = existing?.userIdHex;
+    final wasNew = existing == null;
 
     final dist = xorDistance(ownNodeId, peer.nodeId);
     final idx = bucketIndex(dist);
@@ -209,6 +225,17 @@ class RoutingTable {
       if (evictedHex != null) _unindexFromUser(evictedHex, evicted.nodeId);
     }
     _indexPeer(peer);
+    // Notify listeners only when a previously unknown deviceNodeId joined —
+    // refresh of an existing entry must NOT trigger republishes.
+    if (wasNew) {
+      for (final cb in _onPeerAddedListeners) {
+        try {
+          cb(peer);
+        } catch (_) {
+          // Listener errors must not affect bucket state.
+        }
+      }
+    }
     return true;
   }
 
@@ -318,6 +345,26 @@ class RoutingTable {
       }
     }
     return null;
+  }
+
+  /// Like [getPeer] but returns null when `lastSeen` is older than [maxAge].
+  /// Forces callers in send-paths to fall through to a fresh resolver lookup
+  /// instead of sending to a stale cached address. Address records are only
+  /// authoritative for one Liveness-TTL window after their last refresh.
+  PeerInfo? getFreshPeer(Uint8List nodeId, {required Duration maxAge}) {
+    final p = getPeer(nodeId);
+    if (p == null) return null;
+    if (DateTime.now().difference(p.lastSeen) > maxAge) return null;
+    return p;
+  }
+
+  /// Like [getPeerByUserId] but returns null when no entry's `lastSeen`
+  /// falls within [maxAge]. Same rationale as [getFreshPeer].
+  PeerInfo? getFreshPeerByUserId(Uint8List userId, {required Duration maxAge}) {
+    final p = getPeerByUserId(userId);
+    if (p == null) return null;
+    if (DateTime.now().difference(p.lastSeen) > maxAge) return null;
+    return p;
   }
 
   /// §26 Phase 3: Get ALL peers for a userId (one per device).

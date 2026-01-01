@@ -39,6 +39,19 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
 
+# === cleona_audio shim (cleona_audio.dll) ===
+# Built from native/cleona_audio/, copied next to cleona.exe so DynamicLibrary
+# can load it for FFI calls (audio_engine_shim.dart looks for "cleona_audio.dll"
+# in the same directory as the executable).
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_audio" "${CMAKE_BINARY_DIR}/cleona_audio_build")
+add_dependencies(${BINARY_NAME} cleona_audio)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_audio>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_audio.dll into Windows bundle"
+)
+
 # Copy native DLLs (libsodium, liboqs, libzstd) to the build output directory.
 set(NATIVE_DLLS
   "${CMAKE_CURRENT_SOURCE_DIR}/libsodium.dll"

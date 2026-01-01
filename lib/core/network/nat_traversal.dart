@@ -73,8 +73,27 @@ class NatTraversal {
   /// Record a peer's observation of our public address.
   void addObservation(String peerNodeIdHex, String observedIp, int observedPort) {
     if (observedIp.isEmpty || observedIp == '0.0.0.0') return;
-    // Private/CGNAT IPs can never be public — reject early.
-    if (PeerAddress.isPrivateIp(observedIp)) return;
+    // Private IPs are normally rejected (an echo of our own LAN IP can't be
+    // a public address), but a *cross-class* private observation IS a real
+    // egress: e.g. an Android emulator on 10.0.2.x sees its packets exit
+    // through the host's 192.168.x.x LAN, or a mobile device on carrier
+    // CGNAT (100.64.x.x) shows up to a home peer as 192.168.x.x. In both
+    // cases the observation tells us the legit reachable address from the
+    // observer's perspective — accept and confirm only when we have NO
+    // local IP in the same class as the observation.
+    if (PeerAddress.isPrivateIp(observedIp)) {
+      final localPrivates =
+          PeerAddress.currentLocalIps.where(PeerAddress.isPrivateIp).toList();
+      if (localPrivates.isEmpty) return; // can't disambiguate
+      final sameClassFound = localPrivates
+          .any((local) => PeerAddress.samePrivateClass(observedIp, local));
+      if (sameClassFound) {
+        // Observation is in the same RFC1918 class as a local IP — most
+        // likely an echo of our own LAN, not a real egress. Reject.
+        return;
+      }
+      // Cross-class private: accept as bridged-LAN egress.
+    }
     _observations[peerNodeIdHex] = observedIp;
 
     // Count confirmations for the most-reported IP

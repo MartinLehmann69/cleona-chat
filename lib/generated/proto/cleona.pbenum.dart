@@ -110,6 +110,12 @@ class MessageType extends $pb.ProtobufEnum {
   static const MessageType POLL_SNAPSHOT = MessageType._(149, _omitEnumNames ? '' : 'POLL_SNAPSHOT');
   static const MessageType POLL_VOTE_ANONYMOUS = MessageType._(150, _omitEnumNames ? '' : 'POLL_VOTE_ANONYMOUS');
   static const MessageType POLL_VOTE_REVOKE = MessageType._(151, _omitEnumNames ? '' : 'POLL_VOTE_REVOKE');
+  static const MessageType IDENTITY_AUTH_PUBLISH = MessageType._(152, _omitEnumNames ? '' : 'IDENTITY_AUTH_PUBLISH');
+  static const MessageType IDENTITY_AUTH_RETRIEVE = MessageType._(153, _omitEnumNames ? '' : 'IDENTITY_AUTH_RETRIEVE');
+  static const MessageType IDENTITY_AUTH_RESPONSE = MessageType._(154, _omitEnumNames ? '' : 'IDENTITY_AUTH_RESPONSE');
+  static const MessageType IDENTITY_LIVE_PUBLISH = MessageType._(155, _omitEnumNames ? '' : 'IDENTITY_LIVE_PUBLISH');
+  static const MessageType IDENTITY_LIVE_RETRIEVE = MessageType._(156, _omitEnumNames ? '' : 'IDENTITY_LIVE_RETRIEVE');
+  static const MessageType IDENTITY_LIVE_RESPONSE = MessageType._(157, _omitEnumNames ? '' : 'IDENTITY_LIVE_RESPONSE');
   static const MessageType CALL_RTT_PING = MessageType._(37, _omitEnumNames ? '' : 'CALL_RTT_PING');
   static const MessageType CALL_RTT_PONG = MessageType._(38, _omitEnumNames ? '' : 'CALL_RTT_PONG');
   static const MessageType CALL_TREE_UPDATE = MessageType._(39, _omitEnumNames ? '' : 'CALL_TREE_UPDATE');
@@ -217,6 +223,12 @@ class MessageType extends $pb.ProtobufEnum {
     POLL_SNAPSHOT,
     POLL_VOTE_ANONYMOUS,
     POLL_VOTE_REVOKE,
+    IDENTITY_AUTH_PUBLISH,
+    IDENTITY_AUTH_RETRIEVE,
+    IDENTITY_AUTH_RESPONSE,
+    IDENTITY_LIVE_PUBLISH,
+    IDENTITY_LIVE_RETRIEVE,
+    IDENTITY_LIVE_RESPONSE,
     CALL_RTT_PING,
     CALL_RTT_PONG,
     CALL_TREE_UPDATE,

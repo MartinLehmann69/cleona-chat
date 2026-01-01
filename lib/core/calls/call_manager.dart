@@ -32,6 +32,31 @@ class CallSession {
   int videoFramesSent = 0;
   int videoFramesReceived = 0;
 
+  // ── Per-Call Route Cache (Plan §D2) ──────────────────────────────
+  // Caches the resolved peer for the duration of a call so audio frames
+  // (~50/sec for Opus 20ms) don't repeat the routing-table lookup on
+  // every send. Refreshed when DV-Routing's `onRouteDown` fires for this
+  // peer — the next frame then falls through to the normal resolve path
+  // in `node.sendEnvelope()`.
+  //
+  // Note on plan adaptation: the plan referenced `findBestRoute(...)` and
+  // `sendEnvelopeViaPeer(...)` APIs that don't exist in the actual code.
+  // The real APIs are `routingTable.getPeer(nodeId)` (or `getPeerByUserId`)
+  // for resolution and `node.sendEnvelope(envelope, peer.nodeId)` for the
+  // send. The cache stores the resolved `PeerInfo` and the call-site keeps
+  // using `node.sendEnvelope` with the cached peer's nodeId — saving the
+  // double-hashing work of re-keying the routing table on every frame.
+  PeerInfo? cachedRoute;
+  DateTime? cachedRouteAt;
+
+  /// Invalidate cached route — next frame send will resolve fresh via
+  /// `routingTable.getPeer(...)`. Called from the DV-Routing
+  /// `onRouteDown` callback when this peer's path drops.
+  void invalidateCachedRoute() {
+    cachedRoute = null;
+    cachedRouteAt = null;
+  }
+
   CallSession({
     required this.callId,
     required this.peerNodeIdHex,

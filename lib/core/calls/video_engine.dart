@@ -51,11 +51,14 @@ enum _CaptureCommand { stop, forceKeyframe, mute, unmute }
 
 /// Runs in a separate isolate. Captures camera frames, encodes with VP8,
 /// encrypts with AES-256-GCM, and sends serialized VideoFrame protos back.
-void _captureIsolateEntry(List<dynamic> args) {
-  final init = args[0] as _CaptureInit;
-  final commandPort = args[1] as ReceivePort;
-
+///
+/// See audio_engine.dart 2026-04-26 fix: ReceivePort isn't sendable across
+/// Isolate.spawn, so the child creates its own command RX and ships its
+/// SendPort back as the first wire message; ready-flag follows.
+void _captureIsolateEntry(_CaptureInit init) {
+  final commandPort = ReceivePort();
   final frameSendPort = init.frameSendPort;
+  frameSendPort.send(commandPort.sendPort);
 
   // Each isolate needs its own FFI instances
   VpxFFI? vpx;
@@ -72,6 +75,7 @@ void _captureIsolateEntry(List<dynamic> args) {
     sodium = SodiumFFI();
   } catch (e) {
     frameSendPort.send(null); // signal failure
+    commandPort.close();
     return;
   }
 
@@ -84,6 +88,7 @@ void _captureIsolateEntry(List<dynamic> args) {
   } catch (e) {
     vpx.dispose();
     frameSendPort.send(null); // signal failure
+    commandPort.close();
     return;
   }
 
@@ -262,26 +267,48 @@ class VideoEngine {
       return false;
     }
 
-    // Start capture isolate
+    // Start capture isolate (two-stage handshake — see audio_engine.dart
+    // 2026-04-26 fix: child sends back its command SendPort first, then
+    // ready-flag, then video frame protos).
     _frameReceivePort = ReceivePort();
-    final commandReceivePort = ReceivePort();
+    final commandPortCompleter = Completer<SendPort>();
+    final readyCompleter = Completer<bool>();
+    late StreamSubscription sub;
+    sub = _frameReceivePort!.listen((msg) {
+      if (!commandPortCompleter.isCompleted) {
+        if (msg is SendPort) {
+          commandPortCompleter.complete(msg);
+        } else {
+          commandPortCompleter.completeError(
+              StateError('video capture isolate did not send command port'));
+        }
+        return;
+      }
+      if (!readyCompleter.isCompleted) {
+        if (msg == true) {
+          readyCompleter.complete(true);
+          sub.cancel();
+          _startFrameListener();
+        } else if (msg == null) {
+          readyCompleter.complete(false);
+          sub.cancel();
+        }
+      }
+    });
 
     try {
       _captureIsolate = await Isolate.spawn(
         _captureIsolateEntry,
-        [
-          _CaptureInit(
-            frameSendPort: _frameReceivePort!.sendPort,
-            sharedSecret: sharedSecret,
-            cameraDevice: _cameraDevice,
-            width: _preset.width,
-            height: _preset.height,
-            fps: _preset.fps,
-            bitrateKbps: _preset.bitrateKbps,
-            keyframeInterval: _preset.fps * 2, // keyframe every 2 seconds
-          ),
-          commandReceivePort,
-        ],
+        _CaptureInit(
+          frameSendPort: _frameReceivePort!.sendPort,
+          sharedSecret: sharedSecret,
+          cameraDevice: _cameraDevice,
+          width: _preset.width,
+          height: _preset.height,
+          fps: _preset.fps,
+          bitrateKbps: _preset.bitrateKbps,
+          keyframeInterval: _preset.fps * 2, // keyframe every 2 seconds
+        ),
       );
     } catch (e) {
       _log.error('Failed to spawn capture isolate: $e');
@@ -290,25 +317,16 @@ class VideoEngine {
       return false;
     }
 
-    _captureCommandPort = commandReceivePort.sendPort;
+    try {
+      _captureCommandPort = await commandPortCompleter.future
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      _log.error('Capture isolate did not hand back command port');
+      stop();
+      return false;
+    }
 
-    // Wait for initialization result
-    final completer = Completer<bool>();
-    late StreamSubscription sub;
-    sub = _frameReceivePort!.listen((msg) {
-      if (msg == true) {
-        // Init success — switch to frame handling
-        if (!completer.isCompleted) completer.complete(true);
-        sub.cancel();
-        _startFrameListener();
-      } else if (msg == null) {
-        // Init failure
-        if (!completer.isCompleted) completer.complete(false);
-        sub.cancel();
-      }
-    });
-
-    final success = await completer.future.timeout(
+    final success = await readyCompleter.future.timeout(
       const Duration(seconds: 5),
       onTimeout: () => false,
     );

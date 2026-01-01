@@ -14,6 +14,7 @@ import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
+import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/core/service/service_types.dart' show PeerSummary;
 import 'package:cleona/ui/theme/skins.dart';
 
@@ -220,17 +221,18 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Row(
         children: [
-          CircleAvatar(
+          ProfileAvatar(
+            base64: pic,
             radius: 40,
-            backgroundImage: pic != null ? MemoryImage(base64Decode(pic)) : null,
-            child: pic == null
-                ? Text(
-                    widget.service.displayName.isNotEmpty
-                        ? widget.service.displayName[0].toUpperCase()
-                        : '?',
-                    style: const TextStyle(fontSize: 32),
-                  )
-                : null,
+            fallback: CircleAvatar(
+              radius: 40,
+              child: Text(
+                widget.service.displayName.isNotEmpty
+                    ? widget.service.displayName[0].toUpperCase()
+                    : '?',
+                style: const TextStyle(fontSize: 32),
+              ),
+            ),
           ),
           const SizedBox(width: 16),
           Expanded(

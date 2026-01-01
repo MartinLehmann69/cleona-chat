@@ -961,6 +961,7 @@ class PerMessageKem extends $pb.GeneratedMessage {
     $core.List<$core.int>? ephemeralX25519Pk,
     $core.List<$core.int>? mlKemCiphertext,
     $core.List<$core.int>? aesNonce,
+    $core.int? version,
   }) {
     final $result = create();
     if (ephemeralX25519Pk != null) {
@@ -972,6 +973,9 @@ class PerMessageKem extends $pb.GeneratedMessage {
     if (aesNonce != null) {
       $result.aesNonce = aesNonce;
     }
+    if (version != null) {
+      $result.version = version;
+    }
     return $result;
   }
   PerMessageKem._() : super();
@@ -982,6 +986,7 @@ class PerMessageKem extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'ephemeralX25519Pk', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'mlKemCiphertext', $pb.PbFieldType.OY)
     ..a<$core.List<$core.int>>(3, _omitFieldNames ? '' : 'aesNonce', $pb.PbFieldType.OY)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'version', $pb.PbFieldType.OU3)
     ..hasRequiredFields = false
   ;
 
@@ -1032,6 +1037,15 @@ class PerMessageKem extends $pb.GeneratedMessage {
   $core.bool hasAesNonce() => $_has(2);
   @$pb.TagNumber(3)
   void clearAesNonce() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $core.int get version => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set version($core.int v) { $_setUnsignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasVersion() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearVersion() => clearField(4);
 }
 
 class PeerInfoProto extends $pb.GeneratedMessage {
@@ -12185,6 +12199,390 @@ class PollVoteRevokeMsg extends $pb.GeneratedMessage {
   $core.bool hasRevokedAt() => $_has(4);
   @$pb.TagNumber(5)
   void clearRevokedAt() => clearField(5);
+}
+
+class AuthManifestProto extends $pb.GeneratedMessage {
+  factory AuthManifestProto({
+    $core.List<$core.int>? userId,
+    $core.Iterable<$core.List<$core.int>>? authorizedDeviceNodeIds,
+    $core.int? ttlSeconds,
+    $fixnum.Int64? sequenceNumber,
+    $fixnum.Int64? publishedAtMs,
+    $core.List<$core.int>? ed25519Sig,
+    $core.List<$core.int>? mlDsaSig,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (authorizedDeviceNodeIds != null) {
+      $result.authorizedDeviceNodeIds.addAll(authorizedDeviceNodeIds);
+    }
+    if (ttlSeconds != null) {
+      $result.ttlSeconds = ttlSeconds;
+    }
+    if (sequenceNumber != null) {
+      $result.sequenceNumber = sequenceNumber;
+    }
+    if (publishedAtMs != null) {
+      $result.publishedAtMs = publishedAtMs;
+    }
+    if (ed25519Sig != null) {
+      $result.ed25519Sig = ed25519Sig;
+    }
+    if (mlDsaSig != null) {
+      $result.mlDsaSig = mlDsaSig;
+    }
+    return $result;
+  }
+  AuthManifestProto._() : super();
+  factory AuthManifestProto.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory AuthManifestProto.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'AuthManifestProto', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..p<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'authorizedDeviceNodeIds', $pb.PbFieldType.PY)
+    ..a<$core.int>(3, _omitFieldNames ? '' : 'ttlSeconds', $pb.PbFieldType.O3)
+    ..aInt64(4, _omitFieldNames ? '' : 'sequenceNumber')
+    ..aInt64(5, _omitFieldNames ? '' : 'publishedAtMs')
+    ..a<$core.List<$core.int>>(6, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'mlDsaSig', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  AuthManifestProto clone() => AuthManifestProto()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  AuthManifestProto copyWith(void Function(AuthManifestProto) updates) => super.copyWith((message) => updates(message as AuthManifestProto)) as AuthManifestProto;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static AuthManifestProto create() => AuthManifestProto._();
+  AuthManifestProto createEmptyInstance() => create();
+  static $pb.PbList<AuthManifestProto> createRepeated() => $pb.PbList<AuthManifestProto>();
+  @$core.pragma('dart2js:noInline')
+  static AuthManifestProto getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<AuthManifestProto>(create);
+  static AuthManifestProto? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.List<$core.int>> get authorizedDeviceNodeIds => $_getList(1);
+
+  @$pb.TagNumber(3)
+  $core.int get ttlSeconds => $_getIZ(2);
+  @$pb.TagNumber(3)
+  set ttlSeconds($core.int v) { $_setSignedInt32(2, v); }
+  @$pb.TagNumber(3)
+  $core.bool hasTtlSeconds() => $_has(2);
+  @$pb.TagNumber(3)
+  void clearTtlSeconds() => clearField(3);
+
+  @$pb.TagNumber(4)
+  $fixnum.Int64 get sequenceNumber => $_getI64(3);
+  @$pb.TagNumber(4)
+  set sequenceNumber($fixnum.Int64 v) { $_setInt64(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasSequenceNumber() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearSequenceNumber() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get publishedAtMs => $_getI64(4);
+  @$pb.TagNumber(5)
+  set publishedAtMs($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasPublishedAtMs() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearPublishedAtMs() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $core.List<$core.int> get ed25519Sig => $_getN(5);
+  @$pb.TagNumber(6)
+  set ed25519Sig($core.List<$core.int> v) { $_setBytes(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasEd25519Sig() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearEd25519Sig() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get mlDsaSig => $_getN(6);
+  @$pb.TagNumber(7)
+  set mlDsaSig($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasMlDsaSig() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearMlDsaSig() => clearField(7);
+}
+
+class LivenessRecordProto extends $pb.GeneratedMessage {
+  factory LivenessRecordProto({
+    $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceNodeId,
+    $core.Iterable<PeerAddressProto>? addresses,
+    $core.int? ttlSeconds,
+    $fixnum.Int64? sequenceNumber,
+    $fixnum.Int64? publishedAtMs,
+    $core.List<$core.int>? ed25519Sig,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (deviceNodeId != null) {
+      $result.deviceNodeId = deviceNodeId;
+    }
+    if (addresses != null) {
+      $result.addresses.addAll(addresses);
+    }
+    if (ttlSeconds != null) {
+      $result.ttlSeconds = ttlSeconds;
+    }
+    if (sequenceNumber != null) {
+      $result.sequenceNumber = sequenceNumber;
+    }
+    if (publishedAtMs != null) {
+      $result.publishedAtMs = publishedAtMs;
+    }
+    if (ed25519Sig != null) {
+      $result.ed25519Sig = ed25519Sig;
+    }
+    return $result;
+  }
+  LivenessRecordProto._() : super();
+  factory LivenessRecordProto.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory LivenessRecordProto.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'LivenessRecordProto', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceNodeId', $pb.PbFieldType.OY)
+    ..pc<PeerAddressProto>(3, _omitFieldNames ? '' : 'addresses', $pb.PbFieldType.PM, subBuilder: PeerAddressProto.create)
+    ..a<$core.int>(4, _omitFieldNames ? '' : 'ttlSeconds', $pb.PbFieldType.O3)
+    ..aInt64(5, _omitFieldNames ? '' : 'sequenceNumber')
+    ..aInt64(6, _omitFieldNames ? '' : 'publishedAtMs')
+    ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'ed25519Sig', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  LivenessRecordProto clone() => LivenessRecordProto()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  LivenessRecordProto copyWith(void Function(LivenessRecordProto) updates) => super.copyWith((message) => updates(message as LivenessRecordProto)) as LivenessRecordProto;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static LivenessRecordProto create() => LivenessRecordProto._();
+  LivenessRecordProto createEmptyInstance() => create();
+  static $pb.PbList<LivenessRecordProto> createRepeated() => $pb.PbList<LivenessRecordProto>();
+  @$core.pragma('dart2js:noInline')
+  static LivenessRecordProto getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<LivenessRecordProto>(create);
+  static LivenessRecordProto? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get deviceNodeId => $_getN(1);
+  @$pb.TagNumber(2)
+  set deviceNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceNodeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceNodeId() => clearField(2);
+
+  @$pb.TagNumber(3)
+  $core.List<PeerAddressProto> get addresses => $_getList(2);
+
+  @$pb.TagNumber(4)
+  $core.int get ttlSeconds => $_getIZ(3);
+  @$pb.TagNumber(4)
+  set ttlSeconds($core.int v) { $_setSignedInt32(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasTtlSeconds() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearTtlSeconds() => clearField(4);
+
+  @$pb.TagNumber(5)
+  $fixnum.Int64 get sequenceNumber => $_getI64(4);
+  @$pb.TagNumber(5)
+  set sequenceNumber($fixnum.Int64 v) { $_setInt64(4, v); }
+  @$pb.TagNumber(5)
+  $core.bool hasSequenceNumber() => $_has(4);
+  @$pb.TagNumber(5)
+  void clearSequenceNumber() => clearField(5);
+
+  @$pb.TagNumber(6)
+  $fixnum.Int64 get publishedAtMs => $_getI64(5);
+  @$pb.TagNumber(6)
+  set publishedAtMs($fixnum.Int64 v) { $_setInt64(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasPublishedAtMs() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearPublishedAtMs() => clearField(6);
+
+  @$pb.TagNumber(7)
+  $core.List<$core.int> get ed25519Sig => $_getN(6);
+  @$pb.TagNumber(7)
+  set ed25519Sig($core.List<$core.int> v) { $_setBytes(6, v); }
+  @$pb.TagNumber(7)
+  $core.bool hasEd25519Sig() => $_has(6);
+  @$pb.TagNumber(7)
+  void clearEd25519Sig() => clearField(7);
+}
+
+class IdentityAuthRetrieveRequest extends $pb.GeneratedMessage {
+  factory IdentityAuthRetrieveRequest({
+    $core.List<$core.int>? userId,
+    $fixnum.Int64? minimumSeq,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (minimumSeq != null) {
+      $result.minimumSeq = minimumSeq;
+    }
+    return $result;
+  }
+  IdentityAuthRetrieveRequest._() : super();
+  factory IdentityAuthRetrieveRequest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory IdentityAuthRetrieveRequest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'IdentityAuthRetrieveRequest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..aInt64(2, _omitFieldNames ? '' : 'minimumSeq')
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  IdentityAuthRetrieveRequest clone() => IdentityAuthRetrieveRequest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  IdentityAuthRetrieveRequest copyWith(void Function(IdentityAuthRetrieveRequest) updates) => super.copyWith((message) => updates(message as IdentityAuthRetrieveRequest)) as IdentityAuthRetrieveRequest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static IdentityAuthRetrieveRequest create() => IdentityAuthRetrieveRequest._();
+  IdentityAuthRetrieveRequest createEmptyInstance() => create();
+  static $pb.PbList<IdentityAuthRetrieveRequest> createRepeated() => $pb.PbList<IdentityAuthRetrieveRequest>();
+  @$core.pragma('dart2js:noInline')
+  static IdentityAuthRetrieveRequest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<IdentityAuthRetrieveRequest>(create);
+  static IdentityAuthRetrieveRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $fixnum.Int64 get minimumSeq => $_getI64(1);
+  @$pb.TagNumber(2)
+  set minimumSeq($fixnum.Int64 v) { $_setInt64(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasMinimumSeq() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearMinimumSeq() => clearField(2);
+}
+
+class IdentityLiveRetrieveRequest extends $pb.GeneratedMessage {
+  factory IdentityLiveRetrieveRequest({
+    $core.List<$core.int>? userId,
+    $core.List<$core.int>? deviceNodeId,
+  }) {
+    final $result = create();
+    if (userId != null) {
+      $result.userId = userId;
+    }
+    if (deviceNodeId != null) {
+      $result.deviceNodeId = deviceNodeId;
+    }
+    return $result;
+  }
+  IdentityLiveRetrieveRequest._() : super();
+  factory IdentityLiveRetrieveRequest.fromBuffer($core.List<$core.int> i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromBuffer(i, r);
+  factory IdentityLiveRetrieveRequest.fromJson($core.String i, [$pb.ExtensionRegistry r = $pb.ExtensionRegistry.EMPTY]) => create()..mergeFromJson(i, r);
+
+  static final $pb.BuilderInfo _i = $pb.BuilderInfo(_omitMessageNames ? '' : 'IdentityLiveRetrieveRequest', package: const $pb.PackageName(_omitMessageNames ? '' : 'cleona'), createEmptyInstance: create)
+    ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'userId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(2, _omitFieldNames ? '' : 'deviceNodeId', $pb.PbFieldType.OY)
+    ..hasRequiredFields = false
+  ;
+
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.deepCopy] instead. '
+  'Will be removed in next major version')
+  IdentityLiveRetrieveRequest clone() => IdentityLiveRetrieveRequest()..mergeFromMessage(this);
+  @$core.Deprecated(
+  'Using this can add significant overhead to your binary. '
+  'Use [GeneratedMessageGenericExtensions.rebuild] instead. '
+  'Will be removed in next major version')
+  IdentityLiveRetrieveRequest copyWith(void Function(IdentityLiveRetrieveRequest) updates) => super.copyWith((message) => updates(message as IdentityLiveRetrieveRequest)) as IdentityLiveRetrieveRequest;
+
+  $pb.BuilderInfo get info_ => _i;
+
+  @$core.pragma('dart2js:noInline')
+  static IdentityLiveRetrieveRequest create() => IdentityLiveRetrieveRequest._();
+  IdentityLiveRetrieveRequest createEmptyInstance() => create();
+  static $pb.PbList<IdentityLiveRetrieveRequest> createRepeated() => $pb.PbList<IdentityLiveRetrieveRequest>();
+  @$core.pragma('dart2js:noInline')
+  static IdentityLiveRetrieveRequest getDefault() => _defaultInstance ??= $pb.GeneratedMessage.$_defaultFor<IdentityLiveRetrieveRequest>(create);
+  static IdentityLiveRetrieveRequest? _defaultInstance;
+
+  @$pb.TagNumber(1)
+  $core.List<$core.int> get userId => $_getN(0);
+  @$pb.TagNumber(1)
+  set userId($core.List<$core.int> v) { $_setBytes(0, v); }
+  @$pb.TagNumber(1)
+  $core.bool hasUserId() => $_has(0);
+  @$pb.TagNumber(1)
+  void clearUserId() => clearField(1);
+
+  @$pb.TagNumber(2)
+  $core.List<$core.int> get deviceNodeId => $_getN(1);
+  @$pb.TagNumber(2)
+  set deviceNodeId($core.List<$core.int> v) { $_setBytes(1, v); }
+  @$pb.TagNumber(2)
+  $core.bool hasDeviceNodeId() => $_has(1);
+  @$pb.TagNumber(2)
+  void clearDeviceNodeId() => clearField(2);
 }
 
 

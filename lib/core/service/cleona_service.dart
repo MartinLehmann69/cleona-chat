@@ -12,6 +12,7 @@ import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/dht/channel_index.dart';
 import 'package:cleona/core/dht/mailbox_store.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
+import 'package:cleona/core/identity_resolution/identity_publisher.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/compression.dart';
@@ -25,6 +26,8 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/calls/call_manager.dart';
 import 'package:cleona/core/calls/audio_engine.dart';
+import 'package:cleona/core/calls/audio_permissions.dart';
+import 'package:cleona/core/calls/foreground_service.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/calls/audio_mixer.dart';
 import 'package:cleona/core/calls/group_call_session.dart';
@@ -74,7 +77,12 @@ class CleonaService implements ICleonaService {
 
   late MailboxStore mailboxStore;
   late CallManager callManager;
-  final NetworkStatsCollector _statsCollector = NetworkStatsCollector();
+  // §2.2.4: per-identity Auth+Liveness Publisher. Eine pro CleonaService-Instanz
+  // (Multi-Identity-Daemon hat N Services, sharing one CleonaNode).
+  IdentityPublisher? _identityPublisher;
+  /// Registered listener on the shared RoutingTable; wakes our publisher's
+  /// parked cold-start retry as soon as a new peer joins.
+  void Function(PeerInfo)? _publisherPeerAddedListener;
   @override
   final NotificationSoundService notificationSound = NotificationSoundService();
   AudioEngine? _audioEngine;
@@ -82,6 +90,41 @@ class CleonaService implements ICleonaService {
   AudioMixer? _audioMixer;
   dynamic _groupVideoEngine; // VideoEngine (loaded by GUI, avoids dart:ui in daemon)
   GroupVideoReceiver? _groupVideoReceiver;
+
+  /// Conversation the user is currently looking at (set by ChatScreen.initState,
+  /// cleared on dispose). Used together with [_isAppResumed] to suppress
+  /// in-app notifications for the active chat.
+  String? _activeConversationId;
+  /// Mirrors AppLifecycleState.resumed (set by main.dart's lifecycle observer).
+  /// Defaults to true so the app behaves like „foreground" before the first
+  /// lifecycle event arrives.
+  bool _isAppResumed = true;
+
+  /// True when the user has skipped the UpdateRequiredScreen into limited mode
+  /// (sec-h5 §8.2 / T13). Per-session only — NOT persisted; every restart
+  /// re-shows the splash.
+  ///
+  /// While active, [handleMessage] drops incoming user-message types and the
+  /// public send-methods short-circuit before encrypting/transmitting any user
+  /// payload. DHT participation, peer-list-push, presence, ACKs, contact
+  /// establishment and call signaling are unaffected.
+  bool _reducedMode = false;
+  @override
+  bool get reducedMode => _reducedMode;
+  set reducedMode(bool v) {
+    if (_reducedMode == v) return;
+    _reducedMode = v;
+    _log.warn('reducedMode = $v');
+  }
+  /// Wall-clock of the most recent fired notification per conversation.
+  /// Used for the per-conv 2s debounce that protects against group-chat bursts.
+  final Map<String, DateTime> _lastNotifiedAt = {};
+  /// Maximum age (ms) of an incoming message that still triggers a notification.
+  /// Older messages are treated as backlog (startup re-poll, daemon restart,
+  /// store-and-forward catch-up) and only update the badge silently.
+  static const int _notificationStaleThresholdMs = 30000;
+  /// Minimum spacing (ms) between two notifications for the same conversation.
+  static const int _notificationDebounceMs = 2000;
 
   /// Active moderation config (can be switched between production/test via IPC).
   /// Setting this restarts the moderation timer with the appropriate interval.
@@ -286,8 +329,12 @@ class CleonaService implements ICleonaService {
   /// Callback when a new version is available. UI should show banner/prompt.
   void Function(UpdateManifest manifest, bool isCurrent)? onUpdateAvailable;
 
-  /// The current app version string (set by the GUI at startup).
-  String currentAppVersion = '3.1.25';
+  /// The current app version string. Single source of truth, also consumed
+  /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
+  static const String kCurrentAppVersion = '3.1.25';
+
+  /// Backwards-compatible instance accessor.
+  String get currentAppVersion => kCurrentAppVersion;
 
   // Recovery state
   @override
@@ -296,6 +343,15 @@ class CleonaService implements ICleonaService {
   Timer? _restoreRetryTimer;
   Timer? _restorePollingTimer;
   int _restorePollCount = 0;
+
+  // #U1 startup-poll state: Kademlia bootstrap takes ~15-20s after restart, so
+  // peers responsible for our DHT-fragment storage and S&F-stored messages may
+  // not yet be in the routing table when a single-shot poll fires at T+5/8s.
+  // The startup polling timer fires every 3s for ~30s and polls only newly
+  // observed peers, catching late arrivals without re-flooding known peers.
+  Timer? _startupPollingTimer;
+  int _startupPollCount = 0;
+  final Set<String> _startupPolledPeers = {};
 
   CleonaService({
     required this.identity,
@@ -342,6 +398,20 @@ class CleonaService implements ICleonaService {
       _stopAudioEngine();
       onCallEnded?.call(session.toCallInfo());
       onStateChanged?.call();
+    };
+
+    // Plan §D2: hook DV-Routing route-down → drop cached route on the active
+    // CallSession so the next audio frame re-resolves via routingTable.
+    // peerHex may arrive as deviceNodeId OR userId (V3.1.65 multi-device);
+    // we match against the session's stable peerNodeIdHex, plus the live
+    // deviceNodeId of the cached PeerInfo if present.
+    node.onRouteDownForCalls = (peerHex) {
+      final session = callManager.currentCall;
+      if (session == null) return;
+      final cachedDevHex = session.cachedRoute?.nodeIdHex;
+      if (session.peerNodeIdHex == peerHex || cachedDevHex == peerHex) {
+        session.invalidateCachedRoute();
+      }
     };
 
     // Init group call manager
@@ -488,6 +558,9 @@ class CleonaService implements ICleonaService {
 
     // Load conversations
     _loadConversations();
+    // After load: surface the persisted unreadCount to the system badge so
+    // the Launcher-Badge matches the on-disk truth right after daemon-start.
+    _updateBadgeCount();
 
     // V3.1.44: Migrate self-entries from deviceNodeId to userIdHex in groups/channels/messages.
     // §26 Phase 2 temporarily stored deviceNodeId as member keys, but service-level
@@ -509,17 +582,27 @@ class CleonaService implements ICleonaService {
     }
     if (staleConvs.isNotEmpty) _saveConversations();
 
-    // Schedule mailbox poll (5 seconds after startup)
-    Timer(const Duration(seconds: 5), _pollMailbox);
+    // #U1 fix: aggressive startup polling for DHT-fragment + S&F retrieval.
+    // Single-shot polls at T+5/8s missed peers that joined the routing table
+    // after Kademlia bootstrap (~15-20s), leaving stored CRs and away-period
+    // messages permanently unretrieved. The 30-second window with per-peer
+    // dedup catches late arrivals without re-flooding peers that already
+    // responded with 0 messages.
+    _startupPollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      _startupPollCount++;
+      _pollNewPeersForStoredMessages();
+      if (_startupPollCount >= 10) {
+        timer.cancel();
+        _startupPollingTimer = null;
+        _log.info('Startup polling complete (${_startupPolledPeers.length} peers polled)');
+      }
+    });
 
     // §26: TWIN_ANNOUNCE at startup so existing twins learn about this device.
     // 6 seconds lets the first peers come up first. Fire-and-forget; a no-op
     // when we have no known twins yet (first twin learns us when its own
     // announce arrives here — our handler echoes _sendTwinAnnounce back).
     Timer(const Duration(seconds: 6), _sendTwinAnnounce);
-
-    // Schedule Store-and-Forward poll (8 seconds after startup)
-    Timer(const Duration(seconds: 8), _pollStoredMessages);
 
     // Retry pending outgoing contact requests (every 10 seconds)
     _crRetryTimer = Timer.periodic(const Duration(seconds: 10), (_) => _retryPendingContactRequests());
@@ -552,12 +635,10 @@ class CleonaService implements ICleonaService {
     // Moderation timer: periodic check of all time-based moderation limits
     _startModerationTimer();
 
-    // Wire transport byte counters to stats collector
-    node.transport.onBytesSent ??= (bytes) => _statsCollector.addBytesSent(bytes);
-    node.transport.onBytesReceived ??= (bytes) => _statsCollector.addBytesReceived(bytes);
-
-    // Wire relay byte counter — onRelayBytes fires for each relay forward/delivery
-    node.onRelayBytes ??= (bytes) => _statsCollector.addRelayBytes(bytes);
+    // Stats wiring lives on CleonaNode now (single shared collector across
+    // all identities). #U5: previous per-Service `??=` only let the first
+    // service to start win the transport callbacks; all later services saw
+    // 0 receive bytes.
 
     // RUDP Light: downgrade message status on ACK timeout.
     node.ackTracker.onAckTimeout = _handleAckTimeout;
@@ -584,8 +665,30 @@ class CleonaService implements ICleonaService {
     // Mutual Peer Selection for S&F (Architecture Section 3.3.7).
     node.getMutualPeerIds = _computeMutualPeerIds;
 
-    _statsCollector.markStarted();
+    // markStarted lives on node._startBase now — Multi-Identity-Daemon shouldn't
+    // reset uptime every time a second/third identity comes up.
     await notificationSound.init(identity.profileDir);
+
+    // §2.2.4: 2D-DHT Identity Publisher pro Identität.
+    _identityPublisher = IdentityPublisher(
+      identity: identity,
+      routingTable: node.routingTable,
+      sender: _IdentityPublisherSender(node),
+    );
+    _identityPublisher!.setForeground(_isAppResumed);
+    _identityPublisher!.setAddressProvider(() => node.currentSelfAddresses());
+    // Wake parked cold-start retry as soon as new peers join the routing table.
+    // Without this hook the publisher only ever re-checks every 60s after
+    // initial timeout — meaning a daemon that started before any peer was
+    // known (Bootstrap-Restart, Cold-Start) would not republish until the
+    // 20h auth-refresh tick.
+    void onPeerAdded(PeerInfo _) {
+      _identityPublisher?.onPeerJoined();
+    }
+    node.routingTable.addOnPeerAddedListener(onPeerAdded);
+    _publisherPeerAddedListener = onPeerAdded;
+    // Fire-and-forget: Publisher startet eigene cold-start-wait + scheduling
+    unawaited(_identityPublisher!.start());
 
     // Init voice transcription service (whisper.cpp)
     // Load saved config from transcription_config.json (user may have changed language).
@@ -628,7 +731,7 @@ class CleonaService implements ICleonaService {
         stats: getNetworkStats(),
         externalIpv4: publicIp,
         dismissedUntilMs: _natWizardDismissedUntilMs,
-        uptimeSeconds: _statsCollector.uptime.inSeconds,
+        uptimeSeconds: node.statsCollector.uptime.inSeconds,
       ),
       onTrigger: () {
         _log.info('NAT-Wizard trigger fired (§27.9.1)');
@@ -716,7 +819,16 @@ class CleonaService implements ICleonaService {
 
     // Count user-visible incoming messages for network stats
     if (_isUserVisibleMessage(type)) {
-      _statsCollector.addMessageReceived();
+      node.statsCollector.addMessageReceived();
+    }
+
+    // Reduced-Mode Gate (sec-h5 §8.2): User has skipped UpdateRequiredScreen
+    // into limited mode. Drop user-message types silently; infrastructure
+    // (DHT, peer-list-push, presence, ACKs, contact establishment, calls)
+    // continues so DHT participation and re-update flow are unaffected.
+    if (_reducedMode && _isUserMessage(type)) {
+      _log.warn('receive blocked: reducedMode active for ${type.name}');
+      return;
     }
 
     // KEX Gate (Architecture 5.6.2): Only process encrypted content messages
@@ -890,6 +1002,9 @@ class CleonaService implements ICleonaService {
               decrypted = ZstdCompression.instance.decompress(decrypted);
             }
             groupCallManager.handleGroupCallKeyRotate(envelope, decrypted);
+          } on KemVersionRejectedException catch (e) {
+            _warnKemVersionRejected('GROUP_KEY_ROTATE', e);
+            return;
           } catch (e) {
             _log.debug('GROUP_KEY_ROTATE decrypt failed: $e');
           }
@@ -1091,6 +1206,9 @@ class CleonaService implements ICleonaService {
           decrypted = ZstdCompression.instance.decompress(decrypted);
         }
         text = utf8.decode(decrypted);
+      } on KemVersionRejectedException catch (e) {
+        _warnKemVersionRejected('TEXT', e);
+        return;
       } catch (e) {
         _log.error('Decryption failed: $e');
         return;
@@ -1142,10 +1260,13 @@ class CleonaService implements ICleonaService {
     final isChannel = groupIdHex != null && _channels.containsKey(groupIdHex);
     final isGroup = groupIdHex != null && !isChannel;
     _addMessageToConversation(conversationId, msg, isGroup: isGroup, isChannel: isChannel);
-    notificationSound.playMessageSound();
-    notificationSound.vibrate(VibrationType.message);
-    final textSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-    _postAndroidNotification(textSenderName, text.length > 100 ? '${text.substring(0, 100)}...' : text, conversationId);
+    if (!_shouldSuppressNotification(conversationId, msg.timestamp.millisecondsSinceEpoch)) {
+      notificationSound.playMessageSound();
+      notificationSound.vibrate(VibrationType.message);
+      final textSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+      _postAndroidNotification(textSenderName, text.length > 100 ? '${text.substring(0, 100)}...' : text, conversationId);
+      _lastNotifiedAt[conversationId] = DateTime.now();
+    }
     // Badge update happens inside _addMessageToConversation — single source of truth.
 
     _log.info('TEXT from ${senderHex.substring(0, 8)}: ${text.length > 50 ? text.substring(0, 50) : text}');
@@ -1647,6 +1768,10 @@ class CleonaService implements ICleonaService {
   /// Two-Stage: sends MEDIA_ANNOUNCEMENT first, actual content on MEDIA_ACCEPT.
   @override
   Future<UiMessage?> sendMediaMessage(String conversationId, String filePath) async {
+    if (_reducedMode) {
+      _log.warn('sendMediaMessage blocked: reducedMode active');
+      return null;
+    }
     final file = File(filePath);
     if (!file.existsSync()) return null;
 
@@ -1803,7 +1928,7 @@ class CleonaService implements ICleonaService {
 
         firstMsgId ??= bytesToHex(Uint8List.fromList(envelope.messageId));
         await node.sendEnvelope(envelope, recipient.nodeId);
-        _statsCollector.addMessageSent();
+        node.statsCollector.addMessageSent();
         _storeErasureCodedBackup(envelope, _contacts[bytesToHex(recipient.nodeId)], recipientNodeId: recipient.nodeId);
       }
     } else {
@@ -1928,6 +2053,9 @@ class CleonaService implements ICleonaService {
       } else {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('MEDIA_ANNOUNCEMENT', e);
+      return;
     } catch (e) {
       _log.error('MEDIA_ANNOUNCEMENT decrypt failed: $e');
       return;
@@ -1988,6 +2116,9 @@ class CleonaService implements ICleonaService {
       } else {
         fileData = Uint8List.fromList(envelope.encryptedPayload);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected(envelope.messageType.name, e);
+      return;
     } catch (e) {
       _log.error('Media content decrypt failed: $e');
       return;
@@ -2056,14 +2187,17 @@ class CleonaService implements ICleonaService {
     );
 
     _addMessageToConversation(conversationId, msg, isGroup: groupIdHex != null);
-    notificationSound.playMessageSound();
-    notificationSound.vibrate(VibrationType.message);
-    final mediaSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-    final mediaTypeLabel = metadata.mimeType.startsWith('image/') ? '📷 Bild'
-        : metadata.mimeType.startsWith('video/') ? '🎬 Video'
-        : metadata.mimeType.startsWith('audio/') ? '🎵 Audio'
-        : '📎 Datei';
-    _postAndroidNotification(mediaSenderName, mediaTypeLabel, conversationId);
+    if (!_shouldSuppressNotification(conversationId, msg.timestamp.millisecondsSinceEpoch)) {
+      notificationSound.playMessageSound();
+      notificationSound.vibrate(VibrationType.message);
+      final mediaSenderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
+      final mediaTypeLabel = metadata.mimeType.startsWith('image/') ? '📷 Bild'
+          : metadata.mimeType.startsWith('video/') ? '🎬 Video'
+          : metadata.mimeType.startsWith('audio/') ? '🎵 Audio'
+          : '📎 Datei';
+      _postAndroidNotification(mediaSenderName, mediaTypeLabel, conversationId);
+      _lastNotifiedAt[conversationId] = DateTime.now();
+    }
     // Badge update happens inside _addMessageToConversation — single source of truth.
     _log.info('Media received: $filename (${actualFileData.length} bytes) from ${senderHex.substring(0, 8)}');
 
@@ -2092,6 +2226,9 @@ class CleonaService implements ICleonaService {
       } else {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('MEDIA_ACCEPT', e);
+      return;
     } catch (e) {
       _log.error('MEDIA_ACCEPT decrypt failed: $e');
       return;
@@ -2152,7 +2289,7 @@ class CleonaService implements ICleonaService {
       ..filename = filename;
 
     node.sendEnvelope(contentEnvelope, contact.nodeId);
-    _statsCollector.addMessageSent();
+    node.statsCollector.addMessageSent();
     // Erasure-coded backup for offline delivery (Architecture 3.4.2)
     _storeErasureCodedBackup(contentEnvelope, contact);
     _log.info('Media content sent to ${senderHex.substring(0, 8)}: $filename (+ erasure backup)');
@@ -2190,6 +2327,53 @@ class CleonaService implements ICleonaService {
     if (mimeType.startsWith('video/')) return proto.MessageType.VIDEO;
     return proto.MessageType.FILE;
   }
+
+  /// Whether this message type carries user-authored content that must be
+  /// dropped while reduced-mode (sec-h5 §8.2 / T11) is active. Returning
+  /// false means the type is infrastructure / DHT / signaling and should
+  /// keep flowing even when the local user has skipped a hard-block update.
+  ///
+  /// Mirrors the user-initiated send-paths gated in T11. Note that GIF
+  /// rides on the IMAGE/VIDEO content path and is not a separate enum,
+  /// and that REACTION is `EMOJI_REACTION` in the proto.
+  static bool _isUserMessage(proto.MessageType type) {
+    switch (type) {
+      case proto.MessageType.TEXT:
+      case proto.MessageType.IMAGE:
+      case proto.MessageType.VIDEO:
+      case proto.MessageType.GIF:
+      case proto.MessageType.FILE:
+      case proto.MessageType.VOICE_MESSAGE:
+      case proto.MessageType.MEDIA_ANNOUNCEMENT:
+      case proto.MessageType.MEDIA_ACCEPT:
+      case proto.MessageType.MEDIA_REJECT:
+      case proto.MessageType.MEDIA_CHUNK:
+      case proto.MessageType.EMOJI_REACTION:
+      case proto.MessageType.MESSAGE_EDIT:
+      case proto.MessageType.MESSAGE_DELETE:
+      case proto.MessageType.CHANNEL_POST:
+      case proto.MessageType.CALENDAR_INVITE:
+      case proto.MessageType.CALENDAR_RSVP:
+      case proto.MessageType.CALENDAR_UPDATE:
+      case proto.MessageType.CALENDAR_DELETE:
+      case proto.MessageType.FREE_BUSY_REQUEST:
+      case proto.MessageType.FREE_BUSY_RESPONSE:
+      case proto.MessageType.POLL_CREATE:
+      case proto.MessageType.POLL_VOTE:
+      case proto.MessageType.POLL_VOTE_ANONYMOUS:
+      case proto.MessageType.POLL_VOTE_REVOKE:
+      case proto.MessageType.POLL_UPDATE:
+      case proto.MessageType.POLL_SNAPSHOT:
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  /// Test-only accessor for the private user-message classifier.
+  /// Used by `test/smoke/smoke_reduced_mode.dart`. Not for production callers —
+  /// the gate is enforced inside [handleMessage], not at call sites.
+  static bool isUserMessageForTest(proto.MessageType type) => _isUserMessage(type);
 
   /// Whether this message type represents user-visible content (for stats counting).
   static bool _isUserVisibleMessage(proto.MessageType type) {
@@ -2240,6 +2424,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       editMsg = proto.MessageEdit.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('MESSAGE_EDIT', e);
+      return;
     } catch (e) {
       _log.error('MESSAGE_EDIT decrypt/parse failed: $e');
       return;
@@ -2312,6 +2499,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       deleteMsg = proto.MessageDelete.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('MESSAGE_DELETE', e);
+      return;
     } catch (e) {
       _log.error('MESSAGE_DELETE decrypt/parse failed: $e');
       return;
@@ -2371,6 +2561,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       reaction = proto.EmojiReaction.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('EMOJI_REACTION', e);
+      return;
     } catch (e) {
       _log.error('EMOJI_REACTION decrypt/parse failed: $e');
       return;
@@ -2419,6 +2612,10 @@ class CleonaService implements ICleonaService {
     required String emoji,
     required bool remove,
   }) async {
+    if (_reducedMode) {
+      _log.warn('sendReaction blocked: reducedMode active');
+      return;
+    }
     final conv = conversations[conversationId];
     if (conv == null) return;
 
@@ -2555,6 +2752,9 @@ class CleonaService implements ICleonaService {
     try {
       final payload = _decryptPayload(envelope);
       notification = proto.IdentityDeletedNotification.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('IDENTITY_DELETED', e);
+      return;
     } catch (e) {
       _log.error('IDENTITY_DELETED decrypt/parse failed: $e');
       return;
@@ -2571,9 +2771,10 @@ class CleonaService implements ICleonaService {
         : contact.displayName;
     _log.info('Identity deleted: "$displayName" (${senderHex.substring(0, 8)})');
 
-    // Add system message to conversation
-    final conv = conversations[senderHex];
-    if (conv != null) {
+    // Add system message to conversation. Routed through
+    // _addMessageToConversation so the badge counter and the system Launcher-
+    // Badge stay in sync (#U15 — direct conv.messages.add bypassed both).
+    if (conversations.containsKey(senderHex)) {
       final systemMsg = UiMessage(
         id: bytesToHex(Uint8List.fromList(envelope.messageId)),
         conversationId: senderHex,
@@ -2584,8 +2785,7 @@ class CleonaService implements ICleonaService {
         type: proto.MessageType.IDENTITY_DELETED,
         status: MessageStatus.delivered,
       );
-      conv.messages.add(systemMsg);
-      _saveConversations();
+      _addMessageToConversation(senderHex, systemMsg);
     }
 
     // Mark contact as deleted (prevents re-import)
@@ -2628,6 +2828,9 @@ class CleonaService implements ICleonaService {
       } else {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('PROFILE_UPDATE', e);
+      return;
     } catch (e) {
       _log.error('PROFILE_UPDATE decrypt failed: $e');
       return;
@@ -2690,6 +2893,8 @@ class CleonaService implements ICleonaService {
     try {
       final payload = _decryptPayload(envelope);
       guardianService.handleShareStore(envelope, payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('GUARDIAN_SHARE_STORE', e);
     } catch (e) {
       _log.error('GUARDIAN_SHARE_STORE handler failed: $e');
     }
@@ -2699,6 +2904,8 @@ class CleonaService implements ICleonaService {
     try {
       final payload = _decryptPayload(envelope);
       guardianService.handleRestoreRequest(envelope, payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('GUARDIAN_RESTORE_REQUEST', e);
     } catch (e) {
       _log.error('GUARDIAN_RESTORE_REQUEST handler failed: $e');
     }
@@ -2806,14 +3013,7 @@ class CleonaService implements ICleonaService {
     final peers = node.routingTable.allPeers;
     var sent = 0;
     for (final peer in peers) {
-      final retrieve = proto.PeerRetrieve()
-        ..requesterNodeId = identity.nodeId;
-      final env = identity.createSignedEnvelope(
-        proto.MessageType.PEER_RETRIEVE,
-        retrieve.writeToBuffer(),
-        recipientId: peer.nodeId,
-      );
-      node.sendEnvelope(env, peer.nodeId);
+      _requestStoredMessages(peer);
       sent++;
     }
     if (sent > 0) {
@@ -2821,11 +3021,53 @@ class CleonaService implements ICleonaService {
     }
   }
 
+  /// Send a single PEER_RETRIEVE to one peer.
+  void _requestStoredMessages(PeerInfo peer) {
+    final retrieve = proto.PeerRetrieve()..requesterNodeId = identity.nodeId;
+    final env = identity.createSignedEnvelope(
+      proto.MessageType.PEER_RETRIEVE,
+      retrieve.writeToBuffer(),
+      recipientId: peer.nodeId,
+    );
+    node.sendEnvelope(env, peer.nodeId);
+  }
+
+  /// #U1 fix: poll only peers that joined the routing table since the last
+  /// startup-poll iteration. Each new peer receives both a FRAGMENT_RETRIEVE
+  /// (for DHT-erasure-coded mailbox fragments — primary + fallback mailbox IDs)
+  /// and a PEER_RETRIEVE (for Store-and-Forward stored envelopes). Already-
+  /// polled peers are skipped to avoid re-flooding known-empty mailboxes.
+  void _pollNewPeersForStoredMessages() {
+    final sodium = SodiumFFI();
+    final primaryMailboxId = sodium.sha256(Uint8List.fromList(
+      [...utf8.encode('mailbox'), ...identity.ed25519PublicKey],
+    ));
+    final fallbackMailboxId = sodium.sha256(Uint8List.fromList(
+      [...utf8.encode('mailbox-nid'), ...identity.nodeId],
+    ));
+    final newPeers = node.routingTable.allPeers
+        .where((p) => _startupPolledPeers.add(p.nodeIdHex))
+        .toList();
+    if (newPeers.isEmpty) return;
+    for (final peer in newPeers) {
+      _requestFragments(peer, primaryMailboxId);
+      _requestFragments(peer, fallbackMailboxId);
+      _requestStoredMessages(peer);
+    }
+    _log.info('Startup poll iter $_startupPollCount/10: '
+        '${newPeers.length} new peers polled '
+        '(total ${_startupPolledPeers.length})');
+  }
+
   // ── Sending ────────────────────────────────────────────────────────
 
   /// Send a text message to a contact.
   @override
   Future<UiMessage?> sendTextMessage(String recipientNodeIdHex, String text, {String? forwardedFrom, String? replyToMessageId, String? replyToText, String? replyToSender}) async {
+    if (_reducedMode) {
+      _log.warn('sendTextMessage blocked: reducedMode active');
+      return null;
+    }
     final contact = _contacts[recipientNodeIdHex];
     if (contact == null || contact.status != 'accepted') {
       _log.warn('Cannot send to non-accepted contact: $recipientNodeIdHex');
@@ -2912,7 +3154,7 @@ class CleonaService implements ICleonaService {
 
     // Direct send (PoW runs in isolate via computeAsync)
     final sent = await node.sendEnvelope(envelope, contact.nodeId);
-    _statsCollector.addMessageSent();
+    node.statsCollector.addMessageSent();
 
     // Update message with real ID and status
     final realMsgId = bytesToHex(Uint8List.fromList(envelope.messageId));
@@ -2937,6 +3179,10 @@ class CleonaService implements ICleonaService {
   /// Edit a previously sent message.
   @override
   Future<bool> editMessage(String conversationId, String messageId, String newText) async {
+    if (_reducedMode) {
+      _log.warn('editMessage blocked: reducedMode active');
+      return false;
+    }
     final conv = conversations[conversationId];
     if (conv == null) return false;
 
@@ -3071,6 +3317,10 @@ class CleonaService implements ICleonaService {
   /// Delete a previously sent message.
   @override
   Future<bool> deleteMessage(String conversationId, String messageId) async {
+    if (_reducedMode) {
+      _log.warn('deleteMessage blocked: reducedMode active');
+      return false;
+    }
     final conv = conversations[conversationId];
     if (conv == null) return false;
 
@@ -3291,6 +3541,10 @@ class CleonaService implements ICleonaService {
   /// Forward a message to another conversation.
   @override
   Future<UiMessage?> forwardMessage(String sourceConversationId, String messageId, String targetConversationId) async {
+    if (_reducedMode) {
+      _log.warn('forwardMessage blocked: reducedMode active');
+      return null;
+    }
     // Check allowForwarding on source conversation
     final sourceConv = conversations[sourceConversationId];
     if (sourceConv != null && !sourceConv.config.allowForwarding) {
@@ -3417,6 +3671,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       configMsg = proto.ChatConfigUpdate.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('CHAT_CONFIG_UPDATE', e);
+      return;
     } catch (e) {
       _log.error('CHAT_CONFIG_UPDATE decrypt/parse failed: $e');
       return;
@@ -3955,10 +4212,10 @@ class CleonaService implements ICleonaService {
       type: proto.MessageType.IDENTITY_DELETED,
       status: MessageStatus.delivered,
     );
-    conv.messages.add(systemMsg);
-    _saveConversations();
+    // Route through _addMessageToConversation so badge + Launcher counter
+    // pick up the warning (#U15 — direct conv.messages.add bypassed both).
+    _addMessageToConversation(userIdHex, systemMsg);
     _log.info('Stale sender-side warning for ${userIdHex.substring(0, 8)} (${contact.displayName})');
-    onStateChanged?.call();
   }
 
   // ── CR Retry ───────────────────────────────────────────────────────
@@ -4187,6 +4444,43 @@ class CleonaService implements ICleonaService {
     }))));
   }
 
+  @override
+  void setActiveConversationId(String? conversationId) {
+    _activeConversationId = conversationId;
+  }
+
+  @override
+  void setAppResumed(bool isResumed) {
+    _isAppResumed = isResumed;
+    // §2.2.4: adaptive Liveness-TTL — Foreground 15min, Background 1h.
+    _identityPublisher?.setForeground(isResumed);
+  }
+
+  /// Decide whether the in-app notification (sound + vibrate + Android banner)
+  /// for an incoming message should be suppressed. Three independent layers:
+  ///
+  ///   L1 — Foreground active conversation: chat is already on screen.
+  ///   L2 — Stale backlog: message timestamp older than [_notificationStaleThresholdMs].
+  ///        Covers startup re-poll, daemon restart, S&F catch-up — the user
+  ///        either already saw these elsewhere or there is no point in beeping
+  ///        about old news.
+  ///   L3 — Per-conversation debounce: at most one notification every
+  ///        [_notificationDebounceMs] ms per conversation, against group-chat
+  ///        spam-bursts.
+  ///
+  /// Badge updates run in a different code path and are NOT gated by this.
+  bool _shouldSuppressNotification(String conversationId, int messageTimestampMs) {
+    if (_isAppResumed && _activeConversationId == conversationId) return true;
+    final ageMs = DateTime.now().millisecondsSinceEpoch - messageTimestampMs;
+    if (ageMs > _notificationStaleThresholdMs) return true;
+    final last = _lastNotifiedAt[conversationId];
+    if (last != null &&
+        DateTime.now().difference(last).inMilliseconds < _notificationDebounceMs) {
+      return true;
+    }
+    return false;
+  }
+
   /// Toggle favorite status of a conversation.
   @override
   void toggleFavorite(String conversationId) {
@@ -4367,6 +4661,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text) async {
+    if (_reducedMode) {
+      _log.warn('sendGroupTextMessage blocked: reducedMode active');
+      return null;
+    }
     final group = _groups[groupIdHex];
     if (group == null) return null;
 
@@ -4413,7 +4711,7 @@ class CleonaService implements ICleonaService {
     }
 
     if (firstMsgId == null) return null;
-    _statsCollector.addMessageSent();
+    node.statsCollector.addMessageSent();
 
     // Create single UI message
     final msg = UiMessage(
@@ -4800,6 +5098,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       invite = proto.GroupInvite.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('GROUP_INVITE', e);
+      return;
     } catch (e) {
       _log.error('GROUP_INVITE decrypt/parse failed: $e');
       return;
@@ -4891,6 +5192,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       leaveMsg = proto.GroupLeave.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('GROUP_LEAVE', e);
+      return;
     } catch (e) {
       _log.error('GROUP_LEAVE decrypt/parse failed: $e');
       return;
@@ -5044,6 +5348,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<UiMessage?> sendChannelPost(String channelIdHex, String text) async {
+    if (_reducedMode) {
+      _log.warn('sendChannelPost blocked: reducedMode active');
+      return null;
+    }
     final channel = _channels[channelIdHex];
     if (channel == null) return null;
 
@@ -5098,7 +5406,7 @@ class CleonaService implements ICleonaService {
     // If no other members received the post, generate a local message ID
     // (e.g. owner-only public channel — post is stored locally for future subscribers)
     firstMsgId ??= bytesToHex(SodiumFFI().randomBytes(16));
-    _statsCollector.addMessageSent();
+    node.statsCollector.addMessageSent();
 
     // Create single UI message
     final msg = UiMessage(
@@ -5744,6 +6052,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       return _DecryptedEnvelope(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected(envelope.messageType.name, e);
+      return null;
     } catch (e) {
       _log.debug('Decrypt failed for ${envelope.messageType}: $e');
       return null;
@@ -6576,6 +6887,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       invite = proto.ChannelInvite.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('CHANNEL_INVITE', e);
+      return;
     } catch (e) {
       _log.error('CHANNEL_INVITE decrypt/parse failed: $e');
       return;
@@ -6670,6 +6984,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       leaveMsg = proto.ChannelLeave.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('CHANNEL_LEAVE', e);
+      return;
     } catch (e) {
       _log.error('CHANNEL_LEAVE decrypt/parse failed: $e');
       return;
@@ -6733,6 +7050,9 @@ class CleonaService implements ICleonaService {
         payload = Uint8List.fromList(envelope.encryptedPayload);
       }
       roleMsg = proto.ChannelRoleUpdate.fromBuffer(payload);
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('CHANNEL_ROLE_UPDATE', e);
+      return;
     } catch (e) {
       _log.error('CHANNEL_ROLE_UPDATE decrypt/parse failed: $e');
       return;
@@ -6870,6 +7190,9 @@ class CleonaService implements ICleonaService {
       } else {
         decryptedPayload = Uint8List.fromList(envelope.encryptedPayload);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('CHANNEL_POST', e);
+      return;
     } catch (e) {
       _log.error('CHANNEL_POST decrypt failed: $e');
       return;
@@ -7283,7 +7606,7 @@ class CleonaService implements ICleonaService {
   @override
   Future<void> hangup() async {
     await notificationSound.stopAll();
-    _stopAudioEngine();
+    // Audio-Engine wird via callManager.onCallEnded gestoppt — direkter Aufruf hier wäre doppelt.
     await callManager.hangup();
   }
 
@@ -7354,7 +7677,23 @@ class CleonaService implements ICleonaService {
   }
 
   Future<void> _startAudioMixer(GroupCallSession session) async {
-    if (!Platform.isLinux || session.callKey == null) return;
+    // Plan §E4 — same RECORD_AUDIO gate as 1:1 calls (see _startAudioEngine).
+    // Group calls share the same capture path; without the permission we'd
+    // promote the FGS to mic-type but never actually capture anything.
+    if (Platform.isAndroid) {
+      final granted = await AudioPermissions.requestRecordAudio();
+      if (!granted) {
+        _log.warn('RECORD_AUDIO permission denied — group call audio disabled');
+        return;
+      }
+    }
+
+    // Bug #U10b — same mic-type promotion as 1:1 calls (see _startAudioEngine).
+    if (Platform.isAndroid) {
+      await ForegroundServiceControl.promoteForCall();
+    }
+
+    if (session.callKey == null) return;
     try {
       _audioMixer = AudioMixer(
         callKey: session.callKey!,
@@ -7373,10 +7712,19 @@ class CleonaService implements ICleonaService {
   void _stopAudioMixer() {
     _audioMixer?.stop();
     _audioMixer = null;
+    if (Platform.isAndroid) {
+      ForegroundServiceControl.demoteAfterCall();
+    }
   }
 
   Future<void> _startGroupVideo(GroupCallSession session) async {
-    if (!Platform.isLinux || session.callKey == null) return;
+    // Desktop only — vpx_ffi has Linux/macOS/Windows .so/.dylib/.dll paths.
+    // Android-Group-Video braucht eigenen Codec-Pfad (geplant, separate Spec).
+    // iOS analog (AVFoundation-Port pending).
+    if (!(Platform.isLinux || Platform.isMacOS || Platform.isWindows) ||
+        session.callKey == null) {
+      return;
+    }
     _startGroupVideoCapture(session);
     _startGroupVideoReceiver(session);
   }
@@ -7457,6 +7805,9 @@ class CleonaService implements ICleonaService {
           decrypted = ZstdCompression.instance.decompress(decrypted);
         }
         payload = decrypted;
+      } on KemVersionRejectedException catch (e) {
+        _warnKemVersionRejected('CALL_INVITE', e);
+        return;
       } catch (e) {
         _log.debug('CALL_INVITE KEM decrypt failed: $e');
         // Fall through to 1:1 handler (may be unencrypted)
@@ -7534,7 +7885,30 @@ class CleonaService implements ICleonaService {
   // ── Audio Engine ──────────────────────────────────────────────────
 
   Future<void> _startAudioEngine(CallSession session) async {
-    if (!Platform.isLinux || session.sharedSecret == null) return;
+    // Plan §E4 — RECORD_AUDIO runtime permission must be granted before we
+    // promote the foreground service to mic-type. Asking earlier (e.g. at
+    // app start) would surprise users; asking after promote leaves the FGS
+    // in MICROPHONE mode with no actual capture, which Android logs as a
+    // misuse. The helper is a no-op on non-Android (returns true).
+    if (Platform.isAndroid) {
+      final granted = await AudioPermissions.requestRecordAudio();
+      if (!granted) {
+        _log.warn('RECORD_AUDIO permission denied — call audio disabled');
+        return;
+      }
+    }
+
+    // Bug #U10b — promote the foreground service to MICROPHONE type
+    // BEFORE the engine opens AudioRecord (API 34+ enforces this at the
+    // moment of capture). The helper is a no-op on non-Android. We do
+    // this even though the engine itself is currently Linux-only so the
+    // wiring is already in place for the upcoming C2/C3 cross-platform
+    // refactor.
+    if (Platform.isAndroid) {
+      await ForegroundServiceControl.promoteForCall();
+    }
+
+    if (session.sharedSecret == null) return;
 
     try {
       _audioEngine = AudioEngine(
@@ -7553,17 +7927,46 @@ class CleonaService implements ICleonaService {
   void _stopAudioEngine() {
     _audioEngine?.stop();
     _audioEngine = null;
+    // Bug #U10b — demote back to plain DATA_SYNC so the persistent
+    // "microphone in use" indicator goes away. Fire-and-forget; failures
+    // are non-fatal and swallowed inside the helper.
+    if (Platform.isAndroid) {
+      ForegroundServiceControl.demoteAfterCall();
+    }
   }
 
   void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
     session.framesSent++;
+    final peerNodeId = hexToBytes(session.peerNodeIdHex);
     final envelope = identity.createSignedEnvelope(
       proto.MessageType.CALL_AUDIO,
       encryptedFrame,
-      recipientId: hexToBytes(session.peerNodeIdHex),
+      recipientId: peerNodeId,
     );
-    // Fire-and-forget UDP, no ACK needed for audio
-    node.sendEnvelope(envelope, hexToBytes(session.peerNodeIdHex));
+
+    // Plan §D2: Per-call route cache. On first frame, resolve the peer once
+    // via the routing table and stash the PeerInfo on the session. Subsequent
+    // frames reuse it. The DV-Routing onRouteDown handler invalidates this
+    // cache so a stale entry can't survive a path drop.
+    //
+    // API note (deviation from plan): the plan referenced
+    // `routingTable.findBestRoute(...)` + `node.sendEnvelopeViaPeer(...)` —
+    // those names don't exist. Actual APIs are `routingTable.getPeer(nodeId)`
+    // (with `getPeerByUserId(...)` fallback for §26 multi-device userId
+    // routing) and `node.sendEnvelope(envelope, peer.nodeId)`. The savings
+    // come from skipping the dual XOR+bucket lookup on every audio frame.
+    if (session.cachedRoute == null) {
+      final peer = node.routingTable.getPeer(peerNodeId) ??
+          node.routingTable.getPeerByUserId(peerNodeId);
+      if (peer != null) {
+        session.cachedRoute = peer;
+        session.cachedRouteAt = DateTime.now();
+      }
+    }
+
+    // Fire-and-forget UDP, no ACK needed for audio.
+    final dest = session.cachedRoute?.nodeId ?? peerNodeId;
+    node.sendEnvelope(envelope, dest);
   }
 
   void _handleCallAudio(proto.MessageEnvelope envelope) {
@@ -7611,6 +8014,8 @@ class CleonaService implements ICleonaService {
     _pollMailbox();
     // Also poll Store-and-Forward peers (they may hold messages for us).
     _pollStoredMessages();
+    // §2.2.4: Liveness-Republish bei Adress-Wechsel (debounced 5s im Publisher)
+    _identityPublisher?.onAddressesChanged();
   }
 
   // ── Persistence ────────────────────────────────────────────────────
@@ -7724,6 +8129,7 @@ class CleonaService implements ICleonaService {
           isChannel: convData['isChannel'] as bool? ?? false,
           profilePictureBase64: convData['profilePicture'] as String?,
           isFavorite: convData['isFavorite'] as bool? ?? false,
+          unreadCount: convData['unreadCount'] as int? ?? 0,
         );
       }
       _conversationsLoaded = true;
@@ -7814,6 +8220,7 @@ class CleonaService implements ICleonaService {
           if (entry.value.isChannel) 'isChannel': true,
           if (entry.value.isFavorite) 'isFavorite': true,
           if (entry.value.profilePictureBase64 != null) 'profilePicture': entry.value.profilePictureBase64,
+          if (entry.value.unreadCount > 0) 'unreadCount': entry.value.unreadCount,
           // Use UiMessage.toJson for complete serialization (media, transcripts, reactions, etc.)
           'messages': entry.value.messages.map((m) => m.toJson()).toList(),
         };
@@ -8380,7 +8787,7 @@ class CleonaService implements ICleonaService {
   /// Collect a full network statistics snapshot.
   @override
   NetworkStats getNetworkStats() {
-    return _statsCollector.collect(
+    return node.statsCollector.collect(
       routingTable: node.routingTable,
       mailboxStore: mailboxStore,
       natTraversal: node.natTraversal,
@@ -8717,6 +9124,8 @@ class CleonaService implements ICleonaService {
       }
 
       _log.info('Key rotation received from ${contact.displayName}');
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('KEY_ROTATION', e);
     } catch (e) {
       _log.error('KEY_ROTATION processing failed: $e');
     }
@@ -8846,6 +9255,8 @@ class CleonaService implements ICleonaService {
 
       // Send our own announce back so the new device knows about us
       _sendTwinAnnounce();
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('TWIN_ANNOUNCE', e);
     } catch (e) {
       _log.error('TWIN_ANNOUNCE processing failed: $e');
     }
@@ -8919,6 +9330,8 @@ class CleonaService implements ICleonaService {
           _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');
       }
       _saveDevices(); // Persist dedup IDs
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('TWIN_SYNC', e);
     } catch (e) {
       _log.error('TWIN_SYNC processing failed: $e');
     }
@@ -9222,6 +9635,8 @@ class CleonaService implements ICleonaService {
         _log.debug('DEVICE_REVOKED from ${contact.displayName}: '
             'no PeerInfo in routing table');
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('DEVICE_REVOKED', e);
     } catch (e) {
       _log.error('DEVICE_REVOKED processing failed: $e');
     }
@@ -9249,6 +9664,8 @@ class CleonaService implements ICleonaService {
         // Periodic KEM rotation — delegate to legacy handler
         _handleKeyRotation(envelope);
       }
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('KEY_ROTATION_BROADCAST', e);
     } catch (e) {
       _log.error('KEY_ROTATION_BROADCAST processing failed: $e');
     }
@@ -9607,7 +10024,7 @@ class CleonaService implements ICleonaService {
 
     await node.sendEnvelope(envelope, contact.nodeId);
     _storeErasureCodedBackup(envelope, contact, recipientNodeId: contact.nodeId);
-    _statsCollector.addMessageSent();
+    node.statsCollector.addMessageSent();
   }
 
   /// Handle incoming CALENDAR_INVITE from a group event creator.
@@ -9866,6 +10283,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<String> createCalendarEvent(CalendarEvent event) async {
+    if (_reducedMode) {
+      _log.warn('createCalendarEvent blocked: reducedMode active');
+      return '';
+    }
     calendarManager.createEvent(event);
     if (event.groupId != null) {
       await sendCalendarInvite(event);
@@ -9880,6 +10301,10 @@ class CleonaService implements ICleonaService {
     List<int>? reminders, String? recurrenceRule,
     bool? taskCompleted, int? taskPriority,
   }) async {
+    if (_reducedMode) {
+      _log.warn('updateCalendarEvent blocked: reducedMode active');
+      return false;
+    }
     final ok = calendarManager.updateEvent(eventIdHex,
       title: title, description: description, location: location,
       startTime: startTime, endTime: endTime, allDay: allDay,
@@ -9897,6 +10322,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<bool> deleteCalendarEvent(String eventIdHex) async {
+    if (_reducedMode) {
+      _log.warn('deleteCalendarEvent blocked: reducedMode active');
+      return false;
+    }
     final evt = calendarManager.events[eventIdHex];
     if (evt?.groupId != null && evt?.createdBy == identity.userIdHex) {
       await sendCalendarDelete(eventIdHex);
@@ -9909,6 +10338,10 @@ class CleonaService implements ICleonaService {
   /// Send a calendar invite to all members of a group (Pairwise Fan-out).
   @override
   Future<void> sendCalendarInvite(CalendarEvent event) async {
+    if (_reducedMode) {
+      _log.warn('sendCalendarInvite blocked: reducedMode active');
+      return;
+    }
     if (event.groupId == null) return;
 
     final group = _groups[event.groupId!];
@@ -9956,6 +10389,10 @@ class CleonaService implements ICleonaService {
     int? proposedEnd,
     String? comment,
   }) async {
+    if (_reducedMode) {
+      _log.warn('sendCalendarRsvp blocked: reducedMode active');
+      return;
+    }
     final event = calendarManager.events[eventIdHex];
     if (event == null || event.groupId == null) return;
 
@@ -9989,6 +10426,10 @@ class CleonaService implements ICleonaService {
   /// Send calendar update to all group members.
   @override
   Future<void> sendCalendarUpdate(String eventIdHex) async {
+    if (_reducedMode) {
+      _log.warn('sendCalendarUpdate blocked: reducedMode active');
+      return;
+    }
     final event = calendarManager.events[eventIdHex];
     if (event == null || event.groupId == null) return;
 
@@ -10028,6 +10469,10 @@ class CleonaService implements ICleonaService {
   /// Send calendar delete to all group members.
   @override
   Future<void> sendCalendarDelete(String eventIdHex) async {
+    if (_reducedMode) {
+      _log.warn('sendCalendarDelete blocked: reducedMode active');
+      return;
+    }
     final event = calendarManager.events[eventIdHex];
     if (event == null || event.groupId == null) return;
 
@@ -10055,6 +10500,10 @@ class CleonaService implements ICleonaService {
   /// Send a FREE_BUSY_REQUEST to a contact.
   @override
   Future<String> sendFreeBusyRequest(String contactNodeIdHex, int queryStart, int queryEnd) async {
+    if (_reducedMode) {
+      _log.warn('sendFreeBusyRequest blocked: reducedMode active');
+      return '';
+    }
     final requestIdBytes = SodiumFFI().randomBytes(16);
     final requestIdHex = bytesToHex(requestIdBytes);
 
@@ -10664,6 +11113,10 @@ class CleonaService implements ICleonaService {
     required PollSettings settings,
     required String groupIdHex,
   }) async {
+    if (_reducedMode) {
+      _log.warn('createPoll blocked: reducedMode active');
+      return '';
+    }
     if (_pollRecipients(groupIdHex) == null) {
       throw ArgumentError('Unknown group/channel $groupIdHex');
     }
@@ -10719,6 +11172,10 @@ class CleonaService implements ICleonaService {
     int? scaleValue,
     String? freeText,
   }) async {
+    if (_reducedMode) {
+      _log.warn('submitPollVote blocked: reducedMode active');
+      return false;
+    }
     final poll = pollManager.polls[pollId];
     if (poll == null || poll.closed) return false;
     if (poll.settings.anonymous) {
@@ -10754,6 +11211,10 @@ class CleonaService implements ICleonaService {
     int? scaleValue,
     String? freeText,
   }) async {
+    if (_reducedMode) {
+      _log.warn('submitPollVoteAnonymous blocked: reducedMode active');
+      return false;
+    }
     final poll = pollManager.polls[pollId];
     if (poll == null || poll.closed) return false;
     if (!poll.settings.anonymous) {
@@ -10815,6 +11276,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<bool> revokePollVoteAnonymous(String pollId) async {
+    if (_reducedMode) {
+      _log.warn('revokePollVoteAnonymous blocked: reducedMode active');
+      return false;
+    }
     final poll = pollManager.polls[pollId];
     if (poll == null || !poll.settings.anonymous) return false;
     final keyImage = LinkableRingSignature.deriveKeyImage(
@@ -10843,6 +11308,10 @@ class CleonaService implements ICleonaService {
     int? newDeadline,
     bool delete = false,
   }) async {
+    if (_reducedMode) {
+      _log.warn('updatePoll blocked: reducedMode active');
+      return false;
+    }
     final poll = pollManager.polls[pollId];
     if (poll == null) return false;
     // Only creator or group/channel owner/admin may mutate.
@@ -10894,6 +11363,10 @@ class CleonaService implements ICleonaService {
 
   @override
   Future<String?> convertDatePollToEvent(String pollId, int winningOptionId) async {
+    if (_reducedMode) {
+      _log.warn('convertDatePollToEvent blocked: reducedMode active');
+      return null;
+    }
     final poll = pollManager.polls[pollId];
     if (poll == null || poll.pollType != PollType.datePoll) return null;
     final option = poll.options.firstWhere(
@@ -11330,6 +11803,8 @@ class CleonaService implements ICleonaService {
 
       onRestoreProgress?.call(response.phase, contactsRestored, messagesRestored);
       onStateChanged?.call();
+    } on KemVersionRejectedException catch (e) {
+      _warnKemVersionRejected('RESTORE_RESPONSE', e);
     } catch (e) {
       _log.error('RESTORE_RESPONSE processing failed: $e');
     }
@@ -11442,6 +11917,10 @@ class CleonaService implements ICleonaService {
         decrypted = ZstdCompression.instance.decompress(decrypted);
       }
       return decrypted;
+    } on KemVersionRejectedException {
+      // Version rejected (legacy/future/0) — do NOT try previous keys.
+      // Version mismatch is a protocol rejection, not a crypto failure.
+      rethrow;
     } catch (_) {
       // Try previous keys (for transit messages during rotation)
       if (identity.previousX25519Sk != null && identity.previousMlKemSk != null) {
@@ -11506,6 +11985,8 @@ class CleonaService implements ICleonaService {
     _restoreRetryTimer = null;
     _restorePollingTimer?.cancel();
     _restorePollingTimer = null;
+    _startupPollingTimer?.cancel();
+    _startupPollingTimer = null;
     _channelIndexGossipTimer?.cancel();
     _channelIndexGossipTimer = null;
     _moderationTimer?.cancel();
@@ -11514,6 +11995,13 @@ class CleonaService implements ICleonaService {
     _updateCheckTimer = null;
     _natWizardTrigger?.stop();
     _natWizardTrigger = null;
+    // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
+    if (_publisherPeerAddedListener != null) {
+      node.routingTable.removeOnPeerAddedListener(_publisherPeerAddedListener!);
+      _publisherPeerAddedListener = null;
+    }
+    _identityPublisher?.stop();
+    _identityPublisher = null;
     _saveContacts();
     _saveGroups();
     _saveConversations();
@@ -11555,6 +12043,16 @@ class CleonaService implements ICleonaService {
         if (manifest == null) return;
 
         _latestManifest = manifest;
+        // Sec H-5 (V3.1.72) / T13: persist verified manifest so that the next
+        // startup of `lib/main.dart` can apply the hard-block check before
+        // services initialize. Best-effort — IO errors must not break the poll.
+        try {
+          final cacheFile = File('${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
+          cacheFile.parent.createSync(recursive: true);
+          cacheFile.writeAsStringSync(jsonData, flush: true);
+        } catch (e) {
+          _log.debug('Failed to cache update manifest: $e');
+        }
         final isNewer = checker.isNewer(manifest.version, currentAppVersion);
 
         if (isNewer) {
@@ -11652,6 +12150,12 @@ class CleonaService implements ICleonaService {
       }
     });
   }
+
+  /// Single-source-of-truth log message for KEM version rejections (Sec H-5
+  /// silent-drop contract). Use from [PerMessageKem.decrypt] catch sites.
+  void _warnKemVersionRejected(String context, KemVersionRejectedException e) {
+    _log.warn('KEM version rejected for $context (version=${e.receivedVersion}, drop)');
+  }
 }
 
 /// Simple wrapper for decrypted payload.
@@ -11681,4 +12185,17 @@ class _JurySession {
     this.isPlausibilityJury = false,
     required this.createdAt,
   });
+}
+
+/// §2.2.4: Adapter zwischen `IdentityPublisher.sender.send(envelope, peer)` und
+/// dem CleonaNode's public `sendEnvelopeToPeer`. Fire-and-forget — der Publisher
+/// behandelt Fehler selbst (broadcast an K closest, wenn einer fehlschlägt
+/// reicht's wenn andere ankommen).
+class _IdentityPublisherSender {
+  final CleonaNode _node;
+  _IdentityPublisherSender(this._node);
+
+  Future<void> send(proto.MessageEnvelope envelope, PeerInfo peer) async {
+    await _node.sendEnvelopeToPeer(envelope, peer);
+  }
 }

@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:fixnum/fixnum.dart';
+import 'package:image/image.dart' as img;
 
 // ---------------------------------------------------------------------------
 // Sender-Side Link Preview Fetcher
@@ -402,16 +403,42 @@ class LinkPreviewFetcher {
 
       final bytes = Uint8List.fromList(chunks.expand((c) => c).toList());
 
-      // Cap at 64 KB for the proto field
-      if (bytes.length > 65536) return null;
-
-      return bytes;
+      if (bytes.length <= 65536) return bytes;
+      return recompressToFit(bytes, 65536);
     } on TimeoutException {
       return null;
     } catch (_) {
       return null;
     } finally {
       client?.close(force: true);
+    }
+  }
+
+  /// Decode an image and re-encode as JPEG until it fits in [maxBytes].
+  ///
+  /// Strategy: try descending JPEG quality at width 600, then 400, then 300.
+  /// Returns null if the image cannot be decoded or no quality/size combination
+  /// produces a payload within [maxBytes]. Public so that smoke tests can verify
+  /// the size-fit invariant without requiring a network round-trip.
+  static Uint8List? recompressToFit(Uint8List src, int maxBytes) {
+    try {
+      final decoded = img.decodeImage(src);
+      if (decoded == null) return null;
+
+      const widths = [600, 400, 300];
+      const qualities = [75, 60, 45, 30];
+      for (final w in widths) {
+        final scaled = decoded.width > w
+            ? img.copyResize(decoded, width: w)
+            : decoded;
+        for (final q in qualities) {
+          final encoded = img.encodeJpg(scaled, quality: q);
+          if (encoded.length <= maxBytes) return Uint8List.fromList(encoded);
+        }
+      }
+      return null;
+    } catch (_) {
+      return null;
     }
   }
 }

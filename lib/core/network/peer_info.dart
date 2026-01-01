@@ -155,43 +155,72 @@ class PeerAddress {
   }
 
   /// Whether this address is reachable from the device's current network.
-  /// Global IPv6 and public IPv4 are always reachable.
-  /// Private IPs are only reachable if we also have a private IP (same RFC1918 class).
+  /// Global IPv6 reachable iff WE have a global IPv6 — site-local (fec0:),
+  /// ULA (fc00:/fd00:), link-local (fe80:) on the device do not provide global
+  /// egress (e.g. QEMU user-mode NAT routes ::/0 via fe80::2 but drops the
+  /// packet silently; OS-level send returns ok and the score-pinning prevents
+  /// IPv4 fallback from ever being tried).
+  /// Private IPs reachable iff WE have any private IP — different RFC1918
+  /// classes within one routed network are common (192.168.10.x ↔ 192.0.2.x
+  /// across VLANs, 10.0.2.x QEMU-NAT egressing onto a 192.168.x host LAN).
   /// CGNAT IPs (100.64.x.x) are treated like public (mobile carrier NAT outbound works).
   bool get isReachableFromCurrentNetwork {
-    // IPv6 global is always reachable (no NAT)
-    if (ip.contains(':') && !ip.toLowerCase().startsWith('fe80:')) return true;
+    if (ip.contains(':') && !ip.toLowerCase().startsWith('fe80:')) {
+      if (ip == '::1') return true; // loopback to self always reachable
+      return _hasGlobalIpv6();
+    }
     if (!_isPrivateIp(ip)) return true;
     // Loopback is always reachable from the same machine
     if (ip.startsWith('127.')) return true;
     // Target is private — are WE also on a private network?
-    // If we have ANY private IP, assume private ranges are routable
-    // (different /24s within same org are common, e.g. 192.168.10.x ↔ 192.0.2.x)
+    // Cross-class private routing is common in test labs and home networks,
+    // so any private local IP qualifies. If a target is genuinely on an
+    // isolated subnet, the UDP send simply fails and the cascade falls back
+    // to relay; better than blanket-suppressing valid local addresses.
     for (final localIp in currentLocalIps) {
-      if (_isPrivateIp(localIp) && _sameRfc1918Class(ip, localIp)) return true;
+      if (_isPrivateIp(localIp)) return true;
     }
     return false;
   }
 
-  /// Check if two private IPs are in the same RFC1918 class.
-  /// 10.0.0.0/8 ↔ 10.x.x.x, 172.16.0.0/12 ↔ 172.16-31.x.x, 192.168.0.0/16 ↔ 192.168.x.x
-  static bool _sameRfc1918Class(String ip1, String ip2) {
-    if (ip1.startsWith('10.') && ip2.startsWith('10.')) return true;
-    if (ip1.startsWith('192.168.') && ip2.startsWith('192.168.')) return true;
-    if (_is172Private(ip1) && _is172Private(ip2)) return true;
+  /// True if the device has at least one routable (global) IPv6 address.
+  /// Excludes link-local (fe80:), site-local-deprecated (fec0:),
+  /// ULA (fc00:/fd00:), loopback (::1), multicast (ff..).
+  static bool _hasGlobalIpv6() {
+    for (final localIp in currentLocalIps) {
+      if (!localIp.contains(':')) continue;
+      final lower = localIp.toLowerCase();
+      if (lower == '::1') continue;
+      if (lower.startsWith('fe80:')) continue;
+      if (lower.startsWith('fec0:')) continue;
+      if (lower.startsWith('ff')) continue;
+      if (lower.startsWith('fc') || lower.startsWith('fd')) continue;
+      return true;
+    }
     return false;
-  }
-
-  static bool _is172Private(String ip) {
-    if (!ip.startsWith('172.')) return false;
-    final parts = ip.split('.');
-    if (parts.length < 2) return false;
-    final second = int.tryParse(parts[1]) ?? 0;
-    return second >= 16 && second <= 31;
   }
 
   /// Public access to private-IP check (needed by cleona_node for relay logic).
   static bool isPrivateIp(String ip) => _isPrivateIp(ip);
+
+  /// True if the two IPs belong to the same RFC1918 class
+  /// (10/8, 172.16-31/12, or 192.168/16). Returns false for IPv6 or
+  /// non-private inputs. Used by NAT-egress detection: an observed-IP
+  /// that's private AND in the same class as ours is most likely an echo
+  /// of our own LAN address, not a legit cross-NAT egress.
+  static bool samePrivateClass(String ip1, String ip2) {
+    if (ip1.contains(':') || ip2.contains(':')) return false;
+    if (ip1.startsWith('10.') && ip2.startsWith('10.')) return true;
+    if (ip1.startsWith('192.168.') && ip2.startsWith('192.168.')) return true;
+    final p1 = ip1.split('.');
+    final p2 = ip2.split('.');
+    if (p1.length >= 2 && p2.length >= 2 && p1[0] == '172' && p2[0] == '172') {
+      final s1 = int.tryParse(p1[1]) ?? 0;
+      final s2 = int.tryParse(p2[1]) ?? 0;
+      if (s1 >= 16 && s1 <= 31 && s2 >= 16 && s2 <= 31) return true;
+    }
+    return false;
+  }
 
   @override
   String toString() => '$ip:$port (${type.name}, pri=$priority, score=${score.toStringAsFixed(2)})';
@@ -336,6 +365,47 @@ class PeerInfo {
     relayViaNodeId = null;
     relaySetAt = null;
     consecutiveRelayFailures = 0;
+  }
+
+  /// Per-relay-route cooldown (Task #30): relayHex → expiresAt.
+  ///
+  /// When a learned relay route accumulates 3 consecutive ACK timeouts, we
+  /// stamp the relay's nodeId here. While the timestamp is in the future,
+  /// re-learning of the SAME relay (via incoming RELAY_FORWARD or RELAY_ACK)
+  /// is suppressed and Cascade Step 2a skips it.
+  ///
+  /// Why: asymmetric reachability is real on the internet. b4344987 may be
+  /// able to deliver to us (incoming relay traffic arrives) while being
+  /// unable to deliver from us to a third party (outgoing relay drops).
+  /// Without this cooldown, peer.relayViaNodeId is overwritten every time
+  /// a stale relay sends us a packet, re-arming the broken path.
+  ///
+  /// Transient — not persisted across daemon restarts (defensive: a fresh
+  /// daemon should explore paths from scratch rather than honor a stale
+  /// blacklist that may no longer apply).
+  final Map<String, DateTime> _relayCooldownUntil = {};
+
+  /// Default cooldown: long enough to survive several incoming relay packets
+  /// (Bob's CHANNEL_INDEX_EXCHANGE arrives every 5-15min) but short enough
+  /// that genuine path repair (NAT mapping refresh) recovers within minutes.
+  static const Duration relayFailureCooldown = Duration(minutes: 5);
+
+  /// Mark a relay route as recently failed. Suppresses re-learning of the
+  /// same relay for the cooldown window.
+  void markRelayFailed(String relayHex, {Duration? cooldown}) {
+    _relayCooldownUntil[relayHex] =
+        DateTime.now().add(cooldown ?? relayFailureCooldown);
+  }
+
+  /// Whether the given relay nodeId is currently in cooldown.
+  bool isRelayInCooldown(String relayHex) {
+    final until = _relayCooldownUntil[relayHex];
+    if (until == null) return false;
+    if (DateTime.now().isAfter(until)) {
+      _relayCooldownUntil.remove(relayHex);
+      return false;
+    }
+    return true;
   }
 
   /// Protected seed peers survive maintenance pruning (§27 Doze resilience).

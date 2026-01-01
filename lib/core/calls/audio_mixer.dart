@@ -1,7 +1,6 @@
 // ignore_for_file: constant_identifier_names
 import 'dart:async';
 import 'dart:ffi';
-import 'dart:io';
 import 'dart:isolate';
 import 'dart:typed_data';
 
@@ -9,52 +8,16 @@ import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
 import 'package:cleona/core/network/clogger.dart';
-
-// ── PulseAudio Simple API FFI (same as AudioEngine) ──────────────────────
-
-const int _PA_SAMPLE_S16LE = 3;
-const int _PA_STREAM_PLAYBACK = 1;
-const int _PA_STREAM_RECORD = 2;
-
-final class _PaSampleSpec extends Struct {
-  @Uint32()
-  external int format;
-  @Uint32()
-  external int rate;
-  @Uint8()
-  external int channels;
-}
-
-typedef _PaSimpleNewNative = Pointer<Void> Function(
-    Pointer<Utf8>, Pointer<Utf8>, Int32, Pointer<Utf8>, Pointer<Utf8>,
-    Pointer<_PaSampleSpec>, Pointer<Void>, Pointer<Void>, Pointer<Int32>);
-typedef _PaSimpleNewDart = Pointer<Void> Function(
-    Pointer<Utf8>, Pointer<Utf8>, int, Pointer<Utf8>, Pointer<Utf8>,
-    Pointer<_PaSampleSpec>, Pointer<Void>, Pointer<Void>, Pointer<Int32>);
-
-typedef _PaSimpleReadNative = Int32 Function(
-    Pointer<Void>, Pointer<Uint8>, Size, Pointer<Int32>);
-typedef _PaSimpleReadDart = int Function(
-    Pointer<Void>, Pointer<Uint8>, int, Pointer<Int32>);
-
-typedef _PaSimpleWriteNative = Int32 Function(
-    Pointer<Void>, Pointer<Uint8>, Size, Pointer<Int32>);
-typedef _PaSimpleWriteDart = int Function(
-    Pointer<Void>, Pointer<Uint8>, int, Pointer<Int32>);
-
-typedef _PaSimpleFreeNative = Void Function(Pointer<Void>);
-typedef _PaSimpleFreeDart = void Function(Pointer<Void>);
-
-typedef _PaSimpleDrainNative = Int32 Function(Pointer<Void>, Pointer<Int32>);
-typedef _PaSimpleDrainDart = int Function(Pointer<Void>, Pointer<Int32>);
+import 'package:cleona/core/calls/audio_engine_shim.dart';
 
 // ── Audio Constants ──────────────────────────────────────────────────────
 
 const int _sampleRate = 16000;
 const int _channels = 1;
 const int _frameDurationMs = 20;
-const int _frameSize = _sampleRate * _channels * 2 * _frameDurationMs ~/ 1000; // 640 bytes
-const int _samplesPerFrame = _frameSize ~/ 2; // 320 int16 samples
+const int _samplesPerFrame =
+    _sampleRate * _channels * _frameDurationMs ~/ 1000; // 320
+const int _frameSize = _samplesPerFrame * 2; // 640 bytes
 
 // ── Capture Isolate ──────────────────────────────────────────────────────
 
@@ -66,46 +29,37 @@ class _MixerCaptureInit {
 
 enum _MixerCaptureCommand { mute, unmute, stop }
 
-void _mixerCaptureIsolateEntry(List<dynamic> args) {
-  final init = args[0] as _MixerCaptureInit;
-  final commandPort = args[1] as ReceivePort;
-
-  final lib = DynamicLibrary.open('libpulse-simple.so.0');
-  final paNew = lib.lookupFunction<_PaSimpleNewNative, _PaSimpleNewDart>(
-      'pa_simple_new');
-  final paRead = lib.lookupFunction<_PaSimpleReadNative, _PaSimpleReadDart>(
-      'pa_simple_read');
-  final paFree = lib.lookupFunction<_PaSimpleFreeNative, _PaSimpleFreeDart>(
-      'pa_simple_free');
-
-  final sodium = SodiumFFI();
+void _mixerCaptureIsolateEntry(_MixerCaptureInit init) {
+  // See audio_engine.dart 2026-04-26 fix: a parent-created ReceivePort can't
+  // travel through Isolate.spawn ("object is unsendable - _ReceivePortImpl").
+  // Child owns its own command RX and sends its SendPort back as the first
+  // wire message; ready-flag follows.
+  final commandPort = ReceivePort();
   final frameSendPort = init.frameSendPort;
-  var callKey = init.callKey;
+  frameSendPort.send(commandPort.sendPort);
 
-  final spec = calloc<_PaSampleSpec>();
-  spec.ref.format = _PA_SAMPLE_S16LE;
-  spec.ref.rate = _sampleRate;
-  spec.ref.channels = _channels;
-
-  final err = calloc<Int32>();
-  final appName = 'Cleona-Group'.toNativeUtf8();
-  final recName = 'group-capture'.toNativeUtf8();
-
-  final recordHandle = paNew(
-    nullptr.cast(), appName, _PA_STREAM_RECORD,
-    nullptr.cast(), recName, spec,
-    nullptr, nullptr, err,
+  final shim = AudioEngineShim.load();
+  final engine = shim.create(
+    sampleRate: _sampleRate,
+    channels: _channels,
+    frameSamples: _samplesPerFrame,
+    ringCapacityFrames: 8,
   );
-
-  calloc.free(spec);
-  calloc.free(err);
-  calloc.free(appName);
-  calloc.free(recName);
-
-  if (recordHandle == nullptr) {
+  if (engine.address == 0) {
     frameSendPort.send(null);
+    commandPort.close();
     return;
   }
+  if (shim.start(engine) != 0) {
+    shim.destroy(engine);
+    frameSendPort.send(null);
+    commandPort.close();
+    return;
+  }
+
+  final sodium = SodiumFFI();
+  var callKey = init.callKey;
+
   frameSendPort.send(true);
 
   var running = true;
@@ -117,27 +71,27 @@ void _mixerCaptureIsolateEntry(List<dynamic> args) {
       running = false;
     } else if (message == _MixerCaptureCommand.mute) {
       muted = true;
+      shim.setMute(engine, true);
     } else if (message == _MixerCaptureCommand.unmute) {
       muted = false;
+      shim.setMute(engine, false);
     } else if (message is Uint8List) {
-      // Key update
       callKey = message;
     }
   });
 
-  final buf = calloc<Uint8>(_frameSize);
-  final readErr = calloc<Int32>();
+  final pcmPtr = calloc<Int16>(_samplesPerFrame);
 
   while (running) {
-    final rc = paRead(recordHandle, buf, _frameSize, readErr);
-    if (rc < 0 || !running) break;
+    final r = shim.captureRead(engine, pcmPtr, 100);
+    if (r == -1) break;
+    if (r == 0) continue;
 
     if (!muted) {
-      final pcmData = Uint8List.fromList(buf.asTypedList(_frameSize));
-
+      final pcmData = Uint8List.fromList(
+          pcmPtr.cast<Uint8>().asTypedList(_frameSize));
       final seqBytes = Uint8List(4);
       ByteData.sublistView(seqBytes).setUint32(0, seqNum++, Endian.big);
-
       final nonce = sodium.generateNonce();
       final ciphertext = sodium.aesGcmEncrypt(pcmData, callKey, nonce);
 
@@ -145,14 +99,13 @@ void _mixerCaptureIsolateEntry(List<dynamic> args) {
       packet.setAll(0, seqBytes);
       packet.setAll(4, nonce);
       packet.setAll(16, ciphertext);
-
       frameSendPort.send(packet);
     }
   }
 
-  calloc.free(buf);
-  calloc.free(readErr);
-  paFree(recordHandle);
+  calloc.free(pcmPtr);
+  shim.stop(engine);
+  shim.destroy(engine);
 }
 
 // ── AudioMixer ───────────────────────────────────────────────────────────
@@ -161,7 +114,7 @@ void _mixerCaptureIsolateEntry(List<dynamic> args) {
 ///
 /// Each peer has its own JitterBuffer. Incoming encrypted frames are decrypted,
 /// PCM samples are summed with int16 clamping, and the mixed result is played
-/// via PulseAudio.
+/// via the cross-platform cleona_audio shim (miniaudio + speex AEC/NS).
 ///
 /// Also owns a capture isolate for microphone input (same pattern as AudioEngine
 /// but encrypts with the shared group call key).
@@ -174,12 +127,10 @@ class AudioMixer {
   // Per-peer jitter buffers
   final Map<String, JitterBuffer> _peerBuffers = {};
 
-  // PulseAudio playback
-  Pointer<Void>? _playHandle;
-  late final _PaSimpleNewDart _paNew;
-  late final _PaSimpleWriteDart _paWrite;
-  late final _PaSimpleFreeDart _paFree;
-  late final _PaSimpleDrainDart _paDrain;
+  // cleona_audio shim
+  late final AudioEngineShim _shim;
+  Pointer<CleonaAudioEngine>? _engine;
+  Pointer<Int16>? _playbackPcmPtr;
 
   // Capture isolate
   Isolate? _captureIsolate;
@@ -205,85 +156,72 @@ class AudioMixer {
   })  : _callKey = callKey,
         _callKeyVersion = callKeyVersion,
         _log = CLogger.get('group-audio', profileDir: profileDir) {
-    if (!Platform.isLinux) {
-      throw UnsupportedError('AudioMixer currently only supports Linux');
-    }
-    _initFfi();
-  }
-
-  void _initFfi() {
-    final lib = DynamicLibrary.open('libpulse-simple.so.0');
-    _paNew = lib.lookupFunction<_PaSimpleNewNative, _PaSimpleNewDart>(
-        'pa_simple_new');
-    _paWrite = lib.lookupFunction<_PaSimpleWriteNative, _PaSimpleWriteDart>(
-        'pa_simple_write');
-    _paFree = lib.lookupFunction<_PaSimpleFreeNative, _PaSimpleFreeDart>(
-        'pa_simple_free');
-    _paDrain = lib.lookupFunction<_PaSimpleDrainNative, _PaSimpleDrainDart>(
-        'pa_simple_drain');
+    _shim = AudioEngineShim.load();
   }
 
   /// Start capture isolate, playback, and mix timer.
   Future<bool> start() async {
     if (_running) return true;
 
-    // Open playback stream
-    final spec = calloc<_PaSampleSpec>();
-    spec.ref.format = _PA_SAMPLE_S16LE;
-    spec.ref.rate = _sampleRate;
-    spec.ref.channels = _channels;
-    final err = calloc<Int32>();
-    final appName = 'Cleona-Group'.toNativeUtf8();
-    final playName = 'group-playback'.toNativeUtf8();
-
-    try {
-      _playHandle = _paNew(
-        nullptr.cast(), appName, _PA_STREAM_PLAYBACK,
-        nullptr.cast(), playName, spec,
-        nullptr, nullptr, err,
-      );
-      if (_playHandle == null || _playHandle == nullptr) {
-        _log.error('PulseAudio playback open failed: error=${err.value}');
-        return false;
-      }
-    } finally {
-      calloc.free(spec);
-      calloc.free(err);
-      calloc.free(appName);
-      calloc.free(playName);
+    _engine = _shim.create(
+      sampleRate: _sampleRate,
+      channels: _channels,
+      frameSamples: _samplesPerFrame,
+      ringCapacityFrames: 8,
+    );
+    if (_engine == null || _engine!.address == 0) {
+      _log.error('cleona_audio_create failed (mixer)');
+      return false;
     }
+    if (_shim.start(_engine!) != 0) {
+      _log.error('cleona_audio_start failed (mixer)');
+      _shim.destroy(_engine!);
+      _engine = null;
+      return false;
+    }
+    _playbackPcmPtr = calloc<Int16>(_samplesPerFrame);
 
-    // Start capture isolate
     final captureOk = await _startCaptureIsolate();
     if (!captureOk) {
-      _log.error('Capture isolate failed to start');
-      _paFree(_playHandle!);
-      _playHandle = null;
+      _log.error('Mixer capture isolate failed to start');
+      _shim.stop(_engine!);
+      _shim.destroy(_engine!);
+      _engine = null;
+      calloc.free(_playbackPcmPtr!);
+      _playbackPcmPtr = null;
       return false;
     }
 
-    // Start mix timer (20ms = 1 audio frame)
     _mixTimer = Timer.periodic(
       const Duration(milliseconds: _frameDurationMs),
       (_) => _mixAndPlay(),
     );
 
     _running = true;
-    _log.info('AudioMixer started');
+    _log.info('AudioMixer started (cross-platform shim)');
     return true;
   }
 
   Future<bool> _startCaptureIsolate() async {
     _frameReceivePort = ReceivePort();
-    final commandReceivePort = ReceivePort();
     final init = _MixerCaptureInit(_frameReceivePort!.sendPort, _callKey);
 
+    // Two-stage handshake (see audio_engine.dart 2026-04-26 fix): SendPort,
+    // then ready-flag, then audio frames.
+    final commandPortCompleter = Completer<SendPort>();
     final readyCompleter = Completer<bool>();
-    var firstMessage = true;
 
     _frameSubscription = _frameReceivePort!.listen((message) {
-      if (firstMessage) {
-        firstMessage = false;
+      if (!commandPortCompleter.isCompleted) {
+        if (message is SendPort) {
+          commandPortCompleter.complete(message);
+        } else {
+          commandPortCompleter.completeError(
+              StateError('mixer capture isolate did not send command port'));
+        }
+        return;
+      }
+      if (!readyCompleter.isCompleted) {
         readyCompleter.complete(message == true);
         return;
       }
@@ -292,12 +230,19 @@ class AudioMixer {
       }
     });
 
-    _captureIsolate = await Isolate.spawn(
-      _mixerCaptureIsolateEntry,
-      [init, commandReceivePort],
-    );
+    _captureIsolate =
+        await Isolate.spawn(_mixerCaptureIsolateEntry, init);
 
-    _captureCommandPort = commandReceivePort.sendPort;
+    try {
+      _captureCommandPort = await commandPortCompleter.future
+          .timeout(const Duration(seconds: 5));
+    } catch (_) {
+      _captureIsolate?.kill();
+      _captureIsolate = null;
+      _frameSubscription?.cancel();
+      _frameReceivePort?.close();
+      return false;
+    }
 
     final ok = await readyCompleter.future.timeout(
       const Duration(seconds: 5),
@@ -309,7 +254,6 @@ class AudioMixer {
       _captureIsolate = null;
       _frameSubscription?.cancel();
       _frameReceivePort?.close();
-      commandReceivePort.close();
       return false;
     }
 
@@ -328,7 +272,8 @@ class AudioMixer {
     if (pcm == null) return;
 
     // Extract sequence number from the packet
-    final seqNum = ByteData.sublistView(encryptedAudio).getUint32(0, Endian.big);
+    final seqNum =
+        ByteData.sublistView(encryptedAudio).getUint32(0, Endian.big);
 
     // Get or create peer's JitterBuffer
     final buffer = _peerBuffers.putIfAbsent(
@@ -355,20 +300,15 @@ class AudioMixer {
 
   /// Mix all peer streams and play (called every 20ms).
   void _mixAndPlay() {
-    if (!_running || _playHandle == null || !_speakerEnabled) return;
+    if (!_running || _engine == null || _playbackPcmPtr == null) return;
+    if (!_speakerEnabled) return;
 
     // Drain one frame from each peer's buffer
     final pcmFrames = <Uint8List>[];
-    final emptyPeers = <String>[];
-
     for (final entry in _peerBuffers.entries) {
       final frame = entry.value.pop();
       if (frame != null) {
         pcmFrames.add(frame.data);
-      }
-      // Track peers with no activity for cleanup
-      if (entry.value.framesReceived == 0) {
-        emptyPeers.add(entry.key);
       }
     }
 
@@ -376,21 +316,11 @@ class AudioMixer {
 
     // Mix and play
     final mixed = mixPcm(pcmFrames);
-    _writePcm(mixed);
-  }
+    if (mixed.length != _frameSize) return;
 
-  /// Write raw PCM to PulseAudio playback.
-  void _writePcm(Uint8List pcm) {
-    if (_playHandle == null) return;
-    final buf = calloc<Uint8>(pcm.length);
-    final err = calloc<Int32>();
-    try {
-      buf.asTypedList(pcm.length).setAll(0, pcm);
-      _paWrite(_playHandle!, buf, pcm.length, err);
-    } finally {
-      calloc.free(buf);
-      calloc.free(err);
-    }
+    final byteView = _playbackPcmPtr!.cast<Uint8>().asTypedList(_frameSize);
+    byteView.setAll(0, mixed);
+    _shim.playbackWrite(_engine!, _playbackPcmPtr!, _samplesPerFrame);
   }
 
   /// Mix N PCM buffers (16-bit mono) into one by sample-wise addition
@@ -449,16 +379,15 @@ class AudioMixer {
     _frameSubscription?.cancel();
     _frameReceivePort?.close();
 
-    // Close playback
-    final err = calloc<Int32>();
-    try {
-      if (_playHandle != null) {
-        _paDrain(_playHandle!, err);
-        _paFree(_playHandle!);
-        _playHandle = null;
-      }
-    } finally {
-      calloc.free(err);
+    // Close engine
+    if (_engine != null) {
+      _shim.stop(_engine!);
+      _shim.destroy(_engine!);
+      _engine = null;
+    }
+    if (_playbackPcmPtr != null) {
+      calloc.free(_playbackPcmPtr!);
+      _playbackPcmPtr = null;
     }
 
     _peerBuffers.clear();
@@ -470,7 +399,8 @@ class AudioMixer {
   bool get isMuted => _muted;
   set muted(bool value) {
     _muted = value;
-    _captureCommandPort?.send(value ? _MixerCaptureCommand.mute : _MixerCaptureCommand.unmute);
+    _captureCommandPort?.send(
+        value ? _MixerCaptureCommand.mute : _MixerCaptureCommand.unmute);
     _log.info('Microphone ${value ? "muted" : "unmuted"}');
   }
 

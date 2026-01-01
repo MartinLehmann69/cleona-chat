@@ -34,12 +34,23 @@ class MainActivity : FlutterActivity() {
     private val CHANNEL = "chat.cleona/service"
     private val STORAGE_CHANNEL = "chat.cleona/storage"
     private val AUDIO_CHANNEL = "chat.cleona/audio"
+    private val AUDIO_PERMISSIONS_CHANNEL = "chat.cleona/audio_permissions"
+    private val FOREGROUND_SERVICE_CHANNEL = "chat.cleona/foreground_service"
     private val NOTIFICATION_MSG_CHANNEL = "chat.cleona/notification"
     private val VIBRATION_CHANNEL = "chat.cleona/vibration"
     private val SHARE_CHANNEL = "chat.cleona/share"
     private val MSG_CHANNEL_ID = "cleona_messages"
     private val NOTIFICATION_PERMISSION_CODE = 1001
     private var cameraHandler: CameraXHandler? = null
+
+    // Bug #U10b — RECORD_AUDIO runtime-permission-flow. We retain the
+    // pending MethodChannel.Result across the system permission dialog so
+    // the Dart side can await a single bool answer.
+    private var pendingAudioPermissionResult: MethodChannel.Result? = null
+
+    companion object {
+        private const val REQUEST_AUDIO_PERMISSION = 1002
+    }
 
     // Bug #U16: ACTION_SEND payload, drained by Dart via `chat.cleona/share`.
     // Shape: {"text": String?, "files": List<String>} (content:// → cacheDir copy).
@@ -196,6 +207,64 @@ class MainActivity : FlutterActivity() {
             flutterEngine.dartExecutor.binaryMessenger,
             ClipboardHandler.CHANNEL_NAME
         ).setMethodCallHandler(ClipboardHandler(applicationContext))
+
+        // Audio-permissions bridge (Bug #U10b) — RECORD_AUDIO runtime
+        // permission for calls. has* returns the cached state, request*
+        // shows the system dialog and resolves once onRequestPermissionsResult
+        // fires. Concurrent requests are not supported (single result slot).
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            AUDIO_PERMISSIONS_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "hasRecordAudioPermission" -> {
+                    val granted = ContextCompat.checkSelfPermission(
+                        this, Manifest.permission.RECORD_AUDIO
+                    ) == PackageManager.PERMISSION_GRANTED
+                    result.success(granted)
+                }
+                "requestRecordAudioPermission" -> {
+                    if (ContextCompat.checkSelfPermission(
+                            this, Manifest.permission.RECORD_AUDIO
+                        ) == PackageManager.PERMISSION_GRANTED) {
+                        result.success(true)
+                    } else {
+                        // If a previous request is still pending, fail it
+                        // immediately so the new request gets the slot.
+                        pendingAudioPermissionResult?.success(false)
+                        pendingAudioPermissionResult = result
+                        ActivityCompat.requestPermissions(
+                            this,
+                            arrayOf(Manifest.permission.RECORD_AUDIO),
+                            REQUEST_AUDIO_PERMISSION
+                        )
+                    }
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // Foreground-service mic-type promotion bridge (Bug #U10b). Dart
+        // calls promoteForCall before _audioEngine.start() so the OS
+        // grants the mic stream (API 34+ enforcement) and demoteAfterCall
+        // when the call ends so the persistent "microphone in use"
+        // indicator goes away.
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            FOREGROUND_SERVICE_CHANNEL
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "promoteForCall" -> {
+                    CleonaForegroundService.promoteForCall(this)
+                    result.success(true)
+                }
+                "demoteAfterCall" -> {
+                    CleonaForegroundService.demoteAfterCall(this)
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -208,10 +277,13 @@ class MainActivity : FlutterActivity() {
         createMessageNotificationChannel()
 
         // Foreground Service starten
-        val intent = Intent(this, CleonaForegroundService::class.java)
-        startForegroundService(intent)
+        val serviceIntent = Intent(this, CleonaForegroundService::class.java)
+        startForegroundService(serviceIntent)
 
         // Bug #U16: cold-start via Share-Sheet — stash payload for Dart drain.
+        // Activity-Property `intent` ist getIntent(), enthält das ACTION_SEND-
+        // Payload. Vorher hier die lokale Service-Intent-Variable übergeben —
+        // handleShareIntent verwarf sie wegen falscher Action.
         handleShareIntent(intent)
     }
 
@@ -220,6 +292,23 @@ class MainActivity : FlutterActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+    }
+
+    // Resolves the pending RECORD_AUDIO MethodChannel.Result (Bug #U10b)
+    // and otherwise lets the framework propagate to FlutterActivity (which
+    // forwards to plugins via the request-permissions registry).
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQUEST_AUDIO_PERMISSION) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            pendingAudioPermissionResult?.success(granted)
+            pendingAudioPermissionResult = null
+        }
     }
 
     // Extracts EXTRA_TEXT + EXTRA_STREAM URIs into `pendingShare`. Content

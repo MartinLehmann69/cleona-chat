@@ -204,6 +204,34 @@ build_libwhisper() {
     done
 }
 
+build_libcleona_audio() {
+    echo "=== libcleona_audio bauen ==="
+    local SRC="$PROJECT_DIR/native/cleona_audio"
+    local BUILD="$BUILD_DIR/cleona_audio"
+    rm -rf "$BUILD"
+    mkdir -p "$BUILD"
+    cd "$BUILD"
+
+    # speexdsp is vendored under native/cleona_audio/vendor/speexdsp and built
+    # as a static library by cleona_audio's CMakeLists.txt — no separate
+    # libspeexdsp.so step needed. The static lib gets linked into
+    # libcleona_audio.so so the APK ships exactly one .so for the audio stack.
+    cmake -GNinja \
+        -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
+        -DANDROID_ABI="$CMAKE_ABI" \
+        -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_SHARED_LINKER_FLAGS="$PAGE_SIZE_FLAG" \
+        "$SRC"
+
+    ninja -j"$(nproc)"
+
+    cp libcleona_audio.so "$JNILIBS/libcleona_audio.so"
+    "$STRIP" "$JNILIBS/libcleona_audio.so"
+    verify_alignment "$JNILIBS/libcleona_audio.so"
+    echo "  → $JNILIBS/libcleona_audio.so ($(du -h "$JNILIBS/libcleona_audio.so" | cut -f1))"
+}
+
 build_libzstd() {
     echo "=== libzstd bauen ==="
     local SRC="$BUILD_DIR/zstd"
@@ -249,10 +277,11 @@ TARGET="${1:-all}"
 
 build_target() {
     case "$TARGET" in
-        sodium)  build_libsodium ;;
-        oqs)     build_liboqs ;;
-        zstd)    build_libzstd ;;
-        whisper) build_libwhisper ;;
+        sodium)        build_libsodium ;;
+        oqs)           build_liboqs ;;
+        zstd)          build_libzstd ;;
+        whisper)       build_libwhisper ;;
+        cleona_audio)  build_libcleona_audio ;;
         all)
             build_libsodium
             echo ""
@@ -260,10 +289,12 @@ build_target() {
             echo ""
             build_libzstd
             echo ""
+            build_libcleona_audio
+            echo ""
             build_libwhisper
             ;;
         *)
-            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|all]"
+            echo "Nutzung: $0 [--arch arm64-v8a|x86_64|all] [sodium|oqs|zstd|whisper|cleona_audio|all]"
             exit 1
             ;;
     esac

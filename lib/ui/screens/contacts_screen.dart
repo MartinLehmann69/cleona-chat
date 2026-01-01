@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -7,6 +6,7 @@ import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/contact_tile.dart';
+import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/chat_screen.dart';
 
 class ContactsScreen extends StatelessWidget {
@@ -91,16 +91,15 @@ class ContactsScreen extends StatelessWidget {
                   name: contact.displayName,
                   status: contact.nodeIdHex.substring(0, 16),
                   verificationLevel: _mapVerification(contact.verificationLevel),
-                  avatarOverride: contact.profilePictureBase64 != null
-                      ? CircleAvatar(
-                          backgroundImage: MemoryImage(base64Decode(contact.profilePictureBase64!)),
-                          radius: 22,
-                        )
-                      : Container(
-                          width: 44, height: 44,
-                          decoration: const BoxDecoration(color: Colors.orange, shape: BoxShape.circle),
-                          child: const Icon(Icons.person_add, color: Colors.white),
-                        ),
+                  avatarOverride: ProfileAvatar(
+                    base64: contact.profilePictureBase64,
+                    radius: 22,
+                    fallback: Container(
+                      width: 44, height: 44,
+                      decoration: const BoxDecoration(color: Colors.orange, shape: BoxShape.circle),
+                      child: const Icon(Icons.person_add, color: Colors.white),
+                    ),
+                  ),
                   trailing: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -137,12 +136,10 @@ class ContactsScreen extends StatelessWidget {
                 name: contact.displayName,
                 status: _contactSubtitle(contact),
                 verificationLevel: _mapVerification(contact.verificationLevel),
-                avatarOverride: contact.profilePictureBase64 != null
-                    ? CircleAvatar(
-                        backgroundImage: MemoryImage(base64Decode(contact.profilePictureBase64!)),
-                        radius: 22,
-                      )
-                    : null,
+                avatarOverride: ProfileAvatar(
+                  base64: contact.profilePictureBase64,
+                  radius: 22,
+                ),
                 trailing: PopupMenuButton<String>(
                   onSelected: (value) {
                     if (value == 'delete') {

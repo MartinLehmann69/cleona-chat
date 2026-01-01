@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
@@ -17,6 +18,7 @@ import 'package:cleona/ui/theme/character_profile.dart';
 import 'package:cleona/ui/theme/theme_access.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/chat_list_tile.dart';
+import 'package:cleona/ui/components/reduced_mode_banner.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/screens/identity_detail_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
@@ -305,6 +307,11 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       ],
       body: Column(
         children: [
+          // sec-h5 §8.2 / T12: persistent red warning bar shown when the user
+          // dismissed the [UpdateRequiredScreen] splash with "Open anyway
+          // (limited)". Send/receive of user-messages is short-circuited
+          // until the next restart (which re-shows the splash).
+          if (service.reducedMode) const ReducedModeBanner(),
           // Identity tabs
           SizedBox(
             height: 36,
@@ -2104,6 +2111,16 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
   late final AnimationController _pulseController;
   late final Animation<double> _pulseAnimation;
 
+  // Pulse conveys "searching" visually, but a node without contacts + without
+  // LAN reach cannot self-resolve (architecture: joins via ContactSeed QR,
+  // docs/NETWORK.md §91). After this window, freeze the animation: the icon
+  // stays on the "weak" tier (DHT background bootstrap + Kademlia keep
+  // running), but we stop requesting a repaint every frame. Resumes on the
+  // next weak-tier entry (e.g. after peer loss + network change).
+  static const _pulseFreezeAfter = Duration(seconds: 30);
+  Timer? _pulseFreezeTimer;
+  bool _pulseFrozen = false;
+
   @override
   void initState() {
     super.initState();
@@ -2118,6 +2135,7 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
 
   @override
   void dispose() {
+    _pulseFreezeTimer?.cancel();
     _pulseController.dispose();
     super.dispose();
   }
@@ -2189,12 +2207,29 @@ class _ConnectionStatusIconState extends State<_ConnectionStatusIcon>
         break;
     }
 
-    // Start/stop pulse animation for searching state
-    if (searching && !_pulseController.isAnimating) {
-      _pulseController.repeat(reverse: true);
-    } else if (!searching && _pulseController.isAnimating) {
-      _pulseController.stop();
-      _pulseController.value = 1.0;
+    // Start/stop pulse animation for searching state. Auto-freeze after
+    // _pulseFreezeAfter so long-running no-peer situations don't burn CPU
+    // at 60 FPS (on software GPU, this amplifies to multi-100% host load).
+    if (searching) {
+      if (!_pulseFrozen && !_pulseController.isAnimating) {
+        _pulseController.repeat(reverse: true);
+      }
+      _pulseFreezeTimer ??= Timer(_pulseFreezeAfter, () {
+        if (!mounted) return;
+        setState(() {
+          _pulseFrozen = true;
+          _pulseController.stop();
+          _pulseController.value = 1.0;
+        });
+      });
+    } else {
+      _pulseFreezeTimer?.cancel();
+      _pulseFreezeTimer = null;
+      _pulseFrozen = false;
+      if (_pulseController.isAnimating) {
+        _pulseController.stop();
+        _pulseController.value = 1.0;
+      }
     }
 
     final image = Image.asset(

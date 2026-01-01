@@ -113,6 +113,12 @@ const MessageType$json = {
     {'1': 'POLL_SNAPSHOT', '2': 149},
     {'1': 'POLL_VOTE_ANONYMOUS', '2': 150},
     {'1': 'POLL_VOTE_REVOKE', '2': 151},
+    {'1': 'IDENTITY_AUTH_PUBLISH', '2': 152},
+    {'1': 'IDENTITY_AUTH_RETRIEVE', '2': 153},
+    {'1': 'IDENTITY_AUTH_RESPONSE', '2': 154},
+    {'1': 'IDENTITY_LIVE_PUBLISH', '2': 155},
+    {'1': 'IDENTITY_LIVE_RETRIEVE', '2': 156},
+    {'1': 'IDENTITY_LIVE_RESPONSE', '2': 157},
     {'1': 'CALL_RTT_PING', '2': 37},
     {'1': 'CALL_RTT_PONG', '2': 38},
     {'1': 'CALL_TREE_UPDATE', '2': 39},
@@ -169,11 +175,15 @@ final $typed_data.Uint8List messageTypeDescriptor = $convert.base64Decode(
     'EhQKD0NBTEVOREFSX1VQREFURRCOARIUCg9DQUxFTkRBUl9ERUxFVEUQjwESFgoRRlJFRV9CVV'
     'NZX1JFUVVFU1QQkAESFwoSRlJFRV9CVVNZX1JFU1BPTlNFEJEBEhAKC1BPTExfQ1JFQVRFEJIB'
     'Eg4KCVBPTExfVk9URRCTARIQCgtQT0xMX1VQREFURRCUARISCg1QT0xMX1NOQVBTSE9UEJUBEh'
-    'gKE1BPTExfVk9URV9BTk9OWU1PVVMQlgESFQoQUE9MTF9WT1RFX1JFVk9LRRCXARIRCg1DQUxM'
-    'X1JUVF9QSU5HECUSEQoNQ0FMTF9SVFRfUE9ORxAmEhQKEENBTExfVFJFRV9VUERBVEUQJxIOCg'
-    'pDQUxMX1ZJREVPECgSGQoVQ0FMTF9LRVlGUkFNRV9SRVFVRVNUECkSFAoQQ0FMTF9HUk9VUF9B'
-    'VURJTxAqEhQKEENBTExfR1JPVVBfTEVBVkUQKxIZChVDQUxMX0dST1VQX0tFWV9ST1RBVEUQLB'
-    'IUChBDQUxMX0dST1VQX1ZJREVPEC0iBAgKEAoiBAgLEAsiBAgMEAwiBAg8EDwiBAg9ED0=');
+    'gKE1BPTExfVk9URV9BTk9OWU1PVVMQlgESFQoQUE9MTF9WT1RFX1JFVk9LRRCXARIaChVJREVO'
+    'VElUWV9BVVRIX1BVQkxJU0gQmAESGwoWSURFTlRJVFlfQVVUSF9SRVRSSUVWRRCZARIbChZJRE'
+    'VOVElUWV9BVVRIX1JFU1BPTlNFEJoBEhoKFUlERU5USVRZX0xJVkVfUFVCTElTSBCbARIbChZJ'
+    'REVOVElUWV9MSVZFX1JFVFJJRVZFEJwBEhsKFklERU5USVRZX0xJVkVfUkVTUE9OU0UQnQESEQ'
+    'oNQ0FMTF9SVFRfUElORxAlEhEKDUNBTExfUlRUX1BPTkcQJhIUChBDQUxMX1RSRUVfVVBEQVRF'
+    'ECcSDgoKQ0FMTF9WSURFTxAoEhkKFUNBTExfS0VZRlJBTUVfUkVRVUVTVBApEhQKEENBTExfR1'
+    'JPVVBfQVVESU8QKhIUChBDQUxMX0dST1VQX0xFQVZFECsSGQoVQ0FMTF9HUk9VUF9LRVlfUk9U'
+    'QVRFECwSFAoQQ0FMTF9HUk9VUF9WSURFTxAtIgQIChAKIgQICxALIgQIDBAMIgQIPBA8IgQIPR'
+    'A9');
 
 @$core.Deprecated('Use compressionTypeDescriptor instead')
 const CompressionType$json = {
@@ -554,6 +564,7 @@ const PerMessageKem$json = {
     {'1': 'ephemeral_x25519_pk', '3': 1, '4': 1, '5': 12, '10': 'ephemeralX25519Pk'},
     {'1': 'ml_kem_ciphertext', '3': 2, '4': 1, '5': 12, '10': 'mlKemCiphertext'},
     {'1': 'aes_nonce', '3': 3, '4': 1, '5': 12, '10': 'aesNonce'},
+    {'1': 'version', '3': 4, '4': 1, '5': 13, '10': 'version'},
   ],
 };
 
@@ -561,7 +572,7 @@ const PerMessageKem$json = {
 final $typed_data.Uint8List perMessageKemDescriptor = $convert.base64Decode(
     'Cg1QZXJNZXNzYWdlS2VtEi4KE2VwaGVtZXJhbF94MjU1MTlfcGsYASABKAxSEWVwaGVtZXJhbF'
     'gyNTUxOVBrEioKEW1sX2tlbV9jaXBoZXJ0ZXh0GAIgASgMUg9tbEtlbUNpcGhlcnRleHQSGwoJ'
-    'YWVzX25vbmNlGAMgASgMUghhZXNOb25jZQ==');
+    'YWVzX25vbmNlGAMgASgMUghhZXNOb25jZRIYCgd2ZXJzaW9uGAQgASgNUgd2ZXJzaW9u');
 
 @$core.Deprecated('Use peerInfoProtoDescriptor instead')
 const PeerInfoProto$json = {
@@ -2632,4 +2643,78 @@ final $typed_data.Uint8List pollVoteRevokeMsgDescriptor = $convert.base64Decode(
     'dlGAIgASgMUghrZXlJbWFnZRIlCg5yaW5nX3NpZ25hdHVyZRgDIAEoDFINcmluZ1NpZ25hdHVy'
     'ZRIhCgxyaW5nX21lbWJlcnMYBCADKAxSC3JpbmdNZW1iZXJzEh0KCnJldm9rZWRfYXQYBSABKA'
     'NSCXJldm9rZWRBdA==');
+
+@$core.Deprecated('Use authManifestProtoDescriptor instead')
+const AuthManifestProto$json = {
+  '1': 'AuthManifestProto',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'authorized_device_node_ids', '3': 2, '4': 3, '5': 12, '10': 'authorizedDeviceNodeIds'},
+    {'1': 'ttl_seconds', '3': 3, '4': 1, '5': 5, '10': 'ttlSeconds'},
+    {'1': 'sequence_number', '3': 4, '4': 1, '5': 3, '10': 'sequenceNumber'},
+    {'1': 'published_at_ms', '3': 5, '4': 1, '5': 3, '10': 'publishedAtMs'},
+    {'1': 'ed25519_sig', '3': 6, '4': 1, '5': 12, '10': 'ed25519Sig'},
+    {'1': 'ml_dsa_sig', '3': 7, '4': 1, '5': 12, '10': 'mlDsaSig'},
+  ],
+};
+
+/// Descriptor for `AuthManifestProto`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List authManifestProtoDescriptor = $convert.base64Decode(
+    'ChFBdXRoTWFuaWZlc3RQcm90bxIXCgd1c2VyX2lkGAEgASgMUgZ1c2VySWQSOwoaYXV0aG9yaX'
+    'plZF9kZXZpY2Vfbm9kZV9pZHMYAiADKAxSF2F1dGhvcml6ZWREZXZpY2VOb2RlSWRzEh8KC3R0'
+    'bF9zZWNvbmRzGAMgASgFUgp0dGxTZWNvbmRzEicKD3NlcXVlbmNlX251bWJlchgEIAEoA1IOc2'
+    'VxdWVuY2VOdW1iZXISJgoPcHVibGlzaGVkX2F0X21zGAUgASgDUg1wdWJsaXNoZWRBdE1zEh8K'
+    'C2VkMjU1MTlfc2lnGAYgASgMUgplZDI1NTE5U2lnEhwKCm1sX2RzYV9zaWcYByABKAxSCG1sRH'
+    'NhU2ln');
+
+@$core.Deprecated('Use livenessRecordProtoDescriptor instead')
+const LivenessRecordProto$json = {
+  '1': 'LivenessRecordProto',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_node_id', '3': 2, '4': 1, '5': 12, '10': 'deviceNodeId'},
+    {'1': 'addresses', '3': 3, '4': 3, '5': 11, '6': '.cleona.PeerAddressProto', '10': 'addresses'},
+    {'1': 'ttl_seconds', '3': 4, '4': 1, '5': 5, '10': 'ttlSeconds'},
+    {'1': 'sequence_number', '3': 5, '4': 1, '5': 3, '10': 'sequenceNumber'},
+    {'1': 'published_at_ms', '3': 6, '4': 1, '5': 3, '10': 'publishedAtMs'},
+    {'1': 'ed25519_sig', '3': 7, '4': 1, '5': 12, '10': 'ed25519Sig'},
+  ],
+};
+
+/// Descriptor for `LivenessRecordProto`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List livenessRecordProtoDescriptor = $convert.base64Decode(
+    'ChNMaXZlbmVzc1JlY29yZFByb3RvEhcKB3VzZXJfaWQYASABKAxSBnVzZXJJZBIkCg5kZXZpY2'
+    'Vfbm9kZV9pZBgCIAEoDFIMZGV2aWNlTm9kZUlkEjYKCWFkZHJlc3NlcxgDIAMoCzIYLmNsZW9u'
+    'YS5QZWVyQWRkcmVzc1Byb3RvUglhZGRyZXNzZXMSHwoLdHRsX3NlY29uZHMYBCABKAVSCnR0bF'
+    'NlY29uZHMSJwoPc2VxdWVuY2VfbnVtYmVyGAUgASgDUg5zZXF1ZW5jZU51bWJlchImCg9wdWJs'
+    'aXNoZWRfYXRfbXMYBiABKANSDXB1Ymxpc2hlZEF0TXMSHwoLZWQyNTUxOV9zaWcYByABKAxSCm'
+    'VkMjU1MTlTaWc=');
+
+@$core.Deprecated('Use identityAuthRetrieveRequestDescriptor instead')
+const IdentityAuthRetrieveRequest$json = {
+  '1': 'IdentityAuthRetrieveRequest',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'minimum_seq', '3': 2, '4': 1, '5': 3, '10': 'minimumSeq'},
+  ],
+};
+
+/// Descriptor for `IdentityAuthRetrieveRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List identityAuthRetrieveRequestDescriptor = $convert.base64Decode(
+    'ChtJZGVudGl0eUF1dGhSZXRyaWV2ZVJlcXVlc3QSFwoHdXNlcl9pZBgBIAEoDFIGdXNlcklkEh'
+    '8KC21pbmltdW1fc2VxGAIgASgDUgptaW5pbXVtU2Vx');
+
+@$core.Deprecated('Use identityLiveRetrieveRequestDescriptor instead')
+const IdentityLiveRetrieveRequest$json = {
+  '1': 'IdentityLiveRetrieveRequest',
+  '2': [
+    {'1': 'user_id', '3': 1, '4': 1, '5': 12, '10': 'userId'},
+    {'1': 'device_node_id', '3': 2, '4': 1, '5': 12, '10': 'deviceNodeId'},
+  ],
+};
+
+/// Descriptor for `IdentityLiveRetrieveRequest`. Decode as a `google.protobuf.DescriptorProto`.
+final $typed_data.Uint8List identityLiveRetrieveRequestDescriptor = $convert.base64Decode(
+    'ChtJZGVudGl0eUxpdmVSZXRyaWV2ZVJlcXVlc3QSFwoHdXNlcl9pZBgBIAEoDFIGdXNlcklkEi'
+    'QKDmRldmljZV9ub2RlX2lkGAIgASgMUgxkZXZpY2VOb2RlSWQ=');
 

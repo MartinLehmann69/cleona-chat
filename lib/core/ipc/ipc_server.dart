@@ -632,6 +632,24 @@ class IpcServer {
           _sendResponse(client, IpcResponse(id: req.id, success: deleted));
           break;
 
+        case 'set_reduced_mode_session':
+          // sec-h5 §8.2 / Folge-Task 2026-04-26: GUI splash on Desktop
+          // sets reducedMode here; we propagate to every per-identity
+          // CleonaService so user-message Send/Receive is gated daemon-side
+          // until restart. Per-session, not persisted.
+          final enabled = req.params['enabled'];
+          if (enabled is! bool) {
+            _sendResponse(client, IpcResponse(
+              id: req.id, success: false,
+              error: 'Missing/invalid bool param: enabled'));
+            break;
+          }
+          for (final service in _services.values) {
+            service.reducedMode = enabled;
+          }
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
         case 'get_state':
           final service = _resolveService(client, req);
           if (service != null) {

@@ -38,6 +38,8 @@ import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/ui/theme/skin.dart';
 import 'package:cleona/ui/theme/skins.dart';
+import 'package:cleona/core/update/update_manifest.dart';
+import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 
 void main() {
@@ -84,11 +86,49 @@ void main() {
     _logCrash('PlatformDispatcher', error, stack);
     return true;
   };
+  // Sec H-5 (V3.1.72) / T13: Hard-block check at startup.
+  // Reads the cached, signature-verified update manifest written by the
+  // previous session's 6h DHT-poll (`CleonaService._checkForUpdates`).
+  // If the manifest specifies `minRequiredVersion` and the running app
+  // is older, we route to [UpdateRequiredScreen] before any service is
+  // constructed. Fail-safe: any IO/parse/signature problem leaves the
+  // user on the normal path. On a fresh install no cache exists, so the
+  // splash only kicks in once a manifest has been observed at least once.
+  UpdateManifest? blockManifest;
+  bool hardBlocked = false;
+  try {
+    final cachedJson = _readCachedManifestSync();
+    if (cachedJson != null) {
+      final manifest = UpdateChecker().verifyManifest(cachedJson);
+      if (manifest != null &&
+          UpdateChecker().isHardBlocked(manifest, CleonaService.kCurrentAppVersion)) {
+        blockManifest = manifest;
+        hardBlocked = true;
+      }
+    }
+  } catch (_) {/* never crash startup on cache IO */}
+
   runZonedGuarded(() {
-    runApp(const CleonaApp());
+    runApp(CleonaApp(
+      hardBlocked: hardBlocked,
+      blockManifest: blockManifest,
+    ));
   }, (error, stack) {
     _logCrash('runZonedGuarded', error, stack);
   });
+}
+
+/// Reads the manifest cache written by [CleonaService._checkForUpdates].
+/// Synchronous to keep startup-before-runApp simple — file is small (<2 KB).
+/// Returns null if the file does not exist or is unreadable.
+String? _readCachedManifestSync() {
+  try {
+    final file = File('${AppPaths.dataDir}${Platform.pathSeparator}update_manifest_cache.json');
+    if (!file.existsSync()) return null;
+    return file.readAsStringSync();
+  } catch (_) {
+    return null;
+  }
 }
 
 /// Appends a crash entry to `~/.cleona/crash.log`. Swallows all IO errors
@@ -136,8 +176,25 @@ void _writeGuiLock() {
 
 GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
-class CleonaApp extends StatelessWidget {
-  const CleonaApp({super.key});
+class CleonaApp extends StatefulWidget {
+  /// Sec H-5 (V3.1.72) / T13: when true, render [UpdateRequiredScreen] as
+  /// the initial route. Determined synchronously in [main] from the cached
+  /// signed update manifest.
+  final bool hardBlocked;
+  final UpdateManifest? blockManifest;
+
+  const CleonaApp({
+    super.key,
+    this.hardBlocked = false,
+    this.blockManifest,
+  });
+
+  @override
+  State<CleonaApp> createState() => _CleonaAppState();
+}
+
+class _CleonaAppState extends State<CleonaApp> {
+  late bool _showHardBlock = widget.hardBlocked && widget.blockManifest != null;
 
   @override
   Widget build(BuildContext context) {
@@ -148,6 +205,13 @@ class CleonaApp extends StatelessWidget {
         ChangeNotifierProvider(create: (_) {
           final state = CleonaAppState();
           state._appLocale = appLocale;
+          // Sec H-5 / T13: if the user already chose "skip into limited" on
+          // this session before the appState was constructed (impossible in
+          // the current flow — appState is created the first build — but
+          // guards against future reordering), re-apply.
+          if (!_showHardBlock && widget.hardBlocked) {
+            state._sessionReducedMode = true;
+          }
           state._boot();
           // Bug #U16: Android Share-Sheet-Empfang. Kontext + Service werden
           // lazy beim Share-Event ausgewertet (Identity-Wechsel andert Service).
@@ -163,7 +227,21 @@ class CleonaApp extends StatelessWidget {
         builder: (context, appState, locale, _) {
           final activeSkin = appState.activeSkin;
           final Widget home;
-          if (appState.isInitialized) {
+          if (_showHardBlock && widget.blockManifest != null) {
+            // Sec H-5 / T13 splash. Skipping flips the flag locally and
+            // marks reducedMode on every per-identity service via appState.
+            home = UpdateRequiredScreen(
+              downloadUrl: widget.blockManifest!.downloadUrl,
+              reasonI18nKey: widget.blockManifest!.minRequiredReason
+                  ?? 'update_required_kem_v2',
+              onSkipLimited: () {
+                appState.setReducedModeSession(true);
+                setState(() {
+                  _showHardBlock = false;
+                });
+              },
+            );
+          } else if (appState.isInitialized) {
             home = const HomeScreen();
           } else if (appState.hasProfile) {
             home = const _LoadingScreen();
@@ -228,8 +306,40 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   IpcClient? _ipcClient;
   bool _isInitialized = false;
   bool _hasProfile = false;
+  /// Sec H-5 (V3.1.72) / T13: true after the user clicked "open anyway
+  /// (limited)" on the [UpdateRequiredScreen]. Per-session, not persisted.
+  /// Propagated to every concrete [CleonaService] (Android in-process) and,
+  /// on Desktop, pushed to the daemon via [IpcClient.setReducedModeSession]
+  /// (Folge-Task 2026-04-26). See sec-h5 §8.2.
+  bool _sessionReducedMode = false;
+
+  /// Toggle reducedMode for this GUI session. Sets the flag on every
+  /// concrete [CleonaService] currently known to this state (Android
+  /// multi-identity), pushes it to the daemon over IPC (Desktop), and
+  /// stores the value so future services created via [_boot] /
+  /// identity-add inherit it.
+  void setReducedModeSession(bool v) {
+    _sessionReducedMode = v;
+    for (final service in _androidServices.values) {
+      service.reducedMode = v;
+    }
+    if (_service is CleonaService) {
+      (_service as CleonaService).reducedMode = v;
+    }
+    // Desktop IPC path: push to daemon (sets all per-identity services
+    // there) and refresh listeners again once the wire round-trip lands so
+    // the [ReducedModeBanner] reflects the daemon's mirrored flag.
+    final ipc = _ipcClient;
+    if (ipc != null) {
+      ipc.setReducedModeSession(v).then((_) => notifyListeners());
+    }
+    notifyListeners();
+  }
   ThemeMode _themeMode = ThemeMode.system;
   Timer? _showTriggerTimer;
+  Timer? _androidHeartbeatTimer;
+  DateTime? _androidHeartbeatLastAt;
+  int _androidHeartbeatTick = 0;
   AppLocale? _appLocale;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult> _connectivityResults = [];
@@ -323,6 +433,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Save state on pause, re-bootstrap on resume (§27 Doze resilience).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    final isResumed = state == AppLifecycleState.resumed;
+    // Propagate foreground state to every per-identity service so that
+    // _shouldSuppressForegroundNotification can gate sound/vibrate/banner
+    // for the conversation that ChatScreen has registered as active.
+    for (final service in _androidServices.values) {
+      service.setAppResumed(isResumed);
+    }
+    _service?.setAppResumed(isResumed);
+
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
       for (final service in _androidServices.values) {
         service.saveState();
@@ -330,7 +449,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       if (_service is CleonaService) {
         (_service as CleonaService).saveState();
       }
-    } else if (state == AppLifecycleState.resumed) {
+    } else if (isResumed) {
       // After Doze/background: network may have changed, re-discover peers.
       // Protected seed peers survived pruning — now ping them to reconnect.
       // Guard: node must be running (transport/natTraversal are late-initialized).
@@ -842,6 +961,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         node: node,
         displayName: ctx.displayName,
       );
+      // Sec H-5 / T13: inherit splash decision.
+      if (_sessionReducedMode) service.reducedMode = true;
       _wireServiceCallbacks(service);
       await service.startService();
       _androidServices[ctx.userIdHex] = service;
@@ -874,6 +995,36 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
     // Precache the active skin's hero image after the first home-screen frame.
     _scheduleSkinPrecache(activeId?.skinId);
+
+    // Android in-process heartbeat — liveness diagnostics for the main Dart
+    // isolate. On Linux/Windows/macOS the equivalent lives in
+    // lib/service_daemon.dart (commit a13b490); on Android the node runs
+    // in-process in the UI isolate, so we add the same Timer.periodic(5s)
+    // drift-detector here. Logs to `[heartbeat]` via the primary service's
+    // CLogger so entries land in the identity's tages-log AND in logcat
+    // (INFO level not filtered). Relevant for #U17 Hotel-WLAN-Crashes and
+    // any future ANR — the last heartbeat-tick timestamp narrows the
+    // freeze-window from 60s status-beacon to ~5s.
+    _androidHeartbeatLastAt = DateTime.now();
+    _androidHeartbeatTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      final svc = _service;
+      if (svc == null || !svc.isRunning) return;
+      final now = DateTime.now();
+      final last = _androidHeartbeatLastAt;
+      _androidHeartbeatLastAt = now;
+      _androidHeartbeatTick++;
+      final dtMs = last == null ? 0 : now.difference(last).inMilliseconds;
+      // Expected dt ≈ 5000ms; anything >6500ms indicates main-loop drift
+      // (GC pause, blocking FFI call, expensive async-gap on the isolate).
+      final msg = 'tick=$_androidHeartbeatTick dt=${dtMs}ms';
+      if (dtMs > 6500) {
+        debugPrint('[heartbeat] $msg (DRIFT — main loop delayed ${dtMs - 5000}ms)');
+      } else if (_androidHeartbeatTick % 12 == 0) {
+        // Every 60s: an INFO-level beat marker so filtered log viewers
+        // still see the app is alive.
+        debugPrint('[heartbeat] $msg');
+      }
+    });
   }
 
   // ── Incoming Call ──────────────────────────────────────────────
@@ -957,6 +1108,20 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// Sum of unreadCount across every Android identity service. Drives the
+  /// system Launcher-Badge (#U3 — single counter for a multi-identity daemon).
+  void _updateAndroidBadge() {
+    if (!Platform.isAndroid) return;
+    var total = 0;
+    for (final svc in _androidServices.values) {
+      for (final conv in svc.conversations.values) {
+        total += conv.unreadCount;
+      }
+    }
+    const channel = MethodChannel('chat.cleona/notification');
+    channel.invokeMethod('updateBadge', {'count': total});
+  }
+
   /// Wires standard callbacks on a CleonaService (avoids duplication).
   void _wireServiceCallbacks(CleonaService service) {
     service.onStateChanged = () => notifyListeners();
@@ -988,11 +1153,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         channel.invokeMethod('cancelNotification', {'conversationId': convId});
       };
 
-      // Badge count update
-      service.onBadgeCountChanged = (count) {
-        const channel = MethodChannel('chat.cleona/notification');
-        channel.invokeMethod('updateBadge', {'count': count});
-      };
+      // Badge count: sum across ALL identities, not just the one that fired.
+      // The system Launcher-Badge is a single number per app, so the last-
+      // writer-wins per-identity callback (#U3) showed only the firing
+      // identity's count and lost the others.
+      service.onBadgeCountChanged = (_) => _updateAndroidBadge();
 
       // Sound playback via platform channel
       service.notificationSound.onPlaySoundAndroid = (filename) async {
@@ -1668,6 +1833,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         node: _androidNode!,
         displayName: displayName,
       );
+      // Sec H-5 / T13: inherit splash decision for newly added identities.
+      if (_sessionReducedMode) service.reducedMode = true;
       _wireServiceCallbacks(service);
       await service.startService();
       _androidServices[ctx.userIdHex] = service;
@@ -1696,6 +1863,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _showTriggerTimer?.cancel();
+    _androidHeartbeatTimer?.cancel();
+    _androidHeartbeatTimer = null;
     _connectivitySub?.cancel();
     final home = AppPaths.home;
     try { File('$home/.cleona/gui.lock').deleteSync(); } catch (_) {}

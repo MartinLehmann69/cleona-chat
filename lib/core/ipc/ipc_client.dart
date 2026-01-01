@@ -685,6 +685,26 @@ class IpcClient implements ICleonaService {
   int get fragmentCount => _fragmentCount;
   @override
   bool get isRunning => _isRunning;
+  // sec-h5 §8.2 / T11 + Folge-Task 2026-04-26: reducedMode is a per-session
+  // flag toggled by the GUI splash. On Desktop the splash runs in this GUI
+  // process while CleonaService lives in the daemon — we mirror the bool
+  // locally (so the [ReducedModeBanner] in home_screen renders) AND push it
+  // to the daemon via [setReducedModeSession] so user-message Send/Receive
+  // is gated daemon-side. Reset by daemon restart (splash will re-show).
+  bool _reducedMode = false;
+  @override
+  bool get reducedMode => _reducedMode;
+
+  /// Tell the daemon to enter/leave reducedMode for this session and mirror
+  /// the flag locally. Returns true on success.
+  Future<bool> setReducedModeSession(bool enabled) async {
+    final resp = await _sendRequest('set_reduced_mode_session',
+        params: {'enabled': enabled});
+    if (resp.success) {
+      _reducedMode = enabled;
+    }
+    return resp.success;
+  }
 
   @override
   List<ContactInfo> get acceptedContacts => _acceptedContacts;
@@ -876,6 +896,19 @@ class IpcClient implements ICleonaService {
     _sendRequest('mark_read', params: {'conversationId': conversationId});
     final conv = conversations[conversationId];
     if (conv != null) conv.unreadCount = 0;
+  }
+
+  @override
+  void setActiveConversationId(String? conversationId) {
+    // Daemon-side notifications (sound/vibrate/Android-banner) are emitted in
+    // the daemon process; the GUI tracking lives in CleonaService directly on
+    // Android (in-process). On desktop the daemon has no Android-banner path
+    // and desktop foreground tracking is out of scope for #U18 — no-op here.
+  }
+
+  @override
+  void setAppResumed(bool isResumed) {
+    // No-op (see setActiveConversationId).
   }
 
   @override

@@ -109,7 +109,7 @@ class WhisperFFI {
     final home = Platform.environment['HOME'];
     final searchPaths = <String>[
       libName, // bare name — linker searches system paths + jniLibs on Android
-      if (Platform.isMacOS) ...[
+      if (Platform.isMacOS || Platform.isIOS) ...[
         '@executable_path/../Frameworks/$libName',
         '/opt/homebrew/lib/$libName',
         '/usr/local/lib/$libName',
@@ -170,7 +170,7 @@ class WhisperFFI {
     DynamicLibrary? wrapperLib;
     final wrapperSearchPaths = <String>[
       wrapperName,
-      if (Platform.isMacOS) ...[
+      if (Platform.isMacOS || Platform.isIOS) ...[
         '@executable_path/../Frameworks/$wrapperName',
         '/opt/homebrew/lib/$wrapperName',
         '/usr/local/lib/$wrapperName',
@@ -218,7 +218,9 @@ class WhisperFFI {
   /// for the current platform. On Android/Linux we use `.so`, on macOS `.dylib`,
   /// on Windows `.dll`.
   static (String, String, List<String>) _libNamesForPlatform() {
-    if (Platform.isMacOS) {
+    if (Platform.isMacOS || Platform.isIOS) {
+      // iOS reuses .dylib-Naming auch bei Static-Link via Embedded Framework
+      // (DynamicLibrary.process() / executable-path lookup).
       return (
         'libwhisper.dylib',
         'libwhisper_wrapper.dylib',

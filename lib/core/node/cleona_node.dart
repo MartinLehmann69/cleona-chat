@@ -13,6 +13,7 @@ import 'package:cleona/core/network/message_queue.dart';
 import 'package:cleona/core/network/peer_message_store.dart';
 import 'package:cleona/core/network/reachability_probe.dart';
 import 'package:cleona/core/network/lan_discovery.dart';
+import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/network/tls_fallback.dart';
 import 'package:cleona/core/network/nat_traversal.dart';
 import 'package:cleona/core/network/port_mapper.dart';
@@ -26,6 +27,12 @@ import 'package:cleona/core/network/rate_limiter.dart';
 import 'package:cleona/core/network/peer_reputation.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/node/relay_budget.dart';
+import 'package:cleona/core/identity_resolution/auth_manifest.dart';
+import 'package:cleona/core/identity_resolution/liveness_record.dart';
+import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
+import 'package:cleona/core/identity_resolution/identity_resolver.dart';
+import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -55,8 +62,13 @@ class CleonaNode {
   /// Chunk reassembler for MEDIA_CHUNK messages (large envelopes split for relay).
   late final ChunkReassembler _chunkReassembler;
 
-  /// Callback for relay stats tracking (wired by CleonaService).
-  void Function(int bytes)? onRelayBytes;
+  /// Shared network-stats collector. The transport is owned by the node and
+  /// fan-outs every UDP frame to a single counter pair — wiring it per-Service
+  /// (the previous design) used `??=` and only the first identity to start
+  /// won the receive callback, so all subsequent identities saw byte counters
+  /// stuck at 0 (#U5). Single source of truth here, services read it via
+  /// `node.statsCollector` in their getNetworkStats().
+  final NetworkStatsCollector statsCollector = NetworkStatsCollector();
 
   /// Callback for mutual peer computation (wired by CleonaService).
   /// Returns nodeIdHex set of peers likely known to the recipient
@@ -85,9 +97,20 @@ class CleonaNode {
   late DvRoutingTable dvRouting;
   late PortMapper portMapper;
 
+  // 2D-DHT Identity Resolution (§2.2.4)
+  late IdentityDhtHandler identityDhtHandler;
+  late IdentityResolver identityResolver;
+
   // Callback for application-layer messages routed to a specific identity.
   // If identity is null, recipientId didn't match any registered identity.
   void Function(proto.MessageEnvelope envelope, InternetAddress from, int port, IdentityContext? identity)? onMessageForIdentity;
+
+  // Plan §D2: lightweight signal so application-layer code (e.g. CallManager's
+  // per-CallSession route cache) can invalidate stale routes when DV-Routing
+  // surgically drops a path. Fires from the existing `ackTracker.onRouteDown`
+  // handler — see the wire-up in `_init()`. peerHex may be a deviceNodeId or
+  // a userId (V3.1.65 multi-device routing); listeners should match either.
+  void Function(String peerHex)? onRouteDownForCalls;
 
   // State
   StreamSubscription<PortMapperEvent>? _portMapperSub;
@@ -203,6 +226,7 @@ class CleonaNode {
   /// Common init: transport, discovery, routing table — no bootstrap yet.
   Future<void> _startBase({List<String> bootstrapPeers = const []}) async {
     _log.info('Starting node on port $port...');
+    statsCollector.markStarted();
 
     // Init routing table BEFORE transport (transport callbacks need it)
     // Phase 2: ownNodeId = deviceNodeId (per-device XOR distance)
@@ -251,6 +275,13 @@ class CleonaNode {
       _log.info('Route DOWN via ACK: ${peerHex.substring(0, 8)} via $viaShort — surgical DV markRouteDown');
       dvRouting.markRouteDown(peerHex, viaNextHopHex: viaNextHopHex);
 
+      // Plan §D2: notify call layer so any active CallSession with a
+      // cached route to this peer drops the cache and re-resolves on
+      // the next audio frame. Fire-and-forget; handler is non-throwing.
+      try {
+        onRouteDownForCalls?.call(peerHex);
+      } catch (_) {}
+
       // Mass route-down → infer network change (e.g. ISP IP reassignment, WiFi switch).
       // If ≥3 distinct peers go DOWN within 30s, trigger onNetworkChanged().
       _routeDownTimestamps.add(DateTime.now());
@@ -264,7 +295,13 @@ class CleonaNode {
         onNetworkChanged(force: true).whenComplete(() => _networkChangeInProgress = false);
       }
 
-      final peer = routingTable.getPeer(hexToBytes(peerHex));
+      // Fix B (Task #30): peerHex aus AckTracker kann userId sein, wenn der
+      // Sender mit userId trackAck'd hat. routingTable.getPeer() indiziert
+      // nur deviceNodeId, getPeerByUserId ist der Fallback (V3.1.65 O(1)).
+      // Ohne Fallback war diese Branch quasi-deaktiviert für Multi-Device-
+      // Empfänger und der learned-relay-Cleanup griff praktisch nie.
+      final peer = routingTable.getPeer(hexToBytes(peerHex)) ??
+          routingTable.getPeerByUserId(hexToBytes(peerHex));
       if (peer == null) return;
 
       if (viaNextHopHex != null) {
@@ -273,6 +310,12 @@ class CleonaNode {
         if (relayHex == viaNextHopHex) {
           peer.consecutiveRelayFailures = 3;
           _log.info('Relay route DOWN: ${peerHex.substring(0, 8)} via $viaShort — clearing learned relay');
+          // Task #30 (Y): cooldown the failed relay BEFORE clearRelayRoute
+          // resets state. Without this, the next incoming RELAY_FORWARD from
+          // the same peer via the same broken relay will overwrite
+          // relayViaNodeId again (asymmetric reachability) and the cascade
+          // will pick the dead path on the next send.
+          peer.markRelayFailed(viaNextHopHex);
           peer.clearRelayRoute();
         }
       } else {
@@ -285,6 +328,19 @@ class CleonaNode {
         }
       }
     };
+
+    // 2D-DHT Identity Resolution (§2.2.4): Replicator-Side + Resolver
+    final identityFileEnc = FileEncryption(baseDir: '${AppPaths.home}/.cleona');
+    identityDhtHandler = IdentityDhtHandler(
+      ownNodeId: primaryIdentity.deviceNodeId,
+      fileEncryption: identityFileEnc,
+      storagePath: '${AppPaths.home}/.cleona/identity_dht_storage.json',
+    );
+    await identityDhtHandler.start();
+    identityResolver = IdentityResolver(
+      routingTable: routingTable,
+      dhtRpc: dhtRpc,
+    );
 
     // Init Store-and-Forward message store
     peerMessageStore = PeerMessageStore(profileDir: profileDir);
@@ -343,6 +399,8 @@ class CleonaNode {
     transport.onEnvelope = _onEnvelopeReceived;
     transport.onDiscovery = _onDiscoveryReceived;
     transport.onPortProbe = _onPortProbeReceived;
+    transport.onBytesSent = (b) => statsCollector.addBytesSent(b);
+    transport.onBytesReceived = (b) => statsCollector.addBytesReceived(b);
     await transport.start();
 
     // Init LAN discovery — Phase 2: broadcast deviceNodeId (per-device routing)
@@ -673,6 +731,20 @@ class CleonaNode {
         return;
       case proto.MessageType.PEER_RETRIEVE_RESPONSE:
         _handlePeerRetrieveResponse(envelope);
+        return;
+      // 2D-DHT Identity Resolution (§2.2.4) — Replicator-Side dispatch.
+      // *_RESPONSE-Cases werden vom DhtRpc-Layer als Response abgegriffen.
+      case proto.MessageType.IDENTITY_AUTH_PUBLISH:
+        _handleIdentityAuthPublish(envelope, from, fromPort);
+        return;
+      case proto.MessageType.IDENTITY_AUTH_RETRIEVE:
+        _handleIdentityAuthRetrieve(envelope, from, fromPort);
+        return;
+      case proto.MessageType.IDENTITY_LIVE_PUBLISH:
+        _handleIdentityLivePublish(envelope, from, fromPort);
+        return;
+      case proto.MessageType.IDENTITY_LIVE_RETRIEVE:
+        _handleIdentityLiveRetrieve(envelope, from, fromPort);
         return;
       case proto.MessageType.ROUTE_UPDATE:
         _handleRouteUpdate(envelope);
@@ -1231,11 +1303,19 @@ class CleonaNode {
 
   // ── Envelope Creation ──────────────────────────────────────────────
 
-  proto.MessageEnvelope _createEnvelope(proto.MessageType type) {
+  /// §2.2.4: optionaler `identity`-Parameter für Multi-Identity-Daemons. Ohne
+  /// fällt auf `primaryIdentity` zurück (existing behavior). Application-Layer-
+  /// Sender, die eine spezifische Identität signieren wollen (z.B. Alice +
+  /// AllyCat im selben Daemon), übergeben hier ihren IdentityContext.
+  /// Infrastructure-Sender (DHT, PEER_LIST, ROUTE_UPDATE, etc.) verwenden
+  /// weiterhin `primaryIdentity` — das ist das daemon-weite Self.
+  proto.MessageEnvelope _createEnvelope(
+      proto.MessageType type, {IdentityContext? identity}) {
+    final id = identity ?? primaryIdentity;
     return proto.MessageEnvelope()
       ..version = 1
-      ..senderId = primaryIdentity.nodeId          // userId (stable identity)
-      ..senderDeviceNodeId = primaryIdentity.deviceNodeId  // Phase 2: per-device routing
+      ..senderId = id.nodeId          // userId (stable identity)
+      ..senderDeviceNodeId = id.deviceNodeId  // Phase 2: per-device routing
       ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
       ..messageType = type
       ..networkTag = networkChannel;
@@ -1269,6 +1349,12 @@ class CleonaNode {
       // IPv6 global: no NAT context needed — always routable
       if (addr.ip.contains(':') && !addr.ip.toLowerCase().startsWith('fe80:')) return true;
       if (!_isPrivateIp(addr.ip)) return true;
+      // Bridged-LAN (#U21): target's private IP is in our local network class →
+      // reachable via L2, regardless of public-IP detection state. Without this,
+      // ipify-rotation or stale peer.publicIp causes nodes on the same /24 to
+      // drop direct LAN sends and fall back to relay (~14 s instead of <1 s).
+      // Mirrors the Step-1-success same-network trust at line 1552.
+      if (_isPrivateIp(_localIp) && _samePrivateNetwork(addr.ip, _localIp)) return true;
       // Private IP: only try if same NAT (matching public IP) or unknown
       return effectivePublicIp == null || effectivePublicIp == peer.publicIp || peer.publicIp.isEmpty;
     }).toList();
@@ -1365,42 +1451,87 @@ class CleonaNode {
   Future<bool> sendViaRelay(proto.MessageEnvelope envelope, Uint8List recipientNodeId) =>
       _sendViaRelay(envelope, recipientNodeId);
 
+  /// §2.2.4: public direct-send-to-peer für IdentityPublisher (fire-and-forget).
+  /// Nutzt den existierenden Address-Cascade (LAN-priorisiert, mit Backoff).
+  Future<bool> sendEnvelopeToPeer(proto.MessageEnvelope envelope, PeerInfo peer) =>
+      _sendEnvelopeToPeer(envelope, peer);
+
+  /// §2.2.4: Liefert die aktuelle Adress-Liste dieses Nodes als
+  /// `PeerAddressProto`-Bündel für die Liveness-Records. LAN-Adressen
+  /// (`_localIps`) plus Public-IP aus NAT-Traversal (UPnP/PCP/external-probe).
+  List<proto.PeerAddressProto> currentSelfAddresses() {
+    final list = <proto.PeerAddressProto>[];
+    for (final ip in _localIps) {
+      if (ip.isEmpty || ip == '0.0.0.0' || ip == '::') continue;
+      list.add(proto.PeerAddressProto()
+        ..ip = ip
+        ..port = port
+        ..addressType = ip.contains(':')
+            ? proto.AddressType.IPV6_GLOBAL
+            : proto.AddressType.IPV4_PRIVATE);
+    }
+    final pubV4 = natTraversal.publicIp;
+    if (pubV4 != null && pubV4.isNotEmpty) {
+      list.add(proto.PeerAddressProto()
+        ..ip = pubV4
+        ..port = port
+        ..addressType = proto.AddressType.IPV4_PUBLIC);
+    }
+    final pubV6 = natTraversal.publicIpv6;
+    if (pubV6 != null && pubV6.isNotEmpty) {
+      list.add(proto.PeerAddressProto()
+        ..ip = pubV6
+        ..port = port
+        ..addressType = proto.AddressType.IPV6_GLOBAL);
+    }
+    return list;
+  }
+
   /// V3.1: Public DV next-hop send — for "reply via same path".
   Future<bool> sendViaNextHopPublic(proto.MessageEnvelope envelope, Uint8List recipientNodeId, PeerInfo nextHopPeer) =>
       _sendViaNextHop(envelope, recipientNodeId, nextHopPeer);
 
   /// Send an envelope to a specific peer by node ID.
-  /// V3: Route-based — DV Cheapest Route → Fallback → Default-Gateway → Legacy Relay → S&F
-  /// Route-based, UDP only. Direct → Relay → S&F cascade.
+  /// V3 + §2.2.4: Cache-Hit → Dim-2 Resolution → MessageQueue. Kein Legacy-
+  /// Resolution-Fallback (Hard-Cut, gebündelt mit Sec H-5 KEM v2). DV-Routing
+  /// bleibt als TRANSPORT-Mechanismus aktiv für die aufgelösten Adressen.
   Future<bool> sendEnvelope(proto.MessageEnvelope envelope, Uint8List recipientNodeId) async {
-    // Phase 2: try deviceNodeId first, then userId fallback (callers may pass either)
-    final peer = routingTable.getPeer(recipientNodeId) ??
-        routingTable.getPeerByUserId(recipientNodeId);
+    // Phase 2: try deviceNodeId first, then userId fallback (callers may pass either).
+    // Freshness gate matches IdentityPublisher.foregroundLiveTtl — addresses older
+    // than this window are not authoritative; treat as cache miss so the resolver
+    // can refresh from the 2D-DHT (§2.2.4). Without this gate a stale entry from
+    // a prior session (e.g. peer restart with new NAT-egress port) silently
+    // sends to the dead address and the cascade falls into relay/S&F instead of
+    // direct delivery.
+    const cacheMaxAge = Duration(minutes: 15);
+    var peer = routingTable.getFreshPeer(recipientNodeId, maxAge: cacheMaxAge) ??
+        routingTable.getFreshPeerByUserId(recipientNodeId, maxAge: cacheMaxAge);
+
+    // Cache miss → §2.2.4 IdentityResolver (Auth-Manifest + Liveness-Lookup)
     if (peer == null) {
-      // Peer not in Kademlia routing table. Don't give up — try relay via
-      // DV routing (default gateway or next-hop) which may know this peer.
       final recipientHex = bytesToHex(recipientNodeId);
-      _log.debug('Peer ${recipientHex.substring(0, 8)} not in k-table, trying DV relay');
-
-      final type = envelope.messageType;
-      final isRelayable = type != proto.MessageType.RELAY_FORWARD &&
-          type != proto.MessageType.RELAY_ACK &&
-          type != proto.MessageType.TYPING_INDICATOR &&
-          type != proto.MessageType.READ_RECEIPT;
-
-      if (isRelayable) {
-        // Try default gateway
-        final gwHex = dvRouting.defaultGatewayHex;
-        if (gwHex != null && gwHex != recipientHex && !_isLocalIdentity(gwHex)) {
-          final gwPeer = routingTable.getPeer(hexToBytes(gwHex));
-          if (gwPeer != null) {
-            _log.debug('Sending via default-GW ${gwHex.substring(0, 8)} for unreachable ${recipientHex.substring(0, 8)}');
-            return _sendViaNextHop(envelope, recipientNodeId, gwPeer);
-          }
-        }
+      _log.debug('Peer ${recipientHex.substring(0, 8)} cache miss → Dim-2 lookup');
+      final resolved = await identityResolver.resolve(recipientNodeId);
+      if (resolved.isNotEmpty) {
+        // Resolver populated routingTable; re-query without the freshness gate
+        // (the resolver just wrote these entries, so they're current by definition).
+        peer = routingTable.getPeer(recipientNodeId) ??
+            routingTable.getPeerByUserId(recipientNodeId);
+      } else {
+        // Resolver had no manifest. Fall back to whatever the routing table
+        // still holds — better a stale-address attempt than silently dropping
+        // when a peer has just gone offline.
+        peer = routingTable.getPeer(recipientNodeId) ??
+            routingTable.getPeerByUserId(recipientNodeId);
       }
+    }
 
-      _log.debug('Cannot send: peer ${recipientHex.substring(0, 8)} not in routing table or DV');
+    if (peer == null) {
+      // Hard-Cut: kein Default-Gateway-Resolution-Fallback mehr.
+      final recipientHex = bytesToHex(recipientNodeId);
+      _log.debug('Cannot send: identity ${recipientHex.substring(0, 8)} '
+          'unresolvable via cache + Dim-2');
+      final type = envelope.messageType;
       // Queue ack-worthy messages for later delivery when route appears
       if (AckTracker.isAckWorthy(type) && envelope.messageId.isNotEmpty) {
         final msgIdHex = bytesToHex(Uint8List.fromList(envelope.messageId));
@@ -1560,13 +1691,26 @@ class CleonaNode {
       // routes from disk-loaded routing tables cause unnecessary timeouts.
       if (peer.hasValidRelayRoute) {
         final relayViaHex = bytesToHex(peer.relayViaNodeId!);
-        if (relayViaHex != peerHex && !_isLocalIdentity(relayViaHex)) {
+        // Task #30 (Y): skip the learned relay if it's in cooldown after a
+        // recent 3x ACK timeout. Lets the cascade fall through to DV/GW
+        // alternatives instead of replaying a known-broken outgoing path.
+        if (peer.isRelayInCooldown(relayViaHex)) {
+          _log.debug('Step 2a skipped: ${peerHex.substring(0, 8)} via '
+              '${relayViaHex.substring(0, 8)} in cooldown');
+        } else if (relayViaHex != peerHex && !_isLocalIdentity(relayViaHex)) {
           final relayPeer = routingTable.getPeer(peer.relayViaNodeId!);
           final relayAlive = relayPeer != null && _confirmedPeers.contains(relayViaHex);
           if (relayPeer != null && relayAlive) {
             _log.debug('Learned relay for ${peerHex.substring(0, 8)} via ${relayViaHex.substring(0, 8)}');
             final success = await _sendViaSpecificRelay(envelope, recipientNodeId, relayPeer);
-            if (success) return true; // Learned relay is proven path — no need for DV/GW duplicates
+            // Fix A2 (Task #30): nur short-circuit, wenn diese Route zuletzt
+            // sauber funktioniert hat. Bei recent ACK-Timeouts (consecutive
+            // RelayFailures>0) durchfallen lassen zu 2b/2c/2d/4 — Multi-Pfad-
+            // Versicherung gegen kaputte learned relay routes (z.B. asymmetrische
+            // Reachability oder stale Mapping nach Bob's Routing-Wechsel).
+            // Für Internet-Szenarien bleibt das Lernen unverändert; nur die
+            // Stop-Bedingung der Cascade wird strenger.
+            if (success && peer.consecutiveRelayFailures == 0) return true;
           } else {
             peer.clearRelayRoute();
           }
@@ -2089,6 +2233,12 @@ class CleonaNode {
         final relayHex = bytesToHex(relayNodeId);
         if (relayHex == peer.nodeIdHex) return;
         if (_isLocalIdentity(relayHex)) return;
+        // Task #30 (Y): respect cooldown for recently-failed relays.
+        if (peer.isRelayInCooldown(relayHex)) {
+          _log.debug('Proactive rendezvous: ${peer.nodeIdHex.substring(0, 8)} '
+              'via ${relayHex.substring(0, 8)} suppressed (cooldown)');
+          return;
+        }
         peer.relayViaNodeId = relayNodeId;
         peer.relaySetAt = DateTime.now();
         peer.consecutiveRelayFailures = 0;
@@ -2447,7 +2597,11 @@ class CleonaNode {
 
     // Learned relay route failed — clear it and fall back to generic relay search
     _log.debug('Learned relay route to ${relayPeer.nodeIdHex.substring(0, 8)} failed — clearing');
-    final peer = routingTable.getPeer(recipientNodeId);
+    final peer = routingTable.getPeer(recipientNodeId) ??
+        routingTable.getPeerByUserId(recipientNodeId);
+    // Task #30 (Y): cooldown the failed relay before clear, so re-learning
+    // through incoming traffic doesn't immediately re-arm a dead path.
+    peer?.markRelayFailed(relayPeer.nodeIdHex);
     peer?.clearRelayRoute();
     return _sendViaRelay(envelope, recipientNodeId);
   }
@@ -2618,10 +2772,21 @@ class CleonaNode {
             originPeer = PeerInfo(nodeId: originId, networkChannel: networkChannel);
             routingTable.addPeer(originPeer);
           }
-          originPeer.relayViaNodeId = relayNodeId;
-          originPeer.relaySetAt = DateTime.now();
-          _log.info('Relay route learned (delivery): ${originHex.substring(0, 8)} '
-              'via ${relayHex.substring(0, 8)}');
+          // Task #30 (Y): incoming relay packets prove the relay can reach
+          // us, but NOT that we can reach the origin via that relay
+          // (asymmetric reachability). If the relay is in cooldown after a
+          // recent outgoing failure, do not re-arm relayViaNodeId.
+          if (originPeer.isRelayInCooldown(relayHex)) {
+            _log.debug('Relay re-learn (delivery) suppressed for '
+                '${originHex.substring(0, 8)} via ${relayHex.substring(0, 8)} '
+                '(cooldown)');
+            // fall through past the relayViaNodeId set
+          } else {
+            originPeer.relayViaNodeId = relayNodeId;
+            originPeer.relaySetAt = DateTime.now();
+            _log.info('Relay route learned (delivery): ${originHex.substring(0, 8)} '
+                'via ${relayHex.substring(0, 8)}');
+          }
         } else {
           _log.debug('Relay route skipped (circular): ${originHex.substring(0, 8)} '
               'via ${relayHex.substring(0, 8)}');
@@ -2645,7 +2810,7 @@ class CleonaNode {
         _log.warn('Relay: failed to parse inner envelope: $e');
       }
       _sendRelayAck(relay, delivered: true);
-      onRelayBytes?.call(relay.wrappedEnvelope.length);
+      statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
       return;
     }
 
@@ -2732,7 +2897,7 @@ class CleonaNode {
                   storeIdHex: 'relay-bs-$storeIdHex',
                 );
                 _sendRelayAck(relay, delivered: false);
-                onRelayBytes?.call(relay.wrappedEnvelope.length);
+                statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
                 return;
               }
             }
@@ -2751,7 +2916,7 @@ class CleonaNode {
               storeIdHex: 'relay-bs-$storeIdHex',
             );
             _sendRelayAck(relay, delivered: false);
-            onRelayBytes?.call(relay.wrappedEnvelope.length);
+            statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
             return;
           }
           // Non-neighbor: direct send attempted but unconfirmed — fall through
@@ -2780,7 +2945,7 @@ class CleonaNode {
                 storeIdHex: 'relay-bs-$storeIdHex',
               );
               _sendRelayAck(relay, delivered: false);
-              onRelayBytes?.call(relay.wrappedEnvelope.length);
+              statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
               return;
             }
           }
@@ -2799,7 +2964,7 @@ class CleonaNode {
               _log.info('Relay: forwarded to ${candidate.nodeIdHex.substring(0, 8)} '
                   '(hop ${nextRelay.hopCount})');
               _sendRelayAck(relay, delivered: false);
-              onRelayBytes?.call(relay.wrappedEnvelope.length);
+              statsCollector.addRelayBytes(relay.wrappedEnvelope.length);
               return;
             }
           }
@@ -3420,6 +3585,63 @@ class CleonaNode {
       }
     } catch (e) {
       _log.debug('PEER_RETRIEVE_RESPONSE parse error: $e');
+    }
+  }
+
+  // ── 2D-DHT Identity Resolution Handlers (§2.2.4) ─────────────────────
+
+  void _handleIdentityAuthPublish(
+      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+    try {
+      final m = AuthManifest.fromProto(
+          proto.AuthManifestProto.fromBuffer(envelope.encryptedPayload));
+      identityDhtHandler.handleAuthPublish(m);
+    } catch (e) {
+      _log.debug('IDENTITY_AUTH_PUBLISH parse error: $e');
+    }
+  }
+
+  void _handleIdentityAuthRetrieve(
+      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+    try {
+      final req = proto.IdentityAuthRetrieveRequest.fromBuffer(
+          envelope.encryptedPayload);
+      final m = identityDhtHandler.getAuthManifest(
+          Uint8List.fromList(req.userId));
+      if (m == null) return; // Not-found responses sind silent.
+      final response = _createEnvelope(proto.MessageType.IDENTITY_AUTH_RESPONSE)
+        ..encryptedPayload = m.toProto().writeToBuffer();
+      transport.sendUdp(response, from, fromPort);
+    } catch (e) {
+      _log.debug('IDENTITY_AUTH_RETRIEVE error: $e');
+    }
+  }
+
+  void _handleIdentityLivePublish(
+      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+    try {
+      final r = LivenessRecord.fromProto(
+          proto.LivenessRecordProto.fromBuffer(envelope.encryptedPayload));
+      identityDhtHandler.handleLivePublish(r);
+    } catch (e) {
+      _log.debug('IDENTITY_LIVE_PUBLISH parse error: $e');
+    }
+  }
+
+  void _handleIdentityLiveRetrieve(
+      proto.MessageEnvelope envelope, InternetAddress from, int fromPort) {
+    try {
+      final req = proto.IdentityLiveRetrieveRequest.fromBuffer(
+          envelope.encryptedPayload);
+      final r = identityDhtHandler.getLiveness(
+          Uint8List.fromList(req.userId),
+          Uint8List.fromList(req.deviceNodeId));
+      if (r == null) return;
+      final response = _createEnvelope(proto.MessageType.IDENTITY_LIVE_RESPONSE)
+        ..encryptedPayload = r.toProto().writeToBuffer();
+      transport.sendUdp(response, from, fromPort);
+    } catch (e) {
+      _log.debug('IDENTITY_LIVE_RETRIEVE error: $e');
     }
   }
 
