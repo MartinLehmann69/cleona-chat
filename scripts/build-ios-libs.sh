@@ -321,17 +321,10 @@ build_cleona_audio() {
         "$src"
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
-    # Merge speexdsp INTO cleona_audio so the final all-libs merge has only
-    # one copy of each speexdsp symbol (mirrors other platforms where the
-    # shared .so embeds speexdsp).
-    SPEEX_A=$(find . -name 'libspeexdsp.a' -print -quit)
-    if [ -n "$SPEEX_A" ]; then
-        xcrun libtool -static -o "$INSTALL_DIR/cleona_audio/lib/libcleona_audio.a" \
-            libcleona_audio.a "$SPEEX_A"
-        echo "  merged speexdsp into libcleona_audio.a"
-    else
-        cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
-    fi
+    cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
+    # On iOS, CMake's Ninja generator embeds the speexdsp subdirectory
+    # objects into libcleona_audio.a automatically (unlike shared lib
+    # builds on other platforms). No separate speexdsp/lib needed.
     cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
     cd "$PROJECT_DIR"
 }
@@ -458,16 +451,18 @@ for platform_tag in device simulator; do
     echo "  Merging ${#ALL_ARCHIVES[@]} archives for $platform_tag..."
     # Apple libtool -static merges multiple .a into one, resolving internal refs
     xcrun libtool -static -o "$MERGED" "${ALL_ARCHIVES[@]}"
-    # Pre-link into a single .o to resolve duplicate weak symbols
-    # (C++ runtime stubs emitted by both liboqs and whisper.cpp).
-    DEDUP_O="${MERGED%.a}.o"
-    if xcrun ld -r -force_load "$MERGED" -o "$DEDUP_O" 2>/dev/null; then
-        xcrun ar rcs "${MERGED%.a}_dedup.a" "$DEDUP_O"
-        mv "${MERGED%.a}_dedup.a" "$MERGED"
-        rm -f "$DEDUP_O"
-        echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1)) [deduped via ld -r]"
-    else
-        echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1)) [ld -r skipped, using raw merge]"
+    echo "  -> $MERGED ($(du -h "$MERGED" | cut -f1))"
+    # Diagnose duplicates in merged archive
+    DUPS=$(xcrun nm -g "$MERGED" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l | tr -d ' ')
+    echo "  duplicate symbols in merge: $DUPS"
+    if [ "$DUPS" -gt 0 ]; then
+        echo "  first 10 duplicates:"
+        xcrun nm -g "$MERGED" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | head -10 | sed 's/^/    /'
+        echo "  per-archive symbol check:"
+        for a in "${ALL_ARCHIVES[@]}"; do
+            local_dups=$(xcrun nm -g "$a" 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l | tr -d ' ')
+            [ "$local_dups" -gt 0 ] && echo "    $(basename "$a"): $local_dups internal duplicates"
+        done
     fi
 done
 
