@@ -215,6 +215,22 @@ jobs:
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL" \
             --export-options-plist=ios/ExportOptions.plist
 
+      - name: Diagnose Runner binary symbols
+        if: always()
+        run: |
+          RUNNER=$(find build/ios -path "*/Runner.app/Runner" -not -name "*.plist" -type f 2>/dev/null | head -1)
+          if [ -n "$RUNNER" ]; then
+            echo "Binary: $RUNNER ($(ls -lh "$RUNNER" | awk '{print $5}'))"
+            echo "=== Exported symbols (nm -gU): FFI entry points ==="
+            nm -gU "$RUNNER" 2>/dev/null | grep -E 'sodium_init|OQS_init|ZSTD_compress|opus_encode|whisper_init|cleona_audio_create' | head -10
+            echo "=== Total exported symbol count ==="
+            nm -gU "$RUNNER" 2>/dev/null | wc -l
+            echo "=== STRIP_STYLE in build settings ==="
+            xcodebuild -showBuildSettings -workspace ios/Runner.xcworkspace -scheme Runner -configuration Release 2>/dev/null | grep -E 'STRIP_STYLE|STRIP_INSTALLED|DEAD_CODE|EXPORTED_SYMBOLS' | head -10
+          else
+            echo "Runner binary not found"
+          fi
+
       - name: List build outputs
         if: always()
         run: |

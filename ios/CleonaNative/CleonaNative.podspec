@@ -26,11 +26,13 @@ Pod::Spec.new do |s|
 
   # -force_load loads ALL object files from the merged archive into the
   # linker, even though no ObjC/Swift code references the C symbols.
-  # DEAD_CODE_STRIPPING=NO keeps all symbols visible to dlsym() at
-  # runtime (DynamicLibrary.process()). Duplicate symbols are eliminated
-  # in build-ios-libs.sh (ec backends skipped, C++ stubs stripped).
+  # EXPORTED_SYMBOLS_FILE marks FFI entry points as dead-strip roots;
+  # DEAD_CODE_STRIPPING=YES (default) resolves duplicate symbols.
+  # STRIP_STYLE=non-global preserves the export trie so dlsym() can
+  # find the symbols at runtime (default 'all' strips the export trie).
   s.user_target_xcconfig = {
-    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a -ld_classic',
-    'DEAD_CODE_STRIPPING' => 'NO',
+    'OTHER_LDFLAGS' => '-force_load $(PODS_ROOT)/../CleonaNative/libcleona_all_device.a',
+    'EXPORTED_SYMBOLS_FILE' => '$(PODS_ROOT)/../CleonaNative/cleona_exported_symbols.txt',
+    'STRIP_STYLE' => 'non-global',
   }
 end
