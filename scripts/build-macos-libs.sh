@@ -294,6 +294,30 @@ build_cleona_voice() {
     rewrite_install_name "$OUT_DIR/cleona_voice.dylib"
 }
 
+build_cleona_video() {
+    echo "── libcleona_video (AVFoundation + VideoToolbox) ─────────────"
+    local src="$PROJECT_DIR/native/cleona_video"
+    local build="$BUILD_DIR/cleona_video"
+    rm -rf "$build" && mkdir -p "$build"
+    # BUILD_PLATFORM bleibt an -- genau dieses Backend ist das Ziel. Der
+    # Plattform-Loop in native/cleona_video/CMakeLists.txt steigt auf einem
+    # Apple-Host nur nach apple/ ab; linux/, android/ und windows/ haben alle
+    # einen Host-Guard am Dateianfang.
+    cmake -GNinja -S "$src" -B "$build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_OSX_ARCHITECTURES="$CMAKE_OSX_ARCHITECTURES" \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$MACOS_DEPLOYMENT_TARGET" \
+        -DCLEONA_VIDEO_BUILD_MOCK=OFF \
+        -DCLEONA_VIDEO_BUILD_SMOKE=OFF
+    ninja -C "$build"
+    # Name MIT lib-Praefix, anders als bei cleona_voice oben: video_pipeline.dart
+    # :691-693 sucht "libcleona_video.dylib", voice_session.dart:345/:392 sucht
+    # "cleona_voice.dylib". Die beiden Bindings sind sich uneins; massgeblich ist
+    # je das, was zur Laufzeit tatsaechlich geoeffnet wird.
+    cp "$build/apple/libcleona_video.dylib" "$OUT_DIR/libcleona_video.dylib"
+    rewrite_install_name "$OUT_DIR/libcleona_video.dylib"
+}
+
 # ── Homebrew shortcut ────────────────────────────────────────────────────────
 use_homebrew_libs() {
     echo ">>> Using Homebrew-installed libs (symlinks into $OUT_DIR)"
@@ -351,7 +375,7 @@ verify() {
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 run_builds() {
     local wanted=("${TARGETS[@]}")
-    local all_targets=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice)
+    local all_targets=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice cleona_video)
     if [ "${wanted[0]}" = "all" ]; then
         wanted=("${all_targets[@]}")
     fi
@@ -369,6 +393,7 @@ run_builds() {
             whisper) build_whisper ;;
             cleona_pow) build_cleona_pow ;;
             cleona_voice) build_cleona_voice ;;
+            cleona_video) build_cleona_video ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done

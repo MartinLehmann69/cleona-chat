@@ -552,10 +552,30 @@ jobs:
             cp "$f" "$FRAMEWORKS/"
           done
 
-          if [ ! -f "$FRAMEWORKS/libcleona_voice.dylib" ]; then
-            echo "::error::libcleona_voice.dylib missing from Contents/Frameworks — calls would have no audio"
+          # Namen NICHT vereinheitlichen: massgeblich ist, was Dart zur Laufzeit
+          # oeffnet, und die beiden Bindings sind sich uneins.
+          #   voice: voice_session.dart:345 laedt baseName "cleona_voice",
+          #          :392 haengt ".dylib" an  -> cleona_voice.dylib (ohne lib)
+          #   video: video_pipeline.dart:691  -> libcleona_video.dylib (mit lib)
+          # c6c55a6a hatte hier auf "libcleona_voice.dylib" umgestellt, einen
+          # Namen, den build-macos-libs.sh:293 nie erzeugt -- der Schritt konnte
+          # danach nur noch fehlschlagen. Aufgefallen ist es erst, als S295/S296
+          # gepusht wurden, weil vorher der alte cleona_audio-Guard lief.
+          if [ ! -f "$FRAMEWORKS/cleona_voice.dylib" ]; then
+            echo "::error::cleona_voice.dylib missing from Contents/Frameworks — calls would have no audio"
             exit 1
           fi
+          if [ ! -f "$FRAMEWORKS/libcleona_video.dylib" ]; then
+            echo "::error::libcleona_video.dylib missing from Contents/Frameworks — video calls would have no picture"
+            exit 1
+          fi
+          # Die dylib muss die ABI auch wirklich exportieren, nicht bloss da sein.
+          for _sym in cleona_voice_open cleona_video_open; do
+            if ! nm -gU "$FRAMEWORKS"/*.dylib 2>/dev/null | grep -q "_$_sym\$"; then
+              echo "::error::$_sym not exported by any dylib in Contents/Frameworks"
+              exit 1
+            fi
+          done
 
           cp build/cleona-daemon-macos "$MACOS_BIN/cleona-daemon"
           chmod +x "$MACOS_BIN/cleona-daemon"

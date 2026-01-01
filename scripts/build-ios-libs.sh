@@ -413,12 +413,41 @@ build_cleona_voice() {
     cd "$PROJECT_DIR"
 }
 
+build_cleona_video() {
+    local platform="$1"
+    echo "── libcleona_video (AVFoundation + VideoToolbox) ($platform) ───"
+    setup_env "$platform"
+    local src="$PROJECT_DIR/native/cleona_video"
+    local build="$BUILD_DIR/cleona_video"
+    rm -rf "$build" && mkdir -p "$build" && cd "$build"
+
+    # CLEONA_VIDEO_STATIC=ON ist hier redundant (apple/CMakeLists.txt waehlt
+    # STATIC schon bei CMAKE_SYSTEM_NAME=iOS), aber explizit: iOS hat kein
+    # dlopen, dart:ffi nimmt DynamicLibrary.process(), also MUSS es eine .a
+    # sein, die spaeter in libcleona_all.a landet.
+    cmake -GNinja \
+        -DCMAKE_SYSTEM_NAME=iOS \
+        -DCMAKE_OSX_DEPLOYMENT_TARGET="$IOS_DEPLOYMENT_TARGET" \
+        -DCMAKE_OSX_ARCHITECTURES="$ARCH" \
+        -DCMAKE_OSX_SYSROOT="$SDK_PATH" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLEONA_VIDEO_STATIC=ON \
+        -DCLEONA_VIDEO_BUILD_MOCK=OFF \
+        -DCLEONA_VIDEO_BUILD_SMOKE=OFF \
+        "$src"
+    ninja -j"$NPROC"
+    mkdir -p "$INSTALL_DIR/cleona_video/lib" "$INSTALL_DIR/cleona_video/include"
+    cp apple/libcleona_video.a "$INSTALL_DIR/cleona_video/lib/"
+    cp "$src/cleona_video.h"   "$INSTALL_DIR/cleona_video/include/"
+    cd "$PROJECT_DIR"
+}
+
 # ── Build orchestrator ───────────────────────────────────────────────────────
 PLATFORMS=()
 [ "$BUILD_DEVICE" -eq 1 ] && PLATFORMS+=(iphoneos)
 [ "$BUILD_SIM" -eq 1 ] && PLATFORMS+=(iphonesimulator)
 
-ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice)
+ALL_LIBS=(sodium oqs zstd erasurecode opus whisper cleona_pow cleona_voice cleona_video)
 WANTED=("${TARGETS[@]}")
 if [ "${WANTED[0]}" = "all" ]; then
     WANTED=("${ALL_LIBS[@]}")
@@ -442,6 +471,7 @@ for platform in "${PLATFORMS[@]}"; do
             whisper)       build_whisper "$platform"; build_whisper_wrapper "$platform" ;;
             cleona_pow)    build_cleona_pow "$platform" ;;
             cleona_voice)  build_cleona_voice "$platform" ;;
+            cleona_video)  build_cleona_video "$platform" ;;
             *) echo "Unknown target: $t"; exit 1 ;;
         esac
     done
@@ -492,6 +522,7 @@ for t in "${WANTED[@]}"; do
             ;;
         cleona_pow)    make_xcfw libcleona_pow cleona_pow libcleona_pow.a ;;
         cleona_voice)  make_xcfw CleonaVoice cleona_voice libcleona_voice.a include ;;
+        cleona_video)  make_xcfw CleonaVideo cleona_video libcleona_video.a include ;;
     esac
 done
 
@@ -543,7 +574,7 @@ for platform_tag in device simulator; do
     _index="$_symdir/index"
     : > "$_index"
 
-    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_pow/lib cleona_voice/lib; do
+    for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_pow/lib cleona_voice/lib cleona_video/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
             [ -f "$a" ] || continue
             _slug="$(echo "$a" | tr -c 'A-Za-z0-9' '_')"
