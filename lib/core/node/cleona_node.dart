@@ -1067,16 +1067,16 @@ class CleonaNode {
 
     // Tier 3 — Bootstrap: unicast probe to cached bootstrap addresses.
     // On Android/GUI, _isolatedNodeBootstrapAddrs is empty (no --bootstrap
-    // CLI param). Derive bootstrap targets from stored peers' public
-    // addresses so Mobilfunk/CGNAT nodes can reach Bootstrap via its WAN IP.
+    // CLI param). Derive bootstrap targets from stored peers' reachable
+    // addresses (uses isReachableFromCurrentNetwork: includes same-subnet
+    // private IPs on WiFi, excludes them on Mobilfunk/CGNAT).
     var tier3Addrs = _isolatedNodeBootstrapAddrs.toList();
     if (tier3Addrs.isEmpty) {
       final bsPort = NetworkSecret.channel.defaultBootstrapPort;
       for (final peer in stored) {
         for (final addr in peer.allConnectionTargets()) {
           if (addr.ip.isEmpty || addr.port <= 0) continue;
-          if (_isPrivateIp(addr.ip)) continue;
-          if (addr.ip.startsWith('fe80:') || addr.ip.startsWith('fd')) continue;
+          if (!addr.isReachableFromCurrentNetwork) continue;
           final fmt = addr.ip.contains(':') ? '[${addr.ip}]' : addr.ip;
           final peerAddr = '$fmt:${addr.port}';
           if (!tier3Addrs.contains(peerAddr)) tier3Addrs.add(peerAddr);
@@ -3315,8 +3315,6 @@ class CleonaNode {
         return true;
       }
     }
-    if (directSentBestEffort) return true;
-
     // Confirmed DV neighbor: fire-and-forget direct send, but do NOT stop
     // the cascade. "Confirmed" means we once received a hopCount==0 packet
     // from this peer — it does NOT mean the reverse path works (CGNAT Phone
