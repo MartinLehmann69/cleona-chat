@@ -19,8 +19,6 @@ Pod::Spec.new do |s|
 
   s.source_files = 'CleonaNativeDummy.m'
 
-  s.vendored_libraries = 'libcleona_all_device.a'
-
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation',
                  'Accelerate', 'Metal', 'MetalKit'
 
