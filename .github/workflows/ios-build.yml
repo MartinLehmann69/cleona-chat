@@ -203,22 +203,20 @@ jobs:
           CHANNEL="${INPUT_CHANNEL:-beta}"
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Build IPA
+      - name: Compile Dart AOT
         env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          # Two-phase build:
-          # 1) flutter build ios: compiles Dart, runs pod install, produces
-          #    the Xcode project with all generated files.
-          # 2) xcodebuild archive: links the Runner binary with -force_load
-          #    passed as an extra OTHER_LDFLAGS override. xcodebuild's
-          #    command-line build settings have HIGHEST priority — they
-          #    override xcconfigs, project.pbxproj, and everything else.
+          # flutter build ios --no-codesign compiles Dart to AOT, runs pod
+          # install, and generates all Xcode project files. We use this ONLY
+          # for the Dart compilation — we do NOT use its xcodebuild output.
           flutter build ios --release --no-codesign \
             --dart-define="NETWORK_CHANNEL=$BUILD_CHANNEL"
 
-          # Inject -force_load AFTER flutter's internal pod install
+      - name: Inject force_load into Pods xcconfigs
+        run: |
+          # NOW pod install has run (inside flutter build ios). The Pods
+          # xcconfigs are final. Inject -force_load before our own xcodebuild.
           FORCE_FLAG="-force_load $FORCE_LOAD_PATH"
           XCCONFIG_DIR="ios/Pods/Target Support Files/Pods-Runner"
           for xcconfig in "$XCCONFIG_DIR"/Pods-Runner.*.xcconfig; do
@@ -228,8 +226,17 @@ jobs:
               echo "  $(basename "$xcconfig"): injected"
             fi
           done
+          grep 'force_load' "$XCCONFIG_DIR"/*.xcconfig | head -3
 
-          # Archive + export IPA
+      - name: Archive and export IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # xcodebuild archive re-links the Runner binary. Since we injected
+          # -force_load into the Pods xcconfigs, the linker will now include
+          # all native FFI symbols from libcleona_all_device.a.
+          # Clean the build dir to force a fresh link (no cached Runner binary).
+          rm -rf build/ios/archive
           xcodebuild archive \
             -workspace ios/Runner.xcworkspace \
             -scheme Runner \
@@ -238,7 +245,8 @@ jobs:
             -destination 'generic/platform=iOS' \
             CODE_SIGN_IDENTITY="Apple Development" \
             DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            | tail -20
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            2>&1 | tail -30
 
           xcodebuild -exportArchive \
             -archivePath build/ios/archive/Runner.xcarchive \
