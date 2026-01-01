@@ -186,6 +186,7 @@ build_liberasurecode() {
     fi
     cd "$src"
     ./autogen.sh
+    CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-error" \
     ./configure --host="$CONFIGURE_HOST" \
         --prefix="$BUILD_DIR/install-ec" \
         --disable-static --enable-shared
