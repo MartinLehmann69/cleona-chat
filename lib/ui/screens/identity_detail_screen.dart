@@ -17,7 +17,6 @@ import 'package:cleona/ui/components/picture_shrink.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
 import 'package:cleona/ui/theme/skins.dart';
 import 'package:cleona/ui/screens/settings_screen.dart';
-import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 /// Fullscreen Identity Detail Screen.
@@ -699,7 +698,8 @@ class _LinkOpenModeTileState extends State<LinkOpenModeTile> {
 }
 
 /// The settings stored per identity (the identity's database): media,
-/// notifications, archive, transcription, devices and the rescue bundle.
+/// notifications, archive, transcription language and audio retention
+/// (the model is the device's, D-94), devices and the rescue bundle.
 /// Owner decision 08.10.2026 (S407-E9): what is stored per identity is set
 /// on the identity screen; the general settings screen keeps only what
 /// applies to the whole device. The identity screen opens only for the
@@ -743,17 +743,14 @@ class IdentitySettingsList extends StatelessWidget {
             () => ArchiveSettingsScreen(service: service)),
         const Divider(height: 32),
         _SectionHeader(locale.get('section_transcription')),
+        // D-94: language and retention are the identity's; the model and
+        // its download stand under the general settings.
         tile(Icons.record_voice_over_outlined, 'transcription_settings_title',
-            locale.get('whisper_engine'),
+            '${locale.get('transcription_language')} · '
+                '${locale.get('transcription_retention')}',
             () => TranscriptionSettingsScreen(service: service)),
-        const Divider(height: 32),
-        _SectionHeader(locale.get('section_devices')),
-        tile(Icons.devices, 'device_management_title',
-            locale.get('device_management_subtitle'),
-            () => DeviceManagementScreen(service: service)),
-        const Divider(height: 32),
-        _SectionHeader(locale.get('section_backup')),
-        RecoveryBundleTile(service: service),
+        // D-99 (§14.9.2): the devices and the backup in the network of every
+        // identity are one screen under the general settings.
         const Divider(height: 32),
       ],
     );

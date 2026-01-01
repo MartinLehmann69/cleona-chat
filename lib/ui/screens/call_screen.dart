@@ -8,6 +8,7 @@ import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/cleona_service.dart'
     show CleonaService, PeerCallMediaState;
 import 'package:cleona/ui/components/call_status.dart';
+import 'package:cleona/ui/components/called_identity_label.dart';
 import 'package:cleona/ui/components/peer_video_status.dart';
 
 /// In-Call Screen — shows audio/video call with PiP layout and controls.
@@ -15,10 +16,25 @@ class CallScreen extends StatefulWidget {
   final CallInfo callInfo;
   final String peerDisplayName;
 
+  /// The service that owns this call. Null = the displayed identity's
+  /// service (an outgoing call from its chat, and IPC mode, where the
+  /// `IpcClient` itself carries a call of another identity). In-process
+  /// every identity runs its own service (v4_2 §4.5.1: "all identities at
+  /// once"); a call to an identity that is not displayed lives only on
+  /// that identity's service, and the screen must read and act on it there.
+  final ICleonaService? callService;
+
+  /// The own identity the call arrived on, named under the caller (S418,
+  /// C-3). Null = not shown (one identity on the device, or an outgoing
+  /// call from the displayed identity's chat).
+  final String? calledIdentityName;
+
   const CallScreen({
     super.key,
     required this.callInfo,
     required this.peerDisplayName,
+    this.callService,
+    this.calledIdentityName,
   });
 
   @override
@@ -35,7 +51,7 @@ class _CallScreenState extends State<CallScreen> {
   /// which a local flag toggled only by taps could not follow. Over IPC the
   /// daemon pushes no such change, so the tap-driven flag stays there.
   bool get _videoEnabled {
-    final s = _appStateRef?.service;
+    final s = _callService;
     if (s is CleonaService) return !s.isVideoMuted;
     return _videoEnabledLocal;
   }
@@ -51,6 +67,10 @@ class _CallScreenState extends State<CallScreen> {
   // Cached so dispose() can unregister without a context lookup (Provider
   // reads are unreliable once the element starts unmounting).
   CleonaAppState? _appStateRef;
+
+  /// The service this call lives on — see [CallScreen.callService].
+  ICleonaService? get _callService =>
+      widget.callService ?? _appStateRef?.service;
 
   // ── V1.6: what the peer last said about its own video (§10.6, V1.12) ──
   //
@@ -84,7 +104,7 @@ class _CallScreenState extends State<CallScreen> {
       // direct callback registration (rather than a broadcast stream) is
       // sufficient — see main.dart CleonaAppState.onRemoteVideoTextureChanged docs.
       appState.onRemoteVideoTextureChanged = _onRemoteTextureChanged;
-      _wirePeerVideoState(appState.service);
+      _wirePeerVideoState(_callService);
     }
   }
 
@@ -114,13 +134,13 @@ class _CallScreenState extends State<CallScreen> {
   /// Call id of the active/starting call, hex — `CallInfo.callId` is already
   /// hex-encoded (`CallSession.callIdHex`, `call_manager.dart`).
   String get _activeCallIdHex =>
-      _appStateRef?.service?.currentCall?.callId ?? widget.callInfo.callId;
+      _callService?.currentCall?.callId ?? widget.callInfo.callId;
 
   /// For a 1:1 call the peer's user id equals `peerNodeIdHex`
   /// (`call_manager.dart:412`: "frame.senderUserId is the inviter's
   /// user-id (== peerNodeIdHex here...)").
   String get _activePeerUserIdHex =>
-      _appStateRef?.service?.currentCall?.peerNodeIdHex ??
+      _callService?.currentCall?.peerNodeIdHex ??
       widget.callInfo.peerNodeIdHex;
 
   void _startDurationTimer() {
@@ -163,8 +183,10 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Watched for the rebuild: every identity's service notifies the app
+    // state of its call changes (main.dart `_wireServiceCallbacks`).
     final appState = context.watch<CleonaAppState>();
-    final currentCall = appState.service?.currentCall;
+    final currentCall = _callService?.currentCall;
 
     if (currentCall == null || currentCall.state == CallState.ended) {
       if (!_autoPopScheduled && !_userInitiatedPop) {
@@ -333,7 +355,7 @@ class _CallScreenState extends State<CallScreen> {
                       active: _muted,
                       onPressed: () {
                         setState(() => _muted = !_muted);
-                        _appStateRef?.service?.toggleMute();
+                        _callService?.toggleMute();
                       },
                     ),
                     _VideoCallButton(
@@ -353,7 +375,7 @@ class _CallScreenState extends State<CallScreen> {
                       active: _speaker,
                       onPressed: () {
                         setState(() => _speaker = !_speaker);
-                        _appStateRef?.service?.toggleSpeaker();
+                        _callService?.toggleSpeaker();
                       },
                     ),
                     _VideoCallButton(
@@ -362,7 +384,7 @@ class _CallScreenState extends State<CallScreen> {
                       color: Colors.red,
                       onPressed: () async {
                         _userInitiatedPop = true;
-                        await appState.service?.hangup();
+                        await _callService?.hangup();
                         if (!mounted) return;
                         Navigator.of(this.context).pop();
                       },
@@ -408,11 +430,15 @@ class _CallScreenState extends State<CallScreen> {
               widget.peerDisplayName,
               style: Theme.of(context).textTheme.headlineMedium,
             ),
+            if (widget.calledIdentityName != null) ...[
+              const SizedBox(height: 4),
+              CalledIdentityLabel(name: widget.calledIdentityName!),
+            ],
             const SizedBox(height: 8),
 
             // Status text
             Text(
-              switch (callStatusKey(appState.service?.currentCall)) {
+              switch (callStatusKey(_callService?.currentCall)) {
                 final String key => locale.get(key),
                 null => _formatDuration(_duration),
               },
@@ -424,7 +450,7 @@ class _CallScreenState extends State<CallScreen> {
             // This device cannot capture and sends silence: the call stands,
             // but the peer does not hear the user.
             if (!isRinging &&
-                (appState.service?.currentCall?.captureUnavailable ?? false))
+                (_callService?.currentCall?.captureUnavailable ?? false))
               Padding(
                 padding: const EdgeInsets.fromLTRB(24, 8, 24, 0),
                 child: Text(
@@ -493,7 +519,7 @@ class _CallScreenState extends State<CallScreen> {
                     label: locale.get('reject'),
                     color: Colors.red,
                     onPressed: () {
-                      appState.service?.rejectCall();
+                      _callService?.rejectCall();
                       Navigator.of(context).pop();
                     },
                   ),
@@ -502,7 +528,7 @@ class _CallScreenState extends State<CallScreen> {
                     label: locale.get('accept'),
                     color: Colors.green,
                     onPressed: () {
-                      appState.service?.acceptCall();
+                      _callService?.acceptCall();
                     },
                   ),
                 ],
@@ -515,7 +541,7 @@ class _CallScreenState extends State<CallScreen> {
                 size: 72,
                 onPressed: () async {
                   _userInitiatedPop = true;
-                  await appState.service?.hangup();
+                  await _callService?.hangup();
                   if (!mounted) return;
                   Navigator.of(this.context).pop();
                 },
@@ -533,7 +559,7 @@ class _CallScreenState extends State<CallScreen> {
     setState(() {
       _videoEnabledLocal = !_videoEnabledLocal;
     });
-    final service = _appStateRef?.service;
+    final service = _callService;
     if (service == null) {
       debugPrint('[call] toggleVideo: no active service — no-op');
       return;
@@ -545,7 +571,7 @@ class _CallScreenState extends State<CallScreen> {
   }
 
   void _toggleCamera() {
-    final service = _appStateRef?.service;
+    final service = _callService;
     if (service == null) {
       debugPrint('[call] toggleCamera: no active service — no-op');
       return;

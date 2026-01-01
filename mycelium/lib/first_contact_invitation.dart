@@ -60,8 +60,12 @@ class Invitation {
 
   /// A request is NEWLY waiting for the decision (§12.5) — the question to
   /// the user. A repeated request from the same peer replaces
-  /// the waiting one and is not reported again.
+  /// the waiting one and is not reported again ([onRenewed]).
   final void Function(ContactRequest a)? onBuffered;
+
+  /// A repeated request REPLACED the waiting one (§15.4): no question, but
+  /// what waits has changed and must be saved (BF-S389-1).
+  final void Function(ContactRequest a)? onRenewed;
 
   /// Kind, counter, revocation, expiry (`invitation.dart`) — until S388 a separate
   /// flag here (B2, B4). Without specification (probes): single-use with [code].
@@ -138,6 +142,7 @@ class Invitation {
     this.difficulty = Card.difficultyDefault,
     this.onAccepted,
     this.onBuffered,
+    this.onRenewed,
     this.entry,
     this.recontact,
     this.acceptanceSend,
@@ -327,7 +332,7 @@ class Invitation {
     // Replacing, displacing and the cap of 20 lie in the buffer (§15.4).
     final fresh = _entry.requests.admit(a);
     report?.call('Request waits for the decision of the user');
-    if (fresh) onBuffered?.call(a);
+    fresh ? onBuffered?.call(a) : onRenewed?.call(a);
   }
 
   void _decided(ContactRequest a, bool yes, {bool count = true}) {

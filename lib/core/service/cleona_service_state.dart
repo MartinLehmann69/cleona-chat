@@ -95,6 +95,8 @@ extension StateSnapshotOps on CleonaService {
       'isRunning': isRunning,
       // B-4b (§14.6.1, D-39, D-40): the enrolment for the interface.
       'enrolment': enrolmentView.toJson(),
+      // D-99 (§14.9.2): the devices of the user over all identities.
+      'userDevices': userDevices.toJson(),
       'profilePicture': _profilePictureBase64,
       'profileDescription': _profileDescription,
       // AP-5a: `pendingJuryRequests` is a SYNCHRONOUS interface getter, so the

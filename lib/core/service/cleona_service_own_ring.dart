@@ -12,6 +12,13 @@
 
 part of 'cleona_service.dart';
 
+/// §14.7 "with no deposit pending" (D-115, W-3 of `S419-RCA-D114-WECHSEL.md`):
+/// a device announcement for a change of fixed neighbours is under way
+/// ([_ownWherePendingOf]), and the fixed neighbours changed again meanwhile
+/// ([_ownWhereAgainOf]).
+final Expando<bool> _ownWherePendingOf = Expando('own-where-pending');
+final Expando<bool> _ownWhereAgainOf = Expando('own-where-again');
+
 extension CleonaServiceOwnRing on CleonaService {
   /// Where THIS device is reachable, in the wire form of the twin-sync
   /// envelope — `null` before the mailbox is attached.
@@ -117,10 +124,45 @@ extension CleonaServiceOwnRing on CleonaService {
       final id = _ownLineDeviceId(d.deviceId);
       if (id != null) _ownWhereHand(id, d);
     }
-    mycelium.MailboxOwnSignal(p).ownWhereWatch(() {
-      _log.info('own line: the fixed neighbours of this device changed — '
-          'one deposit per other own device (§14.7)');
-      _sendTwinAnnounce();
+    mycelium.MailboxOwnSignal(p).ownWhereWatch(_ownWhereChanged);
+  }
+
+  /// The edge "the fixed neighbours of this device changed" (§14.7): "a
+  /// change of fixed neighbours with no deposit pending costs one deposit per
+  /// other own device". While one is pending the change is only noted; after
+  /// its end exactly one more goes, with the list of that moment
+  /// (`_ownWhereWires` is read when it is sealed) — S419: four changes within
+  /// 60 ms had cost four deposits (D-115).
+  ///
+  /// The end comes in every case: [_sendTwinAnnounce] returns a future that
+  /// never fails — `false` at once without a sibling or when sealing threw,
+  /// otherwise the end of `_myceliumOwnSend`, which awaits the deposit per
+  /// other own device (`MailboxOwnLine.ownSend` → `node.deposit`; a run
+  /// ends at the second receipt, when every holder's transmission ended,
+  /// with nobody to ask, on a failure of its proof of work, when replaced,
+  /// and at the node's stop — `mycelium/lib/post_box_place.dart`). A throw
+  /// before that future exists is caught here.
+  void _ownWhereChanged() {
+    if (_ownWherePendingOf[this] ?? false) {
+      _ownWhereAgainOf[this] = true;
+      _log.debug('own line: the fixed neighbours changed while a deposit is '
+          'pending — noted, one more follows its end (§14.7, D-115)');
+      return;
+    }
+    _ownWherePendingOf[this] = true;
+    _ownWhereAgainOf[this] = false;
+    _log.info('own line: the fixed neighbours of this device changed — '
+        'one deposit per other own device (§14.7)');
+    Future<bool> deposit;
+    try {
+      deposit = _sendTwinAnnounce();
+    } on Object catch (e) {
+      _log.warn('own line: device announcement not sent: $e');
+      deposit = Future.value(false);
+    }
+    deposit.whenComplete(() {
+      _ownWherePendingOf[this] = false;
+      if (_ownWhereAgainOf[this] ?? false) _ownWhereChanged();
     });
   }
 }

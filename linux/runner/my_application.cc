@@ -27,8 +27,9 @@ static gboolean on_window_delete(GtkWidget* widget, GdkEvent* event, gpointer da
 }
 
 // Whether this bundle is a live build (v4_2 §26.2). The channel is compiled
-// into the Dart side only; data/channel is written by the release build. Without
-// the file a build counts as beta, like the Dart default.
+// into the Dart side; data/channel is written by every build from the same
+// define (linux/CMakeLists.txt). Without the file a build counts as beta, like
+// the Dart default.
 static gboolean bundle_is_live() {
   g_autofree gchar* exe_path = g_file_read_link("/proc/self/exe", NULL);
   if (exe_path == NULL) return FALSE;

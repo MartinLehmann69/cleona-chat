@@ -26,10 +26,13 @@ library;
 /// The version of this build, as a string.
 ///
 /// **It MUST match the `version:` field in `pubspec.yaml`**
-/// (there `4.2.6+7`; the build number after the `+` does not belong to it).
-/// `scripts/preflight.sh` holds both against each other and blocks the
-/// commit on deviation.
-const String kAppVersion = '4.2.6';
+/// (there `4.2.6+40206`; the build number after the `+` does not belong to it).
+/// The build number is not counted by hand: it is computed from this
+/// version as major * 10000 + minor * 100 + patch (4.2.6 -> 40206), with
+/// minor and patch at most 99 (D-98). `scripts/preflight.sh` holds version,
+/// build number and `android/local.properties` against each other and blocks
+/// the commit on deviation (`scripts/check-app-version-single-source.sh`).
+const String kAppVersion = '4.2.7';
 
 /// The own version as `major * 1000 + minor`.
 ///

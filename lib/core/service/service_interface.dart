@@ -468,7 +468,9 @@ abstract class ICleonaService {
   bool anonymousPollPossible(String conversationId);
   Future<String?> createGroup(String name, List<String> memberNodeIdHexList);
   Future<UiMessage?> sendGroupTextMessage(String groupIdHex, String text, {String? replyToMessageId, String? replyToText, String? replyToSender});
-  Future<bool> leaveGroup(String groupIdHex);
+  /// [via] names what triggered the leaving (a fixed ASCII tag, not UI
+  /// text); it only goes into the log line `Left group` (S415-B3).
+  Future<bool> leaveGroup(String groupIdHex, {String via = 'unknown'});
   /// §16.2.2: the answer to the question asked once when the own identity is
   /// the only member left ([GroupInfo.aloneQuestionDue]). [delete] removes
   /// the group as leaving does; otherwise the group is kept and never asked
@@ -915,6 +917,11 @@ abstract class ICleonaService {
   /// Requests tab. In `IpcClient` from the `get_state` snapshot.
   EnrolmentView get enrolmentView;
 
+  /// Settings → Devices (§14.9.2, D-99): the devices of the user over all
+  /// identities, what each does not carry yet, and the backup in the network
+  /// of each identity. In `IpcClient` from the `get_state` snapshot.
+  UserDevicesView get userDevices;
+
   /// "Add another device": opens the 24-hour window for every identity
   /// this device hosts. `false` while the lock is shut (E7).
   Future<bool> enrolmentWindowOpen();
@@ -929,6 +936,26 @@ abstract class ICleonaService {
   /// On a fresh install: the user chooses recovery explicitly (§13.0,
   /// D-40) — the only way into the recovery case.
   Future<bool> enrolmentRecoverNow();
+
+  /// §13.6 (D-103): "finish and renew keys" — completes a running recovery
+  /// with an Emergency Key Rotation. `false`: none runs, or the rotation
+  /// did not take place (the recovery keeps running).
+  Future<bool> enrolmentRecoveryFinish();
+
+  /// §13.3.4 (D-103): the user dismissed the notice that identities were
+  /// removed here because a recovery elsewhere retired them — marked as
+  /// read on this device only.
+  Future<bool> enrolmentRetiredSeen();
+
+  /// §13.7: the user names an index of their own while the search for the
+  /// identities of the words runs ("Name the number yourself"); the identity
+  /// is created there and looks for its bundle. `false`: run closed, index
+  /// carried, deleted or out of range.
+  Future<bool> identityRunNameIndex(int index);
+
+  /// §13.7: the user ends the search for the identities of the words — never
+  /// automatic. Only then a new identity gets an index (§4.5.1).
+  Future<bool> identityRunEnd();
 
   // Guardian recovery (Shamir SSS): removed in S398 P1 — D-17 "No social
   // recovery: no guardians, no split secret" (§13.8).
@@ -1290,16 +1317,20 @@ abstract class ICleonaService {
   /// cannot be asked (IPC down).
   Future<TranscriptionStatus?> getTranscriptionStatus();
 
-  /// Stores language, model size and retention in the identity's store.
-  /// The language is the shared identity setting (§14.7 Type 8) and goes
-  /// to the other own devices when it changed; model size and retention
-  /// stay on this device. `false` if a value is not valid or nothing
-  /// could be written.
+  /// Stores language and retention in the identity's store (D-94: the
+  /// identity's part). The language is the shared identity setting (§14.7
+  /// Type 8) and goes to the other own devices when it changed; the
+  /// retention stays on this device. `false` if a value is not valid or
+  /// nothing could be written.
   Future<bool> setTranscriptionSettings({
     required String language,
-    required String modelSize,
     required int retentionDays,
   });
+
+  /// Stores the model size (`tiny`/`base`/`small`) for the whole DEVICE
+  /// (D-94, `device.db`): every identity transcribes with it. Nothing is
+  /// sent. `false` if the size is not valid or nothing could be written.
+  Future<bool> setTranscriptionModel(String modelSize);
 
   /// Starts downloading the model of [modelSize] (`tiny`/`base`/`small`).
   /// Answers whether a download was started; progress and end come

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:mycelium/board_node.dart' show NodeAnswer;
 import 'package:mycelium/card.dart';
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart';
@@ -61,6 +62,19 @@ extension NodeOutside on Node {
   /// Wired by the outside source (`host_outside.dart`) at its construction.
   void publisherKeyFrom(Uint8List? Function() source) =>
       _publisher[this] = source;
+
+  /// Whether this node's own reachability is evidenced (§11.8a) — the
+  /// evidence byte of its `0x25` (§8.1, D-113): a fixed neighbour whose
+  /// `0x25` says "not evidenced" holds no contact's place (§5.2). The host
+  /// network answers it ([reachabilityEvidenceFrom], `reachableEvidenced`);
+  /// a node without one has only its board's proof.
+  bool get reachabilityEvidenced =>
+      _evidence[this]?.call() ?? (board?.reachableProven ?? false);
+
+  /// Wired by the host network (`host_network.dart`) at its construction.
+  void reachabilityEvidenceFrom(bool Function() source) =>
+      _evidence[this] = source;
 }
 
 final Expando<Uint8List? Function()> _publisher = Expando('publisher key');
+final Expando<bool Function()> _evidence = Expando('own reachability evidence');

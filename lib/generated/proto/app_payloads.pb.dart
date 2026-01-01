@@ -10629,6 +10629,10 @@ class DeviceRecord extends $pb.GeneratedMessage {
     $core.Iterable<PeerAddressProto>? addresses,
     $core.bool? isThisDevice,
     $core.List<$core.int>? deviceNodeId,
+    $core.List<$core.int>? deviceX25519Pk,
+    $core.List<$core.int>? deviceMlKemPk,
+    $core.List<$core.int>? deviceEd25519Pk,
+    $core.List<$core.int>? deviceMlDsaPk,
   }) {
     final $result = create();
     if (deviceId != null) {
@@ -10655,6 +10659,18 @@ class DeviceRecord extends $pb.GeneratedMessage {
     if (deviceNodeId != null) {
       $result.deviceNodeId = deviceNodeId;
     }
+    if (deviceX25519Pk != null) {
+      $result.deviceX25519Pk = deviceX25519Pk;
+    }
+    if (deviceMlKemPk != null) {
+      $result.deviceMlKemPk = deviceMlKemPk;
+    }
+    if (deviceEd25519Pk != null) {
+      $result.deviceEd25519Pk = deviceEd25519Pk;
+    }
+    if (deviceMlDsaPk != null) {
+      $result.deviceMlDsaPk = deviceMlDsaPk;
+    }
     return $result;
   }
   DeviceRecord._() : super();
@@ -10670,6 +10686,10 @@ class DeviceRecord extends $pb.GeneratedMessage {
     ..pc<PeerAddressProto>(6, _omitFieldNames ? '' : 'addresses', $pb.PbFieldType.PM, subBuilder: PeerAddressProto.create)
     ..aOB(7, _omitFieldNames ? '' : 'isThisDevice')
     ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'deviceNodeId', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(9, _omitFieldNames ? '' : 'deviceX25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(10, _omitFieldNames ? '' : 'deviceMlKemPk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(11, _omitFieldNames ? '' : 'deviceEd25519Pk', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(12, _omitFieldNames ? '' : 'deviceMlDsaPk', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -10759,6 +10779,47 @@ class DeviceRecord extends $pb.GeneratedMessage {
   $core.bool hasDeviceNodeId() => $_has(7);
   @$pb.TagNumber(8)
   void clearDeviceNodeId() => clearField(8);
+
+  /// §14.9.1 "Device public keys" (S414): the device's public keys of §4.4.2,
+  /// so that every own device knows every sibling's — a key package (Type 16)
+  /// is sealed against the KEM keys, a countersignature (Type 13) verifies
+  /// against the signing keys. Empty where the sender knows none. ADDITIVE:
+  /// an earlier 4.2 version keeps them in `unknownFields` and reads the rest.
+  @$pb.TagNumber(9)
+  $core.List<$core.int> get deviceX25519Pk => $_getN(8);
+  @$pb.TagNumber(9)
+  set deviceX25519Pk($core.List<$core.int> v) { $_setBytes(8, v); }
+  @$pb.TagNumber(9)
+  $core.bool hasDeviceX25519Pk() => $_has(8);
+  @$pb.TagNumber(9)
+  void clearDeviceX25519Pk() => clearField(9);
+
+  @$pb.TagNumber(10)
+  $core.List<$core.int> get deviceMlKemPk => $_getN(9);
+  @$pb.TagNumber(10)
+  set deviceMlKemPk($core.List<$core.int> v) { $_setBytes(9, v); }
+  @$pb.TagNumber(10)
+  $core.bool hasDeviceMlKemPk() => $_has(9);
+  @$pb.TagNumber(10)
+  void clearDeviceMlKemPk() => clearField(10);
+
+  @$pb.TagNumber(11)
+  $core.List<$core.int> get deviceEd25519Pk => $_getN(10);
+  @$pb.TagNumber(11)
+  set deviceEd25519Pk($core.List<$core.int> v) { $_setBytes(10, v); }
+  @$pb.TagNumber(11)
+  $core.bool hasDeviceEd25519Pk() => $_has(10);
+  @$pb.TagNumber(11)
+  void clearDeviceEd25519Pk() => clearField(11);
+
+  @$pb.TagNumber(12)
+  $core.List<$core.int> get deviceMlDsaPk => $_getN(11);
+  @$pb.TagNumber(12)
+  set deviceMlDsaPk($core.List<$core.int> v) { $_setBytes(11, v); }
+  @$pb.TagNumber(12)
+  $core.bool hasDeviceMlDsaPk() => $_has(11);
+  @$pb.TagNumber(12)
+  void clearDeviceMlDsaPk() => clearField(12);
 }
 
 class KeyRotationBroadcast extends $pb.GeneratedMessage {

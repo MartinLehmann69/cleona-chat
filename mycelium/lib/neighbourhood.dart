@@ -9,7 +9,6 @@ import 'package:mycelium/neighbourhood_join.dart';
 import 'package:mycelium/neighbourhood_open.dart';
 import 'package:mycelium/neighbourhood_seat.dart';
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
-
 export 'package:mycelium/neighbour.dart';
 
 /// The neighbours that this node knows — cap, stamp, memory (V4.2 §11.8).
@@ -58,6 +57,7 @@ class Neighbourhood {
   /// Device of an own contact / excluded by the user (§15.10); by the host.
   bool Function(Neighbour n) isContactDevice = (_) => false;
   bool Function(Neighbour n) neverFixedNeighbour = (_) => false;
+  bool? Function(Neighbour n) reachabilitySaid = (_) => null; // its 0x25 (D-113); by the host
   /// Reachable only over IPv4 on a metered link (§8.1); by the host network.
   bool Function(Neighbour n) v4OnlyOnMetered = (_) => false;
 
@@ -70,7 +70,7 @@ class Neighbourhood {
   final List<void Function(Neighbour)> _removedListener = [];
   final List<void Function(Neighbour)> _confirmedListener = [];
   final List<void Function()> _joinedListener = [];
-
+  final NotEvidencedHandOver handOverOnce = NotEvidencedHandOver(); // §5.2, D-115
   DateTime? _lastRound; // the only state the ceiling needs (§5.4)
 
   /// For `readiness.dart`, synchronously: every removal and confirmation —
@@ -161,7 +161,7 @@ class Neighbourhood {
         : seatAfterConfirm(_list, f, n.id,
             answered: respondingNow ?? (_) => false,
             named: namedByCards,
-            public: _public,
+            public: _public, evidence: reachabilitySaid, once: handOverOnce, // D-114/115
             contact: isContactDevice); // 6.5: the card names no contact
     if (to != null) _seat(to.id);
     if (edge) contactSeatsCheck(n.id); // ... and the contact seats too
@@ -254,7 +254,7 @@ class Neighbourhood {
   void _moveUp() {
     final answered = respondingNow;
     final to = answered == null
-        ? null : seatAfterRemoval(_list, answered, _public, isContactDevice);
+        ? null : seatAfterRemoval(_list, answered, _public, isContactDevice, reachabilitySaid);
     if (to != null) _seat(to.id);
   }
 
@@ -271,7 +271,7 @@ class Neighbourhood {
   /// EDGE for the contact seats and, after them, the card's seat (S405 V1) — also by the host.
   void contactSeatsCheck([int? justNow]) {
     seatAll(_list, justNow, respondingNow ?? (_) => false, namedByCards, isContactDevice,
-        neverFixedNeighbour, _public, v4OnlyOnMetered); // `neighbourhood_contacts.dart`, D-26
+        neverFixedNeighbour, _public, v4OnlyOnMetered, reachabilitySaid, handOverOnce); // D-26, D-113, D-115
     _sort();
   }
 
@@ -296,8 +296,7 @@ class Neighbourhood {
   List<Neighbour> openSet() => _open.read(_list);
 
   /// Redraws the loose seats — at edges.
-  void openSetNewDraw(math.Random random) =>
-      _open.draw(_list, DateTime.now(), random);
+  void openSetNewDraw(math.Random random) => _open.draw(_list, DateTime.now(), random);
 
   /// Sets the state from memory — exactly one call at start (edge: the open
   /// set is drawn). What has no socket here [waiting]s or is a name (C-7).
@@ -324,6 +323,7 @@ class Neighbourhood {
   /// Network change or stop (`Readiness.reset`): nobody answers any more (the
   /// stamps stay, they are the basis for "stale"); the open set is redrawn.
   void runLimit() {
+    handOverOnce.reopen(); // D-115: one hand-over per start or network change
     _list.setAll(0, [
       for (final n in _list) n.copy(addresses: [for (final a in n.addresses) a.asleep])
     ]);

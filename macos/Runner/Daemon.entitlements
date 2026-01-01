@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Entitlements of Contents/MacOS/bin/cleona-daemon (D-100, v4_2 §22.6).
+	     Not used by Xcode: .github/workflows/ios-build.yml "Sign app bundle"
+	     signs the daemon with this file, Developer ID and the Hardened
+	     Runtime, under the identifier <bundle id>.cleona-daemon.
+
+	     Microphone: the daemon captures call audio itself (CallService
+	     opens the VoiceSession, lib/core/service/call_service.dart). The
+	     Hardened Runtime prohibits restricted resources unless an
+	     entitlement removes that protection (Apple, "Configuring the
+	     hardened runtime", Resource Access: Audio Input).
+
+	     Deliberately absent:
+	     - camera: the daemon has no video engine; it is injected only from
+	       a Flutter context (call_service.dart `createVideoEngine`, set in
+	       lib/main.dart, never in lib/service_daemon.dart).
+	     - cs.allow-jit / cs.allow-unsigned-executable-memory: the daemon is
+	       a Dart AOT program (`dart build cli`). Its snapshot is mapped from
+	       the signed file read+execute (dart-lang/sdk
+	       runtime/bin/macho_loader.cc, LoadSegments: `map_type =
+	       File::kReadExecute` + `mappable_->Map(...)`), and FFI callback
+	       trampolines are made with vm_remap of the stub page instead of new
+	       executable memory, because "OS will kill us with a codesigning
+	       violation if hardened runtime is enabled" otherwise
+	       (runtime/vm/ffi_callback_metadata.cc, AllocateTrampolinePage).
+	       The workflow runs the signed daemon once to prove it starts.
+	     - cs.disable-library-validation: every library the daemon opens
+	       from the bundle is signed with the same Team ID (Apple, "Resolving
+	       common notarization issues": do not disable library validation
+	       for executables that do not host plug-ins). -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

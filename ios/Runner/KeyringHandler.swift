@@ -2,7 +2,7 @@ import Flutter
 import Security
 import Foundation
 
-/// §3.7 OS Keyring: iOS Keychain Services (kSecClassGenericPassword).
+/// §4.5.2 OS Keyring: iOS Keychain Services (kSecClassGenericPassword).
 ///
 /// Stores binary data as base64-encoded strings in the default Keychain.
 /// Keys are scoped by service="cleona" and account=name. Data protection

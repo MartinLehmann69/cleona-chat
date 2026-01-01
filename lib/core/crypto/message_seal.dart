@@ -1142,13 +1142,16 @@ final class MessageOpener {
   /// That holds however ONLY as long as the period does not exceed the KEM retention.
   /// Rotation runs every 7 days
   /// (`identity_context.dart`, `needsRotation()`, `inDays >= 7`), and the
-  /// previous generation stays for **32 days** since S362
-  /// (`IdentityContext.previousKeyRetention`, the clamp from §4.5.4 for
-  /// the 31-day class). An `ss_pq` retained longer than
-  /// the key it comes from would reopen exactly
-  /// what rotation is supposed to close. 7 days lie well
-  /// below that — since the clamp the period here is more conservative than
-  /// necessary, never tighter.
+  /// previous generation stays for **7 days** after the rotation (since
+  /// S414; `IdentityContext.previousKeyRetention`, §4.5.4; from S362 until
+  /// S414 it was 32 days for the dropped 31-day class). An `ss_pq` retained
+  /// longer than the key it comes from would reopen exactly
+  /// what rotation is supposed to close. With 32 days the 7 days here lay
+  /// below that; with 7 days they no longer do for a secret opened with the
+  /// PREVIOUS generation: opened on day 6 after the rotation, it is kept
+  /// until day 13, the key goes on day 7. This opener has no caller in
+  /// `lib/` (the post box of `mycelium` opens, §4.5.4); a rebuild from this
+  /// hull bounds such a secret by the predecessor's deadline (S414 B-1).
   ///
   /// (UNTIL S362 THIS SAID „the predecessor stays another 7 days".
   /// The number was right, the calculation drawn from it no longer: it
@@ -1176,7 +1179,8 @@ final class MessageOpener {
   /// clamp"): since S362 [MessageOpener] carries the previous generation
   /// as second selector and second capsule candidate
   /// ([previousX25519Secret], [previousMlKemSecret]), and the
-  /// retention stands at 32 days.
+  /// retention stood at 32 days (until S414; since then 7 days, §4.5.4 —
+  /// the 31-day class is gone from the norm).
   ///
   /// WHAT THIS DOES NOT HEAL, and it is here so that it is not taken for
   /// healed: there is exactly ONE predecessor slot, and
@@ -1890,10 +1894,11 @@ final class MessageOpener {
           final onto = _attempt(sealed, capsule, ss, dh, aad);
           if (onto != null) {
             // THE SECRET OF THE PREVIOUS GENERATION IS REMEMBERED TOO. It
-            // drops away like any other after [secretRetention] = 7 days
-            // and thus does NOT outlive the key it comes from:
-            // the previous generation stays according to
-            // `IdentityContext.previousKeyRetention` for 32 days.
+            // drops away like any other after [secretRetention] = 7 days.
+            // Since S414 the previous generation itself stays only 7 days
+            // after the rotation (`IdentityContext.previousKeyRetention`,
+            // §4.5.4), so this secret can outlive its key by up to 7 days
+            // — see [secretRetention]; this opener has no caller in `lib/`.
             _remember(ss, nowDt);
             return _opened(
                 onto, onceIndex, viaPredecessor || isPredecessor, nowDt);

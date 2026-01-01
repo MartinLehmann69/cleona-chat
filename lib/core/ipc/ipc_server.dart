@@ -142,8 +142,6 @@ class IpcServer {
   Future<String?> Function(String displayName)? onCreateIdentity;
   /// Callback to delete an identity at runtime.
   Future<bool> Function(String nodeIdHex)? onDeleteIdentity;
-  /// Callback to start a recovered identity (from DHT registry).
-  Future<void> Function(Identity identity)? onRecoveredIdentity;
 
   /// Debounce state for `manual_reconnect` IPC command (§12.3.1 tier 2).
   /// Sits between the 10 s spec-minimum and the §5.10 Stage-4/5 cooldown so
@@ -1979,7 +1977,8 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: groupIdHex'));
             break;
           }
-          final leaveResult = await service.leaveGroup(leaveGroupId);
+          final leaveResult = await service.leaveGroup(leaveGroupId,
+              via: 'ipc:${req.params['via'] as String? ?? 'unknown'}');
           _sendResponse(client, IpcResponse(id: req.id, success: leaveResult));
           break;
 
@@ -2409,24 +2408,29 @@ class IpcServer {
           }
           break;
 
-        case 'recover_identities_from_registry':
+        // §13.7 (S413, B-1): the derivation run for the identities of the
+        // words — the user names an index, or ends the run. The run itself
+        // needs no command: it asks at the collection edges.
+        case 'identity_run_name_index':
+        case 'identity_run_end':
           {
             final service = _resolveService(client, req);
             if (service == null) {
               _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
               break;
             }
-            final created = await service.recoverIdentitiesFromRegistry();
-            if (created.isNotEmpty && onRecoveredIdentity != null) {
-              for (final id in created) {
-                await onRecoveredIdentity!(id);
+            final bool done;
+            if (req.command == 'identity_run_end') {
+              done = await service.identityRunEnd();
+            } else {
+              final index = req.params['index'];
+              if (index is! int) {
+                _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: index'));
+                break;
               }
+              done = await service.identityRunNameIndex(index);
             }
-            _sendResponse(client, IpcResponse(
-              id: req.id,
-              success: true,
-              data: {'count': created.length},
-            ));
+            _sendResponse(client, IpcResponse(id: req.id, success: done));
           }
           break;
 
@@ -2651,7 +2655,7 @@ class IpcServer {
               _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
               break;
             }
-            // Debounce: reuse §5.10.5 Re-Discovery cooldown (60 s ≥ spec minimum 10 s).
+            // Debounce: [_manualReconnectCooldown], 30 s (≥ spec minimum 10 s).
             final now = DateTime.now();
             final last = _lastManualReconnect;
             if (last != null && now.difference(last) < _manualReconnectCooldown) {
@@ -3002,21 +3006,40 @@ class IpcServer {
             break;
           }
           final tLanguage = req.params['language'];
-          final tModel = req.params['modelSize'];
           final tRetention = req.params['retentionDays'];
-          if (tLanguage is! String || tModel is! String || tRetention is! int) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: language, modelSize, retentionDays'));
+          if (tLanguage is! String || tRetention is! int) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: language, retentionDays'));
             break;
           }
           final tStored = await service.setTranscriptionSettings(
             language: tLanguage,
-            modelSize: tModel,
             retentionDays: tRetention,
           );
           _sendResponse(client, IpcResponse(
             id: req.id,
             success: tStored,
             error: tStored ? null : 'Transcription settings not stored',
+          ));
+          break;
+
+        // D-94: the model size is the DEVICE's — any identity's service
+        // writes the one row of `device.db`.
+        case 'transcription_model_set':
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final tModelSize = req.params['modelSize'];
+          if (tModelSize is! String) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: modelSize'));
+            break;
+          }
+          final tModelStored = await service.setTranscriptionModel(tModelSize);
+          _sendResponse(client, IpcResponse(
+            id: req.id,
+            success: tModelStored,
+            error: tModelStored ? null : 'Transcription model not stored',
           ));
           break;
 
@@ -3098,6 +3121,8 @@ class IpcServer {
         case 'enrolment_window_open':
         case 'enrolment_window_cancel':
         case 'enrolment_recover_now':
+        case 'enrolment_recovery_finish':
+        case 'enrolment_retired_seen':
         case 'enrolment_decide':
           final service = _resolveService(client, req);
           if (service == null) {
@@ -3111,6 +3136,12 @@ class IpcServer {
             done = await service.enrolmentWindowCancel();
           } else if (req.command == 'enrolment_recover_now') {
             done = await service.enrolmentRecoverNow();
+          } else if (req.command == 'enrolment_recovery_finish') {
+            // §13.6 (D-103): "finish and renew keys".
+            done = await service.enrolmentRecoveryFinish();
+          } else if (req.command == 'enrolment_retired_seen') {
+            // §13.3.4 (D-103): the notice of a retired identity, read.
+            done = await service.enrolmentRetiredSeen();
           } else {
             final id = req.params['requestId'] as String?;
             final accept = req.params['accept'] as bool?;

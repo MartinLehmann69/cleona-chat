@@ -71,6 +71,14 @@ class CallService {
   JitterBuffer? _jitterBuffer;
   bool _speakerEnabled = true;
 
+  /// The user's "mute" of the 1:1 call — held here, not only in the voice
+  /// session: a tap while no session is open (permission dialog still up,
+  /// or the device cannot capture) was lost, the screen showed "muted", and
+  /// a session opened afterwards sent the microphone (S418, WIN 64.W02).
+  /// Handed to every session that opens ([_startVoiceSession]); reset when
+  /// the call ends ([_stopVoiceSession]).
+  bool _micMuted = false;
+
   /// The caller `route_policy.dart`'s file doc says `RoutePolicy` needs but
   /// never gets on its own (S367): drains `VoiceSession.pollEvent()` on
   /// every capture tick and applies the resulting route switches. `null`
@@ -912,15 +920,16 @@ class CallService {
 
   bool get isMuted {
     if (_audioMixer != null) return _audioMixer!.isMuted;
-    return _voiceSession?.micMuted ?? false;
+    return _micMuted;
   }
 
   void toggleMute() {
     if (_audioMixer != null) {
       _audioMixer!.muted = !_audioMixer!.isMuted;
-    } else if (_voiceSession != null) {
-      _voiceSession!.micMuted = !_voiceSession!.micMuted;
+      return;
     }
+    _micMuted = !_micMuted;
+    _voiceSession?.micMuted = _micMuted;
   }
 
   bool get isSpeakerEnabled {
@@ -1195,6 +1204,9 @@ class CallService {
       final lib = VoiceNativeLibrary.platform();
       final voiceSession = VoiceSession.open(library: lib);
       final format = voiceSession.format;
+      // A "mute" tapped before the session existed holds (I6: mute never
+      // tears a stream down, so setting it before start() is the same path).
+      if (_micMuted) voiceSession.micMuted = true;
 
       _voiceSession = voiceSession;
       _voiceReportLogger = VoiceReportLogger(
@@ -1393,6 +1405,7 @@ class CallService {
     _captureTimer?.cancel();
     _captureTimer = null;
     _voiceClock = null;
+    _micMuted = false;
 
     _closeVoiceBackend();
     _silenceCodec?.dispose();

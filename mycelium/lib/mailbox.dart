@@ -223,10 +223,12 @@ class Mailbox {
   /// It waits for a decision that can take hours (§12.5), and
   /// must survive the restart (§15.4, E-1): it is saved WITH its
   /// invitation ([invitationsRemember]). That is the only place where a
-  /// mailbox learns of a newly arrived request.
-  void contactRequestReported(ContactRequest a) {
-    invitationsRemember();
-    _onContactRequest?.call(a);
+  /// mailbox learns of a newly arrived request. A renewed one (not [fresh],
+  /// §15.4) replaced the waiting one: saved, but no second question, and
+  /// the own codes are unchanged (`mailbox_pair.dart` `inboundCodes`).
+  void contactRequestReported(ContactRequest a, {bool fresh = true}) {
+    invitationsRemember(codes: fresh);
+    if (fresh) _onContactRequest?.call(a);
   }
 
   /// ALL routes to [a] from THIS mailbox — for [Node.routesTo]. Three

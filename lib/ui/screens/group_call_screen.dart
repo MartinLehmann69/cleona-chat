@@ -5,7 +5,9 @@ import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
+import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/ui/components/called_identity_label.dart';
 
 /// Group Call Screen — shows participant video grid, timer, and controls.
 ///
@@ -20,10 +22,22 @@ class GroupCallScreen extends StatefulWidget {
   final GroupCallInfo callInfo;
   final String groupName;
 
+  /// The service that owns this group call (S417 C-3b, as
+  /// `CallScreen.callService`). Null = the displayed identity's service
+  /// (a call started from its chat, and IPC mode, where the `IpcClient`
+  /// itself carries a call of another identity).
+  final ICleonaService? callService;
+
+  /// The own identity the group call arrived on (S418, C-3, as
+  /// `CallScreen.calledIdentityName`). Null = not shown.
+  final String? calledIdentityName;
+
   const GroupCallScreen({
     super.key,
     required this.callInfo,
     required this.groupName,
+    this.callService,
+    this.calledIdentityName,
   });
 
   @override
@@ -68,6 +82,10 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
     super.dispose();
   }
 
+  /// The service this group call lives on — see [GroupCallScreen.callService].
+  ICleonaService? _callService(CleonaAppState appState) =>
+      widget.callService ?? appState.service;
+
   String _formatDuration(Duration d) {
     final h = d.inHours;
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
@@ -102,8 +120,10 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Watched for the rebuild: every identity's service notifies the app
+    // state of its group call changes (main.dart `_wireServiceCallbacks`).
     final appState = context.watch<CleonaAppState>();
-    final currentCall = appState.service?.currentGroupCall;
+    final currentCall = _callService(appState)?.currentGroupCall;
     final locale = AppLocale.read(context);
 
     if (currentCall == null || currentCall.state == GroupCallState.ended) {
@@ -276,6 +296,10 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           widget.groupName,
           style: Theme.of(context).textTheme.headlineSmall,
         ),
+        if (widget.calledIdentityName != null) ...[
+          const SizedBox(height: 4),
+          CalledIdentityLabel(name: widget.calledIdentityName!),
+        ],
         const SizedBox(height: 4),
         Text(
           isRinging ? locale.get('group_call_incoming') : locale.get('group_call_waiting'),
@@ -463,7 +487,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
             label: locale.get('reject'),
             color: Colors.red,
             onPressed: () {
-              appState.service?.rejectGroupCall();
+              _callService(appState)?.rejectGroupCall();
               Navigator.of(context).pop();
             },
           ),
@@ -472,7 +496,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
             label: locale.get('accept'),
             color: Colors.green,
             onPressed: () {
-              appState.service?.acceptGroupCall();
+              _callService(appState)?.acceptGroupCall();
             },
           ),
         ],
@@ -488,11 +512,12 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           active: _muted,
           onPressed: () {
             setState(() => _muted = !_muted);
-            appState.service?.toggleMute();
+            _callService(appState)?.toggleMute();
           },
         ),
         // §17.7: not offered past the video limit.
-        if (appState.service?.currentGroupCall?.videoSwitchedOff ?? false)
+        if (_callService(appState)?.currentGroupCall?.videoSwitchedOff ??
+            false)
           _GroupCallButton(
             icon: Icons.videocam_off,
             label: locale.get('group_call_video_off'),
@@ -514,7 +539,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           active: _speaker,
           onPressed: () {
             setState(() => _speaker = !_speaker);
-            appState.service?.toggleSpeaker();
+            _callService(appState)?.toggleSpeaker();
           },
         ),
         _GroupCallButton(
@@ -522,7 +547,7 @@ class _GroupCallScreenState extends State<GroupCallScreen> {
           label: locale.get('leave'),
           color: Colors.red,
           onPressed: () {
-            appState.service?.leaveGroupCall();
+            _callService(appState)?.leaveGroupCall();
             Navigator.of(context).pop();
           },
         ),

@@ -1238,13 +1238,19 @@ enum TwinSyncType {
   TWIN_DEVICE_REVOKED = 11;
   ROTATION_APPROVAL_REQUEST = 12;   // §7.5: Primary → Linked: countersign this rotation
   ROTATION_APPROVAL_RESPONSE = 13;  // §7.5: Linked → Primary: Device-Sig countersig token
-  // 14/15/16 are RESERVED and are deliberately NOT used here: v4_1
-  // §14.7 lists the 17 twin types canonically and assigns exactly these
-  // three numbers to INVITE_LIST (14), PREKEY_CONSUMED (15) and
-  // DEVICE_SET_CHANGED (16). They are not built in `lib/` yet. Whoever
-  // uses them here for something else makes the numbering of the
-  // architecture document and that of the wire permanently different.
-  reserved 14, 15, 16;
+  // 14/15 are RESERVED and are deliberately NOT used here: v4_2 §14.7
+  // assigns exactly these numbers to INVITE_LIST (14) and PREKEY_CONSUMED
+  // (15). They are not built in `lib/` yet. Whoever uses them here for
+  // something else makes the numbering of the architecture document and
+  // that of the wire permanently different.
+  reserved 14, 15;
+
+  // §14.7 Type 16, §14.4 "Device side" (S414): the key package of ONE
+  // remaining device at a lock-out or an Emergency Key Rotation, placed
+  // under that device's value in the OLD line and sealed against its device
+  // KEM keys (`device_key_package.dart`). WIRE EXTENSION: an earlier 4.2
+  // device skips the value (`_handleTwinSync`).
+  DEVICE_SET_CHANGED = 16;
 
   // §21.5.2 / package E-9: the identity was deleted — the message to
   // the OWN devices. `broadcastIdentityDeleted` reached until here
@@ -1291,6 +1297,16 @@ enum TwinSyncType {
   // takes it where it holds the channel not at all or with an epoch that
   // is not newer, like Type 6 for a group. Payload: JSON (`ChannelInfo`).
   CHANNEL_JOINED = 22;
+
+  // §14.7 Type 23 (S413, D-99): the identity list of the sending device —
+  // per identity its index, display name, creation time and `active` flag,
+  // and the DeviceID it carries there; or one piece (at most 32 KB) of an
+  // identity's handover (§14.6.2) for a device whose list lacks it. Sent
+  // when an identity is created or deleted, once at the first start of a
+  // version that knows the type, and in answer to a differing list; never
+  // on a timer. Payload: JSON (`cleona_service_identity_set.dart`). WIRE
+  // EXTENSION: an earlier 4.2 device skips the value (`_handleTwinSync`).
+  IDENTITY_SET = 23;
 }
 
 // ── §14.6.3 Type 20 RECONCILE (D-42) ─────────────────────────────────────
@@ -1468,6 +1484,15 @@ message DeviceRecord {
   repeated PeerAddressProto addresses = 6; // Current network addresses of this device
   bool is_this_device = 7;         // True if this is the local device
   bytes device_node_id = 8;        // §26 Phase 4: routing-level ID for this device (for DEVICE_REVOKED)
+  // §14.9.1 "Device public keys" (S414): the device's public keys of §4.4.2,
+  // so that every own device knows every sibling's — a key package (Type 16)
+  // is sealed against the KEM keys, a countersignature (Type 13) verifies
+  // against the signing keys. Empty where the sender knows none. ADDITIVE:
+  // an earlier 4.2 version keeps them in `unknownFields` and reads the rest.
+  bytes device_x25519_pk = 9;
+  bytes device_ml_kem_pk = 10;
+  bytes device_ed25519_pk = 11;
+  bytes device_ml_dsa_pk = 12;
 }
 message KeyRotationBroadcast {
   bytes new_ed25519_pk = 1;        // 32 bytes — new public key

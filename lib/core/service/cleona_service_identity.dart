@@ -318,11 +318,11 @@ extension IdentityDeviceOps on CleonaService {
       final json = jsonDecode(utf8.decode(payload)) as Map<String, dynamic>;
       final deviceId = json['deviceId'] as String;
       final newName = json['deviceName'] as String;
-      if (_devices.containsKey(deviceId)) {
-        _devices[deviceId]!.deviceName = newName;
-        _saveDevices();
+      final device = _devices[deviceId];
+      if (device != null) {
+        // D-99 (§14.9.1): the name holds in the sets of every identity.
+        identitySetRenameEverywhere(device, newName);
         _log.info('Twin device renamed: $deviceId → $newName');
-        _notifyDevicesChanged();
       }
     } catch (e) {
       _log.warn('Twin DEVICE_RENAMED failed: $e');

@@ -59,11 +59,15 @@
 /// A sender without a fixed neighbour sends the `0x20` directly to each next
 /// address in an own address family (§8.1, §11.1 V1).
 ///
+/// A sender the recipient names, holding the code, hands the `0x20` to the
+/// device directly ([heldHereFirst], D-110).
+///
 /// Pure function over lists; `node_codes.dart` applies it. A separate file
 /// because `node_codes.dart` stands at the line budget.
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/neighbour.dart';
@@ -143,6 +147,47 @@ String _openNote(List<Neighbour> open, bool Function(Neighbour n) live,
   final more = open.length > _kNoteMax ? ', …' : '';
   return '; open set ${open.where(live).length} of ${open.length} live'
       '${shown.isEmpty ? '' : ': ${shown.join(', ')}$more'}';
+}
+
+/// §8.1 "Sender behaviour": "A sender that is itself one of the recipient's
+/// named fixed neighbours holds the recipient's codes and hands the `0x20` to
+/// the recipient's device directly, as forwarder step 2 does; its `0x22`
+/// names only the other neighbours" (D-110, owner 07.11.2026).
+///
+/// Both conditions hold together: [next] names this node ([self]: an own
+/// interface, the confirmed public address of §7.3 or one the shell proved,
+/// `ownTarget`), and [device] — the device that registered the code HERE
+/// (`CodeTable.who`) — is known. Then [direct] gets the device's address,
+/// and what comes back is [next] without the own addresses: the rest for
+/// the `0x22`, empty when the recipient named no other neighbour. Otherwise
+/// [next] comes back unchanged.
+///
+/// Holding the code alone is not enough: a former fixed neighbour keeps a
+/// device's codes until the end of the day after their day (§8.1) without
+/// being named any more, and sent a second copy (`smoke_code_route` 3, S414:
+/// two copies instead of one).
+///
+/// Until D-110 the sender wrapped the `0x20` into a `0x22` to its OWN address
+/// through its first fixed neighbour. In the field that neighbour could not
+/// reach the sender's public address, and the receipt waited 2 h 18 min for
+/// the recipient's next collection (`berichte/S414-RCA-LAUF-NETZ.md`
+/// finding 1, E2E AVM 3.07; the sender knew that address as its confirmed
+/// public one since 17:20:44). An own address [self] does not recognise
+/// leaves the sending as before.
+List<CardAddress> heldHereFirst(
+    ({InternetAddress address, int port})? device, List<CardAddress> next,
+    {required bool Function(CardAddress a) self,
+    required void Function(CardAddress to) direct,
+    String code = '',
+    void Function(String)? report}) {
+  if (device == null || !next.any(self)) return next;
+  final to = CardAddress(Uint8List.fromList(device.address.rawAddress), device.port);
+  direct(to);
+  final rest = [for (final a in next) if (!self(a)) a];
+  report?.call('Step 3: code $code is registered here — this node is a '
+      'neighbour the recipient named; 0x20 directly to its device $to (§8.1, '
+      'forwarder step 2)${rest.isEmpty ? ', no 0x22' : ''}');
+  return rest;
 }
 
 /// See the file header. [fixed]: the own fixed neighbours in order

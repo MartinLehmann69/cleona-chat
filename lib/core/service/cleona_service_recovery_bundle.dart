@@ -552,7 +552,20 @@ extension RecoveryBundleOps on CleonaService {
       return;
     }
     final rk = recoveryKey(seed, index);
-    final state = _recoveryStateLoad();
+    var state = _recoveryStateLoad();
+    // §13.3.4 (D-99): an identity created here from another own device's
+    // identity list lays its first bundle when the cadence makes it due,
+    // counted from the creation time the list named — not at once, which
+    // would lay a bundle emptier than the one already lying.
+    final createdThere = identitySetFirstBundleTake(identity.baseDir, index);
+    if (state.last == null && createdThere != null) {
+      state = (
+        last: DateTime.fromMillisecondsSinceEpoch(createdThere),
+        holders: state.holders,
+      );
+      _log.info('Rescue bundle: identity taken from another own device — '
+          'first placement due 3 days after its creation (§13.3.4)');
+    }
     // §13.2.1 (D-70) × §4.4.3: the pair of every restored contact from the
     // bundle (its `s_AB`, the founding key the bundle named) until its first
     // envelope anchors it ([_recoveryAnchor]) — the mailbox forms `K_AB`
@@ -597,14 +610,26 @@ extension RecoveryBundleOps on CleonaService {
         lastHolders: state.holders,
         onDeposited: (_, _) {
           _recoveryHeadSave();
+          // §13.7: with the highest living identity's bundle, the minimal
+          // bundles of the deleted indices below it.
+          unawaited(recoveryDeletedLay());
           onStateChanged?.call();
         },
-        onFound: _recoveryBundleFound);
+        onFound: _recoveryBundleFound,
+        // §13.3.4 (D-103): before a renewal, retired by a recovery? And for
+        // 7 days after a takeover the former fixed neighbours first.
+        retiredBy: _recoveryRetiredBy,
+        alsoNamed: _recoveryAlsoNamed);
     // §13.0, D-40: the phase decides whether the box seeks, reads only, or
     // lays (`cleona_service_enrolment.dart`).
     recoveryBox = box;
+    // Kept across a restart: the due time of the first placement.
+    if (createdThere != null && state.holders == 0) _recoveryHeadSave();
     _enrolmentAttach(p, box, rk);
     box.attach();
+    // §13.7: the run for the other identities of the words, at the same
+    // edges (it asks only while open).
+    _identityRunAttach(p);
     _log.info(recoveryBundleStatus);
   }
 
@@ -633,18 +658,39 @@ extension RecoveryBundleOps on CleonaService {
 
   // ── Taking a found bundle over (E7) ────────────────────────────────────
 
-  /// What a search brought: the newest bundle that opens is taken over; the
-  /// search ends. Found, but none opens: named and ended too — a bundle that
+  /// What a search brought: the bundle that counts (§13.3.2: furthest along
+  /// the rotation chain, among the same keys the newest) is taken over; the
+  /// search ends. Copies whose chains fork: shown, none taken, the search
+  /// goes on. Found, but none opens: named and ended too — a bundle that
   /// the own seed does not open now does not open later (§13.2.3: that is
   /// not an error, and §13.2.2 applies).
   void _recoveryBundleFound(List<Uint8List> pieces) {
     final box = recoveryBox;
     if (box == null || !box.seeking) return;
-    RecoveryBundleContent? best;
+    final active = <RecoveryBundleContent>[];
+    var deletionMarks = 0;
     for (final s in pieces) {
       final c = openRecoveryBundle(s);
       if (c == null) continue;
-      if (best == null || c.depositedAtMs > best.depositedAtMs) best = c;
+      // §13.7: a minimal bundle with `active = false` keeps a deleted index
+      // in the run — it carries nothing to take over.
+      if (!c.active) {
+        deletionMarks++;
+        continue;
+      }
+      active.add(c);
+    }
+    final choice = recoveryBundleChoose(active);
+    if (choice.fork) {
+      _recoveryForkSeen('${active.length} copies found in one search');
+      return;
+    }
+    final best = choice.best;
+    if (best == null && deletionMarks > 0) {
+      _log.warn('Rescue bundle (§13.7): only a deletion mark (active = false) '
+          'found for index ${identity.hdIndex} — not taken over, the search '
+          'goes on');
+      return;
     }
     if (best == null) {
       // While undecided (D-40) the search goes on: a bundle that does not
@@ -660,7 +706,7 @@ extension RecoveryBundleOps on CleonaService {
     if (enrolmentHolds(_enrol.phase)) {
       if (_enrol.phase == EnrolmentPhase.waiting) return;
       final sealedBest = pieces.firstWhere(
-          (s) => openRecoveryBundle(s)?.depositedAtMs == best!.depositedAtMs);
+          (s) => openRecoveryBundle(s)?.depositedAtMs == best.depositedAtMs);
       _enrolBundleFound(best, sealedBest);
       return;
     }
@@ -691,6 +737,9 @@ extension RecoveryBundleOps on CleonaService {
     // E5-a: the holder deleted it on our receipt — the device lays a fresh
     // one now, with everything it just took over.
     unawaited(box.deposit());
+    // §13.6 (D-103): the recovery runs until it is completed with an
+    // Emergency Key Rotation — with nothing to wait for, at once.
+    _recoveryOpenStart(n, best.ownNeighbours);
     onStateChanged?.call();
   }
 
@@ -883,6 +932,11 @@ extension RecoveryBundleOps on CleonaService {
     _log.event('Rescue bundle: contact ${hex.substring(0, 8)} anchored by its '
         'first envelope (E7-b) — s_AB ${waiting.pairRandom == null ? "none" : "from the bundle"}, '
         '${waiting.neighbours.length} fixed neighbour(s)');
+    // §13.6 F-1 = A: the last restored contact back completes the recovery.
+    // Not in the stack of the envelope that anchored it.
+    if (_recoveryAnchors.isEmpty && _enrol.recoveryOpen) {
+      unawaited(Future(_recoveryCompleteIfAllBack));
+    }
     return true;
   }
 }

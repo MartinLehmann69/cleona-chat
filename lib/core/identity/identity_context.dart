@@ -263,11 +263,20 @@ class IdentityContext {
   /// Used for contact lookup, sender_id in envelopes, S&F storage key.
   late Uint8List userId;
 
-  /// Device-Node-ID: daemon-global routing identifier.
-  /// device_id = SHA-256(network_secret + ed25519_device_pubkey)
-  /// Derived from the daemon-global Device-Sig keypair (§3.5/§3.7) — all
-  /// hosted UserIDs share the same DeviceID. See Architecture §3.1.
+  /// The identifier under which THIS identity's device set names this device
+  /// to its own devices and to its contacts (§4.1, §14.5, §14.9.1):
+  /// `SHA-256(kIdentityDomain ‖ Ed25519 device key this device holds for the
+  /// identity)`. Since D-101/D-106 it differs per identity, so that a contact
+  /// of two identities of one user sees no device identifier both have in
+  /// common (§4.4.2, §15.10).
   late Uint8List deviceNodeId;
+
+  /// The node identifier of the device (§4.1): the same derivation applied
+  /// to the device-wide Device-Sig key pair — one for all identities of this
+  /// device. Only the own devices learn it (§14.7 Type 23 `node`); it
+  /// recognises a device across identities and never goes to a contact.
+  late Uint8List deviceNodeOfDevice;
+  String get deviceNodeOfDeviceHex => bytesToHex(deviceNodeOfDevice);
 
   // ── 2D-DHT IDENTITY RESOLUTION: DROPPED (S366) ──────────────────
   //
@@ -333,8 +342,19 @@ class IdentityContext {
   /// Null until [initKeys] has run. Carrier for §7.5/§14.5: without the
   /// private Device-Sig key no approval token comes into existence, and
   /// without a token there is no quorum.
+  ///
+  /// D-101/D-106 (§4.4.2 "One key set per identity"): this is the device key
+  /// set the device holds for THIS identity — its own row of the device
+  /// database, not the device-wide row, which only forms
+  /// [deviceNodeOfDevice].
   DeviceKeyBundle? _deviceKeys;
   DeviceKeyBundle? get deviceKeys => _deviceKeys;
+
+  /// Whether [initKeys] generated [deviceKeys] in this run — the identity's
+  /// first start on this device, or the first start of a version with one
+  /// key set per identity. The other own devices then do not know the keys
+  /// yet and are sent a Type 9 with them (§14.7 Type 23, D-106).
+  bool deviceKeysCreatedNow = false;
 
   /// HD-Wallet derivation index (null = legacy random keys).
   final int? hdIndex;
@@ -394,7 +414,7 @@ class IdentityContext {
   // All entry points (service_daemon, main.dart) use these
   // instead of duplicating the init sequence.
 
-  /// §3.7: Initialize crypto subsystem — keyring + migration.
+  /// §4.5.2: Initialize crypto subsystem — keyring + migration.
   /// Call once at daemon/app startup before any key access.
   /// On Android/iOS: call MobileKeyringService.init() BEFORE this.
   static Future<void> initCrypto(String baseDir) async {
@@ -542,16 +562,31 @@ class IdentityContext {
       'no such identity (§4.5.2, §21.4.1); every start path reads the seed '
       'first.';
 
-  /// The device keys of this device (§4.4.2), from the device database
+  /// The device-wide device keys (§4.1, §4.4.2), from the device database
   /// (`DeviceKeysStore.loadOrCreate`) under `deriveSharedFileEncKey(seed)`,
-  /// created at the first start and the same ever after. Fail-loud
-  /// (§4.5.2): a device database that does not open THROWS, and without a
-  /// master seed there is no device database — and no identity (S407).
-  DeviceKeyBundle _deviceKeysOf() {
+  /// created at the first start and the same ever after — they form only
+  /// the node identifier of the device. Fail-loud (§4.5.2): a device
+  /// database that does not open THROWS, and without a master seed there is
+  /// no device database — and no identity (S407).
+  DeviceKeyBundle _deviceNodeKeysOf() {
     final seed = masterSeed;
     if (seed == null) throw StateError(_noSeedMessage);
     return DeviceKeysStore.loadOrCreate(
         baseDir: _baseDir, key: HdWallet.deriveSharedFileEncKey(seed));
+  }
+
+  /// The device key set this device holds for THIS identity (§4.4.2 "One key
+  /// set per identity", D-106): its own row of the device database under the
+  /// HD index, generated at the identity's first start here. Fail-loud as
+  /// [_deviceNodeKeysOf].
+  ({DeviceKeyBundle bundle, bool created}) _deviceKeysOf() {
+    final seed = masterSeed;
+    final index = hdIndex;
+    if (seed == null || index == null) throw StateError(_noSeedMessage);
+    return DeviceKeysStore.loadOrCreateFor(
+        baseDir: _baseDir,
+        key: HdWallet.deriveSharedFileEncKey(seed),
+        index: index);
   }
 
   /// The resolved key for the SYNCHRONOUS write paths.
@@ -758,18 +793,22 @@ class IdentityContext {
     // `Address.identifier` in mycelium and the card fingerprint.
     userId = HdWallet.computeUserId(foundingEd25519Pk, foundingMlDsaPk);
 
-    // Compute Device-Node-ID from the device-wide Device-Sig keypair
-    // (§4.1, §4.4.2). Multi-Identity sharing: all IdentityContexts of this
-    // device load the SAME device keys — ONE row of the device database
-    // (`device.db` in baseDir, S403) — and therefore derive the SAME
-    // deviceNodeId. The device database opens under the device-wide key
+    // The node identifier of the device from the device-wide Device-Sig
+    // keypair (§4.1): all IdentityContexts of this device load the SAME row
+    // of the device database (`device.db` in baseDir, S403) and derive the
+    // SAME value. The device database opens under the device-wide key
     // derived from the master seed, not under the key of an identity.
-    final deviceBundle = _deviceKeysOf();
-    // S360: the bundle is KEPT instead of thrown away after the one
-    // derivation — see [deviceKeys].
-    _deviceKeys = deviceBundle;
-    deviceNodeId =
-        HdWallet.computeDeviceNodeId(deviceBundle.sig.ed25519PublicKey);
+    deviceNodeOfDevice = HdWallet.computeDeviceNodeId(
+        _deviceNodeKeysOf().sig.ed25519PublicKey);
+    // D-101/D-106 (§4.4.2): the device keys of THIS identity, and the
+    // identifier its device set names this device by. S360: the bundle is
+    // KEPT instead of thrown away after the one derivation — see
+    // [deviceKeys].
+    final own = _deviceKeysOf();
+    _deviceKeys = own.bundle;
+    // Kept across a second `initKeys` of the same context in this run.
+    deviceKeysCreatedNow = deviceKeysCreatedNow || own.created;
+    deviceNodeId = HdWallet.computeDeviceNodeId(own.bundle.sig.ed25519PublicKey);
 
     // S362: the display name is now only on `debug`. The identifiers
     // carry the diagnosis; the name is the part that names a person.
@@ -1062,9 +1101,33 @@ class IdentityContext {
     required Uint8List newX25519Sk,
     required Uint8List newMlKemPk,
     required Uint8List newMlKemSk,
+    StoredRotationLink? link,
   }) {
     final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKeyEffective);
 
+    // S414: [link] — the link the rotating device already formed with
+    // [rotationLinkTo] and handed to its siblings in their key packages
+    // (§14.7 Type 16), so that every device keeps the SAME chain.
+    if (link != null) {
+      rotationChain.add(link);
+    } else {
+      rotationChain.add(rotationLinkTo(newEd25519Pk, newMlDsaPk));
+    }
+    _replaceKeysAfterLink(fileEnc,
+        newEd25519Pk: newEd25519Pk,
+        newEd25519Sk: newEd25519Sk,
+        newMlDsaPk: newMlDsaPk,
+        newMlDsaSk: newMlDsaSk,
+        newX25519Pk: newX25519Pk,
+        newX25519Sk: newX25519Sk,
+        newMlKemPk: newMlKemPk,
+        newMlKemSk: newMlKemSk);
+  }
+
+  /// The continuity link from the current signing keys to [newEd25519Pk] /
+  /// [newMlDsaPk], signed hybrid by the current secret keys (§4.5.4) — not
+  /// yet appended.
+  StoredRotationLink rotationLinkTo(Uint8List newEd25519Pk, Uint8List newMlDsaPk) {
     // SR-2 (§3.1 stable anchor / §7.4b step 4): append the continuity link
     // BEFORE replacing keys — the OLD secret key signs the successor pubkeys
     // (`newEd25519Pk || newMlDsaPk`, the §4.3 RotationChainLink shape).
@@ -1078,7 +1141,7 @@ class IdentityContext {
     // `test/smoke/smoke_syschan_rotation_chain.dart`).
     final linkContent =
         StoredRotationLink.linkContentOf(newEd25519Pk, newMlDsaPk);
-    rotationChain.add(StoredRotationLink(
+    return StoredRotationLink(
       oldEd25519Pk: ed25519PublicKey,
       oldMlDsaPk: mlDsaPublicKey,
       newEd25519Pk: newEd25519Pk,
@@ -1088,8 +1151,20 @@ class IdentityContext {
       // §4.5.4 "The chain is signed hybrid": the whole keypair is present
       // here, so BOTH old keys sign.
       oldSignatureMlDsa: OqsFFI().mlDsaSign(linkContent, mlDsaSecretKey),
-    ));
+    );
+  }
 
+  void _replaceKeysAfterLink(
+    FileEncryption fileEnc, {
+    required Uint8List newEd25519Pk,
+    required Uint8List newEd25519Sk,
+    required Uint8List newMlDsaPk,
+    required Uint8List newMlDsaSk,
+    required Uint8List newX25519Pk,
+    required Uint8List newX25519Sk,
+    required Uint8List newMlKemPk,
+    required Uint8List newMlKemSk,
+  }) {
     // Keep old KEM secret keys for transit messages ([previousKeyRetention])
     previousX25519Sk = x25519SecretKey;
     previousMlKemSk = mlKemSecretKey;
@@ -1175,49 +1250,69 @@ class IdentityContext {
         '${rotationChain.length}');
   }
 
+  /// Takes over the keys and the chain of a key package from another own
+  /// device (§14.4 "Device side", §14.7 Type 16, S414). The chain must be
+  /// THIS device's chain with at least one link more, the first new link
+  /// leaving THIS device's current signing keys, the last ending at
+  /// [ed25519Pk]/[mlDsaPk]; the caller has checked the signatures
+  /// (`RotationChain.holds`). Throws [ArgumentError] otherwise; nothing
+  /// changed then. The current KEM generation becomes the previous one
+  /// (7 d window, §14.4 "End of the transition").
+  void adoptSiblingRotation({
+    required List<StoredRotationLink> chain,
+    required Uint8List ed25519Pk,
+    required Uint8List ed25519Sk,
+    required Uint8List mlDsaPk,
+    required Uint8List mlDsaSk,
+    required Uint8List x25519Pk,
+    required Uint8List x25519Sk,
+    required Uint8List mlKemPk,
+    required Uint8List mlKemSk,
+  }) {
+    bool same(Uint8List a, Uint8List b) =>
+        a.length == b.length &&
+        Iterable<int>.generate(a.length).every((i) => a[i] == b[i]);
+    final n = rotationChain.length;
+    var prefix = chain.length > n;
+    for (var i = 0; prefix && i < n; i++) {
+      prefix = same(chain[i].newEd25519Pk, rotationChain[i].newEd25519Pk) &&
+          same(chain[i].newMlDsaPk, rotationChain[i].newMlDsaPk);
+    }
+    if (!prefix ||
+        !same(chain[n].oldEd25519Pk, ed25519PublicKey) ||
+        !same(chain[n].oldMlDsaPk, mlDsaPublicKey) ||
+        !same(chain.last.newEd25519Pk, ed25519Pk) ||
+        !same(chain.last.newMlDsaPk, mlDsaPk) ||
+        ed25519Sk.length != 64 ||
+        !same(Uint8List.sublistView(ed25519Sk, 32), ed25519Pk)) {
+      throw ArgumentError('the package does not continue this device\'s keys');
+    }
+    final fileEnc = FileEncryption(baseDir: _baseDir, key: _fileEncKeyEffective);
+    rotationChain.addAll(chain.sublist(n));
+    _replaceKeysAfterLink(fileEnc,
+        newEd25519Pk: ed25519Pk,
+        newEd25519Sk: ed25519Sk,
+        newMlDsaPk: mlDsaPk,
+        newMlDsaSk: mlDsaSk,
+        newX25519Pk: x25519Pk,
+        newX25519Sk: x25519Sk,
+        newMlKemPk: mlKemPk,
+        newMlKemSk: mlKemSk);
+  }
+
   /// How long the PREVIOUS KEM generation stays around after a rotation.
   ///
-  /// ── THE BRACKET FROM §4.5.4, BUILT ON 02.09.2026 (S362) ─────────────
-  ///
-  /// §4.5.4 names two deadlines in one sentence: "the retention deadline for
-  /// the previous KEM keys is the **rotation interval itself — 7 days**
-  /// (32 days for the 31-day TTL class)". Until S362 only the first number
-  /// stood here. The second belongs to the management retention class
-  /// (`kManagementKeepEpochs` = 31, `secure_mode.dart`), whose cells lie
-  /// up to 31 days at the responsible relay and whose harvest also
-  /// collects them since S362.
-  ///
-  /// THERE IS ONLY ONE PREDECESSOR SLOT, so there can only be ONE
-  /// deadline: §4.5.4 explicitly holds on to "Exactly **one** previous
-  /// generation is retained", and `MessageOpener` knows no classes at all
-  /// (it only sees a cell, never its storage frame). The longer of the two
-  /// deadlines is therefore the only one that can carry both promises at
-  /// once — 7 days would break the 31-day class, 32 days does not break
-  /// the 7-day class (it holds longer than necessary, never shorter).
-  ///
-  /// ── WHAT THIS DEADLINE DOES NOT ACHIEVE, AND MEASURED SO ────────────────
-  ///
-  /// It extends the lifetime of a particular generation ONLY as long as no
-  /// rotation comes in between: [rotateKemKeys] overwrites the predecessor
-  /// slot on EVERY rotation (`previousX25519Sk = x25519SecretKey`, above).
-  /// A continuously running device rotates every 7 days, so generation N−1
-  /// still falls out of the slot there after 7 days — not through this
-  /// deadline, but through the next rotation. Whoever reads "32 days
-  /// openable during operation" out of this number reads too much; that
-  /// would be a SECOND predecessor slot, and §4.5.4 rules that out.
-  ///
-  /// WHAT IT DOES ACHIEVE: it takes away the discarding's lead over the
-  /// replacing. Until S362 the condition here and the one in
-  /// [needsRotation] were IDENTICAL WORD FOR WORD (`inDays >= 7` on
-  /// [keyRotatedAt]) — the discarding could thus never fire without a
-  /// simultaneously due rotation, but very well WITHOUT that rotation
-  /// arriving: the caller calls it first and starts the rotation
-  /// afterwards unobserved (`cleona_service.dart`, `_performKeyRotation()`
-  /// is `async` and not awaited; the ML-KEM generation runs in an
-  /// isolate). If it aborts or the process dies in between, the
-  /// predecessor was destroyed without having been replaced. With 32 days
-  /// it stays around in this case until the rotation is caught up.
-  static const Duration previousKeyRetention = Duration(days: 32);
+  /// §4.5.4: "the retention deadline for the previous KEM keys is the
+  /// rotation interval itself — 7 days". The delivery layer applies the
+  /// same deadline from `state` (`mycelium/lib/post_box.dart`
+  /// `_previousInDeadline`), and only the delivery layer opens with it; so
+  /// past 7 days a kept predecessor opens nothing and only lengthens the
+  /// exposure of a seized device. (Until S414 this stood at 32 days, for
+  /// the 31-day class of the superseded layer that the norm dropped on
+  /// 02.10.2026.) When the discarding fires before a due rotation that then
+  /// aborts, the predecessor is gone and the current generation stays —
+  /// the price §4.5.4 names and accepts.
+  static const Duration previousKeyRetention = kKemRotationInterval;
 
   /// Discard previous keys once [previousKeyRetention] has passed.
   void discardPreviousKeysIfExpired() {

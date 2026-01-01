@@ -68,8 +68,10 @@
 //         second CAPSULE candidate. Both together are needed: the
 //         selector decides BEFORE the capsule, an ML-KEM predecessor supplied
 //         alone would have been an unentered branch.
-//       - `IdentityContext.previousKeyRetention` stands at 32 days (the
-//         bracket from §4.5.4 for the 31-day class), no longer at 7.
+//       - `IdentityContext.previousKeyRetention` stood at 32 days (the
+//         bracket from §4.5.4 for the 31-day class) from S362 until
+//         S414; since S414 it is 7 days again — the norm dropped the
+//         class on 02.10.2026.
 //     WHAT REMAINS OPEN: there is exactly ONE predecessor slot, which every
 //     rotation overwrites. A device running continuously therefore still loses
 //     generation N−1 after 7 days; the fallback fully carries

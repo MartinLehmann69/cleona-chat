@@ -107,6 +107,7 @@ import 'package:mycelium/card_address.dart'
         relayWrite;
 import 'package:mycelium/neighbourhood.dart';
 import 'package:mycelium/neighbourhood_contacts.dart' show kContactSeats;
+import 'package:mycelium/neighbours_packet.dart' show kCallPort;
 import 'package:mycelium/pair.dart' show kCodeLength;
 
 /// The current version of the host file — public for the smoke of the
@@ -248,8 +249,19 @@ class HostMemory {
   /// a card carries this port. With a port assigned by the
   /// operating system every restart devalues every
   /// issued card, every learned way back, every remembered neighbour.
-  int portSet() =>
-      _ownPort ??= kPortFrom + _dice.nextInt(kPortUntil - kPortFrom + 1);
+  ///
+  /// Never the call port [kCallPort] (S413): a data port there is deaf. A
+  /// device that remembered it was deaf on every start; it gets a new port,
+  /// and `Host.start` saves it.
+  int portSet() {
+    final kept = _ownPort;
+    if (kept != null && kept != kCallPort) return kept;
+    int p;
+    do {
+      p = kPortFrom + _dice.nextInt(kPortUntil - kPortFrom + 1);
+    } while (p == kCallPort);
+    return _ownPort = p;
+  }
 
   /// Throws away the set port and draws anew — for the case that
   /// another program holds it in the meantime.

@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/log/clogger.dart';
 
-/// §3.7 Mobile OS Keyring via MethodChannel (shared protocol).
+/// §4.5.2 Mobile OS Keyring via MethodChannel (shared protocol).
 ///
 /// Android: EncryptedSharedPreferences backed by AndroidKeyStore.
 /// iOS: Keychain Services (kSecClassGenericPassword).

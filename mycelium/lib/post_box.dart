@@ -120,8 +120,12 @@ class PostBox {
   ///
   /// What stays: the identifier, the founding secret key, the book. What
   /// becomes previous: the current KEM generation (§4.5.4, 7 d) and the
-  /// current day-key seed (§8.2, asked 7 more days, E-A6).
-  void signingAdopt(PostBox fresh, {DateTime? now}) {
+  /// current day-key seed (§8.2, asked 7 more days, E-A6) — unless
+  /// [askPreviousDayValues] is `false` (§13.2.2: a recovery without a
+  /// bundle asks only under the new day values; the post under the previous
+  /// ones may belong to a device that still lives).
+  void signingAdopt(PostBox fresh,
+      {DateTime? now, bool askPreviousDayValues = true}) {
     final a = fresh._address;
     if (!a.sameIdentity(_address) ||
         !a.rotated ||
@@ -132,10 +136,12 @@ class PostBox {
     }
     final t = (now ?? DateTime.now()).millisecondsSinceEpoch;
     _previous = (x25519Sk: _x25519Sk, mlKemSk: _mlKemSk);
-    _previousDaySeed = (
-      seed: Uint8List.fromList(daySeed),
-      until: t + kKemRotationInterval.inMilliseconds,
-    );
+    _previousDaySeed = askPreviousDayValues
+        ? (
+            seed: Uint8List.fromList(daySeed),
+            until: t + kKemRotationInterval.inMilliseconds,
+          )
+        : null;
     _foundingEd25519Sk = fresh.secretParts().foundingEd25519Sk;
     _ed25519Sk = fresh._ed25519Sk;
     _mlDsaSk = fresh._mlDsaSk;

@@ -67,26 +67,28 @@ class _CreateGroupDialogState extends State<CreateGroupDialog> {
               Text(locale.get('select_members'),
                   style: const TextStyle(fontWeight: FontWeight.w500)),
               const SizedBox(height: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 300),
-                child: ListView.builder(
-                  shrinkWrap: true,
-                  itemCount: widget.contacts.length,
-                  itemBuilder: (_, i) {
-                    final c = widget.contacts[i];
-                    return CheckboxListTile(
-                      title: Text(shownContactName(c.displayName, locale)),
-                      value: _selected.contains(c.nodeIdHex),
-                      onChanged: (v) => setState(() {
-                        if (v == true) {
-                          _selected.add(c.nodeIdHex);
-                        } else {
-                          _selected.remove(c.nodeIdHex);
-                        }
-                      }),
-                    );
-                  },
-                ),
+              // S416 B2: ONE scroll area. The member list scrolls as part of
+              // the outer SingleChildScrollView; a capped inner list of its
+              // own hid the last contacts (no visible scrollbar on Android)
+              // and swallowed the swipe once the keyboard squeezed the dialog.
+              ListView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: widget.contacts.length,
+                itemBuilder: (_, i) {
+                  final c = widget.contacts[i];
+                  return CheckboxListTile(
+                    title: Text(shownContactName(c.displayName, locale)),
+                    value: _selected.contains(c.nodeIdHex),
+                    onChanged: (v) => setState(() {
+                      if (v == true) {
+                        _selected.add(c.nodeIdHex);
+                      } else {
+                        _selected.remove(c.nodeIdHex);
+                      }
+                    }),
+                  );
+                },
               ),
               if (tooFew) ...[
                 const SizedBox(height: 8),

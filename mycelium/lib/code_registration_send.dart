@@ -94,6 +94,12 @@ class RegistrationSend {
   /// A fixed neighbour named its record key in its `0x25` (S407 a').
   void Function(CardAddress by, Uint8List key)? onRecordKey;
 
+  /// What the `0x25` of the neighbour with [Neighbour.id] [id] said about its
+  /// own reachability (D-113, §5.2): `true`/`false` by its evidence byte,
+  /// `null` without one (an earlier 4.2 version). Every `0x25` that answers a
+  /// piece reports it, before the confirmation of its address.
+  void Function(int id, CardAddress by, bool? evidenced)? onEvidence;
+
   /// By [Neighbour.id].
   final Map<int, _Round> _rounds = {};
 
@@ -266,6 +272,8 @@ class RegistrationSend {
       if (wait != null && !wait.isCompleted) wait.complete();
       _report('0x25 registered from $at: day ${a.day} piece ${a.piece + 1}, '
           '${r.open.length} piece(s) still open');
+      // D-113: before [_confirm], so a seat edge it starts sees the statement.
+      onEvidence?.call(e.key, by, a.evidenced);
       _confirm(from, port); // its listeners may start the next edge
       final rk = a.recordKey;
       if (rk != null) onRecordKey?.call(by, rk);

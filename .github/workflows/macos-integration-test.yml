@@ -22,6 +22,9 @@ on:
       - 'lib/core/contact/contact_seed.dart'
       - 'lib/core/platform/app_paths.dart'
       - 'integration_test/app_test_ci.dart'
+      - 'integration_test/keychain_takeover_ci.dart'
+      - 'lib/core/platform/keychain_ffi.dart'
+      - 'lib/core/crypto/keyring_service.dart'
       - '.github/workflows/macos-integration-test.yml'
 
 concurrency:
@@ -88,56 +91,62 @@ jobs:
           echo "=== Dylibs in Frameworks ==="
           ls -lh "$FRAMEWORKS"/*.dylib 2>/dev/null || echo "No dylibs found!"
 
-      # DIAGNOSIS (S412, 05.11.2026 — measure before the fix, owner A). The
-      # runs of 30.10. and 04.11. hung 43 min after "[main] KeyringService OK"
-      # until the 50-min job limit; the cleanup killed an orphan `security`.
-      # lib/core/crypto/keyring_service.dart _MacOsKeychainKeyring calls
-      # `security` with Process.runSync and no bound, which blocks the whole
-      # isolate — `--timeout 120s` never fired. Not yet measured: WHICH
-      # `security` call waits and WHY (locked keychain? a prompt without a
-      # screen?). This step records the keychain state before the test and,
-      # if the test is still running after 8 min (green runs took 2:35–2:51
-      # including the app build), the processes with their arguments (the
-      # value after -w is a secret and is masked), the keychain state again
-      # and the test output so far; then it stops the test and fails.
-      # Every `security` call here is bounded by perl's alarm (macOS ships no
-      # `timeout`). Remove this diagnosis with the fix of the keychain backend.
-      - name: Run integration test (with hang diagnosis)
+      # The hang diagnosis of S412 (04edf98e) is gone with its cause (S413,
+      # D-95): the keychain is reached through Security.framework with the
+      # dialog switched off, so a call that would need it answers -25308 at
+      # once instead of waiting. The step bound stays as a net: a hang is
+      # a finding, never 50 minutes of job time.
+      #
+      # Case 1 — fresh keychain: the setup writes the seed with the access
+      # list "this program", reads it back WITHOUT a dialog, and the home
+      # screen comes up.
+      - name: Run integration test (fresh keychain)
+        timeout-minutes: 10
         env:
           BOOTSTRAP_CONTACT_SEED: ${{ vars.BOOTSTRAP_CONTACT_SEED }}
         run: |
-          set +e
-          bounded() { perl -e 'alarm shift; exec @ARGV' "$@"; echo "  (exit $?)"; }
-          keychain_state() {
-            echo "--- keychains (user): ---";   bounded 20 security list-keychains -d user
-            echo "--- default keychain: ---";   bounded 20 security default-keychain -d user
-            KC=$(bounded 20 security default-keychain -d user | head -1 | tr -d ' "')
-            echo "--- show-keychain-info $KC: ---"; bounded 20 security show-keychain-info "$KC"
+          set -o pipefail
+          flutter test integration_test/app_test_ci.dart -d macos --timeout 120s 2>&1 | tee test-output.log
+
+      # Case 2 — an entry of 4.2.3–4.2.6 (D-95): written by `security` with
+      # `-T ''` (empty access list) into a keychain of its own, which is the
+      # only one in the search list, so case 1's entries cannot answer. The
+      # app must report "present, takeover needed" and must NOT generate a
+      # new seed. Writing with `-T ''` raises no dialog (only reading does,
+      # `SecAccess.h` `trustedlist`); every `security` call is still bounded.
+      # The test value is a fixed CI dummy, not a secret.
+      - name: Keychain takeover case (entry of 4.2.3–4.2.6)
+        timeout-minutes: 10
+        run: |
+          set -eo pipefail
+          bounded() {
+            "$@" & local pid=$!
+            ( sleep 20; kill "$pid" 2>/dev/null ) & local guard=$!
+            wait "$pid"; local rc=$?
+            kill "$guard" 2>/dev/null || true
+            return $rc
           }
-          echo "=== DIAG before the test ==="
-          keychain_state
-          flutter test integration_test/app_test_ci.dart -d macos --timeout 120s > test-output.log 2>&1 &
-          TEST_PID=$!
-          WAITED=0
-          while kill -0 "$TEST_PID" 2>/dev/null && [ "$WAITED" -lt 480 ]; do
-            sleep 15; WAITED=$((WAITED + 15))
-          done
-          if kill -0 "$TEST_PID" 2>/dev/null; then
-            echo "=== DIAG: test still running after ${WAITED}s — hang ==="
-            echo "--- processes (security, Cleona, dart, SecurityAgent; -w value masked): ---"
-            ps -axo pid,ppid,etime,stat,command \
-              | grep -E '[s]ecurity|[C]leona|[d]art|[S]ecurityAgent|[s]ecurityd' \
-              | sed -E 's/(-w )[^ ]+/\1<masked>/g'
-            keychain_state
-            echo "--- test output so far (last 60 lines): ---"
-            tail -60 test-output.log
-            pkill -P "$TEST_PID" 2>/dev/null; kill "$TEST_PID" 2>/dev/null
-            echo "::error::integration test hung (> ${WAITED}s) — see DIAG above"
+          KC="$HOME/Library/Keychains/ci-takeover.keychain-db"
+          KCPW="ci_takeover_temp"
+          OLD_LIST=$(security list-keychains -d user | tr -d '"')
+          bounded security create-keychain -p "$KCPW" "$KC"
+          bounded security set-keychain-settings "$KC"
+          bounded security unlock-keychain -p "$KCPW" "$KC"
+          bounded security list-keychains -d user -s "$KC"
+          bounded security default-keychain -d user -s "$KC"
+          DUMMY=$(printf 'ci-dummy-not-a-secret-0123456789' | base64)
+          bounded security add-generic-password -a cleona -s cleona_master_seed -w "$DUMMY" -T '' "$KC"
+          BEFORE=$(bounded security find-generic-password -a cleona -s cleona_master_seed "$KC" | grep -E '"mdat"')
+          echo "entry before: $BEFORE"
+          flutter test integration_test/keychain_takeover_ci.dart -d macos --timeout 120s 2>&1 | tee takeover-output.log
+          AFTER=$(bounded security find-generic-password -a cleona -s cleona_master_seed "$KC" | grep -E '"mdat"')
+          echo "entry after:  $AFTER"
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "::error::the 4.2.3–4.2.6 entry was rewritten — D-95 forbids it"
             exit 1
           fi
-          wait "$TEST_PID"; EXIT_CODE=$?
-          cat test-output.log
-          exit $EXIT_CODE
+          # Restore the search list for later steps.
+          bounded security list-keychains -d user -s $OLD_LIST
 
       - name: Collect crash logs on failure
         if: failure()
@@ -157,5 +166,6 @@ jobs:
           name: macos-test-failure-logs
           path: |
             test-output.log
+            takeover-output.log
             ~/Library/Logs/DiagnosticReports/Cleona*
           retention-days: 7

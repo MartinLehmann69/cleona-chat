@@ -3114,20 +3114,83 @@ class EnrolmentView {
   /// The requests waiting for a decision in the Requests tab.
   final List<EnrolmentRequestView> requests;
 
+  /// §13.7: the derivation run for the identities of the words is open on
+  /// this device, and how many identities it carries so far.
+  final bool identityRunOpen;
+  final int identityRunFound;
+
+  /// §14.6.1 step 3, §14.8 (D-99): the name of the device last refused
+  /// because the user has five devices already; `null` otherwise.
+  final String? refusedAtCap;
+
+  /// §13.6 (D-103): a recovery from a bundle runs on this identity until it
+  /// is completed ("finish and renew keys", or by itself once every restored
+  /// contact is back) — [recoveryBack] of [recoveryTotal] contacts are back;
+  /// [recoveryReminder]: it has run for a few days, the opening of the app
+  /// reminds.
+  final bool recoveryOpen;
+
+  /// When the running recovery took its bundle over — the days the reminder
+  /// names. `null` while none runs.
+  final DateTime? recoverySince;
+  final int recoveryBack;
+  final int recoveryTotal;
+  final bool recoveryReminder;
+
+  /// §13.3.2, §13.3.4: when copies of this identity's bundle were last seen
+  /// whose chains fork — another install of the words with other keys.
+  final DateTime? forkSeenAt;
+
+  /// §13.3.4 (D-103): identities this device removed because a recovery on
+  /// another device retired it — name and when.
+  final List<({String name, DateTime at})> retired;
+
+  /// §14.6.3 (D-107): another own device changed this identity's keys and
+  /// this device found no key package for it — it was offline too long and
+  /// must be enrolled again. Nothing was deleted.
+  final bool offlineTooLong;
+
   const EnrolmentView({
     this.available = false,
     this.phase = EnrolmentPhase.none,
     this.windowUntil,
     this.bundleAt,
     this.requests = const [],
+    this.identityRunOpen = false,
+    this.identityRunFound = 0,
+    this.refusedAtCap,
+    this.recoveryOpen = false,
+    this.recoverySince,
+    this.recoveryBack = 0,
+    this.recoveryTotal = 0,
+    this.recoveryReminder = false,
+    this.forkSeenAt,
+    this.retired = const [],
+    this.offlineTooLong = false,
   });
 
   Map<String, dynamic> toJson() => {
         'available': available,
+        if (offlineTooLong) 'offlineTooLong': true,
         'phase': phase.name,
         if (windowUntil != null) 'windowUntil': windowUntil!.millisecondsSinceEpoch,
         if (bundleAt != null) 'bundleAt': bundleAt!.millisecondsSinceEpoch,
         'requests': [for (final r in requests) r.toJson()],
+        if (identityRunOpen) 'identityRunOpen': true,
+        if (identityRunOpen) 'identityRunFound': identityRunFound,
+        if (refusedAtCap != null) 'refusedAtCap': refusedAtCap,
+        if (recoveryOpen) 'recoveryOpen': true,
+        if (recoveryOpen && recoverySince != null)
+          'recoverySince': recoverySince!.millisecondsSinceEpoch,
+        if (recoveryOpen) 'recoveryBack': recoveryBack,
+        if (recoveryOpen) 'recoveryTotal': recoveryTotal,
+        if (recoveryReminder) 'recoveryReminder': true,
+        if (forkSeenAt != null) 'forkSeenAt': forkSeenAt!.millisecondsSinceEpoch,
+        if (retired.isNotEmpty)
+          'retired': [
+            for (final r in retired)
+              {'name': r.name, 'at': r.at.millisecondsSinceEpoch}
+          ],
       };
 
   static EnrolmentView fromJson(Map<String, dynamic> j) => EnrolmentView(
@@ -3143,6 +3206,116 @@ class EnrolmentView {
         requests: [
           for (final r in (j['requests'] as List? ?? const []))
             if (r is Map) EnrolmentRequestView.fromJson(r.cast<String, dynamic>())
+        ],
+        identityRunOpen: j['identityRunOpen'] as bool? ?? false,
+        identityRunFound: j['identityRunFound'] as int? ?? 0,
+        refusedAtCap: j['refusedAtCap'] as String?,
+        recoveryOpen: j['recoveryOpen'] as bool? ?? false,
+        recoverySince: j['recoverySince'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(j['recoverySince'] as int),
+        recoveryBack: j['recoveryBack'] as int? ?? 0,
+        recoveryTotal: j['recoveryTotal'] as int? ?? 0,
+        recoveryReminder: j['recoveryReminder'] as bool? ?? false,
+        offlineTooLong: j['offlineTooLong'] as bool? ?? false,
+        forkSeenAt: j['forkSeenAt'] == null
+            ? null
+            : DateTime.fromMillisecondsSinceEpoch(j['forkSeenAt'] as int),
+        retired: [
+          for (final r in (j['retired'] as List? ?? const []))
+            if (r is Map && r['at'] is int)
+              (
+                name: r['name'] as String? ?? '',
+                at: DateTime.fromMillisecondsSinceEpoch(r['at'] as int),
+              )
+        ],
+      );
+}
+
+/// One device of the user as Settings → Devices shows it (§14.9.2, D-99).
+class UserDeviceView {
+  final String deviceName;
+  final String platform;
+  final bool isThisDevice;
+  final DateTime lastSeen;
+
+  /// The names of the user's identities this device does not carry yet.
+  final List<String> lacks;
+
+  /// The device sent an identity list (§14.7 Type 23): it waits for one
+  /// that names the missing identities. `false`: an earlier version that
+  /// does not take identities over.
+  final bool sentList;
+
+  /// The DeviceIDs this device has in the sets of the user's identities.
+  final List<String> deviceIds;
+
+  const UserDeviceView({
+    required this.deviceName,
+    required this.platform,
+    required this.isThisDevice,
+    required this.lastSeen,
+    this.lacks = const [],
+    this.sentList = false,
+    this.deviceIds = const [],
+  });
+
+  Map<String, dynamic> toJson() => {
+        'name': deviceName,
+        'platform': platform,
+        'this': isThisDevice,
+        'lastSeen': lastSeen.millisecondsSinceEpoch,
+        if (lacks.isNotEmpty) 'lacks': lacks,
+        if (sentList) 'sentList': true,
+        'ids': deviceIds,
+      };
+
+  static UserDeviceView fromJson(Map<String, dynamic> j) => UserDeviceView(
+        deviceName: j['name'] as String? ?? '',
+        platform: j['platform'] as String? ?? '',
+        isThisDevice: j['this'] as bool? ?? false,
+        lastSeen:
+            DateTime.fromMillisecondsSinceEpoch(j['lastSeen'] as int? ?? 0),
+        lacks: [for (final n in (j['lacks'] as List? ?? const [])) '$n'],
+        sentList: j['sentList'] as bool? ?? false,
+        deviceIds: [for (final i in (j['ids'] as List? ?? const [])) '$i'],
+      );
+}
+
+/// The devices of the user and the backup in the network of each identity
+/// (§14.9.2, §13.3.4, D-99) — one value for all identities, across IPC as
+/// JSON.
+class UserDevicesView {
+  final List<UserDeviceView> devices;
+
+  /// Per identity: its name and until when its bundle lies with its holders
+  /// (`null`: none known).
+  final List<({String name, DateTime? validUntil})> backups;
+
+  const UserDevicesView({this.devices = const [], this.backups = const []});
+
+  Map<String, dynamic> toJson() => {
+        'devices': [for (final d in devices) d.toJson()],
+        'backups': [
+          for (final b in backups)
+            {'name': b.name, 'until': b.validUntil?.millisecondsSinceEpoch}
+        ],
+      };
+
+  static UserDevicesView fromJson(Map<String, dynamic> j) => UserDevicesView(
+        devices: [
+          for (final d in (j['devices'] as List? ?? const []))
+            if (d is Map) UserDeviceView.fromJson(d.cast<String, dynamic>())
+        ],
+        backups: [
+          for (final b in (j['backups'] as List? ?? const []))
+            if (b is Map)
+              (
+                name: b['name'] as String? ?? '',
+                validUntil: b['until'] is int
+                    ? DateTime.fromMillisecondsSinceEpoch(b['until'] as int)
+                    : null,
+              )
         ],
       );
 }
@@ -3201,6 +3374,46 @@ class DeviceRecord {
   String? whereNeighboursHex;
   String? whereSegmentHex;
 
+  /// §14.7 Type 23 (D-99): the identity list this device sent last — per
+  /// HD index (as a string) the DeviceID it carries there, `''` for an index
+  /// it lists as deleted. `null` until it sent one: an earlier 4.2 version
+  /// never does, and is then never entered into a new identity's set.
+  Map<String, String>? identitySet;
+
+  /// The device KEM public key (X25519, hex) its enrolment request named —
+  /// the one the device holds for THIS identity (§4.4.2, D-106); a device is
+  /// counted across identities by its DeviceID and [nodeOfDeviceHex], not by
+  /// this key (§14.8, D-99).
+  String? deviceKemHex;
+
+  /// §14.9.1 "Device public keys" (S414): the rest of the device's public
+  /// keys of §4.4.2 — the ML-KEM-768 key beside [deviceKemHex], and the
+  /// device signing keys (Ed25519 + ML-DSA-65). Taken from the enrolment
+  /// request (§14.6.1 step 2) or from Type 9; `null` where neither named
+  /// them (a request of the earlier form). A key package (Type 16) is sealed
+  /// against the KEM keys named here, a countersignature (Type 13) verifies
+  /// against the signing keys named here — the keys this identity's device
+  /// set names (D-101).
+  String? deviceMlKemHex;
+  String? deviceSigEd25519Hex;
+  String? deviceSigMlDsaHex;
+
+  /// The node identifier of the device (§4.1, D-106): one for all its
+  /// identities, learned from its identity list (§14.7 Type 23 `node`) or,
+  /// for this device, from the device-wide key. It recognises one device
+  /// across identities — [deviceNodeIdHex] and the device keys differ per
+  /// identity — and stays among the own devices: it is kept in the stored
+  /// set (and so in a handover, §14.6.2), never in Type 9 or in anything a
+  /// contact receives.
+  String? nodeOfDeviceHex;
+
+  /// Whether this entry names all four device public keys.
+  bool get namesDeviceKeys =>
+      deviceKemHex != null &&
+      deviceMlKemHex != null &&
+      deviceSigEd25519Hex != null &&
+      deviceSigMlDsaHex != null;
+
   DeviceRecord({
     required this.deviceId,
     required this.deviceName,
@@ -3211,6 +3424,12 @@ class DeviceRecord {
     this.deviceNodeIdHex,
     this.whereNeighboursHex,
     this.whereSegmentHex,
+    this.identitySet,
+    this.deviceKemHex,
+    this.deviceMlKemHex,
+    this.deviceSigEd25519Hex,
+    this.deviceSigMlDsaHex,
+    this.nodeOfDeviceHex,
   });
 
   Map<String, dynamic> toJson() => {
@@ -3223,7 +3442,17 @@ class DeviceRecord {
         if (deviceNodeIdHex != null) 'deviceNodeIdHex': deviceNodeIdHex,
         if (whereNeighboursHex != null) 'whereNeighbours': whereNeighboursHex,
         if (whereSegmentHex != null) 'whereSegment': whereSegmentHex,
+        if (identitySet != null) 'identitySet': identitySet,
+        if (deviceKemHex != null) 'deviceKem': deviceKemHex,
+        if (deviceMlKemHex != null) 'deviceMlKem': deviceMlKemHex,
+        if (deviceSigEd25519Hex != null) 'deviceSigEd25519': deviceSigEd25519Hex,
+        if (deviceSigMlDsaHex != null) 'deviceSigMlDsa': deviceSigMlDsaHex,
+        if (nodeOfDeviceHex != null) 'node': nodeOfDeviceHex,
       };
+
+  static Map<String, String>? _identitySetOf(Object? v) => v is Map
+      ? {for (final e in v.entries) '${e.key}': '${e.value}'}
+      : null;
 
   static DeviceRecord fromJson(Map<String, dynamic> json) => DeviceRecord(
         deviceId: json['deviceId'] as String,
@@ -3235,6 +3464,12 @@ class DeviceRecord {
         deviceNodeIdHex: json['deviceNodeIdHex'] as String?,
         whereNeighboursHex: json['whereNeighbours'] as String?,
         whereSegmentHex: json['whereSegment'] as String?,
+        identitySet: _identitySetOf(json['identitySet']),
+        deviceKemHex: json['deviceKem'] as String?,
+        deviceMlKemHex: json['deviceMlKem'] as String?,
+        deviceSigEd25519Hex: json['deviceSigEd25519'] as String?,
+        deviceSigMlDsaHex: json['deviceSigMlDsa'] as String?,
+        nodeOfDeviceHex: json['node'] as String?,
       );
 }
 

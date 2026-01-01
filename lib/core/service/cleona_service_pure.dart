@@ -455,73 +455,14 @@ extension PureServiceOps on CleonaService {
   // to a method that does not exist would not be preservation, but a
   // compile error.
 
-  // ── Identity registry in the network ────────────────────────────────────
+  // ── No identity registry in the network (S413, B-1) ─────────────────────
   //
-  // Formerly `cleona_service_v3_delivery.dart:443/525` (`pollRegistryFromDht`
-  // / `storeRegistryInDht`), removed in the V3 demolition.
-  //
-  // GAP G-5, NOT (T). What is missing is the STORAGE PLACE — the V3 DHT in
-  // which the erasure-coded fragments lay. §7 (multi-identity) keeps the
-  // registry as a subject, but V4.1 has no pollable third party (the
-  // paragraph bridge in CLAUDE.md says explicitly about §4.3 "replaced,
-  // not renumbered").
-  //
-  // ADDENDUM 08.09.2026 (S376): here it said that `IdentityDhtRegistry` and
-  // the Reed-Solomon codec lived on "unchanged". The class has been
-  // DELETED (owner decision V-11 = A) — it had zero callers in `lib/` and
-  // produced fragments for a network that does not exist. The Reed-Solomon
-  // codec stays, it has other consumers. Gap G-5 is thus NOT closed, only
-  // separated from its component: the replacement per v4_1 §13.7
-  // (derivation instead of directory) is outstanding.
-  //
-  // Both places therefore fail LOUDLY and with a reason, instead of
-  // returning `null` or `false` like an empty network. The difference is
-  // load-bearing: `null` would have told the recovery "no registry found"
-  // and let the user create a second identity that the HD counter would
-  // then have assigned twice.
-
-  /// Poll the network for identity registry fragments after seed recovery.
-  ///
-  /// Gap G-5 — no storage place in V4.1.
-  Future<({List<Map<String, dynamic>> identities, int nextIndex})?>
-      pollRegistryFromDht(Uint8List masterSeed) async {
-    _log.error('Identity registry: collecting not possible — V4.1 has '
-        'no storage location for the erasure-coded fragments (gap '
-        'G-5). The replacement per v4_1 §13.7 — derivation instead of directory '
-        '— is not built; `IdentityDhtRegistry` was deleted on 08.09.2026 '
-        'because it built for a network that does not exist.');
-    throw UnsupportedError(
-        'pollRegistryFromDht: V4.1 has no registry storage location (G-5). '
-        'A silent `null` would be dangerous here — the restore '
-        'reads it as "no further identities" and assigns HD indices '
-        'twice.');
-  }
-
-  /// Store the current identity registry in the network.
-  ///
-  /// Gap G-5 — no storage place in V4.1.
-  Future<bool> storeRegistryInDht(Uint8List masterSeed,
-      List<({int? hdIndex, String name})> identities, int nextIndex) async {
-    _log.error('Identity registry: storing not possible — V4.1 has '
-        'no storage location (gap G-5). ${identities.length} identity(ies), '
-        'nextIndex=$nextIndex NOT published.');
-    return false;
-  }
-
-  /// Fire-and-forget: publish identity registry after a rename.
-  ///
-  /// Stays as ONE place at which gap G-5 shows up in the log, instead of
-  /// vanishing at three call sites.
-  void _publishIdentityRegistryIfPossible() {
-    if (identity.masterSeed == null) return;
-    final mgr = IdentityManager();
-    final identities = mgr.loadIdentities();
-    final entries = identities
-        .map((i) => (hdIndex: i.hdIndex, name: i.displayName))
-        .toList();
-    unawaited(storeRegistryInDht(
-        identity.masterSeed!, entries, mgr.nextHdIndex()));
-  }
+  // Here stood `pollRegistryFromDht`, `storeRegistryInDht` and
+  // `_publishIdentityRegistryIfPossible` (gap G-5), with a 24-hour clock
+  // that wrote one error line a day. §13.7: "There is no directory of one's
+  // own identities in the network — neither a queryable object nor a storage
+  // location"; §5.4: nothing on a clock. The identities of the words are
+  // found by the derivation run (`cleona_service_recovery.dart`).
 
   // ── §5.8 THE APP'S MEMBERSHIP RESEND QUEUE IS GONE (S408 P19) ───────
   //

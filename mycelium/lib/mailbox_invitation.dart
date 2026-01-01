@@ -22,6 +22,7 @@ import 'package:mycelium/mailbox_outbound.dart';
 import 'package:mycelium/mailbox_first_contact.dart';
 import 'package:mycelium/invitation_way_in.dart' show MailboxWayIn;
 import 'package:mycelium/envelope.dart' show Address;
+import 'package:mycelium/host_contact_seats.dart' show HostContactSeats;
 import 'package:mycelium/trace_first_contact.dart' show traceCardIssued, traceCardRead;
 
 /// How a contact comes about: issue an invitation, join
@@ -353,6 +354,7 @@ extension MailboxInvitation on Mailbox {
     // EDGE (§8.1): the same reason as in `mailbox_pair.dart` — the code
     // contact→me exists only now, and the answer comes immediately.
     node.codeRoute.codesChanged();
+    host.contactSeatsEdge(); // §5.2: the new contact may take a seat
     // EDGE: the same case as with an accepted request, only from the
     // joining side. Whoever already wrote before the join
     // should not wait until the next start. WITHOUT a condition: §8.2 carries

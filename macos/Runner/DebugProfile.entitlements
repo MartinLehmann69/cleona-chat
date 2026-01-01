@@ -15,7 +15,15 @@
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
 
-	<!-- Dart VM uses JIT in debug/profile builds -->
+	<!-- Dart VM uses JIT in debug/profile builds. The beta channel ships a
+	     debug build (ios-build.yml "Build native libs + Flutter app"), and
+	     since D-100 it runs under the Hardened Runtime. On macOS the Dart VM
+	     allocates executable memory with MAP_JIT (dart-lang/sdk
+	     runtime/vm/virtual_memory_posix.cc, AllocateAligned:
+	     `if (is_executable && !ShouldDualMapExecutablePages())
+	     map_flags |= MAP_JIT;`), which the Hardened Runtime allows only with
+	     this key (Apple, "Hardened Runtime": allow-jit "may create writable
+	     and executable memory using the MAP_JIT flag"). -->
 	<key>com.apple.security.cs.allow-jit</key>
 	<true/>
 
@@ -24,6 +32,13 @@
 	<key>com.apple.security.network.client</key>
 	<true/>
 	<key>com.apple.security.network.server</key>
+	<true/>
+
+	<!-- Microphone and camera under the Hardened Runtime (D-100) — the same
+	     keys and the same sources as in Release.entitlements. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
 	<true/>
 </dict>
 </plist>

@@ -84,7 +84,7 @@ class Neighbours {
   static final InternetAddress _group = InternetAddress('239.192.67.76');
   static final InternetAddress _broadcastCallTarget =
       InternetAddress('255.255.255.255');
-  static const int _port = 41341;
+  static const int _port = kCallPort;
 
   static const int _callCode = 0x52; // 'R'
   static const int _answerCode = 0x41; // 'A'

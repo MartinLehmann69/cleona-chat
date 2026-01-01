@@ -38,15 +38,26 @@ extension MailboxRotation on Mailbox {
   /// Takes the Emergency Key Rotation into the running mailbox — [fresh] is
   /// the app's post box after `rotateIdentityFull` (`postBoxFrom`). Throws
   /// [ArgumentError] if [fresh] is not this identity one rotation further;
-  /// then nothing has changed.
-  void identityRotate(PostBox fresh, {DateTime? now}) {
-    identity.postBox.signingAdopt(fresh, now: now);
+  /// then nothing has changed. [askPreviousDayValues] `false`: a recovery
+  /// without a bundle (§13.2.2) — the replaced day values are not asked.
+  ///
+  /// [fromSibling] `true` (§14.4 "Device side", §14.7 Type 16): another own
+  /// device rotated and this one takes its keys over. The day keys follow
+  /// from the signing key (§8.2) and the rotating device already sent them
+  /// to every contact — this device sends none again.
+  void identityRotate(PostBox fresh,
+      {DateTime? now,
+      bool askPreviousDayValues = true,
+      bool fromSibling = false}) {
+    identity.postBox.signingAdopt(fresh,
+        now: now, askPreviousDayValues: askPreviousDayValues);
     ownPostBoxSave();
     for (final k in contacts) {
-      contactPut(contactWithChainState(k, acked: false, dayKeysDue: true));
+      contactPut(
+          contactWithChainState(k, acked: false, dayKeysDue: !fromSibling));
     }
     dayKeyNoticesForget(); // the notices under way carry the old keys
-    final sent = dayKeyDistribute(now: now);
+    final sent = fromSibling ? 0 : dayKeyDistribute(now: now);
     giveUpAgain(reseal: true);
     final revoked = allInvitationsRevoke();
     node.codeRoute.codesChanged();

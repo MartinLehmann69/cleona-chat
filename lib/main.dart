@@ -30,6 +30,10 @@ import 'package:cleona/core/service/gui_device_setting.dart';
 import 'package:cleona/core/calls/call_integration_channel.dart';
 import 'package:cleona/core/calls/session_behaviour_channel.dart';
 import 'package:cleona/core/service/cleona_service.dart';
+import 'package:cleona/core/channels/crash_report_builder.dart';
+import 'package:cleona/core/channels/system_channel_api.dart'
+    show SystemChannelApi;
+import 'package:cleona/core/channels/system_channels.dart' show CrashReport;
 import 'package:cleona/core/ipc/ipc_client.dart';
 import 'package:cleona/core/ipc/ipc_probe.dart' show parseCleonaPortFile;
 import 'package:collection/collection.dart';
@@ -87,10 +91,13 @@ import 'package:cleona/core/platform/apk_installer.dart';
 import 'package:cleona/ui/screens/update_required_screen.dart';
 import 'package:cleona/ui/screens/first_start_wipe_notice_screen.dart';
 import 'package:cleona/ui/screens/keyring_file_warning_screen.dart';
+import 'package:cleona/ui/screens/keychain_takeover_screen.dart';
+import 'package:cleona/core/platform/keychain_ffi.dart' show KeychainTakeoverOutcome;
 import 'package:cleona/core/platform/first_start_wipe.dart';
 import 'package:cleona/ui/components/archive_retrieval_state.dart';
 import 'package:cleona/ui/components/archive_preview_cache.dart';
 import 'package:cleona/ui/components/call_notice.dart';
+import 'package:cleona/ui/components/called_identity_label.dart';
 import 'package:cleona/ui/components/escape_pops_route.dart';
 import 'package:cleona/ui/components/connection_sheet.dart';
 import 'package:cleona/ui/components/transfer_progress_state.dart';
@@ -157,7 +164,7 @@ Future<void> initUiCrypto() async {
   debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
   OqsFFI().init();
   debugPrint('[main] OqsFFI OK.');
-  // §3.7: start up the keyring. On Linux/Windows the
+  // §4.5.2: start up the keyring. On Linux/Windows the
   // START sequence (`initCrypto`: first-start wipe path, envelope change,
   // cleaner) belongs to the daemon — the UI there ONLY starts up the
   // keyring, see the `else` branch below.
@@ -200,6 +207,41 @@ Future<void> initUiCrypto() async {
     debugPrint('[main] KeyringService OK '
         '(hw=${KeyringService.instance.isHardwareProtected}).');
   }
+}
+
+/// The app's own semantics handle (S419, 0b.03). Held while a view exists,
+/// released at [AppLifecycleState.detached].
+///
+/// Why it may not be held for the whole process: a [SemanticsOwner] — and
+/// with it a COMPLETE semantics tree, root node 0 included — is only created
+/// on the transition "semantics off -> on" (Flutter framework,
+/// `PipelineOwner._updateSemanticsOwner`; the new owner triggers
+/// `RenderView.scheduleInitialSemantics`).
+/// `SemanticsBinding.semanticsEnabled` stays true as long as ANY handle is
+/// open (`SemanticsBinding.ensureSemantics` / `_didDisposeSemanticsHandle`).
+/// On Android the cached engine outlives its activity
+/// (`MainActivity.provideFlutterEngine`); the next activity brings a new
+/// FlutterView with a new, empty AccessibilityBridge (Flutter embedding).
+/// With a permanent handle there is never an off -> on transition, the
+/// framework only sends changed nodes, root node 0 never reaches the new
+/// bridge, and its tree stays empty (log line "Attempted to
+/// getRootSemanticsNode without a root semantics node.", S419 run
+/// 10.11.2026, `mycelium/berichte/S419-RCA-0B03.md`).
+///
+/// Android sends `detached` when the activity lets go of the engine
+/// (`FlutterActivityAndFragmentDelegate.onDetach`, `appIsDetached()`) and
+/// `resumed` when the next one shows it (`onResume`, `appIsResumed()`). The
+/// Linux and Windows embedders never send `detached`, so the desktop keeps
+/// the handle for the whole run as before.
+SemanticsHandle? _appSemanticsHandle;
+
+void _keepSemanticsOn() {
+  _appSemanticsHandle ??= SemanticsBinding.instance.ensureSemantics();
+}
+
+void _releaseSemanticsWhileDetached() {
+  _appSemanticsHandle?.dispose();
+  _appSemanticsHandle = null;
 }
 
 void main() async {
@@ -366,9 +408,12 @@ void main() async {
     _logCrash('main-ffi-init', e, stack);
   }
 
-  // Enable accessibility semantics so AT-SPI can inspect the widget tree
-  // This is required for automated GUI testing via accessibility tools
-  SemanticsBinding.instance.ensureSemantics();
+  // Keep accessibility semantics on so AT-SPI / uiautomator can read the
+  // widget tree (automated GUI tests via accessibility tools). The handle is
+  // released while the engine has no view (AppLifecycleState.detached: on
+  // Android the activity is gone while the cached engine lives on) and taken
+  // again when a view returns — see `_keepSemanticsOn`.
+  _keepSemanticsOn();
 
   // H7 (#U17): global error handlers — uncaught exceptions otherwise crash
   // Android silently. Mirror of the pattern from service_daemon.dart.
@@ -672,6 +717,18 @@ class _CleonaAppState extends State<CleonaApp> {
                 setState(() => _wipeNotice = null);
               },
             );
+          } else if (appState.keychainTakeoverPending) {
+            // D-95: a keychain entry of 4.2.3–4.2.6 is present but needs
+            // the macOS dialog. Before the setup and before the daemon:
+            // nothing may read, generate or overwrite the seed until it is
+            // taken over.
+            home = KeychainTakeoverScreen(
+              onStart: appState.keychainTakeoverRunning
+                  ? null
+                  : () => unawaited(appState.runKeychainTakeover()),
+              running: appState.keychainTakeoverRunning,
+              failedOnce: appState.keychainTakeoverFailedOnce,
+            );
           } else if (appState.keyringFileWarningPending) {
             // V18: no unlocked OS keyring — the master secret lies in the
             // file-variant containers. A blocking screen before the first
@@ -685,7 +742,7 @@ class _CleonaAppState extends State<CleonaApp> {
           } else if (appState.hasProfile) {
             home = _LoadingScreen(error: appState._initError);
           } else {
-            home = const SetupScreen();
+            home = SetupScreen(restoreOnly: appState.seedRestoreOnly);
           }
           return Directionality(
             textDirection: locale.textDirection,
@@ -874,6 +931,71 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _keyringFileWarningPending = false;
   bool get keyringFileWarningPending => _keyringFileWarningPending;
 
+  /// D-95: set while the keychain holds an entry of 4.2.3–4.2.6 that this
+  /// build cannot read without the macOS dialog. Evaluated in [_boot]
+  /// before anything reads the seed; cleared only by a takeover that
+  /// succeeded. While it stands, neither the setup nor the daemon starts.
+  bool _keychainTakeoverPending = false;
+  bool get keychainTakeoverPending => _keychainTakeoverPending;
+  bool _keychainTakeoverRunning = false;
+  bool get keychainTakeoverRunning => _keychainTakeoverRunning;
+  bool _keychainTakeoverFailedOnce = false;
+  bool get keychainTakeoverFailedOnce => _keychainTakeoverFailedOnce;
+
+  /// Whether a keychain entry is present but not readable right now.
+  static bool _keychainTakeoverDue() {
+    if (!KeyringService.isInitialized) return false;
+    final ring = KeyringService.instance;
+    if (!ring.canTakeOver) return false;
+    final names = ring.unreadableEntries();
+    if (names.isNotEmpty) {
+      debugPrint('[main] keychain: present but not readable: '
+          '${names.join(', ')} — takeover pending (D-95)');
+    }
+    return names.isNotEmpty;
+  }
+
+  /// S413 (finding D): set when the master seed is present but not readable
+  /// and this keyring has no takeover (Windows: DPAPI refuses
+  /// `master_seed.dpapi`). Evaluated in [_boot] instead of reading the
+  /// profile, which would throw; the setup then offers only the restore
+  /// from the 24 words, the planned way (§13.5.2: delete the profile
+  /// completely, then the words).
+  bool _seedRestoreOnly = false;
+  bool get seedRestoreOnly => _seedRestoreOnly;
+
+  /// Whether the master seed is present but not readable and no takeover
+  /// can read it (every keyring but macOS, D-95).
+  static bool seedRestoreOnlyDue() {
+    if (!KeyringService.isInitialized) return false;
+    final ring = KeyringService.instance;
+    if (ring.canTakeOver) return false;
+    if (!ring.unreadableEntries().contains('master_seed')) return false;
+    debugPrint('[main] keyring: master_seed present but not readable, no '
+        'takeover — setup offers only the restore from the 24 words');
+    return true;
+  }
+
+  /// The button of [KeychainTakeoverScreen]. Bounded (two minutes); a
+  /// declined or unanswered dialog leaves the screen and offers it again.
+  Future<void> runKeychainTakeover() async {
+    if (_keychainTakeoverRunning) return;
+    _keychainTakeoverRunning = true;
+    notifyListeners();
+    final outcome = await KeyringService.instance.takeOverUnreadable();
+    _keychainTakeoverRunning = false;
+    final stillDue = outcome != KeychainTakeoverOutcome.done ||
+        _keychainTakeoverDue();
+    if (stillDue) {
+      _keychainTakeoverFailedOnce = true;
+      notifyListeners();
+      return;
+    }
+    _keychainTakeoverPending = false;
+    notifyListeners();
+    _bootProfile();
+  }
+
   /// The acknowledge button of the warning screen. Marks the flag in the
   /// device database (device-wide row, no second key) and lets the app
   /// continue into the HomeScreen.
@@ -1061,7 +1183,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// is non-null. Fixes the Linux-Desktop race where an early `incoming_call`
   /// event arrived before `runApp` finished building.
   CallInfo? _pendingIncomingCall;
+
+  /// The service that owns [_pendingIncomingCall] (see
+  /// [_showIncomingCallScreen]); null in IPC mode.
+  ICleonaService? _pendingIncomingCallOwner;
   GroupCallInfo? _pendingIncomingGroupCall;
+
+  /// The service that owns [_pendingIncomingGroupCall]; null in IPC mode.
+  ICleonaService? _pendingIncomingGroupCallOwner;
 
   /// Current connectivity results from connectivity_plus.
   /// Used by HomeScreen to display connection status icon.
@@ -1246,14 +1375,37 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// immediately; otherwise queues it for later processing.
   void handleCrash(Object error, StackTrace stack) {
     final service = _activeCleonaService;
-    if (service == null) {
+    if (service != null) {
+      try {
+        service.saveState();
+      } catch (_) {}
+    }
+    final api = _crashReportApi;
+    if (api == null) {
       _pendingCrashes.add((error, stack));
       return;
     }
-    try {
-      service.saveState();
-    } catch (_) {}
-    _scheduleCrashDialog(service, error, stack);
+    _scheduleCrashDialog(api, _buildCrashReport(error, stack));
+  }
+
+  /// When this state was created — the uptime a crash report of the desktop
+  /// window names (the window holds no `CleonaService`, S417 W-1).
+  final DateTime _createdAt = DateTime.now();
+
+  /// Where a crash report goes after the opt-in popup (§16.7): the
+  /// in-process service on Android/iOS/macOS without a daemon, the daemon's
+  /// system channels over IPC on the desktop (S417 W-1 — until then a crash
+  /// of the desktop window stayed in [_pendingCrashes] and the popup never
+  /// appeared). Null while neither is there.
+  SystemChannelApi? get _crashReportApi =>
+      _activeCleonaService?.systemChannelApi ?? _ipcClient?.systemChannelApi;
+
+  CrashReport _buildCrashReport(Object error, StackTrace stack) {
+    final service = _activeCleonaService;
+    if (service != null) return service.crashReporter.buildReport(error, stack);
+    return buildCrashReport(error, stack,
+        startedAt: _createdAt,
+        peerCount: _ipcClient?.independentSyncPartners ?? 0);
   }
 
   CleonaService? get _activeCleonaService {
@@ -1269,20 +1421,31 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _processPendingCrashes() {
     if (_pendingCrashes.isEmpty) return;
-    final service = _activeCleonaService;
-    if (service == null) return;
+    final api = _crashReportApi;
+    if (api == null) return;
     final pending = List<(Object, StackTrace)>.from(_pendingCrashes);
     _pendingCrashes.clear();
     for (final (error, stack) in pending) {
-      _scheduleCrashDialog(service, error, stack);
+      _scheduleCrashDialog(api, _buildCrashReport(error, stack));
     }
   }
 
-  void _scheduleCrashDialog(CleonaService service, Object error, StackTrace stack) {
+  /// S417 W-1: a daemon that vanished under the previous window without an
+  /// orderly stop ([_logDaemonCrash]) is offered now, in the same opt-in
+  /// popup with its preview (§16.7). The record goes when the popup shows
+  /// it — at most once per crash; when the popup cannot show it now (no
+  /// navigator yet, another crash popup open) it waits for the next start.
+  void _offerDaemonExitReport(SystemChannelApi api) {
+    final record = DaemonExitRecord.load(_baseDir);
+    if (record == null) return;
+    _scheduleCrashDialog(api, record.toReport(),
+        onShown: () => DaemonExitRecord.drop(_baseDir));
+  }
+
+  void _scheduleCrashDialog(SystemChannelApi api, CrashReport report,
+      {void Function()? onShown}) {
     if (_crashDialogShowing) return;
     _crashDialogShowing = true;
-    final reporter = service.crashReporter;
-    final report = reporter.buildReport(error, stack);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final ctx = navigatorKey.currentContext;
@@ -1290,11 +1453,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         _crashDialogShowing = false;
         return;
       }
+      onShown?.call();
       // §16.7: the popup is the preview; a known fingerprint is shown in
       // it with "+1" / "send my report as a variant" — the user decides.
       showCrashReportDialog(
         context: ctx,
-        api: service.systemChannelApi,
+        api: api,
         report: report,
       ).whenComplete(() => _crashDialogShowing = false);
     });
@@ -1374,6 +1538,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Save state on pause, re-bootstrap on resume (§27 Doze resilience).
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // S419 (0b.03): without a view the app's semantics handle is released, so
+    // the next view gets a complete semantics tree (`_appSemanticsHandle`).
+    if (state == AppLifecycleState.detached) {
+      _releaseSemanticsWhileDetached();
+    } else {
+      _keepSemanticsOn();
+    }
     final isResumed = state == AppLifecycleState.resumed;
     // Desktop (V4.2 §8.2): the daemon asks the post box when a window
     // APPEARS, not when a visible one gets the focus back. `inactive` is "at
@@ -1979,6 +2150,24 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       });
     }
 
+    // D-95: BEFORE the list of identities — it opens only under a key
+    // derived from the seed, and an unreadable seed must lead to the
+    // takeover, not to an error or to the setup.
+    if (_keychainTakeoverDue()) {
+      _keychainTakeoverPending = true;
+      return;
+    }
+    // S413 (finding D): without a takeover the list of identities would
+    // throw on the unreadable seed; the only way back is the restore.
+    if (seedRestoreOnlyDue()) {
+      _seedRestoreOnly = true;
+      return;
+    }
+    _bootProfile();
+  }
+
+  /// The part of [_boot] that reads the profile.
+  void _bootProfile() {
     final hasIdentities = IdentityManager().loadIdentities().isNotEmpty;
     if (hasIdentities) {
       _hasProfile = true;
@@ -2109,18 +2298,11 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// discarded, it only repeats the log — S395-2). Cut to its last half
   /// before each start once it passes 1 MB, so it cannot grow without bound.
   String _prepareDaemonStdioLog() {
-    final path = '$_baseDir/logs/daemon-stdio.log';
-    try {
-      Directory('$_baseDir/logs').createSync(recursive: true);
-      final f = File(path);
-      if (f.existsSync() && f.lengthSync() > 1024 * 1024) {
-        final bytes = f.readAsBytesSync();
-        f.writeAsBytesSync(bytes.sublist(bytes.length - 512 * 1024), flush: true);
-      }
-    } catch (e) {
-      debugPrint('[main] Daemon stdio log not prepared: $e');
+    final r = prepareDaemonStdioLog(_baseDir);
+    if (r.error != null) {
+      debugPrint('[main] Daemon stdio log not prepared: ${r.error}');
     }
-    return path;
+    return r.path;
   }
 
   /// The last [lines] lines of the daemon's stderr, or a line
@@ -2157,15 +2339,27 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       final ts = DateTime.now().toIso8601String();
       final buf = StringBuffer()
         ..writeln('=== Daemon crash detected at $ts ===');
+      final String exitLine;
       if (_daemonExit == null) {
-        buf.writeln('Exit status: unknown (daemon not started by this GUI)');
+        exitLine = 'Exit status: unknown (daemon not started by this GUI)';
       } else if (exitCode == null) {
-        buf.writeln('Exit status: not yet available after 2 s');
+        exitLine = 'Exit status: not yet available after 2 s';
       } else if (exitCode < 0) {
-        buf.writeln('Exit status: killed by signal ${-exitCode}');
+        exitLine = 'Exit status: killed by signal ${-exitCode}';
       } else {
-        buf.writeln('Exit status: $exitCode');
+        exitLine = 'Exit status: $exitCode';
       }
+      buf.writeln(exitLine);
+
+      // S417 W-1: this window notices an orderly stop of the daemon the
+      // same way as a crash (measured: node2 08.11.2026 17:29:25 "SIGTERM
+      // received" -> 17:29:28 "Daemon crash detected", "Exit status: 0").
+      // Only an end that was not orderly is offered as a crash report.
+      final pidLeft = File('$_baseDir/cleona.pid').existsSync();
+      final endedInOrder = DaemonExitRecord.endedInOrder(
+          pidFileLeft: pidLeft, exitCode: exitCode);
+      buf.writeln('Ended in order: ${endedInOrder ? 'yes' : 'no'} '
+          '(cleona.pid ${pidLeft ? 'present' : 'gone'})');
 
       // Read PID from lock/pid file
       int? daemonPid;
@@ -2208,8 +2402,30 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         } catch (e) {
           buf.writeln('dmesg: $e');
         }
-        buf.writeln('Last lines of $_baseDir/logs/daemon-stdio.log:');
-        buf.writeln(_daemonStdioTail());
+      }
+      // S416 W-1: on every platform. Under Windows the GUI never holds the
+      // exit status (the daemon starts detached), so the daemon's stderr —
+      // where the Dart runtime writes the reason of a fatal abort
+      // (0xc0000409) — is the only evidence the crash report can carry.
+      final stdioTail = _daemonStdioTail();
+      buf.writeln('Last lines of $_baseDir/logs/daemon-stdio.log:');
+      buf.writeln(stdioTail);
+
+      // S417 W-1 (§16.7): the crash report waits for the next start of the
+      // window with a running daemon; nothing leaves the device before the
+      // user agrees in the opt-in popup.
+      if (!endedInOrder) {
+        try {
+          DaemonExitRecord(
+            detectedAtMs: DateTime.now().millisecondsSinceEpoch,
+            exitStatus: exitLine,
+            stdioTail: stdioTail,
+            daemonVersion: _ipcClient?.daemonAppVersion ?? '',
+            peerCount: _ipcClient?.independentSyncPartners ?? 0,
+          ).save(_baseDir);
+        } catch (e) {
+          debugPrint('[main] Daemon crash report not kept: $e');
+        }
       }
 
       final crashLog = File('$_baseDir/crash-daemon.log');
@@ -2308,12 +2524,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       // console, and the daemon is built as a GUI-subsystem program
       // (windows/scripts/set-gui-subsystem.ps1), so Windows gives it none
       // either; the redirection above still reaches it.
-      final stdioLog = _prepareDaemonStdioLog().replaceAll('/', r'\');
-      final launcher = File('$_baseDir/daemon-start.cmd'); // not a log
-      final line = [daemonBinary, ...args].map((a) => '"$a"').join(' ');
-      launcher.writeAsStringSync('@$line 2>>"$stdioLog" >NUL\r\n');
-      await Process.start('cmd.exe', ['/d', '/c', launcher.path.replaceAll('/', r'\')],
-          mode: ProcessStartMode.detached);
+      // S418 (W-1-D): the launcher is shared with the daemon's own restart
+      // through it (`daemon_stdio.dart`) and marks the start as redirected.
+      await startWindowsDaemonWithStdioLog(_baseDir, daemonBinary, args);
     } else {
       await Process.start(daemonBinary, args, mode: ProcessStartMode.detached);
     }
@@ -2833,6 +3046,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         // Force Navigator rebuild when transitioning from loading to home
         navigatorKey = GlobalKey<NavigatorState>();
         notifyListeners();
+        // S417 W-1 (§16.7): crashes of this window from before the
+        // connection, then a daemon that vanished under the previous
+        // window — both through the opt-in popup, over the daemon's
+        // system channels.
+        _processPendingCrashes();
+        _offerDaemonExitReport(ipcClient.systemChannelApi);
         // §7.1 LD-2 / §7.5: catch-up for requests that arrived while no GUI
         // was connected to receive the live event.
         unawaited(refreshPendingSecurityRequests());
@@ -3346,27 +3565,40 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Incoming Call ──────────────────────────────────────────────
 
-  void _showIncomingCallScreen(CallInfo call) {
+  /// [owner] is the service the call arrived on. In-process every identity
+  /// runs its own service, all of them active at once (v4_2 §4.5.1), so a
+  /// call to an identity that is not displayed lives only on [owner] — the
+  /// screen reads the call, the caller's name and every action there, and
+  /// the displayed identity stays as it is. Null in IPC mode: the
+  /// `IpcClient` (= [_service]) carries a call of any identity itself.
+  void _showIncomingCallScreen(CallInfo call, {ICleonaService? owner}) {
     final nav = navigatorKey.currentState;
     if (nav == null) {
       // Navigator not attached yet (early event before first frame). Buffer
       // the call and retry after the post-frame callback, matching the
       // [_scheduleSkinPrecache] pattern.
       _pendingIncomingCall = call;
+      _pendingIncomingCallOwner = owner;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final pending = _pendingIncomingCall;
+        final pendingOwner = _pendingIncomingCallOwner;
         if (pending != null) {
           _pendingIncomingCall = null;
-          _showIncomingCallScreen(pending);
+          _pendingIncomingCallOwner = null;
+          _showIncomingCallScreen(pending, owner: pendingOwner);
         }
       });
       return;
     }
     _pendingIncomingCall = null;
+    _pendingIncomingCallOwner = null;
 
-    // Determine display name from contacts
-    final contact = _service?.getContact(call.peerNodeIdHex);
+    // Determine display name from the contacts of the identity being called
+    final contact = (owner ?? _service)?.getContact(call.peerNodeIdHex);
     final displayName = contact?.displayName ?? call.peerNodeIdHex.substring(0, 8);
+    final service = _service;
+    final calledId = owner?.nodeIdHex ??
+        (service is IpcClient ? service.callIdentityId : service?.nodeIdHex);
 
     nav.push(
       MaterialPageRoute(
@@ -3375,33 +3607,62 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           child: CallScreen(
             callInfo: call,
             peerDisplayName: displayName,
+            callService: owner,
+            calledIdentityName: _calledIdentityNameFor(calledId),
           ),
         ),
       ),
     );
   }
 
+  /// The display name of the own identity [nodeIdHex] for the call screens
+  /// (S418, C-3) — `null` (nothing shown) with a single identity on the
+  /// device, an unknown id, or an unreadable identity list.
+  String? _calledIdentityNameFor(String? nodeIdHex) {
+    try {
+      final identities = IdentityManager().loadIdentities();
+      return calledIdentityName(nodeIdHex,
+          [for (final i in identities) (i.nodeIdHex, i.displayName)]);
+    } catch (e) {
+      debugPrint('[call] identity list not readable, called identity not '
+          'named: $e');
+      return null;
+    }
+  }
+
   /// Shows the incoming/outgoing group call screen. Buffers like the 1:1 path
   /// so a `group_call_started` event that races with the first frame is not lost.
-  void _showIncomingGroupCallScreen(GroupCallInfo call) {
+  /// [owner]: as for [_showIncomingCallScreen] — the service the group call
+  /// arrived on; null in IPC mode.
+  void _showIncomingGroupCallScreen(GroupCallInfo call,
+      {ICleonaService? owner}) {
     final nav = navigatorKey.currentState;
     if (nav == null) {
       _pendingIncomingGroupCall = call;
+      _pendingIncomingGroupCallOwner = owner;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         final pending = _pendingIncomingGroupCall;
+        final pendingOwner = _pendingIncomingGroupCallOwner;
         if (pending != null) {
           _pendingIncomingGroupCall = null;
-          _showIncomingGroupCallScreen(pending);
+          _pendingIncomingGroupCallOwner = null;
+          _showIncomingGroupCallScreen(pending, owner: pendingOwner);
         }
       });
       return;
     }
     _pendingIncomingGroupCall = null;
+    _pendingIncomingGroupCallOwner = null;
 
-    final groupName = _service?.groups[call.groupIdHex]?.name ??
+    final groupName = (owner ?? _service)?.groups[call.groupIdHex]?.name ??
         (call.groupIdHex.length >= 8
             ? call.groupIdHex.substring(0, 8)
             : call.groupIdHex);
+    final service = _service;
+    final calledId = owner?.nodeIdHex ??
+        (service is IpcClient
+            ? service.groupCallIdentityId
+            : service?.nodeIdHex);
 
     nav.push(
       MaterialPageRoute(
@@ -3410,6 +3671,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           child: GroupCallScreen(
             callInfo: call,
             groupName: groupName,
+            callService: owner,
+            calledIdentityName: _calledIdentityNameFor(calledId),
           ),
         ),
       ),
@@ -3602,7 +3865,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onNewMessage = (convId, msg) => notifyListeners();
     service.onContactRequestReceived = (nodeId, name) => notifyListeners();
     service.onContactAccepted = (nodeId) => notifyListeners();
-    service.onIncomingCall = (call) => _showIncomingCallScreen(call);
+    service.onIncomingCall =
+        (call) => _showIncomingCallScreen(call, owner: service);
     service.onCallEnded = _onCallEnded;
     service.onCallAccepted = (_) => notifyListeners();
     service.onCallRejected = _onCallRejected;
@@ -3617,8 +3881,13 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     service.onIdentityDeletedRemotely = (id) {
       unawaited(Future(() => _identityFernDeleted(id)));
     };
+    // §13.7: an identity the derivation run found or the user named — its
+    // service and mailbox start here (the daemon does the same,
+    // `service_daemon.dart` `_startRecoveredIdentity`).
+    service.onIdentityFound = _startFoundIdentity;
     service.onJuryRequestReceived = (_) => notifyListeners();
-    service.onIncomingGroupCall = (call) => _showIncomingGroupCallScreen(call);
+    service.onIncomingGroupCall =
+        (call) => _showIncomingGroupCallScreen(call, owner: service);
     service.onGroupCallStarted = (_) => notifyListeners();
     service.onGroupCallEnded = (_) => notifyListeners();
 
@@ -3944,61 +4213,44 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     return true;
   }
 
-  /// §6.4.3: Recover additional identities from DHT registry after seed restore.
-  /// Fire-and-forget — runs in background, notifies UI when done.
-  Future<void> recoverIdentitiesFromRegistry() async {
-    // Linux: delegate to daemon via IPC
-    if (_ipcClient != null) {
-      final count = await (_ipcClient as IpcClient).recoverIdentitiesFromRegistry();
-      if (count > 0) {
-        debugPrint('[main] Registry recovery: $count identities restored via IPC');
-        notifyListeners();
-      }
-      return;
-    }
-
-    // Android: in-process
-    final svc = _service;
+  /// In-process (Android, iOS): starts an identity the derivation run found
+  /// or the user named (§13.7, `CleonaService.onIdentityFound`). The record
+  /// is already in the device database (`createIdentityAtIndex`).
+  Future<void> _startFoundIdentity(Identity identity) async {
     final host = _host;
-    if (svc is CleonaService && host != null) {
-      final created = await svc.recoverIdentitiesFromRegistry();
-      if (created.isNotEmpty) {
-        final mgr = IdentityManager();
-        final masterSeed = mgr.loadMasterSeed();
-        for (final identity in created) {
-          final ctx = await IdentityContext.createFromIdentity(
-            identity: identity,
-            baseDir: _baseDir,
-            masterSeed: masterSeed,
-          );
-          final ids = mgr.loadIdentities();
-          for (final id in ids) {
-            if (id.id == identity.id) {
-              id.nodeIdHex = ctx.userIdHex;
-              break;
-            }
-          }
-          mgr.saveIdentities(ids);
-          _inProcessContexts[ctx.userIdHex] = ctx;
-          final service = CleonaService(
-            identity: ctx,
-            displayName: identity.displayName,
-            port: host.port,
-          );
-          if (_sessionReducedMode) service.reducedMode = true;
-          _wireServiceCallbacks(service);
-          await service.startService();
-          // CATCH UP THE MAILBOX (S387) — otherwise this identity would have
-          // no network, and that silently. First the service, then the
-          // connection: the connection collects immediately.
-          serviceRegister(host, service);
-          planeDRegister(host, service);
-          _inProcessServiceAdd(ctx.userIdHex, service);
-        }
-        debugPrint('[main] Registry recovery: ${created.length} identities restored in-process');
-        notifyListeners();
+    if (host == null) return;
+    final mgr = IdentityManager();
+    final ctx = await IdentityContext.createFromIdentity(
+      identity: identity,
+      baseDir: _baseDir,
+      masterSeed: mgr.loadMasterSeed(),
+    );
+    final ids = mgr.loadIdentities();
+    for (final id in ids) {
+      if (id.id == identity.id) {
+        id.nodeIdHex = ctx.userIdHex;
+        break;
       }
     }
+    mgr.saveIdentities(ids);
+    _inProcessContexts[ctx.userIdHex] = ctx;
+    final service = CleonaService(
+      identity: ctx,
+      displayName: identity.displayName,
+      port: host.port,
+    );
+    if (_sessionReducedMode) service.reducedMode = true;
+    _wireServiceCallbacks(service);
+    await service.startService();
+    // CATCH UP THE MAILBOX (S387) — otherwise this identity would have no
+    // network, and that silently. First the service, then the connection:
+    // the connection collects immediately.
+    serviceRegister(host, service);
+    planeDRegister(host, service);
+    _inProcessServiceAdd(ctx.userIdHex, service);
+    debugPrint('[main] Identity run (§13.7): identity at index '
+        '${identity.hdIndex} started in-process');
+    notifyListeners();
   }
 
   Future<void> _handleGuiAction(Map<String, dynamic> data) async {
@@ -4335,24 +4587,29 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
             // app-bound, measured in
             // `docs/v4-redesign/S363-messung-schluesselbund.md`, 5.1).
             final String reason;
-            switch (access.outcome) {
-              case GateOutcome.cancelled:
-                reason = t('seed_phrase_gate_cancelled');
-                break;
-              case GateOutcome.invalidated:
-                reason = t('seed_phrase_gate_invalidated');
-                break;
-              case GateOutcome.absent:
-                // NOT `hasDeviceGate` — the statement is "the
-                // keyring falls with the app installation", and
-                // that holds on both mobile platforms; the
-                // device-code lock only exists on Android.
-                reason = IdentityManager().hasAppBoundKeyring
-                    ? t('seed_phrase_absent_device')
-                    : t('no_recovery_phrase');
-                break;
-              default:
-                reason = t('no_recovery_phrase');
+            if (access.unreadable) {
+              // Present, but the keyring does not open them (S413, E).
+              reason = t('seed_phrase_unreadable');
+            } else {
+              switch (access.outcome) {
+                case GateOutcome.cancelled:
+                  reason = t('seed_phrase_gate_cancelled');
+                  break;
+                case GateOutcome.invalidated:
+                  reason = t('seed_phrase_gate_invalidated');
+                  break;
+                case GateOutcome.absent:
+                  // NOT `hasDeviceGate` — the statement is "the
+                  // keyring falls with the app installation", and
+                  // that holds on both mobile platforms; the
+                  // device-code lock only exists on Android.
+                  reason = IdentityManager().hasAppBoundKeyring
+                      ? t('seed_phrase_absent_device')
+                      : t('no_recovery_phrase');
+                  break;
+                default:
+                  reason = t('no_recovery_phrase');
+              }
             }
             showDialog(
               context: nav.context,

@@ -7,6 +7,7 @@ import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
 import 'package:cleona/main.dart' show CleonaAppState;
 import 'package:cleona/ui/components/app_screenshot_button.dart';
+import 'package:cleona/ui/screens/settings_screen.dart' show recoveryBundleText;
 
 /// Device Management Screen (§26) — list, rename, revoke twin devices.
 /// §7.1 LD-9/LD-10/LD-11: Cert-Status, Renewal, Kopplung.
@@ -68,6 +69,30 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
     widget.service.onStateChanged = _previousOnStateChanged;
     _ticker?.cancel();
     super.dispose();
+  }
+
+  /// D-99 (§14.9.2): the devices of the user over all identities.
+  UserDevicesView get _userDevices => widget.service.userDevices;
+
+  UserDeviceView? _viewOf(DeviceRecord d) => _userDevices.devices
+      .firstWhereOrNull((v) => v.deviceIds.contains(d.deviceId));
+
+  /// Which identities [v] does not carry yet, and why (§14.9.2): waiting for
+  /// its identity list, or an earlier version (§14.7 Type 23).
+  Widget? _lacksHint(BuildContext context, UserDeviceView? v) {
+    if (v == null || v.lacks.isEmpty) return null;
+    final locale = AppLocale.read(context);
+    final theme = Theme.of(context);
+    final why = locale.get(
+        v.sentList ? 'device_lacks_waiting' : 'device_lacks_older_version');
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Text(
+        '${locale.tr('device_lacks_identities', {'names': v.lacks.join(', ')})} — $why',
+        style: theme.textTheme.bodySmall
+            ?.copyWith(color: theme.colorScheme.error),
+      ),
+    );
   }
 
   void _refresh() {
@@ -673,6 +698,7 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
                       ),
+                      ?_lacksHint(context, _viewOf(device)),
                       const SizedBox(height: 8),
                       Row(
                         children: [
@@ -701,6 +727,20 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
               );
             }),
 
+            // D-99 (§14.9.2): a device of the user that this identity's set
+            // does not name yet.
+            for (final v in _userDevices.devices)
+              if (!_devices.any((d) => v.deviceIds.contains(d.deviceId)))
+                Card(
+                  margin:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  child: ListTile(
+                    leading: Icon(_platformIcon(v.platform), size: 32),
+                    title: Text(v.deviceName),
+                    subtitle: _lacksHint(context, v),
+                  ),
+                ),
+
             if (_devices.isEmpty)
               Padding(
                 padding: const EdgeInsets.all(32),
@@ -713,6 +753,30 @@ class _DeviceManagementScreenState extends State<DeviceManagementScreen> {
             // B-4b (§14.6.1): add another device over the 24 words
             const Divider(height: 32),
             _buildEnrolmentSection(context),
+
+            // D-99 (§14.9.2, §13.3.4): the backup in the network, one line
+            // per identity.
+            const Divider(height: 32),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(locale.get('recovery_bundle_title'),
+                  style: theme.textTheme.titleSmall),
+            ),
+            for (final b in _userDevices.backups)
+              Builder(builder: (context) {
+                final t = recoveryBundleText(locale, b.validUntil);
+                return ListTile(
+                  dense: true,
+                  leading: Icon(Icons.cloud_done_outlined,
+                      color: t.warn
+                          ? theme.colorScheme.error
+                          : theme.colorScheme.onSurfaceVariant),
+                  title: Text('${b.name}: ${t.text}',
+                      style: t.warn
+                          ? TextStyle(color: theme.colorScheme.error)
+                          : null),
+                );
+              }),
 
             // Key Rotation section
             const Divider(height: 32),

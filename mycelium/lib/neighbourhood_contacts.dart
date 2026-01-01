@@ -7,8 +7,12 @@
 /// Up to [kContactSeats] seats go to devices of the node's OWN contacts
 /// ([contact], set by the host: `host_contact_seats.dart`) that are
 ///
-///  * reachable from the open network under the rule of the card's seat —
-///    confirmed under a public address ([reachableNeighbour]), and
+///  * evidenced reachable, as their `0x25` says ([evidence], D-113, §5.2:
+///    `true`); where it said nothing (`null` — not yet, or a device of an
+///    earlier 4.2 version) reachable from the open network under the rule of
+///    the card's seat — confirmed under a public address
+///    ([reachableNeighbour]); a device whose `0x25` said "not evidenced"
+///    (`false`) gives up its seat at that edge and takes none, and
 ///  * have answered since the last start or network change ([answered],
 ///    `Readiness`, §22.7.1) — the one just confirmed counts ([justNow]),
 ///  * and are not excluded by the user ([never], §15.10 of the proposal),
@@ -26,8 +30,9 @@
 /// (§11.8: a failed use, never silence) — both are edges. A holder keeps
 /// its seat while it is quiet, like the card's seat; it loses it only when
 /// it is removed, takes the card's seat, stops being a contact, is
-/// excluded by the user, or the link becomes metered while it could reach
-/// the node only over IPv4. Nothing here sends a packet or runs on a clock.
+/// excluded by the user, its `0x25` says it is not evidenced, or the link
+/// becomes metered while it could reach the node only over IPv4. Nothing
+/// here sends a packet or runs on a clock.
 ///
 /// Pure functions over the list; `neighbourhood.dart` applies them. A
 /// separate file because the neighbourhood is at its line budget.
@@ -35,7 +40,7 @@ library;
 
 import 'package:mycelium/neighbour.dart';
 import 'package:mycelium/neighbourhood_seat.dart'
-    show cardSeatHandOver, reachableNeighbour;
+    show NotEvidencedHandOver, cardSeatHandOver, reachableNeighbour;
 
 /// At most this many fixed seats go to devices of contacts (D1).
 const int kContactSeats = 3;
@@ -51,9 +56,11 @@ Map<int, int> contactSeatsAfter(
   required bool Function(Neighbour n) never,
   required bool Function(NeighbourAddress a) public,
   bool Function(Neighbour n)? v4Only,  // version-name-ok: IP address family
+  bool? Function(Neighbour n)? evidence,
 }) {
   bool keeps(Neighbour n) =>
-      !n.fixed && contact(n) && !never(n) && !(v4Only?.call(n) ?? false);
+      !n.fixed && contact(n) && !never(n) && !(v4Only?.call(n) ?? false) &&
+      evidence?.call(n) != false;
   final seats = <int, int>{
     for (final n in list)
       if (n.contactSeat > 0 && keeps(n)) n.id: n.contactSeat,
@@ -65,7 +72,8 @@ Map<int, int> contactSeatsAfter(
   for (final n in list) {
     if (free.isEmpty) break;
     if (seats.containsKey(n.id) || !keeps(n)) continue;
-    if (!reachableNeighbour(n, public)) continue;
+    // D-113: evidenced by its 0x25, or nothing said and the address rule.
+    if (evidence?.call(n) != true && !reachableNeighbour(n, public)) continue;
     if (n.id != justNow && !answered(n)) continue;
     seats[n.id] = free.removeAt(0);
   }
@@ -80,14 +88,16 @@ void seatContacts(
     bool Function(Neighbour n) contact,
     bool Function(Neighbour n) never,
     bool Function(NeighbourAddress a) public,
-    [bool Function(Neighbour n)? v4Only]) {
+    [bool Function(Neighbour n)? v4Only, // version-name-ok: IP address family
+    bool? Function(Neighbour n)? evidence]) {
   final seats = contactSeatsAfter(list,
       justNow: justNow,
       answered: answered,
       contact: contact,
       never: never,
       public: public,
-      v4Only: v4Only);
+      v4Only: v4Only,
+      evidence: evidence);
   for (var j = 0; j < list.length; j++) {
     final s = seats[list[j].id] ?? 0;
     if (list[j].contactSeat != s) list[j] = list[j].copy(contactSeat: s);
@@ -98,7 +108,8 @@ void seatContacts(
 /// device no longer a contact's frees its seat first), then the card's seat
 /// (`cardSeatHandOver`), and once more the contact seats when the card's
 /// seat moved — a contact's device it freed takes its contact seat at THIS
-/// edge (§5.2 "one such contact holds one place"; D-26).
+/// edge (§5.2 "one such contact holds one place"; D-26). [once]: the limit
+/// of D-115 for the card's seat (`neighbourhood_seat.dart`).
 void seatAll(
     List<Neighbour> list,
     int? justNow,
@@ -107,10 +118,12 @@ void seatAll(
     bool Function(Neighbour n) contact,
     bool Function(Neighbour n) never,
     bool Function(NeighbourAddress a) public,
-    [bool Function(Neighbour n)? v4Only]) {
-  seatContacts(list, justNow, answered, contact, never, public, v4Only);
-  if (cardSeatHandOver(list, answered, named, public, contact)) {
-    seatContacts(list, justNow, answered, contact, never, public, v4Only);
+    [bool Function(Neighbour n)? v4Only, // version-name-ok: IP address family
+    bool? Function(Neighbour n)? evidence,
+    NotEvidencedHandOver? once]) {
+  seatContacts(list, justNow, answered, contact, never, public, v4Only, evidence);
+  if (cardSeatHandOver(list, answered, named, public, contact, evidence, once)) {
+    seatContacts(list, justNow, answered, contact, never, public, v4Only, evidence);
   }
 }
 

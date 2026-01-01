@@ -82,7 +82,17 @@ for DIR in "$HOME/Desktop" "$HOME/Schreibtisch"; do
   if [ -d "$DIR" ]; then
     cp "$DESKTOP_DIR/cleona.desktop" "$DIR/"
     chmod +x "$DIR/cleona.desktop"
+    # GNOME (Nautilus) trusts on metadata::trusted; Xfce (xfdesktop >= 4.18)
+    # only when metadata::xfce-exe-checksum equals the sha256 of the file —
+    # without it a double-click shows "untrusted application launcher"
+    # (measured on Xfce 4.20, S415). Set both; the checksum is read back.
     gio set "$DIR/cleona.desktop" metadata::trusted true 2>/dev/null || true
+    if command -v xfdesktop >/dev/null 2>&1; then
+      sum=$(sha256sum "$DIR/cleona.desktop" | cut -d' ' -f1)
+      gio set -t string "$DIR/cleona.desktop" metadata::xfce-exe-checksum "$sum" 2>/dev/null || true
+      have=$(gio info -a metadata::xfce-exe-checksum "$DIR/cleona.desktop" 2>/dev/null | awk '/xfce-exe-checksum/ {print $2}')
+      [ "$have" = "$sum" ] || echo "WARNING: $DIR/cleona.desktop not marked trusted for Xfce — the desktop asks once on first start"
+    fi
   fi
 done
 

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import '../log/clogger.dart';
 import '../service/cleona_service.dart';
+import 'crash_report_builder.dart';
 import 'system_channels.dart';
 
 /// Builds crash and log reports (§16.7).
@@ -17,59 +18,22 @@ class CrashReporter {
 
   // ── Report building ───────────────────────────────────────────────
 
+  /// The report body is built by [buildCrashReport], which the desktop
+  /// window uses as well (it holds no `CleonaService`, S417 W-1).
   CrashReport buildReport(Object error, StackTrace stackTrace) {
-    final exType = error.runtimeType.toString();
-    final exMsg = error.toString();
-    final rawStack = stackTrace.toString();
-
-    final fingerprint = computeCrashFingerprint(exType, rawStack);
-
-    final truncatedMsg = exMsg.length > SystemChannels.maxExceptionMsgChars
-        ? exMsg.substring(0, SystemChannels.maxExceptionMsgChars)
-        : exMsg;
-
-    final stackLines = rawStack.split('\n');
-    final truncatedStack = stackLines
-        .take(SystemChannels.maxStackFrames)
-        .map(_normalizePath)
-        .join('\n');
-
-    final logLines =
-        CLogger.getReportLines(SystemChannels.maxLogTailLines).join('\n');
-
-    final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
-
     int peerCount = 0;
     try {
       peerCount = _service.independentSyncPartners; // §22.7.1, S411
     } catch (_) {}
-
-    int memBytes = 0;
-    try {
-      memBytes = ProcessInfo.currentRss;
-    } catch (_) {}
-
-    return CrashReport(
-      fingerprint: fingerprint,
-      appVersion: CleonaService.kCurrentAppVersion,
-      platform: _platformString(),
-      dartVersion: Platform.version.split(' ').first,
-      timestampMs: DateTime.now().millisecondsSinceEpoch,
-      exceptionType: exType,
-      exceptionMsg: truncatedMsg,
-      stackTrace: truncatedStack,
-      logTail: logLines,
-      peerCount: peerCount,
-      uptimeSeconds: uptime,
-      memoryBytes: memBytes,
-    );
+    return buildCrashReport(error, stackTrace,
+        startedAt: _service.serviceStartedAt, peerCount: peerCount);
   }
 
   // ── Manual log report ──────────────────────────────────────────────
 
   LogReport buildLogReport() {
     final logLines = CLogger.getReportLines(SystemChannels.maxLogTailLines)
-        .map(_normalizePath)
+        .map(normalizeCrashPath)
         .toList();
 
     final uptime = DateTime.now().difference(_service.serviceStartedAt).inSeconds;
@@ -126,12 +90,12 @@ class CrashReporter {
 
     // Recent events (CR, contact changes, KEX, delivery)
     final events = CLogger.getRecentEvents()
-        .map(_normalizePath)
+        .map(normalizeCrashPath)
         .toList();
 
     return LogReport(
       appVersion: CleonaService.kCurrentAppVersion,
-      platform: _platformString(),
+      platform: crashPlatformString(),
       timestampMs: DateTime.now().millisecondsSinceEpoch,
       logTail: logLines.join('\n'),
       peerCount: peerCount,
@@ -143,30 +107,5 @@ class CrashReporter {
       contactSummary: contactSummary,
       eventTail: events.isEmpty ? null : events.join('\n'),
     );
-  }
-
-  // ── Helpers ───────────────────────────────────────────────────────
-
-  static String _platformString() {
-    final os = Platform.operatingSystem;
-    String arch = 'unknown';
-    try {
-      final info = Platform.version;
-      if (info.contains('x64') || info.contains('x86_64')) {
-        arch = 'x86_64';
-      } else if (info.contains('arm64') || info.contains('aarch64')) {
-        arch = 'arm64';
-      } else if (info.contains('arm')) {
-        arch = 'arm';
-      }
-    } catch (_) {}
-    return '$os-$arch';
-  }
-
-  static String _normalizePath(String frame) {
-    return frame
-        .replaceAll(RegExp(r'/home/[^ ]*/lib/'), 'lib/')
-        .replaceAll(RegExp(r'C:\\[^ ]*\\lib\\'), 'lib/')
-        .replaceAll(RegExp(r'/data/[^ ]*/lib/'), 'lib/');
   }
 }

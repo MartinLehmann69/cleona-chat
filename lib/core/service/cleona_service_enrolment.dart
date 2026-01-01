@@ -121,6 +121,23 @@ class EnrolmentRuntime {
   /// The case is settled — enrolled or recovered: never searching again,
   /// even for an identity without contacts.
   bool settled = false;
+
+  /// §13.6 (D-103): a recovery from a bundle runs until it is completed
+  /// with an Emergency Key Rotation — by the user, or by itself once every
+  /// restored contact is back. [recoveryTotal]: the contacts restored from
+  /// the bundle.
+  bool recoveryOpen = false;
+  int recoveryTotal = 0;
+
+  /// When the bundle was taken over, and the former fixed neighbours it
+  /// named: named first among the holders of the own deposits for 7 days
+  /// after it (§13.3.4 "At a rotation") — also after the completion.
+  DateTime? recoveryTakenAt;
+  List<BundleNeighbour> recoveryFormer = const [];
+
+  /// §13.3.2, §13.3.4: when copies of this identity's bundle were last seen
+  /// whose chains fork — shown to the user, nothing taken or deleted.
+  DateTime? forkSeenAt;
 }
 
 /// Area of the enrolment state in the store of the identity.
@@ -148,8 +165,12 @@ const String kEnrolmentHeadKey = '_';
 /// build of this line left in the profile.
 const String _kEnrolmentFile = 'enrolment.json';
 
-/// At most this many requests wait at once (§14.8: 5 devices per identity).
+/// At most this many requests wait at once per identity (§14.8: 5 devices
+/// per user).
 const int _kEnrolPendingAtMost = 5;
+
+/// Per host: the name of the device last refused at the cap (§14.8).
+final Expando<String> _enrolCapRefusedOf = Expando('enrol-cap');
 
 /// What an existing device hands over from the storage (§14.6.2): the key
 /// state, contacts with their deletion marks, groups, channels, profile,
@@ -180,22 +201,42 @@ const List<String> _kHandoverMemory = [
 extension CleonaServiceEnrolment on CleonaService {
   // ── What the interface shows ───────────────────────────────────────────
 
-  EnrolmentView get enrolViewBuild => EnrolmentView(
+  EnrolmentView get enrolViewBuild {
+    final run = identityRunState;
+    final open = _enrol.recoveryOpen;
+    final taken = _enrol.recoveryTakenAt;
+    List<({String name, DateTime at})> retired;
+    try {
+      retired = [
+        for (final r in _identityMgr.retiredIdentities())
+          if (!r.seen) (name: r.name, at: r.at)
+      ];
+    } on Object {
+      retired = const [];
+    }
+    return EnrolmentView(
+        identityRunOpen: run.open,
+        identityRunFound: run.found,
         available: EnrolmentGate.open,
         phase: _enrol.phase,
         windowUntil: _enrol.window?.until,
         bundleAt: _enrol.foundAt,
-        requests: [
-          for (final e in _enrol.pending.entries)
-            EnrolmentRequestView(
-              requestIdHex: e.key,
-              deviceName: e.value.q.deviceName,
-              platform: e.value.q.platform,
-              deviceIdHex: e.value.q.deviceIdHex,
-              receivedAt: e.value.at,
-            )
-        ],
+        requests: _enrolRequestsOfHost,
+        refusedAtCap: _enrolCapRefused,
+        recoveryOpen: open,
+        recoverySince: open ? taken : null,
+        recoveryBack: open ? _recoveryBack : 0,
+        recoveryTotal: open ? _enrol.recoveryTotal : 0,
+        // §13.6: the reminder at the opening of the app — read when the
+        // interface asks, no clock of its own.
+        recoveryReminder: open &&
+            taken != null &&
+            recoveryBundleClock().difference(taken) >= kRecoveryRemindAfter,
+        forkSeenAt: _enrol.forkSeenAt,
+        retired: retired,
+        offlineTooLong: recoveryOfflineTooLong,
       );
+  }
 
   // ── At the mailbox ─────────────────────────────────────────────────────
 
@@ -329,6 +370,14 @@ extension CleonaServiceEnrolment on CleonaService {
       _enrol.pending[id] = (q: q, at: DateTime.now());
       _enrolPendingSave(id);
       fresh++;
+      if (_enrolApproved.contains(q.deviceIdHex)) {
+        // The user approved this device already — one approval for every
+        // identity, kept until it is locked out (§14.6.1 step 3, D-99).
+        _log.event('Enrolment: request of "${q.deviceName}" — the device '
+            'was approved before, accepted with that approval');
+        unawaited(enrolDecide(id, true));
+        continue;
+      }
       _log.event('Enrolment: request of "${q.deviceName}" (${q.platform}, '
           'device ${q.deviceIdHex.substring(0, 8)}) waits in the Requests tab'
           '${from == null ? "" : " (LAN call)"}');
@@ -337,9 +386,134 @@ extension CleonaServiceEnrolment on CleonaService {
     if (fresh > 0) onStateChanged?.call();
   }
 
-  /// The user's decision in the Requests tab (§14.6.1 step 3, E-1 = A).
+  /// The waiting requests of every identity of this host, one entry per new
+  /// device (§14.6.1 step 3, D-99): the requests of one device for several
+  /// identities carry the same DeviceID (§4.1, D-104) — each with the device
+  /// keys the device holds for that identity (§4.4.2, D-106) — and are one
+  /// entry.
+  List<EnrolmentRequestView> get _enrolRequestsOfHost {
+    final seen = <String>{};
+    final out = <EnrolmentRequestView>[];
+    for (final s in _enrolHostServices) {
+      for (final e in s._enrol.pending.entries) {
+        if (!seen.add(e.value.q.deviceIdHex)) continue;
+        out.add(EnrolmentRequestView(
+          requestIdHex: e.key,
+          deviceName: e.value.q.deviceName,
+          platform: e.value.q.platform,
+          deviceIdHex: e.value.q.deviceIdHex,
+          receivedAt: e.value.at,
+        ));
+      }
+    }
+    return out;
+  }
+
+  List<CleonaService> get _enrolHostServices {
+    final p = myceliumMailbox;
+    return p == null ? [this] : servicesOnHost(p.host, this);
+  }
+
+  /// How many devices the user has (§14.8, D-99): every device of every set
+  /// of this host, each once, this device included. Two records are one
+  /// device when they share the DeviceID or the node identifier of the device
+  /// (D-106, `deviceRecordKeys`) — the device keys differ per identity.
+  int get _enrolUserDeviceCount {
+    final groups = <Set<String>>[];
+    for (final s in _enrolHostServices) {
+      for (final r in s._devices.values) {
+        final keys = deviceRecordKeys(r);
+        final hit = groups.where((g) => g.any(keys.contains)).toList();
+        for (final g in hit) {
+          keys.addAll(g);
+          groups.remove(g);
+        }
+        groups.add(keys);
+      }
+    }
+    return groups.length;
+  }
+
+  /// Test-only: sealed requests as the window brings them
+  /// ([_enrolRequestsIn]) — opened under this identity's words, entered.
+  @visibleForTesting
+  void enrolRequestsInForTesting(List<Uint8List> sealed) =>
+      _enrolRequestsIn(sealed, null);
+
+  /// The user's decision in the Requests tab (§14.6.1 step 3, E-1 = A): one
+  /// decision for every request of that new device, in every identity of
+  /// this host (D-99). A device that would make the user's devices more than
+  /// [kDeviceCapPerUser] is refused, and the interface says so (§14.8).
   /// `false` for an unknown request.
   Future<bool> enrolDecide(String requestIdHex, bool accept) async {
+    EnrolRequest? q;
+    for (final s in _enrolHostServices) {
+      q ??= s._enrol.pending[requestIdHex]?.q;
+    }
+    if (q == null) return false;
+    // D-106 (K-2): the device by its DeviceID — its keys differ per identity.
+    final device = q.deviceIdHex;
+    final mine = [
+      for (final s in _enrolHostServices)
+        for (final e in s._enrol.pending.entries)
+          if (e.value.q.deviceIdHex == device) (s: s, id: e.key)
+    ];
+    var refuse = !accept;
+    final held = _enrolUserDeviceCount;
+    final approvedBefore = _enrolApproved.contains(device);
+    if (accept && !approvedBefore && held >= kDeviceCapPerUser) {
+      refuse = true;
+      _enrolCapRefused = q.deviceName;
+      _log.event('Enrolment: "${q.deviceName}" REFUSED — the user has $held '
+          'device(s), at most $kDeviceCapPerUser (§14.8)');
+    } else {
+      _enrolCapRefused = null;
+    }
+    // One approval counts for every identity of that device — also for a
+    // request of it that arrives later, after a restart too, until it is
+    // locked out (§14.6.1 step 3, D-99).
+    if (!refuse && !approvedBefore) _enrolApprovedSet(device, true);
+    var done = false;
+    for (final m in mine) {
+      if (await m.s._enrolDecideHere(m.id, !refuse)) done = true;
+    }
+    onStateChanged?.call();
+    return done;
+  }
+
+  /// The devices the user approved (their DeviceIDs, the device database —
+  /// D-106: no longer a device key, which differs per identity); empty when
+  /// it is not readable.
+  Set<String> get _enrolApproved {
+    try {
+      return _identityMgr.enrolApproved();
+    } on Object catch (e) {
+      _log.warn('Enrolment: approved devices not readable — $e');
+      return const {};
+    }
+  }
+
+  void _enrolApprovedSet(String deviceIdHex, bool approved) {
+    try {
+      _identityMgr.enrolApprovedSet(deviceIdHex, approved);
+    } on Object catch (e) {
+      _log.warn('Enrolment: approval not ${approved ? "kept" : "removed"} — $e');
+    }
+  }
+
+  /// A device left the set by a lock-out: its approval ends (D-99).
+  void enrolApprovalEnd(DeviceRecord? removed) {
+    if (removed != null) _enrolApprovedSet(removed.deviceId, false);
+  }
+
+  /// The device refused at the cap (§14.8), its name, for the interface —
+  /// until the next decision.
+  String? get _enrolCapRefused => _enrolCapRefusedOf[_enrolHostKey];
+  set _enrolCapRefused(String? v) => _enrolCapRefusedOf[_enrolHostKey] = v;
+  Object get _enrolHostKey => myceliumMailbox?.host ?? this;
+
+  /// The decision for ONE request of this identity.
+  Future<bool> _enrolDecideHere(String requestIdHex, bool accept) async {
     final e = _enrol.pending.remove(requestIdHex);
     if (e == null) return false;
     _enrolPendingSave(requestIdHex);
@@ -364,6 +538,18 @@ extension CleonaServiceEnrolment on CleonaService {
       platform: q.platform,
       firstSeen: now,
       lastSeen: now,
+      deviceKemHex: bytesToHex(q.deviceX25519Pk),
+      // §14.9.1 (S414): every device public key the request names; the node
+      // identifier follows from the Ed25519 key (§4.4.2). A request of the
+      // earlier form names no signing keys — the entry then has none.
+      deviceMlKemHex: bytesToHex(q.deviceMlKemPk),
+      deviceSigEd25519Hex:
+          q.namesSigningKeys ? bytesToHex(q.deviceEd25519Pk!) : null,
+      deviceSigMlDsaHex:
+          q.namesSigningKeys ? bytesToHex(q.deviceMlDsaPk!) : null,
+      deviceNodeIdHex: q.namesSigningKeys
+          ? bytesToHex(HdWallet.computeDeviceNodeId(q.deviceEd25519Pk!))
+          : null,
     );
     _saveDevices();
     final body = enrolBodyOf(_enrolHandoverBuild());
@@ -450,6 +636,8 @@ extension CleonaServiceEnrolment on CleonaService {
       ..platform = CleonaService._platformToProto(q.platform)
       ..firstSeen = Int64(DateTime.now().millisecondsSinceEpoch)
       ..lastSeen = Int64(DateTime.now().millisecondsSinceEpoch);
+    final added = _devices[q.deviceIdHex];
+    if (added != null) CleonaService._deviceKeysToProto(added, record);
     for (final other in _devices.values) {
       if (other.isThisDevice || other.deviceId == q.deviceIdHex) continue;
       final to = hexToBytes(other.deviceId);
@@ -466,16 +654,27 @@ extension CleonaServiceEnrolment on CleonaService {
   /// window it asks to be added; without, the user is asked. Nothing from
   /// the bundle is taken into use — only the window's end and the fixed
   /// neighbours to lay the request at. The holders answer one after the
-  /// other: an older copy never replaces a newer one already found
-  /// (§13.3.2 "the newest of several copies wins").
+  /// other: a copy replaces the one already found only when it counts more
+  /// (§13.3.2: further along the chain, among the same keys newer); copies
+  /// whose chains fork are shown and neither replaces the other.
   void _enrolBundleFound(RecoveryBundleContent best, Uint8List sealed) {
     final p = myceliumMailbox;
     if (p == null) return;
-    final at = _enrol.foundAt;
-    if (_enrol.found != null &&
-        at != null &&
-        best.depositedAtMs < at.millisecondsSinceEpoch) {
-      return;
+    final before = _enrol.found;
+    final held = before == null ? null : openRecoveryBundle(before);
+    if (held != null) {
+      switch (keyPathOrder(bundleKeyPath(held), bundleKeyPath(best))) {
+        case KeyPathOrder.fork:
+          _recoveryForkSeen('the copy found before and a new one');
+          return;
+        case KeyPathOrder.behind:
+          return;
+        case KeyPathOrder.same:
+        case KeyPathOrder.unknown:
+          if (best.depositedAtMs < held.depositedAtMs) return;
+        case KeyPathOrder.ahead:
+          break;
+      }
     }
     _enrol.found = sealed;
     _enrol.foundAt = DateTime.fromMillisecondsSinceEpoch(best.depositedAtMs);
@@ -514,7 +713,8 @@ extension CleonaServiceEnrolment on CleonaService {
   void _enrolRequestLay(mycelium.Mailbox p, RecoveryBundleContent best) {
     final rk = _enrolRecoveryKey();
     final kem = identity.deviceKeys?.kem;
-    if (rk == null || kem == null) {
+    final sig = identity.deviceKeys?.sig;
+    if (rk == null || kem == null || sig == null) {
       _log.error('Enrolment: no request — ${rk == null ? "no recovery key" : "no device KEM keys"}');
       return;
     }
@@ -538,6 +738,9 @@ extension CleonaServiceEnrolment on CleonaService {
       platform: CleonaService._detectPlatform(),
       deviceX25519Pk: kem.x25519PublicKey,
       deviceMlKemPk: kem.mlKemPublicKey,
+      // §14.6.1 step 2, §14.9.1 (S414): the device signing keys too.
+      deviceEd25519Pk: sig.ed25519PublicKey,
+      deviceMlDsaPk: sig.mlDsaPublicKey,
       replyPks: [for (final r in _enrol.reply) r.pk],
       addresses: [for (final c in cardOwnAddresses(p.node).take(4)) held(c)],
       holders: [
@@ -643,6 +846,9 @@ extension CleonaServiceEnrolment on CleonaService {
           'identity (§4.5.4) — NOT taken over');
       return;
     }
+    // This device's own record: the handed-over set names it when the
+    // sender added it first (enrolment, §14.7 Type 23); kept either way.
+    final ownRecord = _devices[_localDeviceId];
     // 1. the delivery layer's memory, under THIS device's mailbox key.
     final d = mailboxDetailsFor(this);
     final enc = FileEncryption(baseDir: d.directory.path, key: d.key);
@@ -680,6 +886,10 @@ extension CleonaServiceEnrolment on CleonaService {
     _loadProfileUpdateState();
     _devices.clear();
     _loadDevices();
+    if (ownRecord != null && !_devices.containsKey(_localDeviceId)) {
+      _devices[_localDeviceId] = ownRecord;
+      _saveDevices();
+    }
     _inviteLedgerCached = null;
     // §14.6.2 "shared settings" — after the contacts, whose "allow calls"
     // they carry with its time. A v4.2.3 device hands over none.
@@ -702,7 +912,7 @@ extension CleonaServiceEnrolment on CleonaService {
     myceliumDetach();
     final fresh = host.reopen(p, mailboxDetailsFor(this));
     myceliumAttach(fresh);
-    _sendTwinAnnounce();
+    _sendTwinAnnounce(withKeys: true);
     _log.event('Enrolment: handover taken over (§14.6.2) — '
         '${_contacts.length} contact(s), ${_groups.length} group(s), '
         '${_devices.length} own device(s); an ordinary own device now');
@@ -736,11 +946,40 @@ extension CleonaServiceEnrolment on CleonaService {
   /// The user chose recovery explicitly (§13.0, D-40): the one way into the
   /// recovery case. A bundle already found is taken over at once;
   /// otherwise the search goes on, now collecting the own post.
+  ///
+  /// Without a bundle (§13.2.2, D-103) the choice performs an Emergency Key
+  /// Rotation first, with N = 1 and without the previous day values: a
+  /// previous device that never rotated holds the same keys and day values,
+  /// and its post stays where it lies. If the rotation does not take place,
+  /// the choice is refused (`false`, the phase is unchanged) — recovering on
+  /// the words' keys would collect and delete that device's post.
   Future<bool> enrolRecover() async {
     if (!enrolmentHolds(_enrol.phase)) return false;
     final p = myceliumMailbox;
     final box = recoveryBox;
     if (p == null || box == null) return false;
+    if (_enrol.found == null) {
+      if (!await emergencyKeyRotation(askPreviousDayValues: false)) {
+        _log.warn('Enrolment: recovery WITHOUT a bundle refused — the '
+            'Emergency Key Rotation of §13.2.2 did not take place');
+        return false;
+      }
+      // The rotation awaited: the phase may have changed meanwhile.
+      if (!enrolmentHolds(_enrol.phase) || myceliumMailbox != p) return false;
+    } else if (box.seeking) {
+      // §13.3.2 (S418, owner A, 09.11.2026): the copy held so far came from
+      // the holders that answered first; of several copies the one furthest
+      // along the rotation chain wins over ALL holders. A holder of an old
+      // copy (the device's first fixed neighbour keeps it 7 days) can answer
+      // before the holders of the newer one — taking it over at once ran the
+      // fresh deposit and, without contacts to wait for, the Emergency Key
+      // Rotation on the OLD keys, a fork against the real chain. So before
+      // the choice is applied, every collection holder is asked once and
+      // has answered (`seek`, §8.2: two quiet periods at the latest); each
+      // piece passes `_enrolBundleFound`, which keeps the best copy.
+      await box.seek();
+      if (!enrolmentHolds(_enrol.phase) || myceliumMailbox != p) return false;
+    }
     _enrol.wait?.detach();
     _enrol.wait = null;
     _enrol.phase = EnrolmentPhase.recovering;
@@ -832,6 +1071,19 @@ extension CleonaServiceEnrolment on CleonaService {
     final at = j['foundAt'] as int?;
     _enrol.foundAt = at == null ? null : DateTime.fromMillisecondsSinceEpoch(at);
     _enrol.rejectedAtMs = j['rejectedAtMs'] as int?;
+    _enrol.recoveryOpen = j['recoveryOpen'] as bool? ?? false;
+    _enrol.recoveryTotal = j['recoveryTotal'] as int? ?? 0;
+    final taken = j['recoveryTakenAt'] as int?;
+    _enrol.recoveryTakenAt =
+        taken == null ? null : DateTime.fromMillisecondsSinceEpoch(taken);
+    _enrol.recoveryFormer = <BundleNeighbour>[
+      for (final n in (j['recoveryFormer'] as List? ?? const []))
+        if (n is List && n.length == 2)
+          (ip: base64Decode(n[0] as String), port: n[1] as int)
+    ];
+    final fork = j['forkSeenAt'] as int?;
+    _enrol.forkSeenAt =
+        fork == null ? null : DateTime.fromMillisecondsSinceEpoch(fork);
   }
 
   /// Writes the head: window, phase, and on a new device its request with
@@ -849,6 +1101,14 @@ extension CleonaServiceEnrolment on CleonaService {
         if (_enrol.found != null) 'found': base64Encode(_enrol.found!),
         'foundAt': _enrol.foundAt?.millisecondsSinceEpoch,
         'rejectedAtMs': _enrol.rejectedAtMs,
+        // §13.6, §13.3.4 (D-103): the running recovery and the takeover.
+        'recoveryOpen': _enrol.recoveryOpen,
+        'recoveryTotal': _enrol.recoveryTotal,
+        'recoveryTakenAt': _enrol.recoveryTakenAt?.millisecondsSinceEpoch,
+        'recoveryFormer': [
+          for (final n in _enrol.recoveryFormer) [base64Encode(n.ip), n.port]
+        ],
+        'forkSeenAt': _enrol.forkSeenAt?.millisecondsSinceEpoch,
       });
     } catch (e) {
       _log.warn('Enrolment: state not written ($e)');

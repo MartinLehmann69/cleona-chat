@@ -49,6 +49,14 @@ import 'dart:io' show InternetAddress;
 import 'dart:math' show Random;
 import 'dart:typed_data';
 
+/// The call port of the search and neighbour calls (V4.2 §7.2 table
+/// "port | 41341", §11.1: "their own socket on port 41341"). No data port may
+/// equal it: the listener binds it with reuseAddress/reusePort, a data port on
+/// the same number binds silently and the kernel hands its unicast datagrams
+/// to the listener (S413, smoke_link_preview_group run 12). One definition
+/// site — the call, the draw of the host and the app's port check read it.
+const int kCallPort = 41341;
+
 /// Code byte + data port (u16). After that comes the identifier up to the end.
 const int _headerLength = 1 + 2;
 

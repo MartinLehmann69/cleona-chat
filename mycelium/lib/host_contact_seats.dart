@@ -4,9 +4,10 @@
 ///
 /// The neighbourhood knows no identities and no contacts; the host is the
 /// only place that holds the node AND all mailboxes (§4.5.1). It therefore
-/// sets the two predicates the contact seats need
-/// (`neighbourhood_contacts.dart`) and decides what the contacts of each
-/// identity learn when the fixed neighbours change.
+/// sets the predicates the contact seats need (`neighbourhood_contacts.dart`:
+/// a contact's device, excluded, and — D-113 — what its `0x25` said about its
+/// reachability) and decides what the contacts of each identity learn when
+/// the fixed neighbours change: only who holds a place.
 ///
 /// ── A CONTACT'S DEVICE ─────────────────────────────────────────────────
 ///
@@ -35,6 +36,7 @@ library;
 
 import 'dart:io';
 
+import 'package:mycelium/neighbour_evidence.dart';
 import 'package:mycelium/neighbour_keys.dart';
 import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
 import 'package:mycelium/own_segment.dart' show withinOwnSegment;
@@ -61,6 +63,29 @@ extension HostContactSeats on Host {
         .any((p) => p.contacts.any((k) => deviceOfContact(k, x)));
     n.neverFixedNeighbour = (x) => mailboxes.any((p) => p.contacts
         .any((k) => k.neverFixedNeighbour && deviceOfContact(k, x)));
+    // D-113 (§5.2, §8.1): a contact's place needs evidenced reachability, as
+    // the device's own `0x25` says (`neighbour_evidence.dart`).
+    n.reachabilitySaid = (x) => node.evidenceOf(x.id);
+    // D-115 (§5.2): the one hand-over of this start or network change went.
+    n.handOverOnce.onWaived = (holder, to) => report?.call('card seat: '
+        '${holder.key} says reachability not evidenced — it stays; the one '
+        'hand-over of this start or network change went already, not to '
+        '${to.key} (§5.2, D-115)');
+    node.codeRoute.registration.onEvidence = (id, by, said) {
+      if (!node.evidenceHeard(id, said)) return;
+      final x = n.all.where((m) => m.id == id).firstOrNull;
+      report?.call('fixed neighbour $by: its 0x25 says reachability '
+          '${switch (said) {
+            true => 'evidenced',
+            false => 'not evidenced',
+            null => 'nothing (an earlier 4.2 version) — address rule',
+          }} (§8.1, D-113)');
+      // §5.2: "gives up its place at that edge" — the edge is this `0x25`;
+      // since D-114 the card's seat too (a standing invitation keeps it).
+      if (said == false && x != null && (x.contactSeat > 0 || x.fixed)) {
+        contactSeatsEdge();
+      }
+    };
   }
 
   /// EDGE "a contact arose or its mark changed": the contact seats are

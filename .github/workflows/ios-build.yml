@@ -36,6 +36,17 @@
 #                              chat.cleona.cleona, named "Cleona Distribution" (the
 #                              name in ios/ExportOptions.plist and the Xcode project). A Development or
 #                              Ad-Hoc profile will NOT work for TestFlight upload.
+#   (CERT_P12_* and PROVISIONING_PROFILE_B64 serve the iPhone job only.)
+#   DEVID_CERT_P12_BASE64    — "Developer ID Application: … (APPLE_TEAM_ID)"
+#                              certificate + key as a legacy PKCS12 (base64) — the
+#                              macOS job signs the app, the daemon and the DMG with
+#                              it and notarizes the DMG (D-100, v4_2 §22.6). Apple:
+#                              "You can only notarize apps that you sign with a
+#                              Developer ID certificate" ("Resolving common
+#                              notarization issues").
+#   DEVID_CERT_P12_PASSWORD  — Password for that .p12 file
+#   The macOS job also uses APPLE_TEAM_ID (identity check) and the three
+#   APP_STORE_CONNECT_* secrets (notarytool).
 #
 # Parallelization (S206):
 #   - iOS + macOS jobs run on separate runners in parallel
@@ -686,46 +697,226 @@ jobs:
       # macOS target linked, and every required dylib landed in
       # Contents/Frameworks. Signing, DMG packaging and notarization produce a
       # distributable — that belongs to a release, not to a push.
-      - name: Sign app bundle
+      #
+      # D-100 (v4_2 §22.6): the release app is signed with "Developer ID
+      # Application" and notarized; every step of this tail fails red. Until
+      # S413 the app was signed ad hoc (`--sign -`) and "Notarize DMG" ended
+      # green on `status: Invalid` (Apple run 42124598440, v4.2.6-beta) through
+      # `|| echo …` and `|| true`. scripts/check-apple-signing-fail-closed.py
+      # (preflight) keeps that from coming back.
+      - name: Install Developer ID certificate
         if: env.IS_RELEASE == 'true'
         env:
-          CERT_P12_BASE64: ${{ secrets.CERT_P12_BASE64 }}
-          CERT_P12_PASSWORD: ${{ secrets.CERT_P12_PASSWORD }}
+          DEVID_CERT_P12_BASE64: ${{ secrets.DEVID_CERT_P12_BASE64 }}
+          DEVID_CERT_P12_PASSWORD: ${{ secrets.DEVID_CERT_P12_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
-          CERT_PATH="$RUNNER_TEMP/distribution.p12"
-          echo "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          set -euo pipefail
+          : "${APPLE_TEAM_ID:?APPLE_TEAM_ID secret is empty}"
+          : "${DEVID_CERT_P12_BASE64:?DEVID_CERT_P12_BASE64 secret is empty}"
+          CERT_PATH="$RUNNER_TEMP/developer-id.p12"
+          printf '%s' "$DEVID_CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
 
-          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          # A keychain of its own, as in the iPhone job's "Install distribution
+          # certificate"; removed by "Cleanup keychain".
+          KEYCHAIN_PATH="$RUNNER_TEMP/devid-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
-
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import "$CERT_PATH" -P "$CERT_P12_PASSWORD" \
+          security import "$CERT_PATH" -P "$DEVID_CERT_P12_PASSWORD" \
             -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          rm -f "$CERT_PATH"
           security set-key-partition-list -S apple-tool:,apple: \
             -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
 
+          # Exactly one "Developer ID Application: … (<team>)" identity, chosen
+          # by its SHA-1 hash — a name could match an Apple Distribution or a
+          # second Developer ID identity as well. Anything else is red.
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          printf '%s\n' "$IDENTITIES"
+          MATCH="$(printf '%s\n' "$IDENTITIES" \
+            | awk -v team="($APPLE_TEAM_ID)\"" 'index($0, "\"Developer ID Application: ") && substr($0, length($0) - length(team) + 1) == team')"
+          COUNT="$(printf '%s\n' "$MATCH" | awk 'NF' | wc -l | tr -d ' ')"
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::expected exactly one 'Developer ID Application: … (team)' identity in DEVID_CERT_P12_BASE64, found $COUNT — D-100 forbids any other signature"
+            exit 1
+          fi
+          HASH="$(printf '%s\n' "$MATCH" | awk '{print $2}')"
+          NAME="$(printf '%s\n' "$MATCH" | sed -n 's/^[^"]*"\(.*\)"$/\1/p')"
+          if ! printf '%s' "$HASH" | grep -Eq '^[0-9A-F]{40}$'; then
+            echo "::error::could not read the SHA-1 hash of the Developer ID identity"
+            exit 1
+          fi
+          echo "Signing identity: $NAME ($HASH)"
+          echo "DEVID_IDENTITY=$HASH" >> "$GITHUB_ENV"
+          echo "DEVID_NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Sign app bundle
+        # Apple, "Creating distribution-signed code for macOS": "Sign code from
+        # the inside out", "Don't pass the --deep option to codesign when you
+        # sign code", "add the --timestamp option to include a secure
+        # timestamp", "-o runtime" for every main executable, "-i <BundleID>"
+        # for nonbundled code, entitlements only on main executables ("Don't
+        # apply entitlements to library code").
+        if: env.IS_RELEASE == 'true'
+        env:
+          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
+        run: |
+          set -euo pipefail
+          : "${DEVID_IDENTITY:?no identity from Install Developer ID certificate}"
+          BUILD_CONFIG="Debug"
+          APP_ENTITLEMENTS="macos/Runner/DebugProfile.entitlements"
+          if [ "$BUILD_CHANNEL" = "live" ]; then
+            BUILD_CONFIG="Release"
+            APP_ENTITLEMENTS="macos/Runner/Release.entitlements"
+          fi
+          APP_PATH="build/macos/Build/Products/$BUILD_CONFIG/Cleona.app"
+          INFO="$APP_PATH/Contents/Info.plist"
+          MAIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$INFO")"
+          BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO")"
+          DAEMON_REL="Contents/MacOS/bin/cleona-daemon"
+
+          # Entitlements re-serialised without comments (plutil also lints).
+          plutil -convert xml1 -o "$RUNNER_TEMP/app.entitlements" "$APP_ENTITLEMENTS"
+          plutil -convert xml1 -o "$RUNNER_TEMP/daemon.entitlements" macos/Runner/Daemon.entitlements
+
+          # Every Mach-O of the bundle is assigned to exactly one code item.
+          # Whatever does not fit the known layout stops the run instead of
+          # being guessed at: a nested .app/.appex/.xpc/.bundle, a Mach-O in a
+          # framework other than its own binary, an executable that is neither
+          # the app nor the daemon.
+          LIBS=()
+          FRAMEWORKS=""
+          while IFS= read -r -d '' f; do
+            case "$(file -b "$f")" in *Mach-O*) ;; *) continue ;; esac
+            rel="${f#"$APP_PATH"/}"
+            [ "$rel" = "Contents/MacOS/$MAIN_NAME" ] && continue
+            [ "$rel" = "$DAEMON_REL" ] && continue
+            case "$rel" in
+              *.app/*|*.appex/*|*.xpc/*|*.bundle/*|*.plugin/*|*.systemextension/*)
+                echo "::error::nested code bundle at $rel — the signing step knows no order for it; extend it deliberately"
+                exit 1 ;;
+              Contents/Frameworks/*.framework/*)
+                inner="${rel#Contents/Frameworks/}"
+                fw="${inner%%.framework/*}"
+                bin="${inner#"$fw".framework/}"
+                case "$bin" in
+                  "$fw"|Versions/*/"$fw")
+                    case "$bin" in Versions/*/*/*) echo "::error::unexpected Mach-O in a framework: $rel"; exit 1 ;; esac
+                    FRAMEWORKS="$FRAMEWORKS$APP_PATH/Contents/Frameworks/$fw.framework"$'\n' ;;
+                  *) echo "::error::unexpected Mach-O in a framework: $rel"; exit 1 ;;
+                esac ;;
+              *.dylib) LIBS+=("$f") ;;
+              *) echo "::error::unexpected Mach-O executable: $rel"; exit 1 ;;
+            esac
+          done < <(find "$APP_PATH" -type f -print0)
+          if [ ! -f "$APP_PATH/$DAEMON_REL" ]; then
+            echo "::error::$DAEMON_REL missing — nothing to sign for the daemon"
+            exit 1
+          fi
+
+          # 1. Libraries (Contents/Frameworks/*.dylib, Contents/MacOS/lib/).
+          # (`${LIBS[@]+…}`: an empty array under `set -u` is an error in bash 3.2.)
+          for f in ${LIBS[@]+"${LIBS[@]}"}; do
+            echo "sign library: ${f#"$APP_PATH"/}"
+            codesign --force --timestamp --sign "$DEVID_IDENTITY" "$f"
+          done
+          # 2. Frameworks (FlutterMacOS, App, plugin and native-asset frameworks).
+          while IFS= read -r fw; do
+            [ -n "$fw" ] || continue
+            echo "sign framework: ${fw#"$APP_PATH"/}"
+            codesign --force --timestamp --sign "$DEVID_IDENTITY" "$fw"
+          done < <(printf '%s' "$FRAMEWORKS" | sort -u)
+          # 3. The daemon: nonbundled code, so its identifier is set by hand.
+          #    It must stay the same in every release — the keychain access
+          #    list (D-95) and the designated requirement follow it.
+          codesign --force --timestamp --options runtime \
+            --entitlements "$RUNNER_TEMP/daemon.entitlements" \
+            -i "$BUNDLE_ID.cleona-daemon" \
+            --sign "$DEVID_IDENTITY" "$APP_PATH/$DAEMON_REL"
+          # 4. The app itself, last.
+          codesign --force --timestamp --options runtime \
+            --entitlements "$RUNNER_TEMP/app.entitlements" \
+            --sign "$DEVID_IDENTITY" "$APP_PATH"
+
+      - name: Verify app signature
+        if: env.IS_RELEASE == 'true'
+        env:
+          BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
           BUILD_CONFIG="Debug"
           if [ "$BUILD_CHANNEL" = "live" ]; then BUILD_CONFIG="Release"; fi
           APP_PATH="build/macos/Build/Products/$BUILD_CONFIG/Cleona.app"
+          MAIN_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Contents/Info.plist")"
+          DAEMON="$APP_PATH/Contents/MacOS/bin/cleona-daemon"
 
-          for f in "$APP_PATH/Contents/Frameworks"/*.dylib \
-                   "$APP_PATH/Contents/MacOS/lib"/*.dylib \
-                   "$APP_PATH/Contents/MacOS/bin/cleona-daemon"; do
-            [ -e "$f" ] || continue
-            codesign --force --sign - "$f" || true
-          done
-          codesign --force --deep --sign - "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+
+          # Each Mach-O: Developer ID signer of this team, secure timestamp
+          # (`Timestamp=`; without one codesign prints `Signed Time=`).
+          BAD=0
+          while IFS= read -r -d '' f; do
+            case "$(file -b "$f")" in *Mach-O*) ;; *) continue ;; esac
+            INFO="$(codesign -dvvv "$f" 2>&1)"
+            if ! printf '%s\n' "$INFO" | grep -qxF "Authority=$DEVID_NAME"; then
+              echo "::error::not signed by $DEVID_NAME: ${f#"$APP_PATH"/}"; BAD=1
+            fi
+            if ! printf '%s\n' "$INFO" | grep -qxF "TeamIdentifier=$APPLE_TEAM_ID"; then
+              echo "::error::wrong team: ${f#"$APP_PATH"/}"; BAD=1
+            fi
+            if ! printf '%s\n' "$INFO" | grep -q '^Timestamp='; then
+              echo "::error::no secure timestamp: ${f#"$APP_PATH"/}"; BAD=1
+            fi
+          done < <(find "$APP_PATH" -type f -print0)
+
+          # Main executables: Hardened Runtime, no get-task-allow ("Resolving
+          # common notarization issues": notarization fails with it), and the
+          # entitlements that were meant for them.
+          check_exe() {
+            local f="$1"; shift
+            local info ents key
+            info="$(codesign -dvvv "$f" 2>&1)"
+            if ! printf '%s\n' "$info" | grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime'; then
+              echo "::error::Hardened Runtime missing: ${f#"$APP_PATH"/}"; BAD=1
+            fi
+            ents="$(codesign -d --entitlements - --xml "$f" 2>/dev/null)"
+            if printf '%s' "$ents" | grep -q 'com.apple.security.get-task-allow'; then
+              echo "::error::get-task-allow in ${f#"$APP_PATH"/}"; BAD=1
+            fi
+            for key in "$@"; do
+              if ! printf '%s' "$ents" | grep -qF "<key>$key</key>"; then
+                echo "::error::entitlement $key missing on ${f#"$APP_PATH"/}"; BAD=1
+              fi
+            done
+          }
+          check_exe "$APP_PATH/Contents/MacOS/$MAIN_NAME" \
+            com.apple.security.device.audio-input com.apple.security.device.camera
+          check_exe "$DAEMON" com.apple.security.device.audio-input
+          if [ "$BAD" -ne 0 ]; then exit 1; fi
+
+          # The signed daemon starts under the Hardened Runtime: an unknown
+          # switch ends it with 64 in _parseArgs, before any file, lock or
+          # socket is made (lib/service_daemon.dart). A code-signing
+          # violation would kill it before Dart's main.
+          PROBE_RC=0
+          PROBE_OUT="$("$DAEMON" --signing-probe 2>&1)" || PROBE_RC=$?
+          printf '%s\n' "$PROBE_OUT"
+          if [ "$PROBE_RC" -ne 64 ] || ! printf '%s' "$PROBE_OUT" | grep -q 'unknown switch "--signing-probe"'; then
+            echo "::error::the signed daemon did not reach its main (exit $PROBE_RC)"
+            exit 1
+          fi
+          echo "Signature verified: $DEVID_NAME, Hardened Runtime, secure timestamps, daemon starts"
 
       - name: Create DMG
         if: env.IS_RELEASE == 'true'
         env:
           BUILD_CHANNEL: ${{ steps.channel.outputs.channel }}
         run: |
+          set -euo pipefail
           BUILD_CONFIG="Debug"
           if [ "$BUILD_CHANNEL" = "live" ]; then BUILD_CONFIG="Release"; fi
           APP_PATH="build/macos/Build/Products/$BUILD_CONFIG/Cleona.app"
@@ -738,29 +929,63 @@ jobs:
             mv "$APP_PATH" "$(dirname "$APP_PATH")/Cleona Beta.app"
             APP_PATH="$(dirname "$APP_PATH")/Cleona Beta.app"
           fi
+          codesign --verify --deep --strict "$APP_PATH"
           hdiutil create -volname "$VOLUME" \
             -srcfolder "$APP_PATH" \
             -ov -format UDZO \
             "$DMG_PATH"
+          # Disk images are signed with Developer ID Application as well
+          # ("Resolving common notarization issues").
+          codesign --force --timestamp --sign "$DEVID_IDENTITY" "$DMG_PATH"
+          codesign --verify --strict --verbose=2 "$DMG_PATH"
+          # Into a variable first: `codesign | grep -q` under pipefail can turn
+          # red through SIGPIPE when grep exits before codesign has written.
+          DMG_INFO="$(codesign -dvvv "$DMG_PATH" 2>&1)"
+          if ! printf '%s\n' "$DMG_INFO" | grep -qxF "Authority=$DEVID_NAME"; then
+            echo "::error::the DMG is not signed by $DEVID_NAME"
+            exit 1
+          fi
 
       - name: Notarize DMG
+        # Apple, "Customizing the notarization workflow": `--wait` exits "only
+        # after the Notary service finishes processing the submission"; an
+        # accepted submission reads `status: Accepted`, a rejected one
+        # `"status": "Invalid"`; "Always check the log file, even if
+        # notarization succeeds". Anything but Accepted is red (D-100).
         if: env.IS_RELEASE == 'true'
+        timeout-minutes: 60
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER: ${{ secrets.APP_STORE_CONNECT_ISSUER }}
           APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
         run: |
+          set -euo pipefail
+          DMG_PATH="build/cleona-chat-macos-arm64.dmg"
           KEY_PATH="$RUNNER_TEMP/asc-key.p8"
-          echo "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
+          printf '%s' "$APP_STORE_CONNECT_KEY" | base64 --decode > "$KEY_PATH"
+          AUTH=(--key "$KEY_PATH" --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER")
 
-          xcrun notarytool submit \
-            build/cleona-chat-macos-arm64.dmg \
-            --key "$KEY_PATH" \
-            --key-id "$APP_STORE_CONNECT_KEY_ID" \
-            --issuer "$APP_STORE_CONNECT_ISSUER" \
-            --wait || echo "Notarization failed or timed out — DMG still available as artifact"
+          SUBMIT_JSON="$RUNNER_TEMP/notary-submit.json"
+          SUBMIT_RC=0
+          xcrun notarytool submit "$DMG_PATH" "${AUTH[@]}" \
+            --wait --output-format json > "$SUBMIT_JSON" || SUBMIT_RC=$?
+          cat "$SUBMIT_JSON"
+          echo
+          if ! ID="$(plutil -extract id raw -o - "$SUBMIT_JSON" 2>/dev/null)"; then ID=""; fi
+          if ! STATUS="$(plutil -extract status raw -o - "$SUBMIT_JSON" 2>/dev/null)"; then STATUS=""; fi
+          echo "notarytool: id='$ID' status='$STATUS' exit=$SUBMIT_RC"
+          if [ -n "$ID" ]; then
+            echo "::group::Notarization log"
+            xcrun notarytool log "$ID" "${AUTH[@]}"
+            echo "::endgroup::"
+          fi
+          if [ "$STATUS" != "Accepted" ] || [ "$SUBMIT_RC" -ne 0 ]; then
+            echo "::error::notarization not accepted (status '$STATUS', exit $SUBMIT_RC) — the log above names the cause; no DMG is released (D-100)"
+            exit 1
+          fi
 
-          xcrun stapler staple build/cleona-chat-macos-arm64.dmg || true
+          xcrun stapler staple "$DMG_PATH"
+          xcrun stapler validate "$DMG_PATH"
 
       - name: Upload DMG artifact
         if: env.IS_RELEASE == 'true'
@@ -771,5 +996,7 @@ jobs:
           retention-days: 30
 
       - name: Cleanup keychain
+        # The keychain of "Install Developer ID certificate"; absent in a
+        # VERIFY run, hence tolerated here (this step signs nothing).
         if: always()
-        run: security delete-keychain "$RUNNER_TEMP/app-signing.keychain-db" 2>/dev/null || true
+        run: security delete-keychain "$RUNNER_TEMP/devid-signing.keychain-db" 2>/dev/null || true

@@ -126,3 +126,29 @@ void traceHandOn(void Function(String) say, Uint8List p, InternetAddress target,
       '$port as transmission $as: ${how.name} after '
       '${DateTime.now().difference(since).inMilliseconds} ms')));
 }
+
+/// Test-only measurement (S419, `smoke_kem_rotation_mailbox`, RCA
+/// `S419-RCA-SMOKE-KEM-ROTATION-VOLL.md` D3): one line per end mark sent by
+/// the recipient and per end mark that reached the sender. Off by default —
+/// a clean transmission writes nothing in the field (owner decision
+/// 07.10.2026 "A", see the head of this file); only a smoke switches it on.
+bool traceEndMarks = false;
+
+/// The recipient holds [identifier] whole ([count] parts) and sends its end
+/// mark to [to]:[port].
+void traceSplitEndMarkSent(void Function(String) say, Uint8List identifier,
+    int count, InternetAddress to, int port) {
+  if (!traceEndMarks) return;
+  say('TRACE split in: transmission ${hexShort(identifier)} whole '
+      '($count parts) — end mark sent to ${to.address}:$port');
+}
+
+/// The sender got the end mark for [identifier] from [from]:[port]; [how]
+/// is null while the transmission still runs (it is then delivered).
+void traceSplitEndMarkCame(void Function(String) say, Uint8List identifier,
+    InternetAddress from, int port, SendEnd? how) {
+  if (!traceEndMarks) return;
+  say('TRACE split out: end mark for ${hexShort(identifier)} from '
+      '${from.address}:$port — '
+      '${how == null ? "running: delivered" : "kept (${how.name}): released only"}');
+}

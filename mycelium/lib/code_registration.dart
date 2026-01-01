@@ -13,8 +13,16 @@
 /// ```
 /// 0x24 | day u32 BE | piece u8 | pieces u8 | count u8 | device code 16 B
 ///                                                     | count × 16 B
-/// 0x25 | day u32 BE | piece u8 [| record key 32 B]
+/// 0x25 | day u32 BE | piece u8 [| record key 32 B] [| evidence u8]
 /// ```
+///
+/// Two bits of the pieces byte say what the device reads in the `0x25`:
+/// 0x80 the record key (S407 a'), 0x40 the evidence byte (D-113, S417) —
+/// `1` when the neighbour's own reachability is evidenced (§11.8a), else
+/// `0`. A neighbour sends each part only to a `0x24` with its bit, so a
+/// 4.2.3 device (no bit; reads only 6 B) and a 4.2.4–4.2.6 device (bit 0x80;
+/// reads only 6 or 38 B) never get a length they refuse. Both read the pieces
+/// byte only into their log (4.2.3's refusal `p[4] >= p[5]` stays false).
 ///
 /// Every piece stands for itself: the neighbour registers what arrives, and
 /// needs no order (`code_table.dart`). The piece counter only says
@@ -75,7 +83,8 @@ const int kPieceLength = _kHeader + kCodesPerPiece * kCodeLength;
 
 /// Length of a `0x25`: kind, day, piece — and, from a neighbour that writes
 /// an address record (§11.9), its record key (S407 a'): the registering
-/// device names it with the neighbour's address to its contacts.
+/// device names it with the neighbour's address to its contacts. The
+/// evidence byte (D-113) adds one: 6, 7, 38 or 39 B, each length one form.
 const int kRegisteredLength = 1 + 4 + 1;
 const int kRegisteredKeyedLength = kRegisteredLength + 32;
 
@@ -86,28 +95,35 @@ Uint8List registrationPacket(Uint8List piece) =>
       ..setRange(1, 1 + piece.length, piece);
 
 /// The `0x25` answering the piece [piece] of day [day], with [recordKey]
-/// when this node writes an address record.
-Uint8List registeredPacket(int day, int piece, [Uint8List? recordKey]) {
-  final p = Uint8List(recordKey == null ? kRegisteredLength : kRegisteredKeyedLength)
-    ..[0] = kinds.kRegistered;
+/// when this node writes an address record, and with the evidence byte when
+/// [evidenced] is not `null` — only for a `0x24` that set bit 0x40 (D-113).
+Uint8List registeredPacket(int day, int piece,
+    [Uint8List? recordKey, bool? evidenced]) {
+  final head = recordKey == null ? kRegisteredLength : kRegisteredKeyedLength;
+  final p = Uint8List(head + (evidenced == null ? 0 : 1))..[0] = kinds.kRegistered;
   ByteData.sublistView(p).setUint32(1, day);
   p[5] = piece;
-  if (recordKey != null) p.setRange(kRegisteredLength, p.length, recordKey);
+  if (recordKey != null) p.setRange(kRegisteredLength, head, recordKey);
+  if (evidenced != null) p[head] = evidenced ? 1 : 0;
   return p;
 }
 
-/// Reads a `0x25`; `null` if it is none. Never throws.
-({int day, int piece, Uint8List? recordKey})? registeredRead(Uint8List p) {
-  if ((p.length != kRegisteredLength && p.length != kRegisteredKeyedLength) ||
-      p[0] != kinds.kRegistered) {
-    return null;
-  }
+/// Reads a `0x25`; `null` if it is none. Never throws. [evidenced] is `null`
+/// when the `0x25` carries no evidence byte — a neighbour of an earlier 4.2
+/// version says nothing about its reachability (§5.2).
+({int day, int piece, Uint8List? recordKey, bool? evidenced})? registeredRead(
+    Uint8List p) {
+  final keyed = p.length == kRegisteredKeyedLength || p.length == kRegisteredKeyedLength + 1;
+  final plain = p.length == kRegisteredLength || p.length == kRegisteredLength + 1;
+  if (!(keyed || plain) || p[0] != kinds.kRegistered) return null;
+  final head = keyed ? kRegisteredKeyedLength : kRegisteredLength;
   return (
     day: ByteData.sublistView(p).getUint32(1),
     piece: p[5],
-    recordKey: p.length == kRegisteredKeyedLength
-        ? Uint8List.fromList(Uint8List.sublistView(p, kRegisteredLength))
+    recordKey: keyed
+        ? Uint8List.fromList(Uint8List.sublistView(p, kRegisteredLength, head))
         : null,
+    evidenced: p.length == head ? null : p[head] == 1,
   );
 }
 
@@ -121,6 +137,11 @@ Uint8List registeredPacket(int day, int piece, [Uint8List? recordKey]) {
 /// pieces byte for nothing but its log, so the bit costs it nothing either.
 const int kReadsKeyedRegistered = kinds.kBitReadsKeyedRegistered;
 
+/// Bit in the pieces byte of a `0x24`: the registering device reads a `0x25`
+/// that ends in the evidence byte (D-113, §8.1). Older 4.2 devices neither
+/// set it nor answer it — their `0x25` says nothing (§5.2: address rule).
+const int kReadsEvidenceRegistered = kinds.kBitReadsEvidenceRegistered;
+
 /// A read piece.
 typedef RegisterPiece = ({
   int day,
@@ -128,6 +149,7 @@ typedef RegisterPiece = ({
   int piece,
   int pieces,
   bool readsKey,
+  bool readsEvidence,
   List<Uint8List> codes
 });
 
@@ -160,7 +182,7 @@ List<Uint8List> registrationBuild(
         final b = BytesBuilder(copy: false)
           ..add((ByteData(4)..setUint32(0, day)).buffer.asUint8List())
           ..addByte(s)
-          ..addByte(pieces | kReadsKeyedRegistered) // S407 a', see there
+          ..addByte(pieces | kReadsKeyedRegistered | kReadsEvidenceRegistered) // S407 a', D-113
           ..addByte(kCodesPerPiece)
           ..add(device);
         for (var i = 0; i < kCodesPerPiece; i++) {
@@ -176,7 +198,7 @@ RegisterPiece? registrationRead(Uint8List p) {
   if (p.length < _kHeader) return null;
   final d = ByteData.sublistView(p);
   final count = p[6];
-  final pieces = p[5] & ~kReadsKeyedRegistered;
+  final pieces = p[5] & ~(kReadsKeyedRegistered | kReadsEvidenceRegistered);
   if (p.length != _kHeader + count * kCodeLength || p[4] >= pieces) return null;
   return (
     day: d.getUint32(0),
@@ -184,6 +206,7 @@ RegisterPiece? registrationRead(Uint8List p) {
     piece: p[4],
     pieces: pieces,
     readsKey: p[5] & kReadsKeyedRegistered != 0,
+    readsEvidence: p[5] & kReadsEvidenceRegistered != 0,
     codes: [
       for (var i = 0; i < count; i++)
         Uint8List.fromList(Uint8List.sublistView(

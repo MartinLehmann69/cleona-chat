@@ -43,7 +43,7 @@ import 'package:mycelium/node.dart';
 import 'package:mycelium/neighbour_keys.dart';
 import 'package:mycelium/node_outside.dart' show NodeOutside;
 import 'package:mycelium/node_silence.dart';
-import 'package:mycelium/node_helpers.dart' show hexFrom, shortFrom;
+import 'package:mycelium/node_helpers.dart' show hexFrom, shortFrom, ownTarget;
 import 'package:mycelium/ladder.dart' show Shipment;
 import 'package:mycelium/pair.dart';
 import 'package:mycelium/kinds.dart' as kinds;
@@ -52,8 +52,7 @@ import 'package:mycelium/split_trace.dart' show traceHandOn;
 import 'package:mycelium/forward.dart';
 import 'package:mycelium/forward_family.dart';
 
-/// How long after a `0x21` a receipt (also from step 4) is
-/// waited for before ONE `0x23` goes out.
+/// How long after a `0x21` a receipt (also from step 4) is waited for before ONE `0x23` goes out.
 const Duration kRouteLossWindow = Duration(seconds: 60);
 
 /// At most one `0x23` per contact in this interval (§8.1).
@@ -95,8 +94,7 @@ class CodeRoute {
   /// ([out] `false`) or goes out — for probes and the statistics.
   void Function(Uint8List packet, bool out)? recording;
 
-  /// Changeable ONLY for tests.
-  DateTime Function() now = DateTime.now;
+  DateTime Function() now = DateTime.now; // this and the next: changeable ONLY for tests
   Duration routeLossWindow = kRouteLossWindow;
 
   final CodeTable table;
@@ -149,8 +147,7 @@ class CodeRoute {
 
   int get _today => utcDay(now());
 
-  /// Sending, answer and re-send of the `0x24` pieces (§8.1).
-  late final RegistrationSend registration;
+  late final RegistrationSend registration; // sending, answer, re-send of the 0x24 pieces (§8.1)
 
   /// The edge "the UTC day changes" (§8.1).
   late final UtcDayEdge _day = UtcDayEdge(edge, () => now());
@@ -209,11 +206,13 @@ class CodeRoute {
     codeMoveAsk(_k, a.device, from, fromPort); // §11.8.9: moves only on an answer
     final by = CardAddress(Uint8List.fromList(from.rawAddress), fromPort);
     if (a.readsKey) _k.readsKeysAt(by); // S407: a contact's device shows it
-    _out(registeredPacket(a.day, a.piece, a.readsKey ? _k.publisherKey : null), by);
+    final e = a.readsEvidence ? _k.reachabilityEvidenced : null; // D-113: only to whom reads it
+    _out(registeredPacket(a.day, a.piece, a.readsKey ? _k.publisherKey : null, e), by);
     _k.report('0x24 registration from $at: piece ${a.piece + 1}/${a.pieces} day '
         '${a.day}, $taken/${a.codes.length} accepted, first '
         '${a.codes.isEmpty ? "-" : shortFrom(hexFrom(a.codes.first))}, table '
-        '${table.countCodes} code(s) / ${table.countDevices} device(s) — 0x25 back');
+        '${table.countCodes} code(s) / ${table.countDevices} device(s) — 0x25 back'
+        '${e == null ? "" : ", evidence ${e ? 1 : 0}"}');
     return true;
   }
 
@@ -249,16 +248,18 @@ class CodeRoute {
     );
   }
 
-  /// [underCodeSendTo] with the one neighbour a card names — the first
-  /// contact (M1, §15.2) and its way back.
+  /// [underCodeSendTo] with the one neighbour a card names — first contact (M1, §15.2) and its way back.
   void underCodeSend(Uint8List code, CardAddress neighbour, Uint8List packet) =>
       underCodeSendTo(code, [neighbour], packet);
 
-  /// Sends [packet] under [code] to the recipient's fixed neighbours [next]
-  /// — ONE `0x22` via the own fixed neighbour, without one directly (§8.1,
+  /// Sends [packet] under [code] to the recipient's fixed neighbours [next] — named itself and holding
+  /// the code, first to its device (D-110), then ONE `0x22` via the own fixed neighbour, without one directly (§8.1,
   /// the choice of the first hop: `code_send.dart`; never [recipientAt], S408).
   void underCodeSendTo(Uint8List code, List<CardAddress> next, Uint8List packet, {List<CardAddress> recipientAt = const []}) {
     final inside = Forwarder.build(code: code, content: packet);
+    next = heldHereFirst(table.who(code), next, code: shortFrom(hexFrom(code)), report: _k.report,
+        direct: (a) => _out(inside, a), self: (a) => ownTarget(_k, a)); // §7.3 public address too
+    if (next.isEmpty) return;
     final n = _k.neighbourhood;
     final plan = stepThreePlan(
         fixed: n.fixedNeighbours,
@@ -282,8 +283,7 @@ class CodeRoute {
       retry.sent(hop, inside, plan.next, plan.later, plan.resort, shortFrom(hexFrom(code)));
       retry.watch(_out(Forwarder.buildDetour(plan.next, inside), hop), hop); // §11.3, fix B
     }
-    // AFTER sending (S392 B-3). THE funnel of every `0x20`/`0x22` of this
-    // node; the code prefix is the one handle to join two logs (proposal M).
+    // AFTER sending (S392 B-3): THE funnel of every `0x20`/`0x22`; the code prefix joins two logs (proposal M).
     _k.report('Step 3: ${plan.why} to ${plan.next.join(", ")}'
         '${hop == null ? "" : " (sent to $hop)"} '
         'under code ${shortFrom(hexFrom(code))} (${packet.length} B)');

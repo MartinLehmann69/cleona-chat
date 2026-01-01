@@ -11,8 +11,9 @@
 namespace {
 
 // Whether this bundle is a live build (v4_2 §26.2). The channel is compiled into
-// the Dart side only; data\channel is written by the release build. Without the
-// file a build counts as beta, like the Dart default.
+// the Dart side; data\channel is written by every build from the same define
+// (native/cleona_channel/network_channel.cmake). Without the file a build
+// counts as beta, like the Dart default.
 bool BundleIsLive() {
   wchar_t exe_path[MAX_PATH];
   if (!GetModuleFileNameW(nullptr, exe_path, MAX_PATH)) return false;

@@ -27,11 +27,27 @@
 /// bundle yet would lay an emptier, newer one over it (§13.3.2 "time of
 /// deposit — the newest of several copies wins").
 ///
+/// **Before a renewal (§13.3.4 "A retired device removes the identity",
+/// D-103).** The box first reads the values of the days since its own last
+/// deposit, from the day after it ([renewAsk]), and leaves what it finds with
+/// its holders; the application decides ([BundleBox.retiredBy]) whether a
+/// bundle among them continues this device's keys along the rotation chain.
+/// Then the box is retired: it lays nothing and asks nothing any more. One
+/// question per renewal, no packet of its own; a holder without anything
+/// answers `0x34` (§13.7). A device with siblings is never retired by a key
+/// change one of them made (D-107): the application says `behind`, the box
+/// lays nothing, asks again once its own collection round has ended (which
+/// brings the key package, §14.7 Type 16), and is held until released.
+///
+/// **For 7 days after a takeover (§13.3.4 "At a rotation").** The recovering
+/// device names the former fixed neighbours of the taken-over bundle first
+/// among the holders of its own deposits ([BundleBox.alsoNamed]) — there the
+/// previous device asks before its renewal.
+///
 /// Idle: nothing. A [BundleBox] sends only from an edge or a call.
 library;
 
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart' show CardAddress;
@@ -40,40 +56,10 @@ import 'package:mycelium/node_collect_edge.dart';
 import 'package:mycelium/node_first_contact_box.dart';
 import 'package:mycelium/node_post_box.dart';
 import 'package:mycelium/pair.dart' show dayValue, utcDay;
-import 'package:mycelium/post_box_deposit.dart'
-    show DayPair, Neighbour, Question, kAtMostAge, kAtMostValues;
+import 'package:mycelium/post_box_deposit.dart' show Neighbour;
+import 'package:mycelium/recovery_bundle_ask.dart';
 
-/// How long a bundle lies with its holders: the retention of every post-box
-/// entry (§8.2, D-6) — nothing longer, a holder cannot tell a bundle apart.
-const Duration kBundleLife = kAtMostAge;
-
-/// Renewed at an edge from this age of the last deposit on (E2-a): a device
-/// with an edge at least every four days keeps its bundle alive.
-const Duration kBundleRenewAfter = Duration(days: 3);
-
-/// The box key pair of UTC day `d` — from the application (E3-a).
-typedef BoxKeyFor = DayPair Function(int day);
-
-/// Is a renewal due at [now]? Never before a first deposit took place is it
-/// NOT due; a clock set back (last after now) makes it not due.
-bool bundleRenewDue(DateTime? last, DateTime now) =>
-    last == null || now.difference(last) >= kBundleRenewAfter;
-
-/// The ONE question of a search: the box values of today and the six days
-/// before, each with its pair (a holder hands out only against the proof).
-List<Question> bundleAsk(BoxKeyFor keyFor, DateTime now) {
-  final today = utcDay(now);
-  return [
-    for (var d = 0; d < kAtMostValues; d++)
-      if (keyFor(today - d) case final p) (value: dayValue(p.pk), pair: p),
-  ];
-}
-
-/// The holders a card names: its own addresses and its neighbour.
-List<Neighbour> cardHolders(List<CardAddress> own, CardAddress? neighbour) => [
-      for (final c in [...own, if (neighbour != null) neighbour])
-        (InternetAddress.fromRawAddress(Uint8List.fromList(c.address)), c.port),
-    ];
+export 'package:mycelium/recovery_bundle_ask.dart';
 
 /// The recovery bundle of ONE identity, at the node of its mailbox
 /// (`Mailbox.node`).
@@ -95,6 +81,30 @@ class BundleBox {
 
   /// What a search brought — sealed bundles, opened by the application.
   final void Function(List<Uint8List> found)? onFound;
+
+  /// Before a renewal: what the question of [renewAsk] found, sealed, and
+  /// whether the own collection round of that edge has ended. `retired`: the
+  /// box lays nothing any more (§13.3.4). `behind` (D-107): asked again once
+  /// that round has ended; still `behind` then, the box is [held]. `null`: no
+  /// check (the box renews as before D-103).
+  final BundleFinding Function(List<Uint8List> found, bool afterRound)?
+      retiredBy;
+
+  /// Holders named FIRST at a deposit, before the own fixed neighbours —
+  /// the former fixed neighbours for 7 days after a takeover (§13.3.4).
+  final List<CardAddress> Function()? alsoNamed;
+
+  /// Set once [retiredBy] said so: nothing is laid or asked any more.
+  bool retired = false;
+
+  /// Set when [retiredBy] said `behind` after the own round (D-107): nothing
+  /// is laid or asked until [release] — the application releases the box
+  /// once the device's keys caught up.
+  bool held = false;
+
+  /// The device's keys caught up with its sibling's (§14.7 Type 16): the box
+  /// renews again from its next edge.
+  void release() => held = false;
 
   /// When the last deposit was acknowledged, `null`: none known.
   DateTime? lastDeposit;
@@ -126,6 +136,8 @@ class BundleBox {
     this.now = DateTime.now,
     this.onDeposited,
     this.onFound,
+    this.retiredBy,
+    this.alsoNamed,
     this.lastDeposit,
     this.lastHolders = 0,
   });
@@ -154,24 +166,93 @@ class BundleBox {
   DateTime? get validUntil => lastDeposit?.add(kBundleLife);
 
   void _edge(List<Neighbour>? only, Future<int>? round) {
-    if (!_attached) return;
+    if (!_attached || retired || held) return;
     if (seeking) {
       unawaited(seek(withWhom: only));
     } else if (bundleRenewDue(lastDeposit, now())) {
-      unawaited(deposit());
-      // The post of this edge is fed after that bundle was built: once the
-      // round has ended and brought pieces, one more is laid with them.
-      unawaited(round?.then((pieces) {
-        if (_attached && !seeking && pieces > 0) unawaited(depositSoon());
-      }));
+      unawaited(_renew(round));
+    }
+  }
+
+  bool _renewRuns = false;
+
+  /// A renewal at an edge: first the question of [renewAsk], then the
+  /// deposit — unless the device is retired by what came.
+  Future<void> _renew(Future<int>? round) async {
+    if (_renewRuns) return;
+    _renewRuns = true;
+    try {
+      if (!await _mayLay(round)) return;
+    } finally {
+      _renewRuns = false;
+    }
+    if (!_attached || seeking) return;
+    unawaited(deposit());
+    // The post of this edge is fed after that bundle was built: once the
+    // round has ended and brought pieces, one more is laid with them.
+    unawaited(round?.then((pieces) {
+      if (_attached && !seeking && !retired && pieces > 0) {
+        unawaited(depositSoon());
+      }
+    }));
+  }
+
+  /// Reads the values since the own last deposit (they stay with their
+  /// holders) and asks [retiredBy] — a second time after the own [round]
+  /// when it says `behind` (D-107). `false`: retired, held, or detached
+  /// meanwhile — nothing is laid. Does not throw.
+  Future<bool> _mayLay(Future<int>? round) async {
+    final check = retiredBy;
+    final last = lastDeposit;
+    if (check == null || last == null) return true;
+    final ask = renewAsk(keyFor, last, now());
+    if (ask.isEmpty) return true;
+    final found = await _node.compartmentCollect(ask,
+        withWhom: _node.collectNeighbours, keep: true);
+    if (!_attached) return false;
+    _say('recovery bundle: before the renewal ${ask.length} day value(s) '
+        'read — ${found == null ? "not asked" : "${found.length} piece(s)"}');
+    if (found == null || found.isEmpty) return true;
+    var finding = _judged(check, found, false);
+    if (finding == BundleFinding.behind) {
+      // The pieces of the own round are fed synchronously; one turn of the
+      // event loop lets what they started finish (a key package taken over).
+      if (round == null) return false;
+      await round;
+      await Future<void>.delayed(Duration.zero);
+      if (!_attached) return false;
+      finding = _judged(check, found, true);
+      if (finding == BundleFinding.behind) {
+        held = true;
+        _say('recovery bundle: a newer bundle continues these keys and the '
+            'own round brought none of them — held, nothing laid (D-107)');
+        return false;
+      }
+    }
+    if (finding == BundleFinding.none) return true;
+    retired = true;
+    _say('recovery bundle: a newer bundle continues these keys — this device '
+        'is retired, nothing laid (§13.3.4)');
+    return false;
+  }
+
+  BundleFinding _judged(
+      BundleFinding Function(List<Uint8List>, bool) check,
+      List<Uint8List> found,
+      bool afterRound) {
+    try {
+      return check(List.of(found), afterRound);
+    } on Object catch (e) {
+      _say('recovery bundle: the check before the renewal failed — $e');
+      return BundleFinding.none;
     }
   }
 
   /// Lays the bundle under today's value (E1-b, E6-a). Returns how many
   /// holders acknowledged it; `0` also when nothing was laid (a deposit is
-  /// running, the recovery case, nothing to lay). Does not throw.
+  /// running, the recovery case, retired, nothing to lay). Does not throw.
   Future<int> deposit() {
-    if (_depositRuns || seeking) return Future.value(0);
+    if (_depositRuns || seeking || retired) return Future.value(0);
     final f = _deposit();
     _running = f.whenComplete(() => _running = null);
     return f;
@@ -192,12 +273,19 @@ class BundleBox {
       final at = now();
       final p = keyFor(utcDay(at));
       deposits++;
-      final named = [
-        for (final f in _node.neighbourhood.fixedNeighbours) f.asCardAddress
-      ];
+      final first = alsoNamed?.call() ?? const <CardAddress>[];
+      final named = <CardAddress>[...first];
+      for (final f in _node.neighbourhood.fixedNeighbours) {
+        final c = f.asCardAddress;
+        if (!named.any((n) => n.port == c.port && _sameIp(n.address, c.address))) {
+          named.add(c);
+        }
+      }
       final r = await _node.depositNamed(s, dayValue(p.pk), named);
-      _say('recovery bundle: ${s.length} B, ${named.length} own fixed '
-          'neighbour(s) named — ${r.$1 ? "placed" : "NOT placed"}, '
+      _say('recovery bundle: ${s.length} B, ${named.length - first.length} '
+          'own fixed neighbour(s)'
+          '${first.isEmpty ? "" : " after ${first.length} former one(s)"} '
+          'named — ${r.$1 ? "placed" : "NOT placed"}, '
           '${r.$2} holder(s) acknowledged');
       if (r.$2 > 0) {
         lastDeposit = at;
@@ -257,4 +345,12 @@ class BundleBox {
   }
 
   void _say(String s) => report?.call(s);
+}
+
+bool _sameIp(List<int> a, List<int> b) {
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
 }

@@ -625,13 +625,20 @@ class KeyMigration {
     return migrated;
   }
 
-  /// The master seed for the device-scoped envelope. Keyring first (§3.7);
+  /// The master seed for the device-scoped envelope. Keyring first (§4.5.2);
   /// the legacy `master_seed.json` only when a legacy key file ALREADY
   /// exists — reading it must never be the thing that creates `db.key`.
+  /// A keyring entry that is present but not readable (D-95) answers
+  /// `null` here: the caller then does nothing ("a keyring that does not
+  /// open right now"), which rewrites nothing.
   static Uint8List? _seedForDeviceScope(String baseDir) {
     if (KeyringService.isInitialized) {
-      final seed = KeyringService.instance.load('master_seed');
-      if (seed != null && seed.isNotEmpty) return seed;
+      try {
+        final seed = KeyringService.instance.load('master_seed');
+        if (seed != null && seed.isNotEmpty) return seed;
+      } on Exception {
+        return null;
+      }
     }
     final legacy = FileEncryption.legacyKeyBytes(baseDir);  // V3-TOUCH-OK: legacy key fallback, normative in v4_1 §4.5.3 (db.key is one of the six files that never move into the database)
     if (legacy == null) return null;

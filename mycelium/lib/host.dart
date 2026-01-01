@@ -375,8 +375,8 @@ class Host {
     node.readiness.onChange = (z, n) => onReadiness?.call(z, n);
     node.onAccepted =
         (to, who, origin) => mailboxFor(to)?.requestAccepted(who, origin);
-    node.onContactRequest =
-        (to, a) => mailboxFor(to)?.contactRequestReported(a);
+    node.onContactRequest = (to, a, fresh) =>
+        mailboxFor(to)?.contactRequestReported(a, fresh: fresh);
     node.onRecontact = (to, who, origin) =>
         mailboxFor(to)?.requestCheck(who, origin) == true;
     // For an ANSWER (delivery receipt, amendment) the ladder needs

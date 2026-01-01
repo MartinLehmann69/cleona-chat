@@ -83,17 +83,18 @@ const TwinSyncType$json = {
     {'1': 'TWIN_DEVICE_REVOKED', '2': 11},
     {'1': 'ROTATION_APPROVAL_REQUEST', '2': 12},
     {'1': 'ROTATION_APPROVAL_RESPONSE', '2': 13},
+    {'1': 'DEVICE_SET_CHANGED', '2': 16},
     {'1': 'TWIN_IDENTITY_DELETED', '2': 17},
     {'1': 'DELIVERY_MIRROR', '2': 18},
     {'1': 'KEM_ROTATED', '2': 19},
     {'1': 'RECONCILE', '2': 20},
     {'1': 'GROUP_LEFT', '2': 21},
     {'1': 'CHANNEL_JOINED', '2': 22},
+    {'1': 'IDENTITY_SET', '2': 23},
   ],
   '4': [
     {'1': 14, '2': 14},
     {'1': 15, '2': 15},
-    {'1': 16, '2': 16},
   ],
 };
 
@@ -104,10 +105,10 @@ final $typed_data.Uint8List twinSyncTypeDescriptor = $convert.base64Decode(
     'EAQSFQoRVFdJTl9SRUFEX1JFQ0VJUFQQBRIRCg1HUk9VUF9DUkVBVEVEEAYSEwoPUFJPRklMRV'
     '9DSEFOR0VEEAcSFAoQU0VUVElOR1NfQ0hBTkdFRBAIEhMKD0RFVklDRV9BTk5PVU5DRRAJEhIK'
     'DkRFVklDRV9SRU5BTUVEEAoSFwoTVFdJTl9ERVZJQ0VfUkVWT0tFRBALEh0KGVJPVEFUSU9OX0'
-    'FQUFJPVkFMX1JFUVVFU1QQDBIeChpST1RBVElPTl9BUFBST1ZBTF9SRVNQT05TRRANEhkKFVRX'
-    'SU5fSURFTlRJVFlfREVMRVRFRBAREhMKD0RFTElWRVJZX01JUlJPUhASEg8KC0tFTV9ST1RBVE'
-    'VEEBMSDQoJUkVDT05DSUxFEBQSDgoKR1JPVVBfTEVGVBAVEhIKDkNIQU5ORUxfSk9JTkVEEBYi'
-    'BAgOEA4iBAgPEA8iBAgQEBA=');
+    'FQUFJPVkFMX1JFUVVFU1QQDBIeChpST1RBVElPTl9BUFBST1ZBTF9SRVNQT05TRRANEhYKEkRF'
+    'VklDRV9TRVRfQ0hBTkdFRBAQEhkKFVRXSU5fSURFTlRJVFlfREVMRVRFRBAREhMKD0RFTElWRV'
+    'JZX01JUlJPUhASEg8KC0tFTV9ST1RBVEVEEBMSDQoJUkVDT05DSUxFEBQSDgoKR1JPVVBfTEVG'
+    'VBAVEhIKDkNIQU5ORUxfSk9JTkVEEBYSEAoMSURFTlRJVFlfU0VUEBciBAgOEA4iBAgPEA8=');
 
 @$core.Deprecated('Use devicePlatformDescriptor instead')
 const DevicePlatform$json = {
@@ -2130,6 +2131,10 @@ const DeviceRecord$json = {
     {'1': 'addresses', '3': 6, '4': 3, '5': 11, '6': '.cleona.PeerAddressProto', '10': 'addresses'},
     {'1': 'is_this_device', '3': 7, '4': 1, '5': 8, '10': 'isThisDevice'},
     {'1': 'device_node_id', '3': 8, '4': 1, '5': 12, '10': 'deviceNodeId'},
+    {'1': 'device_x25519_pk', '3': 9, '4': 1, '5': 12, '10': 'deviceX25519Pk'},
+    {'1': 'device_ml_kem_pk', '3': 10, '4': 1, '5': 12, '10': 'deviceMlKemPk'},
+    {'1': 'device_ed25519_pk', '3': 11, '4': 1, '5': 12, '10': 'deviceEd25519Pk'},
+    {'1': 'device_ml_dsa_pk', '3': 12, '4': 1, '5': 12, '10': 'deviceMlDsaPk'},
   ],
 };
 
@@ -2140,7 +2145,10 @@ final $typed_data.Uint8List deviceRecordDescriptor = $convert.base64Decode(
     'bGF0Zm9ybVIIcGxhdGZvcm0SHQoKZmlyc3Rfc2VlbhgEIAEoBFIJZmlyc3RTZWVuEhsKCWxhc3'
     'Rfc2VlbhgFIAEoBFIIbGFzdFNlZW4SNgoJYWRkcmVzc2VzGAYgAygLMhguY2xlb25hLlBlZXJB'
     'ZGRyZXNzUHJvdG9SCWFkZHJlc3NlcxIkCg5pc190aGlzX2RldmljZRgHIAEoCFIMaXNUaGlzRG'
-    'V2aWNlEiQKDmRldmljZV9ub2RlX2lkGAggASgMUgxkZXZpY2VOb2RlSWQ=');
+    'V2aWNlEiQKDmRldmljZV9ub2RlX2lkGAggASgMUgxkZXZpY2VOb2RlSWQSKAoQZGV2aWNlX3gy'
+    'NTUxOV9waxgJIAEoDFIOZGV2aWNlWDI1NTE5UGsSJwoQZGV2aWNlX21sX2tlbV9waxgKIAEoDF'
+    'INZGV2aWNlTWxLZW1QaxIqChFkZXZpY2VfZWQyNTUxOV9waxgLIAEoDFIPZGV2aWNlRWQyNTUx'
+    'OVBrEicKEGRldmljZV9tbF9kc2FfcGsYDCABKAxSDWRldmljZU1sRHNhUGs=');
 
 @$core.Deprecated('Use keyRotationBroadcastDescriptor instead')
 const KeyRotationBroadcast$json = {

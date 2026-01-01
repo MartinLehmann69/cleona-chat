@@ -38,8 +38,13 @@ import 'dart:io';
 import 'package:mycelium/neighbour.dart';
 
 /// Whether [n] is reachable from the open network: one of its addresses is
-/// confirmed and [public].
-bool reachableNeighbour(Neighbour n, bool Function(NeighbourAddress a) public) =>
+/// confirmed and [public] — and, with [evidence] (what its `0x25` said,
+/// `neighbour_evidence.dart`), it did not say "not evidenced" (§5.2, D-114:
+/// the rule of D-113 for the card's seat too). Nothing said (`null`, an
+/// earlier 4.2 version): the address decides alone.
+bool reachableNeighbour(Neighbour n, bool Function(NeighbourAddress a) public,
+        [bool? Function(Neighbour n)? evidence]) =>
+    evidence?.call(n) != false &&
     n.addresses.any((a) => a.confirmedEver && public(a));
 
 /// The seat a removal empties (W7 "the next CONFIRMED one"): the first of
@@ -48,11 +53,12 @@ bool reachableNeighbour(Neighbour n, bool Function(NeighbourAddress a) public) =
 /// answered, the seat stays empty.
 Neighbour? seatAfterRemoval(List<Neighbour> list,
     bool Function(Neighbour n) answered, bool Function(NeighbourAddress a) public,
-    [bool Function(Neighbour n) contact = _none]) {
+    [bool Function(Neighbour n) contact = _none,
+    bool? Function(Neighbour n)? evidence]) {
   Neighbour? private;
   for (final n in list) {
     if (contact(n) || !answered(n)) continue;
-    if (reachableNeighbour(n, public)) return n;
+    if (reachableNeighbour(n, public, evidence)) return n;
     private ??= n;
   }
   return private;
@@ -65,6 +71,7 @@ Neighbour? seatAfterRemoval(List<Neighbour> list,
 /// (§5.2, D-26). `null`: no move — the fixed one is reachable and no
 /// contact, a standing invitation [named] it, or there is nobody to take it
 /// (for a contact holder [cardSeatHandOver] then empties the seat).
+/// [once]: the limit of D-115 ([NotEvidencedHandOver]); without it, none.
 Neighbour? seatAfterConfirm(
   List<Neighbour> list,
   Neighbour fixed,
@@ -73,17 +80,66 @@ Neighbour? seatAfterConfirm(
   required bool Function(Neighbour n) named,
   required bool Function(NeighbourAddress a) public,
   bool Function(Neighbour n) contact = _none,
+  bool? Function(Neighbour n)? evidence,
+  NotEvidencedHandOver? once,
 }) {
   final leave = contact(fixed);
-  if ((reachableNeighbour(fixed, public) && !leave) || named(fixed)) return null;
-  Neighbour? private;
+  if ((reachableNeighbour(fixed, public, evidence) && !leave) || named(fixed)) {
+    return null;
+  }
+  Neighbour? to, private;
   for (final n in list) {
     if (n.id == fixed.id || n.contactSeat > 0) continue; // keeps its own seat
     if (contact(n) || (n.id != justNow && !answered(n))) continue;
-    if (reachableNeighbour(n, public)) return n;
+    if (reachableNeighbour(n, public, evidence)) {
+      to = n;
+      break;
+    }
     if (leave) private ??= n;
   }
-  return private;
+  to ??= private;
+  // D-115 (§5.2): limited is only the hand-over whose reason is the holder's
+  // "not evidenced" — by its address alone it would stay. A contact's device
+  // that must go ([leave]) and a private holder (V6) are not limited.
+  if (to != null && once != null && !leave && reachableNeighbour(fixed, public) &&
+      !once.take(fixed, to)) {
+    return null;
+  }
+  return to;
+}
+
+/// The one hand-over away from a "not evidenced" holder of the card's seat
+/// (§5.2, D-115). A node learns what a neighbour says only from its `0x25`,
+/// i.e. once that neighbour holds the seat and has the codes (§8.1). Without
+/// a limit a node whose neighbours are all behind routers handed the seat
+/// through every one of them (S419: six hand-overs in
+/// `smoke_mycelium_own_line_app`, each with a registration and one deposit
+/// per other own device, `S419-RCA-D114-WECHSEL.md` W-1). So the seat moves
+/// this way at most ONCE between two starts or network changes; if the new
+/// holder says "not evidenced" too, it stays with it until the next one.
+/// A start is a new [Neighbourhood] (memory only); a network change or stop
+/// is `Readiness.reset`, which calls `Neighbourhood.runLimit`, which calls
+/// [reopen] — the same tick as `Readiness.resets`, under which the
+/// statements themselves expire (`neighbour_evidence.dart`). A removal
+/// ([seatAfterRemoval]) is no such hand-over and is not limited.
+class NotEvidencedHandOver {
+  bool _used = false;
+
+  /// Log only, set by the host: the hand-over from [holder] to [to] that the
+  /// limit waived.
+  void Function(Neighbour holder, Neighbour to)? onWaived;
+
+  /// A start or network change: the next such hand-over may go again.
+  void reopen() => _used = false;
+
+  /// A hand-over from the "not evidenced" [holder] to [to] stands: `true`
+  /// takes the one of this start or network change (the caller applies it),
+  /// `false` — it went already — keeps the seat with [holder].
+  bool take(Neighbour holder, Neighbour to) {
+    if (!_used) return _used = true;
+    onWaived?.call(holder, to);
+    return false;
+  }
 }
 
 bool _none(Neighbour _) => false;
@@ -131,17 +187,20 @@ List<Neighbour> seatsFromMemory(
 /// `seatContacts`; `true` if the seat moved. A contact's device on the seat
 /// with nobody to take it empties it (D-26); an empty seat is filled by the
 /// rule of a removal ([seatAfterRemoval]) — never with a contact's device.
+/// [once]: the limit of D-115, as at a confirmation.
 bool cardSeatHandOver(List<Neighbour> list, bool Function(Neighbour n) answered,
     bool Function(Neighbour n) named, bool Function(NeighbourAddress a) public,
-    bool Function(Neighbour n) contact) {
+    bool Function(Neighbour n) contact, [bool? Function(Neighbour n)? evidence,
+    NotEvidencedHandOver? once]) {
   final f = list.where((n) => n.fixed).firstOrNull;
   final Neighbour? to;
   if (f == null) {
-    to = seatAfterRemoval(list, answered, public, contact);
+    to = seatAfterRemoval(list, answered, public, contact, evidence);
     if (to == null) return false;
   } else {
     to = seatAfterConfirm(list, f, -1,
-        answered: answered, named: named, public: public, contact: contact);
+        answered: answered, named: named, public: public, contact: contact,
+        evidence: evidence, once: once);
     if (to == null && (!contact(f) || named(f))) return false;
   }
   for (var j = 0; j < list.length; j++) {

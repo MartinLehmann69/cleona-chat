@@ -66,7 +66,7 @@ import Network
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
 
-    // §3.7 OS Keyring: register Keychain MethodChannel handler.
+    // §4.5.2 OS Keyring: register Keychain MethodChannel handler.
     if let keyringRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "KeyringHandler") {
       KeyringHandler.register(with: keyringRegistrar)
     }

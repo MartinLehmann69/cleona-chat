@@ -114,12 +114,14 @@ class TwinSyncType extends $pb.ProtobufEnum {
   static const TwinSyncType TWIN_DEVICE_REVOKED = TwinSyncType._(11, _omitEnumNames ? '' : 'TWIN_DEVICE_REVOKED');
   static const TwinSyncType ROTATION_APPROVAL_REQUEST = TwinSyncType._(12, _omitEnumNames ? '' : 'ROTATION_APPROVAL_REQUEST');
   static const TwinSyncType ROTATION_APPROVAL_RESPONSE = TwinSyncType._(13, _omitEnumNames ? '' : 'ROTATION_APPROVAL_RESPONSE');
+  static const TwinSyncType DEVICE_SET_CHANGED = TwinSyncType._(16, _omitEnumNames ? '' : 'DEVICE_SET_CHANGED');
   static const TwinSyncType TWIN_IDENTITY_DELETED = TwinSyncType._(17, _omitEnumNames ? '' : 'TWIN_IDENTITY_DELETED');
   static const TwinSyncType DELIVERY_MIRROR = TwinSyncType._(18, _omitEnumNames ? '' : 'DELIVERY_MIRROR');
   static const TwinSyncType KEM_ROTATED = TwinSyncType._(19, _omitEnumNames ? '' : 'KEM_ROTATED');
   static const TwinSyncType RECONCILE = TwinSyncType._(20, _omitEnumNames ? '' : 'RECONCILE');
   static const TwinSyncType GROUP_LEFT = TwinSyncType._(21, _omitEnumNames ? '' : 'GROUP_LEFT');
   static const TwinSyncType CHANNEL_JOINED = TwinSyncType._(22, _omitEnumNames ? '' : 'CHANNEL_JOINED');
+  static const TwinSyncType IDENTITY_SET = TwinSyncType._(23, _omitEnumNames ? '' : 'IDENTITY_SET');
 
   static const $core.List<TwinSyncType> values = <TwinSyncType> [
     CONTACT_ADDED,
@@ -136,12 +138,14 @@ class TwinSyncType extends $pb.ProtobufEnum {
     TWIN_DEVICE_REVOKED,
     ROTATION_APPROVAL_REQUEST,
     ROTATION_APPROVAL_RESPONSE,
+    DEVICE_SET_CHANGED,
     TWIN_IDENTITY_DELETED,
     DELIVERY_MIRROR,
     KEM_ROTATED,
     RECONCILE,
     GROUP_LEFT,
     CHANNEL_JOINED,
+    IDENTITY_SET,
   ];
 
   static final $core.Map<$core.int, TwinSyncType> _byValue = $pb.ProtobufEnum.initByValue(values);

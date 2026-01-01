@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/device_keys_store.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
 import 'package:cleona/core/identity/identity_context.dart';
 import 'package:cleona/core/storage/device_store.dart';
@@ -152,6 +153,28 @@ class IdentityLimitReached implements Exception {
       'device, at most $kMaxIdentitiesPerDevice (§20.2)';
 }
 
+/// Thrown when a new identity is to be created while the derivation run of
+/// §13.7 is open: the device does not know yet which indices the user's
+/// identities hold, and a new one would get an index another device of the
+/// same words already uses (§4.5.1). The interface says the search is
+/// running; the user ends it first.
+class IdentityRunOpen implements Exception {
+  const IdentityRunOpen();
+  @override
+  String toString() => 'IdentityRunOpen: the search for the identities of '
+      'these words is still running (§13.7)';
+}
+
+/// Thrown when an identity is to be created at an index that belonged to a
+/// deleted identity (§4.5.1: "a deleted index is never given again").
+class HdIndexDeleted implements Exception {
+  final int hdIndex;
+  const HdIndexDeleted(this.hdIndex);
+  @override
+  String toString() => 'HdIndexDeleted: index $hdIndex belonged to a deleted '
+      'identity and is never given again (§4.5.1)';
+}
+
 class IdentityManager {
   final String baseDir; // ~/.cleona
   int _maxHdIndex = -1;
@@ -175,7 +198,8 @@ class IdentityManager {
   /// The lists are **not identical**: Firefox additionally blocks 4190
   /// (ManageSieve) and 6679; Chromium additionally blocks 0. 10080 (the
   /// Amanda backup port, blocked by both since 2021) is the only member
-  /// at or above 10000 and therefore the only one [drawDataPort] can hit.
+  /// at or above 10000; since S413 [drawDataPort] draws in 20000–60000
+  /// (§11.1) and cannot hit it either.
   ///
   /// **Why the full set is needed even though the draw can only hit 10080:**
   /// the invitation link does not carry the drawn port. It carries
@@ -395,16 +419,37 @@ class IdentityManager {
     _stampProfileMarker();
     final entropy = SeedPhrase.wordsToEntropy(words); // validates checksum
     final masterSeed = SeedPhrase.entropyToSeed(entropy);
+    // An entry that is still present but not readable is refused here
+    // ([_storeMasterSeed], D-95), on every platform. The restore of the GUI
+    // deletes the profile completely BEFORE this call (§13.5.2,
+    // `setup_screen.dart` `wipeBeforeRecovery`), the entry included.
     _storeMasterSeed(masterSeed);
     _storeSeedPhrase(words);
     return masterSeed;
   }
 
+  /// What the user can do about an entry that is present but not readable
+  /// — the same on every path that refuses to write over one.
+  static const String _unreadableAdvice = 'nothing is overwritten '
+      '(§4.5.2); on macOS take the entry over first (D-95), on Windows '
+      'restore from the 24 words (the restore deletes the profile first, '
+      '§13.5.2), elsewhere retry once the keyring answers.';
+
   /// Check if a master seed exists (keyring or legacy file).
+  ///
+  /// An entry that is present but not readable (macOS before the takeover,
+  /// D-95; Windows when DPAPI refuses the file) counts as PRESENT: the
+  /// answer decides whether the setup
+  /// generates a new seed, and a new seed over an existing one is identity
+  /// loss (§4.5.2 "fail-loud").
   bool hasMasterSeed() {
     if (KeyringService.isInitialized) {
-      final seed = KeyringService.instance.load('master_seed');
-      if (seed != null) return true;
+      try {
+        final seed = KeyringService.instance.load('master_seed');
+        if (seed != null) return true;
+      } on Exception {
+        return true;
+      }
     }
     // Legacy fallback: check for db.key-encrypted file
     return File('$baseDir/master_seed.json.enc').existsSync() ||
@@ -412,8 +457,11 @@ class IdentityManager {
   }
 
   /// Load the master seed. Tries keyring first, falls back to legacy db.key.
+  ///
+  /// THROWS (`KeyringEntryUnreadable`) when the keyring holds an entry it
+  /// cannot read — never `null` then (§4.5.2 "fail-loud", D-95).
   Uint8List? loadMasterSeed() {
-    // §3.7: keyring is the primary source
+    // §4.5.2: keyring is the primary source
     if (KeyringService.isInitialized) {
       final seed = KeyringService.instance.load('master_seed');
       if (seed != null) return seed;
@@ -477,6 +525,15 @@ class IdentityManager {
           '(main.dart / service_daemon.dart do that).');
     }
     final ring = KeyringService.instance;
+    // D-95: an entry that is present but not readable is never replaced —
+    // it may be the only copy of an identity. The takeover (macOS) reads it
+    // first; the restore from the 24 words deletes it first (§13.5.2).
+    try {
+      ring.load('master_seed');
+    } on Exception catch (e) {
+      throw StateError('A master seed is present in the keyring but not '
+          'readable ($e) — $_unreadableAdvice');
+    }
     if (!ring.store('master_seed', seed)) {
       throw StateError('The keyring rejected the master seed — '
           'there is NO fallback to a file under "db.key" (S368).');
@@ -522,6 +579,15 @@ class IdentityManager {
   /// Store the seed phrase words (for backup display in Settings).
   void _storeSeedPhrase(List<String> words) {
     if (KeyringService.isInitialized) {
+      // D-95: an unreadable entry is never replaced (see _storeMasterSeed)
+      // and never answered with a file copy either.
+      try {
+        KeyringService.instance.load('seed_phrase');
+      } on Exception catch (e) {
+        RedactedConsole.err('[IdentityManager] WARNING: the 24 words are '
+            'present in the keyring but not readable ($e) — not overwritten');
+        return;
+      }
       final phraseBytes = Uint8List.fromList(words.join(' ').codeUnits);
       final stored = KeyringService.instance.store('seed_phrase', phraseBytes);
       if (!stored) {
@@ -649,16 +715,37 @@ class IdentityManager {
         // noDeviceLock / unavailable: the ungated path still applies. That
         // is NO deterioration compared to the state before S363 — it is
         // exactly this state —, but it is named instead of kept silent.
-        final words = loadSeedPhrase();
+        final List<String>? words;
+        try {
+          words = loadSeedPhrase();
+        } on Exception catch (e) {
+          return _seedPhraseUnreadable(e);
+        }
         return SeedPhraseAccess(
             words, words == null ? GateOutcome.absent : status,
             gated: false);
       }
     }
-    final words = loadSeedPhrase();
+    final List<String>? words;
+    try {
+      words = loadSeedPhrase();
+    } on Exception catch (e) {
+      return _seedPhraseUnreadable(e);
+    }
     return SeedPhraseAccess(
         words, words == null ? GateOutcome.absent : GateOutcome.unavailable,
         gated: false);
+  }
+
+  /// The words are present but the keyring does not open them (Windows:
+  /// DPAPI refuses `seed_phrase.dpapi`; macOS before the takeover, D-95).
+  /// Not `absent` — "nothing stored" would be false. The display says so
+  /// instead of throwing (`seed_phrase_unreadable`).
+  SeedPhraseAccess _seedPhraseUnreadable(Exception e) {
+    RedactedConsole.err('[IdentityManager] WARNING: the 24 words are '
+        'present but not readable ($e) — shown as unreadable, not as absent');
+    return const SeedPhraseAccess(null, GateOutcome.unavailable,
+        gated: false, unreadable: true);
   }
 
   /// MAKES SURE THAT THE KEYRING REALLY HOLDS THE SEED —
@@ -711,7 +798,19 @@ class IdentityManager {
     final ring = KeyringService.instance;
     final log = CLogger.get('identity', profileDir: baseDir);
 
-    if (ring.load('master_seed') == null) {
+    // D-95: an entry that is present but not readable is neither "empty"
+    // nor a reason to write — the reconciliation leaves it alone.
+    bool absent(String name) {
+      try {
+        return ring.load(name) == null;
+      } on Exception catch (e) {
+        log.warn('Keyring reconciliation: "$name" is present but not '
+            'readable ($e) — left untouched');
+        return false;
+      }
+    }
+
+    if (absent('master_seed')) {
       // `loadMasterSeed` falls back to the file when the keyring is empty
       // — exactly the value that belongs here.
       final seed = loadMasterSeed();
@@ -726,7 +825,7 @@ class IdentityManager {
       }
     }
 
-    if (ring.load('seed_phrase') == null) {
+    if (absent('seed_phrase')) {
       final words = loadSeedPhrase();
       if (words != null && words.length == 24) {
         if (ring.store(
@@ -837,18 +936,167 @@ class IdentityManager {
     }
   }
 
-  /// Get the next HD index for a new identity.
-  /// Uses _maxHdIndex (persisted high-water-mark) to survive identity deletions.
+  /// The HD index a new identity gets (§4.5.1): one above the highest this
+  /// device knows — the high-water mark of what it assigned, its own
+  /// identities, and the deleted indices (its own deletions and those the
+  /// derivation run found, §13.7). A deleted index is never given again.
   int nextHdIndex() {
     final identities = loadIdentities();
-    var maxFromList = -1;
+    var top = _maxHdIndex;
     for (final id in identities) {
-      if (id.hdIndex != null && id.hdIndex! > maxFromList) {
-        maxFromList = id.hdIndex!;
-      }
+      if (id.hdIndex != null && id.hdIndex! > top) top = id.hdIndex!;
     }
-    final effective = _maxHdIndex > maxFromList ? _maxHdIndex : maxFromList;
-    return effective + 1;
+    for (final i in deletedHdIndices()) {
+      if (i > top) top = i;
+    }
+    return top + 1;
+  }
+
+  /// The HD indices of deleted identities ([DeviceStore.keyDeletedHdIndices]),
+  /// ascending. Empty without a device database.
+  List<int> deletedHdIndices() {
+    final v = _deviceStoreIfPresent()
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyDeletedHdIndices)?['v'];
+    if (v is! List) return const [];
+    return [for (final i in v) if (i is int) i]..sort();
+  }
+
+  /// Notes [hdIndex] as deleted — at the deletion of an identity on this
+  /// device, and when the derivation run finds a bundle with
+  /// `active = false` (§13.7). Idempotent.
+  void markHdIndexDeleted(int hdIndex) {
+    final store = _deviceStoreForWrite('the deleted indices');
+    store.transaction(() {
+      final v = store.entry(
+          DeviceStore.areaDevice, DeviceStore.keyDeletedHdIndices)?['v'];
+      final list = <int>[
+        if (v is List)
+          for (final i in v)
+            if (i is int) i
+      ];
+      if (list.contains(hdIndex)) return;
+      list
+        ..add(hdIndex)
+        ..sort();
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyDeletedHdIndices,
+          {'v': list});
+    });
+  }
+
+  /// Whether the derivation run of §13.7 is open on this device
+  /// ([DeviceStore.keyIdentityRun]).
+  bool identityRunOpen() =>
+      _deviceStoreIfPresent()
+          ?.entry(DeviceStore.areaDevice, DeviceStore.keyIdentityRun)?['v'] ==
+      true;
+
+  /// The signature of the identity list this device last sent to its other
+  /// own devices (§14.7 Type 23, [DeviceStore.keyIdentitySetSent]); `null`
+  /// before the first start of a version that knows the type.
+  String? identitySetSent() => _deviceStoreIfPresent()
+      ?.entry(DeviceStore.areaDevice, DeviceStore.keyIdentitySetSent)?['v']
+      as String?;
+
+  /// Notes [signature] as the identity list last sent (§14.7 Type 23).
+  void identitySetSentPut(String signature) =>
+      _deviceStoreForWrite('the identity list sent').putEntry(
+          DeviceStore.areaDevice,
+          DeviceStore.keyIdentitySetSent,
+          {'v': signature});
+
+  /// The devices approved for enrolment ([DeviceStore.keyEnrolApproved]):
+  /// their DeviceIDs (hex, D-106; until S414 their device KEM keys, which
+  /// now differ per identity — such an entry matches no request any more,
+  /// and the device is approved once again). Empty without a device
+  /// database.
+  Set<String> enrolApproved() {
+    final v = _deviceStoreIfPresent()
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyEnrolApproved)?['v'];
+    return {if (v is List) for (final k in v) if (k is String) k};
+  }
+
+  /// Adds ([approved] true) or removes a device's approval (§14.6.1 step 3:
+  /// approved once for all identities; removed when it is locked out).
+  void enrolApprovedSet(String deviceIdHex, bool approved) {
+    final store = _deviceStoreForWrite('the approved devices');
+    store.transaction(() {
+      final v = store.entry(
+          DeviceStore.areaDevice, DeviceStore.keyEnrolApproved)?['v'];
+      final set = {if (v is List) for (final k in v) if (k is String) k};
+      final changed =
+          approved ? set.add(deviceIdHex) : set.remove(deviceIdHex);
+      if (!changed) return;
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyEnrolApproved,
+          {'v': set.toList()..sort()});
+    });
+  }
+
+  /// The identities this device removed because a recovery elsewhere
+  /// retired it (§13.3.4, D-103, [DeviceStore.keyRetiredIdentities]): index,
+  /// name, when, and whether the user dismissed the notice ([seen]). Empty
+  /// without a device database.
+  List<({int hdIndex, String name, DateTime at, bool seen})>
+      retiredIdentities() {
+    final v = _deviceStoreIfPresent()
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyRetiredIdentities)?['v'];
+    return [
+      if (v is List)
+        for (final e in v)
+          if (e is Map && e['i'] is int && e['at'] is int)
+            (
+              hdIndex: e['i'] as int,
+              name: e['name'] as String? ?? '',
+              at: DateTime.fromMillisecondsSinceEpoch(e['at'] as int),
+              seen: e['seen'] == true,
+            )
+    ];
+  }
+
+  /// The user dismissed the notice of every retired identity: the notes stay
+  /// (they keep the index from being noted as deleted, [deleteIdentity]),
+  /// marked as read. Local only — nothing leaves the device.
+  void retiredIdentitiesSeen() {
+    if (_deviceStoreIfPresent() == null) return;
+    final store = _deviceStoreForWrite('the retired identities');
+    store.transaction(() {
+      final v = store.entry(
+          DeviceStore.areaDevice, DeviceStore.keyRetiredIdentities)?['v'];
+      if (v is! List || v.isEmpty) return;
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyRetiredIdentities, {
+        'v': [
+          for (final e in v)
+            if (e is Map) {...e.cast<String, dynamic>(), 'seen': true}
+        ]
+      });
+    });
+  }
+
+  /// Notes that the identity at [hdIndex] was retired by a recovery on
+  /// another device — BEFORE it is removed, so that [deleteIdentity] does
+  /// not note its index as deleted (§13.7: it lives on elsewhere). A note
+  /// for the same index is replaced.
+  void retiredIdentityNote(int hdIndex, String name, DateTime at) {
+    final store = _deviceStoreForWrite('the retired identities');
+    store.transaction(() {
+      final v = store.entry(
+          DeviceStore.areaDevice, DeviceStore.keyRetiredIdentities)?['v'];
+      final list = <Map<String, dynamic>>[
+        if (v is List)
+          for (final e in v)
+            if (e is Map && e['i'] != hdIndex) e.cast<String, dynamic>()
+      ];
+      list.add({'i': hdIndex, 'name': name, 'at': at.millisecondsSinceEpoch});
+      store.putEntry(DeviceStore.areaDevice, DeviceStore.keyRetiredIdentities,
+          {'v': list});
+    });
+  }
+
+  /// Closes the derivation run — the user's choice, never automatic (§13.7).
+  void identityRunClose() {
+    final store = _deviceStoreIfPresent();
+    if (store == null) return;
+    _deviceStoreForWrite('the identity run')
+        .removeEntry(DeviceStore.areaDevice, DeviceStore.keyIdentityRun);
   }
 
   /// Monotonically increasing identity number — survives deletions.
@@ -1145,6 +1393,9 @@ class IdentityManager {
     _stampProfileMarker();
     final identities = loadIdentities();
     _checkIdentityLimit(identities.length);
+    // §4.5.1, §13.7 (S413 B-4): while the run looks for the identities of
+    // these words, no index is given — it might be one in use elsewhere.
+    if (!restoredFromPhrase && identityRunOpen()) throw const IdentityRunOpen();
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';
@@ -1245,11 +1496,20 @@ class IdentityManager {
           {'v': _maxHdIndex});
       store.putEntry(DeviceStore.areaDevice, DeviceStore.keyDataPort,
           {'v': deviceDataPort});
+      // §13.7: an identity from the words opens the run for the others —
+      // in the same transaction, so no identity from the words exists
+      // without it. The run's own finds are created from the words too and
+      // find it open already.
+      if (identity.restoredFromPhrase) {
+        store.putEntry(
+            DeviceStore.areaDevice, DeviceStore.keyIdentityRun, {'v': true});
+      }
     });
   }
 
-  /// Create an identity at a specific HD-Wallet index (§6.4.3 registry recovery).
-  /// Unlike [createIdentity], this targets an exact [hdIndex] instead of auto-incrementing.
+  /// Create an identity at a specific HD index — a find of the derivation
+  /// run, or an index the user names (§13.7). Unlike [createIdentity], this
+  /// targets an exact [hdIndex]; a deleted one is refused ([HdIndexDeleted]).
   Future<Identity> createIdentityAtIndex(int hdIndex, String displayName,
       {bool restoredFromPhrase = false}) async {
     // First writer of the profile directory — see [_stampProfileMarker].
@@ -1258,6 +1518,7 @@ class IdentityManager {
     if (identities.any((i) => i.hdIndex == hdIndex)) {
       throw StateError('Identity with hdIndex=$hdIndex already exists');
     }
+    if (deletedHdIndices().contains(hdIndex)) throw HdIndexDeleted(hdIndex);
     _checkIdentityLimit(identities.length);
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
@@ -1423,6 +1684,23 @@ class IdentityManager {
 
     // Remove profile directory
     final removed = identity;
+    // §4.5.1: the index of a deleted identity is never given again, and the
+    // highest living identity keeps a minimal bundle for it (§13.7) —
+    // except an identity a recovery on another device retired (§13.3.4,
+    // D-103): it lives on there, and a minimal bundle would hide it from the
+    // next derivation run. Its index is never given again either: the
+    // high-water mark [DeviceStore.keyMaxHdIndex] stays.
+    final hd = removed?.hdIndex;
+    if (hd != null && !retiredIdentities().any((r) => r.hdIndex == hd)) {
+      markHdIndexDeleted(hd);
+    }
+    // §4.4.2 (D-106): the device key set this device held for the identity
+    // goes with it — a local deletion, Type 17 and a retirement (D-103)
+    // alike.
+    if (hd != null) {
+      final store = _deviceStoreIfPresent();
+      if (store != null) DeviceKeysStore.removeFor(store, hd);
+    }
     if (removed != null) {
       final dir = Directory(removed.profileDir);
       // S405 A-5: the logger must not recreate the directory afterwards.
@@ -1589,5 +1867,11 @@ class SeedPhraseAccess {
   /// came via the path that already existed before S363.
   final bool gated;
 
-  const SeedPhraseAccess(this.words, this.outcome, {required this.gated});
+  /// The words are present, but the keyring does not open them right now
+  /// (S413, finding E). [words] is then `null`; the UI shows
+  /// `seed_phrase_unreadable`, never "nothing stored".
+  final bool unreadable;
+
+  const SeedPhraseAccess(this.words, this.outcome,
+      {required this.gated, this.unreadable = false});
 }

@@ -16,7 +16,13 @@ import 'package:cleona/ui/components/language_selector.dart';
 import 'package:cleona/ui/components/app_screenshot_button.dart';
 
 class SetupScreen extends StatefulWidget {
-  const SetupScreen({super.key});
+  /// S413 (finding D): the master seed is present but not readable and no
+  /// takeover can read it (`CleonaAppState.seedRestoreOnlyDue`). Then only
+  /// the restore from the 24 words is offered — a new setup would be
+  /// refused anyway (`generateSeedPhrase`, §4.5.2).
+  final bool restoreOnly;
+
+  const SetupScreen({super.key, this.restoreOnly = false});
 
   @override
   State<SetupScreen> createState() => _SetupScreenState();
@@ -28,9 +34,36 @@ class _SetupScreenState extends State<SetupScreen> {
   String? _error;
   Future<dynamic>? _pqPrewarmFuture;
 
+  /// §13.3.4 (D-103): identities this device removed because a recovery on
+  /// another device retired them — shown until the user dismisses the
+  /// notice (marked as read in the device database, local only). Read
+  /// once; nothing readable is nothing to show.
+  late List<({String name, DateTime at})> _retired = _retiredUnseen();
+
+  List<({String name, DateTime at})> _retiredUnseen() {
+    try {
+      return [
+        for (final r in IdentityManager().retiredIdentities())
+          if (!r.seen) (name: r.name, at: r.at)
+      ];
+    } on Object {
+      return const [];
+    }
+  }
+
+  void _retiredDismiss() {
+    try {
+      IdentityManager().retiredIdentitiesSeen();
+    } on Object {
+      // Not writable: the notice comes again at the next start.
+    }
+    setState(() => _retired = const []);
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
+    final material = MaterialLocalizations.of(context);
 
     return Scaffold(
       body: SafeArea(child: Stack(
@@ -70,6 +103,37 @@ class _SetupScreenState extends State<SetupScreen> {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 32),
+                for (var i = 0; i < _retired.length; i++)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Expanded(
+                          child: Text(
+                            locale.tr('identity_retired', {
+                              'name': _retired[i].name,
+                              'date': material.formatMediumDate(_retired[i].at),
+                            }),
+                            key: Key('setup_identity_retired_$i'),
+                          ),
+                        ),
+                        if (i == 0)
+                          IconButton(
+                            key: const Key('setup_identity_retired_dismiss'),
+                            icon: const Icon(Icons.close),
+                            tooltip: material.closeButtonTooltip,
+                            onPressed: _retiredDismiss,
+                          ),
+                      ],
+                    ),
+                  ),
+                if (widget.restoreOnly) ...[
+                  Text(
+                    locale.get('keyring_unreadable_restore_hint'),
+                    textAlign: TextAlign.center,
+                  ),
+                ] else ...[
                 TextField(
                   controller: _nameController,
                   decoration: InputDecoration(
@@ -100,6 +164,7 @@ class _SetupScreenState extends State<SetupScreen> {
                       : const Icon(Icons.play_arrow),
                   label: Text(_loading ? locale.get('starting') : locale.get('start')),
                 ),
+                ],
                 const SizedBox(height: 16),
                 OutlinedButton.icon(
                   onPressed: _loading ? null : _showRestore,
@@ -588,11 +653,10 @@ class _RestoreScreenState extends State<_RestoreScreen> {
 
       final appState = context.read<CleonaAppState>();
       await appState.initialize();
-
-      // §6.4.3: Recover additional identities from DHT registry (fire-and-forget).
-      // Runs in background — DHT lookup takes 30-60s. Primary identity is
-      // already active; additional identities start as they are discovered.
-      appState.recoverIdentitiesFromRegistry();
+      // §13.7: the other identities of the words are found by the
+      // derivation run, which this identity opened (`createIdentity`
+      // above); it asks at the collection edges, and the host starts each
+      // find (`CleonaService.onIdentityFound`).
     } catch (e) {
       if (mounted) {
         setState(() {

@@ -195,9 +195,9 @@ PostBox postBoxFrom(IdentityContext id) {
     x25519Sk: id.x25519SecretKey,
     mlKemSk: id.mlKemSecretKey,
     mlDsaSk: id.mlDsaSecretKey,
-    // The app keeps the previous generation for 32 d; mycelium only uses it
-    // within its own deadline from `state` (7 d) and discards it itself
-    // afterwards.
+    // The app keeps the previous generation for 7 d from `keyRotatedAt`
+    // (§4.5.4); mycelium uses it within the same deadline from `state` and
+    // discards it itself afterwards.
     previous: id.previousX25519Sk == null || id.previousMlKemSk == null
         ? null
         : (x25519Sk: id.previousX25519Sk!, mlKemSk: id.previousMlKemSk!),

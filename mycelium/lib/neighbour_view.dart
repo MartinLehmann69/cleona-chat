@@ -49,6 +49,14 @@ Map<String, Object?> neighbourView(Node k, {DateTime? now}) {
     'registeredDevices': [
       for (final (a, p) in k.codeRoute.table.registeredAt) '${a.address}:$p'
     ],
+    // This device's own code (§8.1) and, per registration here, the device's
+    // code with where and when it last registered (S418): behind address
+    // translation the address does not name the device.
+    'ownDevice': hexFrom(k.devicesCode),
+    'registrations': [
+      for (final (device, a, p, last) in k.codeRoute.table.registrations)
+        {'device': device, 'at': '${a.address}:$p', 'last': last.toIso8601String()}
+    ],
     'removed': [
       for (final e in r.dropped.entries)
         {'key': e.key, 'state': 'removed', 'at': e.value.toIso8601String()}

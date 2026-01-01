@@ -5,15 +5,19 @@ import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/log/clogger.dart';
 import 'package:cleona/core/platform/dpapi_ffi.dart';
+import 'package:cleona/core/platform/keychain_ffi.dart';
 import 'package:cleona/core/platform/libsecret_ffi.dart';
 
-/// OS Keyring abstraction (Architecture §3.7).
+/// OS Keyring abstraction (Architecture §4.5.2).
 ///
 /// Protects master_seed and device_keys via platform-native credential storage:
 /// Linux: libsecret (GNOME Keyring / KWallet) — store via FFI, lookup/delete
 ///        via the secret-tool CLI
-/// Windows: DPAPI (CryptProtectData / CryptUnprotectData)
-/// Android/macOS/iOS: file-based fallback (platform backends TBD)
+/// Windows: DPAPI (CryptProtectData / CryptUnprotectData) via FFI
+///        (`dpapi_ffi.dart`), every call bounded in a helper isolate
+/// macOS: login keychain through Security.framework via FFI
+///        (`keychain_ffi.dart`, D-95)
+/// Android/iOS: MethodChannel backend (`keyring_mobile.dart`)
 ///
 /// Falls back to file-based storage when no OS keyring is available —
 /// INCLUDING a keyring that exists but is LOCKED (automatic login): where
@@ -110,18 +114,68 @@ abstract class KeyringService {
         }
       }
     } else if (Platform.isWindows) {
-      final dpapi = _WindowsDpapiKeyring(baseDir, log);
-      if (await dpapi._roundTripProbe()) {
-        log.info('Using Windows DPAPI for key protection');
+      // Every DPAPI call — and the file I/O next to it — runs in a helper
+      // isolate confirmed here, before the first call; the caller waits at
+      // most a few seconds (`BoundedDpapiStore`, §4.5.2).
+      final bounded =
+          await BoundedDpapiStore.start(DpapiFileStoreFactory(baseDir).open);
+      if (bounded == null) {
+        // Never an unbounded call instead, and never the file variant next
+        // to a DPAPI store that may hold the seed — fail loud.
+        throw StateError('the DPAPI helper could not be started — an '
+            'unbounded keyring call is never made (§4.5.2)');
+      }
+      final dpapi = _WindowsDpapiKeyring(log, bounded);
+      final probe = bounded.probe();
+      if (probe == kDpapiOk) {
+        log.info('Using Windows DPAPI for key protection (FFI, every call '
+            'bounded)');
         _instance = dpapi;
         _takeFileVariantIntoKeyring(_instance!, baseDir, log);
         return _instance!;
       }
-      log.warn('DPAPI round-trip probe failed or timed out — file-based key storage');
+      if (probe == kDpapiTimedOut) {
+        // DPAPI exists on every Windows; one that does not answer is not
+        // "no keyring". The file variant here would answer "no seed" next to
+        // a `master_seed.dpapi` it cannot see — fail loud instead.
+        throw StateError('DPAPI did not answer the round-trip probe within '
+            'the bound — the OS keyring is binding (§4.5.2), no file '
+            'variant');
+      }
+      log.warn('DPAPI round-trip probe failed (status $probe) — file-based '
+          'key storage');
       dpapi.delete('_probe');
     } else if (Platform.isMacOS) {
-      log.info('Using macOS Keychain via security CLI');
-      _instance = _MacOsKeychainKeyring(log);
+      // D-95: Security.framework via FFI. The confirmation dialog is
+      // switched off for the whole process BEFORE the first keychain call
+      // (`SecKeychain.h:634`): from here on every call returns at once,
+      // and an entry that would need the dialog answers -25308 instead of
+      // hanging (§4.5.2 point 1). Only `KeychainTakeover` opens it again.
+      final ffi = KeychainFfi.instance;
+      if (ffi == null) {
+        // The framework ships with every macOS. Not loading it is a broken
+        // system; the file variant here would answer "no seed" next to a
+        // keychain that may hold one — fail loud instead.
+        throw StateError('Security.framework could not be loaded — the '
+            'macOS keychain is binding (§4.5.2), no file variant');
+      }
+      ffi.setInteractionAllowed(false);
+      // Interaction off covers the LOCKED keychain; a `securityd` that does
+      // not answer at all is covered by the bound: every call runs in a
+      // helper isolate confirmed here, before the first call, and the
+      // caller waits at most a few seconds (`BoundedKeychainBackend`).
+      final bounded =
+          await BoundedKeychainBackend.start(openKeychainFfiInWorker);
+      if (bounded == null) {
+        // Never an unbounded call instead, and never the file variant next
+        // to a keychain that may hold the seed — fail loud.
+        throw StateError('the keychain helper could not be started — an '
+            'unbounded keychain call is never made (§4.5.2)');
+      }
+      log.info('Using macOS Keychain via Security.framework (FFI, '
+          'interaction off, every call bounded)');
+      _instance = _MacOsKeychainKeyring(
+          log, bounded, keychainTrustedPathsOfThisProcess());
       _takeFileVariantIntoKeyring(_instance!, baseDir, log);
       return _instance!;
     } else if (Platform.isAndroid || Platform.isIOS) {
@@ -188,13 +242,65 @@ abstract class KeyringService {
       _FileKeyringFallback(baseDir, CLogger.get('keyring', profileDir: baseDir),
           hostnameOverride: hostname, saltOverride: saltOverride);
 
+  /// Test seam (S413): the macOS keyring over a stand-in [backend], so that
+  /// the status mapping — absent, readable, present but unreadable — runs on
+  /// Linux. Production builds it in [init] over `KeychainFfi`.
+  static KeyringService macOsKeychainForTest(KeychainBackend backend,
+          {String baseDir = '/tmp',
+          List<String> trustedPaths = const ['/Applications/Cleona.app/'
+              'Contents/MacOS/Cleona']}) =>
+      _MacOsKeychainKeyring(
+          CLogger.get('keyring', profileDir: baseDir), backend, trustedPaths);
+
+  /// Test seam (S413): the Windows keyring over a stand-in [store] (e.g. a
+  /// [BoundedDpapiStore] around a hanging stand-in), so that the status
+  /// mapping and the bound run on Linux. Production builds it in [init]
+  /// over `DpapiFileStore` and kernel32.
+  static KeyringService windowsDpapiForTest(DpapiStore store,
+          {String baseDir = '/tmp'}) =>
+      _WindowsDpapiKeyring(CLogger.get('keyring', profileDir: baseDir), store);
+
   // ── Interface ──────────────────────────────────────────────────────────
 
   /// Store binary data under [name]. Returns true on success.
+  ///
+  /// A backend never replaces an entry it cannot read (macOS: an entry of
+  /// 4.2.3–4.2.6 before the takeover) — it answers `false`.
   bool store(String name, Uint8List data);
 
-  /// Load binary data by [name]. Returns null if not found.
+  /// Load binary data by [name].
+  ///
+  /// Returns `null` ONLY when the entry is known to be ABSENT. An entry that
+  /// is present but cannot be read — or a keyring that cannot say — throws
+  /// [KeyringEntryUnreadable] (§4.5.2 "fail-loud": silent regeneration is
+  /// identity loss). Callers treat every [Exception] from here the same way:
+  /// never as "no seed", never as a reason to write.
   Uint8List? load(String name);
+
+  /// The keyring names that are present but not readable right now (D-95).
+  /// The GUI offers the takeover for them before anything else reads the
+  /// seed. Default: asks [load] for each name.
+  List<String> unreadableEntries() {
+    final out = <String>[];
+    for (final name in _keyringNames) {
+      try {
+        load(name);
+      } on Exception {
+        out.add(name);
+      }
+    }
+    return out;
+  }
+
+  /// Whether this keyring can take over unreadable entries with a system
+  /// dialog (macOS only, D-95).
+  bool get canTakeOver => false;
+
+  /// Takes over [unreadableEntries] with the system dialog, bounded by
+  /// [bound]. Without a takeover path: [KeychainTakeoverOutcome.failed].
+  Future<KeychainTakeoverOutcome> takeOverUnreadable(
+          {Duration bound = const Duration(minutes: 2)}) async =>
+      KeychainTakeoverOutcome.failed;
 
   /// Delete stored data by [name]. Returns true if something was deleted.
   bool delete(String name);
@@ -378,6 +484,25 @@ void _takeFileVariantIntoKeyring(
   }
 }
 
+/// An entry that is PRESENT in the keyring but cannot be read (§4.5.2
+/// "fail-loud", D-95). Never means "no seed": whoever catches it neither
+/// generates nor writes. [status] is the platform's code (macOS: the
+/// Security.framework `OSStatus`, e.g. -25308 = the entry needs the
+/// confirmation dialog; -2 on macOS and Windows = the keyring did not
+/// answer within the bound; Windows also the store status of
+/// `dpapi_ffi.dart`: 2 = DPAPI refused, 4 = I/O error, 5 = no ciphertext).
+/// Carries no secret.
+class KeyringEntryUnreadable implements Exception {
+  final String name;
+  final int status;
+  const KeyringEntryUnreadable(this.name, this.status);
+
+  @override
+  String toString() => 'KeyringEntryUnreadable: "$name" is present in the '
+      'keyring but not readable (status $status) — nothing is regenerated '
+      'or overwritten';
+}
+
 /// Outcome of an access to the gated storage.
 enum GateOutcome {
   /// Read, or ready.
@@ -499,127 +624,58 @@ class _LinuxSecretToolKeyring extends KeyringService {
   }
 }
 
-// ── Windows: DPAPI via PowerShell ───────────────────────────────────────
+// ── Windows: DPAPI via FFI (`dpapi_ffi.dart`), every call bounded ──────
 
 class _WindowsDpapiKeyring extends KeyringService {
-  final String _baseDir;
   final CLogger _log;
+  final DpapiStore _store;
 
-  _WindowsDpapiKeyring(this._baseDir, this._log);
+  _WindowsDpapiKeyring(this._log, this._store);
 
   @override
   bool get isHardwareProtected => true;
 
-  String _pathFor(String name) => '$_baseDir/$name.dpapi';
-
-  Future<bool> _roundTripProbe() async {
-    try {
-      final testData = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
-      final encrypted = DpapiFfi.instance.protect(testData);
-      if (encrypted == null) {
-        _log.warn('DPAPI Protect probe failed');
-        return false;
-      }
-      final decrypted = DpapiFfi.instance.unprotect(encrypted);
-      if (decrypted == null) {
-        _log.warn('DPAPI Unprotect probe failed');
-        return false;
-      }
-      if (decrypted.length != 4) return false;
-      for (var i = 0; i < 4; i++) {
-        if (decrypted[i] != testData[i]) return false;
-      }
-      return true;
-    } catch (e) {
-      _log.warn('DPAPI round-trip probe exception: $e');
-      return false;
-    }
-  }
+  static String _why(int status) => switch (status) {
+        kDpapiUnprotectFailed => 'CryptUnprotectData failed',
+        kDpapiProtectFailed => 'CryptProtectData failed',
+        kDpapiIoError => 'file I/O error',
+        kDpapiBadContent => 'the file contains invalid characters',
+        kDpapiTimedOut => 'DPAPI did not answer within the bound',
+        _ => 'status $status',
+      };
 
   @override
   bool store(String name, Uint8List data) {
-    try {
-      final encrypted = DpapiFfi.instance.protect(data);
-      if (encrypted == null) {
-        _log.warn('DPAPI Protect failed for "$name"');
-        return false;
-      }
-      final file = File(_pathFor(name));
-      file.parent.createSync(recursive: true);
-      file.writeAsBytesSync(encrypted);
-      return true;
-    } catch (e) {
-      _log.warn('DPAPI store error for "$name": $e');
-      return false;
-    }
+    final status = _store.write(name, data);
+    if (status == kDpapiOk) return true;
+    _log.warn('DPAPI store failed for "$name" (${_why(status)})');
+    return false;
   }
 
   @override
   Uint8List? load(String name) {
-    try {
-      final file = File(_pathFor(name));
-      if (!file.existsSync()) return null;
-      final raw = file.readAsBytesSync();
-      if (raw.isEmpty) return null;
-
-      // Migration: old PowerShell-based code wrote base64-encoded DPAPI
-      // ciphertext as text. Detect by checking if content is valid ASCII
-      // base64 (only printable chars + whitespace). Raw DPAPI ciphertext
-      // contains non-ASCII bytes, so the heuristic is reliable.
-      Uint8List encrypted;
-      if (_looksLikeBase64Text(raw)) {
-        var text = String.fromCharCodes(raw).trim();
-        text = text.replaceAll(RegExp(r'\s+'), '');
-        if (!RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(text)) {
-          _log.warn('DPAPI file for "$name" contains invalid characters');
-          return null;
-        }
-        encrypted = base64Decode(text);
-      } else {
-        encrypted = raw;
-      }
-
-      final decrypted = DpapiFfi.instance.unprotect(encrypted);
-      if (decrypted == null) {
-        _log.warn('DPAPI Unprotect failed for "$name"');
-        return null;
-      }
-
-      // Re-write as raw binary so future loads skip the base64 path.
-      if (_looksLikeBase64Text(raw)) {
-        try {
-          file.writeAsBytesSync(encrypted);
-        } catch (_) {}
-      }
-
-      return decrypted;
-    } catch (e) {
-      _log.warn('DPAPI load error for "$name": $e');
-      return null;
-    }
-  }
-
-  static bool _looksLikeBase64Text(Uint8List data) {
-    for (final b in data) {
-      if (b > 0x7E) return false;
-      if (b < 0x09) return false;
-    }
-    return true;
+    final r = _store.read(name);
+    if (r.status == kDpapiOk && r.value != null) return r.value;
+    if (r.status == kDpapiAbsent) return null;
+    // Every other status: the file is there (or cannot even be checked)
+    // and DPAPI does not open it — a timeout, CryptUnprotectData refusing
+    // (another user, a lost master key, a domain controller out of reach),
+    // content that is no ciphertext, an I/O error. Not known to be absent:
+    // never "no seed" (§4.5.2 fail-loud). Until S413 every status but the
+    // timeout answered `null`, and the setup generated a new seed over the
+    // file.
+    _log.warn('DPAPI entry "$name" is not readable (${_why(r.status)})');
+    throw KeyringEntryUnreadable(name, r.status);
   }
 
   @override
   bool delete(String name) {
-    try {
-      final file = File(_pathFor(name));
-      if (file.existsSync()) {
-        file.deleteSync();
-        return true;
-      }
-      return false;
-    } catch (e) {
-      _log.warn('DPAPI delete error for "$name": $e');
-      return false;
+    final status = _store.remove(name);
+    if (status == kDpapiOk) return true;
+    if (status != kDpapiAbsent) {
+      _log.warn('DPAPI delete failed for "$name" (${_why(status)})');
     }
+    return false;
   }
 }
 
@@ -1416,71 +1472,108 @@ class _FileKeyringFallback extends KeyringService {
 }
 
 
-// ── macOS: Keychain via security CLI ────────────────────────────────────
+// ── macOS: Keychain via Security.framework (FFI, D-95) ─────────────────
+
+/// The service name every 4.2.x build used: `cleona_<name>` (beta) and
+/// `cleona_live_<name>` (live, D-89).
+String _macOsService(String name) =>
+    '${kKeyringApplication.replaceAll('-', '_')}_$name';
 
 class _MacOsKeychainKeyring extends KeyringService {
   final CLogger _log;
+  final KeychainBackend _backend;
 
-  _MacOsKeychainKeyring(this._log);
+  /// The access list of every entry this keyring writes: the GUI and the
+  /// daemon of the bundle (§22.6), never empty.
+  final List<String> _trusted;
+
+  _MacOsKeychainKeyring(this._log, this._backend, this._trusted);
 
   @override
   bool get isHardwareProtected => true;
 
-  String _service(String name) =>
-      '${kKeyringApplication.replaceAll('-', '_')}_$name';
-
-  @override
-  bool store(String name, Uint8List data) {
-    try {
-      final b64 = base64Encode(data);
-      // Delete existing entry first (add-generic-password fails on duplicates).
-      Process.runSync('security', [
-        'delete-generic-password', '-a', 'cleona', '-s', _service(name),
-      ]);
-      final result = Process.runSync('security', [
-        'add-generic-password',
-        '-a', 'cleona',
-        '-s', _service(name),
-        '-w', b64,
-        '-T', '', // no ACL — app access only
-      ]);
-      if (result.exitCode != 0) {
-        _log.warn('Keychain store failed for "$name" (exit ${result.exitCode})');
-        return false;
-      }
-      return true;
-    } catch (e) {
-      _log.warn('Keychain store error for "$name": $e');
-      return false;
+  /// The status of [name], read without a dialog. While a takeover holds
+  /// the dialog open for the process (`KeychainTakeover.inFlight`), nothing
+  /// is asked — the answer is "not asked", i.e. not known to be absent.
+  KeychainRead _read(String name) {
+    if (KeychainTakeover.inFlight) {
+      return const KeychainRead(kSecStatusNotAsked, null);
     }
+    return _backend.read(_macOsService(name));
   }
 
   @override
   Uint8List? load(String name) {
+    final r = _read(name);
+    if (r.status == kSecStatusItemNotFound) return null;
+    if (r.status == kSecStatusSuccess && r.value != null) {
+      final decoded = decodeKeychainValue(r.value!);
+      if (decoded != null) return decoded;
+      _log.error('Keychain entry "$name" is present but holds no base64 '
+          'value — not treated as absent');
+      throw KeyringEntryUnreadable(name, r.status);
+    }
+    _log.warn('Keychain entry "$name" is present but not readable '
+        '(status ${r.status}${r.status == kSecStatusInteractionNotAllowed ? ': the entry needs the confirmation dialog — takeover pending' : r.status == kSecStatusTimedOut ? ': the keychain did not answer within the bound' : ''})');
+    throw KeyringEntryUnreadable(name, r.status);
+  }
+
+  @override
+  bool store(String name, Uint8List data) {
     try {
-      final result = Process.runSync('security', [
-        'find-generic-password', '-a', 'cleona', '-s', _service(name), '-w',
-      ]);
-      if (result.exitCode != 0) return null;
-      final b64 = (result.stdout as String).trim();
-      if (b64.isEmpty) return null;
-      return base64Decode(b64);
+      final r = _read(name);
+      if (r.status == kSecStatusSuccess) {
+        final removed = _backend.remove(_macOsService(name));
+        if (removed != kSecStatusSuccess && removed != kSecStatusItemNotFound) {
+          _log.warn('Keychain store for "$name": the old entry could not be '
+              'removed (status $removed)');
+          return false;
+        }
+      } else if (r.status != kSecStatusItemNotFound) {
+        // Present but not readable: never replaced. Replacing it would be
+        // the identity loss §4.5.2 forbids; the takeover reads it first.
+        _log.warn('Keychain store for "$name" refused: an entry is present '
+            'that this program cannot read (status ${r.status})');
+        return false;
+      }
+      final value = Uint8List.fromList(utf8.encode(base64Encode(data)));
+      final status = _backend.add(_macOsService(name), value, _trusted);
+      if (status != kSecStatusSuccess) {
+        _log.warn('Keychain store failed for "$name" (status $status)');
+        return false;
+      }
+      return true;
     } catch (e) {
-      _log.warn('Keychain load error for "$name": $e');
-      return null;
+      _log.warn('Keychain store error for "$name": ${e.runtimeType}');
+      return false;
     }
   }
 
   @override
   bool delete(String name) {
+    if (KeychainTakeover.inFlight) return false;
     try {
-      final result = Process.runSync('security', [
-        'delete-generic-password', '-a', 'cleona', '-s', _service(name),
-      ]);
-      return result.exitCode == 0;
+      return _backend.remove(_macOsService(name)) == kSecStatusSuccess;
     } catch (e) {
-      _log.warn('Keychain delete error for "$name": $e');
+      _log.warn('Keychain delete error for "$name": ${e.runtimeType}');
       return false;
     }
+  }
+
+  @override
+  bool get canTakeOver => true;
+
+  @override
+  Future<KeychainTakeoverOutcome> takeOverUnreadable(
+      {Duration bound = const Duration(minutes: 2)}) async {
+    final names = KeychainTakeover.inFlight ? _keyringNames : unreadableEntries();
+    if (names.isEmpty) return KeychainTakeoverOutcome.done;
+    _log.info('Keychain takeover offered for ${names.join(', ')} — macOS '
+        'asks once per entry (D-95)');
+    final outcome = await KeychainTakeover.run(
+        [for (final n in names) _macOsService(n)],
+        bound: bound);
+    _log.info('Keychain takeover: ${outcome.name}');
+    return outcome;
   }
 }

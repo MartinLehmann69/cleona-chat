@@ -96,6 +96,14 @@ class CodeTable {
   Iterable<(InternetAddress, int)> get registeredAt =>
       _devices.values.map((d) => (d.address, d.port));
 
+  /// Every device registered here — its own code (hex), where and when it
+  /// last registered — for the diagnostic view only (`neighbour_view.dart`,
+  /// S418: behind address translation the address alone does not say which
+  /// device a registration belongs to).
+  Iterable<(String, InternetAddress, int, DateTime)> get registrations =>
+      _devices.entries
+          .map((e) => (e.key, e.value.address, e.value.port, e.value.last));
+
   /// How many codes the device [device] holds here.
   int codesFrom(Uint8List device) => _devices[_hex(device)]?.codes.length ?? 0;
 

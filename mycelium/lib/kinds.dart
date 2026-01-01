@@ -356,11 +356,15 @@ const int kWhereAreYou = 0x23;
 const int kRegistration = 0x24;
 
 /// Registered, the fixed neighbour's answer to each `0x24`: kind | day u32 BE
-/// | piece 1 [| its record key 32 B, S407 a']. 6 B (38 B with the key).
+/// | piece 1 [| its record key 32 B, S407 a'] [| evidence byte 1, D-113].
+/// 6 B (38 B with the key; one more with the evidence byte).
 const int kRegistered = 0x25;
 
-/// Not a kind — two bits in fields of packets above (S407 a'): in the pieces
+/// Not a kind — bits in fields of packets above (S407 a'): in the pieces
 /// byte of a `0x24`, "this device reads a `0x25` with record key"; in the count
 /// byte of a neighbour list (`neighbour_list.dart`), "record keys follow".
+/// D-113 (S417): in the pieces byte of a `0x24`, 0x40 "this device reads a
+/// `0x25` with evidence byte" (§8.1).
 const int kBitReadsKeyedRegistered = 0x80;
 const int kBitNeighbourKeysFollow = 0x80;
+const int kBitReadsEvidenceRegistered = 0x40;

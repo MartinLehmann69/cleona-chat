@@ -14,6 +14,9 @@ library;
 
 import 'dart:math';
 
+import 'package:mycelium/host_memory.dart' show kPortFrom, kPortUntil;
+import 'package:mycelium/neighbours_packet.dart' show kCallPort;
+
 abstract final class DataPort {
   /// Draw a random UDP data port for a new identity.
   ///
@@ -27,7 +30,7 @@ abstract final class DataPort {
   /// transport socket die at the HMAC check. Sending stays intact, so the
   /// node looks healthy to everyone else while its own reception is lossy.
   ///
-  /// The exclusion costs one value out of 55 000 — the port stays random per
+  /// The exclusion costs one value out of 40 001 — the port stays random per
   /// node, which is what keeps Cleona from being blockable by a single port
   /// rule. It also removes a fingerprinting surface: a node whose data port
   /// equals the publicly documented discovery port announces itself as
@@ -49,20 +52,31 @@ abstract final class DataPort {
   ///
   /// Since then **both** values are excluded ([isReservedLanPort]).
   /// 41338 stays in although it has no binder here any more: the price is
-  /// one value out of 55 000, and the draw wanders into profiles that live
+  /// one value out of 40 001, and the draw wanders into profiles that live
   /// longer than a branch.
   ///
   /// The second exclusion is [browserUnsafePort] (E-64, V4 §19.6.5): 10080 is
-  /// the only value in 10000–64999 that every browser refuses with
+  /// the only value in the former range 10000–64999 that every browser refuses with
   /// `ERR_UNSAFE_PORT`. A node that happened to draw it would serve its
   /// invitation links (§19.6.5 browser assembler) on a port no browser will
   /// ever open — the links would be dead in every browser, permanently and
   /// without any error the node could see. Same price as the discovery-port
-  /// exclusion: one value out of 55 000.
+  /// exclusion. Since S413 the range (§11.1) lies above it.
+  ///
+  /// **S413: the range is the one of V4.2 §11.1** ("chosen at first start,
+  /// random in 20000–60000, then stable"), taken from the mycelium host
+  /// ([kPortFrom]..[kPortUntil], both inclusive). Until S413 this draw used
+  /// 10000–64999, and because the app names its device port to the host
+  /// (`mycelium_seam.dart`: "a named port wins"), every device drew from the
+  /// wider range — below 20000 lie many assigned services, above 60000 the
+  /// ephemeral range of many kernels. A port already stored stays as it is
+  /// (§11.1 "then stable"); only a new draw is affected. 10080 now lies
+  /// outside the range; the condition stays as a guard should the range
+  /// ever widen again.
   static int drawDataPort() {
     int port;
     do {
-      port = 10000 + Random().nextInt(55000);
+      port = kPortFrom + Random().nextInt(kPortUntil - kPortFrom + 1);
     } while (isReservedLanPort(port) || port == browserUnsafePort);
     return port;
   }
@@ -136,7 +150,7 @@ abstract final class DataPort {
   /// VALUE stands only here.
   static const int lanEntryPort = 41340;
 
-  /// Does [port] coincide with one of the two fixed LAN ports?
+  /// Does [port] coincide with one of the three fixed LAN ports?
   ///
   /// **The only access for the rejection paths.** Five places besides the
   /// draw check a port coming from the user or from a profile against the
@@ -147,12 +161,20 @@ abstract final class DataPort {
   /// Until 2026-09-08 they each compared against [lanDiscoveryPort] on
   /// their own. A list that is repeated at five places is not a list but
   /// five — that is why it stands here and is only asked there.
+  ///
+  /// **S413: the call port as well** ([kCallPort], 41341, V4.2 §11.1). The
+  /// mycelium listener binds it with reuseAddress/reusePort; a device whose
+  /// data port is 41341 binds silently beside it and receives nothing on its
+  /// data port. Through this one access the draw avoids it, a device that
+  /// stored it is healed on load, and `set_port` refuses it.
   static bool isReservedLanPort(int port) =>
-      port == lanDiscoveryPort || port == lanEntryPort;
+      port == lanDiscoveryPort || port == lanEntryPort || port == kCallPort;
 
-  /// The single `ERR_UNSAFE_PORT` value inside the data-port range
-  /// 10000–64999 (E-64, V4 §19.6.5). Browsers refuse to open any URL on this
-  /// port, which would silently kill this node's invitation links.
+  /// The single `ERR_UNSAFE_PORT` value at or above 10000 (E-64,
+  /// V4 §19.6.5). Browsers refuse to open any URL on this port, which would
+  /// silently kill this node's invitation links. Since S413 the draw range
+  /// (20000–60000, §11.1) no longer contains it; the value still matters for
+  /// the published port (see `identity_manager.dart`).
   ///
   /// The other blocked ports of the browser lists (21, 25, 110, 6667, …) all
   /// lie below 10000 and are therefore already out of range.

@@ -136,6 +136,46 @@ class DeviceStore extends EncryptedStore {
   /// assigned twice.
   static const String keyMaxHdIndex = 'max_hd_index';
 
+  /// [areaDevice]: the HD indices of deleted identities (`{'v': [i, …]}`,
+  /// §4.5.1 "a deleted index is never given again", §13.7) — deleted on
+  /// this device, or found deleted by the derivation run (a bundle with
+  /// `active = false`). Only ever grows; at most one entry per index ever
+  /// assigned.
+  static const String keyDeletedHdIndices = 'deleted_hd_indices';
+
+  /// [areaDevice]: the derivation run of §13.7 is open (`{'v': true}`);
+  /// absent when it is not. Opened when an identity is created from the
+  /// words, closed only by the user ("no further identity" is never
+  /// concluded automatically, §13.7).
+  static const String keyIdentityRun = 'identity_run';
+
+  /// [areaDevice]: the identity list this device last sent to its other own
+  /// devices (§14.7 Type 23, D-99) as its signature (`{'v': '…'}`). Absent
+  /// before the first start of a version that knows the type — that start
+  /// sends the list once; afterwards only a changed list is sent.
+  static const String keyIdentitySetSent = 'identity_set_sent';
+
+  /// [areaDevice]: the devices the user approved for enrolment (`{'v':
+  /// [DeviceID hex, …]}`, §14.6.1 step 3, D-99, D-106) — one approval counts
+  /// for every identity of that device until it is locked out, also for a
+  /// request that arrives after a restart.
+  static const String keyEnrolApproved = 'enrol_approved';
+
+  /// [areaDevice]: identities this device removed because a recovery on
+  /// another device retired it (§13.3.4, §13.6, D-103) — `{'v': [{'i':
+  /// index, 'name': …, 'at': ms}, …]}`, for the interface to say why. Their
+  /// index is NOT noted as deleted: the identity lives on, on the recovering
+  /// device, and a minimal bundle with `active = false` would hide it from
+  /// the next derivation run (§13.7).
+  static const String keyRetiredIdentities = 'retired_identities';
+
+  /// [areaDevice]: the DeviceID of this device (`{'v': <32 hex digits>}`,
+  /// §14.1; §4.1 "a daemon hosting N identities has exactly one DeviceID")
+  /// — ONE for every identity of the device. Set by the first identity that
+  /// starts on a device without it; every identity created later takes it
+  /// (`CleonaService._initLocalDevice`).
+  static const String keyDeviceId = 'device_id';
+
   /// [areaDevice]: the data port of this device (`{'v': port}`, §11.1).
   static const String keyDataPort = 'data_port';
 
@@ -161,7 +201,10 @@ class DeviceStore extends EncryptedStore {
   /// 4.2.3 and earlier (`{'v': true}`) are overwritten by the next check.
   static const String keyWindowsFirewallRule = 'windows_firewall_rule';
 
-  /// The device keys (§4.4.2): ONE row, key [keySingle], the container of
+  /// The device keys (§4.4.2): the device-wide container under [keySingle]
+  /// (it forms only the node identifier of the device, §4.1) and one
+  /// container per identity under its HD index (D-106,
+  /// `DeviceKeysStore.loadOrCreateFor`), each the container of
   /// `DeviceKeysStore` as base64.
   static const String areaDeviceKeys = 'device_keys';
 

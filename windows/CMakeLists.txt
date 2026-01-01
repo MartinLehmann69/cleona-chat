@@ -49,6 +49,15 @@ endfunction()
 set(FLUTTER_MANAGED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/flutter")
 add_subdirectory(${FLUTTER_MANAGED_DIR})
 
+# === Network channel of the bundle (data\channel) ===
+# Derived from --dart-define=NETWORK_CHANNEL, the same define that goes into
+# app.so, so every `flutter build windows` carries the file — the lab build
+# exactly like the release build (S413-13); scripts/release-build.sh only
+# checks it. One module for Linux and Windows; the rule is described there.
+include("${CMAKE_SOURCE_DIR}/../native/cleona_channel/network_channel.cmake")
+cleona_network_channel_file(
+  "${FLUTTER_MANAGED_DIR}/ephemeral/generated_config.cmake" CLEONA_CHANNEL_FILE)
+
 # Application build; see runner/CMakeLists.txt.
 add_subdirectory("runner")
 
@@ -77,6 +86,10 @@ install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
 
 install(FILES "${FLUTTER_ICU_DATA_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
+
+# data\channel, derived above from --dart-define=NETWORK_CHANNEL.
+install(FILES "${CLEONA_CHANNEL_FILE}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
+  RENAME "channel" COMPONENT Runtime)
 
 install(FILES "${FLUTTER_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
   COMPONENT Runtime)

@@ -280,7 +280,13 @@ class LegacyKeyPurge {
     if (!KeyringService.isInitialized) return false;
     final outFile = _hexToBytes(json['seed'] as String?);
     if (outFile == null) return false;
-    final outBundle = KeyringService.instance.load('master_seed');
+    // D-95: a present but unreadable entry proves nothing — nothing goes.
+    final Uint8List? outBundle;
+    try {
+      outBundle = KeyringService.instance.load('master_seed');
+    } on Exception {
+      return false;
+    }
     if (outBundle == null) return false;
     return _equal(outFile, outBundle);
   }
@@ -289,7 +295,12 @@ class LegacyKeyPurge {
     if (!KeyringService.isInitialized) return false;
     final words = (json['words'] as List<dynamic>?)?.cast<String>();
     if (words == null || words.isEmpty) return false;
-    final outBundle = KeyringService.instance.load('seed_phrase');
+    final Uint8List? outBundle;
+    try {
+      outBundle = KeyringService.instance.load('seed_phrase');
+    } on Exception {
+      return false;
+    }
     if (outBundle == null) return false;
     return String.fromCharCodes(outBundle) == words.join(' ');
   }

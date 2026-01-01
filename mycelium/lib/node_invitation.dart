@@ -178,8 +178,9 @@ extension NodeInvitation on Node {
       acceptanceSend: (p, origin, who) => _acceptanceRoute(p, origin, who, to),
       onBuffered: (a) {
         _totalCap();
-        _onContactRequest[this]?.call(to, a);
+        _onContactRequest[this]?.call(to, a, true);
       },
+      onRenewed: (a) => _onContactRequest[this]?.call(to, a, false),
       report: report,
     );
     asValue.open[hexFrom(e.code)] = waiting;
@@ -285,9 +286,9 @@ extension NodeInvitation on Node {
           bool Function(Address to, Address who, CardAddress origin)? f) =>
       _onRecontact[this] = f;
 
-  /// Who learns of a WAITING request — the question to the user
-  /// (§12.5). Set by the host.
-  set onContactRequest(void Function(Address to, ContactRequest a)? f) =>
+  /// Who learns of a WAITING request — [fresh] the question to the user
+  /// (§12.5), else a renewal (§15.4, only saved). Set by the host.
+  set onContactRequest(void Function(Address, ContactRequest, bool fresh)? f) =>
       _onContactRequest[this] = f;
 
   /// ES-6 (a), owner decision 15.09.2026: the acceptance (3) goes via the
@@ -388,7 +389,7 @@ int _nextNumber = 0;
 /// `node.dart` is at the line budget.
 final Expando<void Function(Address, Address, CardAddress?)> _onAccepted =
     Expando('onAccepted');
-final Expando<void Function(Address, ContactRequest)> _onContactRequest =
+final Expando<void Function(Address, ContactRequest, bool)> _onContactRequest =
     Expando('onContactRequest');
 final Expando<bool Function(Address, Address, CardAddress)>
     _onRecontact = Expando('onRecontact');

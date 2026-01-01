@@ -82,6 +82,22 @@ bool _versionNewer(String a, String b) {
   return false;
 }
 
+/// The daemon's events of a 1:1 call (`IpcServer`, `onIncomingCall` ff.).
+const _kCallEvents = {
+  'incoming_call',
+  'call_accepted',
+  'call_rejected',
+  'call_ended',
+  'call_unavailable',
+};
+
+/// The daemon's events of a group call.
+const _kGroupCallEvents = {
+  'incoming_group_call',
+  'group_call_started',
+  'group_call_ended',
+};
+
 /// IPC client that connects to the cleona-daemon via Unix Domain Socket.
 /// Implements ICleonaService so the GUI can use it transparently.
 class IpcClient implements ICleonaService, ContactSeedDataSource {
@@ -223,6 +239,18 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // Cached call state
   CallInfo? _currentCall;
+
+  /// The identity [_currentCall] belongs to (S417 C-3b). All identities are
+  /// active at once (v4_2 §4.5.1), so a call can arrive on one that is not
+  /// displayed. Every call command carries this id, the daemon resolves the
+  /// service by it (`IpcServer._resolveService`), and the events of this
+  /// identity's call are taken although it is not the active one. Without
+  /// it, "accept" went to the displayed identity, which has no call.
+  String? _callIdentityId;
+
+  /// The identity (nodeIdHex) the running 1:1 call belongs to — read by the
+  /// call screen to name it (S418, C-3). Null without a call.
+  String? get callIdentityId => _callIdentityId;
 
   // Typing indicator state
   final Set<String> _typingContacts = {};
@@ -504,22 +532,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     // Binary updates live on the primary identity's service — never filter.
     final isGlobalEvent = event.event == 'update_state_changed' ||
         event.event == 'update_available';
-    // Event for a different identity — track unread counts, handle calls
+    // A call of another identity is that identity's: its events are handled
+    // below like the active identity's (S417 C-3b).
+    final isForeignCallEvent = event.identityId != null &&
+        ((_kCallEvents.contains(event.event) &&
+                (event.event == 'incoming_call' ||
+                    event.identityId == _callIdentityId)) ||
+            (_kGroupCallEvents.contains(event.event) &&
+                (event.event == 'incoming_group_call' ||
+                    event.identityId == _groupCallIdentityId)));
+    // Event for a different identity — track unread counts
     if (!isGlobalEvent &&
+        !isForeignCallEvent &&
         event.identityId != null &&
         activeIdentityId != null &&
         event.identityId != activeIdentityId) {
-      if (event.event == 'incoming_call') {
-        final call = CallInfo.fromJson(event.data);
-        _currentCall = call;
-        onIncomingCall?.call(call);
-        onStateChanged?.call();
-      } else if (event.event == 'incoming_group_call') {
-        final call = GroupCallInfo.fromJson(event.data);
-        _currentGroupCall = call;
-        onIncomingGroupCall?.call(call);
-        onStateChanged?.call();
-      } else if (event.event == 'new_message') {
+      if (event.event == 'new_message') {
         // Track unread for non-active identity
         final msgData = event.data['message'] as Map<String, dynamic>?;
         final isOutgoing = msgData?['isOutgoing'] as bool? ?? true;
@@ -707,11 +735,13 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         break;
       case 'incoming_call':
         _currentCall = CallInfo.fromJson(event.data);
+        _callIdentityId = event.identityId ?? activeIdentityId;
         onIncomingCall?.call(_currentCall!);
         onStateChanged?.call();
         break;
       case 'call_accepted':
         _currentCall = CallInfo.fromJson(event.data);
+        _callIdentityId = event.identityId ?? _callIdentityId;
         onCallAccepted?.call(_currentCall!);
         onStateChanged?.call();
         break;
@@ -719,12 +749,14 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         final call = CallInfo.fromJson(event.data);
         final reason = event.data['reason'] as String? ?? 'rejected';
         _currentCall = null;
+        _callIdentityId = null;
         onCallRejected?.call(call, reason);
         onStateChanged?.call();
         break;
       case 'call_ended':
         final call = CallInfo.fromJson(event.data);
         _currentCall = null;
+        _callIdentityId = null;
         onCallEnded?.call(call);
         onStateChanged?.call();
         break;
@@ -739,17 +771,20 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
         break;
       case 'incoming_group_call':
         _currentGroupCall = GroupCallInfo.fromJson(event.data);
+        _groupCallIdentityId = event.identityId ?? activeIdentityId;
         onIncomingGroupCall?.call(_currentGroupCall!);
         onStateChanged?.call();
         break;
       case 'group_call_started':
         _currentGroupCall = GroupCallInfo.fromJson(event.data);
+        _groupCallIdentityId = event.identityId ?? _groupCallIdentityId;
         onGroupCallStarted?.call(_currentGroupCall!);
         onStateChanged?.call();
         break;
       case 'group_call_ended':
         final call = GroupCallInfo.fromJson(event.data);
         _currentGroupCall = null;
+        _groupCallIdentityId = null;
         onGroupCallEnded?.call(call);
         onStateChanged?.call();
         break;
@@ -975,6 +1010,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     _isRunning = state['isRunning'] as bool? ?? _isRunning;
     final ev = state['enrolment'] as Map<String, dynamic>?;
     if (ev != null) _enrolmentView = EnrolmentView.fromJson(ev);
+    final ud = state['userDevices'] as Map<String, dynamic>?;
+    if (ud != null) _userDevices = UserDevicesView.fromJson(ud);
     _profilePictureBase64 = state['profilePicture'] as String?;
     _profileDescription = state['profileDescription'] as String?;
     // AP-5a: absent on a pre-AP-5a daemon -> keep the previous list rather
@@ -1154,11 +1191,24 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       }
     }
 
-    final callData = state['currentCall'] as Map<String, dynamic>?;
-    _currentCall = callData != null ? CallInfo.fromJson(callData) : null;
+    // The snapshot is the ACTIVE identity's. A call of another identity is
+    // not in it and must not be wiped by it (S417 C-3b) — [refreshState]
+    // reads that call from its own identity.
+    if (_callIdentityId == null || _callIdentityId == activeIdentityId) {
+      final callData = state['currentCall'] as Map<String, dynamic>?;
+      _currentCall = callData != null ? CallInfo.fromJson(callData) : null;
+      _callIdentityId = _currentCall != null ? activeIdentityId : null;
+    }
 
-    final groupCallData = state['currentGroupCall'] as Map<String, dynamic>?;
-    _currentGroupCall = groupCallData != null ? GroupCallInfo.fromJson(groupCallData) : null;
+    if (_groupCallIdentityId == null ||
+        _groupCallIdentityId == activeIdentityId) {
+      final groupCallData = state['currentGroupCall'] as Map<String, dynamic>?;
+      _currentGroupCall = groupCallData != null
+          ? GroupCallInfo.fromJson(groupCallData)
+          : null;
+      _groupCallIdentityId =
+          _currentGroupCall != null ? activeIdentityId : null;
+    }
 
     // §11/G-11: the start peer candidates of the NODE. If the key is
     // missing, the last state stays instead of jumping to empty — a
@@ -1294,7 +1344,33 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     final resp = await _sendRequest('get_state');
     if (resp.success) {
       _applyStateSnapshot(resp.data);
+      await _refreshCallsOfOtherIdentity();
       onStateChanged?.call();
+    }
+  }
+
+  /// S417 C-3b: a call that belongs to an identity other than the active
+  /// one is read from that identity (`get_call_state` /
+  /// `get_group_call_state` with its id) — the state snapshot does not
+  /// carry it. Local IPC only, and only while such a call exists.
+  Future<void> _refreshCallsOfOtherIdentity() async {
+    final callId = _callIdentityId;
+    if (callId != null && callId != activeIdentityId) {
+      final r = await _sendRequest('get_call_state', identityId: callId);
+      if (r.success && _callIdentityId == callId) {
+        final data = r.data['currentCall'] as Map<String, dynamic>?;
+        _currentCall = data != null ? CallInfo.fromJson(data) : null;
+        if (_currentCall == null) _callIdentityId = null;
+      }
+    }
+    final groupId = _groupCallIdentityId;
+    if (groupId != null && groupId != activeIdentityId) {
+      final r = await _sendRequest('get_group_call_state', identityId: groupId);
+      if (r.success && _groupCallIdentityId == groupId) {
+        final data = r.data['currentGroupCall'] as Map<String, dynamic>?;
+        _currentGroupCall = data != null ? GroupCallInfo.fromJson(data) : null;
+        if (_currentGroupCall == null) _groupCallIdentityId = null;
+      }
     }
   }
 
@@ -1347,16 +1423,6 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       onStateChanged?.call();
     }
     return resp.success;
-  }
-
-  /// §6.4.3: Recover multi-identity list from DHT registry.
-  /// Returns the number of newly created + started identities.
-  Future<int> recoverIdentitiesFromRegistry() async {
-    final resp = await _sendRequest('recover_identities_from_registry');
-    if (resp.success) {
-      return resp.data['count'] as int? ?? 0;
-    }
-    return 0;
   }
 
   /// List all identities with their status.
@@ -1475,6 +1541,12 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   EnrolmentView get enrolmentView => _enrolmentView;
 
+  // D-99 (§14.9.2): the devices of the user, from the `get_state` snapshot.
+  UserDevicesView _userDevices = const UserDevicesView();
+
+  @override
+  UserDevicesView get userDevices => _userDevices;
+
   @override
   Future<bool> enrolmentWindowOpen() async =>
       (await _sendRequest('enrolment_window_open')).success;
@@ -1492,6 +1564,23 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   Future<bool> enrolmentRecoverNow() async =>
       (await _sendRequest('enrolment_recover_now')).success;
+
+  @override
+  Future<bool> enrolmentRecoveryFinish() async =>
+      (await _sendRequest('enrolment_recovery_finish')).success;
+
+  @override
+  Future<bool> enrolmentRetiredSeen() async =>
+      (await _sendRequest('enrolment_retired_seen')).success;
+
+  @override
+  Future<bool> identityRunNameIndex(int index) async =>
+      (await _sendRequest('identity_run_name_index', params: {'index': index}))
+          .success;
+
+  @override
+  Future<bool> identityRunEnd() async =>
+      (await _sendRequest('identity_run_end')).success;
   // sec-h5 §8.2 / T11 + follow-up task 2026-04-26: reducedMode is a per-session
   // flag toggled by the GUI splash. On Desktop the splash runs in this GUI
   // process while CleonaService lives in the daemon — we mirror the bool
@@ -1995,9 +2084,10 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   }
 
   @override
-  Future<bool> leaveGroup(String groupIdHex) async {
+  Future<bool> leaveGroup(String groupIdHex, {String via = 'unknown'}) async {
     final resp = await _sendRequest('leave_group', params: {
       'groupIdHex': groupIdHex,
+      'via': via,
     });
     if (resp.success) await refreshState();
     return resp.success;
@@ -2169,14 +2259,19 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   Future<bool> setTranscriptionSettings({
     required String language,
-    required String modelSize,
     required int retentionDays,
   }) async {
     final resp = await _sendRequest('transcription_settings_set', params: {
       'language': language,
-      'modelSize': modelSize,
       'retentionDays': retentionDays,
     });
+    return resp.success;
+  }
+
+  @override
+  Future<bool> setTranscriptionModel(String modelSize) async {
+    final resp = await _sendRequest('transcription_model_set',
+        params: {'modelSize': modelSize});
     return resp.success;
   }
 
@@ -2951,6 +3046,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     });
     if (resp.success) {
       _currentCall = CallInfo.fromJson(resp.data);
+      // `start_call` above went to the active identity.
+      _callIdentityId = activeIdentityId;
       return _currentCall;
     }
     return null;
@@ -2958,19 +3055,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   Future<void> acceptCall() async {
-    await _sendRequest('accept_call');
+    await _sendRequest('accept_call', identityId: _callIdentityId);
   }
 
   @override
   Future<void> rejectCall({String reason = 'declined'}) async {
-    await _sendRequest('reject_call', params: {'reason': reason});
+    await _sendRequest('reject_call',
+        params: {'reason': reason}, identityId: _callIdentityId);
     _currentCall = null;
+    _callIdentityId = null;
   }
 
   @override
   Future<void> hangup() async {
-    await _sendRequest('hangup');
+    await _sendRequest('hangup', identityId: _callIdentityId);
     _currentCall = null;
+    _callIdentityId = null;
   }
 
   // ── Group Calls ──────────────────────────────────────────────────
@@ -2978,6 +3078,17 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
   @override
   GroupCallInfo? get currentGroupCall => _currentGroupCall;
   GroupCallInfo? _currentGroupCall;
+
+  /// The identity [_currentGroupCall] belongs to — see [_callIdentityId].
+  String? _groupCallIdentityId;
+
+  /// Read side of [_groupCallIdentityId] for the call screen (S418, C-3).
+  String? get groupCallIdentityId => _groupCallIdentityId;
+
+  /// The identity a mute/speaker/video command is for: the 1:1 call's while
+  /// there is one, else the group call's. Null = the active identity.
+  String? get _mediaIdentityId =>
+      _currentCall != null ? _callIdentityId : _groupCallIdentityId;
 
   @override
   void Function(GroupCallInfo info)? onIncomingGroupCall;
@@ -2995,6 +3106,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     });
     if (resp.success && resp.data.containsKey('callId')) {
       _currentGroupCall = GroupCallInfo.fromJson(resp.data);
+      // `start_group_call` above went to the active identity.
+      _groupCallIdentityId = activeIdentityId;
       return _currentGroupCall;
     }
     return null;
@@ -3002,19 +3115,22 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   Future<void> acceptGroupCall() async {
-    await _sendRequest('accept_group_call');
+    await _sendRequest('accept_group_call', identityId: _groupCallIdentityId);
   }
 
   @override
   Future<void> rejectGroupCall({String reason = 'declined'}) async {
-    await _sendRequest('reject_group_call', params: {'reason': reason});
+    await _sendRequest('reject_group_call',
+        params: {'reason': reason}, identityId: _groupCallIdentityId);
     _currentGroupCall = null;
+    _groupCallIdentityId = null;
   }
 
   @override
   Future<void> leaveGroupCall() async {
-    await _sendRequest('leave_group_call');
+    await _sendRequest('leave_group_call', identityId: _groupCallIdentityId);
     _currentGroupCall = null;
+    _groupCallIdentityId = null;
   }
 
   @override
@@ -3023,7 +3139,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   void toggleMute() {
-    _sendRequest('toggle_mute').then((resp) {
+    _sendRequest('toggle_mute', identityId: _mediaIdentityId).then((resp) {
       if (resp.success) {
         _isMuted = resp.data['isMuted'] as bool? ?? false;
       }
@@ -3036,7 +3152,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   void toggleSpeaker() {
-    _sendRequest('toggle_speaker').then((resp) {
+    _sendRequest('toggle_speaker', identityId: _mediaIdentityId).then((resp) {
       if (resp.success) {
         _isSpeakerEnabled = resp.data['isSpeakerEnabled'] as bool? ?? true;
       }
@@ -3049,7 +3165,8 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   @override
   void toggleVideoMute() {
-    _sendRequest('toggle_video_mute').then((resp) {
+    _sendRequest('toggle_video_mute', identityId: _mediaIdentityId)
+        .then((resp) {
       if (resp.success) {
         _isVideoMuted = resp.data['isVideoMuted'] as bool? ?? false;
       }

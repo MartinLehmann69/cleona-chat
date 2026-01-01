@@ -18,8 +18,10 @@
 // ML-KEM-768, `PerMessageKem`): a piece that arrives alone — directly or
 // from a post box — opens alone, and a holder sees only opaque bytes.
 //
-// No compatibility: a new format number, nothing older is read (4.2 has no
-// legacy enrolments).
+// Two request forms (S414): form 2 names the device signing public keys
+// beside the KEM keys (§14.6.1 step 2, §14.9.1); form 1 — the form of 4.2.3
+// to 4.2.6 — names only the KEM keys and is still read. No 4.2 version before
+// S414 opens an enrolment window, so none of them ever reads a form-2 request.
 
 import 'dart:convert';
 import 'dart:typed_data';
@@ -34,6 +36,12 @@ import 'package:cleona/core/recovery/recovery_keys.dart';
 const List<int> _kRequestMagic = <int>[0x43, 0x45, 0x52, 0x00]; // "CER\0"
 const List<int> _kAnswerMagic = <int>[0x43, 0x45, 0x41, 0x00]; // "CEA\0"
 const int _kVersion = 1;
+
+/// The request form that also names the device signing public keys
+/// (S414, §14.6.1 step 2 "device public keys", §14.9.1). Form 1 — without
+/// them — is what 4.2.3 to 4.2.6 send and is still read; it is written only
+/// for a request that names no signing keys.
+const int _kRequestVersionSigning = 2;
 
 /// The window of an enrolment (§14.6.1: 24 hours).
 const Duration kEnrolWindow = Duration(hours: 24);
@@ -68,7 +76,9 @@ final class EnrolRequest {
     required this.addresses,
     required this.holders,
     required this.atMs,
-  });
+    this.deviceEd25519Pk,
+    this.deviceMlDsaPk,
+  }) : assert((deviceEd25519Pk == null) == (deviceMlDsaPk == null));
 
   final Uint8List requestId;
   final Uint8List deviceId;
@@ -76,6 +86,14 @@ final class EnrolRequest {
   final String platform;
   final Uint8List deviceX25519Pk;
   final Uint8List deviceMlKemPk;
+
+  /// The device signing public keys (§4.4.2) — `null` in a request of the
+  /// earlier form (4.2.3 to 4.2.6), which names only the KEM keys.
+  final Uint8List? deviceEd25519Pk;
+  final Uint8List? deviceMlDsaPk;
+
+  /// Whether the request names the device signing keys.
+  bool get namesSigningKeys => deviceEd25519Pk != null && deviceMlDsaPk != null;
 
   /// Public reply keys, today first; the answer lies under their values.
   final List<Uint8List> replyPks;
@@ -95,15 +113,20 @@ final class EnrolRequest {
   Uint8List encode() {
     final b = BytesBuilder()
       ..add(_kRequestMagic)
-      ..addByte(_kVersion)
+      ..addByte(namesSigningKeys ? _kRequestVersionSigning : _kVersion)
       ..add(_fixed(requestId, 16))
       ..add(_fixed(deviceId, 16));
     _str(b, deviceName);
     _str(b, platform);
     b
       ..add(_fixed(deviceX25519Pk, 32))
-      ..add(_fixed(deviceMlKemPk, OqsFFI.mlKemPublicKeyLength))
-      ..addByte(replyPks.length);
+      ..add(_fixed(deviceMlKemPk, OqsFFI.mlKemPublicKeyLength));
+    if (namesSigningKeys) {
+      b
+        ..add(_fixed(deviceEd25519Pk!, 32))
+        ..add(_fixed(deviceMlDsaPk!, OqsFFI.mlDsaPublicKeyLength));
+    }
+    b.addByte(replyPks.length);
     for (final p in replyPks) {
       b.add(_fixed(p, 32));
     }
@@ -139,13 +162,21 @@ final class EnrolRequest {
   static EnrolRequest? read(Uint8List bytes) {
     try {
       final r = _Reader(bytes);
-      if (!_same(r.raw(4), _kRequestMagic) || r.u8() != _kVersion) return null;
+      if (!_same(r.raw(4), _kRequestMagic)) return null;
+      final version = r.u8();
+      if (version != _kVersion && version != _kRequestVersionSigning) { // V3-TOUCH-OK: both forms are 4.2 (form 1 of 4.2.3-4.2.6), CLAUDE.md "Linien": 4.2.x stay compatible
+
+        return null;
+      }
       final id = r.raw(16);
       final dev = r.raw(16);
       final name = r.str();
       final platform = r.str();
       final x = r.raw(32);
       final kem = r.raw(OqsFFI.mlKemPublicKeyLength);
+      final signing = version == _kRequestVersionSigning;
+      final ed = signing ? r.raw(32) : null;
+      final dsa = signing ? r.raw(OqsFFI.mlDsaPublicKeyLength) : null;
       final n = r.u8();
       if (n < 1 || n > kEnrolReplyKeys) return null;
       final pks = [for (var i = 0; i < n; i++) r.raw(32)];
@@ -164,7 +195,9 @@ final class EnrolRequest {
           replyPks: pks,
           addresses: addresses,
           holders: holders,
-          atMs: at);
+          atMs: at,
+          deviceEd25519Pk: ed,
+          deviceMlDsaPk: dsa);
     } catch (_) {
       return null;
     }

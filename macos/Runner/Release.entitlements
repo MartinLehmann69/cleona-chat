@@ -12,5 +12,21 @@
 	<true/>
 	<key>com.apple.security.network.server</key>
 	<true/>
+
+	<!-- D-100 (v4_2 §22.6): the release app is signed with Developer ID and
+	     the Hardened Runtime (.github/workflows/ios-build.yml "Sign app
+	     bundle"). The Hardened Runtime prohibits "access to restricted
+	     resources, such as the device's built-in camera" unless an
+	     entitlement removes that protection (Apple, "Configuring the
+	     hardened runtime", Resource Access: Audio Input, Camera). The GUI
+	     records voice messages (plugin `record`) and scans invitation QR
+	     codes (plugin `mobile_scanner`); NSMicrophoneUsageDescription and
+	     NSCameraUsageDescription stand in Info.plist, the user is still
+	     asked by macOS. No JIT key here: a release build runs the AOT code
+	     of App.framework and creates no executable memory of its own. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+	<key>com.apple.security.device.camera</key>
+	<true/>
 </dict>
 </plist>

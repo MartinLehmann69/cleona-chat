@@ -106,6 +106,9 @@ extension CleonaServiceMycelium on CleonaService {
     // the start of the sender-side auto-delete deadline hang on it.
     p.onCarried = _myceliumMessageCarried;
     _myceliumOwnLineSync(); // the own device set (§14.7, D-37)
+    // §14.7 Type 23 (D-99): the own devices carrying this identity join its
+    // set; a changed identity list goes to the other own devices.
+    _identitySetAttach();
     // §15.3 "lives 60 s": the mailbox closed at its start what was due; a
     // face-to-face invitation shown shortly before a restart gets its rest.
     _faceToFaceArm();
@@ -1110,6 +1113,13 @@ extension CleonaServiceMycelium on CleonaService {
     // as well; a mirror would undo the leaving on them.
     if (verdict != GroupGateVerdict.discarded) {
       _myceliumMirror(frame, e.content, e.identifier);
+    } else if (frame.messageType ==
+        proto.MessageType.MT_GROUP_MEMBERS_CHANGE) {
+      // S419 diagnostics (smoke_twin_chat_config, section 11): logging only.
+      _log.info('Twin DELIVERY_MIRROR out: MT_GROUP_MEMBERS_CHANGE '
+          '${_membersChangeNote(frame)} from ${senderHex.substring(0, 8)} '
+          '(device ${_localDeviceId.substring(0, 8)}): not mirrored, '
+          'discarded by the group gate');
     }
   }
 
@@ -1347,6 +1357,9 @@ extension CleonaServiceMycelium on CleonaService {
     // asked for the rescue bundle first. Did it bring this very contact
     // back, no request is sent — its first envelope anchors it (E7-b).
     await _recoverySeekAtCard(reading.card!);
+    // §13.7: and for the other identities of the words, while the run is
+    // open — not waited for.
+    _identityRunAtCard(reading.card!);
     // D-40, §14.6.1: undecided, the install searches only — no request goes
     // out in the identity's name.
     if (enrolmentHolds(_enrol.phase)) {

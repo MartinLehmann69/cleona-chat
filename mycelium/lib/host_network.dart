@@ -41,7 +41,9 @@ import 'package:mycelium/open_check.dart';
 import 'package:mycelium/open_check_answer.dart';
 import 'package:mycelium/network_watch.dart';
 import 'package:mycelium/host_outside.dart';
-import 'package:mycelium/host_media.dart' show bulkFamilyOpen;
+import 'package:mycelium/host_media.dart' show bulkFamilyOpen, reachableEvidenced;
+import 'package:mycelium/neighbour_evidence.dart';
+import 'package:mycelium/node_outside.dart' show NodeOutside;
 import 'package:mycelium/host_router.dart';
 import 'package:mycelium/node_helpers.dart' show interfaces;
 import 'package:mycelium/host_memory.dart';
@@ -164,6 +166,8 @@ class HostNetwork {
     // evidenced open; each evidence's first arrival is an edge to publish.
     _outside.familyEvidenced = (f) =>
         bulkFamilyOpen(this, f) || (_k.passiveProof?.provenFor(f) ?? false);
+    // D-113 (§8.1): the evidence byte of every `0x25` this node answers with.
+    _k.reachabilityEvidenceFrom(() => reachableEvidenced(_k, (f) => bulkFamilyOpen(this, f)));
     _k.passiveProof?.onFamily = (_) => _run(_outside.write());
     _k.coverStream.onKeepAlive = echo.keepAlive;
     echo.onMoved = keepAlive.moved;
@@ -321,6 +325,7 @@ class HostNetwork {
       _report?.call('TRACE seat fixed neighbours changed: '
           '${seatsOf(_k.neighbourhood, _k.readiness.responding).join(" | ")}');
     }
+    _contactSeatsReport(before, list);
     save();
     // S394 V6: a new fixed NODE needs the codes before a contact sends there
     // (§8.1) — the registration goes out NOW as `0x24`.
@@ -332,6 +337,25 @@ class HostNetwork {
     keepAlive.edgeNow();
     // No notice to the contacts: the list rides sealed in every message and
     // acknowledgement (`message.dart`; proposal rule 5, the 0x17 is gone).
+  }
+
+  /// D-113 (§5.2): every contact's place set or given up, with what the
+  /// holder's `0x25` said — "yes", "no", or "unknown" (address rule).
+  void _contactSeatsReport(List<Neighbour> before, List<Neighbour> now) {
+    bool holds(List<Neighbour> l, Neighbour n) =>
+        l.any((x) => x.id == n.id && x.contactSeat > 0);
+    for (final n in now.where((x) => x.contactSeat > 0 && !holds(before, x))) {
+      final why = _k.evidenceOf(n.id) == null ? ' (address rule)' : ' (its 0x25)';
+      _report?.call('contact seat ${n.contactSeat} set: ${n.key} — evidence '
+          '${_k.evidenceWord(n)}$why (§5.2)');
+    }
+    for (final n in before.where((x) => x.contactSeat > 0 && !holds(now, x))) {
+      final why = _k.evidenceOf(n.id) == false
+          ? ' (its 0x25)'
+          : ' (another edge: gone, no contact, excluded, metered or the card seat)';
+      _report?.call('contact seat ${n.contactSeat} given up: ${n.key} — evidence '
+          '${_k.evidenceWord(n)}$why (§5.2)');
+    }
   }
 
   /// The fixed neighbours with their seats as the cards name them — a new

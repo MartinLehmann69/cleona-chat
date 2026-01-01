@@ -598,7 +598,7 @@ class NetworkStatsCollector {
   //
   // UNTIL S361 THIS SAID "gap G-2". That was a WRONG NUMBER: G-2 is
   // the distribution of the two system channels (Bug Log, Feature
-  // Requests, `cleona_service_pure.dart:793`) and has nothing to do with the
+  // Requests, `channels/system_object_legacy.dart:8`) and has nothing to do with the
   // network statistics. The display metrics are G-10,
   // and G-10 was CLOSED in S360 — for the V4.1 layer: `v41_attach.dart`
   // sets `service.v41NodeGauges`, `cleona_service.dart` fetches them in

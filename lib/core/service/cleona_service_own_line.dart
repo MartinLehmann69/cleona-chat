@@ -181,11 +181,13 @@ extension CleonaServiceOwnLine on CleonaService {
   /// Type 0 CONTACT_ADDED (§14.7, D-28): everything another own device needs
   /// to reach [contact] — keys, founding anchor, and from the delivery layer
   /// the pair secret `s_AB`, the peer's day keys and its fixed neighbours.
-  /// It travels only sealed to the own identity (the own line).
-  void _sendTwinContactAdded(ContactInfo contact) {
+  /// It travels only sealed to the own identity (the own line). [to]: one
+  /// own device only (its DeviceID) — a device that just joined the set of
+  /// an identity it carried apart (§14.7 Type 23).
+  void _sendTwinContactAdded(ContactInfo contact, {Uint8List? to}) {
     final hex = contact.nodeIdHex;
     final k = myceliumMailbox?.contactOrNull(hex);
-    _sendTwinSync(proto.TwinSyncType.CONTACT_ADDED,
+    _sendTwinSync(targetDeviceId: to, proto.TwinSyncType.CONTACT_ADDED,
         Uint8List.fromList(utf8.encode(jsonEncode({
       'nodeId': hex,
       'displayName': contact.displayName,
@@ -255,7 +257,7 @@ extension CleonaServiceOwnLine on CleonaService {
   /// `joined` — and, per group pair of this group (D-36), what Type 0
   /// carries per contact: `sAB`, the co-member's `dayKeys` and its fixed
   /// `neighbours`, so that every own device reaches every member.
-  void _sendTwinGroupCreated(GroupInfo group) {
+  void _sendTwinGroupCreated(GroupInfo group, {Uint8List? to}) {
     final p = myceliumMailbox;
     final pairs = <String, dynamic>{};
     for (final m in group.members.keys) {
@@ -276,7 +278,7 @@ extension CleonaServiceOwnLine on CleonaService {
       };
     }
     final sk = _skTwinState(group.groupIdHex);
-    _sendTwinSync(proto.TwinSyncType.GROUP_CREATED,
+    _sendTwinSync(targetDeviceId: to, proto.TwinSyncType.GROUP_CREATED,
         Uint8List.fromList(utf8.encode(jsonEncode({
       ...group.toJson(),
       if (pairs.isNotEmpty) 'groupPairs': pairs,
@@ -307,14 +309,14 @@ extension CleonaServiceOwnLine on CleonaService {
   /// the way it holds a group after Type 6. Sent only while the identity is
   /// a member: the state a leaving device sends to the remaining members no
   /// longer names it, and its leaving travels as Type 21 GROUP_LEFT.
-  void _sendTwinChannelJoined(ChannelInfo channel) {
+  void _sendTwinChannelJoined(ChannelInfo channel, {Uint8List? to}) {
     if (!channel.members.containsKey(identity.userIdHex)) return;
     final sk = _skTwinState(channel.channelIdHex);
     // §14.7 Type 22 "name and settings" (S407-EINSTELLUNGEN A-5): the
     // settings in force here (§21.5.4) — they live at the conversation, not
     // at the channel object.
     final settings = conversations[channel.channelIdHex]?.config.toJson();
-    _sendTwinSync(proto.TwinSyncType.CHANNEL_JOINED,
+    _sendTwinSync(targetDeviceId: to, proto.TwinSyncType.CHANNEL_JOINED,
         Uint8List.fromList(utf8.encode(jsonEncode({
       ...channel.toJson(),
       // §14.7 Type 22, §16.2.5: the key state this device holds.
@@ -429,8 +431,39 @@ extension CleonaServiceOwnLine on CleonaService {
       return;
     }
     if (!_kMirrored.contains(frame.messageType)) return;
+    if (frame.messageType == proto.MessageType.MT_GROUP_MEMBERS_CHANGE) {
+      _membersMirrorOutNote(frame);
+    }
     _sendTwinSync(proto.TwinSyncType.DELIVERY_MIRROR, content,
         deliveryId: identifier);
+  }
+
+  /// S419 diagnostics (smoke_twin_chat_config, section 11): whether and to
+  /// which own devices THIS device mirrors a membership change it collected
+  /// — in a process with several own devices the device is named. Logging
+  /// only; the same condition as [_sendTwinSync] decides, not this line.
+  void _membersMirrorOutNote(proto.ApplicationFrame frame) {
+    final others = [
+      for (final d in _devices.values)
+        if (!d.isThisDevice)
+          d.deviceId.length >= 8 ? d.deviceId.substring(0, 8) : d.deviceId,
+    ];
+    _log.info('Twin DELIVERY_MIRROR out: MT_GROUP_MEMBERS_CHANGE '
+        '${_membersChangeNote(frame)} from '
+        '${CleonaService._hexShort(Uint8List.fromList(frame.senderUserId))} '
+        '(device ${_localDeviceId.substring(0, 8)}): '
+        '${_devices.length <= 1 ? 'not mirrored, no other own device' : 'mirrored to ${others.length} own device(s) $others'}');
+  }
+
+  /// Group and epoch of the membership change in [frame], for a log line.
+  String _membersChangeNote(proto.ApplicationFrame frame) {
+    try {
+      final ch = proto.GroupMembersChange.fromBuffer(frame.payload);
+      return 'group ${bytesToHex(Uint8List.fromList(ch.groupId)).substring(0, 8)} '
+          'epoch ${ch.membershipEpoch}';
+    } catch (_) {
+      return 'unreadable';
+    }
   }
 
   /// A Type 18 mirror from another own device: the contact's frame, shown as
@@ -501,10 +534,24 @@ extension CleonaServiceOwnLine on CleonaService {
                     membersOverPair)) ||
         !constantTimeEquals(
             Uint8List.fromList(frame.recipientUserId), identity.userId)) {
+      // S419: the device that discards and which condition failed — in a
+      // process with several own devices (smoke_twin_chat_config) the line
+      // was not attributable (RCA S-3, NOT VERIFIED why A2 kept F "member").
       _log.warn('Twin DELIVERY_MIRROR: ${frame.messageType.name} from '
           '${CleonaService._hexShort(sender)} — not a mirrored delivery of '
-          'a contact. Discarded.');
+          'a contact. Discarded (device ${_localDeviceId.substring(0, 8)}, '
+          'contact $isContact, config $configOverPair, missed $missedOverPair, '
+          'members $membersOverPair).');
       return;
+    }
+    if (frame.messageType == proto.MessageType.MT_GROUP_MEMBERS_CHANGE) {
+      // S419 diagnostics (smoke_twin_chat_config, section 11): the mirror
+      // arrived on this device and is taken; what the epoch rule then does
+      // is logged by `_groupMembersChangeReceived`.
+      _log.info('Twin DELIVERY_MIRROR in: MT_GROUP_MEMBERS_CHANGE '
+          '${_membersChangeNote(frame)} from ${CleonaService._hexShort(sender)} '
+          'taken (device ${_localDeviceId.substring(0, 8)}, contact $isContact, '
+          'members $membersOverPair)');
     }
     await handleApplicationFrame(
       event: HarvestEvent.fromApplicationFrame(

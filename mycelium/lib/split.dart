@@ -305,6 +305,7 @@ class Splitter {
     } finally {
       if (s.count >= 2) {
         endMarksSent++;
+        traceSplitEndMarkSent(_say, s.identifier, s.count, s.from, s.fromPort);
         _wire.send(buildMissingRequest(s.identifier, const []), s.from, s.fromPort);
       }
     }
@@ -346,7 +347,10 @@ class Splitter {
       Uint8List identifier, int countMissing, Uint8List packet, InternetAddress from, int fromPort) async {
     final t = flow.answerableFor(hopKey(from, fromPort), identifier);
     if (t == null) return traceSplitUnknownRequest(_say, identifier, countMissing, from, fromPort);
-    if (countMissing == 0) return flow.endMark(t); // the recipient holds it whole
+    if (countMissing == 0) {
+      traceSplitEndMarkCame(_say, identifier, from, fromPort, t.how);
+      return flow.endMark(t); // the recipient holds it whole
+    }
     flow.asked(t);
     final bd = ByteData.sublistView(packet);
     var sent = 0;

@@ -585,27 +585,30 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     Text(locale.get('select_subscribers'),
                         style: const TextStyle(fontWeight: FontWeight.w500)),
                     const SizedBox(height: 8),
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(maxHeight: 300),
-                      child: ListView.builder(
-                        shrinkWrap: true,
-                        itemCount: contacts.length,
-                        itemBuilder: (_, i) {
-                          final c = contacts[i];
-                          return CheckboxListTile(
-                            title: Text(shownContactName(c.displayName, locale)),
-                            value: selected.contains(c.nodeIdHex),
-                            dense: true,
-                            onChanged: (v) => setDialogState(() {
-                              if (v == true) {
-                                selected.add(c.nodeIdHex);
-                              } else {
-                                selected.remove(c.nodeIdHex);
-                              }
-                            }),
-                          );
-                        },
-                      ),
+                    // S417 B2: ONE scroll area, as in CreateGroupDialog. The
+                    // subscriber list scrolls as part of the outer
+                    // SingleChildScrollView; a capped inner list of its own
+                    // kept the swipe once the keyboard squeezed the dialog,
+                    // and the last contacts stayed out of reach.
+                    ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: contacts.length,
+                      itemBuilder: (_, i) {
+                        final c = contacts[i];
+                        return CheckboxListTile(
+                          title: Text(shownContactName(c.displayName, locale)),
+                          value: selected.contains(c.nodeIdHex),
+                          dense: true,
+                          onChanged: (v) => setDialogState(() {
+                            if (v == true) {
+                              selected.add(c.nodeIdHex);
+                            } else {
+                              selected.remove(c.nodeIdHex);
+                            }
+                          }),
+                        );
+                      },
                     ),
                   ],
                 ],
@@ -1586,7 +1589,7 @@ class _ConversationListViewState extends State<_ConversationListView> {
                   const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8),
                   Text(locale.get(_isGroupManager(conv.id) ? 'group_management' : 'group_info')),
                 ])),
-                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave'), style: const TextStyle(color: Colors.red))])),
+                PopupMenuItem(value: 'leave', child: Row(children: [const Icon(Icons.exit_to_app, size: 18, color: Colors.red), const SizedBox(width: 8), Text(locale.get('leave_group'), style: const TextStyle(color: Colors.red))])),
               ],
               if (conv.isChannel) ...[
                 PopupMenuItem(value: 'info', child: Row(children: [const Icon(Icons.info_outline, size: 18), const SizedBox(width: 8), Text(locale.get('channel_info'))])),
@@ -1713,9 +1716,9 @@ class _ConversationListViewState extends State<_ConversationListView> {
             style: TextButton.styleFrom(foregroundColor: colorScheme.error),
             onPressed: () {
               Navigator.pop(ctx);
-              widget.service.leaveGroup(conv.id);
+              widget.service.leaveGroup(conv.id, via: 'group_list_menu');
             },
-            child: Text(locale.get('leave')),
+            child: Text(locale.get('leave_group')),
           ),
         ],
       ),
@@ -2302,8 +2305,11 @@ class _InboxView extends StatelessWidget {
     // be added — name, platform, DeviceID; nothing is handed over before the
     // user accepts.
     final enrol = service.enrolmentView.requests;
+    // §14.6.1 step 3, §14.8 (D-99): a device refused because the user has
+    // five devices already.
+    final refused = service.enrolmentView.refusedAtCap;
 
-    if (pending.isEmpty && enrol.isEmpty) {
+    if (pending.isEmpty && enrol.isEmpty && refused == null) {
       return _EmptyState(
         icon: Icons.inbox_outlined,
         text: locale.get('inbox_empty'),
@@ -2313,6 +2319,16 @@ class _InboxView extends StatelessWidget {
 
     return ListView(
       children: [
+        if (refused != null)
+          Card(
+            key: const Key('enrol_refused_at_cap'),
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: ListTile(
+              leading: Icon(Icons.block, color: colorScheme.error),
+              title: Text(locale.tr('enrol_refused_at_cap', {'name': refused}),
+                  style: TextStyle(color: colorScheme.error)),
+            ),
+          ),
         for (final r in enrol)
           Card(
             key: Key('enrol_request_${r.requestIdHex}'),
@@ -2579,11 +2595,23 @@ class _IdentityTabBar extends StatelessWidget {
       limitReached();
       return;
     }
+    // §4.5.1, §13.7 (S413 B-4): no new index while the search for the
+    // identities of the words runs — it might be one in use elsewhere.
+    void runOpen() => messenger.showSnackBar(
+        SnackBar(content: Text(locale.get('identity_run_open'))));
+    if (IdentityManager().identityRunOpen()) {
+      runOpen();
+      return;
+    }
     void create(BuildContext ctx, String name) {
       Navigator.pop(ctx);
       appState.createAndSwitchIdentity(name).catchError((Object e) {
         if (e is IdentityLimitReached) {
           limitReached();
+          return;
+        }
+        if (e is IdentityRunOpen) {
+          runOpen();
           return;
         }
         throw e;

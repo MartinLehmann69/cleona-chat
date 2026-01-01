@@ -67,7 +67,7 @@ extension WhereAreYouAnswer on Mailbox {
     _answered[this]![who] = now;
     identity.messages.receiptSend(Uint8List(kIdentifierLength), to);
     report?.call('0x23 from ${who.substring(0, 8)} answered: acknowledgement '
-        'with ${ownNeighbours.length} fixed neighbour(s) on the ordinary way');
+        'with ${ownNeighboursFor(to).length} fixed neighbour(s) on the ordinary way');
     return true;
   }
 

@@ -8,6 +8,7 @@ import 'package:cleona/core/link_io/native_send_path.dart';
 import 'package:mycelium/wire_counters.dart';
 export 'package:mycelium/wire_counters.dart' show WireCounters;
 import 'package:mycelium/wire_target.dart';
+import 'package:mycelium/wire_port.dart' show bindAlone;
 import 'package:mycelium/own_address.dart' show usableIpv6Present;
 
 /// What a caller needs from the wire — packet out, packet in. Nothing more.
@@ -111,7 +112,7 @@ class Wire implements PacketRoute {
       List<NetworkInterface>? interfaces,
       void Function(String)? report}) async {
     final to4 = toAddress ?? InternetAddress.anyIPv4;
-    final s4 = await RawDatagramSocket.bind(to4, port);
+    final s4 = await bindAlone(to4, port); // S413: no shared data port
     final d = Wire._(report);
     d._v4 = _Side(d, to4, 'IPv4', s4);
     if (toAddress6 != null) {

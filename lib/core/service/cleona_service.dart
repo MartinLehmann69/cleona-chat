@@ -24,6 +24,7 @@ import 'package:cleona/core/crypto/per_message_kem.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/pq_isolate.dart';
 import 'package:cleona/core/crypto/hd_wallet.dart';
+import 'package:cleona/core/recovery/recovery_bundle_choice.dart';
 import 'package:cleona/core/recovery/recovery_bundle_content.dart';
 import 'package:cleona/core/recovery/recovery_keys.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
@@ -75,6 +76,7 @@ import 'package:cleona/core/archive/voice_transcription_service.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart' show WhisperFFI;
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_types.dart';
+import 'package:cleona/core/archive/whisper_models.dart';
 import 'package:cleona/core/archive/archive_config.dart';
 import 'package:cleona/core/archive/archive_manager.dart';
 import 'package:cleona/core/archive/archive_types.dart'
@@ -106,6 +108,7 @@ import 'package:cleona/core/service/harvest_event.dart';
 import 'package:cleona/core/service/poll_service.dart';
 import 'package:cleona/core/service/poll_finality.dart';
 import 'package:cleona/core/service/reconcile_wire.dart';
+import 'package:cleona/core/service/device_key_package.dart';
 import 'package:cleona/core/service/call_service.dart';
 import 'package:cleona/core/services/key_change_policy.dart';
 import 'package:cleona/core/channels/system_channels.dart';
@@ -207,7 +210,15 @@ import 'package:mycelium/envelope.dart' as mycelium show Address;
 // `cleona_service_recovery_bundle.dart`). The two node extensions without
 // prefix, for the same reason as `node_invitation.dart` above.
 import 'package:mycelium/mailbox_recovery_bundle.dart' as mycelium
-    show BundleBox, cardHolders, kBundleRenewAfter;
+    show
+        BundleBox,
+        BundleFinding,
+        bundleAsk,
+        bundleRenewDue,
+        cardHolders,
+        kBundleRenewAfter;
+import 'package:mycelium/node_collect_edge.dart' show NodeCollectEdge;
+import 'package:mycelium/node_collect_queue.dart' show NodeCompartment;
 import 'package:mycelium/node_post_box.dart' show NodePostBox;
 import 'package:mycelium/media.dart' as mycelium
     show Lane, laneChoose, inlineContainer, inlineObject, MediaBroken, stripeNumber;
@@ -268,6 +279,7 @@ part 'cleona_service_identity_deletion.dart';
 part 'cleona_service_lockout.dart';
 part 'cleona_service_deviceset.dart';
 part 'cleona_service_recovery_bundle.dart';
+part 'cleona_service_recovery_end.dart';
 part 'cleona_service_mycelium.dart';
 part 'cleona_service_own_line.dart';
 part 'cleona_service_kem_line.dart';
@@ -298,6 +310,8 @@ part 'cleona_service_pair_tag.dart';
 part 'cleona_service_missed_call.dart';
 part 'cleona_service_own_ring.dart';
 part 'cleona_service_shared_settings.dart';
+part 'cleona_service_identity_set.dart';
+part 'cleona_service_key_package.dart';
 
 // `AppFrameDispatchOutcome` STOOD HERE — REMOVED ON 2026-09-03.
 //
@@ -635,6 +649,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// belongs to a different package of this session; the wiring proposal
   /// for host and interface stands in the session report.
   void Function(String nodeIdHex)? onIdentityDeletedRemotely;
+
+  /// The derivation run (§13.7) created [identity] in the list of
+  /// identities: the host — `service_daemon.dart` or the in-process path in
+  /// `main.dart` — starts its service and its mailbox. Without a listener the
+  /// identity starts with the next start of the process.
+  Future<void> Function(Identity identity)? onIdentityFound;
   @override
   void Function(String conversationId, UiMessage message)? onNewMessage;
   @override
@@ -863,7 +883,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // §19.6.2 — periodic housekeeping on the fragment store (prunes
   // superseded versions + enforces the platform storage budget).
   Timer? _binaryGcTimer;
-  Timer? _registryRepublishTimer;
+
+  /// The derivation run of §13.7 (`cleona_service_recovery.dart`): the node
+  /// whose collection edges it hangs on (an edge cannot be taken back, so it
+  /// is added once per node), the pass that is running, and the one pass
+  /// that follows it for every edge that came meanwhile (S413).
+  Object? _identityRunNode;
+  Future<int>? _identityRunRunning;
+  _IdentityRunAgain? _identityRunAgain;
+
+  /// When this process last laid the minimal bundles of the deleted indices
+  /// (§13.7) — they follow the own bundle's cadence (§13.3.4), not every
+  /// extra deposit after incoming post.
+  final _recoveryDeletedLaidAt = _DeletedIndexLays();
   InviteLinkService? get inviteLinkService => _inviteLinkService;
   PhysicalTransferHelper? get physicalTransferHelper => _physicalTransferHelper;
   @override
@@ -1606,12 +1638,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     await _initInNetworkUpdate();
 
-    // Identity registry DHT republish (P4-Publish): keep fragments alive
-    // across DHT TTL (7d). Republish every 24h — low traffic, idempotent.
-    _registryRepublishTimer = Timer.periodic(const Duration(hours: 24), (_) {
-      _publishIdentityRegistryIfPossible();
-    });
-
     // Load conversations
     _loadConversations();
     // No start-time reset of media states (S399 P2-7): a waiting lane 2/3
@@ -1825,20 +1851,25 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // switch, silently fall back to `production()` —
     // language `auto`, 30 days, `base` — and nobody would see that the
     // user's choice no longer arrives at all.
+    //
+    // D-94: the model size is the DEVICE's (`whisper_models.dart`); language
+    // and retention stay the identity's.
     var vtConfig = VoiceTranscriptionConfig.production();
+    VoiceTranscriptionSettings? vts;
     try {
-      final vts = VoiceTranscriptionSettings.readFrom(store);
-      if (vts != null) {
-        vtConfig = VoiceTranscriptionConfig(
-          defaultLanguage: vts.defaultLanguage,
-          audioRetentionDays: vts.audioRetentionDays,
-          modelSize: _parseModelSize(vts.modelSize),
-        );
-        _log.info('Voice transcription config loaded: lang=${vtConfig.defaultLanguage}');
-      }
+      vts = VoiceTranscriptionSettings.readFrom(store);
     } catch (e) {
       _log.warn('Failed to load transcription config: $e');
     }
+    final deviceModel = _deviceTranscriptionModel(vts);
+    vtConfig = VoiceTranscriptionConfig(
+      defaultLanguage: vts?.defaultLanguage ?? vtConfig.defaultLanguage,
+      audioRetentionDays:
+          vts?.audioRetentionDays ?? vtConfig.audioRetentionDays,
+      modelSize: deviceModel,
+    );
+    _log.info('Voice transcription config loaded: '
+        'lang=${vtConfig.defaultLanguage}, model=${deviceModel.name}');
     _voiceTranscription = VoiceTranscriptionService(
       config: vtConfig,
       profileDir: profileDir,
@@ -3085,6 +3116,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _sendTwinSync(proto.TwinSyncType.TWIN_IDENTITY_DELETED, payload);
     _log.info('TWIN_IDENTITY_DELETED queued for ${_devices.isEmpty ? 0 : _devices.length - 1} '
         'own devices');
+    // §14.7 Type 23 (D-99): the identity list naming this index deleted, on
+    // the line of another identity of this host — so that an own device
+    // outside this identity's set learns it too and never takes it again.
+    final hd = identity.hdIndex;
+    if (hd != null) identitySetDeleting(hd);
   }
 
 
@@ -5399,7 +5435,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   Future<bool> joinGroup(String groupIdHex) => _groupJoin(groupIdHex);
 
   @override
-  Future<bool> leaveGroup(String groupIdHex) async {
+  Future<bool> leaveGroup(String groupIdHex, {String via = 'unknown'}) async {
     final group = _groups[groupIdHex];
     if (group == null) return false;
     // The membership state this device leaves with (§16.2.2): the mark of
@@ -5469,7 +5505,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _saveGroups();
     _saveConversations();
     onStateChanged?.call();
-    _log.info('Left group $groupIdHex');
+    _log.info('Left group $groupIdHex (via $via)');
     return true;
   }
 
@@ -5498,7 +5534,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final group = _groups[groupIdHex];
     if (group == null || !group.aloneQuestionDue) return false;
     // §16.2.2: "deleting removes it as leaving does".
-    if (delete) return leaveGroup(groupIdHex);
+    if (delete) return leaveGroup(groupIdHex, via: 'alone_question');
     group.aloneQuestion = kGroupAloneAnswered;
     _saveGroups();
     onStateChanged?.call();
@@ -7042,7 +7078,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     displayName = newName;
     _broadcastProfileUpdate();
     _sendTwinProfileChanged({'displayName': newName});
-    _publishIdentityRegistryIfPossible();
     onStateChanged?.call();
     _log.info('Display name updated to "$newName", update to the contacts '
         '${_profileUpdatePending ? "held back (§15.8)" : "sent"}');
@@ -8577,15 +8612,56 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── Multi-Device Persistence (§26) ─────────────────────────────────
 
-  /// Initialize local device ID (generated once, persisted in devices.json).
+  /// Initialize the local DeviceID — ONE per device for all its identities
+  /// (§14.1; §4.1 "a daemon hosting N identities has exactly one
+  /// DeviceID"), kept in the device database ([_deviceWideDeviceId]).
+  ///
+  /// An identity that already carries another DeviceID (every identity
+  /// drew its own until S413) takes the device's only where no other own
+  /// device can know the old one ([_ownDeviceIdMayBeKnown]): then the id
+  /// has never gone onto the line, and changing it costs no packet and
+  /// loses nothing. Otherwise it keeps its id.
   void _initLocalDevice() {
     _loadDevices();
 
     // Check if we already have a local device ID on disk
     final existing = _devices.values.where((d) => d.isThisDevice).toList();
+    final device = _deviceWideDeviceId(
+        existing.isEmpty ? null : existing.first.deviceId);
     if (existing.isNotEmpty) {
-      _localDeviceId = existing.first.deviceId;
-      existing.first.lastSeen = DateTime.now();
+      var own = existing.first;
+      if (device != null && device != own.deviceId) {
+        if (_ownDeviceIdMayBeKnown) {
+          _log.info('Local DeviceID ${own.deviceId} kept, not the device\'s '
+              '$device: another own device can know it (§14.1)');
+        } else {
+          final was = own.deviceId;
+          own = DeviceRecord(
+            deviceId: device,
+            deviceName: own.deviceName,
+            platform: own.platform,
+            firstSeen: own.firstSeen,
+            lastSeen: own.lastSeen,
+            isThisDevice: true,
+            deviceNodeIdHex: own.deviceNodeIdHex,
+            whereNeighboursHex: own.whereNeighboursHex,
+            whereSegmentHex: own.whereSegmentHex,
+            identitySet: own.identitySet,
+            deviceKemHex: own.deviceKemHex,
+            deviceMlKemHex: own.deviceMlKemHex,
+            deviceSigEd25519Hex: own.deviceSigEd25519Hex,
+            deviceSigMlDsaHex: own.deviceSigMlDsaHex,
+          );
+          _devices
+            ..remove(was)
+            ..[device] = own;
+          _log.event('Local DeviceID $was → $device, the one of this device '
+              '(§14.1); no other own device knew the old one');
+        }
+      }
+      _localDeviceId = own.deviceId;
+      own.lastSeen = DateTime.now();
+      _ownDeviceKeysInto(own);
       // S368: here stood `deviceNodeIdHex ??= bytesToHex(identity.deviceNodeId)`
       // with the justification "migration from pre-Phase-4". A device row
       // without `deviceNodeIdHex` can only come from a profile before §26
@@ -8594,9 +8670,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       return;
     }
 
-    // Generate new device ID (UUID v4 as hex)
-    final uuid = SodiumFFI().randomBytes(16);
-    _localDeviceId = bytesToHex(uuid);
+    // The device's DeviceID; a fresh random one only without a device
+    // database ([_deviceWideDeviceId]).
+    _localDeviceId = device ?? bytesToHex(SodiumFFI().randomBytes(16));
 
     final now = DateTime.now();
     // S398, B-3: never `Platform.localHostname` alone — on Android that is
@@ -8611,8 +8687,148 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       isThisDevice: true,
       deviceNodeIdHex: bytesToHex(identity.deviceNodeId),
     );
+    _ownDeviceKeysInto(_devices[_localDeviceId]!);
     _saveDevices();
     _log.info('Local device registered: $_localDeviceId ($name)');
+  }
+
+  /// §14.9.1 (S414): this device's own entry names its four device public
+  /// keys (§4.4.2) — the handover carries the set to a new device, and Type 9
+  /// to the others, so every device holds every sibling's keys. A no-op
+  /// before the device keys are loaded.
+  ///
+  /// D-106: the keys this device holds for THIS identity, the identifier
+  /// that follows from them (§4.1), and the node identifier of the device,
+  /// which recognises it across identities among the own devices.
+  void _ownDeviceKeysInto(DeviceRecord own) {
+    final k = identity.deviceKeys;
+    if (k == null) return;
+    own
+      ..deviceNodeIdHex = identity.deviceNodeIdHex
+      ..nodeOfDeviceHex = identity.deviceNodeOfDeviceHex
+      ..deviceKemHex = bytesToHex(k.kem.x25519PublicKey)
+      ..deviceMlKemHex = bytesToHex(k.kem.mlKemPublicKey)
+      ..deviceSigEd25519Hex = bytesToHex(k.sig.ed25519PublicKey)
+      ..deviceSigMlDsaHex = bytesToHex(k.sig.mlDsaPublicKey);
+  }
+
+  /// Type 9 (§14.7, §14.9.1): the device public keys [r] names, into the
+  /// announced record. A key not named stays empty.
+  static void _deviceKeysToProto(DeviceRecord r, proto.DeviceRecord p) {
+    if (r.deviceKemHex != null) p.deviceX25519Pk = hexToBytes(r.deviceKemHex!);
+    if (r.deviceMlKemHex != null) {
+      p.deviceMlKemPk = hexToBytes(r.deviceMlKemHex!);
+    }
+    if (r.deviceSigEd25519Hex != null) {
+      p.deviceEd25519Pk = hexToBytes(r.deviceSigEd25519Hex!);
+    }
+    if (r.deviceSigMlDsaHex != null) {
+      p.deviceMlDsaPk = hexToBytes(r.deviceSigMlDsaHex!);
+    }
+  }
+
+  /// Type 9 received (§14.9.1): the device public keys an announced record
+  /// names, taken into [r] — each only with its exact length, the signing
+  /// keys only as a pair and only when they give the device node identifier
+  /// the record names (§4.4.2), so that a record cannot pair one device's
+  /// identifier with another device's keys. Returns whether a key was taken.
+  ///
+  /// A key is taken only where [r] names none yet. A device's keys are
+  /// generated once and never change (§4.4.2, §14.1); a Type 9 naming other
+  /// keys for a known device can only come from a holder of the identity's
+  /// keys that wants a key package (Type 16) sealed to itself — a device
+  /// locked out but not yet rotated away. It is logged and not taken.
+  bool _deviceKeysFromProto(proto.DeviceRecord p, DeviceRecord r) {
+    var took = false;
+    bool learn(String? held, List<int> named, void Function(String) set,
+        String what) {
+      final hex = bytesToHex(Uint8List.fromList(named));
+      if (held == null) {
+        set(hex);
+        return true;
+      }
+      if (held != hex) {
+        _log.warn('Type 9: other $what for the known device '
+            '${r.deviceId.substring(0, 8)} — not taken (a device\'s keys '
+            'never change, §4.4.2)');
+      }
+      return false;
+    }
+
+    if (p.deviceX25519Pk.length == 32) {
+      took |= learn(r.deviceKemHex, p.deviceX25519Pk,
+          (v) => r.deviceKemHex = v, 'X25519 key');
+    }
+    if (p.deviceMlKemPk.length == OqsFFI.mlKemPublicKeyLength) {
+      took |= learn(r.deviceMlKemHex, p.deviceMlKemPk,
+          (v) => r.deviceMlKemHex = v, 'ML-KEM key');
+    }
+    if (r.deviceSigEd25519Hex == null &&
+        p.deviceEd25519Pk.length == 32 &&
+        p.deviceMlDsaPk.length == OqsFFI.mlDsaPublicKeyLength) {
+      final ed = Uint8List.fromList(p.deviceEd25519Pk);
+      final node = bytesToHex(HdWallet.computeDeviceNodeId(ed));
+      if (r.deviceNodeIdHex != null && r.deviceNodeIdHex != node) {
+        _log.warn('Type 9: the device signing key of ${r.deviceId} does not '
+            'give the device node identifier its record names — keys '
+            'not taken (§4.4.2)');
+      } else {
+        r
+          ..deviceNodeIdHex = node
+          ..deviceSigEd25519Hex = bytesToHex(ed)
+          ..deviceSigMlDsaHex =
+              bytesToHex(Uint8List.fromList(p.deviceMlDsaPk));
+        took = true;
+      }
+    }
+    return took;
+  }
+
+  /// The DeviceID of this device from the device database
+  /// ([DeviceStore.keyDeviceId]). On a device without one it is set here, in
+  /// one transaction: to [mine] — the id the starting identity already
+  /// carries — or to a fresh random one. `null` without a device database
+  /// (no master seed) or when it cannot be read or written; the caller then
+  /// keeps the identity's own id.
+  String? _deviceWideDeviceId(String? mine) {
+    bool valid(Object? v) =>
+        v is String && v.length == 32 && RegExp(r'^[0-9a-f]+$').hasMatch(v);
+    try {
+      final store = identity.deviceStoreForWrite();
+      if (store == null) return null;
+      return store.transaction(() {
+        final v =
+            store.entry(DeviceStore.areaDevice, DeviceStore.keyDeviceId)?['v'];
+        if (valid(v)) return v as String;
+        final id =
+            valid(mine) ? mine! : bytesToHex(SodiumFFI().randomBytes(16));
+        store.putEntry(
+            DeviceStore.areaDevice, DeviceStore.keyDeviceId, {'v': id});
+        _log.info('DeviceID of this device set: $id (§14.1)');
+        return id;
+      });
+    } on Object catch (e) {
+      _log.warn('DeviceID of this device not readable ($e) — the identity '
+          'keeps its own');
+      return null;
+    }
+  }
+
+  /// Whether another own device can know this identity's DeviceID: the
+  /// device set names another device, or this device laid an enrolment
+  /// request that is still open (§14.6.1 step 2 — the request names the
+  /// DeviceID). `true` when the store cannot be read.
+  bool get _ownDeviceIdMayBeKnown {
+    if (_devices.values.any((d) => !d.isThisDevice)) return true;
+    try {
+      final head = store.entry(kEnrolmentArea, kEnrolmentHeadKey);
+      return head != null &&
+          head['phase'] == EnrolmentPhase.waiting.name &&
+          head['requestId'] != null;
+    } on Object catch (e) {
+      _log.warn('Enrolment state not readable ($e) — DeviceID kept');
+      return true;
+    }
   }
 
   static String _detectPlatform() {
@@ -8892,18 +9108,48 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   void renameDevice(String deviceId, String newName) {
     final device = _devices[deviceId];
     if (device == null) return;
-    device.deviceName = newName;
-    _saveDevices();
+    // D-99 (§14.9.1): one name per device, in the sets of every identity —
+    // and Type 10 once per other own device, on the line of the first
+    // identity both carry, naming the device as that identity knows it.
+    final records = identitySetRenameEverywhere(device, newName);
     _log.info('Device renamed: $deviceId → $newName');
-
-    // Broadcast to twins
-    final payload = utf8.encode(jsonEncode({
-      'deviceId': deviceId,
-      'deviceName': newName,
-    }));
-    _sendTwinSync(proto.TwinSyncType.DEVICE_RENAMED, Uint8List.fromList(payload));
-    _notifyDevicesChanged();
+    identitySetRenameSend(records, newName);
   }
+
+  /// The lock-out notice to contacts (`MT_DEVICE_REVOCATION`) for [device]
+  /// (§14.4, D-101/D-106): it names the device only by the identifier THIS
+  /// identity's device set names it by (§4.1) — in `device_node_id`, and its
+  /// first 16 bytes in `device_id`, which a 4.2.3 contact reads as at least 4
+  /// bytes. Neither the DeviceID (it stays among the own devices, §4.1) nor
+  /// the device name (one for every identity, D-99) goes to a contact. A
+  /// device whose identifier this identity does not know yet was never
+  /// announced to a contact under any identifier; it is named by 16 random
+  /// bytes, which link to nothing.
+  Uint8List _deviceRevocationRecord(DeviceRecord device) {
+    final idHex = device.deviceNodeIdHex;
+    final id = idHex != null && idHex.length == 64
+        ? hexToBytes(idHex)
+        : null;
+    final record = proto.DeviceRecord()
+      ..deviceId = id != null ? id.sublist(0, 16) : SodiumFFI().randomBytes(16);
+    if (id != null) record.deviceNodeId = id;
+    return Uint8List.fromList(record.writeToBuffer());
+  }
+
+  /// Test-only: the lock-out notice to contacts for the device [deviceId]
+  /// names in this identity's set ([_deviceRevocationRecord]).
+  @visibleForTesting
+  Uint8List? deviceRevocationRecordForTesting(String deviceId) {
+    final d = _devices[deviceId];
+    return d == null ? null : _deviceRevocationRecord(d);
+  }
+
+  /// Test-only: the device set this identity would announce to its contacts
+  /// (§14.5 path 2) — `null` when it cannot prove it completely. A class
+  /// member, so that a probe reaches it over `dynamic`.
+  @visibleForTesting
+  List<DeviceSigInfo>? announceableDeviceSetForTesting() =>
+      _announceableDeviceSet();
 
   /// Revoke a twin device: remove from list, notify twins + contacts.
   /// Returns true if the device was found and revoked.
@@ -8914,21 +9160,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (device == null) return false;
 
     _log.info('Revoking twin device: $deviceId (${device.deviceName})');
+    enrolApprovalEnd(device); // D-99: its enrolment approval ends
 
     // Notify twins: device has been revoked
     final payload = Uint8List.fromList(utf8.encode(deviceId));
     _sendTwinSync(proto.TwinSyncType.TWIN_DEVICE_REVOKED, payload);
 
-    // Broadcast DEVICE_REVOKED to contacts with DeviceRecord proto (§26.6.1).
-    // §26 Phase 4: include deviceNodeId so contacts can remove the specific
-    // routing entry from their routing table.
-    final revokedRecord = proto.DeviceRecord()
-      ..deviceId = hexToBytes(deviceId)
-      ..deviceName = device.deviceName;
-    if (device.deviceNodeIdHex != null) {
-      revokedRecord.deviceNodeId = hexToBytes(device.deviceNodeIdHex!);
-    }
-    final revokePayload = Uint8List.fromList(revokedRecord.writeToBuffer());
+    // Broadcast DEVICE_REVOKED to contacts with DeviceRecord proto (§26.6.1),
+    // naming the device only by what THIS identity's device set names it
+    // ([_deviceRevocationRecord], D-106).
+    final revokePayload = _deviceRevocationRecord(device);
 
     // ── THE LOCK-OUT TRANSITION STARTS HERE (E-7, §14.4/§24.4.3) ───────
     //
@@ -9694,6 +9935,38 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// KEY_ROTATION_BROADCAST to all contacts, syncs new seed to twin devices.
   @override
   Future<void> rotateIdentityKeys() async {
+    await emergencyKeyRotation();
+  }
+
+  /// Probe: lets [emergencyKeyRotation] run with more than one device
+  /// WITHOUT the quorum, which phase 3 of `S414-KOPPELN-BAUPLAN.md` builds —
+  /// so that the key package (Type 16) can be measured on its own. Nothing
+  /// else sets it.
+  @visibleForTesting
+  bool rotationQuorumBypassForTesting = false;
+
+  /// Probe (class member, so that a probe reaches it over `dynamic`): a key
+  /// package for [deviceId] opened with THIS device's keys.
+  @visibleForTesting
+  bool keyPackageOpensWithOwnKeysForTesting(String deviceId) =>
+      _keyPackageOpensWithOwnKeys(deviceId);
+
+  /// Probe: this device announces itself with its device public keys
+  /// (Type 9, §14.9.1) — as after a handover.
+  @visibleForTesting
+  void deviceAnnounceForTesting() => _sendTwinAnnounce(withKeys: true);
+
+  /// The Emergency Key Rotation (§4.5.4) — [rotateIdentityKeys], the
+  /// completion of a recovery (§13.6) and the recovery without a bundle
+  /// (§13.2.2). Returns whether the keys were replaced; `false`: aborted
+  /// (named in the log), the keys are unchanged.
+  ///
+  /// [askPreviousDayValues] `false` (§13.2.2 point 2): the post box asks
+  /// only under the day values of the new keys — post under the previous
+  /// ones may belong to a device that still lives.
+  Future<bool> emergencyKeyRotation(
+      {bool askPreviousDayValues = true,
+      KeyPackageReason reason = KeyPackageReason.emergency}) async {
     // ── WHAT V4.1 ALLOWS HERE, AND WHERE IT STAYS FAIL-CLOSED ───────────
     //
     // Here stood an UNCONDITIONAL abort. It relied on two sentences from
@@ -9722,7 +9995,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // That is why the work below is done in this order — first send
     // (with the OLD key, which must still be present for it), then apply.
     // Not the other way round.
-    if (_devices.length > 1) {
+    // S414: the key package (Type 16) is built (`cleona_service_key_package
+    // .dart`) and the device set names the siblings' KEM keys (§14.9.1). What
+    // still keeps this closed is the quorum (§14.4, §14.8) — phase 3/4 of
+    // `S414-KOPPELN-BAUPLAN.md`. Points 1 and 2 of the block below describe
+    // the state before S414.
+    if (_devices.length > 1 && !rotationQuorumBypassForTesting) {
       // ── SINCE S361 THE REASON IS A DIFFERENT ONE AGAIN ─────────────────
       //
       // The justification has moved twice, and both times because the
@@ -9790,7 +10068,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           '${_contacts.length} contact(s), ${_devices.length} device(s) '
           'would have had to be notified.');
       onStateChanged?.call();
-      return;
+      return false;
     }
 
     // §4.5.4 (D-33, E-A8): "An identity whose founding secret key cannot
@@ -9803,7 +10081,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           'this identity cannot be derived from the seed here (§4.5.4). '
           'NOTHING was rotated; the existing keys are unchanged.');
       onStateChanged?.call();
-      return;
+      return false;
     }
 
     final sodium = SodiumFFI();
@@ -9860,10 +10138,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     broadcast.preRotationDeviceCount = _devices.length;
     final payload = Uint8List.fromList(broadcast.writeToBuffer());
 
-    // 4. Apply locally. `rotateIdentityFull` first appends the hybrid link
+    // 3. §14.4 "Device side" (S414): the link old→new is formed ONCE, and
+    //    every remaining own device gets it in its key package (Type 16),
+    //    placed in the OLD line and awaited — BEFORE the keys change.
+    final link = identity.rotationLinkTo(newEd25519.publicKey, pqKeys.mlDsaPk);
+    if (_devices.values.any((d) => !d.isThisDevice)) {
+      final (placed, missing) = await _keyPackagesPlace(DeviceKeyPackage(
+        reason: reason,
+        chain: [...identity.rotationChain, link],
+        ed25519Sk: newEd25519.secretKey,
+        mlDsaSk: pqKeys.mlDsaSk,
+        x25519Pk: newX25519Pk,
+        x25519Sk: newX25519Sk,
+        mlKemPk: pqKeys.mlKemPk,
+        mlKemSk: pqKeys.mlKemSk,
+        remaining: [for (final d in _devices.values) d.deviceId],
+        atMs: DateTime.now().millisecondsSinceEpoch,
+      ));
+      _log.info('§14.4: $placed key package(s) placed, $missing device(s) '
+          'without known KEM keys');
+    }
+
+    // 4. Apply locally. `rotateIdentityFull` appends the hybrid link
     //    old→new to the rotation chain (`identity_context.dart`) — proof
     //    (i) of §14.4.
     identity.rotateIdentityFull(
+      link: link,
       newEd25519Pk: newEd25519.publicKey,
       newEd25519Sk: newEd25519.secretKey,
       newMlDsaPk: pqKeys.mlDsaPk,
@@ -9885,7 +10185,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final box = myceliumMailbox;
     if (box != null) {
       try {
-        mycelium.MailboxRotation(box).identityRotate(postBoxFrom(identity));
+        mycelium.MailboxRotation(box).identityRotate(postBoxFrom(identity),
+            askPreviousDayValues: askPreviousDayValues);
       } catch (e) {
         _log.error('rotateIdentityKeys: the running mailbox did not take the '
             'rotation over ($e) — it takes the new keys at the next start');
@@ -9962,15 +10263,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     //    against which it could check a quorum next time.
     _announceDeviceSetToContacts(occasion: 'key rotation');
 
-    // OPEN AND NAMED, not silently omitted:
-    //  * §14.4 "The transition (normative)" requires a window in which the
-    //    old and new inbound line are valid at the same time. The carrier
-    //    for that was `_previousMailboxPrimary = _primaryMailboxId()`;
-    //    `_primaryMailboxId()` fell with the CUT and is NOT invented here
-    //    as a substitute — v4_1 §21.2 explicitly denies the mark
-    //    ("There is no mailbox derivable from a pubkey"). Which mark the
-    //    harvest still queries after a rotation is an open
-    //    V4.1-INTERNAL design question and belongs to the owner.
+    // THE TRANSITION after the rotation (§8.2): the post box asks under the
+    // previous day values for 7 more days (`PostBox.signingAdopt`, the
+    // previous day-key seed) and keeps the previous KEM keys as long
+    // (§4.5.4) — except without a bundle (§13.2.2), where
+    // [askPreviousDayValues] is `false`.
     //  * §14.3: the prekey pool is not discarded separately. The reason
     //    is in §14.10 and is measured there: every sealing today falls
     //    back to the long-lived user KEM keys, and step 4 replaces
@@ -9978,8 +10275,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _log.info('§14.10: emergency rotation carried out — all four keys '
         'replaced, broadcast to ${recipient.length} contact(s) pairwise '
         '(§14.4), co-signature '
-        '${ownToken != null ? "1 own device" : "none"} (§14.8).');
+        '${ownToken != null ? "1 own device" : "none"} (§14.8)'
+        '${askPreviousDayValues ? "" : ", previous day values NOT asked (§13.2.2)"}.');
+    // 8. §13.3.4 "At a rotation": the bundle is placed at once, outside the
+    //    3-day cadence — a bundle with the replaced keys restores nothing
+    //    (D-33). While the box searches (the recovery case), nothing is laid.
+    final bundle = recoveryBox;
+    if (bundle != null) unawaited(bundle.depositSoon());
     onStateChanged?.call();
+    return true;
   }
 
   /// Handle incoming KEY_ROTATION from a contact.
@@ -10162,9 +10466,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             '${_devices.length - 1} twin(s)');
   }
 
-  /// Send TWIN_ANNOUNCE to register this device with existing twins.
-  void _sendTwinAnnounce() {
-    if (_devices.length <= 1) return;
+  /// Send TWIN_ANNOUNCE to register this device with existing twins. The
+  /// future completes — never with an error — when the deposit for the other
+  /// own devices has ended (`_myceliumOwnSend`) or nothing went out; only
+  /// the fixed-neighbour watch waits for it (§14.7, D-115,
+  /// `cleona_service_own_ring.dart`), every other caller drops it.
+  Future<bool> _sendTwinAnnounce({bool withKeys = false}) {
+    if (_devices.length <= 1) return Future.value(false);
 
     final record = proto.DeviceRecord()
       ..deviceId = hexToBytes(_localDeviceId)
@@ -10174,6 +10482,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       ..firstSeen = Int64(_devices[_localDeviceId]?.firstSeen.millisecondsSinceEpoch ?? 0)
       ..lastSeen = Int64(DateTime.now().millisecondsSinceEpoch)
       ..deviceNodeId = identity.deviceNodeId;
+    // §14.9.1: the device public keys (≈ 3.2 kB) travel only when a sibling
+    // may not know them yet — after a handover and in answer to a device
+    // that is new here — not with every change of fixed neighbours, which a
+    // receiver already holds the keys for.
+    final own = _devices[_localDeviceId];
+    if (withKeys && own != null) _deviceKeysToProto(own, record);
 
     final payload = Uint8List.fromList(record.writeToBuffer());
 
@@ -10187,15 +10501,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         payload: payload,
         where: _ownWhereWires(), // §14.7, D-46
       );
-      _detachedSend('MT_TWIN_SYNC', sendToUser(
+      final dispatch = sendToUser(
         recipientUserId: identity.nodeId,
         messageType: proto.MessageType.MT_TWIN_SYNC,
         payload: wrapper,
-      ));
+      );
+      _detachedSend('MT_TWIN_SYNC', dispatch); // logs an error at its level
       _log.info('TWIN_ANNOUNCE (TWIN_SYNC/DEVICE_ANNOUNCE) handed to the own '
           'line for $_localDeviceId');
+      return dispatch.catchError((Object _) => false);
     } catch (e) {
       _log.warn('Failed to send TWIN_ANNOUNCE: $e');
+      return Future.value(false);
     }
   }
 
@@ -10492,6 +10809,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       final revoked = _devices.remove(deviceIdHex);
       _saveDevices();
+      enrolApprovalEnd(revoked); // D-99: its enrolment approval ends
       // §7.4/§7.5: same state transition as `revokeDevice`, only arriving over
       // twin-sync instead of local IPC — including the co-auth attempt.
       // Read the record from the `remove` return value: `deviceNodeIdHex` is
@@ -10908,6 +11226,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// The names a model size may carry over IPC and in the store.
   static const Set<String> _kModelSizeNames = {'tiny', 'base', 'small'};
 
+  /// The model size set on this DEVICE (D-94, `whisper_models.dart`).
+  ///
+  /// OLD AND NEW (4.2.x): a version before D-94 kept the size in the
+  /// identity's record ([held]). As long as the device database holds no
+  /// size, the ACTIVE identity's value is taken once as the device value —
+  /// the identity the user saw last; with no note of an active identity,
+  /// the first identity to start. The identity's field stays as it is, so
+  /// nothing is lost and an older 4.2 version still reads it. Nothing is
+  /// sent.
+  WhisperModelSize _deviceTranscriptionModel(VoiceTranscriptionSettings? held) {
+    try {
+      final r = transcriptionModelForDevice(
+        store: identity.deviceStoreOrNull,
+        storeForWrite: identity.deviceStoreForWrite,
+        heldName: held?.modelSize,
+        activeHere: _isActiveIdentityHere(),
+      );
+      if (r.adopted) {
+        _log.info('Transcription model ${r.size.name} of this identity taken '
+            'as the device value (once, D-94)');
+        WhisperModels.instance.announceSize(r.size);
+      }
+      return r.size;
+    } catch (e) {
+      _log.warn('Device transcription model not readable: $e');
+      return WhisperModelSize.base;
+    }
+  }
+
+  /// Whether the device database names this identity as the active one,
+  /// or names none.
+  bool _isActiveIdentityHere() {
+    final row = identity.deviceStoreOrNull
+        ?.entry(DeviceStore.areaDevice, DeviceStore.keyActiveIdentity);
+    if (row == null) return true;
+    return row['profileDir'] == profileDir;
+  }
+
   @override
   void Function(TranscriptionStatus status)? onTranscriptionStatusChanged;
 
@@ -10947,7 +11303,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           if (WhisperFFI.isModelDownloaded(s)) s.name
       ],
       language: vt?.defaultLanguage ?? held.defaultLanguage,
-      modelSize: held.modelSize,
+      // D-94: the size set on the DEVICE; without a row the size the running
+      // service holds (adopted at its start or the default).
+      modelSize: (transcriptionModelRead(identity.deviceStoreOrNull) ??
+              vt?.modelSize ??
+              WhisperModelSize.base)
+          .name,
       retentionDays: held.audioRetentionDays,
     );
   }
@@ -10959,35 +11320,52 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   @override
   Future<bool> setTranscriptionSettings({
     required String language,
-    required String modelSize,
     required int retentionDays,
   }) async {
-    if (!_kModelSizeNames.contains(modelSize) || retentionDays <= 0) {
-      return false;
-    }
+    if (retentionDays <= 0) return false;
     if (!VoiceTranscriptionConfig.production()
         .supportedLanguages
         .contains(language)) {
       return false;
     }
     try {
-      final languageBefore =
-          VoiceTranscriptionSettings.readFrom(store)?.defaultLanguage ??
-              'auto';
+      final held = VoiceTranscriptionSettings.readFrom(store);
+      final languageBefore = held?.defaultLanguage ?? 'auto';
       VoiceTranscriptionSettings(
         defaultLanguage: language,
         audioRetentionDays: retentionDays,
-        modelSize: modelSize,
+        // D-94: the model is no longer set here; the identity's old field
+        // keeps what it held, for an older 4.2 version on this profile.
+        modelSize: held?.modelSize ?? const VoiceTranscriptionSettings().modelSize,
       ).writeTo(store);
       // The language is shared by the devices of the identity (§14.7
-      // Type 8); retention and model size stay on this device.
+      // Type 8); the retention stays on this device.
       if (languageBefore != language) setTranscriptionLanguage(language);
       _voiceTranscription?.defaultLanguage = language;
-      // The set size is the one transcription uses and reports ready for.
-      _voiceTranscription?.modelSize = _parseModelSize(modelSize);
+      // In force from the next cleanup on, not only after a restart.
+      _voiceTranscription?.audioRetentionDays = retentionDays;
       return true;
     } catch (e) {
       _log.warn('Transcription settings not stored: $e');
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> setTranscriptionModel(String modelSize) async {
+    if (!_kModelSizeNames.contains(modelSize)) return false;
+    try {
+      final size = _parseModelSize(modelSize);
+      if (!transcriptionModelWrite(identity.deviceStoreForWrite(), size)) {
+        return false;
+      }
+      // Every identity's transcription service of this device follows.
+      WhisperModels.instance.announceSize(size);
+      // A service not listening (not started) still holds the size here.
+      _voiceTranscription?.modelSize = size;
+      return true;
+    } catch (e) {
+      _log.warn('Transcription model not stored: $e');
       return false;
     }
   }
@@ -11072,8 +11450,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _polls.dispose();
     _systemChannelEvictionTimer?.cancel();
     _systemChannelEvictionTimer = null;
-    _registryRepublishTimer?.cancel();
-    _registryRepublishTimer = null;
     _delegationRenewalTimer?.cancel();
     _delegationRenewalTimer = null;
     // FORMERLY three subsystems were detached here from the SHARED node
@@ -11787,6 +12163,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   @override
   EnrolmentView get enrolmentView => enrolViewBuild;
+
+  @override
+  UserDevicesView get userDevices => userDevicesBuild;
   @override
   Future<bool> enrolmentWindowOpen() => enrolOpenAll();
   @override
@@ -11796,6 +12175,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       enrolDecide(requestIdHex, accept);
   @override
   Future<bool> enrolmentRecoverNow() => enrolRecover();
+  @override
+  Future<bool> enrolmentRecoveryFinish() => enrolRecoveryFinish();
+  @override
+  Future<bool> enrolmentRetiredSeen() async => enrolRetiredSeen();
+  @override
+  Future<bool> identityRunNameIndex(int index) => identityRunName(index);
+  @override
+  Future<bool> identityRunEnd() async => identityRunClose();
 
   /// Restored contacts waiting for their first envelope (B-1 E7-b): UserID
   /// hex → `s_AB` and fixed neighbours from the bundle. Persisted with the
@@ -11806,6 +12193,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// When a found bundle was taken over in this run — for the status line.
   DateTime? _recoveryTaken;
+
+  /// The completion of a recovery that is running (§13.6,
+  /// `cleona_service_recovery_end.dart`) — one at a time.
+  Future<bool>? _recoveryCompleting;
 
   /// The former fixed neighbours of a taken-over bundle and when it was
   /// taken over: every collection edge asks them until each restored
@@ -14658,6 +15049,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
             final now = DateTime.now();
             final isNew = !_devices.containsKey(announcedHex);
+            var learnedKeys = false;
             if (isNew) {
               // Collapse any node-id-keyed bootstrap record for the same
               // physical device into this canonical UUID-keyed one. Pairing
@@ -14680,6 +15072,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
                 lastSeen: now,
                 deviceNodeIdHex: devNodeIdHex,
               );
+              _deviceKeysFromProto(record, _devices[announcedHex]!);
               _log.info('New twin device registered: $announcedHex (${record.deviceName})');
               // §7 (Einleitung): `_devices` is the authorised-device source,
               // so a device that enters it here must reach the manifest too —
@@ -14691,14 +15084,24 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
               // what the service already treats as true.
               _syncAuthorizedDevicesToPublisher();
             } else {
-              _devices[announcedHex]!.lastSeen = now;
-              _devices[announcedHex]!.deviceName = record.deviceName;
-              if (devNodeIdHex != null) {
-                _devices[announcedHex]!.deviceNodeIdHex = devNodeIdHex;
+              final known = _devices[announcedHex]!;
+              known.lastSeen = now;
+              known.deviceName = record.deviceName;
+              // The identifier follows from the device signing key the entry
+              // names (§4.1, §4.4.2); once that key is known, a Type 9 does
+              // not rename the device ([_deviceKeysFromProto]).
+              if (devNodeIdHex != null && known.deviceSigEd25519Hex == null) {
+                known.deviceNodeIdHex = devNodeIdHex;
               }
+              learnedKeys = _deviceKeysFromProto(record, known);
             }
             _notifyDevicesChanged();
-            if (isNew) _sendTwinAnnounce();
+            // D-106 (§14.7 Type 23): a sibling whose keys this device learns
+            // only now — a device that created the identity from a list, or
+            // one that joined its set from a list — does not hold this
+            // device's keys of the identity either; it gets them once. Its
+            // answer teaches this device nothing new, so the exchange ends.
+            if (isNew || learnedKeys) _sendTwinAnnounce(withKeys: true);
           } catch (e) {
             _log.error('DEVICE_ANNOUNCE processing failed: $e');
           }
@@ -14766,6 +15169,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           // §14.7 Type 22 (S407, owner decision 08.10.2026, E17 = A) —
           // `cleona_service_identity.dart`.
           _handleTwinChannelJoined(sync.payload);
+          break;
+        case proto.TwinSyncType.DEVICE_SET_CHANGED:
+          // §14.7 Type 16 (S414) — `cleona_service_key_package.dart`.
+          _handleTwinKeyPackage(sync.payload);
+          break;
+        case proto.TwinSyncType.IDENTITY_SET:
+          // §14.7 Type 23 (S413, D-99) — `cleona_service_identity_set.dart`.
+          unawaited(_handleTwinIdentitySet(sync.payload, event.senderDeviceId));
           break;
         default:
           _log.debug('Unhandled TWIN_SYNC type: ${sync.syncType}');

@@ -8,6 +8,9 @@
 /// Independent of Media Auto-Archive — both can be enabled separately.
 library;
 
+export 'package:cleona/core/archive/whisper_models.dart'
+    show ModelDownloadStatus, WhisperModels;
+
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
@@ -16,6 +19,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
 import 'package:cleona/core/archive/voice_transcription_types.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart';
+import 'package:cleona/core/archive/whisper_models.dart';
 import 'package:cleona/core/media/media_store.dart';
 import 'package:cleona/core/media/media_vault.dart';
 import 'package:cleona/core/media/transient_files.dart';
@@ -75,26 +79,30 @@ class VoiceTranscriptionService {
   /// Called when model download status changes.
   void Function(ModelDownloadStatus status)? onDownloadStatusChanged;
 
-  /// Current download status.
-  ModelDownloadStatus _downloadStatus = ModelDownloadStatus.idle;
-  ModelDownloadStatus get downloadStatus => _downloadStatus;
+  /// The download state is the DEVICE's (D-94, [WhisperModels]): one
+  /// download at a time for every identity of the device. These read it.
+  ModelDownloadStatus get downloadStatus =>
+      WhisperModels.instance.downloadStatus;
 
-  /// Why the last download ended as [ModelDownloadStatus.failed], for the
-  /// surface — never a URL (see [_errorWithoutUrl]). Cleared when a
-  /// download starts.
-  String? _downloadError;
-  String? get downloadError => _downloadError;
+  /// Why the last download ended as [ModelDownloadStatus.failed] — never a
+  /// URL. Cleared when a download starts.
+  String? get downloadError => WhisperModels.instance.downloadError;
 
-  /// Progress of the running or last download (0.0 - 1.0). Held here so
-  /// that a surface in another process can ask for it (S405, A-6) instead
-  /// of only hearing [onDownloadProgress].
-  double _downloadProgress = 0.0;
-  double get downloadProgress => _downloadProgress;
+  /// Progress of the running or last download (0.0 - 1.0), so that a
+  /// surface in another process can ask for it (S405, A-6).
+  double get downloadProgress => WhisperModels.instance.downloadProgress;
 
-  void _reportProgress(double p) {
-    _downloadProgress = p;
-    onDownloadProgress?.call(p);
-  }
+  /// How this service hears the device's models: a download's status and
+  /// progress go to its callbacks, a checked or rejected model of the SET
+  /// size changes its readiness, a new device size becomes its size.
+  late final WhisperModelListener _modelListener = WhisperModelListener(
+    onStatus: (s) => onDownloadStatusChanged?.call(s),
+    onProgress: (p) => onDownloadProgress?.call(p),
+    onChecked: (size, ok) {
+      if (size == _modelSize) _setReady(ok);
+    },
+    onSizeSet: (size) => modelSize = size,
+  );
 
   /// Whether the whisper library is available (independent of model).
   bool get isWhisperAvailable => _whisper != null;
@@ -135,7 +143,29 @@ class VoiceTranscriptionService {
     required this.config,
     required this.profileDir,
     this._store,
-  })  : _log = CLogger.get('voice-transcription', profileDir: profileDir);
+  }) : _log = CLogger.get('voice-transcription', profileDir: profileDir) {
+    // From construction on: a surface may set the callbacks and download
+    // before [start] (the settings screen of a service not yet started).
+    WhisperModels.instance.listen(_modelListener);
+  }
+
+  /// The audio retention in days — the identity's setting. Starts from
+  /// [config]; the settings screen changes it at runtime, and the next
+  /// [runCleanup] uses the new value (until S413 the cleanup read the
+  /// value of the start until the next restart).
+  late int _audioRetentionDays = config.audioRetentionDays;
+  int get audioRetentionDays => _audioRetentionDays;
+  set audioRetentionDays(int days) {
+    if (days <= 0 || days == _audioRetentionDays) return;
+    _audioRetentionDays = days;
+    _log.info('Audio retention set to $days days');
+  }
+
+  /// Whether the audio of a voice message recorded at [recordedAt] is past
+  /// the retention in force now.
+  bool shouldDeleteAudio(DateTime recordedAt) =>
+      DateTime.now().difference(recordedAt) >=
+      Duration(days: _audioRetentionDays);
 
   /// Effective default language (override > config).
   String get defaultLanguage => _languageOverride ?? config.defaultLanguage;
@@ -158,6 +188,7 @@ class VoiceTranscriptionService {
   Future<void> start() async {
     if (_running) return;
     _running = true;
+    WhisperModels.instance.listen(_modelListener);
 
     await _loadTranscriptions();
 
@@ -192,6 +223,7 @@ class VoiceTranscriptionService {
   /// Stop service.
   Future<void> stop() async {
     _running = false;
+    WhisperModels.instance.unlisten(_modelListener);
     _cleanupTimer?.cancel();
     _cleanupTimer = null;
     _whisper?.dispose();
@@ -539,154 +571,14 @@ class VoiceTranscriptionService {
   ///
   /// Callers that ask at the same time (start, a queued job, the sender's
   /// `transcribeNow`) share ONE one-time check.
-  Future<bool> ensureModelChecked(WhisperModelSize size) {
-    if (!File(WhisperFFI.modelPath(size)).existsSync()) {
-      return Future.value(false);
-    }
-    if (WhisperFFI.hasCheckedMark(size)) return Future.value(true);
-    final path = WhisperFFI.modelPath(size);
-    // Block body on purpose: `=> _checking.remove(path)` would return the
-    // removed Future itself, and `whenComplete` waits for a returned Future
-    // — the check would wait for itself forever.
-    return _checking[path] ??= _checkOnce(size, path).whenComplete(() {
-      _checking.remove(path);
-    });
-  }
+  Future<bool> ensureModelChecked(WhisperModelSize size) =>
+      WhisperModels.instance.ensureChecked(size);
 
-  final Map<String, Future<bool>> _checking = {};
-
-  Future<bool> _checkOnce(WhisperModelSize size, String path) async {
-    final source = WhisperFFI.modelSource(size);
-    _log.info('Model ${source.fileName} has no "checked" mark '
-        '(downloaded before the check existed) — checking it once');
-    if (await WhisperFFI.fileMatches(path, source)) {
-      WhisperFFI.writeCheckedMark(size);
-      return true;
-    }
-    _log.warn('Model ${source.fileName} does not match its fixed SHA-256 '
-        '— deleted, download it again in the settings');
-    try {
-      final file = File(path);
-      if (file.existsSync()) file.deleteSync();
-    } catch (e) {
-      _log.warn('Rejected model ${source.fileName} not deletable: $e');
-    }
-    WhisperFFI.removeCheckedMark(size);
-    if (size == _modelSize) _setReady(false);
-    _downloadStatus = ModelDownloadStatus.rejected;
-    onDownloadStatusChanged?.call(_downloadStatus);
-    return false;
-  }
-
-  /// What an exception says without the URL it may carry: an
-  /// [HttpException] names the (redirected, signed) URI with its query.
-  static String _errorWithoutUrl(Object e) => switch (e) {
-        HttpException(:final message) => 'HttpException: $message',
-        SocketException(:final message, :final osError) =>
-          'SocketException: ${[
-            message,
-            if (osError != null && osError.message != message) osError.message,
-          ].where((s) => s.isNotEmpty).join(' — ')}',
-        _ => e.runtimeType.toString(),
-      };
-
-  /// Download the GGML model file from its source (Hugging Face) into a
-  /// temporary file, check it against the fixed SHA-256 (D-64) and only
-  /// then rename it to its place. Returns true if the model is in place.
-  Future<bool> downloadModel(WhisperModelSize size) async {
-    if (_downloadStatus == ModelDownloadStatus.downloading) return false;
-
-    _downloadStatus = ModelDownloadStatus.downloading;
-    _downloadError = null;
-    onDownloadStatusChanged?.call(_downloadStatus);
-    _reportProgress(0.0);
-
-    final source = WhisperFFI.modelSource(size);
-    final uri = Uri.parse(source.url);
-    final targetPath = WhisperFFI.modelPath(size);
-    final tmpPath = '$targetPath.tmp';
-
-    try {
-      // Ensure models directory exists
-      final dir = Directory(File(targetPath).parent.path);
-      if (!dir.existsSync()) dir.createSync(recursive: true);
-      // Model name and host only — no path parameters, no redirect target.
-      _log.info('Downloading model ${source.fileName} from ${uri.host}');
-
-      // HTTP GET with streaming (HttpClient follows redirects automatically)
-      final client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 30);
-      final request = await client.getUrl(uri);
-      final response = await request.close();
-
-      if (response.statusCode != 200) {
-        _log.warn('Model download HTTP ${response.statusCode} '
-            'for ${source.fileName}');
-        client.close();
-        _downloadError = 'HTTP ${response.statusCode}';
-        _downloadStatus = ModelDownloadStatus.failed;
-        onDownloadStatusChanged?.call(_downloadStatus);
-        return false;
-      }
-
-      final expectedSize = response.contentLength;
-      _log.info('Model download started: ${expectedSize > 0 ? "${(expectedSize / 1024 / 1024).toStringAsFixed(1)} MB" : "unknown size"}');
-      final sink = File(tmpPath).openWrite();
-      var received = 0;
-
-      await for (final chunk in response) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (expectedSize > 0) {
-          _reportProgress(received / expectedSize);
-        }
-      }
-      await sink.close();
-      client.close();
-
-      final downloadedSize = File(tmpPath).lengthSync();
-      _log.info('Model download complete: ${(downloadedSize / 1024 / 1024).toStringAsFixed(1)} MB');
-      // D-64: the file reaches its place — and with it the whisper.cpp
-      // parser — only if it is exactly the model the program names.
-      if (!await WhisperFFI.fileMatches(tmpPath, source)) {
-        _log.warn('Model ${source.fileName} does not match its fixed '
-            'SHA-256 ($downloadedSize bytes, expected ${source.bytes}) '
-            '— discarded, not used');
-        File(tmpPath).deleteSync();
-        _downloadStatus = ModelDownloadStatus.rejected;
-        onDownloadStatusChanged?.call(_downloadStatus);
-        return false;
-      }
-
-      // Rename tmp to final path (atomic on same filesystem)
-      // A model that is replaced must not inherit the old mark for a moment.
-      WhisperFFI.removeCheckedMark(size);
-      File(tmpPath).renameSync(targetPath);
-      // Checked at its download — the ONLY hash this model ever gets.
-      WhisperFFI.writeCheckedMark(size);
-
-      _downloadStatus = ModelDownloadStatus.completed;
-      onDownloadStatusChanged?.call(_downloadStatus);
-      _reportProgress(1.0);
-
-      // The freshly checked model makes transcription ready only if it is
-      // the SET size — a download of another size does not.
-      if (size == _modelSize) _setReady(true);
-
-      return true;
-    } catch (e, st) {
-      _log.warn('Model download of ${source.fileName} failed: '
-          '${_errorWithoutUrl(e)}\n$st');
-      // Cleanup partial download
-      final tmp = File(tmpPath);
-      if (tmp.existsSync()) tmp.deleteSync();
-
-      _downloadError = _errorWithoutUrl(e);
-      _downloadStatus = ModelDownloadStatus.failed;
-      onDownloadStatusChanged?.call(_downloadStatus);
-      return false;
-    }
-  }
+  /// Download the model of [size] — the device's one download
+  /// ([WhisperModels.download]): refused while any identity's download
+  /// runs. Returns true if the model is in place.
+  Future<bool> downloadModel(WhisperModelSize size) =>
+      WhisperModels.instance.download(size);
 
   // -- Cleanup (audio retention) -------------------------------------------
 
@@ -702,7 +594,7 @@ class VoiceTranscriptionService {
       // Only process complete status (audio + transcription present).
       if (lifecycle != VoiceLifecycle.complete) continue;
 
-      if (config.shouldDeleteAudio(transcription.timestamp)) {
+      if (shouldDeleteAudio(transcription.timestamp)) {
         // Audio file can be deleted — only transcript remains.
         _setLifecycle(messageId, VoiceLifecycle.transcriptOnly);
         cleaned++;
@@ -820,16 +712,4 @@ class _TranscriptionJob {
     required this.audioFilePath,
     required this.language,
   });
-}
-
-/// Model download status.
-enum ModelDownloadStatus {
-  idle,
-  downloading,
-  completed,
-  failed,
-
-  /// The file did not match the SHA-256 fixed in the program (D-64) — a
-  /// fresh download or a model already on disk — and was deleted.
-  rejected,
 }

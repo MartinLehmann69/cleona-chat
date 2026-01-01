@@ -31,6 +31,7 @@ import 'package:cleona/core/tray/native_tray.dart';
 import 'package:cleona/core/tray/tray_status.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/platform/profile_move.dart';
+import 'package:cleona/core/platform/daemon_stdio.dart';
 import 'package:cleona/core/platform/linux_native_libraries.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/reminder_service.dart';
@@ -140,6 +141,31 @@ void main(List<String> args) {
     zoneLogBaseDir = config.baseDir;
     final log = CLogger.get('daemon', profileDir: config.baseDir);
     if (ProfileMove.lastReport != null) log.info(ProfileMove.lastReport!);
+
+    // S418 (W-1-D): a Windows daemon started without a redirection (autostart,
+    // update and rollback scripts, scheduled tasks, a double click) would lose
+    // its stderr — the only record of a Dart VM abort. It starts itself once
+    // more through the GUI's launcher and ends; the launcher marks the second
+    // start, so this happens at most once. Before every guard, lock and file
+    // of this run: nothing has been taken that the second start would need.
+    bool stderrIsTerminal;
+    try {
+      stderrIsTerminal = stderr.hasTerminal;
+    } catch (_) {
+      stderrIsTerminal = false; // no stderr handle at all (GUI subsystem)
+    }
+    if (windowsDaemonNeedsRelaunch(
+        isWindows: Platform.isWindows,
+        environment: Platform.environment,
+        stderrIsTerminal: stderrIsTerminal)) {
+      log.info('Started without stderr redirection — starting again through '
+          'daemon-start.cmd so that a VM abort leaves its reason in '
+          'logs/daemon-stdio.log');
+      await CLogger.flushAll();
+      await startWindowsDaemonWithStdioLog(
+          config.baseDir, Platform.resolvedExecutable, args);
+      exit(0);
+    }
     // Where a lab daemon finds its lab tone switch (`voice_lab_tone.dart`);
     // only this process kind sets it, so no other process has a lab tone.
     VoiceLabTone.deviceDir = config.baseDir;
@@ -724,12 +750,26 @@ class _MultiServiceDaemon {
     _running = true;
     log.info('Service is starting...');
 
-    // §3.7: Initialize crypto subsystem (shared sequence — S106 fix)
+    // §4.5.2: Initialize crypto subsystem (shared sequence — S106 fix)
     await IdentityContext.initCrypto(config.baseDir);
 
     // Load all identities
     final mgr = IdentityManager(baseDir: config.baseDir);
-    var identities = mgr.loadIdentities();
+    final List<Identity> identities;
+    try {
+      identities = mgr.loadIdentities();
+    } on KeyringEntryUnreadable catch (e) {
+      // S413 (finding D): the master seed is present but the keyring does
+      // not open it (Windows: DPAPI refuses `master_seed.dpapi`). The
+      // device database opens only under a key from that seed. No crash:
+      // the GUI offers the restore from the 24 words, which deletes the
+      // profile first (§13.5.2) and then sends the start trigger.
+      log.error('Master seed present but not readable ($e) — not starting; '
+          'restore from the 24 words in the GUI (§13.5.2). Waiting for the '
+          'cleona.start trigger.');
+      _running = false;
+      return;
+    }
     if (identities.isEmpty) {
       log.warn('No identities found — waiting for GUI setup (cleona.start trigger)');
       _running = false;
@@ -1011,6 +1051,7 @@ class _MultiServiceDaemon {
       // before is called along by it.
       _bindIdentityToTray(ctx.userIdHex, service);
       _bindRemoteDeletion(ctx.userIdHex, service);
+      service.onIdentityFound = _startRecoveredIdentity; // §13.7
       _bindDesktopNotifications(service);
       // Update callbacks BEFORE startService(): the start reports a
       // cached manifest itself. Sequence (S387): manifest →
@@ -1141,7 +1182,6 @@ class _MultiServiceDaemon {
     );
     ipcServer.onCreateIdentity = _createIdentityAtRuntime;
     ipcServer.onDeleteIdentity = _deleteIdentityAtRuntime;
-    ipcServer.onRecoveredIdentity = _startRecoveredIdentity;
     ipcServer.onCalDAVServerGetState = getCalDAVServerState;
     ipcServer.onCalDAVServerSetEnabled = setCalDAVServerEnabled;
     ipcServer.onCalDAVServerRegenerateToken = regenerateCalDAVServerToken;
@@ -1411,6 +1451,7 @@ class _MultiServiceDaemon {
     // edge — see the reasoning in `_bindIdentityToTray`.
     _bindIdentityToTray(ctx.userIdHex, service);
     _bindRemoteDeletion(ctx.userIdHex, service);
+    service.onIdentityFound = _startRecoveredIdentity; // §13.7
     _bindDesktopNotifications(service);
 
     // Update IPC server
@@ -1481,9 +1522,10 @@ class _MultiServiceDaemon {
     return ctx.userIdHex;
   }
 
-  /// IPC callback: start a recovered identity (from DHT registry).
-  /// The Identity record already exists on disk (created by
-  /// recoverIdentitiesFromRegistry), just needs an IdentityContext + service.
+  /// Starts an identity the derivation run found or the user named (§13.7,
+  /// `CleonaService.onIdentityFound`). The record already exists in the
+  /// device database (`createIdentityAtIndex`); it needs a context and a
+  /// service.
   Future<void> _startRecoveredIdentity(Identity identity) async {
     if (_host == null || !_running) return;
     final mgr = IdentityManager(baseDir: config.baseDir);
@@ -1636,39 +1678,14 @@ class _MultiServiceDaemon {
     return true;
   }
 
-  // ── GAP G-5: THE IDENTITY REGISTRY HAS NO STORAGE PLACE ────────
+  // ── NO IDENTITY REGISTRY (§13.7) ────────────────────────────────────
   //
-  // Here stood `_publishIdentityRegistry()` — two callers
-  // (`_createIdentityAtRuntime`, `_deleteIdentityAtRuntime`), one
-  // callee: `CleonaService.storeRegistryInDht`. That lay in
-  // `cleona_service_v3_delivery.dart:525` and stored the multi-identity
-  // registry reed-solomon-encoded in the Kademlia DHT
-  // (`node.routingTable.findClosestPeers` + `MT_FRAGMENT_STORE` at ten
-  // replicators). Both are deleted.
-  //
-  // WHAT IS MISSING, AND SINCE WHEN ALSO THE CONSTRUCTION: until 08.09.2026
-  // it said here that `identity/identity_dht_registry.dart` and the
-  // Reed-Solomon codec lived on — construction, encryption and fragmentation
-  // of the registry were unchanged in place. THE FILE HAS BEEN DELETED SINCE
-  // S376 (owner decision V-11 = A, 08.09.2026). It had
-  // zero callers in `lib/` and built fragments for a storage place that
-  // does not exist: V4.1 has no pollable third-party storage (§4.3 is
-  // replaced in V4.1, not renumbered — liveness is pairwise). The
-  // secure storage on the tagline is addressed to a RECIPIENT; the
-  // registry has none.
-  //
-  // THE GAP STAYS OPEN, it has not become smaller with the deletion
-  // — only more honestly booked: there is now also no half
-  // component lying around that looks like a solution. The REPLACEMENT is
-  // outstanding and normatively sketched: v4_1 §13.7 demands derivation
-  // instead of directory ("derivation instead of a directory"). As long as
-  // nobody builds it, the consequence below applies unchanged.
-  //
-  // CONSEQUENCE, explicitly logged: multi-identity recovery via the
-  // registry is dead until §14 gets a V4.1 carrier. Whoever loses their
-  // device does NOT get their secondary identities back via the seed phrase
-  // — only the primary identity. NOTHING is
-  // faked here: there is no dummy that logs "successful".
+  // Here stood `_publishIdentityRegistry()`, which stored the list of
+  // identities in the V3 DHT. §13.7: there is no directory of one's own
+  // identities in the network. A device set up from the words finds them by
+  // the derivation run (`cleona_service_recovery.dart`, S413); the host
+  // starts each find ([_startRecoveredIdentity] as
+  // `CleonaService.onIdentityFound`).
 
   void _checkProfileIntegrity(IdentityManager mgr, List<Identity> identities) {
     // THE SEED FIRST (S403): the device database below opens only under a
@@ -1680,7 +1697,19 @@ class _MultiServiceDaemon {
       final firstCtx = _contexts.values.firstOrNull;
       if (firstCtx != null && firstCtx.masterSeed != null) {
         final ks = KeyringService.instance;
-        if (ks.load('master_seed') == null) {
+        // D-95: only an entry known to be ABSENT is written back. One that
+        // is present but not readable (macOS before the takeover) is not
+        // "deleted externally" — rewriting it would replace a value this
+        // daemon cannot compare with its own.
+        bool absent;
+        try {
+          absent = ks.load('master_seed') == null;
+        } on Exception catch (e) {
+          absent = false;
+          log.warn('PROFILE WATCHDOG: master_seed is present in the keyring '
+              'but not readable ($e) — not rewritten');
+        }
+        if (absent) {
           log.warn('PROFILE WATCHDOG: master_seed keyring deleted externally — '
               're-persisting from RAM');
           try {

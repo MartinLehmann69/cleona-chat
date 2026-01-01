@@ -17,6 +17,8 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:emoji_picker_flutter/emoji_picker_flutter.dart';
 import 'package:cleona/main.dart';
+import 'package:cleona/core/log/clogger.dart';
+import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
@@ -1752,7 +1754,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 style: TextButton.styleFrom(
                   foregroundColor: Theme.of(context).colorScheme.error,
                 ),
-                label: Text(locale.get('leave')),
+                label: Text(locale.get('leave_group')),
                 onPressed: () {
                   // Follow-up fix #U14: owner-aware confirm body — warns the owner
                   // that the ownership is transferred automatically, and
@@ -1800,12 +1802,12 @@ class _ChatScreenState extends State<ChatScreen> {
                           onPressed: () {
                             Navigator.pop(confirmCtx);
                             Navigator.pop(ctx);
-                            service.leaveGroup(widget.conversationId);
+                            service.leaveGroup(widget.conversationId, via: 'group_info_dialog');
                             WidgetsBinding.instance.addPostFrameCallback((_) {
                               if (context.mounted) Navigator.pop(context);
                             });
                           },
-                          child: Text(locale.get('leave')),
+                          child: Text(locale.get('leave_group')),
                         ),
                       ],
                     ),
@@ -2678,7 +2680,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _pickFile(ICleonaService service) async {
+    // S419 diagnostics (RCA `S419-RCA-19W01-VOLL.md` D1, WIN 19.W01): how
+    // long the platform file dialog takes — on Windows its window opened but
+    // stayed unpainted for 15 s and more. Two lines, no change of behaviour.
+    final log = CLogger.get('filepicker', profileDir: AppPaths.dataDir);
+    final sw = Stopwatch()..start();
+    log.info('pickFiles: calling the platform dialog');
     final result = await FilePicker.platform.pickFiles();
+    log.info('pickFiles: returned after ${sw.elapsedMilliseconds} ms, '
+        'files=${result?.files.length ?? 0}');
     if (result == null || result.files.isEmpty) return;
     final path = result.files.first.path;
     if (path == null) return;
@@ -4343,16 +4353,24 @@ class _MessageBubbleState extends State<_MessageBubble> {
                     // recipient has long since read. Therefore the
                     // hint says "confirmation pending" instead of "not
                     // delivered", and the colour stays neutral.
-                    Tooltip(
-                      message: _statusTooltip(context, message.status),
-                      child: Icon(
-                        _statusIcon(message.status),
-                        size: 14,
-                        color: _statusColor(
-                            message.status,
-                            message.readByRecipient,
-                            colorScheme,
-                            _captionColor(context)),
+                    // The mark is also named to accessibility services with
+                    // the same symbol the plain text bubble shows
+                    // (`MessageBubble.statusTicksFor`): the icon alone told a
+                    // screen reader nothing, and the tooltip is empty once
+                    // delivered (S418, AVM 19.A01).
+                    Semantics(
+                      label: MessageBubble.statusTicksFor(message.status),
+                      child: Tooltip(
+                        message: _statusTooltip(context, message.status),
+                        child: Icon(
+                          _statusIcon(message.status),
+                          size: 14,
+                          color: _statusColor(
+                              message.status,
+                              message.readByRecipient,
+                              colorScheme,
+                              _captionColor(context)),
+                        ),
                       ),
                     ),
                   ],

@@ -15,6 +15,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:cleona/core/config/network_channel.dart';
 import 'package:cleona/core/link/data_port.dart';
+import 'package:cleona/ui/screens/device_management_screen.dart';
 import 'package:cleona/ui/screens/donation_screen.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/voice_transcription_config.dart';
@@ -189,27 +190,32 @@ class SettingsScreen extends StatelessWidget {
     final words = access.words;
     if (words == null) {
       final String message;
-      switch (access.outcome) {
-        case GateOutcome.cancelled:
-          message = locale.get('seed_phrase_gate_cancelled');
-          break;
-        case GateOutcome.invalidated:
-          message = locale.get('seed_phrase_gate_invalidated');
-          break;
-        case GateOutcome.absent:
-          // On a device with an app-bound keyring,
-          // "nothing there" is almost always the reinstallation; otherwise it is the
-          // old, terse sentence.
-          // NOT `hasDeviceGate`: the statement of this sentence is "the
-          // keyring falls with the app installation", and that
-          // applies on BOTH mobile platforms — the device-code lock
-          // exists only on Android. Two statements, two queries.
-          message = access.gated || identityMgr.hasAppBoundKeyring
-              ? locale.get('seed_phrase_absent_device')
-              : locale.get('no_recovery_phrase');
-          break;
-        default:
-          message = locale.get('no_recovery_phrase');
+      if (access.unreadable) {
+        // Present, but the keyring does not open them (S413, finding E).
+        message = locale.get('seed_phrase_unreadable');
+      } else {
+        switch (access.outcome) {
+          case GateOutcome.cancelled:
+            message = locale.get('seed_phrase_gate_cancelled');
+            break;
+          case GateOutcome.invalidated:
+            message = locale.get('seed_phrase_gate_invalidated');
+            break;
+          case GateOutcome.absent:
+            // On a device with an app-bound keyring,
+            // "nothing there" is almost always the reinstallation; otherwise it is the
+            // old, terse sentence.
+            // NOT `hasDeviceGate`: the statement of this sentence is "the
+            // keyring falls with the app installation", and that
+            // applies on BOTH mobile platforms — the device-code lock
+            // exists only on Android. Two statements, two queries.
+            message = access.gated || identityMgr.hasAppBoundKeyring
+                ? locale.get('seed_phrase_absent_device')
+                : locale.get('no_recovery_phrase');
+            break;
+          default:
+            message = locale.get('no_recovery_phrase');
+        }
       }
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(message), duration: const Duration(seconds: 8)),
@@ -374,6 +380,48 @@ class SettingsScreen extends StatelessWidget {
             ],
           ),
 
+          // D-94 (owner 06.11.2026): whisper and its model download are
+          // language-independent and the device's; the language and the
+          // retention stay on the identity screen.
+          FormGroup(
+            title: locale.get('section_transcription'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.record_voice_over_outlined),
+                title: Text(locale.get('transcription_model')),
+                subtitle: Text(locale.get('whisper_engine')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => TranscriptionModelScreen(service: service)),
+                ),
+              ),
+            ],
+          ),
+
+          // D-99 (§14.9.2): one devices screen for every identity of the
+          // user, under the general settings — the device list and the
+          // backup in the network of each identity.
+          FormGroup(
+            title: locale.get('section_devices'),
+            dividers: false,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.devices),
+                title: Text(locale.get('device_management_title')),
+                subtitle: Text(locale.get('device_management_subtitle')),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                      builder: (_) => DeviceManagementScreen(service: service)),
+                ),
+              ),
+            ],
+          ),
+
           FormGroup(
             title: locale.get('section_backup'),
             dividers: false,
@@ -483,6 +531,37 @@ class SettingsScreen extends StatelessWidget {
 
 }
 
+/// The state of the recovery package (§13.3.4, §14.9.2): "Recovery package
+/// valid until" a date, or "Recovery package expires in N days"; an expired
+/// package must not lapse silently. Three states: none in the network
+/// (error colour), expiring within two days (error colour — it is renewed
+/// only when the app meets the network), valid until a date. Shown per
+/// identity on the devices screen (`device_management_screen.dart`); the
+/// tile that showed it for one identity is gone (owner 07.11.2026, S414).
+/// [warn] when it is missing or expires soon.
+({String text, bool warn}) recoveryBundleText(AppLocale locale, DateTime? until) {
+  if (until == null || !until.isAfter(DateTime.now())) {
+    return (text: locale.get('recovery_bundle_none'), warn: true);
+  }
+  final left = until.difference(DateTime.now());
+  if (left < const Duration(days: 2)) {
+    return (
+      text: locale
+          .get('recovery_bundle_expires_days')
+          .replaceAll('{days}', '${left.inHours ~/ 24 + 1}'),
+      warn: true,
+    );
+  }
+  final d = until.toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  return (
+    text: locale
+        .get('recovery_bundle_valid_until')
+        .replaceAll('{date}', '${d.year}-${two(d.month)}-${two(d.day)}'),
+    warn: false,
+  );
+}
+
 /// The limit of recovery — instead of a path that does not carry.
 ///
 /// WHAT STOOD HERE BEFORE. `_GuardianSetupTile` offered "Set up social
@@ -510,51 +589,6 @@ class SettingsScreen extends StatelessWidget {
 /// warns, `unknown` says "cannot be determined", `none` stays silent. The
 /// expensive direction — presenting the user a "you have nothing" where the
 /// state is open — thus no longer occurs.
-/// The rescue bundle in the network (§13.3.4, B-1): "The bundle state
-/// belongs in the UI: `Backup valid until <date>` or `Backup expires in N
-/// days`. An expired bundle must not lapse silently." Three states: none in
-/// the network (error colour), expiring within two days (error colour — it
-/// is renewed only when the app meets the network), valid until a date.
-class RecoveryBundleTile extends StatelessWidget {
-  final ICleonaService service;
-  const RecoveryBundleTile({super.key, required this.service});
-
-  @override
-  Widget build(BuildContext context) {
-    final locale = AppLocale.read(context);
-    final scheme = Theme.of(context).colorScheme;
-    final until = service.recoveryBundleValidUntil;
-    final String text;
-    var warn = true;
-    if (until == null || !until.isAfter(DateTime.now())) {
-      text = locale.get('recovery_bundle_none');
-    } else {
-      final left = until.difference(DateTime.now());
-      if (left < const Duration(days: 2)) {
-        text = locale
-            .get('recovery_bundle_expires_days')
-            .replaceAll('{days}', '${left.inHours ~/ 24 + 1}');
-      } else {
-        final d = until.toLocal();
-        String two(int v) => v.toString().padLeft(2, '0');
-        text = locale
-            .get('recovery_bundle_valid_until')
-            .replaceAll('{date}', '${d.year}-${two(d.month)}-${two(d.day)}');
-        warn = false;
-      }
-    }
-    return ListTile(
-      leading: Icon(Icons.cloud_done_outlined,
-          color: warn ? scheme.error : scheme.onSurfaceVariant),
-      title: Text(locale.get('recovery_bundle_title')),
-      subtitle: Text(text,
-          style: warn
-              ? TextStyle(color: scheme.error, fontWeight: FontWeight.w600)
-              : null),
-    );
-  }
-}
-
 class _SocialRecoveryLimitTile extends StatelessWidget {
   final ICleonaService service;
   const _SocialRecoveryLimitTile({required this.service});
@@ -1343,7 +1377,11 @@ class _ArchiveSettingsState extends State<ArchiveSettingsScreen> {
   }
 }
 
-/// Transkriptions-Einstellungen Screen.
+/// The identity's transcription settings (D-94): the language (§24.3, shared
+/// over the own devices, §14.7 Type 8) and the audio retention. Opened from
+/// the identity screen of the active identity. The model and its download
+/// are the device's and stand under the general settings
+/// ([TranscriptionModelScreen]).
 class TranscriptionSettingsScreen extends StatefulWidget {
   final ICleonaService service;
   const TranscriptionSettingsScreen({super.key, required this.service});
@@ -1353,9 +1391,132 @@ class TranscriptionSettingsScreen extends StatefulWidget {
 }
 
 class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
-  String _selectedModel = 'base';
   String _selectedLanguage = 'auto';
   int _retentionDays = 30;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadTranscriptionStatus();
+  }
+
+  Future<void> _loadTranscriptionStatus() async {
+    final s = await widget.service.getTranscriptionStatus();
+    if (s == null || !mounted) return;
+    setState(() {
+      _selectedLanguage = s.language;
+      _retentionDays = s.retentionDays;
+    });
+  }
+
+  /// S366: the values live in the `transcription_config` area of the
+  /// identity's encrypted store; the service writes them there (and sends
+  /// the language to the other own devices, §14.7 Type 8).
+  ///
+  /// NO DATA-LOSS BOLT, and that is weighed: if the two values are lost,
+  /// transcription runs again with `auto` and 30 days. Nothing is gone that
+  /// the user does not re-choose in five seconds — unlike the archive,
+  /// where a password hangs at the same place.
+  Future<void> _saveTranscriptionConfig() async {
+    await widget.service.setTranscriptionSettings(
+      language: _selectedLanguage,
+      retentionDays: _retentionDays,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final locale = AppLocale.read(context);
+    return AppBarScaffold(
+      title: locale.get('transcription_settings_title'),
+      opaqueBody: true,
+      leading: Navigator.canPop(context)
+          ? IconButton(
+              icon: const Icon(Icons.arrow_back),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
+      // Working rule #6: the AppBar is top-safe, the body is not at the
+      // bottom (Android edge-to-edge).
+      body: SafeArea(
+        top: false,
+        child: ListView(
+          children: [
+            const SizedBox(height: 8),
+            FormGroup(
+              title: locale.get('transcription_language'),
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.language),
+                  title: Text(locale.get('transcription_language')),
+                  subtitle: Text(_selectedLanguage == 'auto'
+                      ? locale.get('transcription_language_auto')
+                      : _selectedLanguage.toUpperCase()),
+                  trailing: DropdownButton<String>(
+                    value: _selectedLanguage,
+                    items: VoiceTranscriptionConfig.production()
+                        .supportedLanguages
+                        .map((l) => DropdownMenuItem(
+                              value: l,
+                              child: Text(l == 'auto'
+                                  ? locale.get('language_auto')
+                                  : l.toUpperCase()),
+                            ))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) {
+                        setState(() => _selectedLanguage = v);
+                        _saveTranscriptionConfig();
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+            FormGroup(
+              title: locale.get('transcription_retention'),
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.timer),
+                  title: Text(locale.get('transcription_retention')),
+                  subtitle: Text('$_retentionDays ${locale.get("days")}'),
+                  trailing: DropdownButton<int>(
+                    value: _retentionDays,
+                    items: [7, 14, 30, 60, 90].map((d) =>
+                      DropdownMenuItem(value: d, child: Text('$d ${locale.get("days")}'))
+                    ).toList(),
+                    onChanged: (v) {
+                      if (v != null) {
+                        setState(() => _retentionDays = v);
+                        _saveTranscriptionConfig();
+                      }
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// The device's transcription model (D-94): whether whisper.cpp is ready,
+/// which model size this device uses, and its download. Whisper and the
+/// model files are language-independent program data of the installation
+/// (§21.7, `<dataDir>/models/`), the same for every identity — so this
+/// stands under the general settings, not on the identity screen.
+class TranscriptionModelScreen extends StatefulWidget {
+  final ICleonaService service;
+  const TranscriptionModelScreen({super.key, required this.service});
+
+  @override
+  State<TranscriptionModelScreen> createState() => _TranscriptionModelState();
+}
+
+class _TranscriptionModelState extends State<TranscriptionModelScreen> {
+  String _selectedModel = 'base';
   double _downloadProgress = 0.0;
   String _downloadStatus = 'idle';
 
@@ -1381,7 +1542,7 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
   }
 
   /// A status pushed while a download runs: only the download part and
-  /// the list of present models — the choices on screen stay the user's.
+  /// the list of present models — the choice on screen stays the user's.
   void _onStatus(TranscriptionStatus s) {
     if (!mounted) return;
     setState(() {
@@ -1396,29 +1557,15 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     if (s == null || !mounted) return;
     setState(() {
       _status = s;
-      _selectedLanguage = s.language;
-      _retentionDays = s.retentionDays;
       _selectedModel = s.modelSize;
       _downloadStatus = s.downloadStatus;
       _downloadProgress = s.downloadProgress;
     });
   }
 
-  /// S366: the values live in the `transcription_config` area of the
-  /// identity's encrypted store; the service writes them there (and sends
-  /// the language to the other own devices, §14.7 Type 8).
-  ///
-  /// NO DATA-LOSS BOLT, and that is weighed: if the three
-  /// values are lost, transcription runs again with `auto`, 30 days
-  /// and `base`. Nothing is gone that the user does not re-choose in five seconds
-  /// — unlike the archive, where a password hangs at the same
-  /// place.
-  Future<void> _saveTranscriptionConfig() async {
-    await widget.service.setTranscriptionSettings(
-      language: _selectedLanguage,
-      modelSize: _selectedModel,
-      retentionDays: _retentionDays,
-    );
+  /// D-94: one row of the device database, for every identity.
+  Future<void> _saveModel() async {
+    await widget.service.setTranscriptionModel(_selectedModel);
   }
 
   bool _isModelDownloaded(String size) =>
@@ -1454,7 +1601,7 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
     final ready = whisperAvailable && modelChecked;
 
     return AppBarScaffold(
-      title: locale.get('transcription_settings_title'),
+      title: locale.get('section_transcription'),
       opaqueBody: true,
       leading: Navigator.canPop(context)
           ? IconButton(
@@ -1462,7 +1609,11 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
               onPressed: () => Navigator.pop(context),
             )
           : null,
-      body: ListView(
+      // Working rule #6: the AppBar is top-safe, the body is not at the
+      // bottom (Android edge-to-edge).
+      body: SafeArea(
+        top: false,
+        child: ListView(
         children: [
           const SizedBox(height: 8),
           FormGroup(
@@ -1489,58 +1640,6 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
             ],
           ),
           FormGroup(
-            title: locale.get('transcription_language'),
-            children: [
-              ListTile(
-                leading: const Icon(Icons.language),
-                title: Text(locale.get('transcription_language')),
-                subtitle: Text(_selectedLanguage == 'auto'
-                    ? locale.get('transcription_language_auto')
-                    : _selectedLanguage.toUpperCase()),
-                trailing: DropdownButton<String>(
-                  value: _selectedLanguage,
-                  items: VoiceTranscriptionConfig.production()
-                      .supportedLanguages
-                      .map((l) => DropdownMenuItem(
-                            value: l,
-                            child: Text(l == 'auto'
-                                ? locale.get('language_auto')
-                                : l.toUpperCase()),
-                          ))
-                      .toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      setState(() => _selectedLanguage = v);
-                      _saveTranscriptionConfig();
-                    }
-                  },
-                ),
-              ),
-            ],
-          ),
-          FormGroup(
-            title: locale.get('transcription_retention'),
-            children: [
-              ListTile(
-                leading: const Icon(Icons.timer),
-                title: Text(locale.get('transcription_retention')),
-                subtitle: Text('$_retentionDays ${locale.get("days")}'),
-                trailing: DropdownButton<int>(
-                  value: _retentionDays,
-                  items: [7, 14, 30, 60, 90].map((d) =>
-                    DropdownMenuItem(value: d, child: Text('$d ${locale.get("days")}'))
-                  ).toList(),
-                  onChanged: (v) {
-                    if (v != null) {
-                      setState(() => _retentionDays = v);
-                      _saveTranscriptionConfig();
-                    }
-                  },
-                ),
-              ),
-            ],
-          ),
-          FormGroup(
             title: locale.get('transcription_model'),
             children: [
               for (final size in ['tiny', 'base', 'small'])
@@ -1554,7 +1653,7 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
                   onChanged: (v) {
                     if (v != null) {
                       setState(() => _selectedModel = v);
-                      _saveTranscriptionConfig();
+                      _saveModel();
                     }
                   },
                 ),
@@ -1565,6 +1664,7 @@ class _TranscriptionSettingsState extends State<TranscriptionSettingsScreen> {
             ],
           ),
         ],
+      ),
       ),
     );
   }

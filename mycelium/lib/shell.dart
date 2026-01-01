@@ -351,6 +351,7 @@ class Shell implements PacketRoute {
     // smaller Elligator share, and in the same way on BOTH sides — otherwise
     // both set up a link and neither matches the other.
     final own = _running[w];
+    if (traceOn && own != null) _report('TRACE shell tie with $w: both started, ${smaller(own.uniform, uniformA) ? "the own handshake (sending ${_attempt[w]} of $kAttempts) wins (smaller share), its flight 1 is set aside" : "its handshake wins (smaller share), its flight 1 is answered"}');
     if (own != null && smaller(own.uniform, uniformA)) return;
 
     // Repetition of the same flight 1 (flight 2 got lost): the same

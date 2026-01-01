@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:facec63a4359, 2026-11-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:a709cc057490, 2026-11-10). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -427,12 +427,22 @@ under point 2 below.
   it, only the search call names it (§7.2), and the invitation data name it as their
   fingerprint (§15.2).
 - **DeviceID is daemon-global under multi-identity.** A daemon hosting
-  N identities has exactly **one** DeviceID, computed from the
-  daemon-global device-sig key pair (§4.4.2) and independent of every
-  UserID.
-- **Neither is persisted.** Neither `userId` nor `deviceId` is stored;
-  both are recomputed on every identity load. A persisted copy could
-  silently drift apart on a change to the derivation constant —
+  N identities has exactly **one** DeviceID, independent of every
+  UserID. The derivation above, applied to the daemon-global device-sig
+  key pair (§4.4.2), gives the device's node identifier, which only the
+  own devices learn (§14.7, Type 23); applied to the device-sig key pair
+  the device holds for one identity, it gives the identifier under which
+  that identity's device set names the device to its own devices and to
+  its contacts (§14.5, §14.9.1). The DeviceID that the own devices name
+  each other by (§14.1, §14.7, the own line §8.2) is 16 random bytes,
+  drawn once per device and kept in the device database; it never leaves
+  the own devices. 128 random bits leave no collision to fear even
+  across millions of devices, and the DeviceID only has to be unique
+  among the user's own devices; its binding to a device's keys is the
+  device record in each identity's device set (§14.9.1).
+- **Neither identifier of the person is persisted.** `userId` is not
+  stored; it is recomputed on every identity load. A persisted copy
+  could silently drift apart on a change to the derivation constant —
   recomputing makes any such change immediately and loudly visible.
 
 ### 4.2 Cryptographic Primitives
@@ -453,12 +463,15 @@ NIST level 3 (192-bit quantum security) and have been
 FIPS-standardized since 2024 — they are not experimental.
 
 The secp256k1 primitive exists only because the public relay network of
-§11.9 accepts nothing else. It carries nothing but throwaway events on
-the relays: the key is generated per published event and discarded.
-Whatever a record asserts rests on the Ed25519 signature inside the
-record, not on the relay signature. The implementation is a hand-written
-BigInt curve and **not constant-time**; that is acceptable only because
-no confidentiality or authenticity property depends on it.
+§11.9 accepts nothing else. It signs nothing but the address records of
+§11.9: a node with a reachable address keeps one key for its records, so
+that a new record replaces the old one; a node without a reachable
+address publishes nothing and holds no such key (§11.9). A record is a
+hint and carries no trust (§11.9, §11.8.3); nothing rests on the relay
+signature. The implementation is a hand-written BigInt curve and **not
+constant-time**; that is acceptable only because no confidentiality
+property depends on it and a forged record can do no more than any wrong
+hint.
 
 **Deliberate exclusions:**
 
@@ -747,6 +760,16 @@ older devices — neither for signatures (appearing as the device) nor
 for KEM material addressed to the device. The `m/device` branch is the
 documented exception to HD-wallet determinism (§4.5.1).
 
+**One key set per identity.** A device holds one device key set (sig
+and KEM) for each identity it carries, generated at that identity's
+first start on the device and kept in the device database under the
+identity's index; it is deleted with the identity. Everything that
+chapters 13 and 14 call a device key is the set the device holds for the
+identity in question. A contact of two identities of one user therefore
+sees no device key and no device identifier that both have in common
+(§15.10). The daemon-global key pair forms only the node identifier
+(§4.1) and leaves the own devices nowhere else.
+
 #### 4.4.3 Signature rule (normative)
 
 | Artifact | Signature | Why |
@@ -867,7 +890,7 @@ master_seed (32 B) = SHA-256("cleona-master-seed-v1" ‖ entropy_32B)
 │   └── invite_root  = HKDF(master_line, "invite-root" ‖ 0 ‖ g_inv)  → invitation line (§15.3.1)
 ├── m/identity/1 … m/identity/N         → further identities, same scheme
 ├── hkdf(info="cleona-shared-file-enc-v1") → daemon-wide file key    [hd_wallet.dart:131-138]
-└── m/device                            → NOT seed-derived, generated locally (§4.4.2)
+└── m/device                            → NOT seed-derived, generated locally, one set per identity (§4.4.2)
 ```
 
 **Not seed-derived:** the **shared key** of the device set (§14.4). It
@@ -891,13 +914,17 @@ addresses nothing (§14.1), there is no way to infer the number of
 hosted identities from network behavior — the liveness/cover traffic
 of all identities blends into one stream, diluted by decoys.
 
-**Identity discovery on restore.** A seed restore on a fresh device
-must recognize at which indices the user's identities sit. Every
-identity is derivable from the phrase; the device derives the indices in
-ascending order and asks for the recovery bundle of each, one index
-beyond the highest one found (§13.7), and each bundle names its own
-index, display name and `active` flag (§13.3.2). There is no directory
-of identities to look up (§13.7).
+**Identity discovery.** A device set up from the words must recognize at
+which indices the user's identities sit. Every identity is derivable from
+the phrase; the device derives the indices in ascending order and asks
+for the recovery bundle of each, one index beyond the highest one found
+(§13.7), and each bundle names its own index, display name and `active`
+flag (§13.3.2). An own device learns an identity created on another own
+device from that device's identity list (§14.7, Type 23), and derives its
+keys from the seed itself. A device gives a new identity the index one
+above the highest it knows — its own, any found by the run, any named in
+an identity list — and a deleted index is never given again. There is no
+directory of identities to look up (§13.7).
 
 #### 4.5.2 Key Storage on the Device
 
@@ -1566,10 +1593,20 @@ it (§8.2). The other neighbours are known addresses, not open paths.
 invitations name (§15.2), for as long as any standing invitation (§15.3) names
 it. It goes to a neighbour reachable from the open network — one confirmed
 under a public address (not private, not shared carrier space, not
-link-local) — whenever the node has one; a neighbour known only under a
-private address takes it only while there is no other, and gives it up at
-the next edge to a reachable one unless a standing invitation still names
-it. When and why the place changes otherwise: §11.8.8; invitations issued
+link-local) and whose `0x25` does not say that its reachability is not
+evidenced (§8.1, §11.8a); a neighbour of an earlier 4.2 version, whose
+`0x25` says nothing about it, qualifies by its address alone — whenever the
+node has one; a neighbour known only under a private address takes it only
+while there is no other, and gives it up at the next edge to a reachable one
+unless a standing invitation still names it. A neighbour holding the place
+whose `0x25` says it is not evidenced gives it up at that edge on the same
+terms: unless a standing invitation still names it — invitations already
+handed out keep working as far as they did; only invitations issued
+afterwards name the new one. A node learns what a neighbour says only once
+that neighbour holds the place (§8.1); it therefore hands the place on in
+this way at most once between two starts or network changes. If the new
+holder says it is not evidenced too, the place stays with it until the next
+start or network change. When and why the place changes otherwise: §11.8.8; invitations issued
 afterwards name the new one,
 and holders of older invitations find the issuer through its publisher key
 (§15.2). **This place never goes to a contact's device:** the invitation
@@ -1577,10 +1614,13 @@ travels to people not yet accepted and is passed on, and a contact's
 address in it would hand a friend's address to every reader.
 
 **Up to three places go to contacts.** A device of one of the node's own
-contacts that is reachable from the open network under the same rule and
-has answered since the last start or network change takes a place before
-any other neighbour — one such contact holds one place, more hold up to
-three. When a place falls free (§11.8.8), another contact that qualifies at
+contacts whose reachability is evidenced (§11.8a), as its `0x25` says
+(§8.1), and that has answered since the last start or network change takes
+a place before any other neighbour — one such contact holds one place, more
+hold up to three. A device of an earlier 4.2 version, whose `0x25` says
+nothing about it, qualifies when it is reachable from the open network
+under the same rule as above; a device whose `0x25` says it is not
+evidenced gives up its place at that edge. When a place falls free (§11.8.8), another contact that qualifies at
 that moment takes it. A contact the user has excluded (§15.10) never takes
 one. These contact
 places and the invitation neighbour's place are the node's **fixed neighbours**; they
@@ -2055,8 +2095,8 @@ deadline (§11.6) is repeated (§11.3a), then no more until the next edge.
 
 | Packet | Content |
 |---|---|
-| `0x24` registration | kind + day (4) + piece (1) + pieces (1; bit `0x80`: the device reads a `0x25` with record key) + count (1) + the device code (16) + count × 16 B codes |
-| `0x25` registered | kind + day (4) + piece (1), followed by the neighbour's record key (32) when the `0x24` set that bit and the neighbour writes a record (§11.9) |
+| `0x24` registration | kind + day (4) + piece (1) + pieces (1; bit `0x80`: the device reads a `0x25` with record key; bit `0x40`: the device reads a `0x25` with evidence byte) + count (1) + the device code (16) + count × 16 B codes |
+| `0x25` registered | kind + day (4) + piece (1), followed by the neighbour's record key (32) when the `0x24` set bit `0x80` and the neighbour writes a record (§11.9), then one evidence byte when the `0x24` set bit `0x40`: `1` if the neighbour's reachability is evidenced (§11.8a), otherwise `0` |
 
 The neighbour keeps a code until the end of the day
 after its day, at most 4,096 codes per device and 256 devices (the device
@@ -2077,7 +2117,10 @@ the recipient last told them (§9.2), or for a first contact the invitation
 neighbour (§15.2) — and sends it to its **own** fixed neighbour, which
 hands the inner packet to each of them. The first acknowledgement wins
 (§7.1), a duplicate is ignored (§9.2). A sender without a fixed neighbour
-sends the `0x20` packet directly. The reply and the acknowledgement travel
+sends the `0x20` packet directly. A sender that is itself one of the
+recipient's named fixed neighbours holds the recipient's codes and hands
+the `0x20` to the recipient's device directly, as forwarder step 2 does;
+its `0x22` names only the other neighbours. The reply and the acknowledgement travel
 the same way under the reverse code.
 
 **No node may be both hops.** A node the recipient named holds the
@@ -3593,9 +3636,11 @@ that phrase**. The fresh install reads the recovery bundle (§13.3.1):
   involvement of contacts.
 * **A bundle younger than 7 days without a window** → the device asks the
   user whether the previous device still exists. If so, the user opens the
-  window there; if not, the user chooses recovery explicitly, warned that
-  two devices running one identity without enrolment do not share their
-  key state.
+  window there; if not, the user chooses recovery explicitly, told that a
+  recovery retires every previous device: it ends with an Emergency Key
+  Rotation (§13.6), and a previous device that finds the newer bundle
+  removes the identity (§13.3.4). Where the previous device cannot open a window, the interface
+  says so and names recovery as moving the identity to this device.
 * **No bundle** → **this is the recovery case.**
   The data is rebuilt from the chats with the contacts, groups and channels
   the user was a member of.
@@ -3771,14 +3816,18 @@ nobody reads anymore.
 
 #### 13.2.2 Without a Bundle: New Inbox, Old Content Lost
 
-Without a bundle, the old Shared Key is unrecoverable. The recovering user
+Without a bundle, the words give only the founding keys (§13.1.1); a
+previous device that never rotated holds the same keys and day values
+(§8.2). When the user chooses recovery without a bundle, the device
 
-1. rolls a **new** Shared Key (making the device their sole device, N = 1,
-   §14.4),
-2. derives `inbox_key = HKDF(shared_key, "inbox")` from it,
-3. communicates the new inbox to contacts via the distress-call return path
-   (§13.4.3), or, once `K_AB` can be formed again, via the Restore
-   Broadcast (§13.5.1).
+1. performs an Emergency Key Rotation at once (§4.5.4) with N = 1 — it
+   has no contact to announce it to, so it sends nothing,
+2. asks the post box only under the day values of its new keys; post under
+   the previous day values stays where it lies — the device could open
+   none of it, and it may belong to a device that still lives or to a
+   bundle found later (§13.2.1),
+3. reaches contacts again by contact rebuild (§13.5.5) or by a bundle
+   found later (§13.3.2: the copy furthest along the chain decides).
 
 **Declared loss, without sugarcoating:** whatever still lay unharvested in
 the old inbox can no longer be opened by anyone. That is the delivery
@@ -3823,16 +3872,18 @@ post-box edge (§8.2) while it is in the recovery case (§13.0), and at once
 with the addresses of any invitation it reads (§15.2). Nothing else can compute
 a value or collect it.
 
-**One bundle per identity.** Shared Key, device set, contact list,
-and current key state are per-identity quantities (§14.4: “all devices
-**of an identity** share a Shared Key"; §14.8: 5 devices **per identity**)
-— and device sets can differ per identity. A master bundle across all
-identities could not be fully built by a device that does not host a
-given identity at all. That is why every device delivers its own bundle
-**per identity it hosts**, into that identity's own line; the index
-parameter follows the HKDF pattern of the HD derivation (§4.5.1). The
-recovering user derives the indices in ascending order and asks one index
-beyond the last one found (§13.7).
+**One bundle per identity.** Contact list and current key state are
+per-identity quantities, and so is the size of the bundle: a
+contact-poor identity does not carry the contacts of another. Every own
+device carries every identity of the user (§14.4), and every device
+delivers a bundle **for each identity**, under that identity's own
+values; the index parameter follows the HKDF pattern of the HD
+derivation (§4.5.1). One bundle per identity also keeps the identities
+apart at the holders: each lies under values of its own index, and no
+holder can tell that two belong to one user. The recovering user derives
+the indices in ascending order and asks one index beyond the last one
+found (§13.7). The interface shows the state of every identity's bundle
+together (§14.9.2).
 
 - Both quantities are derivable **exclusively** from the seed. Neither a
   contact, nor a holder, nor a holder of the ContactSeed can compute a
@@ -3856,7 +3907,7 @@ inbox.
 | per contact: `s_AB` | forming `K_AB` and the codes (§4.3) | 32 B |
 | per contact: its fixed neighbours | step 3 at once (§8.1) | ≤ 57 B |
 | own fixed neighbours | where the own post lies (§8.2) | ≤ 57 B |
-| time of placement | the newest of several copies wins | 8 B |
+| time of placement | of several copies, the one whose keys are furthest along the rotation chain (§4.5.4) wins, among copies with the same keys the newest; copies whose chains fork are shown to the user and none is taken | 8 B |
 | per contact: display name + verification level | UI continuity, key-change detection (§15.7) | ~40 B |
 | per contact: deletion marker / block state | prevents deleted contacts from resurrecting via recovery (§15.9) | 1 B |
 | `g_inv`, `Highwater` of the invite line | closes K-7 (§13.10.3, §15.3.3) | 8 B |
@@ -3918,16 +3969,17 @@ it shortens the path from “elaborate takeover with a visible warning" to
 
 #### 13.3.4 Renewal, Carrier Set, Failure, and Hard Limit
 
-- **Who delivers (every device, for each identity it hosts).** All
-  devices have equal standing; each holds the Shared Keys of the
-  identities it hosts and can form their `seed`-derived quantities,
-  provided it possesses seed-derived material. Identities a device does
-  not host do not concern it — those identities' bundles are maintained
-  by their own devices. The identity sig keys lie under the Shared Key on
-  every device and rotate along with lock-out (§14.4); there is **no
-  privileged device**, every one may renew.
-  As long as any device is alive, the bundle is renewed — there is no
-  device whose failure halts the renewal.
+- **Who delivers (every device, for every identity).** All devices have
+  equal standing and carry every identity of the user (§14.4); each
+  holds the seed and the current key state of every identity and can
+  form their seed-derived quantities. The identity sig keys rotate along
+  with lock-out (§14.4); there is **no privileged device**, every one may
+  renew. As long as any device is alive, every bundle is renewed — there
+  is no device whose failure halts the renewal. A device that took over
+  an identity from another own device (§14.7, Type 23) places that
+  identity's first bundle when the cadence below makes it due, counted
+  from the creation time the identity list names — not at once, so that
+  it does not place a bundle emptier than the one already lying.
 - **Cadence: at a post-box edge (§8.2), when the last placement is 3
   days old or older.** The bundle lives 7 days (§8.2); a device with an
   edge at least every 4 days keeps it alive. There is no timer (§5.4): a
@@ -3935,9 +3987,27 @@ it shortens the path from “elaborate takeover with a visible warning" to
   says so. Opening an enrolment window (§14.6.1) places the bundle at
   once, outside the 3-day cadence; closing it places nothing — the end
   time is in the bundle, and the next routine renewal omits the field.
+- **At a rotation.** An Emergency Key Rotation (§4.5.4) places the bundle
+  at once, outside the 3-day cadence — unless the device is still
+  searching for a bundle without having found one (§13.2.2); it places its
+  first bundle once the search ends. For 7 days after taking a bundle over
+  (§13.2.1) the recovering device names the former fixed neighbours the
+  bundle named among the holders of its own placements.
+- **A retired device removes the identity.** Before it renews, a device
+  asks the values of the days after the day of its own last placement,
+  reading only.
+  If it finds a bundle whose keys continue its own along the rotation
+  chain, it has been retired by a recovery (§13.6): it deletes the identity
+  on itself as a deletion from another own device does (§21.5.2), and the
+  interface says why. A bundle whose chain forks from its own keys is shown
+  to the user and nothing is deleted. One question per identity and
+  renewal; nothing found costs one `0x34` per holder (§13.7).
 - **Visibility.** The bundle state belongs in the UI, following the
-  pattern from §14.4: “Backup valid until <date>" or “Backup expires in
-  N days." An expired bundle must not lapse silently.
+  pattern from §14.4: “Recovery package valid until <date>" or “Recovery
+  package expires in N days." An expired bundle must not lapse silently.
+  The interface calls the bundle the recovery package; it is not a backup
+  of its own — it restores the identities on a device, and the histories
+  then come back from the contacts (§13.5).
 - **Hard limit.** If all devices have been dead for longer than 7 days
   after the last placement, the bundle has expired from its holders.
   Stage 2 (§13.4) is not yet restated for 4.2; until it is, §13.2.2
@@ -4221,8 +4291,8 @@ profile data is deleted completely. Recovery **takes the place of** an
 identity; it does not merge into a running one.
 
 **Distinction from multi-device.** A second device is enrolled, not
-recovered (§14.6); entering the seed on another device is not a setup
-path but a recovery procedure.
+recovered (§14.6): it is set up with the words and approved by a living
+device (§14.6.1). A recovery retires every previous device (§13.6).
 
 #### 13.5.3 Cost of recovery
 
@@ -4287,26 +4357,29 @@ After a restore, the device set is **unclear**: the recovering device is
 new, the old ones may be alive (theft) or dead (water damage). This
 cannot be derived from the seed. Decided:
 
-**Rotation happens — but only after recovery is complete.**
+**Every recovery ends with an Emergency Key Rotation; with a bundle, only
+after recovery is complete.** It retires every previous device: contacts
+that take the chain discard what it signs, and it can neither collect
+under the new day values nor open what is sealed to the new keys (§4.5.4,
+§8.2).
 
-- During the procedure, everything runs over the **old** shared key
-  (bundle case). If rotation happened immediately, every contact not yet
-  reached would deliver into an inbox no one reads — the recovery would
-  cut off its own inflow.
-- The trigger is an **explicit completion in the assistant**: “12
-  contacts recovered — finish and renew keys", with a **reminder after a
-  few days** if the user leaves it be.
-- **Until then, a stolen device can read along, and this must be made
-  visible.** The assistant states this in the same language as §14.4:
-  “As long as recovery is running, old devices can read along."
-- The rotation itself is an ordinary device-set change per §14.4 with
-  N = 1: new shared key, new user KEM key, prekey stock discarded and
-  refilled, pairwise announcement to all recovered contacts, a
-  transition of 7 days (§14.4).
-- **In the no-bundle case, this step is dropped**: a new shared key was
-  already rolled at the start there (§13.2.2), there is nothing to
-  rotate. Contacts not reached stay not reached — their state is the same
-  as before completion.
+- During the procedure, everything runs on the keys the bundle carried. A
+  rotation at once would leave every restored contact that has not yet
+  written with day values the device asks for only 7 more days — the
+  recovery would cut off its own inflow.
+- The trigger is an **explicit completion in the assistant**: “12 of 15
+  contacts back — finish and renew keys", with a **reminder after a few
+  days** at the opening of the app if the user leaves it be. Once every
+  restored contact is back, the recovery completes by itself.
+- **Until then, a previous device can read along, and this must be made
+  visible.** The assistant states: “As long as recovery is running, old
+  devices can read along."
+- The rotation is the Emergency Key Rotation of §4.5.4 with N = 1: new
+  signing and KEM keys, new day keys to every contact, the chain with the
+  announcement and every envelope until acknowledged, the previous day
+  values asked and the previous KEM keys kept for 7 days. The bundle is
+  placed at once (§13.3.4).
+- **Without a bundle** the rotation happened at the choice (§13.2.2).
 
 **Quorum (§14.5).** An emergency key rotation after the restore requires
 countersignatures from `max(2, ⌈N/2⌉)` devices, which the recovering user
@@ -4468,10 +4541,11 @@ standard case of an unknown device set), §15.3.3 (K-7 cross-reference).
 ### 14.1 UserID and DeviceID are two separate identifiers
 
 UserID and DeviceID are two separate identifiers. One identity (UserID)
-can live on multiple devices, and every device carries its own device
-identifier (DeviceID) along with its own device key pair, which is
-generated locally and is **not** derived from the seed (§14.6.1) —
-device identity is disposable, user identity is not. The DeviceID is
+can live on multiple devices — every own device of a user carries all
+of the user's identities (§14.4) —, and every device carries its own device
+identifier (DeviceID) along with its own device key pair for each
+identity, generated locally and **not** derived from the seed (§4.4.2,
+§14.6.1) — device identity is disposable, user identity is not. The DeviceID is
 not an addressing means; it carries exactly the following tasks:
 
 | Task of the DeviceID | Reference |
@@ -4511,7 +4585,7 @@ devices, no per-device delivery states and no “1 of N delivered" special
 case on the contact's side (§14.3). One person costs a contact one
 delivery (§9), regardless of how many devices they read on.
 
-Twin sync (17 content types, §14.7), the device set (§14.5), device
+Twin sync (24 content types, §14.7), the device set (§14.5), device
 lock-out, and the lock-out quorum
 (§14.8) all run over the same delivery path (§7, §8).
 
@@ -4576,9 +4650,20 @@ for each device d:   wrap_d = Enc(device_key_d, shared_key(n))
 inbox_key            = HKDF(shared_key(n), "inbox")
 ```
 
-The seed from the 24 words carries the **identity** (§4.1) and opens
-the recovery bundle (§13). It is **not** the everyday key and need not
-sit permanently on any device.
+The seed from the 24 words carries the **identities** (§4.1) and opens
+the recovery bundles (§13). It is **not** the everyday key. Every own
+device holds it: each was set up with the words (§14.6.1), and each
+opens an identity's store with a key derived from it (§4.5.3).
+
+**All identities on every own device.** Every own device of a user
+carries every identity of the user; the device set is the same for all
+of them. An identity created on one device reaches the other own
+devices with that device's identity list (§14.7, Type 23); a deletion
+reaches them as Type 17. Enrolling a device adds it to every identity
+(§14.6.1), and locking a device out removes it from every identity: a
+device locked out of one identity alone would keep reading the others.
+Each identity then rotates its keys and announces it to its own
+contacts (§14.5); one approval per device counts for all identities.
 
 **Rotation.** The shared key is rerolled on **every change to the
 device set** and rewrapped for the then-valid set:
@@ -4628,10 +4713,13 @@ already locked out. Therefore:
 - **Any device may add alone.** The rotation due in this case wraps for
   all already-enrolled devices too; no one loses anything, and a thief
   gains nothing they did not already have.
-- **Lock-out requires a quorum** of `max(2, ⌈N/2⌉)` devices (counting
-  rules in §14.8). A thief with one device cannot lock out the rest with
+- **Lock-out requires a quorum** of `max(2, ⌈N/2⌉)` of the user's
+  devices (counting rules in §14.8), and it locks the device out of
+  every identity. A thief with one device cannot lock out the rest with
   it. At exactly one device, the rule does not apply — there, that one
-  device suffices.
+  device suffices. While a lock-out awaits its quorum, the set does not
+  grow: no device is added, and key packages (Type 16) go only to devices
+  that were in the set when the lock-out began.
 
 Rationale for the asymmetry: an additional device does not harm the
 owner, lock-out does. That is exactly where the protection sits.
@@ -4777,13 +4865,13 @@ value_E(i, d)   = first 16 B of SHA-256(enrol_box(i, d).pk)                  // 
 ```
 
 1. **On an existing device** the user opens an *enrolment window*
-   (24 hours) for the identities it hosts. The device places the
+   (24 hours) for every identity of the user. The device places the
    recovery bundle at once with the window's end (§13.3.2, §13.3.4).
    While the window is open it adds `value_E(i, d)` of the window's days
    to the questions of its post-box edges — no question of its own, no
    timer (§5.4) — and answers an enrolment call on the LAN.
 2. **On the new device** the user enters the words. The device derives
-   the identities (§13.7), generates its own device keys (§4.4.2), finds
+   the identities (§13.7), generates its own device keys for each of them (§4.4.2), finds
    the bundle and its window (§13.0), and places an enrolment request
    under `value_E(i, d)`: sealed with `HKDF(recovery_key(i),
    "enrol-enc")`, carrying its name, platform, device public keys and
@@ -4791,9 +4879,13 @@ value_E(i, d)   = first 16 B of SHA-256(enrol_box(i, d).pk)                  // 
    call. It takes nothing from the bundle into use and does nothing in
    the identity's name before the handover.
 3. **Approval:** the request appears in the Requests tab of the existing
-   device with the new device's name, platform and DeviceID. Nothing is
-   handed over before the user accepts; there is no automatic approval.
-   A rejected request closes the window and tells the new device so.
+   device with the new device's name, platform and DeviceID; the
+   requests of one new device for several identities are one entry, and
+   accepting it accepts all of them. Nothing is handed over before the
+   user accepts; there is no automatic approval. A device that would make
+   the user's devices more than five (§14.8) is refused and the user is
+   told so. A rejected request closes the window and tells the new
+   device so.
 4. **Handover** of the material of §14.6.2, sealed against the new
    device's KEM keys, to its values — directly while both are present,
    otherwise in the post box.
@@ -4882,17 +4974,17 @@ twin-sync state before it harvests invitation lines or places delivery
 receipts; until then the UI shows “reconciling state" instead of a
 possibly stale state.
 
-### 14.7 Twin-Sync: 23 Content Types
+### 14.7 Twin-Sync: 24 Content Types
 
 When multiple devices are active, changes to application state must be
 reconciled between them. The Twin-Sync content types handle this.
-There are 23 of them.
+There are 24 of them.
 
-**Types 0–22** (canonical `proto/app_payloads.proto::TwinSyncType`).
-*Types 14–16 are assigned here and **reserved** on the wire
-(`reserved 14, 15, 16;`) but not built in `lib/` yet; whoever spends one
-of those numbers on something else makes this document's numbering and
-the wire's permanently different.*
+**Types 0–23** (canonical `proto/app_payloads.proto::TwinSyncType`).
+*Types 14 and 15 are assigned here and **reserved** on the wire
+(`reserved 14, 15;`) but not built in `lib/` yet; Type 16 is built.
+Whoever spends one of those numbers on something else makes this
+document's numbering and the wire's permanently different.*
 
 | # | Type | Content |
 |---|---|---|
@@ -4919,6 +5011,7 @@ the wire's permanently different.*
 | 20 | RECONCILE | the initial reconciliation (§14.6.3): header, manifest block, fetch, deliver, progress, cancel — device-scoped |
 | 21 | GROUP_LEFT | the identity left a group (§16.2.2) — group identifier and the membership epoch at leaving; the receiving device removes the conversation and sets the same mark. A post the leaving device discarded is not forwarded to the other own devices |
 | 22 | CHANNEL_JOINED | the identity created, joined or changed a channel on this device (§16) — the channel's state as it stands there (members with roles, epoch, name and settings; on the shared key also the key state it holds, §16.2.5), sent only while the identity is a member; the receiving device takes it where it holds the channel not at all or with an epoch that is not newer, and shows its conversation. A channel the device left comes back only with a newer state (§16.2.2); leaving travels as Type 21 |
+| 23 | IDENTITY_SET | the identity list of the sending device: per identity its `identity_index`, display name, creation time and `active` flag (§13.3.2) — sent to each other own device when an identity is created or deleted on this device, once at the first start of a version that knows this type, and in answer to an identity list that differs from its own. The receiving device creates an identity it does not carry and has not deleted, with its keys derived from the seed (§4.5.1), adds every own device to its device set and answers with its own list; an identity listed with `active = false` it deletes as Type 17 does; an identity both carry under separate device sets is one identity created twice before either learned of the other, and both join their sets and send each other their contacts (Type 0), groups (Type 6) and channels (Type 22). To a device whose list lacks an identity that already holds random state — contacts, rotated keys, invitations — the sender adds that identity's handover (§14.6.2), in pieces of at most 32 KB, and the receiver takes it over as at enrolment, followed by the initial reconciliation (§14.6.3). It travels on the own line of an identity both devices carry. A device enters another own device into a new identity's set only once that device has sent a Type 23 itself; a device that creates an identity from a list generates its device keys for it (§4.4.2) and sends each other own device a Type 9 with them on that identity's own line; an earlier 4.2 version skips the type and does not carry the identity |
 
 The type carries **17** on the wire (`proto/app_payloads.proto`).
 
@@ -5009,7 +5102,8 @@ a silent intermediate state is ruled out.
 
 ### 14.8 Device Cap and Quorum Count
 
-**Cap: 5 devices per identity**, for three verifiable reasons:
+**Cap: 5 devices per user** — the device set every identity of the user
+shares (§14.4) —, for three verifiable reasons:
 
 1. The key package on every rotation contains **one packet per device**
    (§14.4). It grows linearly with N.
@@ -5019,8 +5113,10 @@ a silent intermediate state is ruled out.
 3. The quorum `max(2, ⌈N/2⌉)` becomes harder to reach as N grows,
    precisely when devices are used rarely.
 
-The limit is enforced **locally, on the enrolling device**, and is
-visible in the device-set announcement. That is weaker than a centrally
+The limit is enforced **locally, on the enrolling device**, which counts
+the devices of all identities together and refuses a sixth (§14.6.1
+step 3), and it is visible in the device-set announcement. That is
+weaker than a centrally
 checked list — a tampered device could enroll more — but it is
 noticeable: contacts see the device count in the announcement, and a
 jump stands out.
@@ -5064,38 +5160,41 @@ Every device keeps a record (`DeviceRecord`,
 | Device identifier | the DeviceID (§14.1: subject, not signpost) |
 | **Device name** | default is the **operating system's computer name**, changeable by the user; a change travels as Twin-Sync Type 10 (`proto/app_payloads.proto::DeviceRecord.device_name`) |
 | Platform (Android / iOS / Linux / Windows / macOS) | basis for the display and the expectations from §31 |
-| Device public keys | the device KEM public key (X25519 + ML-KEM-768) and the device signing public key (Ed25519 + ML-DSA-65) of §4.4.2, taken from the enrolment request (§14.6.1 step 2); Type 16 seals each sibling's packet against its device KEM key, and a countersignature (Type 13) verifies against its device signing key |
+| Device public keys | the device KEM public key (X25519 + ML-KEM-768) and the device signing public key (Ed25519 + ML-DSA-65) the device holds for this identity (§4.4.2), taken from the enrolment request for this identity (§14.6.1 step 2) or, for an identity taken over from an identity list, from the device's Type 9 on this identity's own line; Type 16 seals each sibling's packet against its device KEM key, and a countersignature (Type 13) verifies against its device signing key |
 | first seen / last seen | “last seen" is fed by the last harvested Twin-Sync |
 | “is this device" | marker for the locally running device |
 
 #### 14.9.2 Settings → Devices
 
-The devices screen shows:
+One devices screen serves all identities of the user; it stands under
+the general settings, not under an identity. It shows:
 
-- **Device list** with name, platform icon, “this device" marker, and
-  “last seen".
+- **Device list** of the user with name, platform icon, “this device"
+  marker, and “last seen". A device that does not yet carry an identity
+  of the user says which, and why: waiting for its identity list, or an
+  earlier version that does not take identities over (§14.7, Type 23).
 - **No primary/linked marking.** All devices are peers (§14.4).
-- **Capability chips** for the four bits from §14.6.2, active ones
-  highlighted.
-- **Certificate expiry:** date and remaining validity, warning from
-  7 days out, error color after expiry, “Renew now" button (numbers
-  from §14.6.2: 30-day validity, 7-day warning threshold).
-- **“Lock out device"** with two progress indicators, both normative:
+- **“Lock out device"** — out of every identity (§14.4) — with two
+  progress indicators, both normative:
   1. *Quorum:* “Confirmation from 2 devices needed — 1 of 2 given."
   2. *Effectiveness:* “Device locked — fully effective once all
-     contacts are informed (3 of 47 still open)." A lock-out that is
-     visibly not yet in effect is more honest than one that suggests a
-     security it will only reach in days (§14.4).
-- **State of the network backup** from chapter 13: “Backup in the
-  network valid until <date>" or “expires in N days" (§13.3.4).
-- **“Add device"** is available on every device.
+     contacts are informed (3 of 47 still open)", counted over the
+     contacts of all identities. A lock-out that is visibly not yet in
+     effect is more honest than one that suggests a security it will
+     only reach in days (§14.4).
+- **State of the recovery package** from chapter 13, one line per
+  identity: “<name>: recovery package valid until <date>" or
+  “expires in N days" (§13.3.1, §13.3.4).
+- **“Add device"** is available on every device and opens the window
+  for every identity (§14.6.1).
 
 #### 14.9.3 How Devices Learn About Each Other
 
 Devices learn about each other exclusively through the device-set-change
-deliveries (Type 9 and Type 16, §14.7). There is no directory and no
-published reachability (§4.1, §23); the device set is thus carried
-state, not queryable state.
+deliveries (Type 9 and Type 16, §14.7), and about each other's
+identities through the identity list (Type 23). There is no directory
+and no published reachability (§4.1, §23); the device set and the list
+of identities are thus carried state, not queryable state.
 
 ### 14.10 Assurances of the Device Model, at a Glance
 
@@ -5104,10 +5203,11 @@ What this chapter promises the user, as a list:
 - **There is no primary device.** All devices of an identity have equal
   rights and share a common shared key; excluding a device follows from
   the randomness of the new key, not from a privilege (§14.4).
-- **An additional device is enrolled by a live device** and fetches its
-  application state via the initial reconciliation (§14.6). Entering the
-  24 words on an additional device is a recovery operation, not pairing
-  (§13).
+- **An additional device is enrolled by a live device** — set up with the
+  24 words and approved there — for every identity of the user, and
+  fetches its application state via the initial reconciliation (§14.6).
+  Every own device carries every identity; one created later reaches
+  all of them (§14.4, §14.7 Type 23).
 - **Replacing a device means: add and lock out** (§14.4, §14.6). Chapter
   13 applies only when **all** devices are gone.
 - **One delivery serves all devices** — shared `inbox_key`, shared user
@@ -5167,12 +5267,13 @@ What this chapter promises the user, as a list:
   is named here because a reader of this bullet would otherwise take
   "rotate along with the lock-out" for an instantaneous cut, and it is
   not one.
-- **17 Twin-Sync content types** (§14.7), each using the delivery-ladder
+- **24 Twin-Sync content types** (§14.7), each using the delivery-ladder
   stage appropriate to its latency and linkability needs.
 - **Twin-Sync needs no KEX-gate exception:** the gate is a mathematical
   property — only whoever has `K_own` can form the tag (§4.3, §14.7).
-- **At most 5 devices per identity**, enforced locally on the enrolling
-  device and visible in the device-set announcement (§14.8).
+- **At most 5 devices per user**, carrying every identity of the user,
+  enforced locally on the enrolling device and visible in the
+  device-set announcement (§14.8).
 - **Payload that differs per device travels over Type 16** — wrapped
   shared keys and delegated partial keys, because their placement rule
   is a different one (§14.7).
@@ -6119,8 +6220,14 @@ packets. Addresses learned in the process are reachability hints like any
 other (§6.2).
 
 **Several identities of one user** are not listed anywhere. There is no
-directory that could be queried; the association exists only on the user's
-own devices.
+directory that could be queried, and no key or identifier that a contact
+receives is shared by two identities: each identity names its devices by
+the device keys it holds for them (§4.4.2), and the DeviceID stays among
+the own devices (§4.1). What one device has once for all its identities
+— its addresses and the key of its address record in the invitation data
+(§15.2, §11.9), its fixed neighbours (§9.2) — a contact of two of them
+can lay side by side; separating that would take a node per identity,
+which §4.5.1 rules out.
 
 ### 15.11 Residual risks
 
@@ -9022,7 +9129,7 @@ declared limit and a declared behaviour when it is reached.
 | request buffer (§15.4) | 20 shown, 100 held | oldest evicted, never blocked |
 | neighbours (§11.8) | 32 | the one whose newest stamp is oldest gives way; fixed places excepted |
 | links (§11.8.7) | 64 | the one used longest ago gives way |
-| identities on one device | 16 | the 17th is refused when it is created, and the interface says so; cover (§5.1) and keep-alive (§8.1) run once per device whatever the number |
+| identities of a user — every own device carries all (§14.4) | 16 | the 17th is refused when it is created, and the interface says so; cover (§5.1) and keep-alive (§8.1) run once per device whatever the number |
 | reconciliation source, packets under one device value (§14.6.3) | 80 | it fills again only on the recipient's progress report |
 | reconciliation, open fetches on the new device (§14.6.3) | 1 per source | a new request replaces the open one |
 | reconciliation packet (§14.6.3) | 32 768 B including the seal | split into further packets |
@@ -9797,7 +9904,8 @@ Three touch points are worth noting:
 
 whisper.cpp on-device (`lib/core/archive/whisper_ffi.dart`),
 source-side transcription at the sender with receiver fallback,
-tiny/base/small models (~78 / 148 / 488 MB, selectable per identity),
+tiny/base/small models (~78 / 148 / 488 MB, selectable per device —
+program data of the device, shown under the general settings, D-94),
 beam search `beam_size = 5`, language setting per identity (default
 auto-detect), two-stage lifecycle: stage 1 audio + text in parallel,
 stage 2 text only, once the configurable audio retention period has

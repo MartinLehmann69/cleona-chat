@@ -69,12 +69,25 @@
 
 part of 'cleona_service.dart';
 
-/// How many devices an identity may keep (§14.8: "Cap: 5 devices per
-/// identity"). At the receiver only observing — §14.8 says explicitly that
-/// the limit is enforced "locally, on the enrolling device" and is merely
-/// visible at the contact: "contacts see the device count in the
-/// announcement, and a jump stands out".
-const int kDeviceCapPerIdentity = 5;
+/// How many devices a user may keep (§14.8: "Cap: 5 devices per user — the
+/// device set every identity of the user shares", D-99). Enforced when an
+/// enrolment is accepted (`enrolDecide`, §14.6.1 step 3), counted over the
+/// devices of all identities together. At a contact's receiver only
+/// observing — §14.8 says explicitly that the limit is enforced "locally,
+/// on the enrolling device" and is merely visible at the contact: "contacts
+/// see the device count in the announcement, and a jump stands out".
+const int kDeviceCapPerUser = 5;
+
+/// §14.5, §14.4, §14.8 (S414): whether an announced device set removes a
+/// device the contact holds — then it needs the quorum proof. A device that
+/// is missing is a lock-out whether or not another one joined at the same
+/// time; growth alone needs none ("Any device may add alone").
+bool deviceSetChangeRemoves(List<Uint8List> cached, List<Uint8List> announced) {
+  String hex(Uint8List b) =>
+      b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  final now = {for (final a in announced) hex(a)};
+  return cached.any((c) => !now.contains(hex(c)));
+}
 
 extension DeviceSetAnnouncementOps on CleonaService {
   // ── SENDESEITE ────────────────────────────────────────────────────────
@@ -111,19 +124,29 @@ extension DeviceSetAnnouncementOps on CleonaService {
   List<DeviceSigInfo>? _announceableDeviceSet() {
     final bundle = identity.deviceKeys;
     if (bundle == null) return null;
-    // Only the own device can be proven: `DeviceRecord` keeps no signing
-    // keys, and a storage place for those of the sibling devices does not
-    // exist (the same gap that also keeps the multi-device rotation
-    // fail-closed).
-    if (_devices.length > 1) return null;
-    return [
-      DeviceSigInfo(
-        deviceNodeId: Uint8List.fromList(identity.deviceNodeId),
-        deviceEd25519Pk: Uint8List.fromList(bundle.sig.ed25519PublicKey),
-        deviceMlDsaPk: Uint8List.fromList(bundle.sig.mlDsaPublicKey),
-        isPrimary: true,
-      ),
-    ];
+    final own = DeviceSigInfo(
+      deviceNodeId: Uint8List.fromList(identity.deviceNodeId),
+      deviceEd25519Pk: Uint8List.fromList(bundle.sig.ed25519PublicKey),
+      deviceMlDsaPk: Uint8List.fromList(bundle.sig.mlDsaPublicKey),
+      isPrimary: true,
+    );
+    // §14.9.1 (S414): the device set names the signing keys of every
+    // sibling it took them for — from the enrolment request or from Type 9.
+    // One sibling without them and the set cannot be proven COMPLETELY:
+    // then nothing is announced, as before (see header comment).
+    final out = <DeviceSigInfo>[own];
+    for (final r in _devices.values) {
+      if (r.isThisDevice) continue;
+      final ed = r.deviceSigEd25519Hex, dsa = r.deviceSigMlDsaHex;
+      if (ed == null || dsa == null) return null;
+      out.add(DeviceSigInfo(
+        deviceNodeId: HdWallet.computeDeviceNodeId(hexToBytes(ed)),
+        deviceEd25519Pk: hexToBytes(ed),
+        deviceMlDsaPk: hexToBytes(dsa),
+        isPrimary: false,
+      ));
+    }
+    return out;
   }
 
   /// The next announcement counter, monotonic and across restarts.
@@ -303,9 +326,9 @@ extension DeviceSetAnnouncementOps on CleonaService {
     //    is "noticeable" at the contact. A larger set makes the quorum
     //    HARDER anyway, not easier; rejecting it would lock out an honest
     //    user without protecting anything.
-    if (newIds.length > kDeviceCapPerIdentity) {
+    if (newIds.length > kDeviceCapPerUser) {
       _log.warn('§14.8: ${_short(senderHex)} announces ${newIds.length} '
-          'devices — more than the cap of $kDeviceCapPerIdentity. '
+          'devices — more than the cap of $kDeviceCapPerUser. '
           'Taken over and noted here (the limit applies locally on the '
           'admitting device).');
     }
@@ -319,12 +342,20 @@ extension DeviceSetAnnouncementOps on CleonaService {
     //    along — otherwise whoever can write an announcement could also
     //    name its co-signers (`verifyRotationCoAuth` justifies this at its
     //    own place).
+    //
+    //    S414: "shrinking" is read as "a stored device is missing", not as
+    //    "the count fell". A swap at the same count — one device out, one
+    //    in — removes a device too: it is a lock-out (§14.4 "Lock-out
+    //    requires a quorum"), and §14.8 counts the quorum over the remaining
+    //    devices "on a device-set change", not on a falling count. Before,
+    //    a thief with the identity keys could swap a device out for one of
+    //    its own and go through without a single countersignature.
     final cached = contact.deviceSigKeys
         .map((d) => d.toSigInfo())
         .whereType<DeviceSigInfo>()
         .toList();
-    if (cached.isNotEmpty &&
-        newIds.length < cached.length) {
+    if (deviceSetChangeRemoves(
+        [for (final c in cached) c.deviceNodeId], newIds)) {
       final result = verifyRotationCoAuth(
         tokens:
             ann.approvals.map(RotationApprovalToken.fromProto).toList(),
