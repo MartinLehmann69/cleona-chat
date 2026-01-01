@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
+import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder, ContactSeedDataSource;
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/network/network_stats.dart';
@@ -17,7 +18,7 @@ import 'package:cleona/core/node/identity_context.dart';
 
 /// IPC client that connects to the cleona-daemon via Unix Domain Socket.
 /// Implements ICleonaService so the GUI can use it transparently.
-class IpcClient implements ICleonaService {
+class IpcClient implements ICleonaService, ContactSeedDataSource {
   final String socketPath;
 
   Socket? _socket;
@@ -41,6 +42,10 @@ class IpcClient implements ICleonaService {
 
   // Active identity for this client connection
   String? activeIdentityId;
+
+  late final ContactSeedBuilder _contactSeedBuilder = ContactSeedBuilder(this);
+  @override
+  ContactSeedBuilder get contactSeedBuilder => _contactSeedBuilder;
 
   // Cached state from daemon
   String _nodeIdHex = '';

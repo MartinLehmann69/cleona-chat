@@ -27,6 +27,7 @@ import 'package:cleona/core/service/device_pairing_service.dart';
 import 'package:cleona/core/moderation/jury_selection.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/ack_tracker.dart';
+import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder, ContactSeedDataSource;
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
 import 'package:cleona/core/network/peer_info.dart';
@@ -97,7 +98,7 @@ enum AppFrameDispatchOutcome {
 
 /// Central orchestrator: wires node, contacts, messaging, and manages state.
 /// Now takes a shared CleonaNode + IdentityContext instead of creating its own node.
-class CleonaService implements ICleonaService {
+class CleonaService implements ICleonaService, ContactSeedDataSource {
   final String profileDir;
   @override
   String displayName;
@@ -105,6 +106,10 @@ class CleonaService implements ICleonaService {
   int port;
   final String networkChannel;
   final CLogger _log;
+
+  late final ContactSeedBuilder _contactSeedBuilder = ContactSeedBuilder(this);
+  @override
+  ContactSeedBuilder get contactSeedBuilder => _contactSeedBuilder;
 
   /// The identity this service operates on behalf of.
   @override
@@ -423,7 +428,7 @@ class CleonaService implements ICleonaService {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.92';
+  static const String kCurrentAppVersion = '3.1.93';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;

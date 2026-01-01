@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/service/service_types.dart';
 import 'package:cleona/core/network/network_stats.dart';
+import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder;
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
@@ -76,6 +77,12 @@ abstract class ICleonaService {
   ContactInfo? getContact(String nodeIdHex);
   List<Conversation> get sortedConversations;
   List<PeerSummary> get peerSummaries;
+
+  /// Central, stable CR generator. Network data is computed once when
+  /// the mesh converges (peers confirmed + public IP discovered) and
+  /// cached. UI screens call [ContactSeedBuilder.getContactSeedFor]
+  /// instead of assembling ContactSeeds themselves.
+  ContactSeedBuilder get contactSeedBuilder;
 
   // Groups
   Map<String, GroupInfo> get groups;

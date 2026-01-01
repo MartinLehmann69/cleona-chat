@@ -11,12 +11,10 @@ import 'package:qr_flutter/qr_flutter.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/i18n/app_locale.dart';
-import 'package:cleona/core/network/contact_seed.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/ui/components/profile_avatar.dart';
-import 'package:cleona/core/service/service_types.dart' show PeerSummary;
 import 'package:cleona/ui/theme/skins.dart';
 
 /// Fullscreen Identity Detail Screen.
@@ -131,83 +129,39 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
     final locale = AppLocale.read(context);
     final service = widget.service;
 
-    final validPeers = service.peerSummaries
-        .where((p) => p.address.isNotEmpty && p.port > 0)
-        .toList();
-    // Pick LAN peers from different /16 subnets (max 2, IPv4 only)
-    final lanPeers = <PeerSummary>[];
-    final seenSubnets = <String>{};
-    for (final p in validPeers.where((p) => _isPrivateIp(p.address) && !p.address.contains(':'))) {
-      final subnet = p.address.split('.').take(2).join('.');
-      if (seenSubnets.add(subnet)) lanPeers.add(p);
-      if (lanPeers.length >= 2) break;
-    }
-    // Public/IPv6 peers (max 2) — total max 4 peers (Architecture §6.1)
-    final publicPeers = validPeers.where((p) => !_isPrivateIp(p.address)).take(2).toList();
-    final peers = [...lanPeers, ...publicPeers];
-    // Own addresses: up to 2 IPv4 private + public IPv4 + 1 IPv6 global (§27)
-    final ipv4Ips = service.localIps.where((ip) => !ip.contains(':')).take(2);
-    final ipv6Ips = service.localIps.where((ip) =>
-        ip.contains(':') && !ip.startsWith('fe80:') &&
-        !ip.startsWith('fd') && !ip.startsWith('fc')).take(1);
-    final ownAddrs = [...ipv4Ips, ...ipv6Ips].map((ip) => _formatAddr(ip, service.port)).toList();
-    if (service.publicIp != null && service.publicPort != null) {
-      ownAddrs.add(_formatAddr(service.publicIp!, service.publicPort!));
-    }
-    final seedPeerList = peers.map((p) {
-      final sorted = List<String>.from(p.allAddresses);
-      sorted.sort((a, b) => _addressPriority(a).compareTo(_addressPriority(b)));
-      return SeedPeer(
-        nodeIdHex: p.nodeIdHex,
-        addresses: sorted.isNotEmpty
-            ? sorted.take(3).toList()
-            : [_formatAddr(p.address, p.port)],
-      );
-    }).toList();
-
-    // §8.1.1 rev3: v2 ContactSeed carries userEd25519Pk (32B trust-anchor)
-    // instead of dxk/dmk (1216B). toQrBytes() always emits v2 binary format.
-    // Use widget.identity for userId/displayName (explicit, not IPC state).
     final idNodeIdHex = widget.identity.nodeIdHex ?? service.nodeIdHex;
     final idDisplayName = widget.identity.displayName;
-    final qrSeed = ContactSeed(
+    final channelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
+
+    final seed = service.contactSeedBuilder.getContactSeedFor(
       nodeIdHex: idNodeIdHex,
       displayName: idDisplayName,
-      ownAddresses: ownAddrs,
-      seedPeers: seedPeerList,
-      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
-      deviceIdHex: service.deviceNodeIdHex,
+      channelTag: channelTag,
       userEd25519Pk: service.userEd25519Pk,
-      // SR-2: founding anchor — ContactSeed emits `fp` only when it
-      // differs from ep (i.e. the identity has rotated).
       foundingEd25519Pk: service.foundingEd25519Pk,
-      createdAtMs: DateTime.now().millisecondsSinceEpoch,
     );
-    final qrBytes = qrSeed.toQrBytes();
+
+    if (seed == null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 32),
+        child: Column(
+          children: [
+            const SizedBox(width: 48, height: 48, child: CircularProgressIndicator()),
+            const SizedBox(height: 12),
+            Text(locale.get('qr_mesh_converging'),
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium),
+          ],
+        ),
+      );
+    }
+
+    final qrBytes = seed.toQrBytes();
+    final shareUri = seed.toUri();
     final qrCode = qr_lib.QrCode.fromUint8List(
       data: qrBytes,
       errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
     );
-
-    final shareSeed = ContactSeed(
-      nodeIdHex: idNodeIdHex,
-      displayName: idDisplayName,
-      ownAddresses: ownAddrs,
-      seedPeers: seedPeerList,
-      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
-      deviceIdHex: service.deviceNodeIdHex,
-      userEd25519Pk: service.userEd25519Pk,
-      // SR-2: founding anchor — ContactSeed emits `fp` only when it
-      // differs from ep (i.e. the identity has rotated).
-      foundingEd25519Pk: service.foundingEd25519Pk,
-      createdAtMs: DateTime.now().millisecondsSinceEpoch,
-    );
-    final shareUri = shareSeed.toUri();
-
-    debugPrint('[QR-GEN] peerSummaries=${validPeers.length}, '
-        'lan=${lanPeers.length}, public=${publicPeers.length}, '
-        'seedPeers=${peers.length}, ownAddrs=${ownAddrs.length}, '
-        'qrBytes=${qrBytes.length} bytes, shareUri=${shareUri.length} chars');
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -760,47 +714,3 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-bool _isPrivateIp(String ip) {
-  if (ip.contains(':')) {
-    final lower = ip.toLowerCase();
-    return lower.startsWith('fe80:') || lower.startsWith('fc') ||
-           lower.startsWith('fd') || lower == '::1';
-  }
-  return ip.startsWith('10.') ||
-      ip.startsWith('192.168.') ||
-      ip.startsWith('172.16.') || ip.startsWith('172.17.') ||
-      ip.startsWith('172.18.') || ip.startsWith('172.19.') ||
-      ip.startsWith('172.2') || ip.startsWith('172.3') ||
-      ip.startsWith('192.0.0.') || // IETF reserved / DS-Lite
-      (ip.startsWith('100.') && (int.tryParse(ip.split('.')[1]) ?? 0) >= 64 &&
-          (int.tryParse(ip.split('.')[1]) ?? 0) <= 127); // CGNAT 100.64/10
-}
-
-/// Format ip:port — brackets for IPv6: [2001:db8::1]:41338
-String _formatAddr(String ip, int port) =>
-    ip.contains(':') ? '[$ip]:$port' : '$ip:$port';
-
-/// Sort key: public/global addresses first (0), private/link-local last (2).
-int _addressPriority(String addrPort) {
-  var host = addrPort;
-  if (host.startsWith('[')) {
-    final end = host.indexOf(']');
-    if (end > 0) host = host.substring(1, end);
-  } else {
-    final colon = host.lastIndexOf(':');
-    if (colon > 0) host = host.substring(0, colon);
-  }
-  if (host.contains(':')) {
-    if (host.startsWith('fe80')) return 2;
-    return 0;
-  }
-  final parts = host.split('.');
-  if (parts.length == 4) {
-    final a = int.tryParse(parts[0]) ?? 0;
-    if (a == 10) return 2;
-    if (a == 172 && (int.tryParse(parts[1]) ?? 0) >= 16 && (int.tryParse(parts[1]) ?? 0) <= 31) return 2;
-    if (a == 192 && parts[1] == '168') return 2;
-    if (a == 127) return 2;
-  }
-  return 0;
-}

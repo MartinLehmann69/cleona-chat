@@ -26,14 +26,13 @@ class QrShowScreen extends StatefulWidget {
 
 class _QrShowScreenState extends State<QrShowScreen> {
   Timer? _pollTimer;
-  static const _typicalConvergenceSeconds = 15;
 
   @override
   void initState() {
     super.initState();
-    if (!widget.service.hasSessionConfirmedPeers) {
+    if (!widget.service.contactSeedBuilder.isReady) {
       _pollTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        if (widget.service.hasSessionConfirmedPeers) {
+        if (widget.service.contactSeedBuilder.isReady) {
           _pollTimer?.cancel();
           _pollTimer = null;
         }
@@ -53,11 +52,23 @@ class _QrShowScreenState extends State<QrShowScreen> {
     final service = widget.service;
     final locale = AppLocale.read(context);
 
-    if (!service.hasSessionConfirmedPeers) {
+    final activeIdentity = IdentityManager().getActiveIdentity();
+    final qrNodeIdHex = activeIdentity?.nodeIdHex ?? service.nodeIdHex;
+    final qrDisplayName = activeIdentity?.displayName ?? service.displayName;
+    final channelTag = NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l';
+
+    final seed = service.contactSeedBuilder.getContactSeedFor(
+      nodeIdHex: qrNodeIdHex,
+      displayName: qrDisplayName,
+      channelTag: channelTag,
+      userEd25519Pk: service.userEd25519Pk,
+    );
+
+    if (seed == null) {
       final elapsed = service.nodeStartedAt != null
           ? DateTime.now().difference(service.nodeStartedAt!).inSeconds
           : 0;
-      final progress = (elapsed / _typicalConvergenceSeconds).clamp(0.0, 0.95);
+      final progress = (elapsed / 15).clamp(0.0, 0.95);
       return Scaffold(
         appBar: AppBar(title: Text(locale.get('qr_my_code'))),
         body: Center(
@@ -87,118 +98,12 @@ class _QrShowScreenState extends State<QrShowScreen> {
       );
     }
 
-    // Use GUI-selected identity, not daemon IPC state.
-    // When identity A's tab is visible but daemon internally has identity B
-    // active, the QR must show A's nodeId (IdentityManager tracks GUI selection).
-    final activeIdentity = IdentityManager().getActiveIdentity();
-    final qrNodeIdHex = activeIdentity?.nodeIdHex ?? service.nodeIdHex;
-    final qrDisplayName = activeIdentity?.displayName ?? service.displayName;
-
-    // Build ContactSeed URI: own private + public addresses,
-    // confirmed peers from various subnets.
-    // §8.1.1 seed-peer selection: at least 1 relay-capable peer (has public
-    // IP = reachable from any network), rest by freshness/diversity.
-    final freshCutoff = DateTime.now().subtract(const Duration(minutes: 30));
-    final validPeers = service.peerSummaries
-        .where((p) => p.address.isNotEmpty && p.port > 0 && p.lastSeen.isAfter(freshCutoff))
-        .toList();
-    final peers = <dynamic>[];
-    final seenNodeIds = <String>{};
-    // Slot 1: guaranteed relay-capable peer (has public IP or global IPv6).
-    // This ensures scanners on different networks can reach at least one peer.
-    for (final p in validPeers) {
-      final hasPublic = p.allAddresses.any((a) {
-        if (a.startsWith('[')) {
-          final ip = a.substring(1, a.indexOf(']'));
-          return !ip.startsWith('fe80:') && !ip.startsWith('fd') && !ip.startsWith('fc');
-        }
-        final ip = a.split(':').first;
-        return !_isPrivateIp(ip);
-      });
-      if (hasPublic && seenNodeIds.add(p.nodeIdHex)) {
-        peers.add(p);
-        break;
-      }
-    }
-    // Remaining slots: LAN peers (max 2) + public peers (up to 5 total)
-    for (final p in validPeers.where((p) => _isPrivateIp(p.address))) {
-      if (!seenNodeIds.add(p.nodeIdHex)) continue;
-      peers.add(p);
-      if (peers.length >= 3) break;
-    }
-    for (final p in validPeers.where((p) => !_isPrivateIp(p.address))) {
-      if (!seenNodeIds.add(p.nodeIdHex)) continue;
-      peers.add(p);
-      if (peers.length >= 5) break;
-    }
-    // Own addresses: up to 2 private IPv4 + public IPv4 (if confirmed)
-    // + first global IPv6 (DS-Lite bypass: IPv6-only mobiles can reach us
-    // end-to-end without NAT traversal).
-    final ownAddrs = service.localIps
-        .where((ip) => !ip.contains(':'))
-        .take(2)
-        .map((ip) => '$ip:${service.port}')
-        .toList();
-    if (service.publicIp != null && service.publicPort != null) {
-      ownAddrs.add('${service.publicIp}:${service.publicPort}');
-    }
-    final globalV6 = service.localIps.firstWhere(
-      (ip) => ip.contains(':') && !ip.startsWith('fe80:') &&
-              !ip.startsWith('fd') && !ip.startsWith('fc'),
-      orElse: () => '',
-    );
-    if (globalV6.isNotEmpty) {
-      ownAddrs.add('[$globalV6]:${service.port}');
-    }
-    final seedPeerList = peers.map((p) {
-      // Sort addresses: public IPv4 first (reachable from mobile/CGNAT),
-      // then private IPv4 (LAN), then IPv6.
-      final sorted = List<String>.from(p.allAddresses);
-      sorted.sort((a, b) {
-        final aScore = _addressPriority(a);
-        final bScore = _addressPriority(b);
-        return aScore.compareTo(bScore);
-      });
-      // §8.1.1: take top 3 addresses, but guarantee global IPv6 inclusion
-      // (DS-Lite bypass §4.7). Without this, the IPv6 that qualifies the
-      // peer as relay-capable may be excluded by the limit.
-      final top = sorted.isNotEmpty
-          ? sorted.take(3).toList()
-          : ['${p.address}:${p.port}'];
-      if (sorted.length > 3) {
-        final globalV6 = sorted.firstWhere(
-          (a) => a.startsWith('[') &&
-              !a.contains('fe80:') && !a.contains('fd') && !a.contains('fc'),
-          orElse: () => '',
-        );
-        if (globalV6.isNotEmpty && !top.contains(globalV6)) {
-          top.add(globalV6);
-        }
-      }
-      return SeedPeer(
-        nodeIdHex: p.nodeIdHex,
-        addresses: top,
-      );
-    }).toList();
-
-    // §8.1.1 rev3: QR carries userEd25519Pk (32B trust-anchor) instead of
-    // dxk+dmk (1216B). Device-KEM keys resolved via DHT or Deferred KE.
-    final seed = ContactSeed(
-      nodeIdHex: qrNodeIdHex,
-      displayName: qrDisplayName,
-      ownAddresses: ownAddrs,
-      seedPeers: seedPeerList,
-      channelTag: NetworkSecret.channel == NetworkChannel.beta ? 'b' : 'l',
-      deviceIdHex: service.deviceNodeIdHex,
-      userEd25519Pk: service.userEd25519Pk,
-      createdAtMs: DateTime.now().millisecondsSinceEpoch,
-    );
     final qrBytes = seed.toQrBytes();
+    final shareUri = seed.toUri();
     final qrCode = qr_lib.QrCode.fromUint8List(
       data: qrBytes,
       errorCorrectLevel: qr_lib.QrErrorCorrectLevel.L,
     );
-    final shareUri = seed.toUri();
 
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('qr_my_code'))),
@@ -531,46 +436,6 @@ class _QrScanScreenState extends State<QrScanScreen> {
     _manualController.dispose();
     super.dispose();
   }
-}
-
-bool _isPrivateIp(String ip) {
-  if (ip.contains(':')) {
-    final lower = ip.toLowerCase();
-    return lower.startsWith('fe80:') || lower.startsWith('fc') ||
-           lower.startsWith('fd') || lower == '::1';
-  }
-  if (ip.startsWith('10.')) return true;
-  if (ip.startsWith('192.168.')) return true;
-  if (ip.startsWith('172.')) {
-    final second = int.tryParse(ip.split('.')[1]);
-    if (second != null && second >= 16 && second <= 31) return true;
-  }
-  if (ip.startsWith('192.0.0.')) return true;
-  if (ip.startsWith('100.')) {
-    final second = int.tryParse(ip.split('.')[1]) ?? 0;
-    if (second >= 64 && second <= 127) return true;
-  }
-  if (ip.startsWith('127.')) return true;
-  return false;
-}
-
-/// Address priority for QR seed peers: lower = higher priority.
-/// Public IPv4 and global IPv6 first (reachable from CGNAT/mobile),
-/// then private/link-local.
-int _addressPriority(String addrPort) {
-  final addr = addrPort.startsWith('[')
-      ? addrPort.substring(1, addrPort.indexOf(']'))
-      : addrPort.split(':').first;
-  if (addr.contains(':')) {
-    final lower = addr.toLowerCase();
-    if (lower.startsWith('fe80:') || lower.startsWith('fc') ||
-        lower.startsWith('fd') || lower == '::1') {
-      return 2; // Link-local/private IPv6
-    }
-    return 0; // Global IPv6 (same priority as public IPv4)
-  }
-  if (_isPrivateIp(addr)) return 2; // Private IPv4
-  return 0; // Public IPv4
 }
 
 /// Manual URI input screen (fallback when camera scanner is open).

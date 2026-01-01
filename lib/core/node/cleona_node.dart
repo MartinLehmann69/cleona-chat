@@ -4801,7 +4801,7 @@ class CleonaNode {
     final recipientHex = bytesToHex(recipientDeviceId);
     var count = 0;
     for (final peer in routingTable.allPeers) {
-      if (count >= 20) break;
+      if (count >= 5) break;
       if (peer.nodeIdHex == recipientHex) continue;
       if (routingTable.isLocalNode(peer.nodeId)) continue;
       final route = dvRouting.bestRouteTo(peer.nodeIdHex);

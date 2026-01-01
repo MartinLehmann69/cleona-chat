@@ -5,6 +5,7 @@ import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/network/compression.dart';
 import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
+import 'package:cleona/core/service/service_types.dart' show PeerSummary;
 
 /// ContactSeed: encodes node identity + reachability into a URI for QR codes.
 ///
@@ -606,4 +607,247 @@ class SeedPeer {
   final List<String> addresses; // ip:port pairs
 
   const SeedPeer({required this.nodeIdHex, this.addresses = const []});
+}
+
+// ---------------------------------------------------------------------------
+// ContactSeedBuilder — central, stable CR generation (§8.1.1)
+//
+// Peer-selection, address-computation, and caching live here. The UI never
+// assembles a ContactSeed itself — it calls [getContactSeedFor].
+// ---------------------------------------------------------------------------
+
+/// Inputs the builder needs from the service layer.
+abstract class ContactSeedDataSource {
+  List<PeerSummary> get peerSummaries;
+  List<String> get localIps;
+  String? get publicIp;
+  int? get publicPort;
+  int get port;
+  String get deviceNodeIdHex;
+  bool get hasSessionConfirmedPeers;
+}
+
+/// Cached network snapshot — the stable half of a ContactSeed.
+class _NetworkSnapshot {
+  final List<String> ownAddresses;
+  final List<SeedPeer> seedPeers;
+  final String fingerprint;
+
+  _NetworkSnapshot({
+    required this.ownAddresses,
+    required this.seedPeers,
+    required this.fingerprint,
+  });
+}
+
+class ContactSeedBuilder {
+  final ContactSeedDataSource _source;
+
+  _NetworkSnapshot? _snapshot;
+  int? _createdAtMs;
+
+  ContactSeedBuilder(this._source);
+
+  /// True once the network has enough data for a complete CR.
+  bool get isReady =>
+      _source.hasSessionConfirmedPeers &&
+      (_source.publicIp != null || _hasOnlyLanPeers);
+
+  bool get _hasOnlyLanPeers =>
+      _source.peerSummaries.every((p) => _isPrivateIp(p.address));
+
+  /// Build a stable ContactSeed for the given identity.
+  /// Returns null if the network isn't ready yet.
+  ContactSeed? getContactSeedFor({
+    required String nodeIdHex,
+    required String displayName,
+    required String channelTag,
+    Uint8List? userEd25519Pk,
+    Uint8List? foundingEd25519Pk,
+  }) {
+    if (!isReady) return null;
+    final snap = _ensureSnapshot();
+    return ContactSeed(
+      nodeIdHex: nodeIdHex,
+      displayName: displayName,
+      ownAddresses: snap.ownAddresses,
+      seedPeers: snap.seedPeers,
+      channelTag: channelTag,
+      deviceIdHex: _source.deviceNodeIdHex,
+      userEd25519Pk: userEd25519Pk,
+      foundingEd25519Pk: foundingEd25519Pk,
+      createdAtMs: _createdAtMs!,
+    );
+  }
+
+  /// Force a snapshot rebuild (e.g. after significant network change).
+  void invalidate() {
+    _snapshot = null;
+    _createdAtMs = null;
+  }
+
+  _NetworkSnapshot _ensureSnapshot() {
+    final fp = _computeFingerprint();
+    if (_snapshot != null && _snapshot!.fingerprint == fp) return _snapshot!;
+    _snapshot = _buildSnapshot(fp);
+    _createdAtMs ??= DateTime.now().millisecondsSinceEpoch;
+    return _snapshot!;
+  }
+
+  String _computeFingerprint() {
+    final sb = StringBuffer();
+    sb.write(_source.port);
+    sb.write('|');
+    for (final ip in _source.localIps) {
+      sb.write(ip);
+      sb.write(',');
+    }
+    sb.write('|');
+    sb.write(_source.publicIp ?? '');
+    sb.write(':');
+    sb.write(_source.publicPort ?? 0);
+    sb.write('|');
+    final valid = _source.peerSummaries
+        .where((p) => p.address.isNotEmpty && p.port > 0);
+    for (final p in valid) {
+      sb.write(p.nodeIdHex.substring(0, 8));
+      sb.write('@');
+      for (final a in p.allAddresses) {
+        sb.write(a);
+        sb.write('+');
+      }
+      sb.write(',');
+    }
+    return sb.toString();
+  }
+
+  _NetworkSnapshot _buildSnapshot(String fp) {
+    final validPeers = _source.peerSummaries
+        .where((p) => p.address.isNotEmpty && p.port > 0)
+        .toList();
+
+    // --- Peer selection ---
+    // Slot 1: relay-capable peer (has public IP or global IPv6)
+    final selected = <PeerSummary>[];
+    final seenNodeIds = <String>{};
+    for (final p in validPeers) {
+      if (_hasPublicAddress(p) && seenNodeIds.add(p.nodeIdHex)) {
+        selected.add(p);
+        break;
+      }
+    }
+    // LAN peers from different /16 subnets (max 2)
+    final seenSubnets = <String>{};
+    for (final p in validPeers.where(
+        (p) => _isPrivateIp(p.address) && !p.address.contains(':'))) {
+      if (!seenNodeIds.add(p.nodeIdHex)) continue;
+      final subnet = p.address.split('.').take(2).join('.');
+      if (!seenSubnets.add(subnet)) continue;
+      selected.add(p);
+      if (selected.length >= 3) break;
+    }
+    // Public/IPv6 peers (up to 5 total)
+    for (final p in validPeers.where((p) => !_isPrivateIp(p.address))) {
+      if (!seenNodeIds.add(p.nodeIdHex)) continue;
+      selected.add(p);
+      if (selected.length >= 5) break;
+    }
+
+    final seedPeers = selected.map((p) {
+      final sorted = List<String>.from(p.allAddresses);
+      sorted.sort((a, b) => _addressPriority(a).compareTo(_addressPriority(b)));
+      final top = sorted.isNotEmpty ? sorted.take(3).toList()
+          : [_formatAddr(p.address, p.port)];
+      // Guarantee global IPv6 inclusion (DS-Lite bypass §4.7)
+      if (sorted.length > 3) {
+        final gv6 = sorted.firstWhere(
+          (a) => a.startsWith('[') &&
+              !a.contains('fe80:') && !a.contains('fd') && !a.contains('fc'),
+          orElse: () => '',
+        );
+        if (gv6.isNotEmpty && !top.contains(gv6)) top.add(gv6);
+      }
+      return SeedPeer(nodeIdHex: p.nodeIdHex, addresses: top);
+    }).toList();
+
+    // --- Own addresses ---
+    final ownAddrs = <String>[];
+    // Up to 2 private IPv4
+    final ipv4 = _source.localIps.where((ip) => !ip.contains(':')).take(2);
+    for (final ip in ipv4) {
+      ownAddrs.add(_formatAddr(ip, _source.port));
+    }
+    // Public IPv4
+    if (_source.publicIp != null && _source.publicPort != null) {
+      ownAddrs.add(_formatAddr(_source.publicIp!, _source.publicPort!));
+    }
+    // First global IPv6 (DS-Lite bypass)
+    final gv6 = _source.localIps.firstWhere(
+      (ip) => ip.contains(':') && !ip.startsWith('fe80:') &&
+              !ip.startsWith('fd') && !ip.startsWith('fc'),
+      orElse: () => '',
+    );
+    if (gv6.isNotEmpty) ownAddrs.add(_formatAddr(gv6, _source.port));
+
+    return _NetworkSnapshot(
+      ownAddresses: ownAddrs,
+      seedPeers: seedPeers,
+      fingerprint: fp,
+    );
+  }
+
+  // --- Helpers (shared, no longer duplicated in UI) ---
+
+  static bool _hasPublicAddress(PeerSummary p) {
+    return p.allAddresses.any((a) {
+      if (a.startsWith('[')) {
+        final ip = a.substring(1, a.indexOf(']'));
+        return !ip.startsWith('fe80:') && !ip.startsWith('fd') && !ip.startsWith('fc');
+      }
+      final ip = a.split(':').first;
+      return !_isPrivateIp(ip);
+    });
+  }
+
+  static bool _isPrivateIp(String ip) {
+    if (ip.contains(':')) {
+      final lower = ip.toLowerCase();
+      return lower.startsWith('fe80:') || lower.startsWith('fc') ||
+             lower.startsWith('fd') || lower == '::1';
+    }
+    if (ip.startsWith('10.')) return true;
+    if (ip.startsWith('192.168.')) return true;
+    if (ip.startsWith('172.')) {
+      final second = int.tryParse(ip.split('.')[1]);
+      if (second != null && second >= 16 && second <= 31) return true;
+    }
+    if (ip.startsWith('192.0.0.')) return true;
+    if (ip.startsWith('100.')) {
+      final second = int.tryParse(ip.split('.')[1]) ?? 0;
+      if (second >= 64 && second <= 127) return true;
+    }
+    if (ip.startsWith('127.')) return true;
+    return false;
+  }
+
+  static String _formatAddr(String ip, int port) =>
+      ip.contains(':') ? '[$ip]:$port' : '$ip:$port';
+
+  static int _addressPriority(String addrPort) {
+    var host = addrPort;
+    if (host.startsWith('[')) {
+      final end = host.indexOf(']');
+      if (end > 0) host = host.substring(1, end);
+    } else {
+      final colon = host.lastIndexOf(':');
+      if (colon > 0) host = host.substring(0, colon);
+    }
+    if (host.contains(':')) {
+      final lower = host.toLowerCase();
+      if (lower.startsWith('fe80') || lower.startsWith('fd') || lower.startsWith('fc')) return 2;
+      return 0;
+    }
+    if (_isPrivateIp(host)) return 2;
+    return 0;
+  }
 }

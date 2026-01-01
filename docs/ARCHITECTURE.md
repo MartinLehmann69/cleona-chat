@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ee52d09dba80, 2026-06-16). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ee52d09dba80, 2026-06-17). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device

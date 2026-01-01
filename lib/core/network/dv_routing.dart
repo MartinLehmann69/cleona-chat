@@ -164,7 +164,7 @@ class DvRoutingTable {
     final routes = _routes[hex];
     if (routes != null) {
       for (final r in routes) {
-        if (r.isDirect && r.isAlive) {
+        if (r.isDirect) {
           existingDirect = r;
           break;
         }
@@ -172,18 +172,30 @@ class DvRoutingTable {
     }
 
     if (existingDirect != null) {
-      // Stale direct route from the same connType: revalidate in-place
-      // (remove penalty, clear stale flag) instead of replacing it.
-      // Without this, the stale penalty (+5) inflates cost above the fresh
-      // connectionTypeCost, so every inbound packet looks like a "better
-      // route" → returns true → triggers PEER_LIST_PUSH storm to all peers.
-      if (existingDirect.isStale && existingDirect.connType == connType) {
-        existingDirect.revalidate();
+      // Any existing direct route (alive, stale, or dead) means we already
+      // know this neighbor. Cost changes (LAN↔Public) or stale→alive
+      // transitions update in-place, NOT new-neighbor events.
+      // Without this, peers with multiple addresses trigger 820+ false
+      // new-neighbor detections → Welcome-Push storm (107KB each) →
+      // TLS timeouts → event-loop starvation → cascade failure.
+      if (existingDirect.isAlive && existingDirect.cost <= cost) {
         return false;
       }
-      if (existingDirect.cost <= cost) {
-        return false;
-      }
+      // Revive dead/stale route or update cost — replace in routing table
+      // but return false (not a new neighbor).
+      final route = Route(
+        destination: Uint8List.fromList(nodeId),
+        nextHop: null,
+        hopCount: 1,
+        cost: cost,
+        type: RouteType.direct,
+        connType: connType,
+      );
+      _addOrUpdateRoute(hex, route);
+      routeEpoch++;
+      onRouteChanged?.call(hex, cost);
+      updateDefaultGateway();
+      return false;
     }
 
     // Create/update direct route
