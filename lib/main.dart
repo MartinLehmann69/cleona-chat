@@ -81,7 +81,8 @@ void main() {
     OqsFFI().init();
     debugPrint('[main] OqsFFI OK.');
   } catch (e, stack) {
-    startupError = 'FFI init failed: $e\n$stack';
+    startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
+        'home=${AppPaths.home}\ndataDir=${AppPaths.dataDir}\n\n$e\n$stack';
     debugPrint('[main] FATAL: $startupError');
     _logCrash('main-ffi-init', e, stack);
   }
@@ -169,16 +170,21 @@ String? _readCachedManifestSync() {
 /// Appends a crash entry to `~/.cleona/crash.log`. Swallows all IO errors
 /// so the handler itself never crashes.
 void _logCrash(String source, Object error, StackTrace? stack) {
+  final entry = '${DateTime.now().toIso8601String()} [$source] $error\n$stack\n\n';
   try {
     final dir = Directory('${AppPaths.home}/.cleona');
     if (!dir.existsSync()) dir.createSync(recursive: true);
-    final file = File('${dir.path}/crash.log');
-    file.writeAsStringSync(
-      '${DateTime.now().toIso8601String()} [$source] $error\n$stack\n\n',
-      mode: FileMode.append,
-      flush: true,
-    );
+    File('${dir.path}/crash.log').writeAsStringSync(
+      entry, mode: FileMode.append, flush: true);
   } catch (_) {/* never crash the crash handler */}
+  // iOS: also write to Documents/ (reachable via HouseArrest/AFC).
+  if (Platform.isIOS) {
+    try {
+      final home = AppPaths.home;
+      File('$home/Documents/crash.log').writeAsStringSync(
+        entry, mode: FileMode.append, flush: true);
+    } catch (_) {}
+  }
 }
 
 /// Checks if another GUI instance is running. If so, write a trigger.
