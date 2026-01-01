@@ -391,8 +391,8 @@ class UdpKeepalive {
         final last = _lastTriggerAt;
         final cooldownPassed = last == null ||
             tNow.difference(last) >= triggerCooldown;
-        _consecutiveFullFailures = 0;
         if (cooldownPassed) {
+          _consecutiveFullFailures = 0;
           _lastTriggerAt = tNow;
           _log.warn('All peers failed for $failureThreshold rounds '
               '— triggering onAllPeersFailed');

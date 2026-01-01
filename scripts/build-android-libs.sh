@@ -160,6 +160,7 @@ build_liboqs() {
         -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
         -DANDROID_ABI="$CMAKE_ABI" \
         -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install/oqs" \
         -DBUILD_SHARED_LIBS=ON \
         -DOQS_BUILD_ONLY_LIB=ON \
@@ -274,6 +275,7 @@ build_libzstd() {
         -DCMAKE_TOOLCHAIN_FILE="$CMAKE_TOOLCHAIN" \
         -DANDROID_ABI="$CMAKE_ABI" \
         -DANDROID_NATIVE_API_LEVEL=$API_LEVEL \
+        -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$BUILD_DIR/install/zstd" \
         -DBUILD_SHARED_LIBS=ON \
         -DZSTD_BUILD_PROGRAMS=OFF \

@@ -502,30 +502,34 @@ class _VideoCallButton extends StatelessWidget {
     final bgColor = color ?? (active ? Colors.white24 : Colors.white12);
     final fgColor = color != null ? Colors.white : (active ? Colors.white : Colors.white70);
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Semantics(
-          button: true,
-          label: label,
-          child: SizedBox(
-            width: 48,
-            height: 48,
-            child: FloatingActionButton(
-              heroTag: 'video_$label',
-              backgroundColor: bgColor,
-              elevation: 0,
-              onPressed: onPressed,
-              child: Icon(icon, color: fgColor, size: 22),
+    return GestureDetector(
+      onTap: onPressed,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            button: true,
+            label: label,
+            child: SizedBox(
+              width: 48,
+              height: 48,
+              child: FloatingActionButton(
+                heroTag: 'video_$label',
+                backgroundColor: bgColor,
+                elevation: 0,
+                onPressed: onPressed,
+                child: Icon(icon, color: fgColor, size: 22),
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: const TextStyle(color: Colors.white70, fontSize: 11),
-        ),
-      ],
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -559,29 +563,33 @@ class _CallButton extends StatelessWidget {
             ? Theme.of(context).colorScheme.onPrimaryContainer
             : Theme.of(context).colorScheme.onSurface);
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Semantics(
-          button: true,
-          label: label,
-          child: SizedBox(
-            width: size,
-            height: size,
-            child: FloatingActionButton(
-              heroTag: label,
-              backgroundColor: bgColor,
-              onPressed: onPressed,
-              child: Icon(icon, color: fgColor, size: size * 0.45),
+    return GestureDetector(
+      onTap: onPressed,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            button: true,
+            label: label,
+            child: SizedBox(
+              width: size,
+              height: size,
+              child: FloatingActionButton(
+                heroTag: label,
+                backgroundColor: bgColor,
+                onPressed: onPressed,
+                child: Icon(icon, color: fgColor, size: size * 0.45),
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          label,
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ],
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
     );
   }
 }

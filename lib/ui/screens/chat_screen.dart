@@ -116,6 +116,48 @@ class _ChatScreenState extends State<ChatScreen> {
   DateTime? _lastTypingSent;
   ICleonaService? _cachedService;
 
+  // EmojiPicker Config cache — rebuilt only when Brightness changes (discrete),
+  // not on every frame of the 400ms theme animation (continuous color lerp
+  // triggers ~24 concurrent _updateEmojis() calls in the package → TabBar crash).
+  Brightness? _emojiCfgBrightness;
+  Config? _emojiCfgInput;
+  Config? _emojiCfgReaction;
+
+  Config _emojiConfig(ColorScheme cs, double height) {
+    if (cs.brightness != _emojiCfgBrightness) {
+      _emojiCfgBrightness = cs.brightness;
+      _emojiCfgInput = null;
+      _emojiCfgReaction = null;
+    }
+    final cached = height > 260 ? _emojiCfgReaction : _emojiCfgInput;
+    if (cached != null) return cached;
+    final cfg = Config(
+      height: height,
+      emojiViewConfig: EmojiViewConfig(
+        columns: 8,
+        emojiSizeMax: 28.0 * (Platform.isAndroid ? 1.2 : 1.0),
+        backgroundColor: cs.surface,
+      ),
+      searchViewConfig: SearchViewConfig(
+        backgroundColor: cs.surface,
+        buttonIconColor: cs.primary,
+      ),
+      categoryViewConfig: CategoryViewConfig(
+        backgroundColor: cs.surface,
+        iconColorSelected: cs.primary,
+        indicatorColor: cs.primary,
+        iconColor: cs.onSurfaceVariant,
+      ),
+      bottomActionBarConfig: const BottomActionBarConfig(enabled: false),
+    );
+    if (height > 260) {
+      _emojiCfgReaction = cfg;
+    } else {
+      _emojiCfgInput = cfg;
+    }
+    return cfg;
+  }
+
   // Voice recording state
   bool _isRecording = false;
   DateTime? _recordingStartedAt;
@@ -596,14 +638,15 @@ class _ChatScreenState extends State<ChatScreen> {
             if (v == 'info' && widget.isChannel) _showChannelInfo(context, service);
           },
           itemBuilder: (_) => [
-            PopupMenuItem(
-              value: 'poll',
-              child: Row(children: [
-                const Icon(Icons.poll),
-                const SizedBox(width: 12),
-                Text(locale.get('poll_create')),
-              ]),
-            ),
+            if (widget.isGroup || _canPostInChannel(service))
+              PopupMenuItem(
+                value: 'poll',
+                child: Row(children: [
+                  const Icon(Icons.poll),
+                  const SizedBox(width: 12),
+                  Text(locale.get('poll_create')),
+                ]),
+              ),
             PopupMenuItem(
               value: 'info',
               child: Row(children: [
@@ -921,27 +964,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: EmojiPicker(
                   key: const ValueKey('reaction_picker'),
                   onEmojiSelected: (category, emoji) => react(emoji.emoji),
-                  config: Config(
-                    height: 300,
-                    emojiViewConfig: EmojiViewConfig(
-                      columns: 8,
-                      emojiSizeMax: 28.0 * (Platform.isAndroid ? 1.2 : 1.0),
-                      backgroundColor: colorScheme.surface,
-                    ),
-                    searchViewConfig: SearchViewConfig(
-                      backgroundColor: colorScheme.surface,
-                      buttonIconColor: colorScheme.primary,
-                    ),
-                    categoryViewConfig: CategoryViewConfig(
-                      backgroundColor: colorScheme.surface,
-                      iconColorSelected: colorScheme.primary,
-                      indicatorColor: colorScheme.primary,
-                      iconColor: colorScheme.onSurfaceVariant,
-                    ),
-                    bottomActionBarConfig: const BottomActionBarConfig(
-                      enabled: false,
-                    ),
-                  ),
+                  config: _emojiConfig(colorScheme, 300),
                 ),
               ),
             ],
@@ -1210,27 +1233,7 @@ class _ChatScreenState extends State<ChatScreen> {
             _inputFocusNode.requestFocus();
           }
         },
-        config: Config(
-          height: 260,
-          emojiViewConfig: EmojiViewConfig(
-            columns: 8,
-            emojiSizeMax: 28.0 * (Platform.isAndroid ? 1.2 : 1.0),
-            backgroundColor: colorScheme.surface,
-          ),
-          searchViewConfig: SearchViewConfig(
-            backgroundColor: colorScheme.surface,
-            buttonIconColor: colorScheme.primary,
-          ),
-          categoryViewConfig: CategoryViewConfig(
-            backgroundColor: colorScheme.surface,
-            iconColorSelected: colorScheme.primary,
-            indicatorColor: colorScheme.primary,
-            iconColor: colorScheme.onSurfaceVariant,
-          ),
-          bottomActionBarConfig: const BottomActionBarConfig(
-            enabled: false,
-          ),
-        ),
+        config: _emojiConfig(colorScheme, 260),
       ),
     );
   }
@@ -3459,9 +3462,12 @@ class _MessageBubbleState extends State<_MessageBubble> {
       );
     }
 
-    return Align(
-      alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
-      child: bubble,
+    return GestureDetector(
+      onLongPress: () => _showMessageActions(context),
+      child: Align(
+        alignment: isOutgoing ? Alignment.centerRight : Alignment.centerLeft,
+        child: bubble,
+      ),
     );
   }
 

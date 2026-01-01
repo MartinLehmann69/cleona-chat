@@ -389,7 +389,7 @@ class FirstContactRendezvousManager {
   /// the early 10s/20s retry ticks do not hammer the relays.
   Future<void> resolveOwnerForContact(String targetUserIdHex) async {
     final targetLower = targetUserIdHex.toLowerCase();
-    for (final s in _sessions.values) {
+    for (final s in _sessions.values.toList()) {
       if (s.done || s.role != kFcRoleScanner) continue;
       if (s.targetUserIdHex != targetLower) continue;
       await _resolveOwnerTag(s);

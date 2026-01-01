@@ -47,7 +47,7 @@ void main(List<String> args) {
 
     log.info('Starting Cleona daemon...');
     log.info('Base dir: ${config.baseDir}');
-    log.info('Port: ${config.port}');
+    log.info('Port: ${config.port ?? "(auto — from identity)"}');
     log.info('DISPLAY: ${Platform.environment['DISPLAY'] ?? 'NOT SET'}');
     log.info('WAYLAND_DISPLAY: ${Platform.environment['WAYLAND_DISPLAY'] ?? 'NOT SET'}');
     // Flush the startup banner immediately so a crash before the 2s periodic
@@ -1009,33 +1009,52 @@ class _MultiServiceDaemon {
     exit(0);
   }
 
-  /// Windows: add an inbound UDP firewall rule for the daemon executable.
-  /// Runs once per installation (marker file prevents re-running). Gracefully
-  /// handles non-admin mode (netsh fails → log + continue).
+  /// Windows: ensure inbound firewall rules (UDP + TCP) for the daemon exe.
+  /// Program-based rules — port-independent, set once per installation.
+  /// Non-admin: netsh fails gracefully (rules should be set by installer).
   Future<void> _ensureWindowsFirewallRule(int port) async {
     final marker = File('${config.baseDir}/firewall_rule_added');
     if (marker.existsSync()) return;
 
     final exe = Platform.resolvedExecutable;
-    log.info('Windows: adding inbound UDP firewall rule for $exe');
+    log.info('Windows: checking/adding firewall rules for $exe');
+
+    // Check if rules already exist (e.g. set by installer)
     try {
-      final result = await Process.run('netsh', [
-        'advfirewall', 'firewall', 'add', 'rule',
-        'name=Cleona Messenger',
-        'dir=in', 'action=allow', 'protocol=UDP',
-        'program=$exe',
-        'enable=yes',
+      final check = await Process.run('netsh', [
+        'advfirewall', 'firewall', 'show', 'rule',
+        'name=Cleona Messenger UDP',
       ]);
-      if (result.exitCode == 0) {
-        marker.writeAsStringSync('added');
-        log.info('Windows: firewall rule added successfully');
-      } else {
-        log.warn('Windows: netsh firewall rule failed (exit ${result.exitCode}, '
-            'likely non-admin): ${result.stderr}');
+      if (check.exitCode == 0 && check.stdout.toString().contains('Cleona')) {
+        log.info('Windows: firewall rules already present (set by installer)');
+        marker.writeAsStringSync('installer');
+        return;
       }
-    } catch (e) {
-      log.warn('Windows: could not add firewall rule: $e');
+    } catch (_) {}
+
+    var allOk = true;
+    for (final proto in ['UDP', 'TCP']) {
+      try {
+        final result = await Process.run('netsh', [
+          'advfirewall', 'firewall', 'add', 'rule',
+          'name=Cleona Messenger $proto',
+          'dir=in', 'action=allow', 'protocol=$proto',
+          'program=$exe',
+          'enable=yes',
+        ]);
+        if (result.exitCode == 0) {
+          log.info('Windows: firewall rule $proto added');
+        } else {
+          allOk = false;
+          log.warn('Windows: firewall rule $proto needs admin rights — '
+              'should be set by installer (netsh exit ${result.exitCode})');
+        }
+      } catch (e) {
+        allOk = false;
+        log.warn('Windows: firewall rule $proto: $e');
+      }
     }
+    if (allOk) marker.writeAsStringSync('daemon');
   }
 
   /// Event-driven network change detection.

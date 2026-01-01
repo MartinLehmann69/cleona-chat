@@ -76,6 +76,7 @@
 	<key>BGTaskSchedulerPermittedIdentifiers</key>
 	<array>
 		<string>chat.cleona.cleona.refresh</string>
+		<string>chat.cleona.cleona.processing</string>
 	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>

@@ -884,10 +884,12 @@ class Transport {
             ? const Duration(milliseconds: 4)
             : interFragmentDelay;
         var frag0Failed = false;
+        var fragOkCount = 0;
         for (var i = 0; i < n; i++) {
           final sent = _udpSendRaw(wrappedFragments[i], address, remotePort, socket);
           if (sent > 0) {
             anySent = true;
+            fragOkCount++;
             _log.debug('sendUdp: fragment $i/$n OK ($sent B) '
                 'to ${address.address}:$remotePort');
           } else {
@@ -914,7 +916,9 @@ class Transport {
           }
         }
         if (anySent) {
-          _deadEdge.noteSendSuccess();
+          if (fragOkCount > n ~/ 2) {
+            _deadEdge.noteSendSuccess();
+          }
           onBytesSent?.call(data.length);
           _log.info('sendUdp: ${wrappedFragments.length} fragments (${data.length}B) '
               'sent to ${address.address}:$remotePort');
@@ -1246,8 +1250,13 @@ class Transport {
     final keyPath = '$_profileDir/tls_key.pem';
 
     if (!File(certPath).existsSync() || !File(keyPath).existsSync()) {
+      final opensslBin = _findOpenssl();
+      if (opensslBin == null) {
+        _log.info('openssl not available on this platform');
+        return null;
+      }
       try {
-        final result = await Process.run('openssl', [
+        final result = await Process.run(opensslBin, [
           'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
           '-keyout', keyPath, '-out', certPath,
           '-days', '3650', '-nodes',
@@ -1258,8 +1267,7 @@ class Transport {
           return null;
         }
       } catch (e) {
-        // ProcessException when openssl binary is missing (e.g. Android).
-        _log.info('openssl not available: $e');
+        _log.info('openssl execution failed: $e');
         return null;
       }
     }
@@ -1272,6 +1280,27 @@ class Transport {
       _log.info('TLS context creation failed: $e');
       return null;
     }
+  }
+
+  /// Locate the openssl binary. On Linux/macOS it's on PATH; on Windows
+  /// check Git for Windows and common install locations before PATH.
+  static String? _findOpenssl() {
+    if (!Platform.isWindows) return 'openssl';
+    const winPaths = [
+      r'C:\Program Files\Git\usr\bin\openssl.exe',
+      r'C:\Program Files\OpenSSL-Win64\bin\openssl.exe',
+      r'C:\Program Files (x86)\OpenSSL-Win32\bin\openssl.exe',
+      r'C:\msys64\usr\bin\openssl.exe',
+    ];
+    for (final p in winPaths) {
+      if (File(p).existsSync()) return p;
+    }
+    // Fall back to PATH lookup
+    try {
+      final r = Process.runSync('where', ['openssl']);
+      if (r.exitCode == 0) return 'openssl';
+    } catch (_) {}
+    return null;
   }
 
   /// Send a NetworkPacketV3 to all given addresses in parallel (UDP only).

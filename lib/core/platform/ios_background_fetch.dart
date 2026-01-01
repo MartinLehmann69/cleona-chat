@@ -58,7 +58,9 @@ class IosBackgroundFetch {
   static Future<dynamic> _handleMethodCall(MethodCall call) async {
     switch (call.method) {
       case 'performBackgroundFetch':
-        return _performBackgroundFetch();
+        final args = call.arguments as Map<Object?, Object?>?;
+        final taskType = (args?['taskType'] as String?) ?? 'refresh';
+        return _performBackgroundFetch(taskType: taskType);
       default:
         throw MissingPluginException('Unknown method: ${call.method}');
     }
@@ -67,26 +69,37 @@ class IosBackgroundFetch {
   /// Execute the background fetch: start a minimal node, contact known peers,
   /// retrieve pending messages, and return results to the native side.
   ///
+  /// [taskType] is "refresh" (BGAppRefreshTask, ~30s window, peer budget 3)
+  /// or "processing" (BGProcessingTask, minutes-long window, peer budget 10).
+  ///
   /// Returns a map: {messageCount: int, senderNames: [String], previews: [String]}
   ///
   /// The 9-step wakeup chain (S12.5):
   /// 1. Load saved routing state
   /// 2. Open UDP socket (CleonaNode.startQuick())
-  /// 3. Contact known peers (PING top-3)
+  /// 3. Contact known peers (budget depends on taskType)
   /// 4. Retrieve Store-and-Forward messages
   /// 5. Retrieve Reed-Solomon fragments
   /// 6. Decrypt & notify
   /// 7. Persist state (saveNetworkState)
   /// 8. Close socket (node shutdown)
   /// 9. Return results (native side schedules next task)
-  static Future<Map<String, dynamic>> _performBackgroundFetch() async {
+  static Future<Map<String, dynamic>> _performBackgroundFetch({
+    String taskType = 'refresh',
+  }) async {
     if (_isFetching) {
       debugPrint('[ios-bg-fetch] Already fetching, returning empty');
       return {'messageCount': 0, 'senderNames': <String>[], 'previews': <String>[]};
     }
 
+    final isProcessing = taskType == 'processing';
+    final peerContactBudget = isProcessing ? 10 : 3;
+    // BGProcessingTask gives minutes; BGAppRefreshTask ~30s (20s effective).
+    final waitSeconds = isProcessing ? 120 : 20;
+
     _isFetching = true;
-    debugPrint('[ios-bg-fetch] Starting background fetch...');
+    debugPrint('[ios-bg-fetch] Starting background fetch '
+        '(type=$taskType, peerBudget=$peerContactBudget, wait=${waitSeconds}s)...');
 
     CleonaNode? node;
     final services = <CleonaService>[];
@@ -184,10 +197,10 @@ class IosBackgroundFetch {
         }
       };
 
-      // Wait for responses. The ~30s background window means we poll for
-      // up to 20 seconds, then spend the remaining time saving state.
-      debugPrint('[ios-bg-fetch] Waiting for message retrieval (20s)...');
-      await Future<void>.delayed(const Duration(seconds: 20));
+      // BGAppRefreshTask: ~30s window → 20s for messages, rest for state save.
+      // BGProcessingTask: minutes-long window → 120s for broader peer contact.
+      debugPrint('[ios-bg-fetch] Waiting for message retrieval (${waitSeconds}s)...');
+      await Future<void>.delayed(Duration(seconds: waitSeconds));
 
       // Step 6: Collect new messages
       for (final service in services) {

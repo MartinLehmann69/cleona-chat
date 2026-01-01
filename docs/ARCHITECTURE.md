@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:2fcb430a19e2, 2026-07-05). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:90691976c037, 2026-07-06). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -2523,7 +2523,7 @@ In addition to erasure-coded fragments, on failure the sender also stores a **co
 **Sender-side peer selection** (`_findMutualPeerDeviceIds`):
 - **Phase 1**: Iterate own accepted contacts (excluding the recipient), filter for alive DV routes, rank by number of alive routes, pick top 3.
 - **Phase 1 ranking (V3.1.117 field amendment)**: candidates that are *confirmed* (bidirectional UDP contact within the confirmation TTL) rank strictly above candidates that merely have alive DV routes — relay routes without traffic are never pruned and can point at devices that have been offline for days (2026-07-03 field evidence: an S&F copy was placed on a days-dead contact device).
-- **Phase 2 (fallback)**: If Phase 1 yields zero candidates, fall back to confirmed routing-table peers (e.g. Bootstrap) — any reachable peer can serve as S&F relay because the receiver polls ALL confirmed peers on startup. **Infrastructure exception (F4, V3.1.117):** headless/bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). Without this exception Phase 2 was undeliverable: a spec-compliant bootstrap rejected every Phase-2 store, which went unnoticed for as long as the sender ignored the ACKs. This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
+- **Phase 2 (always appended)**: Confirmed routing-table peers (e.g. Bootstrap) are **always included** in the candidate pool after Phase 1 candidates, ranked by alive-route count. Phase 1 contacts may all reject the store because the recipient is not *their* contact (receiver-enforced criterion 3); the wave-retry mechanism (F1) then falls through to Phase 2 candidates in the same pool. Pre-fix (V3.1.124), Phase 2 was gated on `candidates.isEmpty` — if Phase 1 found *any* contact with an alive route, Bootstrap was never even tried, making S&F undeliverable when no Phase 1 candidate was mutual (2026-07-06 field evidence: Martin→Alice, 0/6 stores accepted, Bootstrap online and willing but excluded). **Infrastructure exception (F4, V3.1.117):** headless/bootstrap nodes accept `PEER_STORE` for **any** recipient within the standard budgets (criterion 3 below does not apply to them — they have no contacts by design). This mirrors the §5.5b First-CR-Mailbox precedent (SeedPeers already store first-CRs for non-contacts, budgeted).
 - **Observability**: if the total number of selected peers (Phase 1 + Phase 2) is less than 3, the sender logs a warning (`S&F: only N/3 mutual peers — offline delivery fragile`). In small networks where only one or two relay peers are available, S&F redundancy is reduced and delivery depends on those peers remaining online until the recipient polls. The warning aids operational diagnosis without altering the placement logic.
 
 **Storage-peer validation (receiver-side):** On receiving a `PEER_STORE` infrastructure message, the storage peer validates:
@@ -5789,48 +5789,60 @@ A push wake-up layer (FCM, APNs, UnifiedPush, or any peer-relayed equivalent) wa
 
 Expected steady-state PSS after the whisper fix on a release build: ~250-350 MB. **What survives of B2:** only the *single-process* service-owned-engine variant (the FGS boots a headless Dart engine after a START_STICKY resurrection so delivery resumes without user interaction) remains a candidate — as a delivery fix for the resurrection gap, not a memory fix. It is considered only if post-Block-E field testing shows genuine process kills with dead resurrections are frequent enough to cost real delivery.
 
-**Abgrenzung BGTaskScheduler (iOS):** Die in §12.5 beschriebene iOS Background App Refresh via `BGAppRefreshTask` ist **kein** Push-Wakeup und faellt nicht unter diese Ablehnung. BGTaskScheduler ist ein OS-gesteuerter Pull-Mechanismus: das Betriebssystem weckt die App periodisch auf, die App verbindet sich aktiv mit dem P2P-Netz und holt wartende Nachrichten ab. Kein Drittanbieter-Server, kein APNs, kein Firebase. Die Einschraenkungen (OS-kontrolliertes Timing, begrenzte Ausfuehrungszeit) sind akzeptiert — sie sind der Preis fuer Hintergrund-Zustellung ohne zentrale Infrastruktur.
+**BGTaskScheduler distinction (iOS):** The iOS background delivery described in §12.5 (BGAppRefreshTask + BGProcessingTask, dual-task strategy) is **not** a push wakeup and does not fall under this rejection. BGTaskScheduler is an OS-controlled pull mechanism: the operating system wakes the app periodically, the app actively connects to the P2P network and retrieves pending messages. No third-party server, no APNs, no Firebase. The limitations (OS-controlled timing, bounded execution time) are accepted — they are the price for background delivery without central infrastructure.
 
 ### 12.5 Platform-Specific Background Behavior
 
 **Android:** The in-process architecture runs all networking within the Flutter app. A foreground service (`CleonaForegroundService`, type `dataSync`) keeps the process alive and the UDP socket open for pushed messages. When the OS suspends the app (Doze mode), WorkManager schedules periodic wake-ups (minimum 15-minute OS interval). The foreground service with persistent notification provides near-instant delivery. Without it, messages arrive during the next WorkManager wake-up. **Lifecycle save:** `CleonaAppState` implements `WidgetsBindingObserver` and calls both `saveState()` (conversations, contacts, groups, channels) **and `saveNetworkState()`** (routing table, DV routing table, peer addresses) when `AppLifecycleState.paused` is received. `saveState()` prevents data loss (e.g., media message types reverting to TEXT); `saveNetworkState()` prevents cold-start peer loss — without it, Android process kills lose the learned topology and the node restarts with routes=0, peers=0.
 
-**iOS:** Kein Daemon-Prozess — die App laeuft In-Process wie auf Android. Im Vordergrund ist der Node aktiv (UDP-Socket offen, Echtzeit-Zustellung). Im Hintergrund nutzt Cleona Apples `BGTaskScheduler` Framework fuer periodische Nachrichten-Abholung:
+**iOS:** No daemon process — the app runs in-process like Android. In the foreground, the node is fully active (UDP socket open, real-time delivery). In the background, Cleona uses Apple's `BGTaskScheduler` framework for periodic message retrieval via two independent task types (dual-task strategy):
 
-**BGAppRefreshTask ("Background App Refresh"):**
-- Registriert beim App-Start via `BGTaskScheduler.shared.register(forTaskWithIdentifier:)` mit dem Identifier `chat.cleona.cleona.refresh`
-- Scheduling: `BGAppRefreshTaskRequest` mit `earliestBeginDate` = 15 Minuten. Das OS entscheidet den tatsaechlichen Zeitpunkt (15 Min bis mehrere Stunden, abhaengig von Nutzerverhalten, Akkuladung, Netzwerkverfuegbarkeit)
-- **Ausfuehrung pro Wakeup (~30 Sekunden):**
-  1. Gespeicherte Routing-Tabelle laden (Peers, Adressen, Scores — persistiert bei `AppLifecycleState.paused`)
-  2. UDP-Socket oeffnen auf dem gespeicherten Port
-  3. Bekannte Peers kontaktieren: PING an Top-3-Peers (nach Score sortiert)
-  4. Store-and-Forward abrufen: Contact Peers nach wartenden Nachrichten fragen
-  5. Reed-Solomon-Fragmente vom DHT holen (fuer Nachrichten die waehrend Offline ankamen)
-  6. Empfangene Nachrichten entschluesseln + als lokale iOS-Notifications anzeigen (`UNUserNotificationCenter`)
-  7. Routing-Tabelle + Nachrichten persistieren
-  8. Socket schliessen, naechsten Task schedulen
-  9. `task.setTaskCompleted(success: true)` aufrufen
-- **Scheduling-Kette:** Jeder abgeschlossene Task registriert den naechsten (`scheduleAppRefresh()` am Ende der Ausfuehrung). Beim allerersten App-Start und nach jedem Vordergrund→Hintergrund-Wechsel wird ebenfalls geschedulet.
-- **Einschraenkungen (akzeptiert):**
-  - Kein Echtzeit-Messaging im Hintergrund (Verzoegerung 15 Min bis Stunden)
-  - OS kann Tasks komplett unterdruecken wenn die App selten geoeffnet wird
-  - ~30 Sekunden Ausfuehrungszeit — genuegt fuer S&F-Abholung und Fragment-Retrieval, nicht fuer DHT-Vollsync
-  - Kein persistenter UDP-Socket (anders als Android Foreground Service)
+**Task 1 — BGAppRefreshTask ("Background App Refresh"):**
+- Identifier: `chat.cleona.cleona.refresh`
+- Scheduling: `BGAppRefreshTaskRequest` with `earliestBeginDate` = 1 minute. The OS decides the actual execution time (depends on user behavior, battery level, network availability). The short hint signals urgency; the OS honors it more frequently for apps the user opens regularly.
+- **Runtime:** ~30 seconds (OS limit)
+- **Execution per wakeup:**
+  1. Load persisted routing table (peers, addresses, scores — saved on `AppLifecycleState.paused`)
+  2. Open UDP socket on the persisted port
+  3. Contact known peers: PING top-3 peers (sorted by score)
+  4. Retrieve Store-and-Forward: ask contact peers for pending messages
+  5. Fetch Reed-Solomon fragments from DHT (for messages that arrived while offline)
+  6. Decrypt received messages + display as local iOS notifications (`UNUserNotificationCenter`)
+  7. Persist routing table + messages
+  8. Close socket, schedule both task types for next wakeup
+  9. Call `task.setTaskCompleted(success: true)`
 
-**Lifecycle-Integration:**
-- `AppLifecycleState.paused` (App geht in Hintergrund): `saveState()` + `saveNetworkState()` + Node herunterfahren (UDP-Socket schliessen, Timer stoppen) + naechsten BGTask schedulen
-- `AppLifecycleState.resumed` (App kommt in Vordergrund): Node komplett starten (UDP-Socket, DHT, Discovery) — Vollmodus wie beim Erststart, aber mit warmer Routing-Tabelle
-- Task-Expiration-Handler: `task.expirationHandler` faehrt den Mini-Node sauber herunter wenn das OS die Zeit abschneidet
+**Task 2 — BGProcessingTask ("Background Processing"):**
+- Identifier: `chat.cleona.cleona.processing`
+- Scheduling: `BGProcessingTaskRequest` with `requiresNetworkConnectivity = true`, `requiresExternalPower = false`, `earliestBeginDate = nil` (immediate execution permitted).
+- **Runtime:** several minutes (OS limit, typically 1–5 min)
+- **Execution:** Identical flow to Task 1 (steps 1–9), but with an extended time budget. The longer runtime additionally allows:
+  - Contacting more than 3 peers (up to 10, time budget permitting)
+  - More thorough fragment retrieval when multiple Reed-Solomon sets are pending
+- **Scheduling behavior:** The OS prefers processing tasks during idle/charging phases but also schedules them without external power when `requiresExternalPower = false`.
 
-**Notification-Bridge:** Im Hintergrund empfangene Nachrichten werden via `UNUserNotificationCenter.add()` als lokale Notifications angezeigt (Absender-Name, Nachrichten-Preview — verschluesselt auf dem Geraet entschluesselt, kein Server sieht den Inhalt). Das App-Badge wird auf die Anzahl ungelesener Nachrichten gesetzt (`UNMutableNotificationContent.badge`).
+**Dual-task rationale:** BGAppRefreshTask and BGProcessingTask are two independent scheduling queues in the OS. Registering both gives the OS two separate triggers — a refresh wakeup and a processing wakeup can fire at different times. In practice, this yields a higher effective wakeup frequency than a single task type.
 
-**Info.plist-Eintraege:**
+- **Scheduling chain:** Every completed task (of either type) re-schedules both task types (`scheduleAppRefresh()` + `scheduleProcessing()`). Both are also scheduled on first app launch and on every foreground→background transition.
+- **Limitations (accepted):**
+  - No real-time messaging in the background (expected delay with dual-task: 5–30 min for regularly-used apps, up to 60 min for rarely-used apps — improved over single-task but not guaranteed)
+  - OS may suppress tasks entirely if the app is rarely opened
+  - No persistent UDP socket (unlike Android Foreground Service)
+
+**Lifecycle integration:**
+- `AppLifecycleState.paused` (app enters background): `saveState()` + `saveNetworkState()` + shut down node (close UDP socket, stop timers) + schedule both BGTask types
+- `AppLifecycleState.resumed` (app enters foreground): full node start (UDP socket, DHT, Discovery) — full mode as on first launch, but with a warm routing table
+- Task expiration handler: `task.expirationHandler` cleanly shuts down the mini-node when the OS cuts time
+
+**Notification bridge:** Messages received in the background are displayed as local notifications via `UNUserNotificationCenter.add()` (sender name, message preview — decrypted on-device, no server sees the content). The app badge is set to the unread message count (`UNMutableNotificationContent.badge`).
+
+**Info.plist entries:**
 - `UIBackgroundModes`: `fetch`, `processing`
-- `BGTaskSchedulerPermittedIdentifiers`: `chat.cleona.cleona.refresh`
+- `BGTaskSchedulerPermittedIdentifiers`: `chat.cleona.cleona.refresh`, `chat.cleona.cleona.processing`
 
-**Implementierung:** Nativer Swift-Code (`ios/Runner/BackgroundFetchHandler.swift`) kommuniziert mit dem Dart-Layer via `MethodChannel("cleona/background_fetch")`. Der Dart-Code stellt einen minimalen Node-Startpfad bereit (`CleonaNode.startQuick()` + `CleonaService.fetchPendingMessages()`) der die schweren Teile (Discovery-Burst, Subnet-Scan, DHT-Bootstrap) ueberspringt und nur bekannte Peers kontaktiert.
+**Implementation:** Native Swift code (`ios/Runner/BackgroundFetchHandler.swift`) communicates with the Dart layer via `MethodChannel("cleona/background_fetch")`. The Dart code provides a minimal node start path (`CleonaNode.startQuick()` + `CleonaService.fetchPendingMessages()`) that skips the heavy parts (discovery burst, subnet scan, DHT bootstrap) and only contacts known peers. The processing task uses the same Dart entry point but passes a `taskType: "processing"` argument so the Dart layer can extend the peer-contact budget from 3 to 10 when time allows.
 
-**Kein APNs, kein Push, kein Drittanbieter.** Dies ist ein reiner Pull-Mechanismus der ausschliesslich auf OS-APIs und dem bestehenden P2P-Netz basiert. Siehe §12.4 fuer die Abgrenzung zu den verworfenen Push-Varianten.
+**No APNs, no push, no third party.** This is a pure pull mechanism based exclusively on OS APIs and the existing P2P network. See §12.4 for the distinction from the rejected push variants.
 
 **Linux Desktop:** The daemon process (`cleona-daemon`) runs continuously as a separate process from the GUI. The UDP socket is permanently open, providing instant push delivery. The daemon survives GUI restarts. Becomes fully offline when the system enters standby. System tray icon (GTK3 + libappindicator3) provides visual status.
 
@@ -5960,7 +5972,7 @@ Ban Decay:
 
 #### 13.1.5 Layer 4: Fragment Budgets
 
-Each node allocates a limited relay storage budget. **Keying honesty (D5 review):** in v3.0 the per-source cap is keyed per **mailbox** (recipient mailbox-ID, 20% of the total budget) plus the total budget bound — a *source-device*-keyed ingest limit does not exist; the original "per source Device-ID" claim was doc-vs-code drift. Excess stores are rejected (FRAGMENT_STORE_NACK), preventing a single mailbox from monopolizing relay storage. Fragments are deliberately NOT part of the D5 collective-quota pool — source-pooled ingest would require persistent sender attribution in the fragment store format (tracked in the security review).
+Each node allocates a limited relay storage budget. **Keying honesty (D5 review):** in v3.0 the per-source cap is keyed per **mailbox** (recipient mailbox-ID, 20% of the total budget) plus the total budget bound — a *source-device*-keyed ingest limit does not exist; the original "per source Device-ID" claim was doc-vs-code drift. Excess stores are silently dropped (no ACK sent; the sender infers rejection by ACK timeout and retries on another replicator), preventing a single mailbox from monopolizing relay storage. Fragments are deliberately NOT part of the D5 collective-quota pool — source-pooled ingest would require persistent sender attribution in the fragment store format (tracked in the security review).
 
 #### 13.1.6 Layer 5: Network-Level Banning
 
@@ -7406,7 +7418,7 @@ The first platform where the OS actively works against Cleona's architecture. Th
 
 **Tier 5 — iOS**
 
-The most restrictive platform for Cleona's use case. Apple does not offer a Foreground Service equivalent. Background execution is limited to BGTaskScheduler, which grants approximately 30 seconds of runtime at OS-determined intervals (typically every 15–30 minutes, sometimes longer). There is no way to maintain a persistent UDP socket in the background. **User impact:** while the app is open, messages arrive instantly. When the app is in the background, message delivery is delayed until the next BGTask window or until the user opens the app. Calls cannot be received in the background without the VoIP push exception (which Apple restricts to apps using CallKit). This is not a bug or missing feature — it is a fundamental conflict between iOS's design philosophy (apps should not run in the background) and Cleona's architecture (peers must be reachable). The full P2P experience is only available while the app is in the foreground.
+The most restrictive platform for Cleona's use case. Apple does not offer a Foreground Service equivalent. Background execution is limited to BGTaskScheduler. Cleona registers two independent task types — a BGAppRefreshTask (~30s runtime) and a BGProcessingTask (minutes of runtime) — to maximize wakeup frequency within Apple's constraints (dual-task strategy, §12.5). There is no way to maintain a persistent UDP socket in the background. **User impact:** while the app is open, messages arrive instantly. When the app is in the background, message delivery is delayed until the next BGTask window or until the user opens the app. With the dual-task strategy, typical delays are 5–30 minutes for regularly-used apps (improved from 15–60 minutes with a single task type), though the OS remains in full control of scheduling. Calls cannot be received in the background without the VoIP push exception (which Apple restricts to apps using CallKit). This is not a bug or missing feature — it is a fundamental conflict between iOS's design philosophy (apps should not run in the background) and Cleona's architecture (peers must be reachable). The full P2P experience is only available while the app is in the foreground.
 
 **Dart Socket Constraints on iOS.** Beyond the background-execution limitations, Dart's `RawDatagramSocket` on iOS has two platform-specific behaviors that require architectural mitigation:
 

@@ -372,6 +372,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   // §26.6.2 Paket C: drives _keyRotationRetry re-sends every 24h.
   Timer? _keyRotationRetryTimer;
   Timer? _expiryTimer;
+  int _processedMsgIdsSaveCounter = 0;
   // §27.9 NAT-Troubleshooting-Wizard trigger + dismissal timestamp.
   NatWizardTrigger? _natWizardTrigger;
   // Unix-ms until which the NAT wizard is suppressed. 0 = never dismissed.
@@ -426,7 +427,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.123';
+  static const String kCurrentAppVersion = '3.1.124';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -719,6 +720,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Load conversations
     _loadConversations();
+    _recoverStuckMedia();
 
     // Seed system channels (§9.5) — MUST run after _loadConversations() so the
     // real chats are already in `conversations`; seeding then only adds the two
@@ -794,7 +796,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         const Duration(hours: 24), (_) => _retryPendingKeyRotations());
 
     // Message expiry: check every 30 seconds for expired messages
-    _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkMessageExpiry());
+    _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _checkMessageExpiry();
+      _processedMsgIdsSaveCounter++;
+      if (_processedMsgIdsSaveCounter >= 2) {
+        _processedMsgIdsSaveCounter = 0;
+        _saveProcessedMessageIds();
+      }
+    });
 
     // Channel index gossip + moderation timers (delegated to sub-service)
     // §9.5.7: system-channel record digests piggyback on the same slot.
@@ -824,6 +833,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // CleonaNode.onFragmentStoreAck hook was dead code (never invoked,
     // since the DhtRpc bridge swallowed the frame before it could fire).
 
+    // §5.1 L1 direct retry on first AckTracker timeout (transient loss).
+    node.onMessageRetryNeeded = _handleRetryNeeded;
     // §5.1 Layer 3: offline cascade when all DV routes are exhausted.
     node.onMessageRetryExhausted = _handleRetryExhausted;
 
@@ -1665,6 +1676,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     return ok;
   }
 
+  static String _uniqueMediaPath(String dirPath, String filename) {
+    var path = '$dirPath/$filename';
+    if (!File(path).existsSync()) return path;
+    final dot = filename.lastIndexOf('.');
+    final base = dot > 0 ? filename.substring(0, dot) : filename;
+    final ext = dot > 0 ? filename.substring(dot) : '';
+    for (var i = 1; i < 1000; i++) {
+      path = '$dirPath/${base}_$i$ext';
+      if (!File(path).existsSync()) return path;
+    }
+    return '$dirPath/${DateTime.now().millisecondsSinceEpoch}$ext';
+  }
+
   String _guessMimeType(String filename) {
     final ext = filename.split('.').last.toLowerCase();
     switch (ext) {
@@ -1833,9 +1857,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       );
     }
 
-    onStateChanged?.call();
-    _saveConversations();
-    _log.info('Reaction ${remove ? "removed" : "added"}: $emoji on ${messageId.substring(0, 8)}');
+    if (msgIndex >= 0) {
+      onStateChanged?.call();
+      _saveConversations();
+      _log.info('Reaction ${remove ? "removed" : "added"}: $emoji on ${messageId.substring(0, 8)}');
+    } else {
+      _log.warn('sendReaction: message ${messageId.substring(0, 8)} not found locally, sent to network only');
+    }
   }
 
   /// Broadcast IDENTITY_DELETED to all accepted contacts before deletion.
@@ -2863,6 +2891,40 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     } catch (_) {/* malformed ACK — ignore */}
   }
 
+  // ── §5.1 L1 Direct Retry (AckTracker timeout) ─────────────────────
+
+  Future<void> _handleRetryNeeded(
+      String messageIdHex, Uint8List serializedPacket, Uint8List recipientUserId) async {
+    final recipientHex = bytesToHex(recipientUserId);
+    _log.info('L1 direct retry for ${messageIdHex.substring(0, 8)} '
+        '→ ${recipientHex.substring(0, 8)}');
+
+    final devices = await node.identityResolver.resolve(recipientUserId);
+    if (devices.isEmpty) {
+      _log.debug('L1 retry: no devices resolved for ${recipientHex.substring(0, 8)}');
+      return;
+    }
+
+    final packet = proto.NetworkPacketV3.fromBuffer(serializedPacket);
+    for (final dev in devices) {
+      final ok = await node.sendToDevice(packet, dev.deviceNodeId);
+      if (ok) {
+        _log.info('L1 retry: direct delivery OK for '
+            '${messageIdHex.substring(0, 8)} → re-tracking ACK');
+        unawaited(node.ackTracker.trackSend(
+          messageIdHex,
+          recipientHex,
+          const <PeerAddress>[],
+          AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId)),
+          serializedPacket: serializedPacket,
+          recipientUserId: recipientUserId,
+        ));
+        return;
+      }
+    }
+    _log.debug('L1 retry: all devices unreachable for ${recipientHex.substring(0, 8)}');
+  }
+
   // ── §5.1 Layer 3: Offline Cascade ──────────────────────────────────
 
   Future<void> _handleRetryExhausted(
@@ -3049,10 +3111,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    // Phase 2: if no contact-based mutuals, fall back to well-connected
-    // routing table peers (e.g. Bootstrap). The receiver polls ALL confirmed
-    // peers on startup, so any reachable peer can serve as S&F relay.
-    if (candidates.isEmpty) {
+    // Phase 2: routing table peers (e.g. Bootstrap) as fallback candidates.
+    // Always appended — Phase 1 contacts may all reject the store (recipient
+    // is not THEIR contact), so infra nodes with acceptAnyPeerStore must be
+    // in the pool for wave-retry to reach them (S142 RCA: Bootstrap was never
+    // tried because isEmpty guard blocked Phase 2 when Phase 1 had contacts).
+    {
       final rtFallback = <(Uint8List, int)>[];
       for (final peer in node.routingTable.allPeers) {
         final peerHex = peer.nodeIdHex;
@@ -4297,7 +4361,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // ── Conversation Management ────────────────────────────────────────
 
-  void _addMessageToConversation(String conversationId, UiMessage msg, {bool isGroup = false, bool isChannel = false}) {
+  bool _addMessageToConversation(String conversationId, UiMessage msg, {bool isGroup = false, bool isChannel = false}) {
     final contact = _contacts[conversationId];
     final group = _groups[conversationId];
     final channel = _channels[conversationId];
@@ -4360,7 +4424,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
         onStateChanged?.call();
         _saveConversations();
-        return;
+        return false;
       }
     }
 
@@ -4375,6 +4439,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     onNewMessage?.call(conversationId, msg);
     onStateChanged?.call();
     _saveConversations();
+    return true;
   }
 
   /// Mark a conversation as read — sends READ_RECEIPTs if enabled.
@@ -4714,28 +4779,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // GM-1 (§9.1.4): post-tag with sender's local membership state
     final gmEpoch = group.membershipEpoch;
     final gmHash = _computeMembershipHash(gmEpoch, groupIdHex, group.members);
-    bool anySent = false;
 
-    for (final member in group.members.values) {
-      if (member.nodeIdHex == identity.userIdHex) continue;
-      final ok = await sendToUser(
-        recipientUserId: hexToBytes(member.nodeIdHex),
-        messageType: proto.MessageTypeV3.MTV3_TEXT,
-        payload: basePayload,
-        groupId: groupIdBytes,
-        groupMembershipEpoch: gmEpoch,
-        groupMembershipHash: gmHash,
-      );
-      if (ok) anySent = true;
-    }
-
-    if (!anySent) return null;
-    node.statsCollector.addMessageSent();
-
-    // Optimistic UI message — V3 generates per-device messageIds inside
-    // sendToUser; for the local single UI bubble we use a fresh random id
-    // (DELIVERY_RECEIPT keys on per-user msgId so the local bubble cannot
-    // be matched 1:1 — that's the C4-Groups follow-up).
     final localId = bytesToHex(SodiumFFI().randomBytes(16));
     final msg = UiMessage(
       id: localId,
@@ -4744,7 +4788,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       text: text,
       timestamp: DateTime.now(),
       type: UiMessageType.text,
-      status: MessageStatus.sent,
+      status: MessageStatus.sending,
       isOutgoing: true,
       replyToMessageId: replyToMessageId,
       replyToText: replyToText,
@@ -4759,6 +4803,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     _addMessageToConversation(groupIdHex, msg, isGroup: true);
+
+    await Future.delayed(Duration.zero);
+
+    bool anySent = false;
+    for (final member in group.members.values) {
+      if (member.nodeIdHex == identity.userIdHex) continue;
+      final ok = await sendToUser(
+        recipientUserId: hexToBytes(member.nodeIdHex),
+        messageType: proto.MessageTypeV3.MTV3_TEXT,
+        payload: basePayload,
+        groupId: groupIdBytes,
+        groupMembershipEpoch: gmEpoch,
+        groupMembershipHash: gmHash,
+      );
+      if (ok) anySent = true;
+    }
+
+    msg.status = anySent ? MessageStatus.sent : MessageStatus.failed;
+    if (anySent) node.statsCollector.addMessageSent();
+    onStateChanged?.call();
+    _saveConversations();
     return msg;
   }
 
@@ -6108,11 +6173,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (json == null) {
         final encFile = File('$profileDir/contacts.json.enc');
         if (encFile.existsSync()) {
-          _log.warn('contacts.json.enc exists (${encFile.lengthSync()} bytes) but could not be decrypted — DATA LOSS');
-        } else {
-          _log.info('No contacts file found (fresh profile)');
+          _log.warn('contacts.json.enc exists (${encFile.lengthSync()} bytes) '
+              'but could not be decrypted — preserving file, saves '
+              'refused until a clean load succeeds');
+          return;
         }
-        _contactsLoaded = true; // File genuinely absent = nothing to protect
+        _log.info('No contacts file found (fresh profile)');
+        _contactsLoaded = true;
         return;
       }
       // Load deleted contacts set
@@ -6303,6 +6370,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       // Removed meanwhile (receipt arrived) → already delivered, skip.
       if (!_outbox.containsKey(entry.messageIdHex)) continue;
+      // Skip entries younger than 10s — AckTracker L1 retry handles those.
+      // Without this gate, every crash-safety-parked message gets re-sent
+      // on the first F3-edge inbound (double-send on every message).
+      final ageMs = DateTime.now().millisecondsSinceEpoch - entry.sentAtMs;
+      if (ageMs < 10000) continue;
       try {
         final recipientUserId = hexToBytes(entry.recipientUserIdHex);
         final canonicalBytes = base64Decode(entry.canonicalPacketB64);
@@ -6611,6 +6683,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
   }
 
+  void _recoverStuckMedia() {
+    var resetCount = 0;
+    for (final conv in conversations.values) {
+      for (final msg in conv.messages) {
+        if (msg.mediaState == MediaDownloadState.downloading) {
+          msg.mediaState = MediaDownloadState.announced;
+          msg.filePath = null;
+          resetCount++;
+        } else if (msg.mediaState == MediaDownloadState.completed &&
+            msg.filePath != null &&
+            !File(msg.filePath!).existsSync()) {
+          msg.mediaState = MediaDownloadState.announced;
+          msg.filePath = null;
+          resetCount++;
+        }
+      }
+    }
+    if (resetCount > 0) {
+      _log.info('Media recovery: reset $resetCount stuck downloads to announced');
+      _saveConversations();
+    }
+  }
+
   /// Post an Android system notification for an incoming message.
   void _postAndroidNotification(String senderName, String text, String conversationId) {
     if (onPostNotificationAndroid == null) return;
@@ -6751,7 +6846,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (json == null) {
         final encFile = File('$profileDir/groups.json.enc');
         if (encFile.existsSync()) {
-          _log.warn('groups.json.enc exists (${encFile.lengthSync()} bytes) but could not be decrypted — DATA LOSS');
+          _log.warn('groups.json.enc exists (${encFile.lengthSync()} bytes) '
+              'but could not be decrypted — preserving file, saves '
+              'refused until a clean load succeeds');
+          return;
         }
         _groupsLoaded = true;
         return;
@@ -6793,7 +6891,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (json == null) {
         final encFile = File('$profileDir/channels.json.enc');
         if (encFile.existsSync()) {
-          _log.warn('channels.json.enc exists (${encFile.lengthSync()} bytes) but could not be decrypted — DATA LOSS');
+          _log.warn('channels.json.enc exists (${encFile.lengthSync()} bytes) '
+              'but could not be decrypted — preserving file, saves '
+              'refused until a clean load succeeds');
+          return;
         }
         _channelsLoaded = true;
         return;
@@ -11663,6 +11764,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             msg.isOutgoing &&
             (msg.status == MessageStatus.sent || msg.status == MessageStatus.queuedOffline)) {
           msg.status = MessageStatus.delivered;
+          _saveConversations();
           onStateChanged?.call();
           break;
         }
@@ -11695,6 +11797,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         if (msg.id == msgIdHex && msg.isOutgoing) {
           msg.status = MessageStatus.read;
           msg.readAt ??= readAt;
+          _saveConversations();
           onReadReceiptReceived?.call(conversationId, msgIdHex);
           break;
         }
@@ -11968,9 +12071,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
       final isChannel = _channels.containsKey(conversationId);
       final isGroup = _groups.containsKey(conversationId);
-      _addMessageToConversation(conversationId, msg,
+      final isNew = _addMessageToConversation(conversationId, msg,
           isGroup: isGroup, isChannel: isChannel);
-      if (!_shouldSuppressNotification(
+      if (isNew && !_shouldSuppressNotification(
           conversationId, msg.timestamp.millisecondsSinceEpoch)) {
         notificationSound.playMessageSound();
         notificationSound.vibrate(VibrationType.message);
@@ -12030,7 +12133,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
       final filename =
           metadata.filename.isNotEmpty ? metadata.filename : 'file_$msgId';
-      final savePath = '${mediaDir.path}/$filename';
+      final savePath = _uniqueMediaPath(mediaDir.path, filename);
       File(savePath).writeAsBytesSync(actualFileData);
 
       final thumbnailB64 =
@@ -12064,8 +12167,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       );
 
       final isGroup = _groups.containsKey(conversationId);
-      _addMessageToConversation(conversationId, msg, isGroup: isGroup);
-      if (!_shouldSuppressNotification(
+      final isNew = _addMessageToConversation(conversationId, msg, isGroup: isGroup);
+      if (isNew && !_shouldSuppressNotification(
           conversationId, msg.timestamp.millisecondsSinceEpoch)) {
         notificationSound.playMessageSound();
         notificationSound.vibrate(VibrationType.message);
@@ -12344,7 +12447,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           msg?.filename ?? 'file_$mediaIdHex';
       final mediaDir = Directory('$profileDir/media');
       if (!mediaDir.existsSync()) mediaDir.createSync(recursive: true);
-      final savePath = '${mediaDir.path}/$filename';
+      final savePath = _uniqueMediaPath(mediaDir.path, filename);
       File(savePath).writeAsBytesSync(assembled);
 
       if (msg != null) {

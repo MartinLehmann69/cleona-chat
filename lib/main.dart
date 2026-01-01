@@ -89,8 +89,8 @@ void main() async {
     }
   }
 
-  // Single-Instance (Unix desktops — Linux + macOS; both have kill -0 and $HOME)
-  if (Platform.isLinux || Platform.isMacOS) {
+  // Single-Instance (desktops: Linux, macOS, Windows)
+  if (Platform.isLinux || Platform.isMacOS || Platform.isWindows) {
     if (_signalExistingInstance()) {
       exit(0);
     }
@@ -125,13 +125,22 @@ void main() async {
     debugPrint('[main] SodiumFFI OK. Initializing OqsFFI...');
     OqsFFI().init();
     debugPrint('[main] OqsFFI OK.');
-    // §3.7: Initialize OS keyring + migrate (shared sequence — S106 fix)
-    debugPrint('[main] Initializing KeyringService...');
+    // §3.7: Initialize OS keyring + migrate (shared sequence — S106 fix).
+    // On Linux/Windows the daemon owns the keyring — the GUI connects via IPC
+    // and never accesses keys directly. Skip initCrypto to avoid redundant
+    // DPAPI probes (W3 fix) and unnecessary file-locking contention.
     if (Platform.isAndroid || Platform.isIOS) {
+      debugPrint('[main] Initializing KeyringService (mobile)...');
       await MobileKeyringService.init(AppPaths.dataDir);
+      await IdentityContext.initCrypto(AppPaths.dataDir);
+      debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
+    } else if (Platform.isMacOS) {
+      debugPrint('[main] Initializing KeyringService (macOS)...');
+      await IdentityContext.initCrypto(AppPaths.dataDir);
+      debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
+    } else {
+      debugPrint('[main] Skipping KeyringService init (daemon owns keyring).');
     }
-    await IdentityContext.initCrypto(AppPaths.dataDir);
-    debugPrint('[main] KeyringService OK (hw=${KeyringService.instance.isHardwareProtected}).');
   } catch (e, stack) {
     startupError = 'FFI init failed on ${Platform.operatingSystem}\n'
         'home=${AppPaths.home}\ndataDir=${AppPaths.dataDir}\n\n$e\n$stack';
@@ -263,8 +272,7 @@ bool _signalExistingInstance() {
   try {
     final otherPid = int.parse(lockFile.readAsStringSync().trim());
     if (otherPid == pid) return false; // It's us
-    if (Process.runSync('kill', ['-0', '$otherPid']).exitCode == 0) {
-      // Other instance is alive — signal "show window"
+    if (_isGuiProcessAlive(otherPid)) {
       File('$home/.cleona/gui.show').writeAsStringSync('$pid');
       return true;
     }
@@ -273,6 +281,29 @@ bool _signalExistingInstance() {
   // Stale lock file
   try { lockFile.deleteSync(); } catch (_) {}
   return false;
+}
+
+bool _isGuiProcessAlive(int p) {
+  try {
+    if (Platform.isWindows) {
+      return _isWindowsProcessAlive(p);
+    }
+    return Process.runSync('kill', ['-0', '$p']).exitCode == 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+bool _isWindowsProcessAlive(int p) {
+  try {
+    final result = Process.runSync(
+        'tasklist', ['/FI', 'PID eq $p', '/FO', 'CSV', '/NH']);
+    final out = result.stdout.toString().trim();
+    if (out.isEmpty || out.startsWith('INFO:')) return false;
+    return out.contains('"$p"');
+  } catch (_) {
+    return false;
+  }
 }
 
 void _writeGuiLock() {
@@ -508,6 +539,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   AppLocale? _appLocale;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
   List<ConnectivityResult> _connectivityResults = [];
+  Timer? _networkChangeDebounce;
+  bool _networkChangeRunning = false;
   String _lastNotificationText = '';
 
   /// Buffered incoming 1:1/group call when the Navigator is not yet attached.
@@ -575,6 +608,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _pendingCrashes.add((error, stack));
       return;
     }
+    try {
+      service.saveState();
+    } catch (_) {}
     _scheduleCrashDialog(service, error, stack);
   }
 
@@ -848,10 +884,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   /// Check if a process with the given PID is alive.
   bool _isProcessAlive(int p) {
     try {
-      if (Platform.isWindows) {
-        final result = Process.runSync('tasklist', ['/FI', 'PID eq $p', '/NH']);
-        return result.stdout.toString().contains('$p');
-      }
+      if (Platform.isWindows) return _isWindowsProcessAlive(p);
       return Process.runSync('kill', ['-0', '$p']).exitCode == 0;
     } catch (_) {
       return false;
@@ -1093,9 +1126,15 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         debugPrint('[main] Daemon ready after retry — reconnecting');
         await initialize();
       } else if (attempt >= 24) {
-        // Give up after 2 minutes of retries (24 x 5s)
         timer.cancel();
         debugPrint('[main] Daemon still not ready after ${attempt * 5}s — giving up');
+        _initError = 'Daemon not reachable after ${attempt * 5}s.\n\n'
+            'baseDir: $_baseDir\n'
+            'lock: ${File('$_baseDir/cleona.lock').existsSync()}\n'
+            'pid: ${File('$_baseDir/cleona.pid').existsSync()}\n'
+            '${Platform.isWindows ? 'port' : 'sock'}: '
+            '${File('$_baseDir/${Platform.isWindows ? 'cleona.port' : 'cleona.sock'}').existsSync()}';
+        notifyListeners();
       }
     });
   }
@@ -1114,17 +1153,26 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       _connectivityResults = results;
       notifyListeners();
       if (!_isInitialized) return;
-      // In-process multi-identity: notify node ONCE + service-side cleanup per
-      // identity (mailbox poll, identity-publisher). Avoid the N+1 node-reset
-      // multiplication — node-reset is global, not per-service.
-      if (_inProcessNode != null) {
-        _inProcessNode!.onNetworkChanged();
-        for (final service in _inProcessServices.values) {
-          service.onNetworkChanged(triggerNodeReset: false);
+      // P4: debounce rapid connectivity events (Hotel-WLAN, captive portals).
+      // Without this, each event fires onNetworkChanged() immediately —
+      // concurrent runs corrupt peer/route state.
+      _networkChangeDebounce?.cancel();
+      _networkChangeDebounce = Timer(const Duration(seconds: 2), () async {
+        if (_networkChangeRunning) return;
+        _networkChangeRunning = true;
+        try {
+          if (_inProcessNode != null) {
+            await _inProcessNode!.onNetworkChanged();
+            for (final service in _inProcessServices.values) {
+              service.onNetworkChanged(triggerNodeReset: false);
+            }
+          } else {
+            await _service?.onNetworkChanged();
+          }
+        } finally {
+          _networkChangeRunning = false;
         }
-      } else {
-        _service?.onNetworkChanged();
-      }
+      });
     });
   }
 
@@ -2581,6 +2629,7 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
     _showTriggerTimer?.cancel();
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+    _networkChangeDebounce?.cancel();
     _connectivitySub?.cancel();
     final home = AppPaths.home;
     try { File('$home/.cleona/gui.lock').deleteSync(); } catch (_) {}

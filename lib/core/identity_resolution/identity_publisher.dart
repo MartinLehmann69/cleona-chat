@@ -118,6 +118,8 @@ class IdentityPublisher {
   List<proto.PeerAddressProto> _lastPublishedAddrs =
       const <proto.PeerAddressProto>[];
   Timer? _addressFlapDebounceTimer;
+  Timer? _authCoalesceTimer;
+  bool _authPublishInFlight = false;
 
   /// Initial-Offset fuer Multi-Identity-Staffelung: i * (period / N).
   /// Gesetzt vom Owner (CleonaService) bevor `start()` gerufen wird, sodass
@@ -271,6 +273,7 @@ class IdentityPublisher {
     _kemTimer?.cancel();
     _coldStartRetryTimer?.cancel();
     _addressFlapDebounceTimer?.cancel();
+    _authCoalesceTimer?.cancel();
     _selfVerifyTimer?.cancel();
     _coldStartTimedOut = false;
   }
@@ -454,7 +457,37 @@ class IdentityPublisher {
     });
   }
 
+  /// Coalesce-Gate: wenn bereits ein Publish laeuft, wird stattdessen ein
+  /// 2s-Trailing-Edge-Timer gestartet der nach Abschluss des laufenden
+  /// Publishes einmal feuert. Damit werden N Startup-Trigger (onPeerJoined,
+  /// addDelegation, _waitForPeersThenPublish) zu max 2 Publishes statt N.
   Future<void> _publishAuthAndStartLiveness() async {
+    if (!_running) return;
+    if (_authPublishInFlight) {
+      _log.info('publish-coalesce: publish in-flight, marking trailing-edge');
+      _authCoalesceTimer?.cancel();
+      _authCoalesceTimer = Timer(Duration.zero, () {});
+      return;
+    }
+    _authCoalesceTimer?.cancel();
+    _authCoalesceTimer = null;
+    _authPublishInFlight = true;
+    try {
+      await _doPublishAuthAndStartLiveness();
+    } finally {
+      _authPublishInFlight = false;
+      if (_authCoalesceTimer != null) {
+        _authCoalesceTimer!.cancel();
+        _authCoalesceTimer = Timer(const Duration(seconds: 2), () {
+          _authCoalesceTimer = null;
+          _log.info('publish-coalesce: trailing-edge timer fired');
+          _publishAuthAndStartLiveness();
+        });
+      }
+    }
+  }
+
+  Future<void> _doPublishAuthAndStartLiveness() async {
     if (!_running) return;
     _log.info('publish-cycle starting (peerCount=${routingTable.peerCount}, '
         'coldStartTimedOut=$_coldStartTimedOut)');

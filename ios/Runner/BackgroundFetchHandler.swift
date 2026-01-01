@@ -5,122 +5,133 @@ import Flutter
 
 /// iOS Background Fetch handler for Cleona P2P messenger (Architecture S12.5).
 ///
-/// Uses BGTaskScheduler to periodically wake the app and retrieve pending
-/// messages from the P2P network. All heavy lifting (node startup, peer
-/// contact, S&F retrieval, Reed-Solomon fragment fetch, decryption) happens
-/// on the Dart side via MethodChannel. This Swift class orchestrates the
-/// OS integration: task registration, scheduling, expiration handling, and
-/// local notification posting.
+/// Uses BGTaskScheduler with two task types to periodically wake the app and
+/// retrieve pending messages from the P2P network:
+/// - BGAppRefreshTask (`chat.cleona.cleona.refresh`): ~30s window, frequent
+/// - BGProcessingTask (`chat.cleona.cleona.processing`): minutes-long window, less frequent
+///
+/// All heavy lifting (node startup, peer contact, S&F retrieval, Reed-Solomon
+/// fragment fetch, decryption) happens on the Dart side via MethodChannel.
+/// This Swift class orchestrates the OS integration: task registration,
+/// scheduling, expiration handling, and local notification posting.
 ///
 /// NO APNs, NO Firebase, NO push -- pure OS-controlled pull.
 class BackgroundFetchHandler {
 
     static let shared = BackgroundFetchHandler()
-    static let taskIdentifier = "chat.cleona.cleona.refresh"
+    static let refreshIdentifier = "chat.cleona.cleona.refresh"
+    static let processingIdentifier = "chat.cleona.cleona.processing"
 
-    /// MethodChannel to communicate with the Dart layer.
-    /// Set from AppDelegate once the FlutterEngine is available.
     var methodChannel: FlutterMethodChannel?
 
-    /// Whether a background fetch is currently in progress.
     private var isFetching = false
 
     private init() {}
 
     // MARK: - Task Registration
 
-    /// Register the BGAppRefreshTask with the system. Must be called
-    /// in `application(_:didFinishLaunchingWithOptions:)` BEFORE the
-    /// app finishes launching.
-    func registerBackgroundTask() {
+    func registerBackgroundTasks() {
         BGTaskScheduler.shared.register(
-            forTaskWithIdentifier: BackgroundFetchHandler.taskIdentifier,
+            forTaskWithIdentifier: BackgroundFetchHandler.refreshIdentifier,
             using: nil
         ) { [weak self] task in
             guard let self = self, let refreshTask = task as? BGAppRefreshTask else {
                 task.setTaskCompleted(success: false)
                 return
             }
-            self.handleBackgroundFetch(task: refreshTask)
+            self.handleBackgroundFetch(task: refreshTask, taskType: "refresh")
         }
-        NSLog("[BackgroundFetch] Registered task: \(BackgroundFetchHandler.taskIdentifier)")
+
+        BGTaskScheduler.shared.register(
+            forTaskWithIdentifier: BackgroundFetchHandler.processingIdentifier,
+            using: nil
+        ) { [weak self] task in
+            guard let self = self, let processingTask = task as? BGProcessingTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            self.handleBackgroundFetch(task: processingTask, taskType: "processing")
+        }
+
+        NSLog("[BackgroundFetch] Registered tasks: refresh + processing")
     }
 
     // MARK: - Scheduling
 
-    /// Schedule the next background app refresh. Called after each completed
-    /// task and when the app transitions to background.
-    func scheduleAppRefresh() {
-        let request = BGAppRefreshTaskRequest(identifier: BackgroundFetchHandler.taskIdentifier)
-        // Earliest: 15 minutes from now. The OS decides the actual time based
-        // on user behavior, battery, network availability.
-        request.earliestBeginDate = Date(timeIntervalSinceNow: 15 * 60)
+    /// Schedule both background task types. Called after each completed task
+    /// and when the app transitions to background.
+    func scheduleBothTasks() {
+        scheduleRefreshTask()
+        scheduleProcessingTask()
+    }
+
+    private func scheduleRefreshTask() {
+        let request = BGAppRefreshTaskRequest(identifier: BackgroundFetchHandler.refreshIdentifier)
+        request.earliestBeginDate = Date(timeIntervalSinceNow: 60)
         do {
             try BGTaskScheduler.shared.submit(request)
-            NSLog("[BackgroundFetch] Scheduled next refresh (earliest: 15 min)")
+            NSLog("[BackgroundFetch] Scheduled refresh (earliest: 1 min)")
         } catch {
-            NSLog("[BackgroundFetch] Failed to schedule: \(error.localizedDescription)")
+            NSLog("[BackgroundFetch] Failed to schedule refresh: \(error.localizedDescription)")
         }
     }
 
-    /// Cancel any pending background fetch tasks.
+    private func scheduleProcessingTask() {
+        let request = BGProcessingTaskRequest(identifier: BackgroundFetchHandler.processingIdentifier)
+        request.requiresNetworkConnectivity = true
+        request.requiresExternalPower = false
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            NSLog("[BackgroundFetch] Scheduled processing")
+        } catch {
+            NSLog("[BackgroundFetch] Failed to schedule processing: \(error.localizedDescription)")
+        }
+    }
+
     func cancelPendingTasks() {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundFetchHandler.taskIdentifier)
-        NSLog("[BackgroundFetch] Cancelled pending tasks")
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundFetchHandler.refreshIdentifier)
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: BackgroundFetchHandler.processingIdentifier)
+        NSLog("[BackgroundFetch] Cancelled all pending tasks")
     }
 
     // MARK: - Task Execution
 
-    /// Handle the background fetch task. The 9-step wakeup chain from S12.5:
-    /// 1. Load saved routing state (Dart side)
-    /// 2. Open UDP socket (Dart CleonaNode.startQuick())
-    /// 3. Contact known peers (PING top-3)
-    /// 4. Retrieve Store-and-Forward messages
-    /// 5. Retrieve Reed-Solomon fragments
-    /// 6. Decrypt & notify (post local iOS notifications)
-    /// 7. Persist state (saveNetworkState)
-    /// 8. Close socket (node shutdown)
-    /// 9. Schedule next task
-    ///
-    /// Steps 1-8 happen on the Dart side. This handler calls into Dart,
-    /// receives results, posts notifications, and manages the task lifecycle.
-    private func handleBackgroundFetch(task: BGAppRefreshTask) {
-        NSLog("[BackgroundFetch] Task started")
+    /// Handle a background fetch task (either refresh or processing).
+    /// Both execute the same 9-step wakeup chain from S12.5, but the
+    /// processing task passes taskType="processing" to Dart so it can
+    /// extend the peer-contact budget from 3 to 10.
+    private func handleBackgroundFetch(task: BGTask, taskType: String) {
+        NSLog("[BackgroundFetch] Task started (type: \(taskType))")
 
         guard !isFetching else {
             NSLog("[BackgroundFetch] Already fetching, completing task")
             task.setTaskCompleted(success: true)
-            scheduleAppRefresh()
+            scheduleBothTasks()
             return
         }
         isFetching = true
 
-        // Expiration handler: clean shutdown if the OS cuts our time (~30s).
         task.expirationHandler = { [weak self] in
-            NSLog("[BackgroundFetch] Task expired by OS")
+            NSLog("[BackgroundFetch] Task expired by OS (type: \(taskType))")
             self?.isFetching = false
-            // The Dart side will handle cleanup on its own timeout path.
-            // We just mark the task as incomplete so the OS knows.
             task.setTaskCompleted(success: false)
-            self?.scheduleAppRefresh()
+            self?.scheduleBothTasks()
         }
 
         guard let channel = methodChannel else {
             NSLog("[BackgroundFetch] No MethodChannel available -- engine not running?")
             isFetching = false
             task.setTaskCompleted(success: false)
-            scheduleAppRefresh()
+            scheduleBothTasks()
             return
         }
 
-        // Call into Dart to perform the actual P2P work.
-        // The Dart side returns: {messageCount: int, senderNames: [String], previews: [String]}
         DispatchQueue.main.async {
-            channel.invokeMethod("performBackgroundFetch", arguments: nil) { [weak self] result in
+            channel.invokeMethod("performBackgroundFetch", arguments: ["taskType": taskType]) { [weak self] result in
                 guard let self = self else { return }
                 defer {
                     self.isFetching = false
-                    self.scheduleAppRefresh()
+                    self.scheduleBothTasks()
                 }
 
                 if let error = result as? FlutterError {
@@ -139,7 +150,7 @@ class BackgroundFetchHandler {
                 let senderNames = response["senderNames"] as? [String] ?? []
                 let previews = response["previews"] as? [String] ?? []
 
-                NSLog("[BackgroundFetch] Completed: \(messageCount) messages from \(senderNames.count) senders")
+                NSLog("[BackgroundFetch] Completed (\(taskType)): \(messageCount) messages from \(senderNames.count) senders")
 
                 if messageCount > 0 {
                     self.postLocalNotifications(
@@ -156,7 +167,6 @@ class BackgroundFetchHandler {
 
     // MARK: - Local Notifications
 
-    /// Request notification authorization. Called once at app startup.
     func requestNotificationAuthorization() {
         let center = UNUserNotificationCenter.current()
         center.requestAuthorization(options: [.alert, .badge, .sound]) { granted, error in
@@ -167,13 +177,9 @@ class BackgroundFetchHandler {
         }
     }
 
-    /// Post local notifications for messages retrieved during background fetch.
-    /// Each sender gets a separate notification with their first message preview.
-    /// The badge is updated to the total unread count.
     private func postLocalNotifications(messageCount: Int, senderNames: [String], previews: [String]) {
         let center = UNUserNotificationCenter.current()
 
-        // Post one notification per sender
         for i in 0..<min(senderNames.count, previews.count) {
             let content = UNMutableNotificationContent()
             content.title = senderNames[i]
@@ -184,7 +190,7 @@ class BackgroundFetchHandler {
             let request = UNNotificationRequest(
                 identifier: "cleona_bg_\(UUID().uuidString)",
                 content: content,
-                trigger: nil  // Deliver immediately
+                trigger: nil
             )
 
             center.add(request) { error in
@@ -194,7 +200,6 @@ class BackgroundFetchHandler {
             }
         }
 
-        // If we have messages but no per-sender breakdown, post a summary
         if senderNames.isEmpty && messageCount > 0 {
             let content = UNMutableNotificationContent()
             content.title = "Cleona Chat"

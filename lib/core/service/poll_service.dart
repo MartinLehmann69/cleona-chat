@@ -83,9 +83,15 @@ class PollService {
   List<Uint8List> _ringForEntity(String entityIdHex) {
     final members = _pollRecipients(entityIdHex)?.toList() ?? const [];
     final keys = <Uint8List>[];
+    final channel = _ctx.channels[entityIdHex];
     for (final memberHex in members) {
       final c = _ctx.contacts[memberHex];
-      if (c?.ed25519Pk != null) keys.add(c!.ed25519Pk!);
+      if (c?.ed25519Pk != null) {
+        keys.add(c!.ed25519Pk!);
+      } else if (channel != null) {
+        final m = channel.members[memberHex];
+        if (m?.ed25519Pk != null) keys.add(m!.ed25519Pk!);
+      }
     }
     keys.add(_ctx.identity.ed25519PublicKey);
     keys.sort((a, b) {
@@ -215,6 +221,27 @@ class PollService {
   Future<void> _fanoutToEntity(String entityIdHex, proto.MessageTypeV3 type, List<int> payload) async {
     final recipients = _pollRecipients(entityIdHex);
     if (recipients == null) return;
+
+    final channel = _ctx.channels[entityIdHex];
+    if (channel != null) {
+      final channelIdBytes = hexToBytes(entityIdHex);
+      for (final member in channel.members.values) {
+        if (member.nodeIdHex == _ctx.identity.userIdHex) continue;
+        final contact = _ctx.contacts[member.nodeIdHex];
+        final x25519Pk = contact?.x25519Pk ?? member.x25519Pk;
+        final mlKemPk = contact?.mlKemPk ?? member.mlKemPk;
+        if (x25519Pk == null || x25519Pk.isEmpty ||
+            mlKemPk == null || mlKemPk.isEmpty) continue;
+        await _ctx.sendToUser(
+          recipientUserId: hexToBytes(member.nodeIdHex),
+          messageType: type,
+          payload: Uint8List.fromList(payload),
+          groupId: channelIdBytes,
+        );
+      }
+      return;
+    }
+
     for (final memberHex in recipients) {
       await _ctx.sendEncryptedPayload(
         hexToBytes(memberHex),
@@ -322,10 +349,15 @@ class PollService {
         ? [poll.createdByHex]
         : recipients.toList();
 
+    final channel = _ctx.channels[poll.groupId];
     final entries = <proto.PollAnonSubmitEntry>[];
     for (final recipientHex in effectiveRecipients) {
       final contact = _ctx.contacts[recipientHex];
-      if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) continue;
+      final chMember = channel?.members[recipientHex];
+      final x25519Pk = contact?.x25519Pk ?? chMember?.x25519Pk;
+      final mlKemPk = contact?.mlKemPk ?? chMember?.mlKemPk;
+      if (x25519Pk == null || x25519Pk.isEmpty ||
+          mlKemPk == null || mlKemPk.isEmpty) continue;
 
       final inner = proto.ApplicationFrameV3()
         ..recipientUserId = hexToBytes(recipientHex)
@@ -336,14 +368,14 @@ class PollService {
 
       final kemBlob = V3FrameCodec.buildDeAttributedInner(
         inner: inner,
-        recipientUserX25519Pk: contact.x25519Pk!,
-        recipientUserMlKemPk: contact.mlKemPk!,
+        recipientUserX25519Pk: x25519Pk,
+        recipientUserMlKemPk: mlKemPk,
       );
 
       final entry = proto.PollAnonSubmitEntry()
         ..recipientUserId = hexToBytes(recipientHex)
         ..kemBlob = kemBlob;
-      if (contact.deviceNodeIds.isNotEmpty) {
+      if (contact != null && contact.deviceNodeIds.isNotEmpty) {
         for (final did in contact.deviceNodeIds) {
           entry.deviceIds.add(hexToBytes(did));
         }
@@ -410,6 +442,25 @@ class PollService {
     Uint8List payload,
     List<String> recipients,
   ) async {
+    final channel = _ctx.channels[poll.groupId];
+    if (channel != null) {
+      final channelIdBytes = hexToBytes(poll.groupId);
+      for (final memberHex in recipients) {
+        final contact = _ctx.contacts[memberHex];
+        final m = channel.members[memberHex];
+        final x25519Pk = contact?.x25519Pk ?? m?.x25519Pk;
+        final mlKemPk = contact?.mlKemPk ?? m?.mlKemPk;
+        if (x25519Pk == null || x25519Pk.isEmpty ||
+            mlKemPk == null || mlKemPk.isEmpty) continue;
+        await _ctx.sendToUser(
+          recipientUserId: hexToBytes(memberHex),
+          messageType: messageType,
+          payload: payload,
+          groupId: channelIdBytes,
+        );
+      }
+      return;
+    }
     for (final memberHex in recipients) {
       await _ctx.sendEncryptedPayload(
         hexToBytes(memberHex),
@@ -545,6 +596,11 @@ class PollService {
     }
     if (_pollRecipients(groupIdHex) == null) {
       throw ArgumentError('Unknown group/channel $groupIdHex');
+    }
+    final channel = _ctx.channels[groupIdHex];
+    if (channel != null && !_ctx.hasChannelPermission(channel, 'post')) {
+      _log.warn('createPoll blocked: no post permission in channel');
+      return '';
     }
     final normalisedOptions = <PollOption>[];
     for (var i = 0; i < options.length; i++) {

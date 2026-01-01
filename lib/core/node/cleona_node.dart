@@ -292,6 +292,16 @@ class CleonaNode {
     Uint8List recipientUserId,
   )? onMessageRetryExhausted;
 
+  /// §5.1 L1 direct retry on first AckTracker timeout. Fires BEFORE
+  /// exhaustion: transient UDP loss in LAN is recoverable with a single
+  /// re-send — going straight to L3 (erasure/S&F) wastes 9+ minutes on
+  /// edge-triggered outbox flush. Same signature as onMessageRetryExhausted.
+  void Function(
+    String messageIdHex,
+    Uint8List serializedPacket,
+    Uint8List recipientUserId,
+  )? onMessageRetryNeeded;
+
   /// Welle 5 (§2.4.1) infrastructure-receive hook. The V3 receive pipeline
   /// ([_onPacketV3Received]) decapsulates `PAYLOAD_INFRASTRUCTURE_FRAME`
   /// packets inline using the local Device-KEM private keys (§3.5b),
@@ -811,10 +821,14 @@ class CleonaNode {
           userIdHex: bytesToHex(recipientUserId), reason: 'retry-exhausted');
     };
 
-    // onRetryNeeded (per-timeout intermediate retries) is intentionally
-    // unwired. V3 relies on the outbox for crash-safety and the exhaustion
-    // callback for Layer 3 offline placement. Per-timeout re-sends would
-    // waste bandwidth on routes already proven broken.
+    // §5.1 L1 direct retry: re-send via resolved devices on first timeout.
+    // Transient LAN packet loss is recoverable — skipping straight to L3
+    // (erasure/S&F) wastes minutes waiting for edge-triggered outbox flush.
+    ackTracker.onRetryNeeded =
+        (messageIdHex, serializedPacket, recipientUserId) {
+      onMessageRetryNeeded?.call(
+          messageIdHex, serializedPacket, recipientUserId);
+    };
 
     // Wire Route-Down: 3x ACK timeout → surgical DV markRouteDown → Poison Reverse
     // V3.1: Only the specific route (via nextHop) is marked down, not all routes.
@@ -1141,6 +1155,22 @@ class CleonaNode {
     transport.onEpochExpired = (minVersion) {
       _log.warn('EPOCH_EXPIRED: network requires secret version $minVersion — this build is outdated');
     };
+
+    // Port mapping (NAT-PMP/PCP + UPnP) — must be initialized BEFORE
+    // transport.start() because _onPacketV3Received accesses portMapper.state
+    // and packets arrive immediately after the UDP socket opens.
+    // NatTraversal is injected so PortMapper can populate the NAT-Wizard
+    // signals (§27.9.1): upnpStatus, pcpStatus, upnpRouterInfoJson.
+    portMapper = PortMapper(
+      internalPort: port,
+      requestedExternalPort: port,
+      profileDir: profileDir,
+      natTraversal: natTraversal,
+    );
+    _portMapperSub = portMapper.events.listen(_onPortMapperEvent);
+    // Fire-and-forget: don't block startup, results come via event stream
+    portMapper.start();
+
     await transport.start();
 
     // Init LAN discovery — Phase 2: broadcast deviceNodeId (per-device routing)
@@ -1160,19 +1190,6 @@ class CleonaNode {
 
     await localDiscovery.start();
     await multicastDiscovery.start();
-
-    // Port mapping (NAT-PMP/PCP + UPnP) — non-blocking, runs in background.
-    // NatTraversal is injected so PortMapper can populate the NAT-Wizard
-    // signals (§27.9.1): upnpStatus, pcpStatus, upnpRouterInfoJson.
-    portMapper = PortMapper(
-      internalPort: port,
-      requestedExternalPort: port,
-      profileDir: profileDir,
-      natTraversal: natTraversal,
-    );
-    _portMapperSub = portMapper.events.listen(_onPortMapperEvent);
-    // Fire-and-forget: don't block startup, results come via event stream
-    portMapper.start();
 
     // Register self in routing table's peer manager
     _registerSelf();

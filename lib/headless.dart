@@ -20,6 +20,7 @@ import 'package:cleona/core/platform/app_paths.dart';
 ///
 /// Usage:
 ///   cleona-headless --profile `dir` --port `port` [--name `name`]
+///                   [--identity <name-or-nodeIdHex>]  # select identity by display name or nodeId prefix
 ///                   [--send-cr <nodeIdHex>]      # send contact request after startup
 ///                   [--send-msg <nodeIdHex:text>] # send message after CR accepted
 ///                   [--export-contact-seed]       # print ContactSeed URI to stdout and exit
@@ -89,10 +90,33 @@ void main(List<String> args) {
       stderr.writeln('ERROR: No identities found in $baseDir');
       exit(1);
     }
-    final activeId = identities.firstWhere(
-      (id) => id.profileDir == config.profileDir,
-      orElse: () => identities.first,
-    );
+    final Identity activeId;
+    if (config.identitySelector != null) {
+      final sel = config.identitySelector!.toLowerCase();
+      final match = identities.where((id) =>
+          id.displayName.toLowerCase() == sel ||
+          (id.nodeIdHex != null && id.nodeIdHex!.toLowerCase().startsWith(sel)));
+      if (match.isEmpty) {
+        stderr.writeln('ERROR: No identity matching "${config.identitySelector}" '
+            'in $baseDir. Available: ${identities.map((id) => '${id.displayName} (${id.nodeIdHex?.substring(0, 8) ?? "?"}...)').join(', ')}');
+        exit(1);
+      }
+      activeId = match.first;
+      log.info('Selected identity: ${activeId.displayName} (${activeId.nodeIdHex?.substring(0, 8) ?? "?"})');
+    } else {
+      final profileMatch = identities.where(
+        (id) => id.profileDir == config.profileDir);
+      if (profileMatch.isNotEmpty) {
+        activeId = profileMatch.first;
+      } else {
+        activeId = identities.first;
+        if (identities.length > 1) {
+          log.warn('No identity matches --profile=${config.profileDir}, '
+              'falling back to "${activeId.displayName}". '
+              'Use --identity to select explicitly.');
+        }
+      }
+    }
     final masterSeed = mgr.loadMasterSeed();
 
     final identity = await IdentityContext.createFromIdentity(
@@ -426,10 +450,22 @@ Future<void> _exportContactSeed(_HeadlessConfig config) async {
     stderr.writeln('ERROR: No identities found in $baseDir');
     exit(1);
   }
-  final activeId = identities.firstWhere(
-    (id) => id.profileDir == config.profileDir,
-    orElse: () => identities.first,
-  );
+  final Identity activeId;
+  if (config.identitySelector != null) {
+    final sel = config.identitySelector!.toLowerCase();
+    final match = identities.where((id) =>
+        id.displayName.toLowerCase() == sel ||
+        (id.nodeIdHex != null && id.nodeIdHex!.toLowerCase().startsWith(sel)));
+    if (match.isEmpty) {
+      stderr.writeln('ERROR: No identity matching "${config.identitySelector}"');
+      exit(1);
+    }
+    activeId = match.first;
+  } else {
+    final profileMatch = identities.where(
+        (id) => id.profileDir == config.profileDir);
+    activeId = profileMatch.isNotEmpty ? profileMatch.first : identities.first;
+  }
   final identity = await IdentityContext.createFromIdentity(
     identity: activeId,
     baseDir: baseDir,
@@ -605,6 +641,7 @@ class _HeadlessConfig {
   final String baseDir;
   final int port;
   final String name;
+  final String? identitySelector;
   final String? sendCr;
   final String? sendMsg;
   final String? publicIp;
@@ -615,6 +652,7 @@ class _HeadlessConfig {
     required this.baseDir,
     required this.port,
     required this.name,
+    this.identitySelector,
     this.sendCr,
     this.sendMsg,
     this.publicIp,
@@ -626,6 +664,7 @@ _HeadlessConfig _parseArgs(List<String> args) {
   String? profileDir;
   int? port;
   String name = 'Headless';
+  String? identitySelector;
   String? sendCr;
   String? sendMsg;
   String? publicIp;
@@ -655,6 +694,9 @@ _HeadlessConfig _parseArgs(List<String> args) {
       case '--name':
         if (i + 1 < flat.length) name = flat[++i];
         break;
+      case '--identity':
+        if (i + 1 < flat.length) identitySelector = flat[++i];
+        break;
       case '--send-cr':
         if (i + 1 < flat.length) sendCr = flat[++i];
         break;
@@ -682,6 +724,7 @@ _HeadlessConfig _parseArgs(List<String> args) {
     baseDir: baseDir,
     port: port,
     name: name,
+    identitySelector: identitySelector,
     sendCr: sendCr,
     sendMsg: sendMsg,
     publicIp: publicIp,

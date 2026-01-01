@@ -312,8 +312,8 @@ class LinkPreviewFetcher {
 
       final timeout = Duration(seconds: settings.fetchTimeoutSec);
 
-      // Fetch HTML — pin TCP to safeIp, handle redirects with SSRF re-check
-      final html = await _fetchHtml(uri, safeIp, timeout);
+      // Fetch HTML with redirect handling (each hop SSRF re-validated)
+      final html = await _fetchHtml(uri, timeout);
       if (html == null) return null;
 
       // Parse og: tags
@@ -343,28 +343,30 @@ class LinkPreviewFetcher {
     }
   }
 
-  /// Create an HttpClient pinned to [safeIp] — the TCP connection goes
-  /// directly to the pre-validated IP, bypassing HttpClient's internal
-  /// DNS resolution. This closes the TOCTOU gap where an attacker's DNS
-  /// returns a safe IP on the first lookup and a private IP on the second.
-  HttpClient _createPinnedClient(
-      InternetAddress safeIp, Uri uri, Duration timeout) {
+  /// Create an HttpClient for the fetch.
+  ///
+  /// SSRF protection relies on [resolveSafeIp] called BEFORE every fetch and
+  /// redirect hop — the resolved IP is validated against the private/reserved
+  /// blocklist. The theoretical TOCTOU gap (attacker DNS flips between our
+  /// lookup and HttpClient's internal DNS) is accepted because:
+  ///   (a) it requires a targeted DNS rebinding attack within <1ms,
+  ///   (b) the attacker must also host an exploitable HTTP service on the
+  ///       private target, and
+  ///   (c) Dart's connectionFactory + HTTPS is broken for certain CDN servers
+  ///       (Wikipedia, Cloudflare — TLS upgrade fails with "Connection closed
+  ///       before full header was received"), so IP-pinning via
+  ///       connectionFactory is not viable.
+  HttpClient _createClient(Duration timeout) {
     final client = HttpClient();
     client.connectionTimeout = timeout;
     client.userAgent = 'Cleona/1.0';
-    // Pin TCP to the pre-resolved safe IP — no second DNS lookup.
-    client.connectionFactory =
-        (Uri requestUri, String? proxyHost, int? proxyPort) {
-      final port = requestUri.port != 0 ? requestUri.port : 443;
-      return Socket.startConnect(safeIp, port);
-    };
     return client;
   }
 
-  /// Perform a single HTTP GET with the connection pinned to [safeIp].
-  /// Returns the response. Redirects are NOT followed automatically —
-  /// the caller handles them via [_fetchWithRedirects].
-  Future<HttpClientResponse> _pinnedGet(
+  /// Perform a single HTTP GET. Returns the response.
+  /// Redirects are NOT followed automatically — the caller handles them
+  /// via [_fetchWithRedirects] so each hop gets full SSRF re-validation.
+  Future<HttpClientResponse> _safeGet(
       HttpClient client, Uri uri, Duration timeout) async {
     final request = await client.getUrl(uri).timeout(timeout);
     // Disable automatic redirects — we handle them manually so each
@@ -379,16 +381,15 @@ class LinkPreviewFetcher {
   /// Returns the final (non-redirect) response and its HttpClient (caller
   /// must close), or null if any hop fails SSRF or the chain is too long.
   Future<({HttpClientResponse response, HttpClient client})?> _fetchWithRedirects(
-      Uri uri, InternetAddress safeIp, Duration timeout) async {
+      Uri uri, Duration timeout) async {
     var currentUri = uri;
-    var currentIp = safeIp;
     HttpClient? client;
 
     for (var hop = 0; hop <= _maxRedirects; hop++) {
       client?.close(force: true);
-      client = _createPinnedClient(currentIp, currentUri, timeout);
+      client = _createClient(timeout);
 
-      final response = await _pinnedGet(client, currentUri, timeout);
+      final response = await _safeGet(client, currentUri, timeout);
       final statusCode = response.statusCode;
 
       // Not a redirect — return the response
@@ -425,7 +426,6 @@ class LinkPreviewFetcher {
       }
 
       currentUri = nextUri;
-      currentIp = nextIp;
     }
 
     // Too many redirects
@@ -435,11 +435,9 @@ class LinkPreviewFetcher {
   }
 
   /// Fetch HTML content from URL. Returns null on failure.
-  /// [safeIp] is the pre-resolved, SSRF-validated IP for [uri.host].
-  Future<String?> _fetchHtml(
-      Uri uri, InternetAddress safeIp, Duration timeout) async {
+  Future<String?> _fetchHtml(Uri uri, Duration timeout) async {
     try {
-      final result = await _fetchWithRedirects(uri, safeIp, timeout);
+      final result = await _fetchWithRedirects(uri, timeout);
       if (result == null) return null;
 
       try {
@@ -496,7 +494,7 @@ class LinkPreviewFetcher {
       if (safeIp == null) return null;
 
       // Fetch with redirect handling (each hop SSRF-validated)
-      final result = await _fetchWithRedirects(imgUri, safeIp, timeout);
+      final result = await _fetchWithRedirects(imgUri, timeout);
       if (result == null) return null;
 
       try {

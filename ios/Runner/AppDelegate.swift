@@ -17,7 +17,7 @@ import Network
   ) -> Bool {
     // Register BGTaskScheduler BEFORE super.application returns.
     // Apple requires registration during didFinishLaunchingWithOptions.
-    BackgroundFetchHandler.shared.registerBackgroundTask()
+    BackgroundFetchHandler.shared.registerBackgroundTasks()
 
     // Request notification permission for background-fetched messages.
     BackgroundFetchHandler.shared.requestNotificationAuthorization()
@@ -89,7 +89,7 @@ import Network
   private func handleMethodCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
     case "scheduleBackgroundFetch":
-      BackgroundFetchHandler.shared.scheduleAppRefresh()
+      BackgroundFetchHandler.shared.scheduleBothTasks()
       result(true)
 
     case "cancelBackgroundFetch":

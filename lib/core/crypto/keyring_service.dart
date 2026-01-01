@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/platform/dpapi_ffi.dart';
 
 /// OS Keyring abstraction (Architecture §3.7).
 ///
@@ -200,49 +201,23 @@ class _WindowsDpapiKeyring extends KeyringService {
   Future<bool> _roundTripProbe() async {
     try {
       final testData = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
-      final b64Input = base64Encode(testData);
-
-      // Protect step with 5s timeout — if DPAPI hangs, fall back to file storage.
-      final protect = await Process.run('powershell', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        'Add-Type -AssemblyName System.Security; '
-            '[Convert]::ToBase64String('
-            '[System.Security.Cryptography.ProtectedData]::Protect('
-            '[Convert]::FromBase64String("$b64Input"), '
-            '\$null, '
-            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
-            '))',
-      ]).timeout(const Duration(seconds: 5));
-      if (protect.exitCode != 0) {
-        _log.warn('DPAPI Protect probe failed: ${protect.stderr}');
+      final encrypted = DpapiFfi.instance.protect(testData);
+      if (encrypted == null) {
+        _log.warn('DPAPI Protect probe failed');
         return false;
       }
-      final encrypted = (protect.stdout as String).trim();
-
-      // Unprotect step with 5s timeout.
-      final unprotect = await Process.run('powershell', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        'Add-Type -AssemblyName System.Security; '
-            '[Convert]::ToBase64String('
-            '[System.Security.Cryptography.ProtectedData]::Unprotect('
-            '[Convert]::FromBase64String("$encrypted"), '
-            '\$null, '
-            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
-            '))',
-      ]).timeout(const Duration(seconds: 5));
-      if (unprotect.exitCode != 0) {
-        _log.warn('DPAPI Unprotect probe failed: ${unprotect.stderr}');
+      final decrypted = DpapiFfi.instance.unprotect(encrypted);
+      if (decrypted == null) {
+        _log.warn('DPAPI Unprotect probe failed');
         return false;
       }
-
-      final loaded = base64Decode((unprotect.stdout as String).trim());
-      if (loaded.length != 4) return false;
+      if (decrypted.length != 4) return false;
       for (var i = 0; i < 4; i++) {
-        if (loaded[i] != testData[i]) return false;
+        if (decrypted[i] != testData[i]) return false;
       }
       return true;
     } catch (e) {
-      _log.warn('DPAPI round-trip probe exception/timeout: $e');
+      _log.warn('DPAPI round-trip probe exception: $e');
       return false;
     }
   }
@@ -250,26 +225,14 @@ class _WindowsDpapiKeyring extends KeyringService {
   @override
   bool store(String name, Uint8List data) {
     try {
-      final b64Input = base64Encode(data);
-      // PowerShell DPAPI: encrypts data bound to the current Windows user.
-      final result = Process.runSync('powershell', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        'Add-Type -AssemblyName System.Security; '
-            '[Convert]::ToBase64String('
-            '[System.Security.Cryptography.ProtectedData]::Protect('
-            '[Convert]::FromBase64String("$b64Input"), '
-            '\$null, '
-            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
-            '))',
-      ]);
-      if (result.exitCode != 0) {
-        _log.warn('DPAPI Protect failed for "$name": ${result.stderr}');
+      final encrypted = DpapiFfi.instance.protect(data);
+      if (encrypted == null) {
+        _log.warn('DPAPI Protect failed for "$name"');
         return false;
       }
-      final encrypted = (result.stdout as String).trim();
       final file = File(_pathFor(name));
       file.parent.createSync(recursive: true);
-      file.writeAsStringSync(encrypted);
+      file.writeAsBytesSync(encrypted);
       return true;
     } catch (e) {
       _log.warn('DPAPI store error for "$name": $e');
@@ -282,41 +245,52 @@ class _WindowsDpapiKeyring extends KeyringService {
     try {
       final file = File(_pathFor(name));
       if (!file.existsSync()) return null;
-      var encrypted = file.readAsStringSync().trim();
-      if (encrypted.isEmpty) return null;
-      // Strip whitespace first: PowerShell's ToBase64String may line-wrap
-      // at 76 chars, inserting \r\n into the DPAPI ciphertext file.
-      // Without stripping, the regex below would reject valid DPAPI output,
-      // causing post-migration identity loss (seed gone, legacy deleted).
-      encrypted = encrypted.replaceAll(RegExp(r'\s+'), '');
-      // Validate strict base64 to prevent PowerShell injection via tampered
-      // .dpapi files (the string is interpolated into a -Command argument).
-      if (!RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(encrypted)) {
-        _log.warn('DPAPI file for "$name" contains invalid characters — '
-            'possible tampering, refusing to load');
+      final raw = file.readAsBytesSync();
+      if (raw.isEmpty) return null;
+
+      // Migration: old PowerShell-based code wrote base64-encoded DPAPI
+      // ciphertext as text. Detect by checking if content is valid ASCII
+      // base64 (only printable chars + whitespace). Raw DPAPI ciphertext
+      // contains non-ASCII bytes, so the heuristic is reliable.
+      Uint8List encrypted;
+      if (_looksLikeBase64Text(raw)) {
+        var text = String.fromCharCodes(raw).trim();
+        text = text.replaceAll(RegExp(r'\s+'), '');
+        if (!RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(text)) {
+          _log.warn('DPAPI file for "$name" contains invalid characters');
+          return null;
+        }
+        encrypted = base64Decode(text);
+      } else {
+        encrypted = raw;
+      }
+
+      final decrypted = DpapiFfi.instance.unprotect(encrypted);
+      if (decrypted == null) {
+        _log.warn('DPAPI Unprotect failed for "$name"');
         return null;
       }
-      final result = Process.runSync('powershell', [
-        '-NoProfile', '-NonInteractive', '-Command',
-        'Add-Type -AssemblyName System.Security; '
-            '[Convert]::ToBase64String('
-            '[System.Security.Cryptography.ProtectedData]::Unprotect('
-            '[Convert]::FromBase64String("$encrypted"), '
-            '\$null, '
-            '[System.Security.Cryptography.DataProtectionScope]::CurrentUser'
-            '))',
-      ]);
-      if (result.exitCode != 0) {
-        _log.warn('DPAPI Unprotect failed for "$name": ${result.stderr}');
-        return null;
+
+      // Re-write as raw binary so future loads skip the base64 path.
+      if (_looksLikeBase64Text(raw)) {
+        try {
+          file.writeAsBytesSync(encrypted);
+        } catch (_) {}
       }
-      final b64 = (result.stdout as String).trim();
-      if (b64.isEmpty) return null;
-      return base64Decode(b64);
+
+      return decrypted;
     } catch (e) {
       _log.warn('DPAPI load error for "$name": $e');
       return null;
     }
+  }
+
+  static bool _looksLikeBase64Text(Uint8List data) {
+    for (final b in data) {
+      if (b > 0x7E) return false;
+      if (b < 0x09) return false;
+    }
+    return true;
   }
 
   @override

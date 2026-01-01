@@ -146,7 +146,7 @@ class _SetupScreenState extends State<SetupScreen> {
         final masterSeed = identityMgr.loadMasterSeed()!;
         final hdIndex = identityMgr.nextHdIndex();
         final pqFuture = identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
-        setState(() => _pqPrewarmFuture = pqFuture);
+        setState(() { _pqPrewarmFuture = pqFuture; });
         log('deterministic prewarm kicked (hdIndex=$hdIndex)');
         if (mounted) {
           await _showSeedPhraseBackup(words);
@@ -159,7 +159,7 @@ class _SetupScreenState extends State<SetupScreen> {
         final masterSeed = identityMgr.loadMasterSeed()!;
         final hdIndex = identityMgr.nextHdIndex();
         final pqFuture = identityMgr.preWarmPqKeysDeterministic(masterSeed, hdIndex);
-        setState(() => _pqPrewarmFuture = pqFuture);
+        setState(() { _pqPrewarmFuture = pqFuture; });
         log('deterministic prewarm kicked (existing seed, hdIndex=$hdIndex)');
       }
 
