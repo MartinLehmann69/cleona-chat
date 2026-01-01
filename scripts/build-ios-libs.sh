@@ -431,11 +431,18 @@ for platform_tag in device simulator; do
     INSTALL="$( [ "$platform_tag" = "device" ] && echo "$DEVICE_INSTALL" || echo "$SIM_INSTALL" )"
     [ -d "$INSTALL" ] || continue
 
-    # Collect all .a files from all lib install dirs
+    # Collect all .a files from all lib install dirs.
+    # Skip libggml-base.a and libggml-cpu.a — libggml.a is the umbrella
+    # that already contains their object files. Including all three causes
+    # duplicate symbols when DEAD_CODE_STRIPPING is disabled.
     ALL_ARCHIVES=()
     for subdir in sodium/lib oqs/lib zstd/lib ec/lib opus/lib whisper/lib cleona_audio/lib speexdsp/lib; do
         for a in "$INSTALL/$subdir"/*.a; do
-            [ -f "$a" ] && ALL_ARCHIVES+=("$a")
+            [ -f "$a" ] || continue
+            case "$(basename "$a")" in
+                libggml-base.a|libggml-cpu.a) echo "  skip $(basename "$a") (in libggml.a)"; continue ;;
+            esac
+            ALL_ARCHIVES+=("$a")
         done
     done
 

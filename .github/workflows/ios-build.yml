@@ -156,6 +156,10 @@ jobs:
         run: |
           ls -lh ios/CleonaNative/libcleona_all_device.a
           ls -lh ios/CleonaNative/libcleona_all_simulator.a 2>/dev/null || true
+          echo "=== Duplicate symbols in merged archive ==="
+          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | head -30
+          echo "=== Duplicate count ==="
+          nm -g ios/CleonaNative/libcleona_all_device.a 2>/dev/null | grep ' T ' | awk '{print $3}' | sort | uniq -d | wc -l
 
       - name: Install distribution certificate
         env:
