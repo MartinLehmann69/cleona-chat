@@ -52,14 +52,16 @@ void main() {
     _writeGuiLock();
   }
 
-  // Android: Edge-to-Edge + Portrait lock.
-  // Portrait lock prevents Activity recreation on rotation which would destroy
-  // the in-process CleonaNode (port conflict, state corruption).
-  if (Platform.isAndroid) {
+  // Mobile: Portrait lock prevents Activity/Scene recreation on rotation
+  // which would destroy the in-process CleonaNode (port conflict, state corruption).
+  if (Platform.isAndroid || Platform.isIOS) {
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.portraitUp,
       DeviceOrientation.portraitDown,
     ]);
+  }
+  // Android-only: Edge-to-Edge transparent system bars.
+  if (Platform.isAndroid) {
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
@@ -933,10 +935,10 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    // Android: no daemon, start node in-process (the app IS the node).
+    // Android + iOS: no daemon, start node in-process (the app IS the node).
     // Same multi-identity model as the Linux daemon: one node, all identities active.
     // IMPORTANT: Defer heavy work so the loading screen renders first.
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid || Platform.isIOS) {
       // Signal that we have a profile (shows loading screen immediately)
       notifyListeners();
       // Schedule heavy init after the current frame completes
