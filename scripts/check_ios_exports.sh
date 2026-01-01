@@ -24,7 +24,7 @@ fi
 
 # Files that contain platform-specific FFI bindings NOT relevant for iOS.
 # These load Win32 APIs, Linux GTK/appindicator, V4L2, or Windows-only shims.
-EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|video_capture_linux\.dart"
+EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.dart|video_capture_linux\.dart|dpapi_ffi\.dart"
 
 # Collect all FFI symbols from Dart code that runs on iOS.
 SYMBOLS=$(grep -rA1 "lookupFunction\|\.lookup<" "$LIB_DIR" --include="*.dart" \
