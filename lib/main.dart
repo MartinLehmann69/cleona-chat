@@ -1335,7 +1335,9 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           mt == proto.MessageTypeV3.MTV3_PEER_STORE_ACK ||
           mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE ||
           mt == proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE ||
-          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE;
+          mt == proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE ||
+          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST ||
+          mt == proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER;
       if (!isServiceRouted) return;
       final deviceIdBytes = Uint8List.fromList(frame.recipientDeviceId);
       final identities = node.identitiesForDevice(deviceIdBytes).toList();
@@ -1401,6 +1403,14 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
           case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
             service.handleIncomingPeerRetrieveResponseInfra(
                 frame, senderDeviceId, from, port, snapshot);
+            break;
+          case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
+            service.handleIncomingDeviceKemRequest(
+                frame, senderDeviceId, from, port);
+            break;
+          case proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER:
+            service.handleIncomingDeviceKemOffer(
+                frame, senderDeviceId);
             break;
           default:
             break;

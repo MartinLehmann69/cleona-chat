@@ -298,6 +298,11 @@ class CleonaService implements ICleonaService {
   // Keeps retrying forever so eventually-online contacts still get through,
   // but at low frequency after the initial burst (~10 attempts in 20min).
   final Map<String, int> _crRetryCountPerContact = {};
+  // §8.1.1 rev3 step 1b: pending DEVICE_KEM_OFFER completers.
+  // Key = hex(targetDeviceId), value = completer resolved by the
+  // incoming DEVICE_KEM_OFFER handler. Timeout in sendContactRequest.
+  final Map<String, Completer<({Uint8List dxk, Uint8List dmk})>>
+      _pendingKemOfferCompleters = {};
   // Per-contact last end-to-end-confirmed ACK (any message type).
   // Proves reachability to the contact — stops CR-Response retry flooding
   // on CGNAT peers where DELIVERY_RECEIPTs arrive only via relay and thus
@@ -2758,20 +2763,83 @@ class CleonaService implements ICleonaService {
         } catch (_) {}
       }
       final picked = firstCrPickDeviceKem(resolved, preferred);
-      if (picked == null) {
+      if (picked != null) {
+        dxk = Uint8List.fromList(picked.deviceX25519Pk!);
+        dmk = Uint8List.fromList(picked.deviceMlKemPk!);
+        recipientDeviceId = Uint8List.fromList(picked.deviceNodeId);
+        _log.info('CONTACT_REQUEST First-CR: DHT resolved device '
+            '${bytesToHex(recipientDeviceId).substring(0, 8)} for '
+            '${recipientUserIdHex.substring(0, 8)} '
+            '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
+      } else if (seedDeviceIdHex != null && seedDeviceIdHex.isNotEmpty) {
+        // §8.1.1 rev3 step 1b: DHT miss — fallback to DEVICE_KEM_REQUEST.
+        // Send a plaintext BOOT-frame request to the target device (no KEM
+        // needed). The target responds with a signed DEVICE_KEM_OFFER
+        // containing its Device-KEM-PK pair. We verify the OFFER signature
+        // against the ep trust-anchor from the ContactSeed.
+        final targetDevId = hexToBytes(seedDeviceIdHex);
+        _log.info('CONTACT_REQUEST First-CR: DHT miss — '
+            'sending DEVICE_KEM_REQUEST to '
+            '${seedDeviceIdHex.substring(0, 8)}');
+        final nonce = SodiumFFI().randomBytes(16);
+        final request = proto.DeviceKemRequestV3()
+          ..targetUserId = recipientUserId
+          ..targetDeviceId = targetDevId
+          ..nonce = nonce
+          ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
+        final requestBytes =
+            Uint8List.fromList(request.writeToBuffer());
+
+        final completer = Completer<({Uint8List dxk, Uint8List dmk})>();
+        final targetDevHex = seedDeviceIdHex;
+        _pendingKemOfferCompleters[targetDevHex] = completer;
+
+        // Send to target directly (BOOT-path, no KEM) + via seed peers.
+        unawaited(node.sendInfraTo(
+          messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST,
+          innerPayload: requestBytes,
+          recipientDeviceId: targetDevId,
+        ));
+
+        try {
+          final offer = await completer.future
+              .timeout(const Duration(seconds: 8));
+          dxk = offer.dxk;
+          dmk = offer.dmk;
+          recipientDeviceId = targetDevId;
+          // Prime the DKR cache so retries skip DHT+handshake.
+          final primed = DeviceKemRecord(
+            userId: recipientUserId,
+            deviceId: targetDevId,
+            deviceX25519Pk: dxk,
+            deviceMlKemPk: dmk,
+            ttlSeconds: 24 * 3600,
+            sequenceNumber: 0,
+            publishedAtMs: DateTime.now().millisecondsSinceEpoch,
+            userEd25519Pk: Uint8List(0),
+            ed25519Sig: Uint8List(0),
+          );
+          node.identityDhtHandler.handleKemPublish(primed);
+          _log.info('CONTACT_REQUEST First-CR: DEVICE_KEM_OFFER received '
+              'for ${seedDeviceIdHex.substring(0, 8)} — proceeding');
+        } on TimeoutException {
+          _pendingKemOfferCompleters.remove(targetDevHex);
+          _log.warn('CONTACT_REQUEST: Deferred Key Exchange timeout — '
+              'no DEVICE_KEM_OFFER from '
+              '${seedDeviceIdHex.substring(0, 8)} within 8s. '
+              'CR queued for retry.');
+          return false;
+        } finally {
+          _pendingKemOfferCompleters.remove(targetDevHex);
+        }
+      } else {
         _log.warn('CONTACT_REQUEST: Deferred Key Exchange failed — '
             'no DeviceKemRecord in DHT for '
-            '${recipientUserIdHex.substring(0, 8)}. '
+            '${recipientUserIdHex.substring(0, 8)} '
+            'and no seedDeviceIdHex for fallback. '
             'CR queued for retry (exponential backoff).');
         return false;
       }
-      dxk = Uint8List.fromList(picked.deviceX25519Pk!);
-      dmk = Uint8List.fromList(picked.deviceMlKemPk!);
-      recipientDeviceId = Uint8List.fromList(picked.deviceNodeId);
-      _log.info('CONTACT_REQUEST First-CR: DHT resolved device '
-          '${bytesToHex(recipientDeviceId).substring(0, 8)} for '
-          '${recipientUserIdHex.substring(0, 8)} '
-          '(publishedAtMs=${picked.deviceKemPublishedAtMs})');
     }
 
     // Build inner ApplicationFrameV3, User-signed. Sender pubkeys are
@@ -9954,6 +10022,110 @@ class CleonaService implements ICleonaService {
   /// §8.1.1 trust-bootstrap (the recipient cannot do contact-registry
   /// lookup because the CR is what creates the contact).
   ///
+  // ── §8.1.1 rev3 step 1b: Deferred Key Exchange handlers ──────────
+
+  /// Handle incoming DEVICE_KEM_REQUEST — respond with DEVICE_KEM_OFFER
+  /// containing our Device-KEM-PK pair, signed with our user Ed25519 SK.
+  void handleIncomingDeviceKemRequest(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+    InternetAddress sourceAddr,
+    int sourcePort,
+  ) {
+    try {
+      final req = proto.DeviceKemRequestV3.fromBuffer(frame.payload);
+      final targetUserHex = bytesToHex(Uint8List.fromList(req.targetUserId));
+      final targetDevHex = bytesToHex(Uint8List.fromList(req.targetDeviceId));
+      if (targetUserHex != identity.userIdHex) return;
+      if (targetDevHex != identity.deviceNodeIdHex) return;
+
+      final dxk = node.deviceKem.x25519PublicKey;
+      final dmk = node.deviceKem.mlKemPublicKey;
+      final nonce = Uint8List.fromList(req.nonce);
+
+      // Sign (dxk + dmk + nonce) with user Ed25519 SK.
+      final sigPayload = Uint8List(dxk.length + dmk.length + nonce.length);
+      sigPayload.setRange(0, dxk.length, dxk);
+      sigPayload.setRange(dxk.length, dxk.length + dmk.length, dmk);
+      sigPayload.setRange(dxk.length + dmk.length, sigPayload.length, nonce);
+      final sig = SodiumFFI().signEd25519(sigPayload, identity.ed25519SecretKey);
+
+      final offer = proto.DeviceKemOfferV3()
+        ..deviceX25519Pk = dxk
+        ..deviceMlKemPk = dmk
+        ..nonce = nonce
+        ..userEd25519Sig = sig
+        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch);
+      final offerBytes = Uint8List.fromList(offer.writeToBuffer());
+
+      unawaited(node.sendInfraTo(
+        messageType: proto.MessageTypeV3.MTV3_DEVICE_KEM_OFFER,
+        innerPayload: offerBytes,
+        recipientDeviceId: senderDeviceId,
+      ));
+      _log.info('DEVICE_KEM_REQUEST from '
+          '${bytesToHex(senderDeviceId).substring(0, 8)} — '
+          'replied with DEVICE_KEM_OFFER');
+    } catch (e) {
+      _log.warn('DEVICE_KEM_REQUEST parse/handle error: $e');
+    }
+  }
+
+  /// Handle incoming DEVICE_KEM_OFFER — verify signature against the ep
+  /// trust-anchor and resolve the pending completer.
+  void handleIncomingDeviceKemOffer(
+    proto.InfrastructureFrameV3 frame,
+    Uint8List senderDeviceId,
+  ) {
+    try {
+      final offer = proto.DeviceKemOfferV3.fromBuffer(frame.payload);
+      final senderDevHex = bytesToHex(senderDeviceId);
+      final completer = _pendingKemOfferCompleters[senderDevHex];
+      if (completer == null || completer.isCompleted) {
+        _log.debug('DEVICE_KEM_OFFER from $senderDevHex — '
+            'no pending completer (stale or duplicate)');
+        return;
+      }
+
+      final dxk = Uint8List.fromList(offer.deviceX25519Pk);
+      final dmk = Uint8List.fromList(offer.deviceMlKemPk);
+      final nonce = Uint8List.fromList(offer.nonce);
+      final sig = Uint8List.fromList(offer.userEd25519Sig);
+
+      // Find the ep trust-anchor for this device from the pending contact.
+      Uint8List? epPk;
+      for (final c in _contacts.values) {
+        if (c.seedDeviceIdHex == senderDevHex && c.seedEpB64 != null) {
+          epPk = base64Decode(c.seedEpB64!);
+          break;
+        }
+      }
+      if (epPk == null) {
+        _log.warn('DEVICE_KEM_OFFER from $senderDevHex — '
+            'no ep trust-anchor found, dropping');
+        return;
+      }
+
+      // Verify: sig over (dxk + dmk + nonce) with the ep public key.
+      final sigPayload = Uint8List(dxk.length + dmk.length + nonce.length);
+      sigPayload.setRange(0, dxk.length, dxk);
+      sigPayload.setRange(dxk.length, dxk.length + dmk.length, dmk);
+      sigPayload.setRange(dxk.length + dmk.length, sigPayload.length, nonce);
+      final valid = SodiumFFI().verifyEd25519(sigPayload, sig, epPk);
+      if (!valid) {
+        _log.warn('DEVICE_KEM_OFFER from $senderDevHex — '
+            'Ed25519 signature verification FAILED against ep');
+        return;
+      }
+
+      completer.complete((dxk: dxk, dmk: dmk));
+      _log.info('DEVICE_KEM_OFFER from $senderDevHex — '
+          'sig verified against ep, completer resolved');
+    } catch (e) {
+      _log.warn('DEVICE_KEM_OFFER parse/handle error: $e');
+    }
+  }
+
   /// Verify path: parse inner ApplicationFrameV3, parse its
   /// ContactRequestMsg payload, extract `(ed25519_pk, ml_dsa_pk)`, run the
   /// User-Sig verify against those — then dispatch through the normal
@@ -12214,6 +12386,7 @@ class CleonaService implements ICleonaService {
         existing.seedDeviceIdHex = null;
         existing.seedDxkB64 = null;
         existing.seedDmkB64 = null;
+        existing.seedEpB64 = null;
         existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
         existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
         existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
