@@ -1,0 +1,84 @@
+# FFI entry points for Cleona native libraries.
+# Symbols listed here are treated as dead-strip roots — the linker keeps them
+# and everything reachable from them. Unlisted symbols (including duplicates
+# between libs) are silently dead-stripped, which resolves duplicate-symbol
+# errors without manual archive deduplication.
+#
+# Wildcard (*) matches any suffix. Prefix underscore is the C symbol mangling
+# on Apple platforms.
+
+# libsodium
+_sodium_init
+_randombytes_buf
+_crypto_sign_keypair
+_crypto_sign_seed_keypair
+_crypto_sign_detached
+_crypto_sign_verify_detached
+_crypto_sign_ed25519_pk_to_curve25519
+_crypto_sign_ed25519_sk_to_curve25519
+_crypto_scalarmult_base
+_crypto_scalarmult
+_crypto_aead_aes256gcm_encrypt
+_crypto_aead_aes256gcm_decrypt
+_crypto_aead_aes256gcm_keygen
+_crypto_hash_sha256
+_crypto_auth_hmacsha256
+_crypto_secretbox_easy
+_crypto_secretbox_open_easy
+_crypto_pwhash
+_crypto_hash_sha512
+_crypto_core_ed25519_is_valid_point
+_crypto_core_ed25519_from_uniform
+_crypto_core_ed25519_add
+_crypto_core_ed25519_scalar_reduce
+_crypto_core_ed25519_scalar_add
+_crypto_core_ed25519_scalar_sub
+_crypto_core_ed25519_scalar_mul
+_crypto_core_ed25519_scalar_random
+_crypto_scalarmult_ed25519_base_noclamp
+_crypto_scalarmult_ed25519_noclamp
+
+# liboqs
+_OQS_init
+_OQS_KEM_new
+_OQS_KEM_free
+_OQS_KEM_keypair
+_OQS_KEM_encaps
+_OQS_KEM_decaps
+_OQS_SIG_new
+_OQS_SIG_free
+_OQS_SIG_keypair
+_OQS_SIG_sign
+_OQS_SIG_verify
+
+# libzstd
+_ZSTD_compress
+_ZSTD_decompress
+_ZSTD_isError
+_ZSTD_getFrameContentSize
+_ZSTD_compressBound
+
+# libopus
+_opus_encoder_create
+_opus_encoder_destroy
+_opus_encode
+_opus_decoder_create
+_opus_decoder_destroy
+_opus_decode
+
+# whisper.cpp
+_whisper_init_from_file*
+_whisper_free
+_whisper_full
+_whisper_full_with_state
+_whisper_full_n_segments*
+_whisper_full_get_segment_text*
+_whisper_full_lang_id*
+_whisper_lang_str*
+_whisper_full_default_params*
+
+# libcleona_audio
+_cleona_audio_*
+
+# libvpx shim
+_cleona_vpx_*
