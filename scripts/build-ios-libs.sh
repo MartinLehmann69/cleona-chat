@@ -322,6 +322,8 @@ build_cleona_audio() {
     ninja -j"$NPROC"
     mkdir -p "$INSTALL_DIR/cleona_audio/lib" "$INSTALL_DIR/cleona_audio/include"
     cp libcleona_audio.a "$INSTALL_DIR/cleona_audio/lib/"
+    # speexdsp is built as a subdirectory — copy its .a too
+    find . -name 'libspeexdsp.a' -exec cp {} "$INSTALL_DIR/cleona_audio/lib/" \;
     cp "$src/cleona_audio.h" "$INSTALL_DIR/cleona_audio/include/"
     cd "$PROJECT_DIR"
 }
