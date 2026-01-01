@@ -40,6 +40,7 @@ import 'package:cleona/core/identity_resolution/liveness_record.dart';
 import 'package:cleona/core/identity_resolution/identity_dht_handler.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart';
 import 'package:cleona/core/crypto/file_encryption.dart';
+import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
@@ -162,6 +163,9 @@ class CleonaNode {
   /// §4.11 External Rendezvous: cold-start address resolution via external
   /// networks (Nostr). Wired by CleonaService after identity init.
   RendezvousManager? rendezvousManager;
+
+  /// §4.11.9 Infrastructure Rendezvous: network entry-point resolution.
+  InfraRendezvousManager? infraRendezvousManager;
 
   // Plan §D2: lightweight signal so application-layer code (e.g. CallManager's
   // per-CallSession route cache) can invalidate stale routes when DV-Routing
@@ -1150,22 +1154,64 @@ class CleonaNode {
       _log.info('§4.5 Cascade Tier 3 exhausted — bootstrap unreachable');
     }
 
-    // Tier 3b — External Rendezvous (§4.11): resolve current addresses
-    // for accepted contacts via Nostr relays. Fires only when internal
-    // discovery (Tier 1–3) failed to reach any peer.
-    if (!_discoveryComplete && rendezvousManager != null) {
+    // Tier 3b — External Rendezvous (§4.11 + §4.11.9): two parallel paths.
+    // (A) Contact-Rendezvous: resolve contact devices via device-scoped tags.
+    // (B) Infra-Rendezvous: resolve network entry-points via network-wide tag.
+    if (!_discoveryComplete &&
+        (rendezvousManager != null || infraRendezvousManager != null)) {
       _log.info('§4.5 Cascade Tier 3b: external rendezvous resolve');
       try {
-        final resolved = await rendezvousManager!.resolveContacts(
-            rendezvousManager!.contactsSnapshot);
-        for (final ep in resolved) {
-          for (final addr in ep.addresses) {
-            _sendPing(addr.ip, addr.port);
-          }
+        final futures = <Future>[];
+
+        // Path A: Contact-Rendezvous (§4.11.4)
+        if (rendezvousManager != null) {
+          futures.add(() async {
+            final contacts = rendezvousManager!.contactsSnapshot;
+            final deviceIds = <String, List<String>>{};
+            for (final c in contacts) {
+              final userIdBytes = hexToBytes(c.userIdHex);
+              final manifest =
+                  identityDhtHandler.getAuthManifest(userIdBytes);
+              if (manifest != null) {
+                deviceIds[c.userIdHex] = manifest.authorizedDeviceNodeIds
+                    .map(bytesToHex)
+                    .toList();
+              }
+            }
+            final resolved = await rendezvousManager!
+                .resolveContacts(contacts, contactDeviceIds: deviceIds);
+            for (final ep in resolved) {
+              for (final addr in ep.addresses) {
+                _sendPing(addr.ip, addr.port);
+              }
+            }
+            if (resolved.isNotEmpty) {
+              _log.info('§4.11 Contact-RV: resolved '
+                  '${resolved.length} contact(s)');
+            }
+          }());
         }
-        if (resolved.isNotEmpty) {
-          _log.info('§4.11 Rendezvous: resolved ${resolved.length} contact(s), '
-              'probing addresses');
+
+        // Path B: Infrastructure-Rendezvous (§4.11.9)
+        if (infraRendezvousManager != null) {
+          futures.add(() async {
+            final infraEps =
+                await infraRendezvousManager!.resolve();
+            for (final ep in infraEps) {
+              for (final addr in ep.addresses) {
+                _sendPing(addr.ip, addr.port);
+              }
+            }
+            if (infraEps.isNotEmpty) {
+              _log.info('§4.11.9 Infra-RV: resolved '
+                  '${infraEps.length} entry-point(s)');
+            }
+          }());
+        }
+
+        await Future.wait(futures);
+
+        if (!_discoveryComplete) {
           for (var i = 0; i < 10 && !_discoveryComplete; i++) {
             await Future.delayed(const Duration(milliseconds: 500));
           }
@@ -4805,6 +4851,7 @@ class CleonaNode {
     // 6a. §4.11: debounced rendezvous publish (10s) so contacts can
     // resolve our new address via Nostr after the IP changed.
     rendezvousManager?.onNetworkChanged();
+    infraRendezvousManager?.onNetworkChanged();
 
     // 6b. §4.5 Discovery Cascade restart: if step 4's PINGs did not
     // re-establish connectivity (no PONG → discoveryComplete stays false),

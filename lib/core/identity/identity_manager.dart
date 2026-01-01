@@ -146,10 +146,20 @@ class IdentityManager {
     // Legacy fallback for pre-migration profiles
     final fileEnc = FileEncryption(baseDir: baseDir);
     final json = fileEnc.readJsonFile('$baseDir/master_seed.json');
-    if (json == null) return null;
-    final hex = json['seed'] as String?;
-    if (hex == null) return null;
-    return _hexToBytes(hex);
+    if (json != null) {
+      final hex = json['seed'] as String?;
+      if (hex != null) return _hexToBytes(hex);
+    }
+    // If a .dpapi file exists but keyring load returned null, the DPAPI
+    // decryption failed (user-switch, session issue). Returning null here
+    // would silently trigger new random key generation → identity loss.
+    if (Platform.isWindows && File('$baseDir/master_seed.dpapi').existsSync()) {
+      stderr.writeln('[IdentityManager] FATAL: master_seed.dpapi exists but '
+          'DPAPI decryption failed and no file fallback available — '
+          'refusing to continue with null seed (would cause identity loss)');
+      throw StateError('master_seed.dpapi unreadable — identity would be lost');
+    }
+    return null;
   }
 
   void _storeMasterSeed(Uint8List seed) {
@@ -157,7 +167,10 @@ class IdentityManager {
     // Prevents seed loss when keyring becomes unreadable (baseDir change,
     // hostname change, secret-tool daemon unavailable).
     if (KeyringService.isInitialized) {
-      KeyringService.instance.store('master_seed', seed);
+      final stored = KeyringService.instance.store('master_seed', seed);
+      if (!stored) {
+        stderr.writeln('[IdentityManager] WARNING: keyring store failed for master_seed — file fallback only');
+      }
     }
     final fileEnc = FileEncryption(baseDir: baseDir);
     fileEnc.writeJsonFile('$baseDir/master_seed.json', {

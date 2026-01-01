@@ -6,7 +6,9 @@ library;
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:cleona/core/crypto/secp256k1_schnorr.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/peer_info.dart';
 import 'package:cleona/core/network/rendezvous/nostr_provider.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_secret.dart';
@@ -124,8 +126,11 @@ class RendezvousManager {
     if (_contacts.isEmpty) return;
 
     final addresses = addrFn();
-    if (addresses.isEmpty) {
-      _log.debug('Rendezvous publish: no addresses, skipping');
+    final publicAddresses = addresses
+        .where((a) => !PeerAddress.isPrivateIp(a.ip))
+        .toList();
+    if (publicAddresses.isEmpty) {
+      _log.debug('Rendezvous publish: no public addresses, skipping');
       return;
     }
 
@@ -134,8 +139,11 @@ class RendezvousManager {
     final currentEpoch = currentEpochString();
     final nextEpoch = nextEpochString();
 
+    final deviceIdHex =
+        devId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+
     final endpointAddresses =
-        addresses.map((a) => EndpointAddress(a.ip, a.port)).toList();
+        publicAddresses.map((a) => EndpointAddress(a.ip, a.port)).toList();
 
     final record = EndpointRecord(
       addresses: endpointAddresses,
@@ -149,15 +157,22 @@ class RendezvousManager {
       final secret = derivePairwiseSecret(
         sk, contact.foundingEd25519Pk, ownId, contact.userIdHex);
 
+      final nostrSk = deriveNostrSecretKey(secret, devId);
+      final nostrKp = secp256k1KeypairFromSecret(nostrSk);
+
       for (final epoch in [currentEpoch, nextEpoch]) {
-        final tag = computeLookupTag(
-            secret, epoch, ownId, contact.userIdHex);
+        final tag = computeLookupTag(secret, epoch, deviceIdHex);
         final encrypted = encryptEndpointRecord(record, secret, tag);
 
         for (final provider in _providers) {
           if (!provider.isAvailable) continue;
           try {
-            await provider.publish(tag, encrypted);
+            if (provider is NostrProvider) {
+              await provider.publishWithKey(
+                  tag, encrypted, nostrKp.secretKey);
+            } else {
+              await provider.publish(tag, encrypted);
+            }
             publishCount++;
           } catch (e) {
             _log.debug('Rendezvous publish failed for '
@@ -194,10 +209,12 @@ class RendezvousManager {
 
   /// Resolve current addresses for the given contacts via all providers.
   ///
-  /// Queries current and previous epoch tags in parallel across all providers.
+  /// For each contact, looks up device IDs from [contactDeviceIds] and queries
+  /// device-scoped tags. Falls back to previous epoch if current yields no hit.
   /// Returns the first valid, decryptable record per contact with highest seq.
   Future<List<ResolvedEndpoint>> resolveContacts(
-      List<RendezvousContact> contacts) async {
+      List<RendezvousContact> contacts,
+      {Map<String, List<String>> contactDeviceIds = const {}}) async {
     final sk = _ownFoundingSk;
     final ownId = _ownUserIdHex;
     if (sk == null || ownId == null) return [];
@@ -211,23 +228,31 @@ class RendezvousManager {
       final secret = derivePairwiseSecret(
           sk, contact.foundingEd25519Pk, ownId, contact.userIdHex);
 
+      final deviceIds = contactDeviceIds[contact.userIdHex] ?? [];
+      if (deviceIds.isEmpty) {
+        _log.debug('Rendezvous resolve: no cached deviceIds for '
+            '${contact.userIdHex.substring(0, 8)}…, skipping');
+        return;
+      }
+
       SignedEndpointRecord? bestRecord;
       Uint8List? bestTag;
 
-      for (final epoch in [currentEpoch, prevEpoch]) {
-        final tag = computeLookupTag(
-            secret, epoch, contact.userIdHex, ownId);
+      for (final devIdHex in deviceIds) {
+        for (final epoch in [currentEpoch, prevEpoch]) {
+          final tag = computeLookupTag(secret, epoch, devIdHex);
 
-        final records = await Future.wait(_providers
-            .where((p) => p.isAvailable)
-            .map((p) => p.resolve(tag).catchError((_) => null)));
+          final records = await Future.wait(_providers
+              .where((p) => p.isAvailable)
+              .map((p) => p.resolve(tag).catchError((_) => null)));
 
-        for (final record in records) {
-          if (record == null) continue;
-          final best = bestRecord;
-          if (best == null || record.seq > best.seq) {
-            bestRecord = record;
-            bestTag = tag;
+          for (final record in records) {
+            if (record == null) continue;
+            final best = bestRecord;
+            if (best == null || record.seq > best.seq) {
+              bestRecord = record;
+              bestTag = tag;
+            }
           }
         }
       }

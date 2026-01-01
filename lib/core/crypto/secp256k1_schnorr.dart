@@ -1,7 +1,7 @@
 /// Minimal secp256k1 BIP-340 Schnorr signature implementation in pure Dart.
 ///
-/// Used exclusively for Nostr event signing (throwaway keys, not
-/// performance-critical). No native dependency — runs on all platforms.
+/// Used for Nostr event signing (deterministic per contact×device keys,
+/// not performance-critical). No native dependency — runs on all platforms.
 ///
 /// References:
 ///   BIP-340: https://github.com/bitcoin/bips/blob/master/bip-0340.mediawiki
@@ -140,6 +140,26 @@ Uint8List _xonly(_Point p) => _bigIntToBytes32(p.x);
 /// Generates a random secp256k1 keypair.
 ///
 /// Returns (secretKey: 32 bytes, publicKey: 32 bytes x-only).
+/// Derives the x-only public key from a 32-byte secret key and returns it
+/// along with the (possibly negated) secret key ready for BIP-340 signing.
+({Uint8List secretKey, Uint8List publicKey}) secp256k1KeypairFromSecret(
+    Uint8List sk) {
+  if (sk.length != 32) {
+    throw ArgumentError('secp256k1KeypairFromSecret: sk must be 32 bytes');
+  }
+  var d = _bytesToBigInt(sk);
+  if (d == BigInt.zero || d >= _n) {
+    throw ArgumentError('secp256k1KeypairFromSecret: sk out of range');
+  }
+  final p = _pointMul(_g, d);
+  final dFinal = p.y.isOdd ? _n - d : d;
+  return (secretKey: _bigIntToBytes32(dFinal), publicKey: _xonly(p));
+}
+
+/// Returns just the x-only public key for a 32-byte secret key.
+Uint8List secp256k1PubkeyFromSecret(Uint8List sk) =>
+    secp256k1KeypairFromSecret(sk).publicKey;
+
 ({Uint8List secretKey, Uint8List publicKey}) generateSecp256k1Keypair() {
   final sodium = SodiumFFI();
   Uint8List sk;

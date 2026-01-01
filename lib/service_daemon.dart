@@ -13,6 +13,9 @@ import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/network/peer_info.dart' show bytesToHex;
 import 'package:cleona/core/ipc/ipc_server.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
+import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart'
+    show RendezvousAddress;
 import 'package:cleona/core/network/transport.dart' show Transport;
 import 'package:cleona/core/tray/native_tray.dart';
 import 'package:cleona/core/platform/app_paths.dart';
@@ -617,6 +620,18 @@ class _MultiServiceDaemon {
     // Start the shared node
     await node.startQuick();
     log.info('Node gestartet auf Port $nodePort, ${_contexts.length} Identitäten');
+
+    // §4.11.9 Infrastructure Rendezvous: publish this node's public addresses.
+    final infraRv = InfraRendezvousManager(profileDir: config.baseDir);
+    infraRv.init(
+      networkSecret: NetworkSecret.secret,
+      deviceId: _contexts.values.first.nodeId,
+      addressProvider: () => node.currentSelfAddresses()
+          .map((a) => RendezvousAddress(a.ip, a.port))
+          .toList(),
+    );
+    node.infraRendezvousManager = infraRv;
+    infraRv.startPeriodicRefresh();
 
     // Create and start a CleonaService for each identity
     for (final ctx in _contexts.values) {

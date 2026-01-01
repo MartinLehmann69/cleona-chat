@@ -8,6 +8,9 @@ import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/service/cleona_service.dart';
 import 'package:cleona/core/network/contact_seed.dart';
+import 'package:cleona/core/network/rendezvous/infra_rendezvous_manager.dart';
+import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart'
+    show RendezvousAddress;
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 import 'package:cleona/core/network/clogger.dart';
 import 'dart:typed_data';
@@ -140,6 +143,19 @@ void main(List<String> args) {
 
     // Start node (blocking bootstrap)
     await node.start();
+
+    // §4.11.9 Infrastructure Rendezvous: publish this node's public addresses
+    // on Nostr so cold-starting clients can find network entry points.
+    final infraRv = InfraRendezvousManager(profileDir: baseDir);
+    infraRv.init(
+      networkSecret: NetworkSecret.secret,
+      deviceId: identity.nodeId,
+      addressProvider: () => node.currentSelfAddresses()
+          .map((a) => RendezvousAddress(a.ip, a.port))
+          .toList(),
+    );
+    node.infraRendezvousManager = infraRv;
+    infraRv.startPeriodicRefresh();
 
     // Start service (contacts, conversations, mailbox)
     await service.startService();

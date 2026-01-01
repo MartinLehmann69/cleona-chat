@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:be3585dd0696, 2026-06-28). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:ad86ba75ce93, 2026-06-30). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1229,7 +1229,7 @@ files/.cleona/                                (Android, in app-private storage)
 ```
 
 **Key cascade**:
-1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) — the DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.enc` files. On Android: AndroidKeyStore with a biometric/device-credential gate. On macOS: Keychain via `security` CLI. When no OS keyring is available (headless daemons, iOS, unsupported platforms), a **file-based fallback** encrypts key material at rest using XSalsa20-Poly1305 (secretbox) with a key derived from `SHA-256(hostname + salt)` (v2 — baseDir was removed from the derivation in S106 because path changes silently broke all stored secrets; v1 files are transparently migrated on first load). The master seed is dual-written to both keyring and legacy file as defence-in-depth against keyring loss. `DeviceKeysStore.loadOrCreate()` refuses to silently regenerate device keys when a `.enc` file exists but cannot be decrypted — it tries legacy `db.key` fallback first, then fails loud. This is not equivalent to hardware-backed protection (the key is reconstructible from machine context), but prevents plaintext seed exposure via backup copies, accidental file access, or forensic disk reads.
+1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) with a **round-trip probe** at `init()` — a 4-byte test value is encrypted, decrypted, and compared; if the probe fails (Session-0 context, corrupted master keys, service accounts), the Windows backend falls back to `_FileKeyringFallback` instead of silently producing unreadable ciphertext. The DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.dpapi` files. On Android: AndroidKeyStore with a biometric/device-credential gate. On macOS: Keychain via `security` CLI. When no OS keyring is available (headless daemons, iOS, unsupported platforms, or Windows DPAPI probe failure), a **file-based fallback** encrypts key material at rest using XSalsa20-Poly1305 (secretbox) with a key derived from `SHA-256(hostname + salt)` (v2 — baseDir was removed from the derivation in S106 because path changes silently broke all stored secrets; v1 files are transparently migrated on first load). The master seed is dual-written to both keyring and legacy file as defence-in-depth against keyring loss; `_storeMasterSeed()` checks the keyring `store()` return value and logs a warning on failure. Both `DeviceKeysStore.loadOrCreate()` and `loadMasterSeed()` refuse to silently regenerate keys when encrypted key material exists on disk but cannot be decrypted — `DeviceKeysStore` tries legacy `db.key` fallback first then fails loud; `loadMasterSeed()` throws `StateError` when a `.dpapi` file exists but DPAPI decryption fails and no file fallback is available (preventing the catastrophic cascade: null seed → null fileEncKey → new random keys → silent identity loss). This is not equivalent to hardware-backed protection (the key is reconstructible from machine context), but prevents plaintext seed exposure via backup copies, accidental file access, or forensic disk reads.
 2. The **Master-Seed** is held in RAM after daemon start (in a protected memory region via libsodium `sodium_mlock`).
 3. **HD-Wallet derivation** (§3.6) generates all further keys on demand — the private keys live only in protected memory.
 4. The **DB-Encryption-Key** is derived from the User-Identity Ed25519 private key (§3.8).
@@ -1697,7 +1697,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 | **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by **stability tier (§4.9.2) first, then lastSeen recency** — Anchor/Stable peers (same address ≥30d/7d) are probed first because they have the highest probability of still being reachable after extended offline. One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
 | **2 — LAN Discovery** | 3× burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76, TTL=4) + IPv6-Multicast, then silence. | Tier 1 exhausted (all stored peers unreachable or routing table empty) | 9 datagrams (3 × 3 channels) |
 | **3 — Bootstrap** | Unicast probe to cached bootstrap addresses: stored peers with public WAN IPs are probed on both their stored port and the channel-default bootstrap port (8081 beta / 8080 live — §17.5). Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–4 PINGs |
-| **3b — External Rendezvous** | Resolve anchor/stable contacts via the RendezvousProvider cascade (§4.11). For each contact with `stabilityTier` anchor/stable: compute the pairwise lookup tag for the current epoch, query all available providers (Nostr relays) in parallel (Happy-Eyeballs). First valid, signature-verified record yields the contact's current addresses → direct contact attempt via UDP. Timeout: 10 s per provider. | Tier 3 exhausted AND at least 1 accepted contact exists | < 50 KB (a few WebSocket requests) |
+| **3b — External Rendezvous** | Two parallel resolve paths: **(A) Contact-Rendezvous** — for each unreachable contact: look up cached AuthManifest (§4.3) → device list; for each device: compute device-scoped lookup tag (§4.11.4), query all providers. First valid record per device yields the device's externally reachable addresses → direct UDP contact attempt. Falls back to previous epoch if current yields no hits. **(B) Infrastructure Rendezvous (§4.11.9)** — compute network-wide infra tag, query all providers → returns current addresses of all publicly reachable network nodes (bootstrap, port-forwarded peers). Connect to any hit → enter the mesh → reach remaining contacts via DV routing. Both paths fire in parallel; first successful connection from either path triggers discovery-complete. Timeout: 10 s per provider. | Tier 3 exhausted AND at least 1 accepted contact exists (path A) OR network secret available (path B) | < 50 KB (a few WebSocket requests) |
 | **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Rate-limited to ~50 pps to avoid flooding upstream WAN links (§4.5.3). Last resort. | Tier 3b exhausted (no external rendezvous hit or no contacts) | ~65 000 probes over ~22 min |
 
 **Discovery-complete gate**: the node-level flag `_discoveryComplete` is set when **any** tier produces a confirmed peer that delivers a `PEER_LIST_PUSH` with ≥1 entry. Once set:
@@ -2073,7 +2073,7 @@ This visibility is identical to V2's behaviour and was implicitly accepted there
 
 When a node is offline for more than 24 hours, its ISP may assign a new IP (dynamic IPv4, CGNAT remapping). The stored peer addresses in its routing table are stale, and the internal Cleona DHT (§4.2/§4.3) cannot help — it is only as alive as the node's own peers. The §4.5 Discovery Cascade escalates to LAN discovery (local only), bootstrap (may also have rotated), and subnet scan (22 minutes, local only). For peers on other networks (mobile carrier, different ISP, different city), there is **no** recovery path.
 
-**Solution**: Bob's **current endpoint** is published on **external, permanently running networks** under a stable, privacy-preserving key. Alice — or any of Bob's contacts — can resolve that key after extended offline to obtain Bob's current address and re-enter the Cleona mesh.
+**Solution**: Each of Bob's **devices** independently publishes its own current endpoint on **external, permanently running networks** under a device-scoped, privacy-preserving key. The resolver uses the 2D DHT AuthManifest (§4.3, cached or live) to map Bob's userId to his device list, then resolves each device's endpoint via device-scoped lookup tags. This makes External Rendezvous a pure **deviceId → IP:port** directory — the userId → deviceId mapping is handled by the existing Identity Resolution (§4.3).
 
 **Scope**: External Rendezvous handles only cold-start address resolution. Once a single live peer is found, all further traffic flows over the existing Closed-Network (§4.10) with HMAC authentication. The external networks **never** carry Cleona message traffic — they are a pure `lookupTag → encryptedEndpoint` directory.
 
@@ -2138,20 +2138,22 @@ rendezvous_secret = HKDF-SHA-256(
 lookup_tag = HKDF-SHA-256(
     ikm    = rendezvous_secret,
     salt   = "cleona-rv-tag-v1",
-    info   = epoch_string || "/" || direction,
+    info   = epoch_string || "/" || hex(publisher_device_id),
     length = 32
 )
 
 epoch_string = "YYYY-MM-DD-HH"  (UTC, 6-hour boundaries: 00/06/12/18)
-direction    = "0" if publisher_userId < resolver_userId (lexicographic)
-               "1" otherwise
 ```
+
+The `publisher_device_id` is the 32-byte Device-Node-ID of the publishing device (HD-Wallet-derived, §7, stable across IP changes). The resolver obtains the publisher's device list from the cached AuthManifest (§4.3) and computes the matching tag for each device.
 
 **Properties**:
 - **Pairwise**: each contact pair has a unique tag per epoch → perfect unlinkability. An observer who compromises one contact's key learns only that pair's tags, not the publisher's presence as seen by other contacts.
-- **6-hour epochs**: balance between publish frequency (4×/day per contact) and correlation window. Short enough that an old tag cannot be polled indefinitely; long enough that publisher and resolver don't need tight clock sync.
-- **Overlap publish**: the publisher always publishes for both the current and the next epoch. This covers the transition window where Alice's clock may be in the next epoch while the record was published under the current one. Cost: 2× records per contact, negligible at Nostr's traffic level.
-- **Direction bit**: ensures Bob's "I am here" record is under a different tag than Alice's "I am here" record for the same contact pair — prevents collisions when both publish simultaneously.
+- **Device-scoped**: each device's tag is unique via its stable `device_id`. No direction bit needed — unlike the user-level design where both sides of a contact pair shared the same rendezvous secret and needed a direction bit to avoid tag collisions, each device already has a globally unique ID. Alice's desktop and Bob's phone naturally produce different tags even for the same contact pair and epoch.
+- **6-hour epochs**: balance between publish frequency (4×/day per contact per device) and correlation window. Short enough that an old tag cannot be polled indefinitely; long enough that publisher and resolver don't need tight clock sync.
+- **Overlap publish**: the publisher always publishes for both the current and the next epoch. This covers the transition window where Alice's clock may be in the next epoch while the record was published under the current one. Cost: 2× records per contact per device, negligible at Nostr's traffic level.
+
+**Resolver device-list source**: the resolver needs the publisher's device IDs to compute lookup tags. These come from the cached AuthManifest (§4.3), which is fetched automatically on first contact and refreshed every 24h while online. Device IDs are HD-Wallet-derived (§7) and stable — a cached manifest from days ago still lists the correct device IDs even if the devices' IPs have changed. This is the key property that makes cold-start resolution work: the AuthManifest cache survives extended offline.
 
 **Clock tolerance**: 6-hour epochs tolerate clock skew of up to ±3 hours (the overlap publish extends coverage to ±6 hours). Cleona's existing NTP sync (§2.4.1) keeps clocks within seconds — this is more than adequate.
 
@@ -2162,7 +2164,7 @@ The record stored on external substrates is encrypted and signed:
 ```
 // Plaintext payload
 endpoint_record = {
-  addresses:    [PeerAddressProto, ...],   // current reachable addresses
+  addresses:    [PeerAddressProto, ...],   // current EXTERNALLY reachable addresses (public IPv4, global IPv6 only — no RFC 1918/RFC 4193 private addresses)
   seq:          uint64,                     // monotonically increasing
   published_at: uint64,                     // ms since epoch
   device_id:    bytes[32],                  // publisher's device ID
@@ -2191,7 +2193,7 @@ signed_endpoint_record = {
 
 **What the substrate sees**: an opaque blob under an opaque tag. No IP addresses, no identity information, no correlation to Cleona.
 
-**What the resolver does**: compute `lookup_tag` from the pairwise secret + epoch, fetch the record, decrypt with `rendezvous_secret`, verify `seq` is highest seen, extract addresses, attempt direct UDP contact.
+**What the resolver does**: look up the contact's device list from the cached AuthManifest (§4.3), compute a device-scoped `lookup_tag` per device from the pairwise secret + epoch + `device_id` (§4.11.4), fetch each record, decrypt with `rendezvous_secret`, verify `seq` is highest seen, extract per-device addresses, attempt direct UDP contact.
 
 **Cross-provider consistency**: `seq` is outside the ciphertext so the cascade can compare records from different providers without decrypting all of them. Highest `seq` wins. A provider returning a stale record (lower `seq` than one already seen from another provider) is ignored.
 
@@ -2199,19 +2201,31 @@ signed_endpoint_record = {
 
 The first external substrate. Chosen for minimal integration effort, negligible traffic overhead, and no participation obligation (unlike Mainline DHT).
 
-**Identity**: a throwaway secp256k1 keypair generated per publish cycle. **No** correlation to the Cleona Ed25519 identity. The Nostr pubkey is disposable — the real authenticity is inside the encrypted payload (Cleona's own signature via `rendezvous_secret`).
+**Identity**: a deterministic secp256k1 keypair derived per contact×device combination:
+
+```
+nostr_sk = HKDF-SHA-256(
+    ikm  = pairwise_rendezvous_secret,
+    salt = "cleona-nostr-v1",
+    info = hex(own_device_id),
+    length = 32
+)
+nostr_pk = secp256k1_pubkey(nostr_sk)   // x-only, 32 bytes
+```
+
+Each contact pair sees a different Nostr pubkey (different `pairwise_rendezvous_secret`), preventing cross-contact correlation by relay operators. The key is stable across publishes, which is **critical** for NIP-33: the relay replaces the previous event only when `(pubkey, kind, d-tag)` matches — a throwaway key would accumulate garbage entries instead of updating in place. **No** correlation to the Cleona Ed25519 identity. The real authenticity is inside the encrypted payload (`rendezvous_secret`).
 
 **Event format** (NIP-01 + NIP-33 Parameterized Replaceable Events):
 
 ```json
 {
   "id":         "<sha256 of serialized event>",
-  "pubkey":     "<hex throwaway secp256k1 pubkey>",
+  "pubkey":     "<hex deterministic secp256k1 pubkey (per contact×device)>",
   "created_at": 1719561600,
   "kind":       30078,
   "tags":       [["d", "<hex(lookup_tag)>"]],
   "content":    "<base64(signed_endpoint_record)>",
-  "sig":        "<schnorr signature with throwaway key>"
+  "sig":        "<schnorr signature with deterministic key>"
 }
 ```
 
@@ -2223,22 +2237,27 @@ The first external substrate. Chosen for minimal integration effort, negligible 
 
 **Protocol flow**:
 
-Publish (Bob goes online or address changes):
-1. Generate throwaway secp256k1 keypair
-2. For each accepted contact: compute `lookup_tag` (current + next epoch)
-3. Build `SignedEndpointRecord` with current addresses
-4. Create Nostr event (kind 30078, d-tag = hex(lookup_tag), content = base64(record))
-5. Sign event with throwaway key
-6. WebSocket connect to each relay, send `["EVENT", event]`, await `["OK", ...]`, close
+Publish (one of Bob's devices goes online or its addresses change):
+1. For each accepted contact:
+   a. Derive deterministic Nostr keypair from `pairwise_rendezvous_secret` + `own_device_id`
+   b. Compute device-scoped `lookup_tag` (current + next epoch, §4.11.4)
+   c. Build `SignedEndpointRecord` with **this device's** current addresses + `device_id`
+   d. Create Nostr event (kind 30078, d-tag = hex(lookup_tag), content = base64(record))
+   e. Sign event with deterministic key
+   f. WebSocket connect to each relay, send `["EVENT", event]`, await `["OK", ...]`, close
+Each of Bob's devices publishes independently — there is no "primary publishes for all" coordinator.
 
 Resolve (Alice cold-starts after 48h offline, Tier 3b):
-1. For each anchor/stable contact: compute `lookup_tag` (current epoch, try previous if no hit)
-2. WebSocket connect to relays, send `["REQ", "sub1", {"#d": [hex(tag)], "kinds": [30078]}]`
-3. First relay response: parse content, decrypt with `rendezvous_secret`, verify `seq`
+1. For each unreachable contact:
+   a. Look up AuthManifest (cached from last online session, or live DHT if reachable) → `authorizedDeviceIds[]`
+   b. For each `deviceId`: compute device-scoped `lookup_tag` (current epoch, §4.11.4)
+2. Query relays for all tags in parallel, send `["REQ", "sub1", {"#d": [hex(tag)], "kinds": [30078]}]`
+3. First relay response per tag: parse content, decrypt with `rendezvous_secret`, verify `seq`
 4. Send `["CLOSE", "sub1"]`, close WebSocket
-5. Extracted addresses → direct UDP contact attempt → back in the mesh
+5. Extracted per-device addresses → direct UDP contact attempt → back in the mesh
+6. If current epoch yields no hits for a device, retry with previous epoch tag
 
-**Traffic budget**: < 1 MB/day. At 20 contacts × 2 epochs × 5 relays × ~1 KB per event = 200 KB per publish cycle. With 4h refresh interval (within 6h epoch) = ~1.2 MB/day worst case.
+**Traffic budget (per device)**: < 1 MB/day. Publish: 20 contacts × 2 epochs × 5 relays × ~1 KB per event = 200 KB per publish cycle. Each device publishes only its own addresses — traffic per device is unchanged from the user-level design. With 4h refresh interval (within 6h epoch) = ~1.2 MB/day worst case per device. Resolve: typically 1–2 unreachable contacts × 2 devices(avg) × 2 epochs × 5 relays × ~0.5 KB = < 20 KB per cold-start.
 
 **Dependencies**: secp256k1 Schnorr signing (libsecp256k1 via FFI or pure-Dart implementation), WebSocket client (Dart standard library `web_socket_channel`), JSON serialization (trivial). No new native C shim required.
 
@@ -2252,9 +2271,13 @@ Resolve (Alice cold-starts after 48h offline, Tier 3b):
 | Epoch boundary | Publish under new epoch tag, retain previous-epoch record | at epoch transition |
 | Contact added/removed | Add/remove lookup tags from publish set | on contact-status change |
 
-**Shutdown**: no explicit unpublish needed. Records become obsolete via `seq` monotonicity (the next publish supersedes) and relay-side eviction (NIP-33 replaceable events are overwritten on next publish from the same pubkey+d-tag).
+**Per-device independence**: every device in a multi-device setup (§7) publishes its own endpoint records independently. There is no coordinator or "primary publishes for all" pattern. Each device runs its own publish cycle on the triggers above, using its own addresses and its own `device_id` in the lookup tag (§4.11.4). This scales to the §7 limit of 5 devices without coordination overhead. On Android (in-process mode), the RendezvousManager is initialized per CleonaService — not gated by a "first service wins" check.
 
-**Publish budget**: for N contacts, each publish cycle generates `N × 2` (current + next epoch) records across `M` relays = `2NM` WebSocket messages. At N=50, M=5: 500 messages × ~1 KB = ~500 KB per cycle. Acceptable even on mobile data (< 2 MB/day at 4h refresh).
+**Address filter**: before building the EndpointRecord, the publisher filters the address list to externally reachable addresses only: public IPv4 (STUN/UPnP-discovered `_advertisedPublicIp`, port-forwarded addresses), global IPv6 (not link-local `fe80:`, not ULA `fd`/`fc`). Private addresses (RFC 1918 `10.x`, `172.16–31.x`, `192.168.x`; RFC 4193 ULA) are excluded — they are unreachable from other networks and leak internal topology to Nostr relays. A node behind CGNAT that discovered its public IP via STUN publishes that mapped public IP (the CGNAT gateway's external address). A node with both a NAT-mapped public IPv4 and a global IPv6 publishes both. The publish is skipped only when zero externally reachable addresses remain after filtering — a rare case (isolated LAN, double-NAT without STUN success, no IPv6).
+
+**Shutdown**: no explicit unpublish needed. Records become obsolete via `seq` monotonicity (the next publish supersedes) and relay-side eviction (NIP-33 replaceable events are overwritten on next publish from the same deterministic pubkey+d-tag).
+
+**Publish budget (per device)**: for N contacts, each publish cycle generates `N × 2` (current + next epoch) records across `M` relays = `2NM` WebSocket messages. At N=50, M=5: 500 messages × ~1 KB = ~500 KB per cycle per device. Acceptable even on mobile data (< 2 MB/day at 4h refresh). Total across D devices: `2NMD` — at D=5 (maximum): 2.5 MB/cycle, ~10 MB/day worst case, distributed across independent devices.
 
 #### 4.11.8 Future Substrates (Planned)
 
@@ -2267,6 +2290,55 @@ The `RendezvousProvider` interface is designed for multiple substrates. Only the
 **(c) Email Dead-Drop (§4.11.8c)** — lowest priority. Operationally fragile: free email accounts require phone verification, automated access triggers lockouts, rate limits are aggressive. Useful only as last-resort "nothing else works" substrate in extreme censorship environments.
 
 **Substrate cascade**: all available providers are queried in parallel (Happy-Eyeballs). The first valid, signature-verified record with the highest `seq` wins. A provider being blocked in the current network (Nostr relays firewalled, Tor blocked) does not delay the cascade — `isAvailable` returns false and the provider is skipped.
+
+#### 4.11.9 Infrastructure Rendezvous
+
+The contact-scoped rendezvous (§4.11.3–§4.11.8) requires a pairwise secret between two contacts. Infrastructure nodes (bootstrap relays, community relays) have no user identity and no contacts — they cannot participate in contact rendezvous. Yet they are the network entry points that nodes behind NAT depend on. If Bootstrap's IP changes while a client is offline, the client has no way back into the mesh.
+
+**Solution**: any node with at least one externally reachable address publishes an Infrastructure Endpoint Record under a network-wide tag derived from the network secret (§4.10). Every network member can resolve this tag to find current entry points.
+
+```
+// Lookup tag — identical for ALL infra publishers per epoch
+infra_tag = HKDF-SHA-256(
+    ikm  = network_secret,
+    salt = "cleona-rv-infra-v1",
+    info = epoch_string,
+    length = 32
+)
+
+// Encryption key — any network member can decrypt
+infra_key = HKDF-SHA-256(
+    ikm  = network_secret,
+    salt = "cleona-rv-infra-key-v1",
+    info = epoch_string,
+    length = 32
+)
+
+// Nostr identity — deterministic per device (different pubkeys
+// → NIP-33 does not overwrite across devices → relay returns ALL infra nodes)
+nostr_sk = HKDF-SHA-256(
+    ikm  = network_secret,
+    salt = "cleona-nostr-infra-v1",
+    info = hex(own_device_id),
+    length = 32
+)
+```
+
+**Who publishes**: every node that has at least one externally reachable address after the address filter (§4.11.7) — public IPv4 via STUN/UPnP or global IPv6. This naturally includes bootstrap nodes (always publicly reachable), port-forwarded desktops, and IPv6-capable mobile nodes. Headless daemons (`cleona-headless`) participate without a user identity — only the network secret and the device's own nodeId are needed.
+
+**Who resolves**: any node where Tier 1–3 of the discovery cascade (§4.5) failed. The infra-resolve runs in **parallel** with the contact-resolve (§4.11.4) inside Tier 3b.
+
+**NIP-33 multi-publisher**: all infra nodes publish under the **same** d-tag (same `infra_tag` per epoch) but with **different** Nostr pubkeys (different `own_device_id` → different `nostr_sk`). NIP-33 replaces only per `(pubkey, kind, d-tag)` — different pubkeys produce separate events. The resolver query `{"#d": [hex(infra_tag)], "kinds": [30078]}` returns events from ALL infra nodes. Each event decrypts independently with `infra_key`.
+
+**EndpointRecord format**: identical to §4.11.5, encrypted with `infra_key` instead of `rendezvous_secret`, AAD = `infra_tag`. The `device_id` field identifies the publishing node.
+
+**Publish triggers**: same as §4.11.7 (startup, network change, 4h refresh, epoch boundary). No contact-add/remove trigger (infra is contact-independent).
+
+**Security**: anyone who knows the network secret can resolve all infra nodes. This is by design — the network secret is the Closed Network admission token (§4.10). An outsider sees opaque blobs under opaque tags on Nostr. The infra tag does not correlate with any contact-rendezvous tag (different salt, different IKM path).
+
+**Headless daemon integration**: `cleona-headless` initializes an `InfraRendezvousManager` at startup (no `RendezvousManager` — no user identity, no contacts). It publishes the daemon's externally reachable addresses under the infra tag. This is the only rendezvous path available to identity-less infrastructure nodes.
+
+**End-to-end cold-start example**: Alice's phone was offline over the weekend. Monday morning: Tier 1–3 fail (all cached IPs stale). Tier 3b fires both paths in parallel: (A) contact-resolve for her contacts → succeeds if any contact has a public IP and published; (B) infra-resolve → finds Bootstrap's current public IP → connects → enters the mesh → DV routing delivers the rest.
 
 ---
 ## 5. Message Delivery

@@ -397,7 +397,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.113';
+  static const String kCurrentAppVersion = '3.1.114';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -620,21 +620,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _syncTierRegistration();
 
     // §4.11 External Rendezvous: Nostr cold-start address resolution.
-    // Only init once on the primary identity (rendezvous is identity-scoped
-    // but the node field is shared — first service wins).
-    if (node.rendezvousManager == null) {
-      _rendezvousManager = RendezvousManager(profileDir: profileDir);
-      _rendezvousManager!.init(
-        ownFoundingSk: identity.ed25519SecretKey,
-        ownUserIdHex: identity.userIdHex,
-        deviceId: identity.nodeId,
-        contacts: _buildRendezvousContacts(),
-        addressProvider: () => node.currentSelfAddresses()
-            .map((a) => RendezvousAddress(a.ip, a.port))
-            .toList(),
-      );
-      node.rendezvousManager = _rendezvousManager;
-    }
+    // Each identity/device inits its own RendezvousManager (§4.11.7
+    // per-device independence — no "first service wins" gate).
+    _rendezvousManager = RendezvousManager(profileDir: profileDir);
+    _rendezvousManager!.init(
+      ownFoundingSk: identity.ed25519SecretKey,
+      ownUserIdHex: identity.userIdHex,
+      deviceId: identity.nodeId,
+      contacts: _buildRendezvousContacts(),
+      addressProvider: () => node.currentSelfAddresses()
+          .map((a) => RendezvousAddress(a.ip, a.port))
+          .toList(),
+    );
+    // Primary identity's manager is used for Tier 3b contact-resolve in the
+    // discovery cascade. All managers publish independently.
+    node.rendezvousManager ??= _rendezvousManager;
 
     // Load conversations
     _loadConversations();

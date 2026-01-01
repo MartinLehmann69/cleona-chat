@@ -38,9 +38,14 @@ abstract class KeyringService {
       }
       log.warn('secret-tool not available — file-based key storage');
     } else if (Platform.isWindows) {
-      log.info('Using Windows DPAPI for key protection');
-      _instance = _WindowsDpapiKeyring(baseDir, log);
-      return _instance!;
+      final dpapi = _WindowsDpapiKeyring(baseDir, log);
+      if (dpapi._roundTripProbe()) {
+        log.info('Using Windows DPAPI for key protection');
+        _instance = dpapi;
+        return _instance!;
+      }
+      log.warn('DPAPI round-trip probe failed — file-based key storage');
+      dpapi.delete('_probe');
     } else if (Platform.isMacOS) {
       log.info('Using macOS Keychain via security CLI');
       _instance = _MacOsKeychainKeyring(log);
@@ -191,6 +196,23 @@ class _WindowsDpapiKeyring extends KeyringService {
   bool get isHardwareProtected => true;
 
   String _pathFor(String name) => '$_baseDir/$name.dpapi';
+
+  bool _roundTripProbe() {
+    try {
+      final testData = Uint8List.fromList([0xDE, 0xAD, 0xBE, 0xEF]);
+      if (!store('_probe', testData)) return false;
+      final loaded = load('_probe');
+      delete('_probe');
+      if (loaded == null || loaded.length != 4) return false;
+      for (var i = 0; i < 4; i++) {
+        if (loaded[i] != testData[i]) return false;
+      }
+      return true;
+    } catch (e) {
+      _log.warn('DPAPI round-trip probe exception: $e');
+      return false;
+    }
+  }
 
   @override
   bool store(String name, Uint8List data) {

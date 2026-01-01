@@ -1,6 +1,8 @@
-/// Pairwise Rendezvous Secret derivation and Lookup Tag computation.
+/// Pairwise Rendezvous Secret derivation, Lookup Tag computation,
+/// and Infrastructure Rendezvous key derivation.
 ///
-/// Architecture §4.11.3 (Pairwise Secret) + §4.11.4 (Lookup Tag & Epoch).
+/// Architecture §4.11.3 (Pairwise Secret) + §4.11.4 (Lookup Tag & Epoch)
+/// + §4.11.9 (Infrastructure Rendezvous).
 library;
 
 import 'dart:convert';
@@ -16,6 +18,10 @@ const int kRendezvousEpochHours = 6;
 
 const String _pairwiseSalt = 'cleona-rendezvous-v1';
 const String _tagSalt = 'cleona-rv-tag-v1';
+const String _nostrKeySalt = 'cleona-nostr-v1';
+const String _infraTagSalt = 'cleona-rv-infra-v1';
+const String _infraKeySalt = 'cleona-rv-infra-key-v1';
+const String _infraNostrSalt = 'cleona-nostr-infra-v1';
 
 // ---------------------------------------------------------------------------
 // Pairwise Rendezvous Secret (§4.11.3)
@@ -64,29 +70,77 @@ Uint8List derivePairwiseSecret(
 // Lookup Tag (§4.11.4)
 // ---------------------------------------------------------------------------
 
-/// Computes the lookup tag for a specific epoch + direction.
+/// Computes the device-scoped lookup tag for a specific epoch.
 ///
 /// [rendezvousSecret] — 32-byte pairwise secret from [derivePairwiseSecret]
 /// [epochString] — e.g. "2026-06-28-12" (UTC, 6h boundary)
-/// [publisherUserIdHex] — userId of the publishing side
-/// [resolverUserIdHex] — userId of the resolving side
+/// [publisherDeviceIdHex] — deviceId of the publishing device (hex)
 Uint8List computeLookupTag(
   Uint8List rendezvousSecret,
   String epochString,
-  String publisherUserIdHex,
-  String resolverUserIdHex,
+  String publisherDeviceIdHex,
 ) {
-  final direction = publisherUserIdHex.toLowerCase()
-              .compareTo(resolverUserIdHex.toLowerCase()) <
-          0
-      ? '0'
-      : '1';
-  final info = '$epochString/$direction';
+  final info = '$epochString/${publisherDeviceIdHex.toLowerCase()}';
 
   return SodiumFFI().hkdfSha256(
     rendezvousSecret,
     salt: Uint8List.fromList(utf8.encode(_tagSalt)),
     info: Uint8List.fromList(utf8.encode(info)),
+    length: 32,
+  );
+}
+
+/// Derives a deterministic secp256k1 secret key for Nostr publishing
+/// per contact×device combination (§4.11.6).
+Uint8List deriveNostrSecretKey(
+  Uint8List rendezvousSecret,
+  Uint8List ownDeviceId,
+) {
+  final deviceHex = ownDeviceId
+      .map((b) => b.toRadixString(16).padLeft(2, '0'))
+      .join();
+  return SodiumFFI().hkdfSha256(
+    rendezvousSecret,
+    salt: Uint8List.fromList(utf8.encode(_nostrKeySalt)),
+    info: Uint8List.fromList(utf8.encode(deviceHex)),
+    length: 32,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure Rendezvous (§4.11.9)
+// ---------------------------------------------------------------------------
+
+/// Computes the network-wide infrastructure lookup tag for an epoch.
+Uint8List computeInfraTag(Uint8List networkSecret, String epochString) {
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_infraTagSalt)),
+    info: Uint8List.fromList(utf8.encode(epochString)),
+    length: 32,
+  );
+}
+
+/// Derives the encryption key for infrastructure endpoint records.
+Uint8List deriveInfraKey(Uint8List networkSecret, String epochString) {
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_infraKeySalt)),
+    info: Uint8List.fromList(utf8.encode(epochString)),
+    length: 32,
+  );
+}
+
+/// Derives a deterministic secp256k1 secret key for Nostr infra publishing
+/// per device (§4.11.9).
+Uint8List deriveInfraNostrSecretKey(
+    Uint8List networkSecret, Uint8List deviceId) {
+  final deviceHex =
+      deviceId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return SodiumFFI().hkdfSha256(
+    networkSecret,
+    salt: Uint8List.fromList(utf8.encode(_infraNostrSalt)),
+    info: Uint8List.fromList(utf8.encode(deviceHex)),
     length: 32,
   );
 }

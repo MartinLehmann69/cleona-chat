@@ -133,6 +133,39 @@ class NostrProvider implements RendezvousProvider {
   // Publish (§4.11.6 — Publish flow)
   // -------------------------------------------------------------------------
 
+  /// Publish with an externally provided secp256k1 secret key (deterministic).
+  Future<void> publishWithKey(Uint8List lookupTag, SignedEndpointRecord record,
+      Uint8List nostrSecretKey) async {
+    final kp = secp256k1PubkeyFromSecret(nostrSecretKey);
+    final tagHex = _bytesToHex(lookupTag);
+    final contentB64 = base64Encode(record.serialize());
+
+    final event = NostrEvent.create(
+      kind: 30078,
+      tags: [
+        ['d', tagHex]
+      ],
+      content: contentB64,
+      secretKey: nostrSecretKey,
+      publicKey: kp,
+    );
+
+    final eventJson = jsonEncode(['EVENT', event.toJson()]);
+    var successCount = 0;
+
+    await Future.wait(relayUris.map((uri) async {
+      try {
+        await _publishToRelay(uri, eventJson);
+        successCount++;
+      } catch (e) {
+        _log.debug('Nostr publish to $uri failed: $e');
+      }
+    }));
+
+    _log.info('Nostr publish: $successCount/${relayUris.length} relays '
+        'for tag ${tagHex.substring(0, 8)}…');
+  }
+
   @override
   Future<void> publish(Uint8List lookupTag, SignedEndpointRecord record) async {
     final kp = generateSecp256k1Keypair();
