@@ -110,6 +110,10 @@ class UdpKeepalive {
   /// Last time [onAllPeersFailed] fired (for cooldown).
   DateTime? _lastTriggerAt;
 
+  /// Whether the all-suspended trigger has already fired (prevents
+  /// log spam on every 5s tick when all peers stay suspended).
+  bool _allSuspendedFired = false;
+
   /// Whether this instance has been disposed.
   bool _disposed = false;
 
@@ -275,6 +279,7 @@ class UdpKeepalive {
         p.converged = false;
       }
     }
+    _allSuspendedFired = false;
     if (reset > 0) {
       _log.info('Network change: reset $reset suspended peers for retry');
     }
@@ -364,6 +369,20 @@ class UdpKeepalive {
               '(consecutive: $_consecutiveFullFailures / $failureThreshold)');
         } else {
           _consecutiveFullFailures = 0;
+        }
+      } else if (_peers.isNotEmpty) {
+        // All peers suspended (unconfirmed + max pings exhausted): no peer
+        // was evaluatable. This is equivalent to "all failed" — the keepalive
+        // system has no active probes left. Without this check, the counter
+        // stalls at (threshold-1) because the final failure round coincides
+        // with suspension, and onAllPeersFailed never fires.
+        final allSuspended = _peers.values.every((p) =>
+            !p.confirmed && p.unconfirmedPingsSent >= maxUnconfirmedPings);
+        if (allSuspended && !_allSuspendedFired) {
+          _allSuspendedFired = true;
+          _consecutiveFullFailures = failureThreshold;
+          _log.info('All keepalive peers suspended — '
+              'treating as full failure (threshold reached)');
         }
       }
 

@@ -43,6 +43,11 @@ class PeerAddress {
   static const _baseBackoffMs = 5000; // 5s (spec first tier)
   static const _maxBackoffMs = 300000; // 5 min cap (spec third tier)
 
+  /// Grace period after network change: recordFailure() is a no-op until
+  /// this timestamp, giving the socket time to stabilize on the new
+  /// interface (WiFi→Mobilfunk transition).
+  static DateTime? networkChangeGraceUntil;
+
   void recordSuccess() {
     successCount++;
     consecutiveFailures = 0;
@@ -60,6 +65,8 @@ class PeerAddress {
   }
 
   void recordFailure() {
+    final grace = networkChangeGraceUntil;
+    if (grace != null && DateTime.now().isBefore(grace)) return;
     failCount++;
     consecutiveFailures++;
     lastAttempt = DateTime.now();
@@ -238,17 +245,20 @@ class PeerAddress {
     return score * decay;
   }
 
-  /// Address priority: 1=same-subnet/link-local, 2=IPv6 global/other-private,
-  /// 3=public IPv4, 4=CGNAT/mobile.
+  /// Address priority (IPv6-First, §4.6):
+  ///   1 = same-subnet IPv4 / link-local IPv6 (LAN direct)
+  ///   2 = global IPv6 (no NAT, end-to-end routable)
+  ///   3 = public IPv4 / ULA IPv6 / other-private IPv4
+  ///   4 = CGNAT/DS-Lite IPv4
   int get priority {
     // IPv6
     if (ip.contains(':')) {
       if (ip.toLowerCase().startsWith('fe80:')) return 1; // Link-local = LAN
       final t = classifyIp(ip);
       if (t == PeerAddressType.ipv6Ula || t == PeerAddressType.ipv6SiteLocal) {
-        return 2; // ULA/site-local = other-subnet private
+        return 3; // ULA/site-local = other-subnet private
       }
-      return 3; // Global IPv6 — no NAT, but public (§4.6: behind other-subnet LAN)
+      return 2; // Global IPv6 — no NAT, end-to-end routable
     }
     // IPv4
     if (_isCgnat(ip)) return 4;
@@ -256,7 +266,7 @@ class PeerAddress {
     for (final localIp in currentLocalIps) {
       if (_sameSubnet(ip, localIp)) return 1;
     }
-    return 2; // Other private subnet
+    return 3; // Other private subnet
   }
 
   /// Check if IP is in CGNAT range (100.64.0.0/10) or carrier NAT (192.0.0.0/24).

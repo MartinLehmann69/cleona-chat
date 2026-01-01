@@ -310,6 +310,9 @@ class CleonaNode {
   final List<DateTime> _routeDownTimestamps = [];
   bool _networkChangeInProgress = false;
 
+  /// Zero-peer recovery: periodic timer that re-bootstraps when isolated.
+  Timer? _zeroPeerRecoveryTimer;
+
   /// Peers that have actually responded since this node started, with the
   /// timestamp of the last direct (hopCount==0) packet received. Used to
   /// distinguish "loaded from disk" peers from truly reachable ones. Peers
@@ -857,6 +860,15 @@ class CleonaNode {
         );
     udpKeepalive.onAllPeersFailed = () {
       if (_networkChangeInProgress) return;
+      // §4.6 IPv6-First: if we have recent confirmed peers (e.g. Bootstrap
+      // via IPv6), keepalive failure means the IPv4-only peers are
+      // structurally unreachable — not that the network is down.
+      if (_confirmedPeers.values.any((ts) =>
+          DateTime.now().difference(ts) <= _confirmedPeerTtl)) {
+        _log.info('UdpKeepalive: all keepalive peers failed but confirmed '
+            'peers exist (IPv6 path alive) — skipping network change');
+        return;
+      }
       _log.info('UdpKeepalive: all peers failed — inferring network change');
       _networkChangeInProgress = true;
       onNetworkChanged(force: true)
@@ -1342,6 +1354,8 @@ class CleonaNode {
       }
       // §4.5: first confirmed peer → disarm isolated-node retry.
       _disarmIsolatedNodeTimer();
+      _zeroPeerRecoveryTimer?.cancel();
+      _zeroPeerRecoveryTimer = null;
 
       // DV-3 bias fix: receiving a direct packet (hopCount=0) proves
       // bidirectional reachability — same as DELIVERY_RECEIPT. Without
@@ -2158,11 +2172,19 @@ class CleonaNode {
           }
         }
 
-        for (final addr in peer.allConnectionTargets()) {
-          if (addr.ip.isEmpty || addr.port <= 0) continue;
-          if (!_needsKeepalive(addr.ip)) continue;
-          udpKeepalive.register(peer.nodeIdHex, addr.ip, addr.port, peer.nodeId);
-          break;
+        // §4.6 IPv6-First: skip IPv4 keepalive if the peer has a global
+        // IPv6 address. IPv6 is end-to-end routable without NAT pinholes;
+        // the phone can always re-establish via IPv6 on demand.
+        final hasGlobalIpv6 = peer.allConnectionTargets().any((a) =>
+            a.ip.contains(':') && !a.ip.toLowerCase().startsWith('fe80:') &&
+            !a.ip.toLowerCase().startsWith('fd'));
+        if (!hasGlobalIpv6) {
+          for (final addr in peer.allConnectionTargets()) {
+            if (addr.ip.isEmpty || addr.port <= 0) continue;
+            if (!_needsKeepalive(addr.ip)) continue;
+            udpKeepalive.register(peer.nodeIdHex, addr.ip, addr.port, peer.nodeId);
+            break;
+          }
         }
 
         // Bellman-Ford-Update: wir haben die DV-Sicht des Senders bekommen
@@ -3939,7 +3961,15 @@ class CleonaNode {
 
     if (isAuthoritative && ip.isNotEmpty && _needsKeepalive(ip) &&
         port > 0) {
-      udpKeepalive.register(bytesToHex(peerId), ip, port, peerId);
+      // §4.6 IPv6-First: skip IPv4 keepalive if this peer has a global
+      // IPv6 address (reachable without NAT pinhole maintenance).
+      final peerInfo = routingTable.getPeer(peerId);
+      final hasGlobalIpv6 = peerInfo != null && peerInfo.allConnectionTargets().any((a) =>
+          a.ip.contains(':') && !a.ip.toLowerCase().startsWith('fe80:') &&
+          !a.ip.toLowerCase().startsWith('fd'));
+      if (!hasGlobalIpv6) {
+        udpKeepalive.register(bytesToHex(peerId), ip, port, peerId);
+      }
     }
 
     // §5.5b: Deliver stored First-CR-Mailbox entries to this device.
@@ -4450,6 +4480,13 @@ class CleonaNode {
     PeerAddress.currentLocalIps = _localIps;
     _log.info('Network recovery: IPs ${updatedIps.join(", ")}');
 
+    // 3a2. Backoff grace period: sends in the first 10s after a network
+    // change often fail because the socket is still transitioning between
+    // interfaces (WiFi→Mobilfunk). Without a grace period, these failures
+    // poison the backoff counters and lock out the correct address.
+    PeerAddress.networkChangeGraceUntil =
+        DateTime.now().add(const Duration(seconds: 10));
+
     // 3b. Soft-reset of per-peer state (Architektur §2.7.2 / §7.6).
     // Per-address failure counters and exponential backoff are network-bound
     // and cleared outright — a peer unreachable on the old network may be
@@ -4475,6 +4512,20 @@ class CleonaNode {
     // 3b3. Reset suspended keepalive peers — NAT context changed, give
     // unconfirmed peers another round of attempts.
     udpKeepalive.resetUnconfirmed();
+
+    // 3b4. Keepalive address refresh: re-register each keepalive peer
+    // with the best available public address. Without this, keepalive
+    // stays locked to a stale private IP after switching to Mobilfunk
+    // where only public IPs are reachable.
+    for (final peer in routingTable.allPeers) {
+      final publicAddrs = peer.allConnectionTargets()
+          .where((a) => !PeerAddress.isPrivateIp(a.ip) && !a.ip.contains(':'))
+          .toList();
+      if (publicAddrs.isNotEmpty) {
+        final best = publicAddrs.first;
+        udpKeepalive.updateAddress(peer.nodeIdHex, best.ip, best.port);
+      }
+    }
 
     // 3c. DV-Routing: mark all routes as stale (cost +5, 30 s deadline)
     // instead of clearing. Topology knowledge survives transient events;
@@ -4586,6 +4637,35 @@ class CleonaNode {
     Future.delayed(const Duration(seconds: 3), () {
       if (!_running) return;
       _probeIpv6Inbound();
+    });
+
+    // 11. Zero-peer recovery loop: if after 60s still no confirmed peer,
+    // periodically clear backoff and re-bootstrap. Without this, a phone
+    // switching WiFi→Mobilfunk during a WAN IP rotation enters a
+    // permanent deadlock: all addresses in backoff, all DV routes pruned,
+    // all keepalive peers suspended — no recovery mechanism.
+    _zeroPeerRecoveryTimer?.cancel();
+    _zeroPeerRecoveryTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+      if (!_running) { timer.cancel(); return; }
+      if (_confirmedPeers.values.any((ts) =>
+          DateTime.now().difference(ts) <= _confirmedPeerTtl)) {
+        _log.info('Zero-peer recovery: peer confirmed — stopping recovery loop');
+        timer.cancel();
+        _zeroPeerRecoveryTimer = null;
+        return;
+      }
+      _log.info('Zero-peer recovery: still 0 confirmed peers — '
+          'clearing backoff + re-bootstrap');
+      for (final peer in routingTable.allPeers) {
+        for (final addr in peer.addresses) {
+          addr.consecutiveFailures = 0;
+        }
+      }
+      PeerAddress.networkChangeGraceUntil =
+          DateTime.now().add(const Duration(seconds: 10));
+      udpKeepalive.resetUnconfirmed();
+      _kademliaBootstrap();
+      _startDiscoveryCascade();
     });
   }
 
@@ -5729,6 +5809,8 @@ class CleonaNode {
     _ipv6ProbeTimer?.cancel();
     _isolatedNodeRetryTimer?.cancel();
     _isolatedNodeRetryTimer = null;
+    _zeroPeerRecoveryTimer?.cancel();
+    _zeroPeerRecoveryTimer = null;
     _discoveryCascadeTimer?.cancel();
     _discoveryCascadeTimer = null;
     _discoveryComplete = false;
@@ -5779,11 +5861,14 @@ bool _isPrivateIp(String ip) {
   return false;
 }
 
-/// §4.7: True for CGNAT addresses (100.64.0.0/10, RFC 6598).
+/// §4.7: True for CGNAT addresses (100.64.0.0/10, RFC 6598) and
+/// DS-Lite well-known prefix (192.0.0.0/24, RFC 7335).
 bool _isCgnat(String ip) {
-  if (!ip.startsWith('100.')) return false;
-  final second = int.tryParse(ip.split('.')[1]) ?? 0;
-  return second >= 64 && second <= 127;
+  if (ip.startsWith('100.')) {
+    final second = int.tryParse(ip.split('.')[1]) ?? 0;
+    if (second >= 64 && second <= 127) return true;
+  }
+  return ip.startsWith('192.0.0.');
 }
 
 PeerAddressType _classifyAddressType(String ip) {
