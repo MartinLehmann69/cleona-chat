@@ -305,7 +305,11 @@ jobs:
           APP_KEYS="$(plutil -convert xml1 -o - ios/Runner/Runner.entitlements \
             | sed -n 's/.*<key>\(.*\)<\/key>.*/\1/p')"
 
-          PP_NAME="$(plutil -extract Name raw - "$PROFILE_PLIST" 2>/dev/null || echo '?')"
+          # `-o -` = output to stdout. A bare `-` is a second INPUT file
+          # (stdin): plutil printed the value from the plist, then failed on
+          # the empty stdin with "Unable to read file from standard input" —
+          # first release run after S403, 08.10.2026 (S406-14).
+          PP_NAME="$(plutil -extract Name raw -o - "$PROFILE_PLIST" 2>/dev/null || echo '?')"
           MISSING=0
           for KEY in $APP_KEYS; do
             # PlistBuddy fails (non-zero) when the key does not exist —
@@ -322,7 +326,7 @@ jobs:
           echo "Entitlements gate passed — profile '$PP_NAME' covers every key of Runner.entitlements:"
           echo "$APP_KEYS" | sed 's/^/  OK: /'
 
-          UUID="$(plutil -extract UUID raw - "$PROFILE_PLIST")"
+          UUID="$(plutil -extract UUID raw -o - "$PROFILE_PLIST")"
           mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
           cp "$PP_PATH" ~/Library/MobileDevice/Provisioning\ Profiles/"$UUID.mobileprovision"
           echo "PROVISIONING_PROFILE_UUID=$UUID" >> "$GITHUB_ENV"
