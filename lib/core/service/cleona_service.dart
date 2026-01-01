@@ -13,6 +13,7 @@ import 'package:cleona/core/crypto/hd_wallet.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/dht/channel_index.dart';
+import 'package:cleona/core/dht/kbucket.dart' show RoutingTable;
 import 'package:cleona/core/dht/mailbox_store.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/identity_resolution/identity_publisher.dart';
@@ -803,7 +804,12 @@ class CleonaService implements ICleonaService {
       routingTable: node.routingTable,
       sender: _IdentityPublisherSender(node),
       dhtHandler: node.identityDhtHandler,
+      // D4 (§4.3 Publisher self-verify): post-publish self-lookup channel.
+      dhtRpc: node.dhtRpc,
     );
+    // D4 observability: feed the idSelfVerifyOk/Miss network-stats counters.
+    _identityPublisher!.onSelfVerifyResult =
+        (ok) => node.statsCollector.recordIdSelfVerify(ok);
     _identityPublisher!.setForeground(_isAppResumed);
     _identityPublisher!.setAddressProvider(() => node.currentSelfAddresses());
     // Welle 5 (§3.5b + §4.3): publisher braucht die Device-KEM-Pubkeys, um
@@ -2468,7 +2474,10 @@ class CleonaService implements ICleonaService {
 
       final rs = ReedSolomon();
       final fragments = rs.encode(packetBytes);
-      final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
+      // D4 (§4.3): subnet-diverse replicator selection (same store/retrieve
+      // pattern as the identity records — eclipse cost binding).
+      final peers = node.routingTable.findClosestPeers(mailboxId,
+          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
       if (peers.isEmpty) {
         _log.debug('Erasure offline-delivery skipped: no DHT replicators known');
         return false;
@@ -10202,7 +10211,9 @@ class CleonaService implements ICleonaService {
       // Store via FRAGMENT_STORE to closest DHT peers.
       // V3 (Architecture §23.3): FRAGMENT_STORE is an infrastructure
       // message — route via DV cascade as InfrastructureFrame.
-      final peers = node.routingTable.findClosestPeers(mailboxId, count: 10);
+      // D4 (§4.3): subnet-diverse replicator selection.
+      final peers = node.routingTable.findClosestPeers(mailboxId,
+          count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
       for (final peer in peers) {
         final store = proto.FragmentStore()
           ..mailboxId = mailboxId

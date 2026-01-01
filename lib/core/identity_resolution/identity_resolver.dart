@@ -536,7 +536,11 @@ class IdentityResolver {
     required Uint8List body,
     required Uint8List dhtKey,
   }) async {
-    final closest = routingTable.findClosestPeers(dhtKey, count: 10);
+    // D4 (§4.3): subnet-diverse lookup selection — must mirror the
+    // publisher's diverse store selection so store-set and lookup-set
+    // converge on the same diverse neighbourhood.
+    final closest = routingTable.findClosestPeers(dhtKey,
+        count: 10, maxPerIpGroup: RoutingTable.diversityMaxPerIpGroup);
     if (closest.isEmpty) {
       // Dokumentierter Fallback: Single-Call mit peer=null (Test-Skeleton/
       // Cold-Start). Production-DhtRpc wirft auf null-Peer → catch → [null];

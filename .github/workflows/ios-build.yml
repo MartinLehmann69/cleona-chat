@@ -60,7 +60,7 @@ jobs:
   build-ios-native-libs:
     name: iOS — Native Libraries
     if: github.event.inputs.platform != 'macos'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -89,7 +89,7 @@ jobs:
     name: iOS — Build IPA & TestFlight
     needs: build-ios-native-libs
     if: github.event.inputs.platform != 'macos'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -329,7 +329,7 @@ jobs:
   build-macos:
     name: macOS — Build & Notarize
     if: github.event.inputs.platform != 'ios'
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 

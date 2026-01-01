@@ -1,3 +1,4 @@
+import 'dart:io' show InternetAddress;
 import 'dart:math' show exp;
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
@@ -963,6 +964,94 @@ class PeerInfo {
       return b.effectiveScore.compareTo(a.effectiveScore);
     });
     return result;
+  }
+
+  /// D4 (§4.3 Replicator & lookup diversity): coarse IP-group key for the
+  /// subnet-diversity selection in `RoutingTable.findClosestPeers`.
+  ///
+  /// Granularity (eclipse cost binding, §13.1.8):
+  ///   IPv4 public  → /16   ("v4:a.b")
+  ///   IPv6 global  → /32   ("v6:xxxxxxxx", first 4 raw bytes hex)
+  ///   IPv4 private → /24   ("lan4:a.b.c")
+  ///   IPv6 ULA/LL/SL → /64 ("lan6:…", first 8 raw bytes hex)
+  ///   address-less → shared single "none" group (an attacker must not be
+  ///   able to dodge the cap by stripping addresses)
+  ///
+  /// Picks the peer's most distinctive address (public IPv4 > global IPv6 >
+  /// private IPv4 > other IPv6); falls back to the legacy publicIp/localIp
+  /// fields when the multi-address list is empty.
+  String get ipDiversityGroup {
+    PeerAddress? pick;
+    var pickRank = 99;
+    for (final a in addresses) {
+      final r = _diversityRank(a.type);
+      if (r < pickRank) {
+        pick = a;
+        pickRank = r;
+      }
+    }
+    if (pick != null) return _ipGroupKey(pick.ip, pick.type);
+    if (publicIp.isNotEmpty && publicIp != '0.0.0.0') {
+      return _ipGroupKey(publicIp, PeerAddress.classifyIp(publicIp));
+    }
+    if (localIp.isNotEmpty && localIp != '0.0.0.0') {
+      return _ipGroupKey(localIp, PeerAddress.classifyIp(localIp));
+    }
+    return 'none';
+  }
+
+  static int _diversityRank(PeerAddressType t) {
+    switch (t) {
+      case PeerAddressType.ipv4Public:
+        return 0;
+      case PeerAddressType.ipv6Global:
+        return 1;
+      case PeerAddressType.ipv4Private:
+        return 2;
+      case PeerAddressType.ipv6Ula:
+      case PeerAddressType.ipv6SiteLocal:
+      case PeerAddressType.ipv6LinkLocal:
+        return 3;
+    }
+  }
+
+  static String _ipGroupKey(String ip, PeerAddressType type) {
+    switch (type) {
+      case PeerAddressType.ipv4Public:
+        final parts = ip.split('.');
+        if (parts.length == 4) return 'v4:${parts[0]}.${parts[1]}';
+        return 'v4:$ip';
+      case PeerAddressType.ipv4Private:
+        final parts = ip.split('.');
+        if (parts.length == 4) return 'lan4:${parts[0]}.${parts[1]}.${parts[2]}';
+        return 'lan4:$ip';
+      case PeerAddressType.ipv6Global:
+        final raw = _rawV6(ip);
+        if (raw != null) return 'v6:${_bytesToHex(raw.sublist(0, 4))}';
+        return 'v6:$ip';
+      case PeerAddressType.ipv6Ula:
+      case PeerAddressType.ipv6SiteLocal:
+      case PeerAddressType.ipv6LinkLocal:
+        final raw = _rawV6(ip);
+        if (raw != null) return 'lan6:${_bytesToHex(raw.sublist(0, 8))}';
+        return 'lan6:$ip';
+    }
+  }
+
+  /// Parse an IPv6 textual address to its 16 raw bytes. Strips brackets and
+  /// zone suffix (`fe80::1%eth0`). Returns null on parse failure — the
+  /// caller then groups by the literal string (still deterministic).
+  static Uint8List? _rawV6(String ip) {
+    var v6 = ip.trim();
+    if (v6.startsWith('[')) {
+      final close = v6.indexOf(']');
+      if (close > 0) v6 = v6.substring(1, close);
+    }
+    final pct = v6.indexOf('%');
+    if (pct >= 0) v6 = v6.substring(0, pct);
+    final parsed = InternetAddress.tryParse(v6);
+    if (parsed == null || parsed.rawAddress.length != 16) return null;
+    return Uint8List.fromList(parsed.rawAddress);
   }
 
   static proto.NatType _natToProto(NatClassification nat) {
