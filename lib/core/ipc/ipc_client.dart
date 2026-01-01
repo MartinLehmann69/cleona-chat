@@ -1673,6 +1673,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
     String? targetDxkB64,
     String? targetDmkB64,
     String? targetEpB64,
+    String? targetRendezvousNonceB64,
   }) {
     _sendRequest('add_seed_peers', params: {
       'targetNodeIdHex': targetNodeIdHex,
@@ -1685,6 +1686,14 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
       'targetDxkB64': ?targetDxkB64,
       'targetDmkB64': ?targetDmkB64,
       'targetEpB64': ?targetEpB64,
+      'targetRendezvousNonceB64': ?targetRendezvousNonceB64,
+    });
+  }
+
+  @override
+  void notifyContactSeedUriShared(String rendezvousNonceB64) {
+    _sendRequest('rendezvous_uri_shared', params: {
+      'nonceB64': rendezvousNonceB64,
     });
   }
 

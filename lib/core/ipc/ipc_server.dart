@@ -1161,7 +1161,26 @@ class IpcServer {
             targetDxkB64: req.params['targetDxkB64'] as String?,
             targetDmkB64: req.params['targetDmkB64'] as String?,
             targetEpB64: req.params['targetEpB64'] as String?,
+            targetRendezvousNonceB64:
+                req.params['targetRendezvousNonceB64'] as String?,
           );
+          _sendResponse(client, IpcResponse(id: req.id, success: true));
+          break;
+
+        case 'rendezvous_uri_shared':
+          // §4.11.10 owner side: the GUI copied/shared a ContactSeed-URI
+          // with an `r` nonce — start the First-Contact rendezvous session.
+          final service = _resolveService(client, req);
+          if (service == null) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'No active service'));
+            break;
+          }
+          final nonceB64 = req.params['nonceB64'] as String?;
+          if (nonceB64 == null || nonceB64.isEmpty) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nonceB64'));
+            break;
+          }
+          service.notifyContactSeedUriShared(nonceB64);
           _sendResponse(client, IpcResponse(id: req.id, success: true));
           break;
 

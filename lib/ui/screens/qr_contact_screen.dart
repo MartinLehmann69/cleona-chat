@@ -14,8 +14,10 @@ import 'package:cleona/core/service/service_interface.dart';
 
 /// Screen showing own QR code for contact sharing.
 /// Implements a convergence gate (§8.1.1): shows a progress indicator until
-/// at least one peer is session-confirmed (fresh direct packet in this
-/// daemon session), then displays the QR code with reliable seed peers.
+/// [ContactSeedBuilder.isReady] — i.e. we have at least one publicly
+/// reachable own address (public IPv4 via STUN or global IPv6), or, in the
+/// LAN-only case, at least one session-confirmed peer as relay candidate.
+/// Then displays the QR code (seed peers `s=` may legitimately be empty).
 class QrShowScreen extends StatefulWidget {
   final ICleonaService service;
   const QrShowScreen({super.key, required this.service});
@@ -158,6 +160,13 @@ class _QrShowScreenState extends State<QrShowScreen> {
                 label: Text(locale.get('copy')),
                 onPressed: () {
                   Clipboard.setData(ClipboardData(text: shareUri));
+                  // §4.11.10: start the owner-side First-Contact rendezvous
+                  // session for the copied URI (transport-side, no UI).
+                  final rn = seed.rendezvousNonce;
+                  if (rn != null) {
+                    service.notifyContactSeedUriShared(
+                        base64Url.encode(rn).replaceAll('=', ''));
+                  }
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text(locale.get('copied_to_clipboard'))),
                   );
@@ -406,6 +415,9 @@ class _QrScanScreenState extends State<QrScanScreen> {
       final dmkB64 = dmk != null ? base64.encode(dmk) : null;
       final ep = seed.userEd25519Pk;
       final epB64 = ep != null ? base64Url.encode(ep).replaceAll('=', '') : null;
+      // §4.11.10: URIs carry the `r` rendezvous nonce (QR/NFC never do) —
+      // pass it through so the scanner-side rendezvous session starts.
+      final rn = seed.rendezvousNonce;
       widget.service.addPeersFromContactSeed(
         seed.nodeIdHex,
         seed.ownAddresses,
@@ -414,6 +426,8 @@ class _QrScanScreenState extends State<QrScanScreen> {
         targetDxkB64: dxkB64,
         targetDmkB64: dmkB64,
         targetEpB64: epB64,
+        targetRendezvousNonceB64:
+            rn != null ? base64Url.encode(rn).replaceAll('=', '') : null,
       );
       await Future.delayed(const Duration(seconds: 3));
       final success = await widget.service.sendContactRequest(

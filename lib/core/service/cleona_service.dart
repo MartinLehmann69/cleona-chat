@@ -69,7 +69,10 @@ import 'package:cleona/core/identity/identity_dht_registry.dart';
 import 'package:cleona/core/channels/system_channels.dart';
 import 'package:cleona/core/channels/contact_issue_reporter.dart';
 import 'package:cleona/core/channels/crash_reporter.dart';
+import 'package:cleona/core/network/rendezvous/first_contact_rendezvous_manager.dart';
 import 'package:cleona/core/network/rendezvous/rendezvous_manager.dart';
+import 'package:cleona/core/network/rendezvous/rendezvous_provider.dart'
+    show EndpointAddress;
 import 'package:fixnum/fixnum.dart';
 import 'package:cleona/generated/proto/cleona.pb.dart' as proto;
 
@@ -257,6 +260,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   // §4.11 External Rendezvous (Nostr cold-start address resolution)
   RendezvousManager? _rendezvousManager;
+
+  // §4.11.10 First-Contact Rendezvous (URI-scoped, nonce from ContactSeed `r`)
+  FirstContactRendezvousManager? _fcRendezvous;
   @override
   PollManager get pollManager => _polls.pollManager;
   @override
@@ -397,7 +403,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.115';
+  static const String kCurrentAppVersion = '3.1.116';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -639,6 +645,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // discovery cascade. All managers publish independently.
     node.rendezvousManager ??= _rendezvousManager;
 
+    // §4.11.10 First-Contact Rendezvous: URI-scoped Nostr rendezvous for the
+    // very first CR over asynchronous ContactSeed-URIs (clipboard/e-mail).
+    // Sessions are persisted in the profileDir and resumed in
+    // _onPostDiscoveryRetrieve (network is up by then).
+    _fcRendezvous = FirstContactRendezvousManager(profileDir: profileDir);
+    _fcRendezvous!.init(
+      deviceId: identity.deviceNodeId,
+      addressProvider: () => node.currentSelfAddresses()
+          .map((a) => RendezvousAddress(a.ip, a.port))
+          .toList(),
+    );
+    _fcRendezvous!.onEndpointResolved = _onFcEndpointResolved;
+
     // Load conversations
     _loadConversations();
 
@@ -764,9 +783,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             entry.value.deviceNodeIds.contains(recipientHex)) {
           _contactLastAckedAt[entry.key] = now;
           _staleWarningWrittenFor.remove(entry.key);
+          // §4.11.10 scanner-side session end: a DELIVERY_RECEIPT from this
+          // contact proves end-to-end reachability — the First-Contact
+          // rendezvous session (if any) is complete. Cheap no-op otherwise.
+          _fcRendezvous?.onCrConfirmed(entry.key);
           return;
         }
       }
+      _fcRendezvous?.onCrConfirmed(recipientHex);
     };
 
     // Mutual Peer Selection for S&F (Architecture Section 3.3.7).
@@ -1958,6 +1982,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     _rendezvousManager?.publishForAllContacts();
     _rendezvousManager?.startPeriodicRefresh();
 
+    // §4.11.10: resume persisted First-Contact rendezvous sessions
+    // (republish records + re-arm owner polls). No-op without sessions.
+    _fcRendezvous?.resumeSessions();
+
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = Timer(const Duration(seconds: 15), () {
       _postDiscoverySecondSweep = null;
@@ -2798,6 +2826,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     String? targetDxkB64,
     String? targetDmkB64,
     String? targetEpB64,
+    String? targetRendezvousNonceB64,
   }) {
     // Add the target node itself — always, even without addresses.
     // Without addresses the Three-Layer Cascade will relay via seed peers.
@@ -2898,6 +2927,80 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // sendToDevice has a last-resort relay path for the First-CR even if
     // no PONG has arrived yet.
     node.dvRouting.updateDefaultGateway();
+
+    // §4.11.10 First-Contact Rendezvous, scanner side: a pasted URI carries
+    // the `r` nonce → resolve the owner-tag (fresher addresses than `a=`),
+    // publish our own EndpointRecord under the scanner-tag, and let the
+    // existing CR retry re-resolve before each attempt.
+    if (targetRendezvousNonceB64 != null && hasDeviceId) {
+      try {
+        final nonce = Uint8List.fromList(
+            base64Url.decode(base64Url.normalize(targetRendezvousNonceB64)));
+        _fcRendezvous?.startScannerSession(
+            nonce, targetNodeIdHex.toLowerCase(), targetDeviceIdHex);
+      } catch (e) {
+        _log.warn('FC-RV: malformed rendezvous nonce in ContactSeed — '
+            'scanner session not started: $e');
+      }
+    }
+  }
+
+  /// §4.11.10 First-Contact Rendezvous, owner side: the UI copied/shared a
+  /// ContactSeed-URI carrying the given `r` nonce (base64url). Starts (or
+  /// resumes — idempotent per nonce) the owner session: publish own
+  /// EndpointRecord under the owner-tag + poll the scanner-tag.
+  @override
+  void notifyContactSeedUriShared(String rendezvousNonceB64) {
+    try {
+      final nonce = Uint8List.fromList(
+          base64Url.decode(base64Url.normalize(rendezvousNonceB64)));
+      _fcRendezvous?.startOwnerSession(nonce);
+    } catch (e) {
+      _log.warn('FC-RV: malformed rendezvous nonce from UI — '
+          'owner session not started: $e');
+    }
+  }
+
+  /// §4.11.10: the other side's EndpointRecord was resolved via the
+  /// First-Contact rendezvous. Merge the addresses into the routing table
+  /// and PING all of them (simultaneous-open: both sides send → carrier
+  /// firewalls/NATs open bidirectionally). Fired on every poll hit while
+  /// the session is active, so the PINGs are repeated.
+  void _onFcEndpointResolved(
+      FcSession session, String deviceIdHex, List<EndpointAddress> addresses) {
+    if (deviceIdHex == bytesToHex(identity.deviceNodeId)) return; // self-echo
+    final deviceId = hexToBytes(deviceIdHex);
+    final existing = node.routingTable.getPeer(deviceId);
+    if (existing == null) {
+      final peer = PeerInfo(
+        nodeId: deviceId,
+        addresses:
+            addresses.map((a) => PeerAddress(ip: a.ip, port: a.port)).toList(),
+      )..isProtectedSeed = true; // survive Doze pruning, like ContactSeed peers
+      if (session.role == kFcRoleScanner && session.targetUserIdHex != null) {
+        peer.userId = hexToBytes(session.targetUserIdHex!);
+      }
+      node.routingTable.addPeer(peer);
+      _log.info('FC-RV: added peer ${deviceIdHex.substring(0, 8)} with '
+          '${addresses.length} rendezvous address(es)');
+    } else {
+      var merged = 0;
+      for (final a in addresses) {
+        final known = existing.addresses
+            .any((pa) => pa.ip == a.ip && pa.port == a.port);
+        if (!known) {
+          existing.addresses.add(PeerAddress(ip: a.ip, port: a.port));
+          merged++;
+        }
+      }
+      if (merged > 0) {
+        _log.info('FC-RV: merged $merged fresh rendezvous address(es) into '
+            'peer ${deviceIdHex.substring(0, 8)}');
+      }
+    }
+    for (final a in addresses) {
+      node.sendPing(a.ip, a.port);
+    }
   }
 
   /// Parse address string: "1.2.3.4:5678" (IPv4) or "[2001:db8::1]:5678" (IPv6).
@@ -3357,6 +3460,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (sent > 0) {
       _log.info('§5.5b FIRST_CR_STORE: deposited CR on $sent seed peers '
           'for ${recipDevHex.substring(0, 8)}');
+    } else {
+      // Clean no-op: seeds with a public own address may legitimately carry
+      // an empty seed-peer list (relaxed §8.1.1 readiness gate) — the CR
+      // then relies on Direct + Relay + rendezvous instead of FIRST_CR_STORE.
+      _log.info('§5.5b FIRST_CR_STORE: no protected seed peers available '
+          'for ${recipDevHex.substring(0, 8)} — skipped (no-op)');
     }
   }
 
@@ -3832,6 +3941,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             '${count + 1}): no persisted ContactSeed — re-scan QR to resend');
         continue;
       }
+      // §4.11.10: before each CR retry, re-resolve the owner-tag of an
+      // active First-Contact rendezvous session (fresher owner addresses
+      // than the URI's `a=`). Fire-and-forget + rate-limited inside the
+      // manager (min 60s) — no own timer, docks onto this existing retry.
+      final fcResolve = _fcRendezvous?.resolveOwnerForContact(entry.key);
+      if (fcResolve != null) unawaited(fcResolve);
       unawaited(sendContactRequest(
         entry.key,
         message: ci.message ?? '',
@@ -5648,6 +5763,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     if (triggerNodeReset) await node.onNetworkChanged();
     // §2.2.4: Liveness-Republish bei Adress-Wechsel (debounced 5s im Publisher)
     _identityPublisher?.onAddressesChanged();
+    // §4.11.10: debounced First-Contact rendezvous republish (10s) so the
+    // other side resolves our new address. No-op without active sessions.
+    _fcRendezvous?.onNetworkChanged();
     // §5.8: Edge-triggered one-shot outbox flush.
     // Fire-and-forget — errors are logged inside _flushOutbox; the flush does
     // not block the network-change recovery path.
@@ -9105,6 +9223,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
     _rendezvousManager?.dispose();
     _rendezvousManager = null;
+    _fcRendezvous?.dispose();
+    _fcRendezvous = null;
     // §2.2.4: stop Identity Publisher (Auth/Liveness-Refresh-Loops)
     if (_publisherPeerAddedListener != null) {
       node.routingTable.removeOnPeerAddedListener(_publisherPeerAddedListener!);
@@ -11738,6 +11858,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // §8.1 per-sender CR rate limit (5/hour).
       if (_isCrRateLimited(senderHex)) return;
 
+      // §4.11.10 owner-side session end: an inbound First-CR from a scanner
+      // device we resolved via the First-Contact rendezvous completes the
+      // owner session (stop polling/publishing). No-op without sessions.
+      _fcRendezvous?.onFirstCrReceived(bytesToHex(senderDeviceId));
+
       // Multi-Identity guard: only process CRs addressed to THIS identity.
       // Without this, a CR to identity B could be processed by identity A's
       // service on the same node, resulting in A responding instead of B.
@@ -11951,6 +12076,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // "accepted your CR" system messages or re-fire the onContactAccepted
         // callback — just refresh the keys in case they changed.
         final wasAlreadyAccepted = existing.status == 'accepted';
+
+        // §4.11.10 scanner-side session end: the contact accepted our CR —
+        // the First-Contact rendezvous session for this target is complete.
+        _fcRendezvous?.onCrConfirmed(senderHex);
 
         // RC-1 (§8.1+§8.3): snapshot old key before overwrite
         final oldEd25519 = existing.ed25519Pk;

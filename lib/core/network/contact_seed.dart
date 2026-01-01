@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/hd_wallet.dart';
@@ -66,6 +67,14 @@ class ContactSeed {
   /// (§4.3 path 2). URI param `fp`, QR formats 0x09/0x0A.
   final Uint8List? foundingEd25519Pk;
 
+  /// §4.11.10 First-Contact Rendezvous: 32-byte random nonce shared via the
+  /// clipboard/share URI (param `r`, base64url). Owner and scanner derive
+  /// URI-scoped lookup tags + encryption keys from it so both sides can find
+  /// each other's endpoint addresses over the external rendezvous channel
+  /// before the first CR succeeds. URI format only — QR/NFC are synchronous
+  /// channels and stay unchanged. null for QR seeds and legacy URIs.
+  final Uint8List? rendezvousNonce;
+
   ContactSeed({
     required this.nodeIdHex,
     required this.displayName,
@@ -78,6 +87,7 @@ class ContactSeed {
     this.deviceMlKemPk,
     this.createdAtMs,
     this.foundingEd25519Pk,
+    this.rendezvousNonce,
   });
 
   /// §8.1.1 integrity check (SR-2): `SHA-256(networkSecret + fp) == userId`
@@ -139,6 +149,12 @@ class ContactSeed {
     final fp = foundingEd25519Pk;
     if (fp != null && fp.length == 32 && !_sameBytes(fp, ep)) {
       sb.write('&fp=${base64Url.encode(fp).replaceAll('=', '')}');
+    }
+
+    // §4.11.10 First-Contact Rendezvous nonce (URI-only, base64url).
+    final rn = rendezvousNonce;
+    if (rn != null && rn.length == 32) {
+      sb.write('&r=${base64Url.encode(rn).replaceAll('=', '')}');
     }
 
     if (ownAddresses.isNotEmpty) {
@@ -259,6 +275,19 @@ class ContactSeed {
         } catch (_) {}
       }
 
+      // §4.11.10 First-Contact Rendezvous nonce (optional; legacy URIs
+      // without `r` parse to null — feature simply stays off for them).
+      Uint8List? rn;
+      final rParam = params['r'];
+      if (rParam != null && rParam.isNotEmpty) {
+        try {
+          final decoded = base64Url.decode(base64Url.normalize(rParam));
+          if (decoded.length == 32) {
+            rn = Uint8List.fromList(decoded);
+          }
+        } catch (_) {}
+      }
+
       return ContactSeed(
         nodeIdHex: nodeIdHex,
         displayName: name,
@@ -271,6 +300,7 @@ class ContactSeed {
         deviceMlKemPk: dmk,
         createdAtMs: createdAt,
         foundingEd25519Pk: fp,
+        rendezvousNonce: rn,
       );
     } catch (_) {
       return null;
@@ -658,13 +688,22 @@ class ContactSeedBuilder {
 
   _NetworkSnapshot? _snapshot;
   int? _createdAtMs;
+  Uint8List? _rendezvousNonce;
 
   ContactSeedBuilder(this._source);
 
   /// True once the network has enough data for a complete CR.
+  ///
+  /// Relaxed gate (§8.1.1): a single publicly reachable own address
+  /// (public IPv4 via STUN or a global IPv6) is sufficient on its own —
+  /// the target can reach us directly, seed peers are a bonus (`s=` may
+  /// be empty). Only the LAN-only case (no public address at all) still
+  /// requires at least one session-confirmed peer so the seed carries
+  /// usable relay candidates.
   bool get isReady =>
-      _source.hasSessionConfirmedPeers &&
-      (_source.publicIp != null || _hasGlobalIpv6 || _hasOnlyLanPeers);
+      _source.publicIp != null ||
+      _hasGlobalIpv6 ||
+      (_source.hasSessionConfirmedPeers && _hasOnlyLanPeers);
 
   bool get _hasGlobalIpv6 => _source.localIps.any((ip) =>
       ip.contains(':') && !ip.startsWith('fe80:') &&
@@ -698,6 +737,7 @@ class ContactSeedBuilder {
       deviceX25519Pk: deviceX25519Pk,
       deviceMlKemPk: deviceMlKemPk,
       createdAtMs: _createdAtMs!,
+      rendezvousNonce: _rendezvousNonce,
     );
   }
 
@@ -705,14 +745,26 @@ class ContactSeedBuilder {
   void invalidate() {
     _snapshot = null;
     _createdAtMs = null;
+    _rendezvousNonce = null;
   }
 
   _NetworkSnapshot _ensureSnapshot() {
     final fp = _computeFingerprint();
+    // §4.11.10: the rendezvous nonce is created once per snapshot lifetime
+    // (`??=` like _createdAtMs — it survives fingerprint refreshes until
+    // invalidate()). It must NOT change per toUri() call, otherwise the
+    // owner-side rendezvous session and the handed-out URI diverge.
+    _rendezvousNonce ??= _generateRendezvousNonce();
     if (_snapshot != null && _snapshot!.fingerprint == fp) return _snapshot!;
     _snapshot = _buildSnapshot(fp);
     _createdAtMs ??= DateTime.now().millisecondsSinceEpoch;
     return _snapshot!;
+  }
+
+  static Uint8List _generateRendezvousNonce() {
+    final rng = Random.secure();
+    return Uint8List.fromList(
+        List<int>.generate(32, (_) => rng.nextInt(256)));
   }
 
   String _computeFingerprint() {

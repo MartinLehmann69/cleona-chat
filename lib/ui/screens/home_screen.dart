@@ -754,6 +754,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 final dmkB64 = dmk != null ? base64.encode(dmk) : null;
                 final ep = seed.userEd25519Pk;
                 final epB64 = ep != null ? base64Url.encode(ep).replaceAll('=', '') : null;
+                // §4.11.10: pasted URIs carry the `r` rendezvous nonce —
+                // pass it through so the scanner-side session starts.
+                final rn = seed.rendezvousNonce;
+                final rnB64 = rn != null
+                    ? base64Url.encode(rn).replaceAll('=', '')
+                    : null;
                 if (seed.seedPeers.isNotEmpty || seed.ownAddresses.isNotEmpty) {
                   service.addPeersFromContactSeed(
                     seed.nodeIdHex,
@@ -763,6 +769,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     targetDxkB64: dxkB64,
                     targetDmkB64: dmkB64,
                     targetEpB64: epB64,
+                    targetRendezvousNonceB64: rnB64,
                   );
                   Future.delayed(const Duration(seconds: 3), () {
                     service.sendContactRequest(

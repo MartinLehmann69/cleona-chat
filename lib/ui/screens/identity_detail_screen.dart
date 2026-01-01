@@ -198,6 +198,13 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
             label: Text(locale.get('copy')),
             onPressed: () {
               Clipboard.setData(ClipboardData(text: shareUri));
+              // §4.11.10: start the owner-side First-Contact rendezvous
+              // session for the copied URI (transport-side, no UI).
+              final rn = seed.rendezvousNonce;
+              if (rn != null) {
+                service.notifyContactSeedUriShared(
+                    base64Url.encode(rn).replaceAll('=', ''));
+              }
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text(locale.get('copied_to_clipboard'))),
               );

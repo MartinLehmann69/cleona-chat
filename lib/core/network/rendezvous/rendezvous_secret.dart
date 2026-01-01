@@ -1,8 +1,10 @@
 /// Pairwise Rendezvous Secret derivation, Lookup Tag computation,
-/// and Infrastructure Rendezvous key derivation.
+/// Infrastructure Rendezvous key derivation, and First-Contact
+/// Rendezvous derivation.
 ///
 /// Architecture §4.11.3 (Pairwise Secret) + §4.11.4 (Lookup Tag & Epoch)
-/// + §4.11.9 (Infrastructure Rendezvous).
+/// + §4.11.9 (Infrastructure Rendezvous) + §4.11.10 (First-Contact
+/// Rendezvous, URI-scoped).
 library;
 
 import 'dart:convert';
@@ -22,6 +24,15 @@ const String _nostrKeySalt = 'cleona-nostr-v1';
 const String _infraTagSalt = 'cleona-rv-infra-v1';
 const String _infraKeySalt = 'cleona-rv-infra-key-v1';
 const String _infraNostrSalt = 'cleona-nostr-infra-v1';
+const String _fcTagSalt = 'cleona-rv-fc-tag-v1';
+const String _fcKeySalt = 'cleona-rv-fc-key-v1';
+const String _fcNostrSalt = 'cleona-nostr-fc-v1';
+
+/// First-Contact Rendezvous role of the URI creator (§4.11.10).
+const String kFcRoleOwner = 'owner';
+
+/// First-Contact Rendezvous role of the URI consumer (§4.11.10).
+const String kFcRoleScanner = 'scanner';
 
 // ---------------------------------------------------------------------------
 // Pairwise Rendezvous Secret (§4.11.3)
@@ -140,6 +151,52 @@ Uint8List deriveInfraNostrSecretKey(
   return SodiumFFI().hkdfSha256(
     networkSecret,
     salt: Uint8List.fromList(utf8.encode(_infraNostrSalt)),
+    info: Uint8List.fromList(utf8.encode(deviceHex)),
+    length: 32,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// First-Contact Rendezvous (§4.11.10) — URI-scoped, nonce-based
+// ---------------------------------------------------------------------------
+
+/// Computes the First-Contact lookup tag for an epoch and role.
+///
+/// [nonce] — 32-byte random nonce from the ContactSeed-URI `r` parameter
+/// [epochString] — e.g. "2026-06-28-12" (UTC, 6h boundary)
+/// [role] — [kFcRoleOwner] (URI creator) or [kFcRoleScanner] (URI consumer)
+Uint8List computeFcTag(Uint8List nonce, String epochString, String role) {
+  return SodiumFFI().hkdfSha256(
+    nonce,
+    salt: Uint8List.fromList(utf8.encode(_fcTagSalt)),
+    info: Uint8List.fromList(utf8.encode('$epochString/$role')),
+    length: 32,
+  );
+}
+
+/// Derives the encryption key for First-Contact endpoint records.
+/// Shared by both roles within one epoch (each side decrypts the other's
+/// record with the same key; the tag in the AAD keeps roles apart).
+Uint8List deriveFcKey(Uint8List nonce, String epochString) {
+  return SodiumFFI().hkdfSha256(
+    nonce,
+    salt: Uint8List.fromList(utf8.encode(_fcKeySalt)),
+    info: Uint8List.fromList(utf8.encode(epochString)),
+    length: 32,
+  );
+}
+
+/// Derives a deterministic secp256k1 secret key for Nostr First-Contact
+/// publishing per device. Different scanners get different Nostr pubkeys,
+/// so NIP-33 replaceable events do not overwrite each other cross-device
+/// and the owner's d-tag query returns ALL scanner records (same pattern
+/// as Infrastructure Rendezvous §4.11.9).
+Uint8List deriveFcNostrSecretKey(Uint8List nonce, Uint8List ownDeviceId) {
+  final deviceHex =
+      ownDeviceId.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+  return SodiumFFI().hkdfSha256(
+    nonce,
+    salt: Uint8List.fromList(utf8.encode(_fcNostrSalt)),
     info: Uint8List.fromList(utf8.encode(deviceHex)),
     length: 32,
   );

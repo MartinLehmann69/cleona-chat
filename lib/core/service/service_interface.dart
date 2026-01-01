@@ -173,6 +173,8 @@ abstract class ICleonaService {
   /// §8.1.1 rev3: pass [targetDeviceIdHex] + Device-KEM-PKs (v1 legacy) or
   /// [targetEpB64] (v2 trust-anchor) from a ContactSeed so the seeded peer
   /// is keyed by Device-Node-ID and a direct DV-route is registered.
+  /// [targetRendezvousNonceB64] (§4.11.10): the URI's `r` nonce (base64url)
+  /// — starts the scanner-side First-Contact rendezvous session.
   void addPeersFromContactSeed(
     String targetNodeIdHex,
     List<String> targetAddresses,
@@ -181,7 +183,12 @@ abstract class ICleonaService {
     String? targetDxkB64,
     String? targetDmkB64,
     String? targetEpB64,
+    String? targetRendezvousNonceB64,
   });
+  /// §4.11.10 First-Contact Rendezvous, owner side: a ContactSeed-URI
+  /// carrying the given `r` nonce (base64url, 32 bytes) was copied/shared.
+  /// Starts the owner-side rendezvous session (idempotent per nonce).
+  void notifyContactSeedUriShared(String rendezvousNonceB64);
   bool addManualPeer(String ip, int port);
   Future<bool> acceptContactRequest(String nodeIdHex);
   void deleteContact(String nodeIdHex);
