@@ -11,19 +11,19 @@ import 'package:cleona/core/service/service_types.dart' show PeerSummary;
 ///
 /// Two format generations (§8.1.1):
 ///
-/// **v2 (rev3, current)** — compact, base64url, ~350 chars URI / QR Version 8-10:
-/// `cleona://<userIdHex>?n=<name>&c=<b|l>&did=<deviceIdHex>&ep=<userEd25519Pk_base64url>&a=<addrs>&s=<seedPeers>`
+/// **URI format (clipboard/share)** — includes Device-KEM-PK for offline first-CR:
+/// `cleona://<userIdHex>?n=<name>&c=<b|l>&did=<deviceIdHex>&ep=<…>&dxk=<…>&dmk=<…>&a=<addrs>&s=<seedPeers>`
 ///
-/// **v1 (legacy, still parsed)** — includes full Device-KEM keys:
-/// `cleona://<userIdHex>?...&dxk=<deviceX25519Pk_b64>&dmk=<deviceMlKemPk_b64>&...`
+/// **QR binary format** — compact v2 (ep only, ~350 chars, QR Version 8-10).
 ///
 /// - nodeIdHex: 64-char hex of the user's 32-byte UserID (§8.1.1).
 /// - n: display name (URL-encoded)
 /// - c: network channel ('b' = beta, 'l' = live)
 /// - did: deviceId (64-char hex)
-/// - ep (v2): userEd25519Pk, 32 bytes, base64url — trust-anchor for Deferred
+/// - ep: userEd25519Pk, 32 bytes, base64url — trust-anchor for Deferred
 ///   Key Exchange and DHT record verification. Integrity: SHA-256(networkSecret + ep) == nodeIdHex.
-/// - dxk/dmk (v1 legacy): Device-KEM keys inline — parsed but no longer emitted.
+/// - dxk/dmk: Device-KEM keys (X25519 32B + ML-KEM-768 1184B, standard base64).
+///   Enables offline first-CR on CGNAT without synchronous DEVICE_KEM_REQUEST.
 /// - a: own addresses (multi-address, + encoded as %2B)
 /// - s: seed peers (up to 5, each: nodeIdHex@ip:port+ip:port)
 class ContactSeed {
@@ -45,11 +45,11 @@ class ContactSeed {
   /// and DEVICE_KEM_OFFER signatures (§8.1.1).
   final Uint8List? userEd25519Pk;
 
-  /// Device-X25519 public key (v1 legacy). 32 bytes. Present only in legacy
-  /// ContactSeeds that carried the full Device-KEM keys inline.
+  /// Device-X25519 public key. 32 bytes. Included in URI format to enable
+  /// offline first-CR (FIRST_CR_STORE) without Deferred Key Exchange.
   final Uint8List? deviceX25519Pk;
 
-  /// Device-ML-KEM-768 public key (v1 legacy). 1184 bytes.
+  /// Device-ML-KEM-768 public key. 1184 bytes.
   final Uint8List? deviceMlKemPk;
 
   /// ContactSeed creation time (ms since epoch, §8.1.1 rev3 — URI `t`,
@@ -96,7 +96,9 @@ class ContactSeed {
   Duration? ageFrom(DateTime now) =>
       createdAtMs == null ? null : now.difference(DateTime.fromMillisecondsSinceEpoch(createdAtMs!));
 
-  /// Build the URI string for QR code encoding.
+  /// Build the URI string for clipboard / share (includes Device-KEM-PK
+  /// when available so CGNAT-to-CGNAT first-CR works without synchronous
+  /// DEVICE_KEM_REQUEST round-trip). QR uses [toQrBytes] (compact v2).
   String toUri() {
     final sb = StringBuffer('cleona://$nodeIdHex');
     sb.write('?n=${Uri.encodeComponent(displayName)}');
@@ -115,6 +117,17 @@ class ContactSeed {
     final ep = userEd25519Pk;
     if (ep != null && ep.length == 32) {
       sb.write('&ep=${base64Url.encode(ep).replaceAll('=', '')}');
+    }
+
+    // Device-KEM-PK: enables offline first-CR (FIRST_CR_STORE on seed
+    // peers) without Deferred Key Exchange. Critical for CGNAT-to-CGNAT
+    // clipboard exchange where both phones may not be online simultaneously.
+    final dxk = deviceX25519Pk;
+    final dmk = deviceMlKemPk;
+    if (dxk != null && dxk.length == deviceX25519PkLength &&
+        dmk != null && dmk.length == deviceMlKemPkLength) {
+      sb.write('&dxk=${base64.encode(dxk)}');
+      sb.write('&dmk=${base64.encode(dmk)}');
     }
 
     // Creation timestamp (rev3): lets the scanner judge seed freshness.
@@ -204,8 +217,8 @@ class ContactSeed {
         } catch (_) {}
       }
 
-      // v1 legacy: Device-KEM pubkeys (standard base64). Parsed for backward
-      // compat — URIs with dxk+dmk skip the Deferred Key Exchange entirely.
+      // Device-KEM pubkeys (standard base64). URIs with dxk+dmk skip the
+      // Deferred Key Exchange — enables offline first-CR on CGNAT.
       Uint8List? dxk;
       Uint8List? dmk;
       final dxkParam = params['dxk'];
@@ -668,6 +681,8 @@ class ContactSeedBuilder {
     required String channelTag,
     Uint8List? userEd25519Pk,
     Uint8List? foundingEd25519Pk,
+    Uint8List? deviceX25519Pk,
+    Uint8List? deviceMlKemPk,
   }) {
     if (!isReady) return null;
     final snap = _ensureSnapshot();
@@ -680,6 +695,8 @@ class ContactSeedBuilder {
       deviceIdHex: _source.deviceNodeIdHex,
       userEd25519Pk: userEd25519Pk,
       foundingEd25519Pk: foundingEd25519Pk,
+      deviceX25519Pk: deviceX25519Pk,
+      deviceMlKemPk: deviceMlKemPk,
       createdAtMs: _createdAtMs!,
     );
   }

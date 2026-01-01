@@ -441,6 +441,12 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
   bool _isInitialized = false;
   bool _hasProfile = false;
   String? _initError;
+
+  /// Non-null while a second (or later) identity is being created.
+  /// Set before PQ keygen starts so the IdentityTabBar can show
+  /// a "creating..." placeholder chip with a spinner immediately.
+  String? _creatingIdentityName;
+  String? get creatingIdentityName => _creatingIdentityName;
   /// Sec H-5 (V3.1.72) / T13: true after the user clicked "open anyway
   /// (limited)" on the [UpdateRequiredScreen]. Per-session, not persisted.
   /// Propagated to every concrete [CleonaService] (in-process) and,
@@ -2267,70 +2273,82 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Creates a new identity and switches to it.
   Future<void> createAndSwitchIdentity(String displayName) async {
-    if (_ipcClient != null) {
-      // Linux: daemon running — create + register identity via IPC
-      final newNodeIdHex = await _ipcClient!.createIdentity(displayName);
-      if (newNodeIdHex != null) {
-        final identities = IdentityManager().loadIdentities();
-        final newIdentity = identities.where((i) => i.nodeIdHex == newNodeIdHex).firstOrNull;
-        if (newIdentity != null) {
-          IdentityManager().setActiveIdentity(newIdentity);
+    _creatingIdentityName = displayName;
+    notifyListeners();
+
+    try {
+      if (_ipcClient != null) {
+        // Linux: daemon running — create + register identity via IPC
+        final newNodeIdHex = await _ipcClient!.createIdentity(displayName);
+        if (newNodeIdHex != null) {
+          final identities = IdentityManager().loadIdentities();
+          final newIdentity = identities.where((i) => i.nodeIdHex == newNodeIdHex).firstOrNull;
+          if (newIdentity != null) {
+            IdentityManager().setActiveIdentity(newIdentity);
+          }
+          _creatingIdentityName = null;
+          notifyListeners();
+          return;
         }
+      }
+
+      // Android in-process: create identity and register with running node
+      if (_inProcessNode != null) {
+        final mgr = IdentityManager();
+        final identity = await mgr.createIdentity(displayName);
+        final masterSeed = mgr.loadMasterSeed();
+        final ctx = IdentityContext(
+          profileDir: identity.profileDir,
+          displayName: displayName,
+          networkChannel: NetworkSecret.channel.name,
+          hdIndex: identity.hdIndex,
+          masterSeed: masterSeed,
+          createdAt: identity.createdAt,
+          isAdult: identity.isAdult,
+        );
+        await ctx.initKeys();
+        identity.nodeIdHex = ctx.userIdHex;
+
+        _inProcessContexts[ctx.userIdHex] = ctx;
+        _inProcessNode!.registerIdentity(ctx);
+
+        final service = CleonaService(
+          identity: ctx,
+          node: _inProcessNode!,
+          displayName: displayName,
+        );
+        // Sec H-5 / T13: inherit splash decision for newly added identities.
+        if (_sessionReducedMode) service.reducedMode = true;
+        _wireServiceCallbacks(service);
+        await service.startService();
+        _inProcessServices[ctx.userIdHex] = service;
+
+        // Save updated nodeIdHex
+        final identities = mgr.loadIdentities();
+        for (final id in identities) {
+          if (id.id == identity.id) {
+            id.nodeIdHex = ctx.userIdHex;
+            break;
+          }
+        }
+        mgr.saveIdentities(identities);
+
+        _service = service;
+        IdentityManager().setActiveIdentity(identity);
+        _creatingIdentityName = null;
         notifyListeners();
         return;
       }
-    }
 
-    // Android in-process: create identity and register with running node
-    if (_inProcessNode != null) {
-      final mgr = IdentityManager();
-      final identity = await mgr.createIdentity(displayName);
-      final masterSeed = mgr.loadMasterSeed();
-      final ctx = IdentityContext(
-        profileDir: identity.profileDir,
-        displayName: displayName,
-        networkChannel: NetworkSecret.channel.name,
-        hdIndex: identity.hdIndex,
-        masterSeed: masterSeed,
-        createdAt: identity.createdAt,
-        isAdult: identity.isAdult,
-      );
-      await ctx.initKeys();
-      identity.nodeIdHex = ctx.userIdHex;
-
-      _inProcessContexts[ctx.userIdHex] = ctx;
-      _inProcessNode!.registerIdentity(ctx);
-
-      final service = CleonaService(
-        identity: ctx,
-        node: _inProcessNode!,
-        displayName: displayName,
-      );
-      // Sec H-5 / T13: inherit splash decision for newly added identities.
-      if (_sessionReducedMode) service.reducedMode = true;
-      _wireServiceCallbacks(service);
-      await service.startService();
-      _inProcessServices[ctx.userIdHex] = service;
-
-      // Save updated nodeIdHex
-      final identities = mgr.loadIdentities();
-      for (final id in identities) {
-        if (id.id == identity.id) {
-          id.nodeIdHex = ctx.userIdHex;
-          break;
-        }
-      }
-      mgr.saveIdentities(identities);
-
-      _service = service;
-      IdentityManager().setActiveIdentity(identity);
+      // Fallback: create directly (no daemon, no running node)
+      final identity = await IdentityManager().createIdentity(displayName);
+      _creatingIdentityName = null;
+      await switchIdentity(identity);
+    } catch (e) {
+      _creatingIdentityName = null;
       notifyListeners();
-      return;
+      rethrow;
     }
-
-    // Fallback: create directly (no daemon, no running node)
-    final identity = await IdentityManager().createIdentity(displayName);
-    await switchIdentity(identity);
   }
 
   @override

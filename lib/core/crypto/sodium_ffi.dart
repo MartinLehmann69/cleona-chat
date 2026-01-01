@@ -278,6 +278,10 @@ typedef _Ed25519ScalarOpDart = void Function(
 typedef _Ed25519ScalarRandomNative = Void Function(Pointer<Uint8>);
 typedef _Ed25519ScalarRandomDart = void Function(Pointer<Uint8>);
 
+// sodium_memzero
+typedef _SodiumMemzeroNative = Void Function(Pointer<Void>, Size);
+typedef _SodiumMemzeroDart = void Function(Pointer<Void>, int);
+
 // ---------------------------------------------------------------------------
 // SodiumFFI — singleton with lazy initialisation
 // ---------------------------------------------------------------------------
@@ -336,6 +340,7 @@ class SodiumFFI {
   late final _Ed25519ScalarOpDart _ed25519ScalarSub;
   late final _Ed25519ScalarOpDart _ed25519ScalarMul;
   late final _Ed25519ScalarRandomDart _ed25519ScalarRandom;
+  late final _SodiumMemzeroDart _sodiumMemzero;
 
   SodiumFFI._internal() {
     final lib = _openLibsodium();
@@ -465,6 +470,9 @@ class SodiumFFI {
 
     _ed25519ScalarRandom = lib.lookupFunction<_Ed25519ScalarRandomNative,
         _Ed25519ScalarRandomDart>('crypto_core_ed25519_scalar_random');
+
+    _sodiumMemzero = lib.lookupFunction<_SodiumMemzeroNative,
+        _SodiumMemzeroDart>('sodium_memzero');
   }
 
   // =========================================================================
@@ -522,6 +530,7 @@ class SodiumFFI {
         secretKey: _fromNative(sk, cryptoSignSecretKeyBytes),
       );
     } finally {
+      _sodiumMemzero(sk.cast(), cryptoSignSecretKeyBytes);
       calloc.free(pk);
       calloc.free(sk);
     }
@@ -546,6 +555,8 @@ class SodiumFFI {
         secretKey: _fromNative(sk, cryptoSignSecretKeyBytes),
       );
     } finally {
+      _sodiumMemzero(sk.cast(), cryptoSignSecretKeyBytes);
+      _sodiumMemzero(s.cast(), seed.length);
       calloc.free(pk);
       calloc.free(sk);
       calloc.free(s);
@@ -572,6 +583,7 @@ class SodiumFFI {
       }
       return _fromNative(sig, cryptoSignBytes);
     } finally {
+      _sodiumMemzero(sk.cast(), secretKey.length);
       calloc.free(sig);
       calloc.free(sigLen);
       calloc.free(msg);
@@ -642,6 +654,8 @@ class SodiumFFI {
       }
       return _fromNative(x25519Sk, cryptoScalarMultScalarBytes);
     } finally {
+      _sodiumMemzero(edSk.cast(), ed25519Sk.length);
+      _sodiumMemzero(x25519Sk.cast(), cryptoScalarMultScalarBytes);
       calloc.free(x25519Sk);
       calloc.free(edSk);
     }
@@ -672,6 +686,7 @@ class SodiumFFI {
         secretKey: x25519Sk,
       );
     } finally {
+      _sodiumMemzero(sk.cast(), x25519Sk.length);
       calloc.free(pk);
       calloc.free(sk);
     }
@@ -700,6 +715,7 @@ class SodiumFFI {
       }
       return _fromNative(q, cryptoScalarMultBytes);
     } finally {
+      _sodiumMemzero(n.cast(), secretKey.length);
       calloc.free(q);
       calloc.free(n);
       calloc.free(p);
@@ -769,6 +785,7 @@ class SodiumFFI {
       }
       return _fromNative(c, cLen);
     } finally {
+      _sodiumMemzero(k.cast(), key.length);
       calloc.free(c);
       calloc.free(cLenOut);
       calloc.free(m);
@@ -826,6 +843,7 @@ class SodiumFFI {
       }
       return _fromNative(m, mLen);
     } finally {
+      _sodiumMemzero(k.cast(), key.length);
       calloc.free(m);
       calloc.free(mLenOut);
       calloc.free(c);
@@ -957,6 +975,7 @@ class SodiumFFI {
       }
       return _fromNative(c, cLen);
     } finally {
+      _sodiumMemzero(k.cast(), key.length);
       calloc.free(c);
       calloc.free(m);
       calloc.free(n);
@@ -995,6 +1014,7 @@ class SodiumFFI {
       }
       return _fromNative(m, mLen);
     } finally {
+      _sodiumMemzero(k.cast(), key.length);
       calloc.free(m);
       calloc.free(c);
       calloc.free(n);
@@ -1044,6 +1064,8 @@ class SodiumFFI {
       }
       return _fromNative(out, keyLength);
     } finally {
+      _sodiumMemzero(pwd.cast(), password.length);
+      _sodiumMemzero(out.cast(), keyLength);
       calloc.free(out);
       calloc.free(pwd);
       calloc.free(s);

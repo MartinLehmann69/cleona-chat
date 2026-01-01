@@ -88,7 +88,7 @@ class CLogger {
   }
 
   static Future<void> flushAll() async {
-    for (final entry in _buffers.entries) {
+    for (final entry in Map.of(_buffers).entries) {
       final dir = entry.key;
       final buffer = entry.value;
       if (buffer.isEmpty) continue;

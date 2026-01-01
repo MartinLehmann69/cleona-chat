@@ -46,10 +46,10 @@ class PollManager {
         }
         _log.info('Loaded ${polls.length} polls');
       }
+      _loaded = true;
     } catch (e) {
       _log.warn('Failed to load polls: $e');
     }
-    _loaded = true;
   }
 
   void save() {

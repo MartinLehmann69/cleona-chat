@@ -226,8 +226,20 @@ class _WindowsDpapiKeyring extends KeyringService {
     try {
       final file = File(_pathFor(name));
       if (!file.existsSync()) return null;
-      final encrypted = file.readAsStringSync().trim();
+      var encrypted = file.readAsStringSync().trim();
       if (encrypted.isEmpty) return null;
+      // Strip whitespace first: PowerShell's ToBase64String may line-wrap
+      // at 76 chars, inserting \r\n into the DPAPI ciphertext file.
+      // Without stripping, the regex below would reject valid DPAPI output,
+      // causing post-migration identity loss (seed gone, legacy deleted).
+      encrypted = encrypted.replaceAll(RegExp(r'\s+'), '');
+      // Validate strict base64 to prevent PowerShell injection via tampered
+      // .dpapi files (the string is interpolated into a -Command argument).
+      if (!RegExp(r'^[A-Za-z0-9+/=]+$').hasMatch(encrypted)) {
+        _log.warn('DPAPI file for "$name" contains invalid characters — '
+            'possible tampering, refusing to load');
+        return null;
+      }
       final result = Process.runSync('powershell', [
         '-NoProfile', '-NonInteractive', '-Command',
         'Add-Type -AssemblyName System.Security; '

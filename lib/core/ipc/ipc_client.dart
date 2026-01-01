@@ -1829,19 +1829,7 @@ class IpcClient implements ICleonaService, ContactSeedDataSource {
 
   // ── Contact issue reporting ────────────────────────────────────────
   @override
-  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex) {
-    ContactIssueReport? result;
-    _sendRequest('build_contact_issue_report',
-        params: {'nodeIdHex': contactNodeIdHex}).then((resp) {
-      if (resp.success && resp.data.containsKey('report')) {
-        result = ContactIssueReport.fromJson(
-            resp.data['report'] as Map<String, dynamic>);
-      }
-    });
-    return result;
-  }
-
-  Future<ContactIssueReport?> fetchContactIssueReport(
+  Future<ContactIssueReport?> buildContactIssueReport(
       String contactNodeIdHex) async {
     final resp = await _sendRequest('build_contact_issue_report',
         params: {'nodeIdHex': contactNodeIdHex});

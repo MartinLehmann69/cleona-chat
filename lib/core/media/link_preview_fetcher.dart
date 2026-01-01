@@ -176,6 +176,20 @@ bool isPrivateOrReservedIp(InternetAddress addr) {
           Uint8List.fromList(bytes.sublist(12, 16)));
       return isPrivateOrReservedIp(ipv4);
     }
+    // 64:ff9b::/96 (NAT64 — last 4 bytes are embedded IPv4)
+    if (bytes[0] == 0x00 && bytes[1] == 0x64 &&
+        bytes[2] == 0xff && bytes[3] == 0x9b &&
+        bytes.sublist(4, 12).every((b) => b == 0)) {
+      final ipv4 = InternetAddress.fromRawAddress(
+          Uint8List.fromList(bytes.sublist(12, 16)));
+      return isPrivateOrReservedIp(ipv4);
+    }
+    // 2002::/16 (6to4 — bytes 2-5 contain the embedded IPv4)
+    if (bytes[0] == 0x20 && bytes[1] == 0x02) {
+      final ipv4 = InternetAddress.fromRawAddress(
+          Uint8List.fromList(bytes.sublist(2, 6)));
+      return isPrivateOrReservedIp(ipv4);
+    }
     return false;
   }
 
@@ -273,6 +287,9 @@ class LinkPreviewFetcher {
     return fetchPreviewForUrl(url);
   }
 
+  /// Maximum number of redirects to follow manually (prevent infinite loops).
+  static const _maxRedirects = 5;
+
   /// Fetch link preview for a specific URL.
   Future<LinkPreviewData?> fetchPreviewForUrl(String url) async {
     try {
@@ -295,8 +312,8 @@ class LinkPreviewFetcher {
 
       final timeout = Duration(seconds: settings.fetchTimeoutSec);
 
-      // Fetch HTML
-      final html = await _fetchHtml(uri, timeout);
+      // Fetch HTML — pin TCP to safeIp, handle redirects with SSRF re-check
+      final html = await _fetchHtml(uri, safeIp, timeout);
       if (html == null) return null;
 
       // Parse og: tags
@@ -326,50 +343,139 @@ class LinkPreviewFetcher {
     }
   }
 
-  /// Fetch HTML content from URL. Returns null on failure.
-  Future<String?> _fetchHtml(Uri uri, Duration timeout) async {
+  /// Create an HttpClient pinned to [safeIp] — the TCP connection goes
+  /// directly to the pre-validated IP, bypassing HttpClient's internal
+  /// DNS resolution. This closes the TOCTOU gap where an attacker's DNS
+  /// returns a safe IP on the first lookup and a private IP on the second.
+  HttpClient _createPinnedClient(
+      InternetAddress safeIp, Uri uri, Duration timeout) {
+    final client = HttpClient();
+    client.connectionTimeout = timeout;
+    client.userAgent = 'Cleona/1.0';
+    // Pin TCP to the pre-resolved safe IP — no second DNS lookup.
+    client.connectionFactory =
+        (Uri requestUri, String? proxyHost, int? proxyPort) {
+      final port = requestUri.port != 0 ? requestUri.port : 443;
+      return Socket.startConnect(safeIp, port);
+    };
+    return client;
+  }
+
+  /// Perform a single HTTP GET with the connection pinned to [safeIp].
+  /// Returns the response. Redirects are NOT followed automatically —
+  /// the caller handles them via [_fetchWithRedirects].
+  Future<HttpClientResponse> _pinnedGet(
+      HttpClient client, Uri uri, Duration timeout) async {
+    final request = await client.getUrl(uri).timeout(timeout);
+    // Disable automatic redirects — we handle them manually so each
+    // redirect target goes through full SSRF validation.
+    request.followRedirects = false;
+    // No cookies, no auth
+    request.headers.removeAll('cookie');
+    return request.close().timeout(timeout);
+  }
+
+  /// Follow redirects manually, re-validating SSRF on every hop.
+  /// Returns the final (non-redirect) response and its HttpClient (caller
+  /// must close), or null if any hop fails SSRF or the chain is too long.
+  Future<({HttpClientResponse response, HttpClient client})?> _fetchWithRedirects(
+      Uri uri, InternetAddress safeIp, Duration timeout) async {
+    var currentUri = uri;
+    var currentIp = safeIp;
     HttpClient? client;
-    try {
-      client = HttpClient();
-      client.connectionTimeout = timeout;
-      client.userAgent = 'Cleona/1.0';
 
-      final request = await client.getUrl(uri).timeout(timeout);
-      // No cookies, no auth
-      request.headers.removeAll('cookie');
+    for (var hop = 0; hop <= _maxRedirects; hop++) {
+      client?.close(force: true);
+      client = _createPinnedClient(currentIp, currentUri, timeout);
 
-      final response = await request.close().timeout(timeout);
-      if (response.statusCode != 200) return null;
+      final response = await _pinnedGet(client, currentUri, timeout);
+      final statusCode = response.statusCode;
 
-      // Check content-type is HTML
-      final contentType = response.headers.contentType;
-      if (contentType != null &&
-          contentType.primaryType != 'text' &&
-          contentType.subType != 'html') {
+      // Not a redirect — return the response
+      if (statusCode < 300 || statusCode >= 400) {
+        return (response: response, client: client);
+      }
+
+      // 3xx redirect — extract Location, SSRF-validate, continue
+      final location = response.headers.value('location');
+      // Drain the redirect response body to free the connection
+      await response.drain<void>();
+      if (location == null || location.isEmpty) {
+        client.close(force: true);
         return null;
       }
 
-      // Read response with size limit
-      final chunks = <List<int>>[];
-      var totalBytes = 0;
-      await for (final chunk in response) {
-        totalBytes += chunk.length;
-        if (totalBytes > settings.maxHtmlBytes) {
-          break; // Size limit exceeded — use what we have
-        }
-        chunks.add(chunk);
+      final nextUri = currentUri.resolve(location);
+
+      // Must stay HTTPS
+      if (nextUri.scheme != 'https') {
+        log?.call('LinkPreview: Redirect to non-HTTPS blocked: $nextUri');
+        client.close(force: true);
+        return null;
       }
 
-      return utf8.decode(
-        chunks.expand((c) => c).toList(),
-        allowMalformed: true,
-      );
+      // Full SSRF check on the redirect target
+      final nextIp = await resolveSafeIp(nextUri.host,
+          timeoutSec: timeout.inSeconds);
+      if (nextIp == null) {
+        log?.call(
+            'LinkPreview: SSRF blocked redirect to private IP: ${nextUri.host}');
+        client.close(force: true);
+        return null;
+      }
+
+      currentUri = nextUri;
+      currentIp = nextIp;
+    }
+
+    // Too many redirects
+    log?.call('LinkPreview: Too many redirects (>$_maxRedirects)');
+    client?.close(force: true);
+    return null;
+  }
+
+  /// Fetch HTML content from URL. Returns null on failure.
+  /// [safeIp] is the pre-resolved, SSRF-validated IP for [uri.host].
+  Future<String?> _fetchHtml(
+      Uri uri, InternetAddress safeIp, Duration timeout) async {
+    try {
+      final result = await _fetchWithRedirects(uri, safeIp, timeout);
+      if (result == null) return null;
+
+      try {
+        final response = result.response;
+        if (response.statusCode != 200) return null;
+
+        // Check content-type is HTML
+        final contentType = response.headers.contentType;
+        if (contentType != null &&
+            contentType.primaryType != 'text' &&
+            contentType.subType != 'html') {
+          return null;
+        }
+
+        // Read response with size limit
+        final chunks = <List<int>>[];
+        var totalBytes = 0;
+        await for (final chunk in response) {
+          totalBytes += chunk.length;
+          if (totalBytes > settings.maxHtmlBytes) {
+            break; // Size limit exceeded — use what we have
+          }
+          chunks.add(chunk);
+        }
+
+        return utf8.decode(
+          chunks.expand((c) => c).toList(),
+          allowMalformed: true,
+        );
+      } finally {
+        result.client.close(force: true);
+      }
     } on TimeoutException {
       return null;
     } catch (_) {
       return null;
-    } finally {
-      client?.close(force: true);
     }
   }
 
@@ -377,7 +483,6 @@ class LinkPreviewFetcher {
   /// Returns raw image bytes (max 64 KB) or null.
   Future<Uint8List?> _fetchThumbnail(
       String imageUrl, Uri pageUri, Duration timeout) async {
-    HttpClient? client;
     try {
       // Resolve relative URLs
       var imgUri = Uri.tryParse(imageUrl);
@@ -385,40 +490,39 @@ class LinkPreviewFetcher {
       if (!imgUri.hasScheme) imgUri = pageUri.resolve(imageUrl);
       if (imgUri.scheme != 'https') return null;
 
-      // SSRF check on image URL too
+      // SSRF check on image URL — resolve and validate
       final safeIp = await resolveSafeIp(imgUri.host,
           timeoutSec: timeout.inSeconds);
       if (safeIp == null) return null;
 
-      client = HttpClient();
-      client.connectionTimeout = timeout;
-      client.userAgent = 'Cleona/1.0';
+      // Fetch with redirect handling (each hop SSRF-validated)
+      final result = await _fetchWithRedirects(imgUri, safeIp, timeout);
+      if (result == null) return null;
 
-      final request = await client.getUrl(imgUri).timeout(timeout);
-      request.headers.removeAll('cookie');
+      try {
+        final response = result.response;
+        if (response.statusCode != 200) return null;
 
-      final response = await request.close().timeout(timeout);
-      if (response.statusCode != 200) return null;
+        // Read with size limit
+        final chunks = <List<int>>[];
+        var totalBytes = 0;
+        await for (final chunk in response) {
+          totalBytes += chunk.length;
+          if (totalBytes > settings.maxImageBytes) return null;
+          chunks.add(chunk);
+        }
 
-      // Read with size limit
-      final chunks = <List<int>>[];
-      var totalBytes = 0;
-      await for (final chunk in response) {
-        totalBytes += chunk.length;
-        if (totalBytes > settings.maxImageBytes) return null;
-        chunks.add(chunk);
+        final bytes = Uint8List.fromList(chunks.expand((c) => c).toList());
+
+        if (bytes.length <= 65536) return bytes;
+        return recompressToFit(bytes, 65536);
+      } finally {
+        result.client.close(force: true);
       }
-
-      final bytes = Uint8List.fromList(chunks.expand((c) => c).toList());
-
-      if (bytes.length <= 65536) return bytes;
-      return recompressToFit(bytes, 65536);
     } on TimeoutException {
       return null;
     } catch (_) {
       return null;
-    } finally {
-      client?.close(force: true);
     }
   }
 

@@ -1008,10 +1008,15 @@ class _MultiServiceDaemon {
   /// Start the ReminderService for all identity calendars.
   void _startReminderService() {
     final reminderService = ReminderService();
-    final calendars = <String, CalendarManager>{};
-    for (final entry in _services.entries) {
-      calendars[entry.key] = entry.value.calendarManager;
+    // Build a live getter so identities added at runtime get reminders too.
+    Map<String, CalendarManager> getCalendars() {
+      final calendars = <String, CalendarManager>{};
+      for (final entry in _services.entries) {
+        calendars[entry.key] = entry.value.calendarManager;
+      }
+      return calendars;
     }
+
     reminderService.onReminderDue = (identityId, reminder) {
       log.info('Reminder due: ${reminder.title} (identity=$identityId, '
           '${reminder.minutesBefore}min before event)');
@@ -1037,9 +1042,10 @@ class _MultiServiceDaemon {
       unawaited(service.notificationSound.playMessageSound());
       unawaited(service.notificationSound.vibrate(VibrationType.message));
     };
-    reminderService.start(calendars);
+    final initialCalendars = getCalendars();
+    reminderService.start(initialCalendars, calendarGetter: getCalendars);
     _reminderService = reminderService;
-    log.info('Reminder service started for ${calendars.length} identity calendars');
+    log.info('Reminder service started for ${initialCalendars.length} identity calendars');
   }
 
   /// Start the CalendarSyncService for each identity. No-op if no provider

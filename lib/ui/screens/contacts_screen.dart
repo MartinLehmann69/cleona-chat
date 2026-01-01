@@ -249,7 +249,7 @@ class ContactsScreen extends StatelessWidget {
   }
 
   void _showContactIssueReport(BuildContext context, ICleonaService svc, ContactInfo contact) async {
-    final report = svc.buildContactIssueReport(contact.nodeIdHex);
+    final report = await svc.buildContactIssueReport(contact.nodeIdHex);
     if (report == null) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(

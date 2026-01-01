@@ -30,6 +30,21 @@ class _ClientState {
   _ClientState({required this.socket, required this.activeIdentityId, this.authenticated = true});
 }
 
+/// Timing-safe string comparison — prevents an attacker on the loopback
+/// from deriving the auth token char-by-char via response-time measurement.
+bool _constantTimeEquals(String a, String b) {
+  final ab = utf8.encode(a);
+  final bb = utf8.encode(b);
+  final len = ab.length > bb.length ? ab.length : bb.length;
+  var diff = ab.length ^ bb.length;
+  for (var i = 0; i < len; i++) {
+    final av = i < ab.length ? ab[i] : 0;
+    final bv = i < bb.length ? bb[i] : 0;
+    diff |= av ^ bv;
+  }
+  return diff == 0;
+}
+
 /// IPC server: listens on a Unix Domain Socket (Linux) or TCP loopback
 /// with auth token (Windows), dispatches commands to the correct
 /// CleonaService based on identityId, and broadcasts events.
@@ -613,7 +628,7 @@ class IpcServer {
     if (!client.authenticated) {
       try {
         final json = jsonDecode(line) as Map<String, dynamic>;
-        if (json['type'] == 'auth' && json['token'] == _authToken) {
+        if (json['type'] == 'auth' && json['token'] is String && _constantTimeEquals(json['token'] as String, _authToken!)) {
           client.authenticated = true;
           _log.info('IPC client authenticated');
           return;
@@ -1178,7 +1193,7 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Missing param: nodeIdHex'));
             break;
           }
-          final ciReport = service.buildContactIssueReport(ciNodeIdHex);
+          final ciReport = await service.buildContactIssueReport(ciNodeIdHex);
           if (ciReport == null) {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Contact not found'));
             break;

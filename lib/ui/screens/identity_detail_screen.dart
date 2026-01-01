@@ -139,6 +139,8 @@ class _IdentityDetailScreenState extends State<IdentityDetailScreen> {
       channelTag: channelTag,
       userEd25519Pk: service.userEd25519Pk,
       foundingEd25519Pk: service.foundingEd25519Pk,
+      deviceX25519Pk: service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk,
     );
 
     if (seed == null) {

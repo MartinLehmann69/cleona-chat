@@ -62,6 +62,8 @@ class _QrShowScreenState extends State<QrShowScreen> {
       displayName: qrDisplayName,
       channelTag: channelTag,
       userEd25519Pk: service.userEd25519Pk,
+      deviceX25519Pk: service.deviceX25519Pk,
+      deviceMlKemPk: service.deviceMlKemPk,
     );
 
     if (seed == null) {
@@ -456,7 +458,7 @@ class _ManualInputScreenState extends State<_ManualInputScreen> {
     final locale = AppLocale.read(context);
     return Scaffold(
       appBar: AppBar(title: Text(locale.get('qr_manual_input'))),
-      body: SafeArea(top: false, child: Padding(
+      body: SafeArea(top: false, child: SingleChildScrollView(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -477,7 +479,17 @@ class _ManualInputScreenState extends State<_ManualInputScreen> {
             const SizedBox(height: 16),
             FilledButton(
               onPressed: () {
-                final seed = ContactSeed.fromUri(_controller.text.trim());
+                final input = _controller.text.trim();
+                ContactSeed? seed;
+                if (input.startsWith('cleona://')) {
+                  seed = ContactSeed.fromUri(input);
+                  if (seed != null && seed.verifyIntegrity() == false) {
+                    seed = null;
+                  }
+                }
+                if (seed == null && input.length == 64 && RegExp(r'^[0-9a-fA-F]+$').hasMatch(input)) {
+                  seed = ContactSeed(nodeIdHex: input, displayName: '');
+                }
                 if (seed != null) {
                   widget.onParsed(seed);
                 } else {

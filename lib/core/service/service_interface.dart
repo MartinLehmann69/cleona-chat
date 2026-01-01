@@ -226,7 +226,7 @@ abstract class ICleonaService {
   NetworkStats getNetworkStats();
 
   // Contact issue reporting
-  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex);
+  Future<ContactIssueReport?> buildContactIssueReport(String contactNodeIdHex);
   Future<bool> publishContactIssueReport(String contactNodeIdHex);
 
   // Manual log report (Bug Log)

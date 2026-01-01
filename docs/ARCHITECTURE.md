@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:8957fbec986f, 2026-06-17). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:a1f6831df2b6, 2026-06-19). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1161,7 +1161,7 @@ Both pairs are populated from the same authenticated channels (self-broadcast `P
 - Inside the **DeviceKemRecord** in the 2D-DHT (§4.3 — separate record with 24h TTL, storage-key `SHA-256("kem" || userId || deviceId)`) — primary distribution channel
 - Via **Deferred Key Exchange** (§8.1.1 rev3): `DEVICE_KEM_REQUEST` → signed `DEVICE_KEM_OFFER` — synchronous fallback when DHT record is unavailable
 - Cached in the local routing table once a `ResolvedDevice` has been observed
-- Legacy: inside the **ContactSeed URI** (§8.1.1 v1 format), parameters `dxk` (X25519) + `dmk` (ML-KEM-768) — still parsed for backward compatibility, but no longer emitted by v2 ContactSeeds
+- Inside the **ContactSeed URI** (clipboard/share path): parameters `dxk` (X25519, 32B) + `dmk` (ML-KEM-768, 1184B), standard base64. Enables offline first-CR (FIRST_CR_STORE on seed peers) without synchronous DEVICE_KEM_REQUEST/OFFER — critical for CGNAT-to-CGNAT clipboard exchange where both phones may not be online simultaneously. QR binary format (camera scan) remains compact v2 (ep only) since QR implies physical co-presence
 
 **Key generation**: locally on the device using cryptographic randomness (NOT derived from the User-Master-Seed). The same rationale as §3.5 applies: device-key independence ensures that a seed compromise does not retroactively compromise the device's KEM state. See §3.6 #5 for the unified explanation that covers both Sig and KEM device keys.
 
@@ -1227,7 +1227,7 @@ files/.cleona/                                (Android, in app-private storage)
 ```
 
 **Key cascade**:
-1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope). On Android: AndroidKeyStore with a biometric/device-credential gate.
+1. The **OS keyring** protects `master_seed.enc` and `device_keys.enc` (which contains both the Device-Sig keypairs Ed25519+ML-DSA-65 and the Device-KEM keypairs X25519+ML-KEM-768; see §3.5 + §3.5b). On Linux: libsecret (GNOME Keyring / KWallet). On Windows: DPAPI (CurrentUser scope) — the DPAPI wrapper validates that ciphertext files contain strict base64 only before passing them to `PowerShell`, preventing injection via tampered `.enc` files. On Android: AndroidKeyStore with a biometric/device-credential gate.
 2. The **Master-Seed** is held in RAM after daemon start (in a protected memory region via libsodium `sodium_mlock`).
 3. **HD-Wallet derivation** (§3.6) generates all further keys on demand — the private keys live only in protected memory.
 4. The **DB-Encryption-Key** is derived from the User-Identity Ed25519 private key (§3.8).
@@ -1319,7 +1319,7 @@ Cleona nodes communicate over **a single UDP port per daemon** that additionally
 2. **UDP fragmented + NACK retry**: payload > 1200 bytes → app-level fragmentation (max 255 fragments, Fragment-NACK CFNK §5.8)
 3. **TLS on the same port** (fallback): after 15 consecutive UDP failures or on anti-censorship indicators → TLS frame instead of UDP datagram
 
-TLS serves exclusively as a **transport fallback** for reachability — the end-to-end encryption (KEM layer) is unaffected. TLS provides no additional security, only additional reachability against operator DPI filters.
+TLS serves exclusively as a **transport fallback** for reachability — the end-to-end encryption (KEM layer) is unaffected. TLS provides no additional security, only additional reachability against operator DPI filters. **Socket lifecycle:** inbound TLS connections that send an invalid or unparseable frame are immediately destroyed (`client.destroy()`) to prevent socket leaks from malformed or probing connections. **TLS capability cache:** per-peer tristate (capable / incapable / unknown) with 24h TTL eviction and 1000-entry hard cap. Eviction causes a re-probe on next bulk send (graceful: unknown defaults to "try TLS"); no mid-transfer impact since entries are written after the send completes.
 
 ### 4.2 DHT (Kademlia, Closed Network)
 
@@ -1684,7 +1684,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 | **1 — Stored peers** | Probe peers from persisted routing table (§4.4), sorted by score (lastSeen recency × address priority §4.6). One `DHT_PING` per peer, 2 s timeout, max 5 peers probed sequentially. First `PONG` triggers `PEER_LIST_WANT` → peer replies with live `PEER_LIST_PUSH`. | Always (if routing table non-empty) | 1–5 PINGs + 1 WANT + 1 PUSH |
 | **2 — LAN Discovery** | 3× burst on IPv4-Broadcast + IPv4-Multicast (239.192.67.76, TTL=4) + IPv6-Multicast, then silence. | Tier 1 exhausted (all stored peers unreachable or routing table empty) | 9 datagrams (3 × 3 channels) |
 | **3 — Bootstrap** | Unicast probe to cached bootstrap addresses: stored peers with public WAN IPs are probed on both their stored port and the channel-default bootstrap port (8081 beta / 8080 live — §17.5). Bootstrap is an accelerator (§4.7), not a first resort. | Tier 2 exhausted (no LAN peer responded) | 1–4 PINGs |
-| **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Last resort. | Tier 3 exhausted (bootstrap unreachable) | ~65 000 probes over 130 s |
+| **4 — Subnet Scan** | Unicast probe over the local /16 (port 41338), DHCP-priority hosts first, then sweep. Rate-limited to ~50 pps to avoid flooding upstream WAN links (§4.5.3). Last resort. | Tier 3 exhausted (bootstrap unreachable) | ~65 000 probes over ~22 min |
 
 **Discovery-complete gate**: the node-level flag `_discoveryComplete` is set when **any** tier produces a confirmed peer that delivers a `PEER_LIST_PUSH` with ≥1 entry. Once set:
 - All pending discovery timers are cancelled (no further tier escalation).
@@ -1700,7 +1700,7 @@ Cleona nodes find each other through a **cascading discovery sequence**. Each ti
 
 LAN-Discovery's send path on Linux and Windows desktop runs through a small C library, **`libcleona_net`**, instead of Dart's built-in `RawDatagramSocket.send()`. The shim wraps the host operating system's native UDP send call — `sendto()` from POSIX on Linux, `WSASendTo()` from WinSock2 on Windows — and exposes a tiny synchronous API to Dart through FFI. This subsection explains why the indirection was necessary, what exactly the shim does and does not do, how it behaves when something is wrong, and what the consequences are for receive, security, and other platforms.
 
-**The reason this exists at all.** When Cleona has no known peer addresses on startup, `LocalDiscovery` enters a subnet-scan phase that probes the local /16 network at /24 resolution, sending one CLEO discovery datagram per host at roughly 500 packets per second. On Linux this completes in roughly 130 seconds and finds same-host neighbours and seed bootstraps reliably. On Windows the same code completes in the same wall-clock time but only about 11 percent of the issued sends actually leave the host — pktmon counters at the Windows TCPIP layer confirm that the dropped sends never reach the kernel network stack. Raising the kernel send buffer to 4 MB does not change the drop rate. The defect therefore lives in Dart's Windows I/O implementation, specifically in the IOCP-based UDP send routine that the VM substitutes for the simpler POSIX path. PowerShell's `.NET UdpClient` doing the equivalent work shows zero drops, which both proves the underlying network can carry the traffic and gives us a reference for what "correct" looks like. The C shim adopts the `.NET UdpClient` strategy: each `cleona_udp_send` call invokes `WSASendTo` synchronously and returns either the number of bytes sent or a negative error code, with no IOCP queueing layer between the Dart caller and the kernel.
+**The reason this exists at all.** When Cleona has no known peer addresses on startup, `LocalDiscovery` enters a subnet-scan phase that probes the local /16 network at /24 resolution, sending one CLEO discovery datagram per host at roughly 50 packets per second (~22 minutes for a full /16; rate-limited from the original 500 pps to avoid flooding upstream WAN links — see §4.5.3). On Windows at the original 500 pps rate, only about 11 percent of the issued sends actually left the host — pktmon counters at the Windows TCPIP layer confirm that the dropped sends never reach the kernel network stack. Raising the kernel send buffer to 4 MB does not change the drop rate. The defect therefore lives in Dart's Windows I/O implementation, specifically in the IOCP-based UDP send routine that the VM substitutes for the simpler POSIX path. PowerShell's `.NET UdpClient` doing the equivalent work shows zero drops, which both proves the underlying network can carry the traffic and gives us a reference for what "correct" looks like. The C shim adopts the `.NET UdpClient` strategy: each `cleona_udp_send` call invokes `WSASendTo` synchronously and returns either the number of bytes sent or a negative error code, with no IOCP queueing layer between the Dart caller and the kernel.
 
 **What the shim does.** A single C source file under `native/cleona_net/` exposes four functions: open a UDP socket bound to a given local port, configure send and receive buffer sizes, send one datagram to a destination IP and port (returning the byte count or a negative error), and close the socket. The Dart side wraps each function in a small `dart:ffi` binding under `lib/core/network/native_udp_sender.dart`. `LocalDiscovery` holds one `NativeUdpSender` instance for the lifetime of the daemon, opened against the well-known discovery port 41338. The shim is **send-only** — no recv, no select, no epoll. Receive remains in Dart's `RawDatagramSocket.listen()` callback as before, because the receive path has no observable defect on any platform we tested.
 
@@ -1715,6 +1715,19 @@ LAN-Discovery's send path on Linux and Windows desktop runs through a small C li
 **Build and deployment.** The C source lives under `native/cleona_net/` with a CMakeLists.txt that produces `libcleona_net.so` on Linux and `cleona_net.dll` on Windows. Linux builds are bundled into the Flutter Linux release alongside `libcleona_audio.so`; Windows builds drop into `build/windows/x64/runner/Release/` next to `libsodium.dll`. Android and macOS desktop builds skip the shim entirely — those platforms continue to use Dart's `RawDatagramSocket` directly, with no functional regression observed. iOS uses a separate native send strategy described below.
 
 **iOS send path (IosUdpSender).** iOS exhibits the same symptom as Windows — Dart's `RawDatagramSocket.send()` returns 0 for all destinations — but the root cause differs: the kqueue-based I/O path reports errno 64 (EHOSTUNREACH) or 65 (ENETDOWN) silently as a zero return value. The fix follows a different strategy than `libcleona_net`: instead of opening a second socket, `IosUdpSender` (`ios_udp_sender.dart`) locates the Dart socket's existing file descriptors — one for IPv4 (`cleona_ios_find_udp_fd`) and one for IPv6 (`cleona_ios_find_udp6_fd`) — by scanning open fds for `AF_INET`/`AF_INET6` `SOCK_DGRAM` sockets bound to the transport port, and calls native `sendto()` / `sendto6()` directly via FFI (`cleona_udp_ios.c`). The dual-fd approach is required because DS-Lite mobile carriers (common in Germany) provide only global IPv6 for end-to-end connectivity; IPv4 is tunneled through CGNAT and unreliable. `send()` dispatches to the IPv4 fd, `send6()` to the IPv6 fd. This preserves the one-socket-per-protocol-family invariant — no additional bound sockets, no receive-path starvation risk. For the discovery port (41338), a separate send-only socket is created via `createSendOnly()` because iOS aggressively recycles the Dart discovery socket's fd (ENOTSOCK on reuse). The native library is statically linked into the Runner binary (`cleona_exported_symbols.txt` controls symbol visibility against the linker's `-dead_strip`).
+
+#### 4.5.3 Subnet-Scan Rate Limiting (V3.1.95)
+
+The subnet scan probes ~65 000 hosts across the local /16 range. All probes to /24 subnets outside the node's own directly-connected network traverse the default gateway. When that gateway leads to the internet — a common topology where a consumer router (e.g. Fritzbox on a 5.5 Mbit/s VDSL line) serves as both internet gateway and local LAN router — the probes are forwarded upstream as WAN traffic. At the original 500 pps (~400 kbps sustained for 130 s), this overwhelmed asymmetric consumer uplinks, caused seconds of added latency for all LAN traffic, and saturated the router's NAT/conntrack table.
+
+**Why not skip non-local subnets?** The default gateway cannot be classified as purely "internet-facing" or purely "local router" — a Fritzbox simultaneously routes to the ISP, bridges additional LAN segments (e.g. a secondary WLAN radio on a different VLAN), and provides a guest WiFi network on its own /24. Blocking the scan for "internet-facing" gateways would prevent discovery of Cleona peers on these legitimate local networks.
+
+**Solution:** rate-limit the scan from 500 pps to **50 pps** (~40 kbps). At this rate the bandwidth consumption is <1 % of even a 5 Mbit/s uplink — imperceptible to the user. The trade-off is scan duration: ~22 minutes for a full /16 instead of ~130 seconds. This is acceptable because:
+
+1. The subnet scan is **Tier 4** — a last resort that fires only after stored-peer probes, LAN broadcast/multicast, and bootstrap all failed.
+2. The node's own /24 is already covered by Tier 2 LAN broadcast; the scan's value lies in reaching *other* /24 subnets.
+3. The stoppage gate (`_discoveryComplete` / `_hasCrossSubnetPeer()`) aborts the scan immediately when a peer is found — typical discovery time is seconds, not minutes.
+4. The reduced batch size (1 packet per 20 ms tick) also eliminates the Windows IOCP burst-drop issue that required the native send shim (§4.5.2) at higher rates.
 
 **Peer-list format** (carried in the PEER_LIST_PUSH application frame):
 
@@ -2315,7 +2328,7 @@ Cleona's "Reliable UDP Light" — minimal overhead for ACK tracking, without TCP
 - If after 500ms a fragment is missing: NACK with `missingFragmentIndices`
 - The sender resends the missing fragments
 - NACKs continue with exponential backoff (500ms→750ms→1s→1.5s→2s cap) until reassembly completes or hard timeout (10s) expires — no fixed retry limit, but bounded by the hard timeout (V3.1.92+, previously capped at 3 retries)
-- Sender-side fragment cache (30s) is refreshed on each NACK receipt, staying alive as long as the receiver actively requests retransmissions
+- Sender-side fragment cache (30s TTL, 500-entry cap) is refreshed on each NACK receipt, staying alive as long as the receiver actively requests retransmissions. When the cap is reached, the oldest entry is evicted; the NACK handler gracefully skips missing cache entries (the upper-layer retry mechanism handles full retransmission)
 - Inter-fragment pacing: 2ms (≤5 fragments), 4ms (>5 fragments) to reduce burst loss at receiver kernel buffers
 
 **App-level UDP fragmentation** (V3):
@@ -2818,8 +2831,8 @@ Once Multi-Device is active, application-state changes (new contacts, conversati
 | 0 | CONTACT_ADDED | new contact accepted (with pubkeys, display name, verification level) |
 | 1 | CONTACT_DELETED | contact deleted |
 | 2 | MESSAGE_SENT | message sent on one device → mirror so the other devices see it locally |
-| 3 | MESSAGE_EDITED | edit within the 15-min window |
-| 4 | MESSAGE_DELETED | delete within the 15-min window |
+| 3 | MESSAGE_EDITED | edit within the per-chat editing window (default 60 min, see §14.6) |
+| 4 | MESSAGE_DELETED | delete within the per-chat editing window (default 60 min, see §14.6) |
 | 5 | TWIN_READ_RECEIPT | own read on one device → other devices also mark read |
 | 6 | GROUP_CREATED | own device created/joined a new group *(receive-side wired; sender-side wiring pending)* |
 | 7 | PROFILE_CHANGED | own profile picture / display name changed *(receive-side wired; sender-side wiring pending — `_emitProfileChange()` hook missing)* |
@@ -3060,7 +3073,7 @@ cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd255
 [1B peerCount] [{32B peerNodeId, 1B addrCount, {1B len, addrUTF8}...}...]
 ```
 
-**Size**: ~130-180 bytes binary (QR Version 8-10), ~300-400 chars URI (fits in a single SMS).
+**Size**: ~130-180 bytes binary (QR Version 8-10, camera scan), ~300-400 chars URI without Device-KEM (QR text fallback, SMS). The clipboard/share URI (V3.1.96+) includes `dxk`+`dmk` and is ~1900-2100 chars — see "Synchronous vs. asynchronous exchange channels" below for the rationale.
 
 **Parameters** (v2):
 
@@ -3082,22 +3095,32 @@ cleona://<userIdHex>?n=<displayName>&c=<channel>&did=<deviceIdHex>&ep=<userEd255
 
 **Seed age**: the scanner surfaces the seed's age from `t` and distinguishes "code is stale — request a fresh one" from "target is offline", instead of silently retrying a seed whose addresses have long expired. The `t` field is outside the integrity-check input (it is not part of the `userId` derivation), so its presence is backward-compatible with legacy seeds.
 
-**Rationale for removing dxk/dmk from v2**: The 1184-byte ML-KEM-768-PK dominated the payload (75% of QR, 73% of URI). This caused two concrete problems: (1) QR Version 26-28 is too dense for reliable phone-to-phone camera scanning, especially in low light; (2) the 2163-char URI with standard base64 (`+`, `/`, `=` characters) was corrupted by messaging apps during copy-paste transfer (link-detection, URL-encoding normalization, line-wrapping). The 32-byte `userEd25519Pk` replaces 1216 bytes of key material with a trust-anchor that enables runtime key resolution via DHT or Deferred Key Exchange.
+**Rationale for removing dxk/dmk from QR binary format**: The 1184-byte ML-KEM-768-PK dominated the QR payload, producing QR Version 26-28 — too dense for reliable phone-to-phone camera scanning, especially in low light. The 32-byte `userEd25519Pk` replaces 1216 bytes in the QR with a trust-anchor that enables runtime key resolution via DHT or Deferred Key Exchange. QR implies physical co-presence (both phones running, same room), so the synchronous DKE round-trip completes reliably.
 
-#### ContactSeed v1 (legacy, still parsed)
+**Rationale for re-including dxk/dmk in the clipboard/share URI (V3.1.96)**: The Deferred Key Exchange (DEVICE_KEM_REQUEST → DEVICE_KEM_OFFER) requires both phones to be **simultaneously online and reachable** — the request is fire-and-forget with no offline store. On CGNAT/Mobilfunk this fails: the recipient's app gets killed by the OS, the NAT mapping expires, and the request goes into the void. The retry timer re-sends every 10s–600s (exponential backoff), but without a guaranteed simultaneous-online window the DKE round-trip never completes. Without `dxk`/`dmk` the sender cannot build the KEM-encrypted CR, and without the CR the FIRST_CR_STORE (§5.5b offline mailbox) cannot be deposited either — the entire offline delivery chain is dead. Clipboard/share URIs are exchanged **asynchronously** (via messenger, email, note) — the recipient may open the seed hours or days later. URI length is unconstrained, so including the 1622-char overhead is costless. The original URI-corruption concern (standard base64 `+`/`/`/`=` mangled by messaging-app link detection) does not apply to clipboard copy-paste of the full `cleona://` URI.
 
-**URI format**: `cleona://...&dxk=<base64>&dmk=<base64>...` (standard base64, 2163 chars typical)
+#### Synchronous vs. asynchronous exchange channels
 
-**QR binary format**: format byte `0x01`/`0x02`, includes `dxk` (32B) + `dmk` (1184B).
+| Channel | Format | Device-KEM inline | Both online required | Async-capable |
+|---------|--------|-------------------|---------------------|---------------|
+| **QR** (camera scan) | Binary v2 (`ep` only) | No — DKE at runtime | Yes (face-to-face) | No |
+| **NFC** (tap) | Own protocol (§8.1.3) | N/A — exchanges full User-Keys directly | Yes (phones touching) | No |
+| **Clipboard/URI** (copy-paste, share) | URI with `dxk`+`dmk` | Yes | No | **Yes** |
 
-Legacy v1 ContactSeeds with `dxk`+`dmk` are still fully parsed and trigger the direct First-CR path (step 3 below) without key resolution. No code removal needed.
+QR and NFC are inherently synchronous (physical co-presence guarantees both devices are running). The DKE round-trip completes within the scan/tap session. Clipboard/URI is the only channel that must work asynchronously — therefore the only one that carries Device-KEM-PK inline.
 
-#### v1 Parameters (legacy, retained for backward compat)
+#### ContactSeed dxk/dmk parameters
+
+**URI format** (V3.1.96+): `cleona://...&dxk=<base64>&dmk=<base64>...` (standard base64, ~2163 chars with Device-KEM-PK, ~540 chars without). The `dxk`/`dmk` parameters are present in every URI generated by V3.1.96+ nodes. Older URIs without these parameters are still fully parsed — the receiver falls back to the Deferred Key Exchange round-trip (§8.1.1 step 2).
+
+**QR binary format**: format byte `0x02` (v2), carries only `ep` (userEd25519Pk) + seed peers. Device-KEM-PK is NOT included — resolved at runtime via DKE (see rationale above).
+
+#### dxk/dmk parameter reference
 
 | Param | Format | Purpose |
 |---|---|---|
-| `dxk` | 32 bytes, base64 | Device-X25519-PK — direct InfrastructureFrame KEM-encap |
-| `dmk` | 1184 bytes, base64 | Device-ML-KEM-768-PK — same |
+| `dxk` | 32 bytes, standard base64 | Device-X25519-PK — enables direct KEM-encap of the First-CR InfrastructureFrame without DKE round-trip |
+| `dmk` | 1184 bytes, standard base64 | Device-ML-KEM-768-PK — hybrid KEM counterpart to `dxk` |
 
 **Seed-peer selection criteria** (V3.1.x):
 
@@ -3157,8 +3180,8 @@ After a daemon restart, the `_confirmedPeers` map is empty — no peer has been 
 **No User/Device-KEM-PK in the v2 URI**, intentionally:
 
 - **User-KEM-PK**: Alice learns Bob's User-KEM-PK only from CONTACT_REQUEST_RESPONSE. Until Bob accepts the CR, Alice has no authorization to encrypt anything to Bob's user identity.
-- **Device-KEM-PK** (removed in rev3): the 1184-byte ML-KEM-768-PK dominated the payload (75% of QR, 73% of URI), producing QR Version 26-28 (unreliable for phone cameras) and 2163-char URIs (corrupted by messaging apps). The 32-byte `userEd25519Pk` (`ep` parameter) replaces these keys as a **trust-anchor**: it allows verifying DHT-published DeviceKemRecords (§3.5b) and DEVICE_KEM_OFFER signatures. Key material is resolved at runtime via the Deferred Key Exchange (steps 1a-1c below).
-- **Legacy v1 URIs** with `dxk`+`dmk` skip key resolution entirely (step 1c path with inline keys).
+- **Device-KEM-PK in QR** (removed in rev3 QR binary format): the 1184-byte ML-KEM-768-PK dominated the QR payload, producing QR Version 26-28 (unreliable for phone cameras). The 32-byte `userEd25519Pk` (`ep` parameter) replaces these keys as a **trust-anchor**: it allows verifying DHT-published DeviceKemRecords (§3.5b) and DEVICE_KEM_OFFER signatures. Key material is resolved at runtime via the Deferred Key Exchange (steps 1a-1c below).
+- **Device-KEM-PK in URI** (V3.1.96+): the clipboard/share URI **includes** `dxk`+`dmk` (§3.5b Distribution bullet 4). URI length is unconstrained; the 1622-char overhead enables offline first-CR via FIRST_CR_STORE (§5.5b) without a synchronous DEVICE_KEM_REQUEST round-trip. Critical for CGNAT-to-CGNAT clipboard exchange where simultaneous online is not guaranteed.
 - **base64url** (RFC 4648 §5): `ep` uses `-`/`_` instead of `+`/`/` and no `=` padding, eliminating the URI-corruption problem that affected v1's standard-base64 `dxk`/`dmk` in messaging apps.
 
 #### Deferred Key Exchange
@@ -5684,7 +5707,11 @@ Each conversation has a configurable editing window that determines how long aft
 
 Only the original author can edit their messages. Edited messages display an "(edited)" label with the timestamp of the last edit. Edit history is **NOT** stored — only the current version exists (data minimization).
 
-Enforcement is dual-sided: the sender's app removes the edit button after the window expires (client-side), AND recipients reject edit messages that arrive after the window has passed based on the original message timestamp (server-side enforcement, even though there is no server).
+Enforcement is dual-sided with asymmetric defaults for mixed-version safety:
+- **Sender-side (UI):** The edit button is removed after 15 minutes (`_defaultEditWindowMs`). This is purely cosmetic — it controls what the sender *sees*, not what the receiver accepts.
+- **Receiver-side (enforcement):** Recipients reject edit messages that arrive more than 60 minutes after the original message timestamp (`_receiverEditToleranceMs`). This generous tolerance ensures edits from older app versions (which used 60 min sender-side) are still accepted during rollout.
+
+The asymmetry is intentional: tightening the sender-side window improves UX (edits feel more "in the moment") while the wider receiver tolerance prevents silent edit rejection on mixed-version networks. The per-chat `edit_window_ms` override (§14.7) replaces both values when set.
 
 ### 14.7 Per-Chat Configuration Protocol
 
@@ -5707,7 +5734,7 @@ Each conversation has configurable policies beyond expiry and editing: download 
 | `allow_downloads` | boolean | true | Whether received files can be saved to disk |
 | `allow_forwarding` | boolean | true | Whether messages can be forwarded |
 | `expiry_duration_ms` | int? | null (no expiry) | Message auto-delete after read |
-| `edit_window_ms` | int? | null (no edits) | Time window for message editing |
+| `edit_window_ms` | int? | null → 60 min default | Time window for message editing (dual-enforced: sender + receiver; changing the default requires coordinated rollout across all nodes to avoid silent edit rejection on mixed-version networks) |
 | `read_receipts_enabled` | boolean | true | Whether read receipts are sent |
 | `typing_indicators_enabled` | boolean | true | Whether typing indicators are sent |
 
@@ -5769,7 +5796,7 @@ Archival starts only when both conditions are met (or share-reachability alone w
 | **FTPS** | FTP over TLS, for older NAS systems | Nice to have |
 | **HTTP/HTTPS** | WebDAV-based, for self-hosted servers | Nice to have |
 
-No plain FTP (insecure). No NFS (impractical on mobile).
+No plain FTP (insecure). No NFS (impractical on mobile). **Credential protection (FTPS):** FTPS credentials are never passed on the command line. The curl-based FTPS transport writes a temporary `--netrc-file` (mode 0600) for authentication and deletes it immediately after the transfer completes.
 
 #### 14.8.5 Directory Structure on Share
 
@@ -5858,9 +5885,9 @@ Voice transcription requires the following native libraries and tools at runtime
 Library search paths (in order): system default, `/usr/lib/`, `/usr/local/lib/`, `$HOME/lib/`, `./build/`.
 Model path: `$HOME/.cleona/models/ggml-{tiny,base,small}.bin`.
 
-**Building whisper.cpp from source:**
+**Building whisper.cpp from source** (pinned to v1.7.1 — all platform build scripts use the same tag to guarantee ABI-compatible struct layouts across Linux, Android, iOS, macOS):
 ```bash
-git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git
+git clone --depth 1 --branch v1.7.1 https://github.com/ggerganov/whisper.cpp.git
 cd whisper.cpp && mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON ..
 make -j$(nproc)
@@ -6286,7 +6313,7 @@ Beyond permissions, Cleona's architecture enforces privacy at the protocol level
 - **No analytics:** No telemetry, no crash reporting, no usage tracking. Zero outbound connections except P2P communication.
 - **No cloud dependencies:** No Google Play Services required. No Apple iCloud integration. (Push wake-up was considered and rejected; see §12.4.)
 - **KEX Gate (§8.2):** Messages from unknown senders are silently dropped at the protocol level. No notification, no "message request" UI — invisible to the recipient.
-- **Link previews:** Fetched by the sender, embedded encrypted in the message. The recipient makes zero network requests. <!-- TODO-XREF: Link-Preview detail section not yet assigned in v3.0 — v2.2 §14.8 had no clear successor in V3_MIGRATION_MAP.md. Candidate locations: §5 Message Delivery or §8 Identity-Authorization. -->
+- **Link previews:** Fetched by the sender, embedded encrypted in the message. The recipient makes zero network requests. SSRF hardening: DNS resolution is checked against private/reserved/loopback ranges before connection; the TCP socket is pinned to the validated IP via `connectionFactory`; HTTP redirects are followed manually with full SSRF re-validation on every hop; IPv6 NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) embeddings are decoded and their inner IPv4 checked. HTTPS only. <!-- TODO-XREF: Link-Preview detail section not yet assigned in v3.0 — v2.2 §14.8 had no clear successor in V3_MIGRATION_MAP.md. Candidate locations: §5 Message Delivery or §8 Identity-Authorization. -->
 
 ---
 

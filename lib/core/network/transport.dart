@@ -96,8 +96,14 @@ class Transport {
   /// Cache of recently sent fragments for NACK-based resend.
   /// Key: "destIp:fragmentId", Value: list of fragment packets.
   /// Auto-expires after 30 seconds; refreshed on each NACK receipt.
+  /// Bounded to [_sentFragmentCacheMaxEntries] — oldest entry evicted on overflow.
   final Map<String, List<Uint8List>> _sentFragmentCache = {};
   final Map<String, Timer> _sentFragmentCacheTimers = {};
+
+  /// Max entries in `_sentFragmentCache` — bounds memory under adversarial
+  /// NACK patterns. Dart Maps preserve insertion order, so removing
+  /// `.keys.first` evicts the oldest entry.
+  static const int _sentFragmentCacheMaxEntries = 500;
 
   // ── Hybrid Bulk Transport — TLS Capability Cache ─────────────────
   // docs/SPEC_HYBRID_BULK_TRANSPORT.md §5.3. Per-destination tristate so
@@ -132,6 +138,17 @@ class Transport {
   /// `capable=false` → most recent attempt failed; re-probe-eligible
   /// once `lastProbeAt` is older than `tlsCapabilityProbeCooldown`.
   final Map<String, _TlsCapabilityEntry> _tlsCapability = {};
+
+  /// Max entries in `_tlsCapability` — safety net against unbounded growth.
+  static const int _tlsCapabilityMaxEntries = 1000;
+
+  /// TTL for TLS capability entries — entries older than this are evicted
+  /// by the periodic cleanup. NOT LRU: we don't want to evict a peer
+  /// mid-conversation just because it hasn't done a TLS transfer recently.
+  static const Duration _tlsCapabilityTtl = Duration(hours: 24);
+
+  /// Periodic cleanup timer for `_tlsCapability`.
+  Timer? _tlsCapabilityCleanupTimer;
 
   // ── Send burst limiter (Ingo crash: GetStackPointerForStackBounds) ──
   // Caps rapid-fire FFI calls from onNetworkChanged bursts. When more than
@@ -378,6 +395,12 @@ class Transport {
         _scheduleTlsRebind();
       }
     }());
+
+    // Periodic cleanup for TLS capability cache — evict entries older than 24h.
+    _tlsCapabilityCleanupTimer = Timer.periodic(
+      const Duration(minutes: 15),
+      (_) => _cleanupTlsCapabilityCache(),
+    );
   }
 
   /// Try to bind TLS IPv4 and IPv6 listeners. Returns whether IPv4 is bound.
@@ -432,6 +455,32 @@ class Transport {
         _tlsRebindAttempt = 0;
       }
     });
+  }
+
+  /// Evict TLS capability entries older than [_tlsCapabilityTtl] (24h).
+  /// Also enforces [_tlsCapabilityMaxEntries] as a hard cap — if still
+  /// over the limit after TTL eviction, remove the oldest by timestamp.
+  void _cleanupTlsCapabilityCache() {
+    if (_tlsCapability.isEmpty) return;
+    final cutoff = DateTime.now().subtract(_tlsCapabilityTtl);
+    _tlsCapability.removeWhere((_, entry) {
+      final ts = entry.lastProbeAt;
+      return ts != null && ts.isBefore(cutoff);
+    });
+    // Hard cap: if still over limit, sort by timestamp and trim oldest.
+    if (_tlsCapability.length > _tlsCapabilityMaxEntries) {
+      final sorted = _tlsCapability.entries.toList()
+        ..sort((a, b) {
+          final ta = a.value.lastProbeAt ?? DateTime(0);
+          final tb = b.value.lastProbeAt ?? DateTime(0);
+          return ta.compareTo(tb);
+        });
+      final excess = _tlsCapability.length - _tlsCapabilityMaxEntries;
+      for (var i = 0; i < excess; i++) {
+        _tlsCapability.remove(sorted[i].key);
+      }
+      _log.info('TLS capability cache: evicted $excess entries (hard cap)');
+    }
   }
 
   /// Select the correct UDP socket for an address (IPv4 vs IPv6).
@@ -795,6 +844,14 @@ class Transport {
           final header = UdpFragmenter.parseHeader(fragments.first);
           if (header != null) {
             final cacheKey = '${address.address}:${header.fragmentId}';
+            // Evict oldest entry if cache is full (Dart Map preserves insertion order).
+            if (_sentFragmentCache.length >= _sentFragmentCacheMaxEntries &&
+                !_sentFragmentCache.containsKey(cacheKey)) {
+              final oldest = _sentFragmentCache.keys.first;
+              _sentFragmentCache.remove(oldest);
+              _sentFragmentCacheTimers[oldest]?.cancel();
+              _sentFragmentCacheTimers.remove(oldest);
+            }
             _sentFragmentCache[cacheKey] = wrappedFragments;
             _resetFragmentCacheTimer(cacheKey);
           }
@@ -935,6 +992,7 @@ class Transport {
         // see TLS reset, fall back to UDP-chunked-relay.
         _log.warn('TLS parse: invalid len=$len from ${client.remoteAddress.address}:${client.remotePort} — dropping connection');
         buffer.clear();
+        client.destroy();
         return;
       }
       if (bytes.length < 4 + len) {
@@ -1593,6 +1651,8 @@ class Transport {
     _iosDiagTimer = null;
     _tlsRebindTimer?.cancel();
     _tlsRebindTimer = null;
+    _tlsCapabilityCleanupTimer?.cancel();
+    _tlsCapabilityCleanupTimer = null;
     _tlsRebindAttempt = 0;
     _nativeSender?.close();
     _nativeSender = null;

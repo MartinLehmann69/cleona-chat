@@ -481,18 +481,23 @@ class LocalDiscovery {
     final hotspots = [1, 50, 100, 150, 200];
     final iterator = _subnetScanIterator(a, b, ownC, hotspots);
 
-    // Send in small batches with proportional pauses, sustaining ~500 pps
-    // average AS SPECIFIED BY THE ARCHITECTURE (Architecture §Discovery: "~500
-    // packets/s = ~130s maximum"). Earlier implementation (batch=50, delay=100ms)
-    // hit the same average but with a 50× over-spec spike (50 sends in <1ms),
-    // which on Windows causes the stack to drop ~80% of each burst at fixed
-    // positions (verified 2026-05-09 via pktmon: only positions 0,5,10,…,45 of
-    // each 50-burst leave the NIC; subnets like 192.0.2.0/24 — Bootstrap! —
-    // are never contacted because their array index never coincides with a
-    // surviving slot). Spreading the burst (10 sends per 20ms) keeps the same
-    // average rate but stays well below the Windows stack's per-tick threshold.
-    // Linux behaviour is unchanged because Linux tolerated the spike already.
-    const batchSize = 10;
+    // Rate-limited sweep: ~50 pps to avoid flooding upstream WAN links.
+    //
+    // Probes to non-local /24s are forwarded by the default gateway. When that
+    // gateway leads to the internet (e.g. Fritzbox with 5.5 Mbit/s VDSL), the
+    // old 500 pps (~400 kbps) overwhelmed the uplink and caused seconds of
+    // latency for all LAN traffic. We cannot simply skip those /24s because
+    // even an internet-facing gateway may route local subnets (guest WiFi,
+    // bridged VLANs). Rate-limiting to 50 pps (~40 kbps) makes the scan
+    // imperceptible on any consumer uplink.
+    //
+    // Trade-off: full /16 takes ~22 min vs ~130 s at 500 pps. Acceptable
+    // because (a) subnet scan is Tier 4 — last resort after broadcast,
+    // multicast, and bootstrap all failed, (b) the own /24 is already covered
+    // by Tier 2 LAN broadcast, and (c) the stoppage gate aborts immediately
+    // when a peer is found. Single-packet batches also eliminate the Windows
+    // IOCP burst-drop issue that plagued higher batch sizes.
+    const batchSize = 1;
     const batchDelay = Duration(milliseconds: 20);
 
     Future<void> sendBatch() async {
@@ -607,7 +612,7 @@ class LocalDiscovery {
     // a different segment are unreachable via burst-discovery and only found by
     // unicast scan. Since ICMP (and therefore unicast UDP) routes correctly
     // via the ARP-proxy/IP-forward chain, scanning the own /24 does reach
-    // them. Cost: 255 extra probes ≈ 0.5 s on a 500 pps budget — negligible.
+    // them. Cost: 255 extra probes ≈ 5 s on a 50 pps budget — negligible.
     // (2026-05-15 fix: was always skipping ownC, causing cross-platform peer misses)
     final subnets = <int>[];
     for (var c = 0; c < 256; c++) {

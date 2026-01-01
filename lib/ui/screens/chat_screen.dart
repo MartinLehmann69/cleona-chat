@@ -69,6 +69,16 @@ class _ChatScreenState extends State<ChatScreen> {
   final _textController = TextEditingController();
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
+  // Stable key for the message TextField — prevents Flutter from disposing
+  // the EditableTextState (and its platform text-input connection) when the
+  // Column child-count shifts due to conditional banners appearing/disappearing.
+  final _textFieldKey = GlobalKey();
+
+  // Focus-guard: tracks whether the input was focused before a build() so we
+  // can restore it in a post-frame callback if incoming events (delivery
+  // receipts, typing indicators, state changes) trigger a rebuild that
+  // transiently drops the platform text-input connection on Linux/GTK.
+  bool _inputHadFocusBeforeBuild = false;
 
   // Edit mode state
   String? _editingMessageId;
@@ -97,6 +107,10 @@ class _ChatScreenState extends State<ChatScreen> {
   // Reply state
   UiMessage? _replyingToMessage;
 
+  // Tracks the text-empty state to avoid rebuilding on every keystroke —
+  // only the empty↔non-empty transition needs a rebuild (mic/send toggle).
+  bool _wasTextEmpty = true;
+
   // Emoji picker state
   bool _showEmojiPicker = false;
 
@@ -110,10 +124,13 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _textController.addListener(_onTextChanged);
-    // Rebuild to toggle mic/send button when text changes
-    _textController.addListener(() {
-      if (mounted) setState(() {});
-    });
+    // Rebuild to toggle mic/send button — but ONLY when the empty↔non-empty
+    // state actually flips. Rebuilding on every keystroke creates a storm of
+    // full widget-tree rebuilds that, combined with incoming-event rebuilds
+    // from context.watch<CleonaAppState>, can disrupt the platform text-input
+    // connection on Linux/GTK, causing typed characters or Enter-to-send to
+    // be lost.
+    _textController.addListener(_onTextEmptyChanged);
     // Handle Enter-to-send and Ctrl+V on the TextField's own focus node.
     // onKeyEvent fires BEFORE TextInput processes the keystroke, so returning
     // KeyEventResult.handled prevents the newline from being inserted.
@@ -166,6 +183,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     _cachedService?.setActiveConversationId(null);
     _textController.removeListener(_onTextChanged);
+    _textController.removeListener(_onTextEmptyChanged);
     _textController.dispose();
     _searchTextController.dispose();
     _scrollController.dispose();
@@ -252,6 +270,19 @@ class _ChatScreenState extends State<ChatScreen> {
     _cachedService?.sendTypingIndicator(widget.conversationId);
   }
 
+  /// Triggers a rebuild only when the text field transitions between empty and
+  /// non-empty (or vice versa), so the mic↔send button toggle updates without
+  /// causing a full rebuild on every keystroke. Reduces rebuild frequency by
+  /// ~10–50x during active typing, which prevents the platform text-input
+  /// connection from being disrupted by overlapping rebuild frames on Linux/GTK.
+  void _onTextEmptyChanged() {
+    final isEmpty = _textController.text.isEmpty;
+    if (isEmpty != _wasTextEmpty) {
+      _wasTextEmpty = isEmpty;
+      if (mounted) setState(() {});
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final locale = AppLocale.read(context);
@@ -259,6 +290,22 @@ class _ChatScreenState extends State<ChatScreen> {
     final service = appState.service;
     final conv = service?.conversations[widget.conversationId];
     final messages = conv?.messages ?? [];
+
+    // Focus-guard: snapshot whether the input field was focused BEFORE this
+    // rebuild. Incoming events (delivery receipts, typing indicators, new
+    // messages) trigger notifyListeners → context.watch rebuild. On Linux/GTK
+    // this can transiently disrupt the platform TextInputConnection, causing
+    // typed characters or Enter-to-send to be lost. The post-frame callback
+    // below restores focus if it was stolen by the rebuild.
+    _inputHadFocusBeforeBuild = _inputFocusNode.hasFocus;
+    if (_inputHadFocusBeforeBuild) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        if (_inputHadFocusBeforeBuild && !_inputFocusNode.hasFocus) {
+          _inputFocusNode.requestFocus();
+        }
+      });
+    }
 
     // Auto-scroll on new incoming/outgoing messages while the chat is open.
     // Only scroll when the user is already near the bottom, so scrolled-up
@@ -994,6 +1041,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
                 Expanded(
                   child: TextField(
+                    key: _textFieldKey,
                     controller: _textController,
                     focusNode: _inputFocusNode,
                     decoration: InputDecoration(
@@ -1913,11 +1961,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final path = result.files.first.path;
     if (path == null) return;
 
-    if (widget.isGroup) {
-      await service.sendMediaMessage(widget.conversationId, path);
-    } else {
-      await service.sendMediaMessage(widget.conversationId, path);
-    }
+    await service.sendMediaMessage(widget.conversationId, path);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -2581,7 +2625,7 @@ class _ImageViewer extends StatelessWidget {
   }
 }
 
-class _MessageBubble extends StatelessWidget {
+class _MessageBubble extends StatefulWidget {
   final UiMessage message;
   final bool isEditing;
   final bool isGroup;
@@ -2603,6 +2647,31 @@ class _MessageBubble extends StatelessWidget {
     this.isSystemChannel = false,
     this.browserOpenMode = BrowserOpenMode.normal,
   });
+
+  @override
+  State<_MessageBubble> createState() => _MessageBubbleState();
+}
+
+class _MessageBubbleState extends State<_MessageBubble> {
+  final List<TapGestureRecognizer> _urlRecognizers = [];
+
+  @override
+  void dispose() {
+    for (final r in _urlRecognizers) {
+      r.dispose();
+    }
+    super.dispose();
+  }
+
+  UiMessage get message => widget.message;
+  bool get isEditing => widget.isEditing;
+  bool get isGroup => widget.isGroup;
+  String get senderDisplayName => widget.senderDisplayName;
+  ChatConfig? get chatConfig => widget.chatConfig;
+  void Function(String action, UiMessage message)? get onMessageAction => widget.onMessageAction;
+  bool get isSearchHighlight => widget.isSearchHighlight;
+  bool get isSystemChannel => widget.isSystemChannel;
+  BrowserOpenMode get browserOpenMode => widget.browserOpenMode;
 
   /// Default edit window: 1 hour.
   static const _defaultEditWindowMs = 60 * 60 * 1000;
@@ -3097,6 +3166,11 @@ class _MessageBubble extends StatelessWidget {
     final matches = _urlRegex.allMatches(text).toList();
     if (matches.isEmpty) return SelectableText(text, style: style);
 
+    for (final r in _urlRecognizers) {
+      r.dispose();
+    }
+    _urlRecognizers.clear();
+
     final spans = <InlineSpan>[];
     int lastEnd = 0;
     for (final match in matches) {
@@ -3104,13 +3178,15 @@ class _MessageBubble extends StatelessWidget {
         spans.add(TextSpan(text: text.substring(lastEnd, match.start)));
       }
       final url = match.group(0)!;
+      final recognizer = TapGestureRecognizer()..onTap = () => _openUrl(context, url);
+      _urlRecognizers.add(recognizer);
       spans.add(TextSpan(
         text: url,
         style: style.copyWith(
           color: Colors.blue,
           decoration: TextDecoration.underline,
         ),
-        recognizer: TapGestureRecognizer()..onTap = () => _openUrl(context, url),
+        recognizer: recognizer,
       ));
       lastEnd = match.end;
     }

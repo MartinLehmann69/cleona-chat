@@ -24,7 +24,6 @@ import 'package:cleona/core/identity_resolution/identity_publisher.dart';
 import 'package:cleona/core/identity_resolution/identity_resolver.dart' show ResolvedDevice;
 import 'package:cleona/core/identity_resolution/device_kem_record.dart';
 import 'package:cleona/core/service/device_pairing_service.dart';
-import 'package:cleona/core/moderation/jury_selection.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/ack_tracker.dart';
 import 'package:cleona/core/network/contact_seed.dart' show ContactSeedBuilder, ContactSeedDataSource;
@@ -39,16 +38,12 @@ import 'package:cleona/core/node/cleona_node.dart';
 import 'package:cleona/core/node/identity_context.dart';
 import 'package:cleona/core/erasure/reed_solomon.dart';
 import 'package:cleona/core/service/service_types.dart';
+import 'package:cleona/core/service/service_context.dart';
+import 'package:cleona/core/service/channel_moderation_service.dart';
 import 'package:cleona/core/service/service_interface.dart';
 import 'package:cleona/core/network/network_stats.dart';
 import 'package:cleona/core/calls/call_manager.dart';
-import 'package:cleona/core/calls/audio_engine.dart';
-import 'package:cleona/core/calls/audio_permissions.dart';
-import 'package:cleona/core/calls/foreground_service.dart';
 import 'package:cleona/core/calls/group_call_manager.dart';
-import 'package:cleona/core/calls/audio_mixer.dart';
-import 'package:cleona/core/calls/group_call_session.dart';
-import 'package:cleona/core/calls/group_video_receiver.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/service/guardian_service.dart';
 import 'package:cleona/core/service/key_rotation_retry_manager.dart';
@@ -65,7 +60,9 @@ import 'package:cleona/core/media/link_preview_fetcher.dart';
 import 'package:cleona/core/calendar/calendar_manager.dart';
 import 'package:cleona/core/calendar/sync/calendar_sync_service.dart';
 import 'package:cleona/core/polls/poll_manager.dart';
-import 'package:cleona/core/crypto/linkable_ring_signature.dart';
+import 'package:cleona/core/service/calendar_protocol_service.dart';
+import 'package:cleona/core/service/poll_service.dart';
+import 'package:cleona/core/service/call_service.dart';
 import 'package:cleona/core/services/contact_manager.dart' show Contact;
 import 'package:cleona/core/services/key_change_policy.dart';
 import 'package:cleona/core/identity/identity_dht_registry.dart';
@@ -98,7 +95,8 @@ enum AppFrameDispatchOutcome {
 
 /// Central orchestrator: wires node, contacts, messaging, and manages state.
 /// Now takes a shared CleonaNode + IdentityContext instead of creating its own node.
-class CleonaService implements ICleonaService, ContactSeedDataSource {
+class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceContext {
+  @override
   final String profileDir;
   @override
   String displayName;
@@ -116,10 +114,13 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   final IdentityContext identity;
 
   /// The shared network node (transport, routing, DHT).
+  @override
   final CleonaNode node;
 
   late MailboxStore mailboxStore;
-  late CallManager callManager;
+  late final CallService _calls;
+  CallManager get callManager => _calls.callManager;
+  GroupCallManager get groupCallManager => _calls.groupCallManager;
   // §2.2.4: per-identity Auth+Liveness Publisher. Eine pro CleonaService-Instanz
   // (Multi-Identity-Daemon hat N Services, sharing one CleonaNode).
   IdentityPublisher? _identityPublisher;
@@ -128,11 +129,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   void Function(PeerInfo)? _publisherPeerAddedListener;
   @override
   final NotificationSoundService notificationSound = NotificationSoundService();
-  AudioEngine? _audioEngine;
-  late GroupCallManager groupCallManager;
-  AudioMixer? _audioMixer;
-  dynamic _groupVideoEngine; // VideoEngine (loaded by GUI, avoids dart:ui in daemon)
-  GroupVideoReceiver? _groupVideoReceiver;
 
   /// Conversation the user is currently looking at (set by ChatScreen.initState,
   /// cleared on dispose). Used together with [_isAppResumed] to suppress
@@ -169,13 +165,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   /// Minimum spacing (ms) between two notifications for the same conversation.
   static const int _notificationDebounceMs = 2000;
 
-  /// Active moderation config (can be switched between production/test via IPC).
-  /// Setting this restarts the moderation timer with the appropriate interval.
-  ModerationConfig _moderationConfig = ModerationConfig.production();
-  ModerationConfig get moderationConfig => _moderationConfig;
+  /// Extracted moderation sub-service (§9.3 jury, §9.4 reports, channel index gossip).
+  late final ChannelModerationService _moderation;
+  ModerationConfig get moderationConfig => _moderation.moderationConfig;
   set moderationConfig(ModerationConfig value) {
-    _moderationConfig = value;
-    _startModerationTimer(); // restart with new interval
+    _moderation.moderationConfig = value;
   }
 
   /// Voice transcription service (whisper.cpp).
@@ -245,25 +239,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   // Persistent deletion flag: prevents re-import of deleted contacts
   final Set<String> _deletedContacts = {};
 
-  // Calendar (§23)
+  // Calendar (§23) — protocol layer delegated to CalendarProtocolService
+  late final CalendarProtocolService _calendarProto;
   @override
-  late CalendarManager calendarManager;
-  /// External calendar sync (§23.8 — CalDAV + Google). Daemon-only, not
-  /// part of the ICleonaService interface: the GUI interacts via IPC commands.
+  CalendarManager get calendarManager => _calendarProto.calendarManager;
   late CalendarSyncService calendarSyncService;
 
-  /// Callback: calendar invite received from a contact.
   void Function(String senderNodeIdHex, String eventId, String title)? onCalendarInviteReceived;
-  /// Callback: RSVP response received for a group event.
   void Function(String eventId, String responderNodeIdHex, RsvpStatus status)? onCalendarRsvpReceived;
-  /// Callback: calendar event updated by creator.
   void Function(String eventId)? onCalendarEventUpdated;
-  /// Callback: reminder is due.
   void Function(String eventId, String title, int minutesBefore)? onCalendarReminderDue;
 
-  // Polls (§24)
+  // Polls (§24) — delegated to PollService
+  late final PollService _polls;
   @override
-  late PollManager pollManager;
+  PollManager get pollManager => _polls.pollManager;
   @override
   void Function(String pollId, String groupId, String question)? onPollCreated;
   @override
@@ -295,15 +285,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   void Function(
           String contactNodeIdHex, String displayName, bool identityKeyChanged)?
       onContactRestoreDetected;
-  /// Closed key-image hex values keyed by pollId (§24.4). In-memory only —
-  /// after a restart every stored vote is re-indexed from poll.votes.
-  final Map<String, Set<String>> _anonymousKeyImages = {};
-  Timer? _pollDeadlineTimer;
-
-  /// Jitter-pending anonymous vote sends, key = `pollId:keyImageHex`
-  /// (§11.4.6). A revoke issued while the send is still pending cancels
-  /// the timer instead of racing the vote on the wire.
-  final Map<String, Timer> _pendingAnonVoteSends = {};
 
   /// §26: fires whenever the twin-device list changes (add/remove/rename).
   /// GUI listens via IPC to refresh the Device Management screen.
@@ -389,23 +370,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
   // Channel index (public channel discovery)
   late ChannelIndex _channelIndex;
-  Timer? _channelIndexGossipTimer;
-  Timer? _moderationTimer;
-  // Moderation state
-  final Map<String, ChannelReport> _channelReports = {};
-  final Map<String, PostReport> _postReports = {};
-  final Map<String, JuryRequest> _pendingJuryRequests = {};
-  /// Active jury sessions we initiated (juryId -> jury state).
-  final Map<String, _JurySession> _activeSessions = {};
-  /// Reports filed per identity per day (rate-limiting).
-  final Map<String, int> _dailyReportCounts = {};
-  DateTime _lastReportCountReset = DateTime.now();
-  /// CSAM reporter cooldowns: nodeIdHex -> last CSAM report time.
-  final Map<String, DateTime> _csamCooldowns = {};
-  /// CSAM reporter strikes: nodeIdHex -> strike count.
-  final Map<String, int> _csamStrikes = {};
-  /// CSAM Stage 3 / jury moderation proofs: channelIdHex -> proof bytes.
-  final Map<String, Uint8List> _moderationProofs = {};
 
   // System channels (§9.5)
   CrashReporter? _crashReporter;
@@ -428,7 +392,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.94';
+  static const String kCurrentAppVersion = '3.1.98';
 
   /// Backwards-compatible instance accessor.
   String get currentAppVersion => kCurrentAppVersion;
@@ -501,43 +465,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     _channelIndex = ChannelIndex(dataDir: profileDir);
     _channelIndex.load();
 
-    // Init call manager
-    callManager = CallManager(identity: identity, node: node, contacts: _contacts, profileDir: profileDir);
-    callManager.sendViaUser = (recipientUserId, type, payload) =>
-        sendToUser(recipientUserId: recipientUserId, messageType: type, payload: payload);
-    callManager.onIncomingCall = (session) {
-      onIncomingCall?.call(session.toCallInfo());
-      onStateChanged?.call();
-    };
-    callManager.onCallAccepted = (session) {
-      _startAudioEngine(session);
-      onCallAccepted?.call(session.toCallInfo());
-      onStateChanged?.call();
-    };
-    callManager.onCallRejected = (session, reason) {
-      _stopAudioEngine();
-      onCallRejected?.call(session.toCallInfo(), reason);
-      onStateChanged?.call();
-    };
-    callManager.onCallEnded = (session) {
-      _stopAudioEngine();
-      onCallEnded?.call(session.toCallInfo());
-      onStateChanged?.call();
-    };
+    // Init moderation sub-service
+    _moderation = ChannelModerationService(this);
+    _moderation.onJuryRequestReceived = (req) => onJuryRequestReceived?.call(req);
 
-    // Plan §D2: hook DV-Routing route-down → drop cached route on the active
-    // CallSession so the next audio frame re-resolves via routingTable.
-    // peerHex may arrive as deviceNodeId OR userId (V3.1.65 multi-device);
-    // we match against the session's stable peerNodeIdHex, plus the live
-    // deviceNodeId of the cached PeerInfo if present.
-    node.onRouteDownForCalls = (peerHex) {
-      final session = callManager.currentCall;
-      if (session == null) return;
-      final cachedDevHex = session.cachedRoute?.nodeIdHex;
-      if (session.peerNodeIdHex == peerHex || cachedDevHex == peerHex) {
-        session.invalidateCachedRoute();
-      }
-    };
+    // Init call service (call/group-call managers, audio/video engine)
+    _calls = CallService(this, notificationSound: notificationSound, log: _log);
+    _calls.onIncomingCall = (info) => onIncomingCall?.call(info);
+    _calls.onCallAccepted = (info) => onCallAccepted?.call(info);
+    _calls.onCallRejected = (info, reason) => onCallRejected?.call(info, reason);
+    _calls.onCallEnded = (info) => onCallEnded?.call(info);
+    _calls.onIncomingGroupCall = (info) => onIncomingGroupCall?.call(info);
+    _calls.onGroupCallStarted = (info) => onGroupCallStarted?.call(info);
+    _calls.onGroupCallEnded = (info) => onGroupCallEnded?.call(info);
+    _calls.onStateChanged = () => onStateChanged?.call();
+    _calls.init();
 
     // §5.5b: FIRST_CR_STORE_ACK callback — update contact status to
     // storedForDelivery when a seed peer confirms it stored our CR.
@@ -558,51 +500,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
           break;
         }
       }
-    };
-
-    // Init group call manager
-    groupCallManager = GroupCallManager(
-      identity: identity,
-      node: node,
-      contacts: _contacts,
-      groups: _groups,
-      profileDir: profileDir,
-    );
-    groupCallManager.sendViaUser = (recipientUserId, type, payload) =>
-        sendToUser(recipientUserId: recipientUserId, messageType: type, payload: payload);
-    groupCallManager.onIncomingGroupCall = (info) {
-      onIncomingGroupCall?.call(info);
-      onStateChanged?.call();
-    };
-    groupCallManager.onGroupCallStarted = (info) {
-      _startAudioMixer(groupCallManager.currentGroupCall!);
-      _startGroupVideo(groupCallManager.currentGroupCall!);
-      onGroupCallStarted?.call(info);
-      onStateChanged?.call();
-    };
-    groupCallManager.onGroupCallEnded = (info) {
-      _stopAudioMixer();
-      _stopGroupVideo();
-      onGroupCallEnded?.call(info);
-      onStateChanged?.call();
-    };
-    groupCallManager.onParticipantChanged = (hex, state) {
-      if (state == ParticipantState.left || state == ParticipantState.crashed) {
-        _audioMixer?.removePeer(hex);
-        _groupVideoReceiver?.removePeer(hex);
-      }
-      onStateChanged?.call();
-    };
-    // §10.2.1 per-sender media keys. Our own rotated key → switch the encrypt
-    // side (capture isolate, video engine). A peer's announced key → register
-    // it on the decrypt side (mixer, video receiver).
-    groupCallManager.onOwnSendKeyChanged = (ownKey, version) {
-      _audioMixer?.updateOwnSendKey(ownKey, version);
-      try { (_groupVideoEngine as dynamic)?.updateKey(ownKey); } catch (_) {}
-    };
-    groupCallManager.onPeerSendKey = (senderUserHex, key, version) {
-      _audioMixer?.setPeerSendKey(senderUserHex, key);
-      _groupVideoReceiver?.setPeerSendKey(senderUserHex, key);
     };
 
     // Init guardian service
@@ -652,32 +549,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     // _loadConversations(), mirroring _loadGroups/_loadChannels above.
 
     // Load moderation state
-    _loadModeration();
+    _moderation.loadModeration();
 
     // Load calendar (§23)
-    calendarManager = CalendarManager(
+    final calMgr = CalendarManager(
       profileDir: profileDir,
       identityId: identity.userIdHex,
       fileEnc: _fileEnc,
     );
-    calendarManager.load();
+    calMgr.load();
+    _calendarProto = CalendarProtocolService(this, calMgr);
+    _calendarProto.onCalendarInviteReceived = (s, e, t) => onCalendarInviteReceived?.call(s, e, t);
+    _calendarProto.onCalendarRsvpReceived = (e, s, st) => onCalendarRsvpReceived?.call(e, s, st);
+    _calendarProto.onCalendarEventUpdated = (e) => onCalendarEventUpdated?.call(e);
+    _calendarProto.init();
 
     // Load external calendar sync (§23.8 — CalDAV + Google)
     calendarSyncService = CalendarSyncService(
       profileDir: profileDir,
       identityId: identity.userIdHex,
-      calendar: calendarManager,
+      calendar: calMgr,
       fileEnc: _fileEnc,
     );
     calendarSyncService.load();
 
     // Polls (§24)
-    pollManager = PollManager(
-      profileDir: profileDir,
-      identityId: identity.userIdHex,
-      fileEnc: _fileEnc,
-    );
-    pollManager.load();
+    _polls = PollService(this);
+    _polls.onPollCreated = (id, gid, q) => onPollCreated?.call(id, gid, q);
+    _polls.onPollTallyUpdated = (id) => onPollTallyUpdated?.call(id);
+    _polls.onPollStateChanged = (id) => onPollStateChanged?.call(id);
+    _polls.init();
 
     // Key rotation retry manager (§26.6.2 Paket C): persisted per-contact
     // retry state so offline contacts still receive KEY_ROTATION_BROADCAST
@@ -688,19 +589,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
       fileEnc: _fileEnc,
     );
     _keyRotationRetry.load();
-
-    // Rebuild the key-image index from persisted anonymous votes so
-    // double-vote detection survives restarts.
-    for (final poll in pollManager.polls.values) {
-      for (final v in poll.votes.values) {
-        if (v.anonymous) {
-          _anonymousKeyImages
-              .putIfAbsent(poll.pollId, () => {})
-              .add(v.voterIdHex);
-        }
-      }
-    }
-    _startPollDeadlineTimer();
 
     // Birthday auto-sync (§23.4): derive yearly birthday events from
     // contacts that carry birthday metadata. Runs once at startup and is
@@ -793,13 +681,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     // Message expiry: check every 30 seconds for expired messages
     _expiryTimer = Timer.periodic(const Duration(seconds: 30), (_) => _checkMessageExpiry());
 
-    // Channel index gossip: share index with peers every 5 minutes
-    _channelIndexGossipTimer = Timer.periodic(const Duration(minutes: 5), (_) => _doChannelIndexGossip());
-    // Prune stale index entries on startup
+    // Channel index gossip + moderation timers (delegated to sub-service)
+    _moderation.startChannelIndexGossip(const Duration(minutes: 5));
     _channelIndex.prune();
-
-    // Moderation timer: periodic check of all time-based moderation limits
-    _startModerationTimer();
+    _moderation.startModerationTimer();
 
     // System channel eviction (§9.5.5)
     _systemChannelEvictionTimer = Timer.periodic(
@@ -1730,8 +1615,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   static bool isUserMessageForTest(proto.MessageTypeV3 type) => _isUserMessage(type);
 
 
-  /// Default edit window: 15 minutes.
-  static const int _defaultEditWindowMs = 60 * 60 * 1000; // 1 hour
+  /// Sender-side edit window: 15 minutes (UI hides edit button after this).
+  static const int _defaultEditWindowMs = 15 * 60 * 1000;
+
+  /// Receiver-side tolerance: accept edits up to 60 min to avoid rejecting
+  /// edits from older nodes that still use the previous 60-min default.
+  static const int _receiverEditToleranceMs = 60 * 60 * 1000;
 
   // ── Emoji Reactions (Architecture Section 14.3) ──────────────────────
 
@@ -2745,7 +2634,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   /// Excludes the recipient itself.
   List<Uint8List> _findMutualPeerDeviceIds(Uint8List recipientUserId, {int limit = 3}) {
     final recipientHex = bytesToHex(recipientUserId);
+    final selfDeviceHex = bytesToHex(identity.nodeId);
     final candidates = <(Uint8List, int)>[];
+    final seen = <String>{};
+
+    // Phase 1: accepted contacts with alive routes (high confidence mutual).
     for (final entry in _contacts.entries) {
       if (entry.key == recipientHex) continue;
       final c = entry.value;
@@ -2759,10 +2652,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
         final aliveCount = routes.where((r) => r.isAlive).length;
         if (aliveCount > 0) {
           candidates.add((devBytes, aliveCount));
+          seen.add(devHex);
           break;
         }
       }
     }
+
+    // Phase 2: if no contact-based mutuals, fall back to well-connected
+    // routing table peers (e.g. Bootstrap). The receiver polls ALL confirmed
+    // peers on startup, so any reachable peer can serve as S&F relay.
+    if (candidates.isEmpty) {
+      final rtFallback = <(Uint8List, int)>[];
+      for (final peer in node.routingTable.allPeers) {
+        final peerHex = peer.nodeIdHex;
+        if (peerHex == recipientHex || peerHex == selfDeviceHex) continue;
+        if (seen.contains(peerHex)) continue;
+        if (!node.isPeerConfirmed(peerHex)) continue;
+        final routes = node.dvRouting.routesTo(peerHex);
+        final aliveCount = routes.where((r) => r.isAlive).length;
+        if (aliveCount > 0) {
+          rtFallback.add((Uint8List.fromList(peer.nodeId), aliveCount));
+        }
+      }
+      rtFallback.sort((a, b) => b.$2.compareTo(a.$2));
+      candidates.addAll(rtFallback.take(limit));
+    }
+
     candidates.sort((a, b) => b.$2.compareTo(a.$2));
     return candidates.take(limit).map((c) => c.$1).toList();
   }
@@ -4096,6 +4011,35 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     return mutual;
   }
 
+  // ── ServiceContext implementation ───────────────────────────────
+
+  @override
+  Map<String, ContactInfo> get contacts => _contacts;
+  @override
+  ChannelIndex get channelIndex => _channelIndex;
+  @override
+  void saveChannels() => _saveChannels();
+  @override
+  void saveConversations() => _saveConversations();
+  @override
+  void notifyStateChanged() => onStateChanged?.call();
+  @override
+  bool hasChannelPermission(ChannelInfo channel, String action) =>
+      _hasChannelPermission(channel, action);
+  @override
+  FileEncryption get fileEnc => _fileEnc;
+  @override
+  Future<void> sendEncryptedPayload(
+    Uint8List recipientUserId,
+    proto.MessageTypeV3 messageType,
+    Uint8List payload, {
+    Uint8List? groupId,
+  }) => _sendEncryptedPayload(recipientUserId, messageType, payload, groupId: groupId);
+  @override
+  void addMessageToConversation(String conversationId, UiMessage msg,
+      {bool isGroup = false, bool isChannel = false}) =>
+      _addMessageToConversation(conversationId, msg, isGroup: isGroup, isChannel: isChannel);
+
   // ── Groups ──────────────────────────────────────────────────────
 
   @override
@@ -5039,21 +4983,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     _log.info('Broadcast channel update for "${channel.name}" to ${channel.members.length - 1} members');
   }
 
-  /// Check if caller has permission for channel action.
-  // ── Public Channel Operations ────────────────────────────────────
+  // ── Public Channel Operations (delegated to ChannelModerationService) ──
 
   @override
   Future<List<ChannelIndexEntry>> searchPublicChannels({
     String? query,
     String? language,
     bool? includeAdult,
-  }) async {
-    return _channelIndex.search(
-      query: query,
-      language: language,
-      includeAdult: includeAdult ?? false,
-    );
-  }
+  }) => _moderation.searchPublicChannels(query: query, language: language, includeAdult: includeAdult);
 
   @override
   Future<bool> publishChannelToIndex(String channelIdHex) async {
@@ -5079,1524 +5016,36 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     return true;
   }
 
-  // joinPublicChannel is implemented in the Channel Join Request section below
-
-  // ── Moderation: Reports ────────────────────────────────────────
-
-  void _resetDailyReportCountsIfNeeded() {
-    final now = DateTime.now();
-    if (now.difference(_lastReportCountReset).inHours >= 24) {
-      _dailyReportCounts.clear();
-      _lastReportCountReset = now;
-    }
-  }
-
-  /// Check if the current identity meets reporter qualification requirements.
-  /// Returns null if qualified, or an error message if not.
-  String? _checkReporterQualification(ReportCategory category) {
-    final config = moderationConfig;
-
-    // Check identity age
-    final identityAge = DateTime.now().difference(identity.createdAt);
-    if (category == ReportCategory.illegalCSAM) {
-      if (identityAge < config.identityMinAgeCSAM) {
-        return 'Identity too young for CSAM reports (need ${config.identityMinAgeCSAM.inDays} days)';
-      }
-      // CSAM requires isAdult
-      if (config.csamRequiresAdult && !identity.isAdult) {
-        return 'CSAM reports require adult verification';
-      }
-      // CSAM: min bidirectional partners
-      final bidirectional = _contacts.values.where((c) => c.status == 'accepted').length;
-      if (bidirectional < config.csamMinBidirectionalPartners) {
-        return 'Not enough contacts for CSAM reports (need ${config.csamMinBidirectionalPartners})';
-      }
-      // CSAM: min long-term contacts
-      final longterm = _contacts.values.where((c) {
-        if (c.status != 'accepted' || c.acceptedAt == null) return false;
-        return DateTime.now().difference(c.acceptedAt!) >= config.csamLongtermContactAge;
-      }).length;
-      if (longterm < config.csamMinLongtermContacts) {
-        return 'Not enough long-term contacts for CSAM reports (need ${config.csamMinLongtermContacts})';
-      }
-      // CSAM cooldown check
-      final lastCsam = _csamCooldowns[identity.userIdHex];
-      if (lastCsam != null && DateTime.now().difference(lastCsam) < config.csamReporterCooldown) {
-        return 'CSAM reporter cooldown active';
-      }
-      // CSAM strike check
-      final strikes = _csamStrikes[identity.userIdHex] ?? 0;
-      if (strikes >= config.csamMaxStrikes) {
-        return 'CSAM reporting permanently banned (${config.csamMaxStrikes} strikes)';
-      }
-    } else {
-      if (identityAge < config.identityMinAge) {
-        return 'Identity too young for reports (need ${config.identityMinAge.inDays} days)';
-      }
-    }
-    return null;
-  }
+  // ── Moderation (delegated to ChannelModerationService) ─────────
 
   @override
-  Future<bool> reportChannel(String channelIdHex, int category, List<String> evidencePostIds, {String? description}) async {
-    _resetDailyReportCountsIfNeeded();
-
-    // Rate limit
-    final dailyCount = _dailyReportCounts[identity.userIdHex] ?? 0;
-    if (dailyCount >= 5) {
-      _log.warn('Daily report limit reached');
-      return false;
-    }
-
-    // Reporter qualification
-    final cat = ReportCategory.values[category];
-    final qualError = _checkReporterQualification(cat);
-    if (qualError != null) {
-      _log.warn('Reporter not qualified: $qualError');
-      return false;
-    }
-
-    // Validate evidence (3-10 posts for channel reports)
-    if (evidencePostIds.isEmpty || evidencePostIds.length > 10) {
-      _log.warn('Channel report needs 1-10 evidence posts');
-      return false;
-    }
-
-    final reportId = bytesToHex(SodiumFFI().randomBytes(16));
-
-    final report = ChannelReport(
-      reportId: reportId,
-      channelIdHex: channelIdHex,
-      reporterNodeIdHex: identity.userIdHex,
-      category: cat,
-      evidencePostIds: evidencePostIds,
-      description: description,
-    );
-
-    _channelReports[reportId] = report;
-    _dailyReportCounts[identity.userIdHex] = dailyCount + 1;
-    if (cat == ReportCategory.illegalCSAM) {
-      _csamCooldowns[identity.userIdHex] = DateTime.now();
-    }
-    _saveModeration();
-
-    _log.info('Channel report $reportId filed for $channelIdHex (category: ${cat.name})');
-
-    // Check if jury threshold reached
-    _checkJuryThreshold(channelIdHex);
-
-    return true;
-  }
-
+  Future<bool> reportChannel(String channelIdHex, int category, List<String> evidencePostIds, {String? description}) =>
+      _moderation.reportChannel(channelIdHex, category, evidencePostIds, description: description);
   @override
-  Future<bool> reportPost(String channelIdHex, String postId, int category, {String? description}) async {
-    _resetDailyReportCountsIfNeeded();
-
-    final dailyCount = _dailyReportCounts[identity.userIdHex] ?? 0;
-    if (dailyCount >= 5) {
-      _log.warn('Daily report limit reached');
-      return false;
-    }
-
-    // Reporter qualification
-    final cat = ReportCategory.values[category];
-    final qualError = _checkReporterQualification(cat);
-    if (qualError != null) {
-      _log.warn('Reporter not qualified: $qualError');
-      return false;
-    }
-
-    final reportId = bytesToHex(SodiumFFI().randomBytes(16));
-
-    final report = PostReport(
-      reportId: reportId,
-      channelIdHex: channelIdHex,
-      postId: postId,
-      reporterNodeIdHex: identity.userIdHex,
-      category: cat,
-      description: description,
-    );
-
-    _postReports[reportId] = report;
-    _dailyReportCounts[identity.userIdHex] = dailyCount + 1;
-    if (cat == ReportCategory.illegalCSAM) {
-      _csamCooldowns[identity.userIdHex] = DateTime.now();
-    }
-    _saveModeration();
-
-    _log.info('Post report $reportId filed for $postId in $channelIdHex (category: ${cat.name})');
-    return true;
-  }
-
-  // submitJuryVote is implemented in the Jury section below (with network send)
-
-  void _saveModeration() {
-    try {
-      final file = File('$profileDir/moderation.json');
-      file.writeAsStringSync(jsonEncode({
-        'channelReports': _channelReports.map((k, v) => MapEntry(k, v.toJson())),
-        'postReports': _postReports.map((k, v) => MapEntry(k, v.toJson())),
-        'juryRequests': _pendingJuryRequests.map((k, v) => MapEntry(k, v.toJson())),
-        'csamCooldowns': _csamCooldowns.map((k, v) => MapEntry(k, v.millisecondsSinceEpoch)),
-        'csamStrikes': _csamStrikes,
-      }));
-    } catch (e) {
-      _log.warn('Failed to save moderation state: $e');
-    }
-  }
-
-  void _loadModeration() {
-    try {
-      final file = File('$profileDir/moderation.json');
-      if (!file.existsSync()) return;
-      final json = jsonDecode(file.readAsStringSync()) as Map<String, dynamic>;
-
-      final reports = json['channelReports'] as Map<String, dynamic>? ?? {};
-      for (final e in reports.entries) {
-        _channelReports[e.key] = ChannelReport.fromJson(e.value as Map<String, dynamic>);
-      }
-
-      final postReports = json['postReports'] as Map<String, dynamic>? ?? {};
-      for (final e in postReports.entries) {
-        _postReports[e.key] = PostReport.fromJson(e.value as Map<String, dynamic>);
-      }
-
-      final jury = json['juryRequests'] as Map<String, dynamic>? ?? {};
-      for (final e in jury.entries) {
-        _pendingJuryRequests[e.key] = JuryRequest.fromJson(e.value as Map<String, dynamic>);
-      }
-
-      final cooldowns = json['csamCooldowns'] as Map<String, dynamic>? ?? {};
-      for (final e in cooldowns.entries) {
-        _csamCooldowns[e.key] = DateTime.fromMillisecondsSinceEpoch(e.value as int);
-      }
-      final strikes = json['csamStrikes'] as Map<String, dynamic>? ?? {};
-      for (final e in strikes.entries) {
-        _csamStrikes[e.key] = e.value as int;
-      }
-    } catch (e) {
-      _log.warn('Failed to load moderation state: $e');
-    }
-  }
-
+  Future<bool> reportPost(String channelIdHex, String postId, int category, {String? description}) =>
+      _moderation.reportPost(channelIdHex, postId, category, description: description);
   @override
-  List<JuryRequest> get pendingJuryRequests => _pendingJuryRequests.values.toList();
-
+  List<JuryRequest> get pendingJuryRequests => _moderation.pendingJuryRequestsList;
   @override
-  Map<String, dynamic> getChannelModerationInfo(String channelIdHex) {
-    final channel = _channels[channelIdHex];
-    final reports = _channelReports.values
-        .where((r) => r.channelIdHex == channelIdHex)
-        .map((r) => <String, dynamic>{
-          'reportId': r.reportId,
-          'channelId': r.channelIdHex,
-          'category': _categoryToString(r.category),
-          'reporterCount': 1,
-          'status': r.state.name,
-          'juryResult': null,
-        }).toList();
-
-    return {
-      'channelId': channelIdHex,
-      'isPublic': channel?.isPublic ?? false,
-      'isAdultContent': channel?.isAdult ?? false,
-      'badBadgeLevel': _badgeLevelToString(channel?.badBadgeLevel ?? 0),
-      if (channel?.badBadgeSince != null) 'badBadgeSince': channel!.badBadgeSince!.millisecondsSinceEpoch,
-      if (channel?.correctionSubmitted == true) 'correctionSubmitted': channel!.correctionSubmitted,
-      'pendingReports': reports,
-      'isTempHidden': channel?.isCsamHidden ?? false,
-      if (channel?.csamHiddenSince != null) 'tempHiddenSince': channel!.csamHiddenSince!.millisecondsSinceEpoch,
-      'tombstoned': channel?.tombstoned ?? false,
-    };
-  }
-
-  String _categoryToString(ReportCategory cat) {
-    switch (cat) {
-      case ReportCategory.notSafeForWork: return 'not_safe_for_work';
-      case ReportCategory.falseContent: return 'false_content';
-      case ReportCategory.illegalDrugs: return 'illegal_drugs';
-      case ReportCategory.illegalWeapons: return 'illegal_weapons';
-      case ReportCategory.illegalCSAM: return 'illegal_csam';
-      case ReportCategory.illegalOther: return 'illegal_other';
-    }
-  }
-
-  String _badgeLevelToString(int level) {
-    switch (level) {
-      case 1: return 'questionable';
-      case 2: return 'repeatedly_misleading';
-      case 3: return 'permanent';
-      default: return 'none';
-    }
-  }
-
+  Map<String, dynamic> getChannelModerationInfo(String channelIdHex) =>
+      _moderation.getChannelModerationInfo(channelIdHex);
   @override
-  Future<bool> dismissPostReport(String channelIdHex, String reportId) async {
-    final report = _postReports[reportId];
-    if (report == null || report.channelIdHex != channelIdHex) return false;
-
-    final channel = _channels[channelIdHex];
-    if (channel == null || !_hasChannelPermission(channel, 'config')) return false;
-
-    _postReports.remove(reportId);
-    _saveModeration();
-    _log.info('Post report $reportId dismissed');
-    return true;
-  }
-
+  Future<bool> dismissPostReport(String channelIdHex, String reportId) =>
+      _moderation.dismissPostReport(channelIdHex, reportId);
   @override
-  Future<bool> submitBadgeCorrection(String channelIdHex, {String? newName, String? newDescription}) async {
-    final channel = _channels[channelIdHex];
-    if (channel == null) return false;
-    if (channel.ownerNodeIdHex != identity.userIdHex) return false;
-    if (channel.badBadgeLevel <= 0 || channel.badBadgeLevel >= 3) return false; // no correction for permanent
-
-    if (newName != null && newName.isNotEmpty) channel.name = newName;
-    if (newDescription != null) channel.description = newDescription;
-    channel.correctionSubmitted = true;
-    _saveChannels();
-
-    // Update index
-    if (channel.isPublic) {
-      _channelIndex.upsert(ChannelIndexEntry(
-        channelIdHex: channelIdHex,
-        name: channel.name,
-        language: channel.language,
-        isAdult: channel.isAdult,
-        description: channel.description,
-        subscriberCount: channel.members.length,
-        badBadgeLevel: channel.badBadgeLevel,
-        badBadgeSince: channel.badBadgeSince,
-        correctionSubmitted: true,
-        ownerNodeIdHex: channel.ownerNodeIdHex,
-        createdAt: channel.createdAt,
-      ));
-      _channelIndex.save();
-    }
-
-    _log.info('Badge correction submitted for channel "${channel.name}"');
-    return true;
-  }
-
+  Future<bool> submitBadgeCorrection(String channelIdHex, {String? newName, String? newDescription}) =>
+      _moderation.submitBadgeCorrection(channelIdHex, newName: newName, newDescription: newDescription);
   @override
-  Future<bool> contestCsamHide(String channelIdHex) async {
-    final channel = _channels[channelIdHex];
-    if (channel == null) return false;
-    if (channel.ownerNodeIdHex != identity.userIdHex) return false;
-    if (!channel.isCsamHidden) return false;
-
-    // Create a plausibility jury (jurors see only metadata, not content)
-    final report = _channelReports.values
-        .where((r) => r.channelIdHex == channelIdHex && r.category == ReportCategory.illegalCSAM)
-        .firstOrNull;
-    if (report == null) return false;
-
-    final juryId = bytesToHex(SodiumFFI().randomBytes(16));
-    final session = _createJurySession(
-      juryId: juryId,
-      reportId: report.reportId,
-      channelIdHex: channelIdHex,
-      category: ReportCategory.illegalCSAM,
-      isPlausibilityJury: true,
-    );
-    if (session == null) {
-      _log.warn('Cannot form plausibility jury — not enough eligible jurors');
-      return false;
-    }
-
-    _log.info('CSAM plausibility jury $juryId formed for channel "${channel.name}" — ${session.jurorNodeIds.length} jurors');
-    return true;
-  }
-
-  // ── Channel Index Gossip ──────────────────────────────────────
-
-  /// Send channel index to up to 3 random connected peers.
-  void _doChannelIndexGossip() {
-    final entries = _channelIndex.allEntries;
-    if (entries.isEmpty) return;
-
-    // Pick up to 3 random peers from routing table
-    final allPeers = node.routingTable.allPeers;
-    if (allPeers.isEmpty) return;
-
-    final shuffled = List<PeerInfo>.from(allPeers)..shuffle();
-    final targets = shuffled.take(3);
-
-    final exchangeMsg = proto.ChannelIndexExchange();
-    for (final entry in entries) {
-      exchangeMsg.entries.add(proto.ChannelIndexEntryProto()
-        ..channelId = hexToBytes(entry.channelIdHex)
-        ..name = entry.name
-        ..language = entry.language
-        ..isAdult = entry.isAdult
-        ..description = entry.description ?? ''
-        ..subscriberCount = entry.subscriberCount
-        ..badBadgeLevel = entry.badBadgeLevel
-        ..correctionSubmitted = entry.correctionSubmitted
-        ..ownerNodeId = hexToBytes(entry.ownerNodeIdHex)
-        ..createdAtMs = Int64(entry.createdAt.millisecondsSinceEpoch));
-      if (entry.badBadgeSince != null) {
-        exchangeMsg.entries.last.badBadgeSinceMs = Int64(entry.badBadgeSince!.millisecondsSinceEpoch);
-      }
-    }
-
-    // V3 channel-index gossip rides InfrastructureFrame: recipients are
-    // arbitrary routing-table peers (NOT necessarily contacts), and there
-    // is no inner User-Sig requirement — receivers treat the entries as
-    // gossip and trust nothing. Device-KEM-Decap at the recipient gates
-    // delivery to addressed devices; HMAC + Outer-Device-Sig per §3.5
-    // protect the wire. Architecture §10.2 + §2.3.5.
-    final payload = Uint8List.fromList(exchangeMsg.writeToBuffer());
-    for (final peer in targets) {
-      unawaited(node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_INDEX_EXCHANGE,
-        innerPayload: payload,
-        recipientDeviceId: peer.nodeId,
-      ));
-    }
-  }
-
-  /// Handle incoming channel index exchange from a peer.
-  ///
-  /// V3-direct: [payload] is the raw `ChannelIndexExchange` proto bytes
-  /// from the InfrastructureFrame body (gossip-style, untrusted by design
-  /// — handler only merges entries into `_channelIndex`). No sender
-  /// argument needed — the entry payload is self-describing per channel.
-  void _handleChannelIndexExchange(Uint8List payload) {
-    try {
-      final exchange = proto.ChannelIndexExchange.fromBuffer(payload);
-      var added = 0;
-      for (final e in exchange.entries) {
-        // Phase 1 (§9.3.1a): log unproven badge/tombstone entries.
-        // Badge ≥ 1 or tombstone (badge 3) without moderation_proof_hash
-        // are accepted but flagged — Phase 2 will reject them.
-        final hasModerationProof = e.moderationProofHash.isNotEmpty;
-        if (e.badBadgeLevel > 0 && !hasModerationProof) {
-          _log.warn('Channel index gossip: badge=${e.badBadgeLevel} for '
-              '${bytesToHex(Uint8List.fromList(e.channelId)).substring(0, 16)} '
-              'WITHOUT moderation proof — accepted (Phase 1 observe-only)');
-        }
-
-        final entry = ChannelIndexEntry(
-          channelIdHex: bytesToHex(Uint8List.fromList(e.channelId)),
-          name: e.name,
-          language: e.language,
-          isAdult: e.isAdult,
-          description: e.description.isEmpty ? null : e.description,
-          subscriberCount: e.subscriberCount,
-          badBadgeLevel: e.badBadgeLevel,
-          badBadgeSince: e.badBadgeSinceMs.toInt() > 0
-              ? DateTime.fromMillisecondsSinceEpoch(e.badBadgeSinceMs.toInt())
-              : null,
-          correctionSubmitted: e.correctionSubmitted,
-          ownerNodeIdHex: bytesToHex(Uint8List.fromList(e.ownerNodeId)),
-          createdAt: DateTime.fromMillisecondsSinceEpoch(
-              e.createdAtMs.toInt() > 0 ? e.createdAtMs.toInt() : 0),
-        );
-        final existing = _channelIndex.get(entry.channelIdHex);
-        if (existing == null || existing.subscriberCount < entry.subscriberCount ||
-            existing.badBadgeLevel != entry.badBadgeLevel) {
-          _channelIndex.upsert(entry);
-          added++;
-        }
-      }
-      if (added > 0) {
-        _channelIndex.save();
-        _log.info('Channel index gossip: merged $added entries from peer');
-      }
-    } catch (e) {
-      _log.debug('Channel index exchange error: $e');
-    }
-  }
-
-  // ── Channel Join Request (Owner-Seite) ────────────────────────
-
-  /// Handle incoming join request for a public channel we own.
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// `ChannelJoinRequest` proto bytes (V3 inner User-Sig + outer
-  /// Device-Sig + KEM-decap chain verified upstream). [senderUserId] is
-  /// the requesting peer's user-id (`frame.senderUserId`).
-  void _handleChannelJoinRequest(Uint8List payload, Uint8List senderUserId) {
-    try {
-      final joinReq = proto.ChannelJoinRequest.fromBuffer(payload);
-      final channelIdHex = bytesToHex(Uint8List.fromList(joinReq.channelId));
-      final channel = _channels[channelIdHex];
-      if (channel == null || !channel.isPublic) {
-        _log.debug('Join request for unknown/private channel $channelIdHex');
-        return;
-      }
-
-      // Only owner processes join requests
-      if (channel.ownerNodeIdHex != identity.userIdHex) return;
-
-      final requesterNodeIdHex = bytesToHex(senderUserId);
-
-      // Already a member?
-      if (channel.members.containsKey(requesterNodeIdHex)) {
-        _log.debug('$requesterNodeIdHex already member of channel $channelIdHex');
-        return;
-      }
-
-      // Add as subscriber
-      channel.members[requesterNodeIdHex] = ChannelMemberInfo(
-        nodeIdHex: requesterNodeIdHex,
-        displayName: joinReq.displayName,
-        role: 'subscriber',
-        ed25519Pk: Uint8List.fromList(joinReq.ed25519Pk),
-        x25519Pk: Uint8List.fromList(joinReq.x25519Pk),
-        mlKemPk: Uint8List.fromList(joinReq.mlKemPk),
-      );
-      _saveChannels();
-
-      // Send CHANNEL_INVITE back with full member list
-      _sendChannelInviteToMember(channel, requesterNodeIdHex);
-
-      // Update index subscriber count
-      if (channel.isPublic) {
-        publishChannelToIndex(channelIdHex);
-      }
-
-      _log.info('Auto-accepted join request from ${joinReq.displayName} for channel "${channel.name}"');
-      onStateChanged?.call();
-    } catch (e) {
-      _log.debug('Channel join request error: $e');
-    }
-  }
-
-  /// Send a CHANNEL_INVITE to a specific member (used for join request responses).
-  Future<void> _sendChannelInviteToMember(ChannelInfo channel, String memberNodeIdHex) async {
-    final memberInfo = channel.members[memberNodeIdHex];
-    if (memberInfo == null) return;
-
-    // Build invite protobuf
-    final invite = proto.ChannelInvite()
-      ..channelId = hexToBytes(channel.channelIdHex)
-      ..channelName = channel.name
-      ..role = memberInfo.role
-      ..isPublic = channel.isPublic
-      ..isAdult = channel.isAdult
-      ..language = channel.language;
-    if (channel.description != null) invite.channelDescription = channel.description!;
-
-    // Include full member list
-    for (final m in channel.members.values) {
-      final gm = proto.GroupMemberV3()
-        ..nodeId = hexToBytes(m.nodeIdHex)
-        ..displayName = m.displayName
-        ..role = m.role;
-      if (m.ed25519Pk != null) gm.ed25519PublicKey = m.ed25519Pk!;
-      if (m.x25519Pk != null) gm.x25519PublicKey = m.x25519Pk!;
-      if (m.mlKemPk != null) gm.mlKemPublicKey = m.mlKemPk!;
-      invite.members.add(gm);
-    }
-
-    // V3: sendToUser handles KEM/Sig + per-device fan-out.
-    final (x25519Pk, mlKemPk) = _resolveMemberKeys(memberNodeIdHex,
-        memberX25519Pk: memberInfo.x25519Pk, memberMlKemPk: memberInfo.mlKemPk);
-    if (x25519Pk == null || mlKemPk == null) return;
-    await sendToUser(
-      recipientUserId: hexToBytes(memberNodeIdHex),
-      messageType: proto.MessageTypeV3.MTV3_CHANNEL_INVITE,
-      payload: Uint8List.fromList(invite.writeToBuffer()),
-      groupId: hexToBytes(channel.channelIdHex),
-    );
-  }
-
+  Future<bool> contestCsamHide(String channelIdHex) =>
+      _moderation.contestCsamHide(channelIdHex);
   @override
-  Future<bool> joinPublicChannel(String channelIdHex) async {
-    final entry = _channelIndex.get(channelIdHex);
-    if (entry == null) return false;
-
-    // Create local channel + conversation
-    if (!_channels.containsKey(channelIdHex)) {
-      final channel = ChannelInfo(
-        channelIdHex: channelIdHex,
-        name: entry.name,
-        description: entry.description,
-        ownerNodeIdHex: entry.ownerNodeIdHex,
-        isPublic: true,
-        isAdult: entry.isAdult,
-        language: entry.language,
-      );
-      channel.members[identity.userIdHex] = ChannelMemberInfo(
-        nodeIdHex: identity.userIdHex,
-        displayName: displayName,
-        role: 'subscriber',
-        ed25519Pk: identity.ed25519PublicKey,
-        x25519Pk: identity.x25519PublicKey,
-        mlKemPk: identity.mlKemPublicKey,
-      );
-      _channels[channelIdHex] = channel;
-      _saveChannels();
-
-      conversations[channelIdHex] = Conversation(
-        id: channelIdHex,
-        displayName: entry.name,
-        isChannel: true,
-      );
-      _saveConversations();
-      onStateChanged?.call();
-    }
-
-    // Send join request to channel owner via V3 sendToUser. Owner is
-    // (per §10.2) a contact for any public channel we discovered, so
-    // sendToUser handles per-device fan-out + KEM/Sig.
-    final ownerContact = _contacts[entry.ownerNodeIdHex];
-    if (ownerContact?.x25519Pk != null && ownerContact?.mlKemPk != null) {
-      final joinReq = proto.ChannelJoinRequest()
-        ..channelId = hexToBytes(entry.channelIdHex)
-        ..displayName = displayName
-        ..ed25519Pk = identity.ed25519PublicKey
-        ..x25519Pk = identity.x25519PublicKey
-        ..mlKemPk = identity.mlKemPublicKey;
-      unawaited(sendToUser(
-        recipientUserId: hexToBytes(entry.ownerNodeIdHex),
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST,
-        payload: Uint8List.fromList(joinReq.writeToBuffer()),
-      ));
-      _log.info('CHANNEL_JOIN_REQUEST sent for "${entry.name}" to owner '
-          '${entry.ownerNodeIdHex.substring(0, 8)}');
-    } else {
-      _log.info('Joined public channel "${entry.name}" locally — owner keys not yet known');
-    }
-    return true;
-  }
-
-  // ── Moderation Timer ─────────────────────────────────────────
-
-  /// Start (or restart) the periodic moderation timer.
-  /// Interval adapts to config: ~1/6 of the shortest timeout, clamped to [5s, 5min].
-  void _startModerationTimer() {
-    _moderationTimer?.cancel();
-    final shortest = [
-      moderationConfig.juryVoteTimeout,
-      moderationConfig.badgeProbationLevel1,
-      moderationConfig.csamTempHideDuration,
-      moderationConfig.singlePostEscalationTimeout,
-    ].reduce((a, b) => a < b ? a : b);
-    var intervalMs = (shortest.inMilliseconds ~/ 6).clamp(5000, 300000);
-    // For very short test timeouts (<5s), tick every second
-    if (shortest.inSeconds < 5) intervalMs = 1000;
-    _moderationTimer = Timer.periodic(Duration(milliseconds: intervalMs), (_) => _runModerationChecks());
-    _log.debug('Moderation timer started: interval=${intervalMs}ms (shortest timeout=${shortest.inSeconds}s)');
-  }
-
-  /// Periodic check of all time-based moderation limits.
-  Future<void> _runModerationChecks() async {
-    final now = DateTime.now();
-    final config = moderationConfig;
-    var changed = false;
-
-    // 1. Jury vote timeouts — attempt replacement jurors or resolve
-    for (final session in _activeSessions.values.toList()) {
-      if (session.isComplete) continue;
-      if (now.difference(session.createdAt) > config.juryVoteTimeout) {
-        _log.info('Moderation timer: jury ${session.juryId} timed out');
-        _handleJuryTimeout(session);
-        changed = true;
-      }
-    }
-
-    // 2. Badge probation — remove badge after successful probation
-    for (final channel in _channels.values) {
-      if (channel.badBadgeLevel <= 0 || channel.badBadgeLevel >= 3) continue;
-      if (!channel.correctionSubmitted) continue;
-      if (channel.badBadgeSince == null) continue;
-
-      final probation = channel.badBadgeLevel == 1
-          ? config.badgeProbationLevel1
-          : config.badgeProbationLevel2;
-      if (now.difference(channel.badBadgeSince!) >= probation) {
-        final oldLevel = channel.badBadgeLevel;
-        channel.badBadgeLevel = (channel.badBadgeLevel - 1).clamp(0, 3);
-        channel.correctionSubmitted = false;
-        if (channel.badBadgeLevel == 0) {
-          channel.badBadgeSince = null;
-        }
-        _log.info('Moderation timer: badge probation complete for "${channel.name}" ($oldLevel → ${channel.badBadgeLevel})');
-        if (channel.isPublic) await publishChannelToIndex(channel.channelIdHex);
-        changed = true;
-      }
-    }
-
-    // 3. CSAM temp-hide — lift hide after duration expires (only Stage 2)
-    for (final channel in _channels.values) {
-      if (!channel.isCsamHidden) continue;
-      if (channel.csamStage3Active) continue; // Stage 3 manages its own lifecycle
-      if (channel.csamHiddenSince == null) continue;
-      if (now.difference(channel.csamHiddenSince!) >= config.csamTempHideDuration) {
-        channel.isCsamHidden = false;
-        channel.csamHiddenSince = null;
-        _log.info('Moderation timer: CSAM temp-hide lifted for "${channel.name}"');
-        if (channel.isPublic) await publishChannelToIndex(channel.channelIdHex);
-        changed = true;
-      }
-    }
-
-    // 3b. CSAM Stage 3 objection window expiry → finalize tombstone
-    for (final channel in _channels.values.toList()) {
-      if (!channel.csamStage3Active) continue;
-      if (channel.tombstoned) continue;
-      if (channel.csamObjectionWindowEnd == null) continue;
-      if (now.isAfter(channel.csamObjectionWindowEnd!)) {
-        // Check if plausibility jury objected (resolved as NOT approved = objection succeeded)
-        final juryId = channel.csamObjectionJuryId;
-        if (juryId != null) {
-          final session = _activeSessions[juryId];
-          if (session != null && session.isComplete) {
-            // Plausibility jury completed — if it was NOT approved,
-            // the objection succeeded and hide should be lifted
-            // (this is handled in _resolveJury already)
-          }
-        }
-        _log.info('Moderation timer: CSAM Stage 3 objection window expired for "${channel.name}"');
-        _finalizeCsamStage3(channel);
-        changed = true;
-      }
-    }
-
-    // 4. Single-post escalation — pending post reports escalate to channel reports
-    for (final report in _postReports.values.toList()) {
-      if (report.state != PostReportState.pending) continue;
-      if (now.difference(report.createdAt) >= config.singlePostEscalationTimeout) {
-        report.state = PostReportState.escalated;
-        // Create a channel-level report from the post report
-        final channelReport = ChannelReport(
-          reportId: report.reportId,
-          channelIdHex: report.channelIdHex,
-          reporterNodeIdHex: report.reporterNodeIdHex,
-          category: report.category,
-          evidencePostIds: [report.postId],
-          description: report.description,
-        );
-        _channelReports[report.reportId] = channelReport;
-        _checkJuryThreshold(report.channelIdHex);
-        _log.info('Moderation timer: post report ${report.reportId} escalated to channel report');
-        changed = true;
-      }
-    }
-
-    // Clean up completed jury sessions (keep for 1 hour, then discard)
-    _activeSessions.removeWhere((id, s) =>
-        s.isComplete && now.difference(s.createdAt) > const Duration(hours: 1));
-
-    if (changed) {
-      _saveChannels();
-      _saveModeration();
-      onStateChanged?.call();
-    }
-  }
-
-  // ── Jury-Auswahl + Verteilung ─────────────────────────────────
-
-  /// Check if reports for a channel have reached the jury threshold.
-  void _checkJuryThreshold(String channelIdHex) {
-    final config = moderationConfig;
-    final channel = _channels[channelIdHex];
-    // Count unique reporters per category for this channel
-    final reportsByCategory = <ReportCategory, Set<String>>{};
-    for (final r in _channelReports.values) {
-      if (r.channelIdHex != channelIdHex || r.state != ReportState.pending) continue;
-      reportsByCategory.putIfAbsent(r.category, () => {}).add(r.reporterNodeIdHex);
-    }
-
-    for (final entry in reportsByCategory.entries) {
-      // CSAM has special procedure — no standard jury
-      if (entry.key == ReportCategory.illegalCSAM) {
-        if (channel == null) continue;
-        final subscriberCount = channel.members.length;
-        _checkCsamThresholds(channel, entry.value.length, subscriberCount);
-        continue;
-      }
-
-      if (entry.value.length >= config.reportThresholdForJury) {
-        // Check if jury already active for this channel+category
-        final alreadyActive = _activeSessions.values.any((s) =>
-            s.channelIdHex == channelIdHex && s.category == entry.key && !s.isComplete);
-        if (alreadyActive) continue;
-
-        _initiateJury(channelIdHex, entry.key);
-      }
-    }
-  }
-
-  /// CSAM special procedure: check Stage 2 (temp-hide) and Stage 3
-  /// (extended-hide + objection window) thresholds.
-  void _checkCsamThresholds(ChannelInfo channel, int uniqueReporters, int subscriberCount) {
-    final config = moderationConfig;
-
-    // Stage 3: extended-hiding + objection window → eventual tombstone
-    final stage3Threshold = config.csamStage3Threshold(subscriberCount);
-    if (uniqueReporters >= stage3Threshold && !channel.csamStage3Active && !channel.tombstoned) {
-      _triggerCsamStage3(channel);
-      return;
-    }
-
-    // Stage 2: temporary hiding
-    final stage2Threshold = config.csamStage2Threshold(subscriberCount);
-    if (uniqueReporters >= stage2Threshold && !channel.isCsamHidden && !channel.csamStage3Active) {
-      channel.isCsamHidden = true;
-      channel.csamHiddenSince = DateTime.now();
-      _saveChannels();
-      _log.info('CSAM Stage 2: channel "${channel.name}" temporarily hidden '
-          '($uniqueReporters reporters ≥ threshold $stage2Threshold)');
-
-      // Start plausibility jury for Stage 2
-      final juryId = bytesToHex(SodiumFFI().randomBytes(16));
-      final report = _channelReports.values
-          .where((r) => r.channelIdHex == channel.channelIdHex &&
-              r.category == ReportCategory.illegalCSAM)
-          .firstOrNull;
-      if (report != null) {
-        _createJurySession(
-          juryId: juryId,
-          reportId: report.reportId,
-          channelIdHex: channel.channelIdHex,
-          category: ReportCategory.illegalCSAM,
-          isPlausibilityJury: true,
-        );
-      }
-    }
-  }
-
-  /// CSAM Stage 3: extended-hide the channel and start the mandatory
-  /// objection window (§9.3.3). Tombstone is NOT written immediately —
-  /// only after the window expires without a successful objection.
-  void _triggerCsamStage3(ChannelInfo channel) {
-    final config = moderationConfig;
-
-    channel.isCsamHidden = true;
-    channel.csamHiddenSince ??= DateTime.now();
-    channel.csamStage3Active = true;
-    channel.csamObjectionWindowEnd = DateTime.now().add(config.csamObjectionWindow);
-
-    _saveChannels();
-    _log.info('CSAM Stage 3: channel "${channel.name}" extended-hidden, '
-        'objection window until ${channel.csamObjectionWindowEnd}');
-
-    // Start mandatory plausibility jury (same as Stage 2, metadata-only)
-    final juryId = bytesToHex(SodiumFFI().randomBytes(16));
-    channel.csamObjectionJuryId = juryId;
-
-    final report = _channelReports.values
-        .where((r) => r.channelIdHex == channel.channelIdHex &&
-            r.category == ReportCategory.illegalCSAM)
-        .firstOrNull;
-    if (report != null) {
-      _createJurySession(
-        juryId: juryId,
-        reportId: report.reportId,
-        channelIdHex: channel.channelIdHex,
-        category: ReportCategory.illegalCSAM,
-        isPlausibilityJury: true,
-      );
-      _log.info('CSAM Stage 3: plausibility jury $juryId started for "${channel.name}"');
-    }
-
-    _saveChannels();
-    if (channel.isPublic) publishChannelToIndex(channel.channelIdHex);
-  }
-
-  /// Finalize CSAM Stage 3: write Tombstone with reporter-quorum proof.
-  /// Called when the objection window expires without a successful objection.
-  void _finalizeCsamStage3(ChannelInfo channel) {
-    // Collect CSAM reports for this channel and build quorum proof
-    final csamReports = _channelReports.values
-        .where((r) => r.channelIdHex == channel.channelIdHex &&
-            r.category == ReportCategory.illegalCSAM)
-        .toList();
-
-    final subscriberCount = channel.members.length;
-    final threshold = moderationConfig.csamStage3Threshold(subscriberCount);
-
-    // Verify we have enough unique reporters
-    final uniqueReporters = csamReports.map((r) => r.reporterNodeIdHex).toSet();
-    if (uniqueReporters.length < threshold) {
-      _log.warn('CSAM Stage 3: cannot finalize "${channel.name}" — '
-          'only ${uniqueReporters.length} reporters, need $threshold');
-      channel.csamStage3Active = false;
-      channel.csamObjectionWindowEnd = null;
-      channel.csamObjectionJuryId = null;
-      _saveChannels();
-      return;
-    }
-
-    // Build reporter-quorum proof (CsamReporterQuorumProof proto)
-    final proof = proto.CsamReporterQuorumProof()
-      ..channelId = hexToBytes(channel.channelIdHex);
-    for (final r in csamReports) {
-      proof.reporterSigs.add(proto.CsamReportSig()
-        ..reporterUserId = hexToBytes(r.reporterNodeIdHex)
-        ..reportId = hexToBytes(r.reportId)
-        ..reportedAtMs = Int64(r.createdAt.millisecondsSinceEpoch));
-    }
-
-    // Write Tombstone
-    channel.tombstoned = true;
-    channel.badBadgeLevel = 3;
-    channel.badBadgeSince = DateTime.now();
-    _channelIndex.remove(channel.channelIdHex);
-    _channelIndex.save();
-
-    // Store proof locally (served on-demand via DHT/gossip)
-    final proofBytes = Uint8List.fromList(proof.writeToBuffer());
-    final sodium = SodiumFFI();
-    final proofHash = computeModerationProofHash(proofBytes, sodium);
-    _moderationProofs[channel.channelIdHex] = proofBytes;
-
-    _saveChannels();
-    _log.info('CSAM Stage 3: channel "${channel.name}" TOMBSTONED with '
-        '${uniqueReporters.length}-reporter quorum proof '
-        '(hash=${bytesToHex(proofHash).substring(0, 16)})');
-  }
-
-  /// Start a jury process for a channel+category.
-  void _initiateJury(String channelIdHex, ReportCategory category) {
-    final report = _channelReports.values
-        .where((r) => r.channelIdHex == channelIdHex && r.category == category)
-        .firstOrNull;
-    if (report == null) return;
-
-    final juryId = bytesToHex(SodiumFFI().randomBytes(16));
-    final session = _createJurySession(
-      juryId: juryId,
-      reportId: report.reportId,
-      channelIdHex: channelIdHex,
-      category: category,
-    );
-    if (session == null) {
-      _log.warn('Cannot form jury for $channelIdHex — not enough eligible jurors');
-      return;
-    }
-
-    // Mark all pending reports as jury-active
-    for (final r in _channelReports.values) {
-      if (r.channelIdHex == channelIdHex && r.category == category && r.state == ReportState.pending) {
-        r.state = ReportState.juryActive;
-      }
-    }
-    _saveModeration();
-    _log.info('Jury $juryId initiated for $channelIdHex (${category.name}) — ${session.jurorNodeIds.length} jurors');
-  }
-
-  /// Create a jury session, select jurors, and send JuryRequests.
-  _JurySession? _createJurySession({
-    required String juryId,
-    required String reportId,
-    required String channelIdHex,
-    required ReportCategory category,
-    bool isPlausibilityJury = false,
-    int juryRound = 0,
-  }) {
-    final config = moderationConfig;
-    final channel = _channels[channelIdHex];
-    final sodium = SodiumFFI();
-    final now = DateTime.now();
-    final epochDay = utcEpochDay(now);
-
-    // Select eligible jurors from accepted contacts
-    final eligible = <ContactInfo>[];
-    for (final c in _contacts.values) {
-      if (c.status != 'accepted') continue;
-      if (c.nodeIdHex == identity.userIdHex) continue;
-      // Skip channel members (independence)
-      if (channel != null && channel.members.containsKey(c.nodeIdHex)) continue;
-      // Skip reporters for this channel
-      if (_channelReports.values.any((r) => r.channelIdHex == channelIdHex && r.reporterNodeIdHex == c.nodeIdHex)) continue;
-      eligible.add(c);
-    }
-
-    if (eligible.length < config.juryMinSize) return null;
-
-    // Deterministic selection via DHT-style XOR distance (§9.3.1a).
-    // Build JurorRecords from eligible contacts and select XOR-closest to H.
-    final jurorRecords = eligible.map((c) => JurorRecord(
-      recordId: computeJurorRecordId(c.ed25519Pk!, sodium),
-      userPubKeyEd25519: c.ed25519Pk!,
-      userPubKeyMlDsa: c.mlDsaPk ?? Uint8List(0),
-      creationEpochMs: 0,
-      selfSigEd25519: Uint8List(0),
-      selfSigMlDsa: Uint8List(0),
-    )).toList();
-
-    final selectionPoint = computeSelectionPoint(
-      channelId: hexToBytes(channelIdHex),
-      categoryIndex: category.index,
-      epochDay: epochDay,
-      juryRound: juryRound,
-      sodium: sodium,
-    );
-
-    final jurySize = config.effectiveJurySize(eligible.length);
-    final selected = selectJurors(
-      selectionPoint: selectionPoint,
-      registeredJurors: jurorRecords,
-      jurySize: jurySize,
-    );
-
-    final snapshotHash = computeEligibilitySnapshotHash(
-      jurorRecords.map((j) => j.recordId).toList(),
-      sodium,
-    );
-
-    final session = _JurySession(
-      juryId: juryId,
-      reportId: reportId,
-      channelIdHex: channelIdHex,
-      category: category,
-      jurorNodeIds: selected.map((j) => j.userIdHex).toList(),
-      isPlausibilityJury: isPlausibilityJury,
-      createdAt: now,
-      epochDay: epochDay,
-      juryRound: juryRound,
-      eligibilitySnapshotHash: snapshotHash,
-    );
-    _activeSessions[juryId] = session;
-
-    // Send JuryRequest to each selected juror
-    for (final j in selected) {
-      final contact = _contacts[j.userIdHex];
-      if (contact != null) _sendJuryRequest(session, contact);
-    }
-
-    return session;
-  }
-
-  /// Send an encrypted JuryRequest to a juror.
-  void _sendJuryRequest(_JurySession session, ContactInfo juror) {
-    final channel = _channels[session.channelIdHex];
-    final juryReq = proto.JuryRequestMsg()
-      ..juryId = hexToBytes(session.juryId)
-      ..channelId = hexToBytes(session.channelIdHex)
-      ..reportId = hexToBytes(session.reportId)
-      ..category = session.category.index
-      ..channelName = channel?.name ?? 'Unknown'
-      ..channelLanguage = channel?.language ?? ''
-      ..epochDay = session.epochDay
-      ..juryRound = session.juryRound
-      ..eligibilitySnapshotHash = session.eligibilitySnapshotHash;
-
-    final report = _channelReports[session.reportId];
-    if (report != null) {
-      juryReq.reportDescription = report.description ?? '';
-      for (final eid in report.evidencePostIds) {
-        juryReq.evidencePostIds.add(hexToBytes(eid));
-      }
-    }
-
-    if (juror.x25519Pk == null || juror.mlKemPk == null) return;
-    // V3: JURY_REQUEST routes via CHANNEL_JURY_VOTE (V3 enum has no
-    // JURY_REQUEST — same Sub-Message-Bump TODO as Channel-Join).
-    sendToUser(
-      recipientUserId: hexToBytes(juror.nodeIdHex),
-      messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
-      payload: Uint8List.fromList(juryReq.writeToBuffer()),
-      groupId: hexToBytes(session.channelIdHex),
-    );
-  }
-
-  /// Handle incoming JuryRequest (we've been selected as juror).
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// `JuryRequestMsg` proto bytes (V3 receive pipeline). [senderUserId]
-  /// is the jury initiator's user-id (`frame.senderUserId`) — recorded
-  /// as `requesterNodeIdHex` for the vote-back routing.
-  void _handleIncomingJuryRequest(Uint8List payload, Uint8List senderUserId) {
-    try {
-      final msg = proto.JuryRequestMsg.fromBuffer(payload);
-      final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
-      final reportId = bytesToHex(Uint8List.fromList(msg.reportId));
-      final channelIdHex = bytesToHex(Uint8List.fromList(msg.channelId));
-      final senderHex = bytesToHex(senderUserId);
-
-      final request = JuryRequest(
-        juryId: juryId,
-        reportId: reportId,
-        channelIdHex: channelIdHex,
-        category: ReportCategory.values[msg.category],
-        channelName: msg.channelName,
-        channelLanguage: msg.channelLanguage,
-        reportDescription: msg.reportDescription.isNotEmpty ? msg.reportDescription : null,
-        requesterNodeIdHex: senderHex,
-        epochDay: msg.epochDay,
-        juryRound: msg.juryRound,
-      );
-
-      _pendingJuryRequests[juryId] = request;
-      _saveModeration();
-      onJuryRequestReceived?.call(request);
-      onStateChanged?.call();
-      _log.info('Received jury request $juryId for channel "${msg.channelName}"');
-    } catch (e) {
-      _log.debug('Jury request error: $e');
-    }
-  }
-
-  /// Handle vote submission — also sends vote back to requester.
+  Future<bool> submitJuryVote(String juryId, String reportId, int vote, {String? reason}) =>
+      _moderation.submitJuryVote(juryId, reportId, vote, reason: reason);
   @override
-  Future<bool> submitJuryVote(String juryId, String reportId, int vote, {String? reason}) async {
-    final request = _pendingJuryRequests[juryId];
-    if (request == null) return false;
+  Future<bool> joinPublicChannel(String channelIdHex) =>
+      _moderation.joinPublicChannel(channelIdHex);
 
-    request.vote = JuryVoteResult.values[vote];
-    request.votedAt = DateTime.now();
-    _saveModeration();
-
-    // Send vote back to the jury initiator
-    if (request.requesterNodeIdHex != null) {
-      final contact = _contacts[request.requesterNodeIdHex!];
-      if (contact?.x25519Pk != null && contact?.mlKemPk != null) {
-        final sodium = SodiumFFI();
-        final consequence = consequenceForCategory(request.category);
-
-        // Hybrid-sign the canonical verdict core (§9.3.1a)
-        final verdictCore = computeVerdictCoreHash(
-          juryId: hexToBytes(juryId),
-          channelId: hexToBytes(request.channelIdHex),
-          reportId: hexToBytes(reportId),
-          vote: vote,
-          consequence: consequence.index,
-          epochDay: request.epochDay,
-          juryRound: request.juryRound,
-          sodium: sodium,
-        );
-
-        final voteMsg = proto.JuryVoteMsg()
-          ..juryId = hexToBytes(juryId)
-          ..reportId = hexToBytes(reportId)
-          ..vote = vote
-          ..reason = reason ?? ''
-          ..sigEd25519 = sodium.signEd25519(verdictCore, identity.ed25519SecretKey)
-          ..sigMlDsa = OqsFFI().mlDsaSign(verdictCore, identity.mlDsaSecretKey)
-          ..juryRound = request.juryRound
-          ..epochDay = request.epochDay;
-        await sendToUser(
-          recipientUserId: hexToBytes(request.requesterNodeIdHex!),
-          messageType: proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE,
-          payload: Uint8List.fromList(voteMsg.writeToBuffer()),
-          groupId: hexToBytes(request.channelIdHex),
-        );
-      }
-    }
-
-    _log.info('Jury vote submitted for $juryId: ${JuryVoteResult.values[vote].name}');
-    return true;
-  }
-
-  /// Handle incoming jury vote (we initiated this jury).
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// `JuryVoteMsg` proto bytes (V3 receive pipeline). [senderUserId] is
-  /// the voter's user-id (`frame.senderUserId`) — recorded in the
-  /// session's vote map.
-  void _handleIncomingJuryVote(Uint8List payload, Uint8List senderUserId) {
-    try {
-      final msg = proto.JuryVoteMsg.fromBuffer(payload);
-      final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
-      final voterHex = bytesToHex(senderUserId);
-
-      final session = _activeSessions[juryId];
-      if (session == null) return;
-
-      // Only selected jurors may vote — anyone who learns the juryId could
-      // otherwise stuff the vote map and force early resolution (§9.3.1).
-      if (!session.jurorNodeIds.contains(voterHex)) {
-        _log.warn('Jury $juryId: vote from non-juror $voterHex dropped');
-        return;
-      }
-
-      session.votes[voterHex] = JuryVoteResult.values[msg.vote];
-
-      // Store hybrid signature for verdict proof (§9.3.1a)
-      if (msg.sigEd25519.isNotEmpty && msg.sigMlDsa.isNotEmpty) {
-        session.verdictSigs[voterHex] = _JurorVerdictSigData(
-          sigEd25519: Uint8List.fromList(msg.sigEd25519),
-          sigMlDsa: Uint8List.fromList(msg.sigMlDsa),
-          vote: msg.vote,
-        );
-      }
-
-      _log.info('Jury $juryId: vote from $voterHex = ${JuryVoteResult.values[msg.vote].name} (sig=${msg.sigEd25519.isNotEmpty ? "yes" : "no"})');
-
-      // Check if all votes are in
-      _checkJuryCompletion(session);
-    } catch (e) {
-      _log.debug('Jury vote error: $e');
-    }
-  }
-
-  /// Check if a jury has enough votes to reach a decision.
-  void _checkJuryCompletion(_JurySession session) {
-    final config = moderationConfig;
-    final totalJurors = session.jurorNodeIds.length;
-    final voteCount = session.votes.length;
-
-    if (voteCount < totalJurors) {
-      // Check for timeout
-      if (DateTime.now().difference(session.createdAt) > config.juryVoteTimeout) {
-        _log.info('Jury ${session.juryId} timed out with $voteCount/$totalJurors votes');
-        _handleJuryTimeout(session);
-      }
-      return;
-    }
-
-    _resolveJury(session);
-  }
-
-  /// Handle jury timeout — attempt deterministic replacement jurors
-  /// (§9.3.1a: next-closest records to H with juryRound+1, max 2 rounds).
-  void _handleJuryTimeout(_JurySession session) {
-    final config = moderationConfig;
-
-    // Identify non-responding jurors
-    final nonResponders = session.jurorNodeIds
-        .where((id) => !session.votes.containsKey(id))
-        .toList();
-
-    if (nonResponders.isEmpty || session.juryRound >= config.juryReplacementRounds) {
-      _log.info('Jury ${session.juryId}: no more replacement rounds '
-          '(round=${session.juryRound}, max=${config.juryReplacementRounds}) — resolving');
-      _resolveJury(session);
-      return;
-    }
-
-    // Build candidate pool (same filter as _createJurySession)
-    final channel = _channels[session.channelIdHex];
-    final sodium = SodiumFFI();
-    final eligible = <ContactInfo>[];
-    for (final c in _contacts.values) {
-      if (c.status != 'accepted') continue;
-      if (c.nodeIdHex == identity.userIdHex) continue;
-      if (c.ed25519Pk == null) continue;
-      if (channel != null && channel.members.containsKey(c.nodeIdHex)) continue;
-      if (_channelReports.values.any((r) =>
-          r.channelIdHex == session.channelIdHex &&
-          r.reporterNodeIdHex == c.nodeIdHex)) continue;
-      // Exclude already-selected jurors (both responded and non-responded)
-      if (session.jurorNodeIds.contains(c.nodeIdHex)) continue;
-      eligible.add(c);
-    }
-
-    if (eligible.isEmpty) {
-      _log.info('Jury ${session.juryId}: no replacement candidates available — resolving');
-      _resolveJury(session);
-      return;
-    }
-
-    // Compute new selection point with incremented round
-    final nextRound = session.juryRound + 1;
-    final newH = computeSelectionPoint(
-      channelId: hexToBytes(session.channelIdHex),
-      categoryIndex: session.category.index,
-      epochDay: session.epochDay,
-      juryRound: nextRound,
-      sodium: sodium,
-    );
-
-    final jurorRecords = eligible.map((c) => JurorRecord(
-      recordId: computeJurorRecordId(c.ed25519Pk!, sodium),
-      userPubKeyEd25519: c.ed25519Pk!,
-      userPubKeyMlDsa: c.mlDsaPk ?? Uint8List(0),
-      creationEpochMs: 0,
-      selfSigEd25519: Uint8List(0),
-      selfSigMlDsa: Uint8List(0),
-    )).toList();
-
-    // Select replacements for non-responders (XOR-closest to new H)
-    final replacements = selectJurors(
-      selectionPoint: newH,
-      registeredJurors: jurorRecords,
-      jurySize: nonResponders.length,
-    );
-
-    if (replacements.isEmpty) {
-      _log.info('Jury ${session.juryId}: replacement selection empty — resolving');
-      _resolveJury(session);
-      return;
-    }
-
-    // Swap non-responders for replacements in the session
-    for (var i = 0; i < nonResponders.length && i < replacements.length; i++) {
-      final oldIdx = session.jurorNodeIds.indexOf(nonResponders[i]);
-      if (oldIdx >= 0) {
-        session.jurorNodeIds[oldIdx] = replacements[i].userIdHex;
-      }
-    }
-
-    // Update session metadata (recreate with new round via mutable fields)
-    // Note: juryRound is final, so we create a replacement session
-    final newSession = _JurySession(
-      juryId: session.juryId,
-      reportId: session.reportId,
-      channelIdHex: session.channelIdHex,
-      category: session.category,
-      jurorNodeIds: session.jurorNodeIds,
-      isPlausibilityJury: session.isPlausibilityJury,
-      createdAt: DateTime.now(),
-      epochDay: session.epochDay,
-      juryRound: nextRound,
-      eligibilitySnapshotHash: session.eligibilitySnapshotHash,
-    );
-    // Carry over existing votes and sigs
-    newSession.votes.addAll(session.votes);
-    newSession.verdictSigs.addAll(session.verdictSigs);
-    _activeSessions[session.juryId] = newSession;
-
-    // Send JuryRequest to replacement jurors
-    for (final j in replacements) {
-      final contact = _contacts[j.userIdHex];
-      if (contact != null) _sendJuryRequest(newSession, contact);
-    }
-
-    _log.info('Jury ${session.juryId}: replaced ${replacements.length} '
-        'non-responders in round $nextRound '
-        '(jurors: ${newSession.jurorNodeIds.length})');
-    _saveModeration();
-  }
-
-  /// Resolve a jury — compute result and apply consequences.
-  void _resolveJury(_JurySession session) {
-    final config = moderationConfig;
-    var approve = 0;
-    var reject = 0;
-    var abstain = 0;
-
-    for (final v in session.votes.values) {
-      switch (v) {
-        case JuryVoteResult.approve: approve++;
-        case JuryVoteResult.reject: reject++;
-        case JuryVoteResult.abstain: abstain++;
-      }
-    }
-
-    // Hard quorum (§9.3.4): approvals are measured against the NOMINAL
-    // jury size (number of selected jurors), never against the number of
-    // responders — rejections, abstentions and timeouts do not lower the
-    // bar. A session that misses the quorum resolves with no consequence.
-    final nominalJurySize = session.jurorNodeIds.length;
-    final approved = config.juryApproved(
-        approvals: approve, nominalJurySize: nominalJurySize);
-    session.isComplete = true;
-
-    _log.info('Jury ${session.juryId} resolved: approve=$approve reject=$reject abstain=$abstain quorum=${config.juryHardQuorum(nominalJurySize)}/$nominalJurySize → ${approved ? "APPROVED" : "REJECTED"}');
-
-    if (approved) {
-      _applyJuryConsequence(session);
-    } else if (session.isPlausibilityJury) {
-      // Plausibility jury rejected = CSAM hide was unjustified → lift hide
-      final channel = _channels[session.channelIdHex];
-      if (channel != null && channel.isCsamHidden) {
-        channel.isCsamHidden = false;
-        channel.csamHiddenSince = null;
-        if (channel.badBadgeLevel > 0) channel.badBadgeLevel--;
-        // Also cancel Stage 3 if active
-        if (channel.csamStage3Active) {
-          channel.csamStage3Active = false;
-          channel.csamObjectionWindowEnd = null;
-          channel.csamObjectionJuryId = null;
-          _log.info('CSAM Stage 3 cancelled for "${channel.name}" — objection upheld');
-        }
-        _saveChannels();
-        _log.info('CSAM hide lifted for "${channel.name}" after plausibility jury rejection');
-      }
-    }
-
-    // Mark reports as resolved
-    for (final r in _channelReports.values) {
-      if (r.channelIdHex == session.channelIdHex && r.state == ReportState.juryActive) {
-        r.state = ReportState.resolved;
-      }
-    }
-    _saveModeration();
-
-    // Send result to all jurors
-    _broadcastJuryResult(session, approve, reject, abstain);
-  }
-
-  /// Apply the consequence of an approved jury verdict.
-  void _applyJuryConsequence(_JurySession session) {
-    final channel = _channels[session.channelIdHex];
-    if (channel == null) return;
-
-    final consequence = consequenceForCategory(session.category);
-
-    switch (consequence) {
-      case JuryConsequence.reclassifyNsfw:
-        channel.isAdult = true;
-        channel.badBadgeLevel = (channel.badBadgeLevel + 1).clamp(0, 3);
-        channel.badBadgeSince = DateTime.now();
-        _log.info('Channel "${channel.name}" relabeled as NSFW, badge level ${channel.badBadgeLevel}');
-        break;
-      case JuryConsequence.addBadBadge:
-        channel.badBadgeLevel = (channel.badBadgeLevel + 1).clamp(0, 3);
-        channel.badBadgeSince = DateTime.now();
-        _log.info('Channel "${channel.name}" badge escalated to level ${channel.badBadgeLevel}');
-        break;
-      case JuryConsequence.deleteChannel:
-        channel.badBadgeLevel = 3;
-        channel.badBadgeSince = DateTime.now();
-        channel.tombstoned = true;
-        _channelIndex.remove(session.channelIdHex);
-        _channelIndex.save();
-        _log.info('Channel "${channel.name}" tombstoned (permanent badge)');
-        break;
-      case JuryConsequence.noAction:
-        _log.info('Channel "${channel.name}" no action (CSAM has special procedure)');
-        break;
-    }
-
-    _saveChannels();
-    // Update index
-    if (channel.isPublic) {
-      publishChannelToIndex(channel.channelIdHex);
-    }
-  }
-
-  /// Send jury result to all jurors.
-  void _broadcastJuryResult(_JurySession session, int approve, int reject, int abstain) {
-    final channel = _channels[session.channelIdHex];
-
-    final resultMsg = proto.JuryResultMsg()
-      ..juryId = hexToBytes(session.juryId)
-      ..reportId = hexToBytes(session.reportId)
-      ..channelId = hexToBytes(session.channelIdHex)
-      ..consequence = consequenceForCategory(session.category).index
-      ..votesApprove = approve
-      ..votesReject = reject
-      ..votesAbstain = abstain
-      ..newBadBadgeLevel = channel?.badBadgeLevel ?? 0
-      ..eligibilitySnapshotHash = session.eligibilitySnapshotHash
-      ..epochDay = session.epochDay
-      ..juryRound = session.juryRound;
-
-    // Attach collected juror verdict signatures (§9.3.1a)
-    for (final entry in session.verdictSigs.entries) {
-      resultMsg.jurorSigs.add(proto.JurorVerdictSig()
-        ..jurorUserId = hexToBytes(entry.key)
-        ..sigEd25519 = entry.value.sigEd25519
-        ..sigMlDsa = entry.value.sigMlDsa
-        ..vote = entry.value.vote);
-    }
-
-    final payload = Uint8List.fromList(resultMsg.writeToBuffer());
-    final channelIdBytes = hexToBytes(session.channelIdHex);
-
-    for (final jurorId in session.jurorNodeIds) {
-      final contact = _contacts[jurorId];
-      if (contact?.x25519Pk == null || contact?.mlKemPk == null) continue;
-      sendToUser(
-        recipientUserId: hexToBytes(jurorId),
-        messageType: proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION,
-        payload: payload,
-        groupId: channelIdBytes,
-      );
-    }
-  }
-
-  /// Handle incoming jury result (we were a juror).
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// `JuryResultMsg` proto bytes (V3 receive pipeline). The handler only
-  /// removes the local pending entry and logs the tally — no sender
-  /// argument is needed (sender authenticity is already enforced by the
-  /// V3 outer Device-Sig + inner User-Sig chain).
-  void _handleIncomingJuryResult(Uint8List payload) {
-    try {
-      final msg = proto.JuryResultMsg.fromBuffer(payload);
-      final juryId = bytesToHex(Uint8List.fromList(msg.juryId));
-
-      // Remove from pending requests
-      _pendingJuryRequests.remove(juryId);
-      _saveModeration();
-      onStateChanged?.call();
-
-      _log.info('Jury result for $juryId: approve=${msg.votesApprove} reject=${msg.votesReject} abstain=${msg.votesAbstain}');
-    } catch (e) {
-      _log.debug('Jury result error: $e');
-    }
-  }
-
-  /// Handle incoming channel report (forwarded from reporter).
-  ///
-  /// V3-direct: [payload] is the already-decrypted+authenticated
-  /// `ChannelReportMsg` proto bytes (V3 receive pipeline). [senderUserId]
-  /// is the reporter's user-id (`frame.senderUserId`) — recorded as
-  /// `reporterNodeIdHex` on the stored `ChannelReport`.
-  void _handleIncomingChannelReport(Uint8List payload, Uint8List senderUserId) {
-    try {
-      final msg = proto.ChannelReportMsg.fromBuffer(payload);
-      final channelIdHex = bytesToHex(Uint8List.fromList(msg.channelId));
-      final reportId = bytesToHex(Uint8List.fromList(msg.reportId));
-      final reporterHex = bytesToHex(senderUserId);
-
-      // reportId is sender-chosen — never let it overwrite someone else's
-      // stored report (report censorship via id collision).
-      final existing = _channelReports[reportId];
-      if (existing != null && existing.reporterNodeIdHex != reporterHex) {
-        _log.warn('Channel report $reportId from $reporterHex dropped: '
-            'id collision with report from ${existing.reporterNodeIdHex}');
-        return;
-      }
-
-      // Evidence sanity (§9.3.1): 1-10 evidence posts, valid category.
-      if (msg.evidencePostIds.isEmpty || msg.evidencePostIds.length > 10) {
-        _log.warn('Channel report $reportId from $reporterHex dropped: '
-            'evidence count ${msg.evidencePostIds.length} outside 1-10');
-        return;
-      }
-      if (msg.category < 0 || msg.category >= ReportCategory.values.length) {
-        _log.warn('Channel report $reportId from $reporterHex dropped: '
-            'invalid category ${msg.category}');
-        return;
-      }
-
-      // Anti-Sybil local reachability (§9.4.1): reporter must be known
-      // to us — either as a contact or visible in the routing table.
-      // A node with zero network presence is likely a Sybil identity.
-      final knownContact = _contacts.containsKey(reporterHex);
-      final knownPeer = node.routingTable.getPeerByUserId(senderUserId) != null;
-      if (!knownContact && !knownPeer) {
-        _log.warn('Channel report $reportId from $reporterHex dropped: '
-            'reporter not reachable (not in contacts or routing table)');
-        return;
-      }
-
-      // Receive-side rate limit (§9.4): sender-side checks are not
-      // enforceable on a remote node.
-      final cutoff = DateTime.now().subtract(const Duration(hours: 24));
-      final recentFromReporter = _channelReports.values.where((r) =>
-          r.reporterNodeIdHex == reporterHex &&
-          r.createdAt.isAfter(cutoff)).length;
-      if (recentFromReporter >= moderationConfig.maxReportsPerIdentityPerDay) {
-        _log.warn('Channel report from $reporterHex dropped: '
-            'daily report limit reached');
-        return;
-      }
-
-      // Store the report
-      final report = ChannelReport(
-        reportId: reportId,
-        channelIdHex: channelIdHex,
-        reporterNodeIdHex: reporterHex,
-        category: ReportCategory.values[msg.category],
-        evidencePostIds: msg.evidencePostIds.map((e) => bytesToHex(Uint8List.fromList(e))).toList(),
-        description: msg.description.isNotEmpty ? msg.description : null,
-      );
-      _channelReports[reportId] = report;
-      _saveModeration();
-
-      // Check if jury threshold is now reached
-      _checkJuryThreshold(channelIdHex);
-
-      _log.info('Received channel report $reportId for $channelIdHex from $reporterHex');
-    } catch (e) {
-      _log.debug('Channel report error: $e');
-    }
-  }
-
-  // ── End moderation ─────────────────────────────────────────────
-
+  // ── End moderation delegation ─────────────────────────────────
   /// Check if caller has permission for channel action.
   bool _hasChannelPermission(ChannelInfo channel, String action) {
     // System channels (§9.5): zero-owner, any member can post
@@ -6966,72 +5415,29 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     return guardianService.confirmRestore(ownerNodeIdHex, recoveryMailboxIdHex);
   }
 
-  // ── Calls ──────────────────────────────────────────────────────────
+  // ── Calls (delegated to CallService) ──────────────────────────────
 
   @override
-  CallInfo? get currentCall => callManager.currentCall?.toCallInfo();
-
+  CallInfo? get currentCall => _calls.currentCall;
   @override
-  Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false}) async {
-    // Mutual exclusion with group calls
-    if (groupCallManager.currentGroupCall != null) return null;
-    final session = await callManager.startCall(peerNodeIdHex, video: video);
-    if (session != null) notificationSound.playRingback();
-    return session?.toCallInfo();
-  }
-
+  Future<CallInfo?> startCall(String peerNodeIdHex, {bool video = false}) =>
+      _calls.startCall(peerNodeIdHex, video: video);
   @override
-  Future<void> acceptCall() async {
-    await notificationSound.stopRingtone();
-    await callManager.acceptCall();
-  }
-
+  Future<void> acceptCall() => _calls.acceptCall();
   @override
-  Future<void> rejectCall({String reason = 'busy'}) async {
-    await notificationSound.stopRingtone();
-    await callManager.rejectCall(reason: reason);
-  }
-
+  Future<void> rejectCall({String reason = 'busy'}) =>
+      _calls.rejectCall(reason: reason);
   @override
-  Future<void> hangup() async {
-    await notificationSound.stopAll();
-    // Audio-Engine wird via callManager.onCallEnded gestoppt — direkter Aufruf hier wäre doppelt.
-    await callManager.hangup();
-  }
-
+  Future<void> hangup() => _calls.hangup();
   @override
-  bool get isMuted {
-    if (_audioMixer != null) return _audioMixer!.isMuted;
-    return _audioEngine?.isMuted ?? false;
-  }
-
+  bool get isMuted => _calls.isMuted;
   @override
-  void toggleMute() {
-    if (_audioMixer != null) {
-      _audioMixer!.muted = !_audioMixer!.isMuted;
-    } else if (_audioEngine != null) {
-      _audioEngine!.muted = !_audioEngine!.isMuted;
-    }
-  }
-
+  void toggleMute() => _calls.toggleMute();
   @override
-  bool get isSpeakerEnabled {
-    if (_audioMixer != null) return _audioMixer!.isSpeakerEnabled;
-    return _audioEngine?.isSpeakerEnabled ?? true;
-  }
-
+  bool get isSpeakerEnabled => _calls.isSpeakerEnabled;
   @override
-  void toggleSpeaker() {
-    if (_audioMixer != null) {
-      _audioMixer!.speakerEnabled = !_audioMixer!.isSpeakerEnabled;
-    } else if (_audioEngine != null) {
-      _audioEngine!.speakerEnabled = !_audioEngine!.isSpeakerEnabled;
-    }
-  }
+  void toggleSpeaker() => _calls.toggleSpeaker();
 
-  // ── Group Calls ─────────────────────────────────────────────────
-
-  // Callbacks for group call events (wired by GUI)
   @override
   void Function(GroupCallInfo info)? onIncomingGroupCall;
   @override
@@ -7040,232 +5446,40 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   void Function(GroupCallInfo info)? onGroupCallEnded;
 
   @override
-  GroupCallInfo? get currentGroupCall =>
-      groupCallManager.currentGroupCall?.toGroupCallInfo();
-
+  GroupCallInfo? get currentGroupCall => _calls.currentGroupCall;
   @override
-  Future<GroupCallInfo?> startGroupCall(String groupIdHex) async {
-    // Mutual exclusion with 1:1 calls
-    if (callManager.currentCall != null) return null;
-    final session = await groupCallManager.startGroupCall(groupIdHex);
-    return session?.toGroupCallInfo();
-  }
-
+  Future<GroupCallInfo?> startGroupCall(String groupIdHex) =>
+      _calls.startGroupCall(groupIdHex);
   @override
-  Future<void> acceptGroupCall() => groupCallManager.acceptGroupCall();
-
+  Future<void> acceptGroupCall() => _calls.acceptGroupCall();
   @override
   Future<void> rejectGroupCall({String reason = 'busy'}) =>
-      groupCallManager.rejectGroupCall(reason: reason);
-
+      _calls.rejectGroupCall(reason: reason);
   @override
-  Future<void> leaveGroupCall() async {
-    _stopAudioMixer();
-    _stopGroupVideo();
-    await groupCallManager.leaveGroupCall();
-  }
+  Future<void> leaveGroupCall() => _calls.leaveGroupCall();
 
-  Future<void> _startAudioMixer(GroupCallSession session) async {
-    // Plan §E4 — same RECORD_AUDIO gate as 1:1 calls (see _startAudioEngine).
-    // Group calls share the same capture path; without the permission we'd
-    // promote the FGS to mic-type but never actually capture anything.
-    if (Platform.isAndroid) {
-      final granted = await AudioPermissions.requestRecordAudio();
-      if (!granted) {
-        _log.warn('RECORD_AUDIO permission denied — group call audio disabled');
-        return;
-      }
-    }
+  void Function(String senderHex, Uint8List i420, int width, int height)?
+      get onGroupVideoI420Frame => _calls.onGroupVideoI420Frame;
+  set onGroupVideoI420Frame(
+          void Function(String, Uint8List, int, int)? v) =>
+      _calls.onGroupVideoI420Frame = v;
 
-    // Bug #U10b — same mic-type promotion as 1:1 calls (see _startAudioEngine).
-    if (Platform.isAndroid) {
-      await ForegroundServiceControl.promoteForCall();
-    }
+  dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)?
+      get createVideoEngine => _calls.createVideoEngine;
+  set createVideoEngine(
+          dynamic Function(Uint8List, void Function(Uint8List))? v) =>
+      _calls.createVideoEngine = v;
 
-    if (session.ownSendKey == null) return;
-    try {
-      _audioMixer = AudioMixer(
-        ownSendKey: session.ownSendKey!,
-        profileDir: profileDir,
-        ownSendKeyVersion: session.ownSendKeyVersion,
-      );
-      // Replay any peer send_keys learned before the mixer started (§10.2.1).
-      session.peerSendKeys.forEach((hex, k) => _audioMixer!.setPeerSendKey(hex, k.key));
-      _audioMixer!.onAudioFrame = (encryptedFrame) {
-        groupCallManager.sendGroupAudioFrame(encryptedFrame);
-      };
-      await _audioMixer!.start();
-    } catch (e) {
-      _log.error('Audio mixer start failed: $e');
-    }
-  }
+  void Function(Uint8List serializedVideoFrame)? get onVideoFrameReceived =>
+      _calls.onVideoFrameReceived;
+  set onVideoFrameReceived(void Function(Uint8List)? v) =>
+      _calls.onVideoFrameReceived = v;
 
-  void _stopAudioMixer() {
-    try {
-      _audioMixer?.stop();
-    } catch (e) {
-      _log.warn('AudioMixer stop threw (swallowed): $e');
-    }
-    _audioMixer = null;
-    if (Platform.isAndroid) {
-      ForegroundServiceControl.demoteAfterCall();
-    }
-  }
+  void Function()? get onKeyframeRequested => _calls.onKeyframeRequested;
+  set onKeyframeRequested(void Function()? v) =>
+      _calls.onKeyframeRequested = v;
 
-  Future<void> _startGroupVideo(GroupCallSession session) async {
-    // Desktop only — vpx_ffi has Linux/macOS/Windows .so/.dylib/.dll paths.
-    // Android-Group-Video braucht eigenen Codec-Pfad (geplant, separate Spec).
-    // iOS analog (AVFoundation-Port pending).
-    if (!(Platform.isLinux || Platform.isMacOS || Platform.isWindows) ||
-        session.ownSendKey == null) {
-      return;
-    }
-    _startGroupVideoCapture(session);
-    _startGroupVideoReceiver(session);
-  }
-
-  /// Factory callback: GUI sets this to create a VideoEngine instance.
-  /// Avoids importing dart:ui in the daemon.
-  /// Signature: (Uint8List callKey, void Function(Uint8List) onVideoFrame) -> dynamic
-  dynamic Function(Uint8List callKey, void Function(Uint8List) onVideoFrame)? createVideoEngine;
-
-  void _startGroupVideoCapture(GroupCallSession session) {
-    if (session.ownSendKey == null || createVideoEngine == null) return;
-    try {
-      _groupVideoEngine = createVideoEngine!(
-        session.ownSendKey!,
-        (serializedFrame) => groupCallManager.sendGroupVideoFrame(serializedFrame),
-      );
-    } catch (e) {
-      _log.error('Group video engine start failed: $e');
-      _groupVideoEngine = null;
-    }
-  }
-
-  void _startGroupVideoReceiver(GroupCallSession session) {
-    if (session.ownSendKey == null) return;
-    _groupVideoReceiver = GroupVideoReceiver(
-      profileDir: profileDir,
-    );
-    // Replay any peer send_keys learned before the receiver started (§10.2.1).
-    session.peerSendKeys.forEach((hex, k) => _groupVideoReceiver!.setPeerSendKey(hex, k.key));
-    _groupVideoReceiver!.onDecodedI420 = (senderHex, i420, w, h) {
-      onGroupVideoI420Frame?.call(senderHex, i420, w, h);
-    };
-  }
-
-  void _stopGroupVideo() {
-    try { (_groupVideoEngine as dynamic)?.stop(); } catch (_) {}
-    _groupVideoEngine = null;
-    _groupVideoReceiver?.dispose();
-    _groupVideoReceiver = null;
-  }
-
-  /// Callback: group video I420 frame decoded (UI converts to RGBA).
-  void Function(String senderHex, Uint8List i420, int width, int height)? onGroupVideoI420Frame;
-
-  // ── Audio Engine ──────────────────────────────────────────────────
-
-  Future<void> _startAudioEngine(CallSession session) async {
-    // Plan §E4 — RECORD_AUDIO runtime permission must be granted before we
-    // promote the foreground service to mic-type. Asking earlier (e.g. at
-    // app start) would surprise users; asking after promote leaves the FGS
-    // in MICROPHONE mode with no actual capture, which Android logs as a
-    // misuse. The helper is a no-op on non-Android (returns true).
-    if (Platform.isAndroid) {
-      final granted = await AudioPermissions.requestRecordAudio();
-      if (!granted) {
-        _log.warn('RECORD_AUDIO permission denied — call audio disabled');
-        return;
-      }
-    }
-
-    // Bug #U10b — promote the foreground service to MICROPHONE type
-    // BEFORE the engine opens AudioRecord (API 34+ enforces this at the
-    // moment of capture). The helper is a no-op on non-Android. We do
-    // this even though the engine itself is currently Linux-only so the
-    // wiring is already in place for the upcoming C2/C3 cross-platform
-    // refactor.
-    if (Platform.isAndroid) {
-      await ForegroundServiceControl.promoteForCall();
-    }
-
-    if (session.sharedSecret == null) return;
-
-    try {
-      _audioEngine = AudioEngine(
-        sharedSecret: session.sharedSecret!,
-        profileDir: profileDir,
-      );
-      _audioEngine!.onAudioFrame = (encryptedFrame) {
-        _sendAudioFrame(session, encryptedFrame);
-      };
-      await _audioEngine!.start();
-    } catch (e) {
-      _log.error('Audio engine start failed: $e');
-    }
-  }
-
-  void _stopAudioEngine() {
-    try {
-      _audioEngine?.stop();
-    } catch (e) {
-      _log.warn('AudioEngine stop threw (swallowed): $e');
-    }
-    _audioEngine = null;
-    // Bug #U10b — demote back to plain DATA_SYNC so the persistent
-    // "microphone in use" indicator goes away. Fire-and-forget; failures
-    // are non-fatal and swallowed inside the helper.
-    if (Platform.isAndroid) {
-      ForegroundServiceControl.demoteAfterCall();
-    }
-  }
-
-  void _sendAudioFrame(CallSession session, Uint8List encryptedFrame) {
-    if (session.state == CallState.ended) return;
-    session.framesSent++;
-    final peerNodeId = hexToBytes(session.peerNodeIdHex);
-
-    // Per-call route cache: keep the resolved PeerInfo on the session so the
-    // routing-table XOR+bucket lookup runs at most once per call. The
-    // DV-Routing onRouteDown handler invalidates this cache. The cache lives
-    // on as a structural optimization; the V3 send-path itself runs through
-    // sendToUser which orchestrates resolveUserToDevices + per-device
-    // dispatch (the inner KEM is unavoidable today; §4.4.5 fast-path
-    // skip-KEM/skip-zstd/skip-ML-DSA optimisation lands later).
-    if (session.cachedRoute == null) {
-      final peer = node.routingTable.getPeer(peerNodeId) ??
-          node.routingTable.getPeerByUserId(peerNodeId);
-      if (peer != null) {
-        session.cachedRoute = peer;
-        session.cachedRouteAt = DateTime.now();
-      }
-    }
-
-    // Fire-and-forget; live audio tolerates frame loss.
-    unawaited(sendToUser(
-      recipientUserId: peerNodeId,
-      messageType: proto.MessageTypeV3.MTV3_CALL_AUDIO,
-      payload: encryptedFrame,
-    ));
-  }
-
-  /// Ask the remote video sender to emit a keyframe on the next encode.
-  /// Signal-only message (empty payload) on the V3 ApplicationFrame path —
-  /// ack-less by design (handled receiver-side as a hint, not a guarantee).
-  void sendKeyframeRequest() {
-    final session = callManager.currentCall;
-    if (session == null || session.state != CallState.inCall) return;
-    sendToUser(
-      recipientUserId: hexToBytes(session.peerNodeIdHex),
-      messageType: proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST,
-      payload: Uint8List(0),
-    );
-  }
-
-  /// Callbacks for video frame events (set by VideoEngine)
-  void Function(Uint8List serializedVideoFrame)? onVideoFrameReceived;
-  void Function()? onKeyframeRequested;
+  void sendKeyframeRequest() => _calls.sendKeyframeRequest();
 
   // ── Network Change ─────────────────────────────────────────────────
 
@@ -8551,7 +6765,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
   // ── Contact issue reporting ────────────────────────────────────────
   @override
-  ContactIssueReport? buildContactIssueReport(String contactNodeIdHex) {
+  Future<ContactIssueReport?> buildContactIssueReport(String contactNodeIdHex) async {
     final contact = _contacts[contactNodeIdHex];
     if (contact == null) return null;
     return contactIssueReporter.buildReport(contact);
@@ -8559,7 +6773,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
   @override
   Future<bool> publishContactIssueReport(String contactNodeIdHex) async {
-    final report = buildContactIssueReport(contactNodeIdHex);
+    final report = await buildContactIssueReport(contactNodeIdHex);
     if (report == null) return false;
     return contactIssueReporter.publishReport(report);
   }
@@ -9784,825 +7998,44 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     node.statsCollector.addMessageSent();
   }
 
-  /// Handle incoming CALENDAR_INVITE from a group event creator.
-  /// Pending Free/Busy query results, keyed by requestId hex.
-  final Map<String, List<FreeBusyBlockResult>> _freeBusyResults = {};
-  final Map<String, void Function(List<FreeBusyBlockResult>)> _freeBusyCallbacks = {};
+  // ── Calendar (§23) — forwarded to CalendarProtocolService ─────────
 
   @override
-  Future<String> createCalendarEvent(CalendarEvent event) async {
-    if (_reducedMode) {
-      _log.warn('createCalendarEvent blocked: reducedMode active');
-      return '';
-    }
-    calendarManager.createEvent(event);
-    if (event.groupId != null) {
-      await sendCalendarInvite(event);
-    }
-    return event.eventId;
-  }
-
+  Future<String> createCalendarEvent(CalendarEvent event) =>
+      _calendarProto.createCalendarEvent(event);
   @override
   Future<bool> updateCalendarEvent(String eventIdHex, {
     String? title, String? description, String? location,
     int? startTime, int? endTime, bool? allDay, bool? hasCall,
     List<int>? reminders, String? recurrenceRule,
     bool? taskCompleted, int? taskPriority, bool? cancelled,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('updateCalendarEvent blocked: reducedMode active');
-      return false;
-    }
-    final ok = calendarManager.updateEvent(eventIdHex,
-      title: title, description: description, location: location,
-      startTime: startTime, endTime: endTime, allDay: allDay,
-      hasCall: hasCall, reminders: reminders, recurrenceRule: recurrenceRule,
-      taskCompleted: taskCompleted, taskPriority: taskPriority,
-      cancelled: cancelled,
-    );
-    if (ok) {
-      final evt = calendarManager.events[eventIdHex];
-      if (evt?.groupId != null && evt?.createdBy == identity.userIdHex) {
-        await sendCalendarUpdate(eventIdHex);
-      }
-    }
-    return ok;
-  }
-
+  }) => _calendarProto.updateCalendarEvent(eventIdHex,
+    title: title, description: description, location: location,
+    startTime: startTime, endTime: endTime, allDay: allDay,
+    hasCall: hasCall, reminders: reminders, recurrenceRule: recurrenceRule,
+    taskCompleted: taskCompleted, taskPriority: taskPriority, cancelled: cancelled);
   @override
-  Future<bool> deleteCalendarEvent(String eventIdHex) async {
-    if (_reducedMode) {
-      _log.warn('deleteCalendarEvent blocked: reducedMode active');
-      return false;
-    }
-    final evt = calendarManager.events[eventIdHex];
-    if (evt?.groupId != null && evt?.createdBy == identity.userIdHex) {
-      await sendCalendarDelete(eventIdHex);
-    } else {
-      calendarManager.deleteEvent(eventIdHex);
-    }
-    return true;
-  }
-
-  /// Send a calendar invite to all members of a group (Pairwise Fan-out).
+  Future<bool> deleteCalendarEvent(String eventIdHex) =>
+      _calendarProto.deleteCalendarEvent(eventIdHex);
   @override
-  Future<void> sendCalendarInvite(CalendarEvent event) async {
-    if (_reducedMode) {
-      _log.warn('sendCalendarInvite blocked: reducedMode active');
-      return;
-    }
-    if (event.groupId == null) return;
-
-    final group = _groups[event.groupId!];
-    if (group == null) {
-      _log.warn('Cannot send calendar invite: group ${event.groupId} not found');
-      return;
-    }
-
-    final invite = proto.CalendarInviteMsg()
-      ..eventId = hexToBytes(event.eventId)
-      ..title = event.title
-      ..description = event.description ?? ''
-      ..location = event.location ?? ''
-      ..startTime = Int64(event.startTime)
-      ..endTime = Int64(event.endTime)
-      ..allDay = event.allDay
-      ..timeZone = event.timeZone
-      ..recurrenceRule = event.recurrenceRule ?? ''
-      ..hasCall = event.hasCall
-      ..groupId = hexToBytes(event.groupId!)
-      ..createdBy = identity.userId
-      ..createdByName = displayName
-      ..category = proto.EventCategory.valueOf(event.category.index) ?? proto.EventCategory.APPOINTMENT;
-    for (final m in event.reminders) {
-      invite.reminders.add(proto.CalendarReminderOffset()..minutesBefore = m);
-    }
-
-    final payload = invite.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == identity.userIdHex) continue;
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        proto.MessageTypeV3.MTV3_CALENDAR_INVITE,
-        Uint8List.fromList(payload),
-      );
-    }
-
-    _log.info('Sent CALENDAR_INVITE for ${event.title} to ${group.members.length - 1} members');
-  }
-
-  /// Send RSVP response for a group calendar event.
+  Future<void> sendCalendarInvite(CalendarEvent event) =>
+      _calendarProto.sendCalendarInvite(event);
   @override
   Future<void> sendCalendarRsvp(String eventIdHex, RsvpStatus status, {
-    int? proposedStart,
-    int? proposedEnd,
-    String? comment,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('sendCalendarRsvp blocked: reducedMode active');
-      return;
-    }
-    final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
-
-    final group = _groups[event.groupId!];
-    if (group == null) return;
-
-    final rsvp = proto.CalendarRsvpMsg()
-      ..eventId = hexToBytes(eventIdHex)
-      ..response = proto.RsvpStatus.valueOf(status.index) ?? proto.RsvpStatus.RSVP_ACCEPTED
-      ..comment = comment ?? '';
-    if (proposedStart != null) rsvp.proposedStart = Int64(proposedStart);
-    if (proposedEnd != null) rsvp.proposedEnd = Int64(proposedEnd);
-
-    // Record own RSVP
-    calendarManager.setRsvp(eventIdHex, identity.userIdHex, status);
-
-    // Fan-out to all group members
-    final payload = rsvp.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == identity.userIdHex) continue;
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        proto.MessageTypeV3.MTV3_CALENDAR_RSVP,
-        Uint8List.fromList(payload),
-      );
-    }
-
-    _log.info('Sent CALENDAR_RSVP for $eventIdHex: $status');
-  }
-
-  /// Send calendar update to all group members.
+    int? proposedStart, int? proposedEnd, String? comment,
+  }) => _calendarProto.sendCalendarRsvp(eventIdHex, status,
+    proposedStart: proposedStart, proposedEnd: proposedEnd, comment: comment);
   @override
-  Future<void> sendCalendarUpdate(String eventIdHex) async {
-    if (_reducedMode) {
-      _log.warn('sendCalendarUpdate blocked: reducedMode active');
-      return;
-    }
-    final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
-
-    final group = _groups[event.groupId!];
-    if (group == null) return;
-
-    final update = proto.CalendarUpdateMsg()
-      ..eventId = hexToBytes(eventIdHex)
-      ..title = event.title
-      ..description = event.description ?? ''
-      ..location = event.location ?? ''
-      ..startTime = Int64(event.startTime)
-      ..endTime = Int64(event.endTime)
-      ..allDay = event.allDay
-      ..timeZone = event.timeZone
-      ..recurrenceRule = event.recurrenceRule ?? ''
-      ..hasCall = event.hasCall
-      ..cancelled = event.cancelled
-      ..updatedAt = Int64(event.updatedAt);
-    for (final m in event.reminders) {
-      update.reminders.add(proto.CalendarReminderOffset()..minutesBefore = m);
-    }
-
-    final payload = update.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == identity.userIdHex) continue;
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        proto.MessageTypeV3.MTV3_CALENDAR_UPDATE,
-        Uint8List.fromList(payload),
-      );
-    }
-
-    _log.info('Sent CALENDAR_UPDATE for $eventIdHex');
-  }
-
-  /// Send calendar delete to all group members.
+  Future<void> sendCalendarUpdate(String eventIdHex) =>
+      _calendarProto.sendCalendarUpdate(eventIdHex);
   @override
-  Future<void> sendCalendarDelete(String eventIdHex) async {
-    if (_reducedMode) {
-      _log.warn('sendCalendarDelete blocked: reducedMode active');
-      return;
-    }
-    final event = calendarManager.events[eventIdHex];
-    if (event == null || event.groupId == null) return;
-
-    final group = _groups[event.groupId!];
-    if (group == null) return;
-
-    final del = proto.CalendarDeleteMsg()
-      ..eventId = hexToBytes(eventIdHex)
-      ..deletedAt = Int64(DateTime.now().millisecondsSinceEpoch);
-
-    final payload = del.writeToBuffer();
-    for (final memberHex in group.members.keys) {
-      if (memberHex == identity.userIdHex) continue;
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        proto.MessageTypeV3.MTV3_CALENDAR_DELETE,
-        Uint8List.fromList(payload),
-      );
-    }
-
-    calendarManager.deleteEvent(eventIdHex);
-    _log.info('Sent CALENDAR_DELETE for $eventIdHex');
-  }
-
-  /// Send a FREE_BUSY_REQUEST to a contact.
+  Future<void> sendCalendarDelete(String eventIdHex) =>
+      _calendarProto.sendCalendarDelete(eventIdHex);
   @override
-  Future<String> sendFreeBusyRequest(String contactNodeIdHex, int queryStart, int queryEnd) async {
-    if (_reducedMode) {
-      _log.warn('sendFreeBusyRequest blocked: reducedMode active');
-      return '';
-    }
-    final requestIdBytes = SodiumFFI().randomBytes(16);
-    final requestIdHex = bytesToHex(requestIdBytes);
+  Future<String> sendFreeBusyRequest(String contactNodeIdHex, int queryStart, int queryEnd) =>
+      _calendarProto.sendFreeBusyRequest(contactNodeIdHex, queryStart, queryEnd);
 
-    final req = proto.FreeBusyRequestMsg()
-      ..queryStart = Int64(queryStart)
-      ..queryEnd = Int64(queryEnd)
-      ..requestId = requestIdBytes;
-
-    await _sendEncryptedPayload(
-      hexToBytes(contactNodeIdHex),
-      proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST,
-      req.writeToBuffer(),
-    );
-
-    _log.info('Sent FREE_BUSY_REQUEST to ${contactNodeIdHex.substring(0, 8)} '
-        '(${DateTime.fromMillisecondsSinceEpoch(queryStart)} – '
-        '${DateTime.fromMillisecondsSinceEpoch(queryEnd)})');
-    return requestIdHex;
-  }
-
-  // ── Polls (§24) ──────────────────────────────────────────────────────
-
-  /// Iterable of member/subscriber node IDs for a group or channel, excluding
-  /// the local identity. Returns null if the entity is unknown.
-  Iterable<String>? _pollRecipients(String entityIdHex) {
-    final group = _groups[entityIdHex];
-    if (group != null) {
-      return group.members.keys.where((h) => h != identity.userIdHex);
-    }
-    final channel = _channels[entityIdHex];
-    if (channel != null) {
-      return channel.members.keys.where((h) => h != identity.userIdHex);
-    }
-    return null;
-  }
-
-  /// Returns the cached channel public keys of all recipients plus our own
-  /// public key — used as the ring for anonymous voting (§24.4).
-  List<Uint8List> _ringForEntity(String entityIdHex) {
-    final members = _pollRecipients(entityIdHex)?.toList() ?? const [];
-    final keys = <Uint8List>[];
-    for (final memberHex in members) {
-      final c = _contacts[memberHex];
-      if (c?.ed25519Pk != null) keys.add(c!.ed25519Pk!);
-    }
-    keys.add(identity.ed25519PublicKey);
-    // Canonical ordering so every participant derives the same challenge.
-    keys.sort((a, b) {
-      for (var i = 0; i < a.length && i < b.length; i++) {
-        final d = a[i] - b[i];
-        if (d != 0) return d;
-      }
-      return a.length - b.length;
-    });
-    return keys;
-  }
-
-  /// Protobuf helper: wrap PollCreateMsg from a local Poll.
-  proto.PollCreateMsg _encodePollCreate(Poll poll) {
-    final msg = proto.PollCreateMsg()
-      ..pollId = hexToBytes(poll.pollId)
-      ..question = poll.question
-      ..description = poll.description
-      ..pollType =
-          proto.PollType.valueOf(poll.pollType.index) ?? proto.PollType.POLL_SINGLE_CHOICE
-      ..groupId = hexToBytes(poll.groupId)
-      ..createdBy = identity.userId
-      ..createdByName = poll.createdByName
-      ..createdAt = Int64(poll.createdAt)
-      ..settings = (proto.PollSettingsMsg()
-        ..anonymous = poll.settings.anonymous
-        ..deadline = Int64(poll.settings.deadline)
-        ..allowVoteChange = poll.settings.allowVoteChange
-        ..showResultsBeforeClose = poll.settings.showResultsBeforeClose
-        ..maxChoices = poll.settings.maxChoices
-        ..scaleMin = poll.settings.scaleMin
-        ..scaleMax = poll.settings.scaleMax
-        ..onlyMembersCanVote = poll.settings.onlyMembersCanVote);
-    for (final o in poll.options) {
-      msg.options.add(proto.PollOptionMsg()
-        ..optionId = o.optionId
-        ..label = o.label
-        ..dateStart = Int64(o.dateStart ?? 0)
-        ..dateEnd = Int64(o.dateEnd ?? 0));
-    }
-    return msg;
-  }
-
-  Poll _decodePollCreate(proto.PollCreateMsg msg, {required String senderHex}) {
-    final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-    final groupIdHex = bytesToHex(Uint8List.fromList(msg.groupId));
-    final settings = PollSettings(
-      anonymous: msg.settings.anonymous,
-      deadline: msg.settings.deadline.toInt(),
-      allowVoteChange: msg.settings.allowVoteChange,
-      showResultsBeforeClose: msg.settings.showResultsBeforeClose,
-      maxChoices: msg.settings.maxChoices,
-      scaleMin: msg.settings.scaleMin == 0 ? 1 : msg.settings.scaleMin,
-      scaleMax: msg.settings.scaleMax == 0 ? 5 : msg.settings.scaleMax,
-      onlyMembersCanVote: msg.settings.onlyMembersCanVote,
-    );
-    final options = msg.options
-        .map((o) => PollOption(
-              optionId: o.optionId,
-              label: o.label,
-              dateStart: o.dateStart.toInt() == 0 ? null : o.dateStart.toInt(),
-              dateEnd: o.dateEnd.toInt() == 0 ? null : o.dateEnd.toInt(),
-            ))
-        .toList();
-    return Poll(
-      pollId: pollIdHex,
-      identityId: identity.userIdHex,
-      question: msg.question,
-      description: msg.description,
-      pollType:
-          PollType.values[msg.pollType.value.clamp(0, PollType.values.length - 1)],
-      options: options,
-      settings: settings,
-      groupId: groupIdHex,
-      createdByHex: senderHex,
-      createdByName: msg.createdByName,
-      createdAt: msg.createdAt.toInt(),
-    );
-  }
-
-  proto.PollVoteMsg _encodePollVote(PollVoteRecord v, {bool stripIdentity = false}) {
-    final msg = proto.PollVoteMsg()
-      ..pollId = hexToBytes(v.pollId)
-      ..scaleValue = v.scaleValue
-      ..freeText = v.freeText
-      ..votedAt = Int64(v.votedAt);
-    if (!stripIdentity) {
-      msg
-        ..voterId = identity.userId
-        ..voterName = v.voterName;
-    }
-    msg.selectedOptions.addAll(v.selectedOptions);
-    for (final entry in v.dateResponses.entries) {
-      msg.dateResponses.add(proto.DateResponseMsg()
-        ..optionId = entry.key
-        ..availability = proto.DateAvailability.valueOf(entry.value.index) ??
-            proto.DateAvailability.DATE_AVAIL_YES);
-    }
-    return msg;
-  }
-
-  PollVoteRecord _decodePollVote(
-    proto.PollVoteMsg msg, {
-    required String voterIdHex,
-    required bool anonymous,
-  }) {
-    return PollVoteRecord(
-      pollId: bytesToHex(Uint8List.fromList(msg.pollId)),
-      voterIdHex: voterIdHex,
-      voterName: msg.voterName,
-      selectedOptions: msg.selectedOptions.toList(),
-      dateResponses: {
-        for (final r in msg.dateResponses)
-          r.optionId:
-              DateAvailability.values[r.availability.value.clamp(0, DateAvailability.values.length - 1)]
-      },
-      scaleValue: msg.scaleValue,
-      freeText: msg.freeText,
-      votedAt: msg.votedAt.toInt(),
-      anonymous: anonymous,
-    );
-  }
-
-  // ── Handlers ──────────────────────────────────────────────────────────
-
-  // ── Senders ──────────────────────────────────────────────────────────
-
-  Future<void> _fanoutToEntity(String entityIdHex, proto.MessageTypeV3 type, List<int> payload) async {
-    final recipients = _pollRecipients(entityIdHex);
-    if (recipients == null) return;
-    for (final memberHex in recipients) {
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        type,
-        Uint8List.fromList(payload),
-      );
-    }
-  }
-
-  Future<void> _sendPollCreate(Poll poll) async {
-    final payload = _encodePollCreate(poll).writeToBuffer();
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_CREATE, payload);
-    _log.info('Sent POLL_CREATE ${poll.pollId.substring(0, 8)} to entity ${poll.groupId.substring(0, 8)}');
-  }
-
-  Future<void> _sendPollVoteNonAnonymous(Poll poll, PollVoteRecord vote) async {
-    final msg = _encodePollVote(vote);
-    final payload = msg.writeToBuffer();
-
-    // Channels: send only to creator (§24.3.2). Groups: fan-out.
-    if (_channels.containsKey(poll.groupId) &&
-        poll.createdByHex != identity.userIdHex) {
-      await _sendEncryptedPayload(
-        hexToBytes(poll.createdByHex),
-        proto.MessageTypeV3.MTV3_POLL_VOTE,
-        Uint8List.fromList(payload),
-      );
-    } else {
-      await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_VOTE, payload);
-    }
-  }
-
-  Future<void> _sendPollVoteAnonymous(Poll poll, PollVoteRecord vote) async {
-    final identityIndexed = _encodePollVote(vote, stripIdentity: true);
-    final voteBytes = identityIndexed.writeToBuffer();
-    final ring = _ringForEntity(poll.groupId);
-    final context = hexToBytes(poll.pollId);
-    final signed = LinkableRingSignature.sign(
-      message: Uint8List.fromList(voteBytes),
-      context: context,
-      ringMembers: ring,
-      signerSk: identity.ed25519SecretKey,
-      signerPk: identity.ed25519PublicKey,
-    );
-
-    final msg = proto.PollVoteAnonymousMsg()
-      ..pollId = hexToBytes(poll.pollId)
-      ..encryptedChoice = voteBytes
-      ..keyImage = signed.keyImage
-      ..ringSignature = signed.signature
-      ..votedAt = Int64(vote.votedAt);
-    for (final pk in ring) {
-      msg.ringMembers.add(pk);
-    }
-
-    final payload = Uint8List.fromList(msg.writeToBuffer());
-    await _sendAnonViaReBroadcaster(
-      poll: poll,
-      messageType: proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS,
-      payload: payload,
-    );
-  }
-
-  Future<void> _sendPollVoteRevoke(Poll poll, Uint8List keyImage) async {
-    final ring = _ringForEntity(poll.groupId);
-    final context = hexToBytes(poll.pollId);
-    final marker = Uint8List.fromList('revoke'.codeUnits);
-    final signed = LinkableRingSignature.sign(
-      message: marker,
-      context: context,
-      ringMembers: ring,
-      signerSk: identity.ed25519SecretKey,
-      signerPk: identity.ed25519PublicKey,
-      presetKeyImage: keyImage,
-    );
-
-    final msg = proto.PollVoteRevokeMsg()
-      ..pollId = hexToBytes(poll.pollId)
-      ..keyImage = keyImage
-      ..ringSignature = signed.signature
-      ..revokedAt = Int64(DateTime.now().millisecondsSinceEpoch);
-    for (final pk in ring) {
-      msg.ringMembers.add(pk);
-    }
-
-    final payload = Uint8List.fromList(msg.writeToBuffer());
-    await _sendAnonViaReBroadcaster(
-      poll: poll,
-      messageType: proto.MessageTypeV3.MTV3_POLL_REVOKE,
-      payload: payload,
-    );
-  }
-
-  // ── §11.4.8 Anonymous Vote Re-Broadcaster ────────────────────────────
-
-  /// Pending re-broadcaster ACKs: pollId → completer.
-  final Map<String, Completer<bool>> _anonSubmitAcks = {};
-
-  /// §11.4.8: Send an anonymous vote/revoke via a random re-broadcaster R.
-  /// Builds de-attributed inner frames (no senderUserId, no user sigs),
-  /// bundles them, and ships to R. Falls back to legacy direct send if no
-  /// suitable R is found or all retries fail.
-  Future<void> _sendAnonViaReBroadcaster({
-    required Poll poll,
-    required proto.MessageTypeV3 messageType,
-    required Uint8List payload,
-  }) async {
-    final recipients = _pollRecipients(poll.groupId);
-    if (recipients == null || recipients.isEmpty) return;
-
-    // Channels: creator-only (§24.3.2).
-    final isChannel = _channels.containsKey(poll.groupId);
-    final effectiveRecipients = isChannel && poll.createdByHex != identity.userIdHex
-        ? [poll.createdByHex]
-        : recipients.toList();
-
-    // Build de-attributed KEM blob per recipient.
-    final entries = <proto.PollAnonSubmitEntry>[];
-    for (final recipientHex in effectiveRecipients) {
-      final contact = _contacts[recipientHex];
-      if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) continue;
-
-      final inner = proto.ApplicationFrameV3()
-        ..recipientUserId = hexToBytes(recipientHex)
-        ..timestampMs = Int64(DateTime.now().millisecondsSinceEpoch)
-        ..messageId = SodiumFFI().randomBytes(16)
-        ..messageType = messageType
-        ..payload = payload;
-
-      final kemBlob = V3FrameCodec.buildDeAttributedInner(
-        inner: inner,
-        recipientUserX25519Pk: contact.x25519Pk!,
-        recipientUserMlKemPk: contact.mlKemPk!,
-      );
-
-      final entry = proto.PollAnonSubmitEntry()
-        ..recipientUserId = hexToBytes(recipientHex)
-        ..kemBlob = kemBlob;
-      if (contact.deviceNodeIds.isNotEmpty) {
-        for (final did in contact.deviceNodeIds) {
-          entry.deviceIds.add(hexToBytes(did));
-        }
-      }
-      entries.add(entry);
-    }
-    if (entries.isEmpty) return;
-
-    final bundle = proto.PollAnonSubmitMsg()
-      ..pollId = hexToBytes(poll.pollId);
-    bundle.entries.addAll(entries);
-    final bundleBytes = bundle.writeToBuffer();
-
-    // §11.4.8 limit: ≤64KB, ≤64 entries.
-    if (bundleBytes.length > 65536 || entries.length > 64) {
-      _log.warn('Anon submit bundle too large (${bundleBytes.length}B, '
-          '${entries.length} entries) — legacy fallback');
-      await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
-      return;
-    }
-
-    // Try up to 3 different re-broadcasters.
-    for (var attempt = 0; attempt < 3; attempt++) {
-      final r = _selectReBroadcaster(poll.groupId);
-      if (r == null) {
-        _log.info('No suitable re-broadcaster found — legacy fallback');
-        await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
-        return;
-      }
-
-      final pollIdHex = poll.pollId;
-      final completer = Completer<bool>();
-      _anonSubmitAcks[pollIdHex] = completer;
-
-      final ok = await node.sendInfraTo(
-        messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT,
-        innerPayload: Uint8List.fromList(bundleBytes),
-        recipientDeviceId: r.nodeId,
-      );
-
-      if (!ok) {
-        _anonSubmitAcks.remove(pollIdHex);
-        _log.info('Anon submit to R ${_hexShort(r.nodeId)} failed (attempt $attempt)');
-        continue;
-      }
-
-      // Wait for ACK with timeout.
-      final acked = await completer.future
-          .timeout(const Duration(seconds: 10), onTimeout: () => false);
-      _anonSubmitAcks.remove(pollIdHex);
-
-      if (acked) {
-        _log.info('Anon vote re-broadcast OK via R ${_hexShort(r.nodeId)}');
-        return;
-      }
-      _log.info('Anon submit ACK timeout from R ${_hexShort(r.nodeId)} '
-          '(attempt $attempt)');
-    }
-
-    _log.info('All re-broadcaster attempts failed — legacy fallback');
-    await _sendAnonLegacy(poll, messageType, payload, effectiveRecipients);
-  }
-
-  /// Legacy direct-send path for anonymous votes (Phase 1 behavior).
-  Future<void> _sendAnonLegacy(
-    Poll poll,
-    proto.MessageTypeV3 messageType,
-    Uint8List payload,
-    List<String> recipients,
-  ) async {
-    for (final memberHex in recipients) {
-      await _sendEncryptedPayload(
-        hexToBytes(memberHex),
-        messageType,
-        payload,
-      );
-    }
-  }
-
-  /// Select a random routing-table peer as re-broadcaster R.
-  /// R must not be a participant in the poll's entity and not a contact.
-  PeerInfo? _selectReBroadcaster(String entityIdHex) {
-    final participantIds = <String>{};
-    final group = _groups[entityIdHex];
-    if (group != null) {
-      participantIds.addAll(group.members.keys);
-    }
-    final channel = _channels[entityIdHex];
-    if (channel != null) {
-      participantIds.addAll(channel.members.keys);
-    }
-    participantIds.add(identity.userIdHex);
-
-    final contactIds = _contacts.keys.toSet();
-
-    final candidates = node.routingTable.allPeers.where((p) {
-      final pHex = bytesToHex(p.nodeId);
-      final uHex = p.userId != null ? bytesToHex(p.userId!) : null;
-      if (participantIds.contains(pHex) || participantIds.contains(uHex)) return false;
-      if (contactIds.contains(pHex) || contactIds.contains(uHex)) return false;
-      return true;
-    }).toList();
-
-    if (candidates.isEmpty) return null;
-    // Uniform random selection via libsodium.
-    final idx = SodiumFFI().randomBytes(4);
-    final v = ((idx[0] << 24) | (idx[1] << 16) | (idx[2] << 8) | idx[3]) & 0x7fffffff;
-    return candidates[v % candidates.length];
-  }
-
-  /// R-side handler: validate and re-originate each entry under own identity.
-  void handleIncomingPollAnonSubmit(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-    InternetAddress from,
-    int port,
-    SenderIdentitySnapshot snapshot,
-  ) {
-    final proto.PollAnonSubmitMsg bundle;
-    try {
-      bundle = proto.PollAnonSubmitMsg.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.warn('POLL_ANON_SUBMIT parse error: $e');
-      return;
-    }
-
-    // Validate limits.
-    if (frame.payload.length > 65536) {
-      _log.warn('POLL_ANON_SUBMIT too large: ${frame.payload.length}B — rejected');
-      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_large');
-      return;
-    }
-    if (bundle.entries.length > 64) {
-      _log.warn('POLL_ANON_SUBMIT too many entries: ${bundle.entries.length} — rejected');
-      _sendAnonSubmitAck(senderDeviceId, bundle.pollId, false, 'too_many_entries');
-      return;
-    }
-
-    // Re-originate each entry as fresh APPLICATION_FRAME under own device identity.
-    final myDeviceNodeId = node.primaryIdentity.deviceNodeId;
-    for (final entry in bundle.entries) {
-      final recipientUserId = Uint8List.fromList(entry.recipientUserId);
-
-      // Resolve device IDs: prefer bundle-supplied, fall back to local cache.
-      List<Uint8List> deviceIds;
-      if (entry.deviceIds.isNotEmpty) {
-        deviceIds = entry.deviceIds.map((d) => Uint8List.fromList(d)).toList();
-      } else {
-        final cached = node.routingTable.getAllPeersForUserId(recipientUserId);
-        if (cached.isEmpty) continue;
-        deviceIds = cached.map((p) => p.nodeId).toList();
-      }
-
-      for (final deviceId in deviceIds) {
-        final outer = V3FrameCodec.buildOuter(
-          nextHopDeviceId: deviceId,
-          senderDeviceId: myDeviceNodeId,
-          deviceKeys: node.deviceKeyPair,
-          innerPayload: Uint8List.fromList(entry.kemBlob),
-          payloadType: proto.PayloadTypeV3.PAYLOAD_APPLICATION_FRAME,
-          applicationFlavor: true,
-          skipPoW: true,
-        );
-        unawaited(node.sendToDevice(outer, deviceId));
-      }
-    }
-
-    _log.info('POLL_ANON_SUBMIT: re-originated ${bundle.entries.length} entries '
-        'from ${_hexShort(senderDeviceId)}');
-    _sendAnonSubmitAck(senderDeviceId, bundle.pollId, true, '');
-  }
-
-  void _sendAnonSubmitAck(
-      Uint8List recipientDeviceId, List<int> pollId, bool accepted, String reason) {
-    final ack = proto.PollAnonSubmitAckMsg()
-      ..pollId = pollId
-      ..accepted = accepted
-      ..rejectReason = reason;
-    unawaited(node.sendInfraTo(
-      messageType: proto.MessageTypeV3.MTV3_POLL_ANON_SUBMIT_ACK,
-      innerPayload: Uint8List.fromList(ack.writeToBuffer()),
-      recipientDeviceId: recipientDeviceId,
-    ));
-  }
-
-  /// Voter-side handler: resolve pending ACK.
-  void handleIncomingPollAnonSubmitAck(
-    proto.InfrastructureFrameV3 frame,
-    Uint8List senderDeviceId,
-  ) {
-    final proto.PollAnonSubmitAckMsg ack;
-    try {
-      ack = proto.PollAnonSubmitAckMsg.fromBuffer(frame.payload);
-    } catch (e) {
-      _log.warn('POLL_ANON_SUBMIT_ACK parse error: $e');
-      return;
-    }
-    final pollIdHex = bytesToHex(Uint8List.fromList(ack.pollId));
-    final completer = _anonSubmitAcks.remove(pollIdHex);
-    if (completer != null && !completer.isCompleted) {
-      completer.complete(ack.accepted);
-      _log.info('POLL_ANON_SUBMIT_ACK from ${_hexShort(senderDeviceId)}: '
-          '${ack.accepted ? "accepted" : "rejected: ${ack.rejectReason}"}');
-    }
-  }
-
-  Future<void> _sendPollUpdate(Poll poll, proto.PollAction action,
-      {List<PollOption>? addedOptions,
-      List<int>? removedOptions,
-      int? newDeadline}) async {
-    final msg = proto.PollUpdateMsg()
-      ..pollId = hexToBytes(poll.pollId)
-      ..action = action
-      ..updatedBy = identity.userId
-      ..updatedAt = Int64(DateTime.now().millisecondsSinceEpoch);
-    if (addedOptions != null) {
-      for (final o in addedOptions) {
-        msg.addedOptions.add(proto.PollOptionMsg()
-          ..optionId = o.optionId
-          ..label = o.label
-          ..dateStart = Int64(o.dateStart ?? 0)
-          ..dateEnd = Int64(o.dateEnd ?? 0));
-      }
-    }
-    if (removedOptions != null) msg.removedOptions.addAll(removedOptions);
-    if (newDeadline != null) msg.newDeadline = Int64(newDeadline);
-
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_UPDATE, msg.writeToBuffer());
-  }
-
-  Future<void> _broadcastPollSnapshot(Poll poll) async {
-    final tally = pollManager.computeTally(poll.pollId);
-    final msg = proto.PollSnapshotMsg()
-      ..pollId = hexToBytes(poll.pollId)
-      ..totalVotes = tally.totalVotes
-      ..scaleAverage = tally.scaleAverage
-      ..scaleCount = tally.scaleCount
-      ..closed = poll.closed
-      ..snapshotAt = Int64(DateTime.now().millisecondsSinceEpoch);
-    if (poll.pollType == PollType.datePoll) {
-      for (final entry in tally.dateCounts.entries) {
-        msg.optionCounts.add(proto.OptionCountMsg()
-          ..optionId = entry.key
-          ..yesCount = entry.value[DateAvailability.yes] ?? 0
-          ..maybeCount = entry.value[DateAvailability.maybe] ?? 0
-          ..noCount = entry.value[DateAvailability.no] ?? 0);
-      }
-    } else {
-      for (final entry in tally.optionCounts.entries) {
-        msg.optionCounts.add(proto.OptionCountMsg()
-          ..optionId = entry.key
-          ..count = entry.value);
-      }
-    }
-    await _fanoutToEntity(poll.groupId, proto.MessageTypeV3.MTV3_POLL_SNAPSHOT, msg.writeToBuffer());
-  }
-
-  void _startPollDeadlineTimer() {
-    _pollDeadlineTimer?.cancel();
-    _pollDeadlineTimer = Timer.periodic(const Duration(seconds: 30), (_) {
-      final closed = pollManager.enforceDeadlines();
-      for (final id in closed) {
-        final poll = pollManager.polls[id];
-        if (poll != null && poll.createdByHex == identity.userIdHex) {
-          _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_CLOSE);
-          if (_channels.containsKey(poll.groupId)) {
-            _broadcastPollSnapshot(poll);
-          }
-        }
-        onPollStateChanged?.call(id);
-      }
-      if (closed.isNotEmpty) onStateChanged?.call();
-    });
-  }
-
-  // ── Interface implementation ────────────────────────────────────────
+  // ── Polls (§24) — forwarded to PollService ────────────────────────
 
   @override
   Future<String> createPoll({
@@ -10612,57 +8045,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     required List<PollOption> options,
     required PollSettings settings,
     required String groupIdHex,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('createPoll blocked: reducedMode active');
-      return '';
-    }
-    if (_pollRecipients(groupIdHex) == null) {
-      throw ArgumentError('Unknown group/channel $groupIdHex');
-    }
-    final normalisedOptions = <PollOption>[];
-    for (var i = 0; i < options.length; i++) {
-      normalisedOptions.add(PollOption(
-        optionId: i,
-        label: options[i].label,
-        dateStart: options[i].dateStart,
-        dateEnd: options[i].dateEnd,
-      ));
-    }
-    final poll = Poll(
-      pollId: PollManager.generateUuid(),
-      identityId: identity.userIdHex,
-      question: question,
-      description: description,
-      pollType: pollType,
-      options: normalisedOptions,
-      settings: settings,
-      groupId: groupIdHex,
-      createdByHex: identity.userIdHex,
-      createdByName: displayName,
-      createdAt: DateTime.now().millisecondsSinceEpoch,
-    );
-    pollManager.createPoll(poll);
-
-    if (conversations.containsKey(groupIdHex)) {
-      _addMessageToConversation(groupIdHex, UiMessage(
-        id: bytesToHex(SodiumFFI().randomBytes(16)),
-        conversationId: groupIdHex,
-        senderNodeIdHex: identity.userIdHex,
-        text: '$displayName: ${poll.question}',
-        timestamp: DateTime.fromMillisecondsSinceEpoch(poll.createdAt),
-        type: UiMessageType.pollCreate,
-        status: MessageStatus.delivered,
-        isOutgoing: true,
-        pollId: poll.pollId,
-      ), isGroup: _groups.containsKey(groupIdHex), isChannel: _channels.containsKey(groupIdHex));
-    }
-
-    await _sendPollCreate(poll);
-    onPollCreated?.call(poll.pollId, groupIdHex, poll.question);
-    onStateChanged?.call();
-    return poll.pollId;
-  }
+  }) => _polls.createPoll(
+    question: question, description: description, pollType: pollType,
+    options: options, settings: settings, groupIdHex: groupIdHex);
 
   @override
   Future<bool> submitPollVote({
@@ -10671,37 +8056,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     Map<int, DateAvailability>? dateResponses,
     int? scaleValue,
     String? freeText,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('submitPollVote blocked: reducedMode active');
-      return false;
-    }
-    final poll = pollManager.polls[pollId];
-    if (poll == null || poll.closed) return false;
-    if (poll.settings.anonymous) {
-      throw StateError('Use submitPollVoteAnonymous for anonymous polls');
-    }
-    final vote = PollVoteRecord(
-      pollId: pollId,
-      voterIdHex: identity.userIdHex,
-      voterName: displayName,
-      selectedOptions: selectedOptions ?? [],
-      dateResponses: dateResponses ?? {},
-      scaleValue: scaleValue ?? 0,
-      freeText: freeText ?? '',
-      votedAt: DateTime.now().millisecondsSinceEpoch,
-    );
-    if (!pollManager.recordVote(vote)) return false;
-    await _sendPollVoteNonAnonymous(poll, vote);
-
-    if (_channels.containsKey(poll.groupId) &&
-        poll.createdByHex == identity.userIdHex) {
-      await _broadcastPollSnapshot(poll);
-    }
-    onPollTallyUpdated?.call(pollId);
-    onStateChanged?.call();
-    return true;
-  }
+  }) => _polls.submitPollVote(
+    pollId: pollId, selectedOptions: selectedOptions,
+    dateResponses: dateResponses, scaleValue: scaleValue, freeText: freeText);
 
   @override
   Future<bool> submitPollVoteAnonymous({
@@ -10710,135 +8067,22 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     Map<int, DateAvailability>? dateResponses,
     int? scaleValue,
     String? freeText,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('submitPollVoteAnonymous blocked: reducedMode active');
-      return false;
-    }
-    final poll = pollManager.polls[pollId];
-    if (poll == null || poll.closed) return false;
-    if (!poll.settings.anonymous) {
-      throw StateError('Poll is not configured as anonymous');
-    }
-
-    final vote = PollVoteRecord(
-      pollId: pollId,
-      voterIdHex: '', // Set after ring signing from key image
-      voterName: '',
-      selectedOptions: selectedOptions ?? [],
-      dateResponses: dateResponses ?? {},
-      scaleValue: scaleValue ?? 0,
-      freeText: freeText ?? '',
-      votedAt: DateTime.now().millisecondsSinceEpoch,
-      anonymous: true,
-    );
-
-    // Derive key image locally so we can record our own vote without waiting
-    // for network echo — keeps UI responsive and prevents accidental double-send.
-    final ring = _ringForEntity(poll.groupId);
-    final keyImage = LinkableRingSignature.deriveKeyImage(
-      signerSk: identity.ed25519SecretKey,
-      signerPk: identity.ed25519PublicKey,
-      context: hexToBytes(pollId),
-    );
-    final keyImageHex = bytesToHex(keyImage);
-
-    final seen = _anonymousKeyImages.putIfAbsent(pollId, () => {});
-    final pendingKey = '$pollId:$keyImageHex';
-    var needsRevoke = false;
-    if (seen.contains(keyImageHex)) {
-      // Re-vote on an anonymous poll requires revoke first (§24.4.5).
-      if (!poll.settings.allowVoteChange) return false;
-      // If the previous vote is still jitter-pending it never reached the
-      // wire — cancelling the timer replaces the on-wire revoke.
-      final pending = _pendingAnonVoteSends.remove(pendingKey);
-      pending?.cancel();
-      needsRevoke = pending == null;
-      pollManager.revokeAnonymousVote(pollId, keyImageHex);
-      seen.remove(keyImageHex);
-    }
-
-    pollManager.recordVote(PollVoteRecord(
-      pollId: pollId,
-      voterIdHex: keyImageHex,
-      voterName: '',
-      selectedOptions: vote.selectedOptions,
-      dateResponses: vote.dateResponses,
-      scaleValue: vote.scaleValue,
-      freeText: vote.freeText,
-      votedAt: vote.votedAt,
-      anonymous: true,
-    ));
-    seen.add(keyImageHex);
-
-    // _sendPollVoteAnonymous uses an internally-derived ring that must match
-    // the canonical sort used here, so both sides produce the same key image.
-    ring.length; // ensure variable escapes so analyzer does not complain
-
-    Future<void> sendNow() async {
-      try {
-        if (needsRevoke) await _sendPollVoteRevoke(poll, keyImage);
-        await _sendPollVoteAnonymous(poll, vote);
-      } catch (e) {
-        _log.warn('Anonymous vote send failed: $e');
-      }
-    }
-
-    final jitter = _anonVoteJitter();
-    if (jitter == Duration.zero) {
-      await sendNow();
-    } else {
-      // §11.4.6: random 0-30s send jitter so arrival order does not hint
-      // at the voter. The local tally above is recorded immediately.
-      _pendingAnonVoteSends[pendingKey] = Timer(jitter, () {
-        _pendingAnonVoteSends.remove(pendingKey);
-        sendNow();
-      });
-    }
-    onPollTallyUpdated?.call(pollId);
-    onStateChanged?.call();
-    return true;
-  }
-
-  /// Random 0..[ModerationConfig.anonVoteJitterMax] send delay (§11.4.6).
-  Duration _anonVoteJitter() {
-    final maxMs = moderationConfig.anonVoteJitterMax.inMilliseconds;
-    if (maxMs <= 0) return Duration.zero;
-    final b = SodiumFFI().randomBytes(4);
-    final v = ((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]) & 0x7fffffff;
-    return Duration(milliseconds: v % maxMs);
-  }
+  }) => _polls.submitPollVoteAnonymous(
+    pollId: pollId, selectedOptions: selectedOptions,
+    dateResponses: dateResponses, scaleValue: scaleValue, freeText: freeText);
 
   @override
-  Future<bool> revokePollVoteAnonymous(String pollId) async {
-    if (_reducedMode) {
-      _log.warn('revokePollVoteAnonymous blocked: reducedMode active');
-      return false;
-    }
-    final poll = pollManager.polls[pollId];
-    if (poll == null || !poll.settings.anonymous) return false;
-    final keyImage = LinkableRingSignature.deriveKeyImage(
-      signerSk: identity.ed25519SecretKey,
-      signerPk: identity.ed25519PublicKey,
-      context: hexToBytes(pollId),
-    );
-    final keyImageHex = bytesToHex(keyImage);
-    if (!(_anonymousKeyImages[pollId]?.contains(keyImageHex) ?? false)) {
-      return false;
-    }
-    // If the vote is still jitter-pending (§11.4.6) it never reached the
-    // wire — cancel the pending send instead of racing it with a revoke.
-    final pending = _pendingAnonVoteSends.remove('$pollId:$keyImageHex');
-    pending?.cancel();
-    if (pending == null) {
-      await _sendPollVoteRevoke(poll, keyImage);
-    }
-    pollManager.revokeAnonymousVote(pollId, keyImageHex);
-    _anonymousKeyImages[pollId]?.remove(keyImageHex);
-    onPollTallyUpdated?.call(pollId);
-    onStateChanged?.call();
-    return true;
-  }
+  Future<bool> revokePollVoteAnonymous(String pollId) =>
+      _polls.revokePollVoteAnonymous(pollId);
+
+  void handleIncomingPollAnonSubmit(
+    proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
+    InternetAddress from, int port, SenderIdentitySnapshot snapshot,
+  ) => _polls.handleIncomingPollAnonSubmit(frame, senderDeviceId, from, port, snapshot);
+
+  void handleIncomingPollAnonSubmitAck(
+    proto.InfrastructureFrameV3 frame, Uint8List senderDeviceId,
+  ) => _polls.handleIncomingPollAnonSubmitAck(frame, senderDeviceId);
 
   @override
   Future<bool> updatePoll(String pollId, {
@@ -10848,65 +8092,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     List<int>? removeOptions,
     int? newDeadline,
     bool delete = false,
-  }) async {
-    if (_reducedMode) {
-      _log.warn('updatePoll blocked: reducedMode active');
-      return false;
-    }
-    final poll = pollManager.polls[pollId];
-    if (poll == null) return false;
-    // Only creator or group/channel owner/admin may mutate.
-    final group = _groups[poll.groupId];
-    final channel = _channels[poll.groupId];
-    final role = group?.members[identity.userIdHex]?.role ??
-        channel?.members[identity.userIdHex]?.role;
-    final isCreator = poll.createdByHex == identity.userIdHex;
-    final isAdmin = role == 'owner' || role == 'admin';
-    if (!isCreator && !isAdmin) return false;
-
-    if (delete) {
-      pollManager.deletePoll(pollId);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_DELETE);
-      // System channels: remove the UiMessage container entirely
-      if (SystemChannels.isSystemChannel(poll.groupId)) {
-        final conv = conversations[poll.groupId];
-        conv?.messages.removeWhere((m) => m.pollId == pollId);
-      }
-      onPollStateChanged?.call(pollId);
-      onStateChanged?.call();
-      _saveConversations();
-      return true;
-    }
-    if (close == true) {
-      pollManager.closePoll(pollId);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_CLOSE);
-      if (_channels.containsKey(poll.groupId)) {
-        await _broadcastPollSnapshot(poll);
-      }
-    }
-    if (reopen == true) {
-      pollManager.reopenPoll(pollId);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_REOPEN);
-    }
-    if (addOptions != null && addOptions.isNotEmpty) {
-      pollManager.addOptions(pollId, addOptions);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_ADD_OPTIONS,
-          addedOptions: addOptions);
-    }
-    if (removeOptions != null && removeOptions.isNotEmpty) {
-      pollManager.removeOptions(pollId, removeOptions);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_REMOVE_OPTIONS,
-          removedOptions: removeOptions);
-    }
-    if (newDeadline != null) {
-      pollManager.extendDeadline(pollId, newDeadline);
-      await _sendPollUpdate(poll, proto.PollAction.POLL_ACTION_EXTEND_DEADLINE,
-          newDeadline: newDeadline);
-    }
-    onPollStateChanged?.call(pollId);
-    onStateChanged?.call();
-    return true;
-  }
+  }) => _polls.updatePoll(pollId,
+    close: close, reopen: reopen, addOptions: addOptions,
+    removeOptions: removeOptions, newDeadline: newDeadline, delete: delete);
 
   @override
   Future<String?> convertDatePollToEvent(String pollId, int winningOptionId) async {
@@ -10923,7 +8111,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     if (option.optionId == -1 || option.dateStart == null || option.dateEnd == null) {
       return null;
     }
-
     final event = CalendarEvent(
       eventId: PollManager.generateUuid(),
       identityId: identity.userIdHex,
@@ -11629,9 +8816,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
   @override
   Future<void> stop() async {
-    _stopAudioMixer();
-    _stopGroupVideo();
-    groupCallManager.leaveGroupCall();
+    _calls.dispose();
     _postDiscoverySecondSweep?.cancel();
     _postDiscoverySecondSweep = null;
     _keyRotationTimer?.cancel();
@@ -11644,14 +8829,8 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     _restoreRetryTimer = null;
     _restorePollingTimer?.cancel();
     _restorePollingTimer = null;
-    _channelIndexGossipTimer?.cancel();
-    _channelIndexGossipTimer = null;
-    _moderationTimer?.cancel();
-    _moderationTimer = null;
-    for (final t in _pendingAnonVoteSends.values) {
-      t.cancel();
-    }
-    _pendingAnonVoteSends.clear();
+    _moderation.dispose();
+    _polls.dispose();
     _systemChannelEvictionTimer?.cancel();
     _systemChannelEvictionTimer = null;
     _updateCheckTimer?.cancel();
@@ -11854,6 +9033,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
   /// [l3Result] is a single-element list used as an optional output parameter
   /// (Dart has no ref/out params).  Pass `[false]` and read index 0 after the
   /// call.  Existing callers that ignore L3 outcome can omit this parameter.
+  @override
   Future<bool> sendToUser({
     required Uint8List recipientUserId,
     required proto.MessageTypeV3 messageType,
@@ -12860,77 +10040,75 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
         _handleChannelRoleUpdateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_BAD_BADGE_REPORT:
-        _handleChannelBadBadgeReportV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelBadBadgeReportV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_JURY_VOTE:
-        _handleChannelJuryVoteV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelJuryVoteV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_MOD_DECISION:
-        _handleChannelModDecisionV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelModDecisionV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_SUBSCRIBE_PROBE:
-        _handleChannelSubscribeProbeV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelSubscribeProbeV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_JOIN_REQUEST:
-        _handleChannelJoinRequestV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelJoinRequestV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CHANNEL_REPORT:
-        _handleChannelReportV3(frame, senderDeviceId, snapshot);
+        _moderation.handleChannelReportV3(frame, senderDeviceId, snapshot);
         break;
 
-      // Calls — Cluster C3
+      // Calls — Cluster C3 (delegated to CallService)
       case proto.MessageTypeV3.MTV3_CALL_INVITE:
-        _handleCallInviteV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallInviteV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_ANSWER:
-        _handleCallAnswerV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallAnswerV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_REJECT:
-        _handleCallRejectV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallRejectV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_HANGUP:
-        _handleCallHangupV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallHangupV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_ICE_CANDIDATE:
-        _handleIceCandidateV3(frame, senderDeviceId, snapshot);
+        _calls.handleIceCandidateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_REJOIN:
-        _handleCallRejoinV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallRejoinV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_AUDIO:
-        _handleCallAudioV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallAudioV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_VIDEO:
-        _handleCallVideoV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallVideoV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_KEYFRAME_REQUEST:
-        // Signal-only: ask our video encoder to force the next frame as a
-        // keyframe. Empty payload by design.
-        onKeyframeRequested?.call();
+        _calls.onKeyframeRequested?.call();
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_AUDIO:
-        _handleCallGroupAudioV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallGroupAudioV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_VIDEO:
-        _handleCallGroupVideoV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallGroupVideoV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_LEAVE:
-        _handleCallGroupLeaveV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallGroupLeaveV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_KEY_ROTATE:
-        _handleCallGroupKeyRotateV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallGroupKeyRotateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_GROUP_SENDER_KEY:
-        groupCallManager.handleGroupCallSenderKeyV3(frame, senderDeviceId, snapshot);
+        _calls.groupCallManager.handleGroupCallSenderKeyV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_RTT_PING:
-        _handleCallRttPingV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallRttPingV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_RTT_PONG:
-        _handleCallRttPongV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallRttPongV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_TREE_UPDATE:
-        _handleCallTreeUpdateV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallTreeUpdateV3(frame, senderDeviceId, snapshot);
         break;
 
       // Wave 2B.3: PEER_LIST_*, DHT_*, ROUTE_UPDATE, REACHABILITY_*, HOLE_PUNCH_*
@@ -12991,65 +10169,65 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
       // Calendar — Cluster C4
       case proto.MessageTypeV3.MTV3_CALENDAR_INVITE:
-        _handleCalendarInviteV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleCalendarInviteV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALENDAR_RSVP:
-        _handleCalendarRsvpV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleCalendarRsvpV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALENDAR_UPDATE:
-        _handleCalendarUpdateV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleCalendarUpdateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALENDAR_DELETE:
-        _handleCalendarDeleteV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleCalendarDeleteV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_FREE_BUSY_REQUEST:
-        _handleFreeBusyRequestV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleFreeBusyRequestV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE:
-        _handleFreeBusyResponseV3(frame, senderDeviceId, snapshot);
+        _calendarProto.handleFreeBusyResponseV3(frame, senderDeviceId, snapshot);
         break;
 
       // Polls — Cluster C4
       case proto.MessageTypeV3.MTV3_POLL_CREATE:
-        _handlePollCreateV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollCreateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_POLL_VOTE:
-        _handlePollVoteV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollVoteV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_POLL_VOTE_ANONYMOUS:
-        _handlePollVoteAnonymousV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollVoteAnonymousV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_POLL_UPDATE:
-        _handlePollUpdateV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollUpdateV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_POLL_SNAPSHOT:
-        _handlePollSnapshotV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollSnapshotV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_POLL_REVOKE:
-        _handlePollRevokeV3(frame, senderDeviceId, snapshot);
+        _polls.handlePollRevokeV3(frame, senderDeviceId, snapshot);
         break;
 
-      // In-Call Collaboration (§25, geplant) — Cluster C3
+      // In-Call Collaboration (§25, geplant) — Cluster C3 (delegated to CallService)
       case proto.MessageTypeV3.MTV3_WHITEBOARD_STROKE:
-        _handleWhiteboardStrokeV3(frame, senderDeviceId, snapshot);
+        _calls.handleWhiteboardStrokeV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_WHITEBOARD_PAGE:
-        _handleWhiteboardPageV3(frame, senderDeviceId, snapshot);
+        _calls.handleWhiteboardPageV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_FILE_EXCHANGE:
-        _handleFileExchangeV3(frame, senderDeviceId, snapshot);
+        _calls.handleFileExchangeV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CLIPBOARD_EXCHANGE:
-        _handleClipboardExchangeV3(frame, senderDeviceId, snapshot);
+        _calls.handleClipboardExchangeV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_SCREEN_SHARE_FRAME:
-        _handleScreenShareFrameV3(frame, senderDeviceId, snapshot);
+        _calls.handleScreenShareFrameV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_CALL_CHAT:
-        _handleCallChatV3(frame, senderDeviceId, snapshot);
+        _calls.handleCallChatV3(frame, senderDeviceId, snapshot);
         break;
       case proto.MessageTypeV3.MTV3_REMOTE_CONTROL_INPUT:
-        _handleRemoteControlInputV3(frame, senderDeviceId, snapshot);
+        _calls.handleRemoteControlInputV3(frame, senderDeviceId, snapshot);
         break;
 
       default:
@@ -13992,9 +11170,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
         return;
       }
 
-      // Edit-Window check (per-chat config).
+      // Edit-Window check — receiver uses the wider tolerance to avoid
+      // rejecting edits from older nodes that still use the 60-min default.
       final chatEditWindowMs =
-          conv.config.editWindowMs ?? _defaultEditWindowMs;
+          conv.config.editWindowMs ?? _receiverEditToleranceMs;
       if (chatEditWindowMs == 0) {
         _log.warn('EDIT-V3 rejected: editing disabled for $conversationId');
         return;
@@ -14068,152 +11247,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     _handleMediaInlineV3(frame, senderDeviceId, snapshot);
   }
 
-  // C3 — Calls (Architecture §10 + §10.5; live-frame skip-verify §4.4.5/§10.4.5)
-  //
-  // Setup-class (INVITE/ANSWER/REJECT/HANGUP/REJOIN/GROUP_LEAVE/GROUP_KEY_ROTATE):
-  //   inner User-Sig already verified upstream; frame.payload is the parsed
-  //   sub-message bytes. Dispatch routes to 1:1 (callManager) vs group
-  //   (groupCallManager) — for ANSWER/REJECT/HANGUP the rule is: if a
-  //   group call is currently active, the frame belongs to it.
-  //
-  // Live-frame class (GROUP_AUDIO/VIDEO, RTT_PING/PONG, TREE_UPDATE):
-  //   sender skipped ML-DSA + zstd per §4.4.5; AES-GCM under call_key carries
-  //   pro-frame authenticity. Receive side just dispatches into relay/RTT/tree
-  //   machinery.
-  void _handleCallInviteV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    proto.CallInvite invite;
-    try {
-      invite = proto.CallInvite.fromBuffer(f.payload);
-    } catch (e) {
-      _log.warn('CALL_INVITE V3: payload parse failed: $e');
-      return;
-    }
-    if (invite.isGroupCall) {
-      groupCallManager.handleGroupCallInviteV3(f, sd, s);
-    } else {
-      callManager.handleCallInviteV3(f, sd, s);
-    }
-    notificationSound.startRingtone();
-    notificationSound.vibrate(VibrationType.call);
-  }
-
-  void _handleCallAnswerV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    try { notificationSound.stopRingtone(); } catch (_) {}
-    try { notificationSound.stopRingback(); } catch (_) {}
-    try { notificationSound.playConnected(); } catch (_) {}
-    if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallAnswerV3(f, sd, s);
-    } else {
-      callManager.handleCallAnswerV3(f, sd, s);
-    }
-  }
-
-  void _handleCallRejectV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    try { notificationSound.stopRingtone(); } catch (_) {}
-    try { notificationSound.stopRingback(); } catch (_) {}
-    if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallRejectV3(f, sd, s);
-    } else {
-      callManager.handleCallRejectV3(f, sd, s);
-    }
-  }
-
-  void _handleCallHangupV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    try { notificationSound.stopRingtone(); } catch (_) {}
-    try { notificationSound.stopRingback(); } catch (_) {}
-    if (groupCallManager.currentGroupCall != null) {
-      groupCallManager.handleGroupCallHangupV3(f, sd, s);
-    } else {
-      callManager.handleCallHangupV3(f, sd, s);
-    }
-  }
-
-  // ICE_CANDIDATE: MTV3 enum exists, but no live handler or send-path.
-  // Reserved for a future ICE/NAT-traversal wave.
-  void _handleIceCandidateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    _log.debug('ICE_CANDIDATE V3: not wired yet — drop');
-  }
-
-  void _handleCallRejoinV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    groupCallManager.handleCallRejoinV3(f, sd, s);
-  }
-
-  void _handleCallAudioV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    final engine = _audioEngine;
-    if (engine == null || !engine.isRunning) return;
-    callManager.currentCall?.framesReceived++;
-    engine.playFrame(Uint8List.fromList(f.payload));
-  }
-
-  void _handleCallVideoV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    final session = callManager.currentCall;
-    if (session == null || session.state != CallState.inCall) return;
-    session.videoFramesReceived++;
-    onVideoFrameReceived?.call(Uint8List.fromList(f.payload));
-  }
-
-  void _handleCallGroupAudioV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    // Tree relay
-    groupCallManager.handleGroupCallAudioV3(f, sd, s);
-    // Local mix for playback
-    if (_audioMixer != null) {
-      try {
-        final audio = proto.GroupCallAudio.fromBuffer(f.payload);
-        final senderHex = bytesToHex(Uint8List.fromList(audio.senderNodeId));
-        if (senderHex != identity.userIdHex) {
-          _audioMixer!.addFrame(senderHex, Uint8List.fromList(audio.encryptedAudio));
-        }
-      } catch (e) {
-        _log.debug('Group audio V3 parse failed: $e');
-      }
-    }
-  }
-
-  void _handleCallGroupVideoV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    // Tree relay
-    groupCallManager.handleGroupCallVideoV3(f, sd, s);
-    // Local decode for display
-    if (_groupVideoReceiver != null) {
-      try {
-        final video = proto.GroupCallVideo.fromBuffer(f.payload);
-        final senderHex = bytesToHex(Uint8List.fromList(video.senderNodeId));
-        if (senderHex != identity.userIdHex) {
-          _groupVideoReceiver!.addFrame(senderHex, Uint8List.fromList(video.videoFrameData));
-        }
-      } catch (e) {
-        _log.debug('Group video V3 parse failed: $e');
-      }
-    }
-  }
-
-  void _handleCallGroupLeaveV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    groupCallManager.handleGroupCallLeaveV3(f, sd, s);
-  }
-
-  void _handleCallGroupKeyRotateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    // V3-Pipeline liefert frame.payload bereits klartext.
-    groupCallManager.handleGroupCallKeyRotateV3(f, sd, s);
-  }
-
-  void _handleCallRttPingV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    groupCallManager.handleCallRttPingV3(f, sd, s);
-  }
-
-  void _handleCallRttPongV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    groupCallManager.handleCallRttPongV3(f, sd, s);
-  }
-
-  void _handleCallTreeUpdateV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {
-    groupCallManager.handleCallTreeUpdateV3(f, sd, s);
-  }
-  // §10.5 In-Call Collaboration (planned, not implemented in v3.x).
-  void _handleWhiteboardStrokeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleWhiteboardPageV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleFileExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleClipboardExchangeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleScreenShareFrameV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleCallChatV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-  void _handleRemoteControlInputV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
 
   // C4 — Recovery / Identity / Profile / CR / Groups / Channels / DHT /
   //       Fragments / Peer-Store / Chat-Config / Routing / Hole-Punch /
@@ -15290,88 +12323,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
 
     onStateChanged?.call();
   }
-  // §9.3.1 Bad Badge Reporting (moderation Phase 2, not yet implemented).
-  void _handleChannelBadBadgeReportV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
-
-  /// V3-direct handler for MTV3_CHANNEL_JOIN_REQUEST (Wave 2B.3, §10.2).
-  /// Owner-bound AppFrame; payload is the `ChannelJoinRequest` proto
-  /// already decrypted+authenticated by the V3 receive pipeline.
-  void _handleChannelJoinRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    _handleChannelJoinRequest(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
-    );
-  }
-
-  /// V3-direct handler for MTV3_CHANNEL_REPORT (Wave 2B.3, §10.2). No
-  /// active V3 sender today (reportChannel mutates local state only) —
-  /// handler in place so future moderator-fanout can land without a
-  /// silent drop. Payload is the `ChannelReportMsg` proto already
-  /// decrypted+authenticated by the V3 receive pipeline.
-  void _handleChannelReportV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    _handleIncomingChannelReport(
-      Uint8List.fromList(frame.payload),
-      Uint8List.fromList(frame.senderUserId),
-    );
-  }
-
-  /// V3-direct InfraFrame handler for MTV3_CHANNEL_INDEX_EXCHANGE (Wave
-  /// 2B.3, §10.2). Gossip-style channel-index distribution to non-contact
-  /// peers; payload is untrusted by design — handler just merges entries
-  /// into `_channelIndex`. No KEM-decap and no inner User-Sig (public
-  /// gossip on the InfraFrame path); the outer Device-Sig is the only
-  /// authenticator and is verified upstream by the V3 receive pipeline.
+  // Moderation V3 handlers — delegated to ChannelModerationService.
   void handleIncomingChannelIndexExchangeInfra(
     proto.InfrastructureFrameV3 frame,
     Uint8List senderDeviceId,
     InternetAddress sourceAddr,
     int sourcePort,
     SenderIdentitySnapshot snapshot,
-  ) {
-    _handleChannelIndexExchange(Uint8List.fromList(frame.payload));
-  }
-  /// V3-direct dispatcher for MTV3_CHANNEL_JURY_VOTE. The wire-type is
-  /// overloaded by the V3 sender (cleona_service Z.~5023) — it carries
-  /// either a `JuryRequestMsg` (initiator → juror, "you've been selected")
-  /// or a `JuryVoteMsg` (juror → initiator, "here's my vote"). Both
-  /// proto-bodies share the leading `juryId` field, so we early-parse as
-  /// `JuryVoteMsg` and discriminate by initiator-side state: if we hold an
-  /// `_activeSessions[juryId]` entry, this incoming frame is a vote-back
-  /// for that session; otherwise it's a fresh request to participate.
-  void _handleChannelJuryVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final payload = Uint8List.fromList(frame.payload);
-      final senderUserId = Uint8List.fromList(frame.senderUserId);
-      // Try parsing as JuryVoteMsg first (vote-back from juror to initiator).
-      // If we hold an active session for this juryId, it's a vote; otherwise
-      // parse as JuryRequestMsg (initiator → juror selection).
-      try {
-        final voteCandidate = proto.JuryVoteMsg.fromBuffer(payload);
-        final juryIdHex = bytesToHex(Uint8List.fromList(voteCandidate.juryId));
-        if (_activeSessions.containsKey(juryIdHex)) {
-          _handleIncomingJuryVote(payload, senderUserId);
-          return;
-        }
-      } catch (_) {
-        // Not a valid JuryVoteMsg — fall through to JuryRequestMsg parse
-      }
-      _handleIncomingJuryRequest(payload, senderUserId);
-    } catch (e) {
-      _log.warn('_handleChannelJuryVoteV3: dispatch fail: $e '
-          '(sender=${_hexShort(Uint8List.fromList(frame.senderUserId))})');
-    }
-  }
-
-  /// V3-direct handler for MTV3_CHANNEL_MOD_DECISION (jury verdict
-  /// broadcast). Payload is the `JuryResultMsg` proto already
-  /// decrypted+authenticated by the V3 receive pipeline. The handler is
-  /// sender-agnostic (only updates local state from the result tally), so
-  /// no senderUserId is forwarded.
-  void _handleChannelModDecisionV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    _handleIncomingJuryResult(Uint8List.fromList(frame.payload));
-  }
-  // §9.3.1a Subscribe Probe (moderation reachability check, not yet implemented).
-  void _handleChannelSubscribeProbeV3(proto.ApplicationFrameV3 f, Uint8List sd, SenderIdentitySnapshot s) {}
+  ) => _moderation.handleChannelIndexExchangeInfra(frame, senderDeviceId, sourceAddr, sourcePort, snapshot);
   // Wave 2B.3: PEER_LIST_*, DHT_*, FRAGMENT_*, PEER_STORE_* dead-stub
   // declarations removed. PEER_LIST_*/DHT_* are §2.3.5 Infrastructure types
   // dispatched in cleona_node.dart's `_dispatchInfrastructureFrameLocal`.
@@ -16063,529 +13022,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
       _log.error('DEVICE_REVOKED processing failed: $e');
     }
   }
-  /// Handle incoming CALENDAR_INVITE — V3-direct.
-  void _handleCalendarInviteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final invite = proto.CalendarInviteMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final eventIdHex = bytesToHex(Uint8List.fromList(invite.eventId));
-
-      // Create local calendar event from invite
-      final event = CalendarEvent(
-        eventId: eventIdHex,
-        identityId: identity.userIdHex,
-        title: invite.title,
-        description: invite.description.isNotEmpty ? invite.description : null,
-        location: invite.location.isNotEmpty ? invite.location : null,
-        startTime: invite.startTime.toInt(),
-        endTime: invite.endTime.toInt(),
-        allDay: invite.allDay,
-        timeZone: invite.timeZone.isNotEmpty ? invite.timeZone : 'UTC',
-        recurrenceRule: invite.recurrenceRule.isNotEmpty ? invite.recurrenceRule : null,
-        hasCall: invite.hasCall,
-        groupId: invite.groupId.isNotEmpty ? bytesToHex(Uint8List.fromList(invite.groupId)) : null,
-        category: EventCategory.values[invite.category.value.clamp(0, EventCategory.values.length - 1)],
-        reminders: invite.reminders.map((r) => r.minutesBefore).toList(),
-        createdBy: senderHex,
-      );
-      calendarManager.createEvent(event);
-
-      // Add system message to group chat if it's a group event
-      if (event.groupId != null && conversations.containsKey(event.groupId)) {
-        final senderName = _contacts[senderHex]?.displayName ?? invite.createdByName;
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName hat einen Termin erstellt: ${event.title}',
-          timestamp: DateTime.now(),
-          type: UiMessageType.calendarInvite,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('Received calendar invite: ${event.title} from ${senderHex.substring(0, 8)}');
-      onCalendarInviteReceived?.call(senderHex, eventIdHex, event.title);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handleCalendarInviteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  /// Handle incoming CALENDAR_RSVP from a group event participant — V3-direct.
-  void _handleCalendarRsvpV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final rsvp = proto.CalendarRsvpMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final eventIdHex = bytesToHex(Uint8List.fromList(rsvp.eventId));
-
-      final status = RsvpStatus.values[rsvp.response.value.clamp(0, RsvpStatus.values.length - 1)];
-      calendarManager.setRsvp(eventIdHex, senderHex, status);
-
-      // System message in group chat
-      final event = calendarManager.events[eventIdHex];
-      if (event?.groupId != null && conversations.containsKey(event!.groupId)) {
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        final statusText = switch (status) {
-          RsvpStatus.accepted => 'hat zugesagt',
-          RsvpStatus.declined => 'hat abgesagt',
-          RsvpStatus.tentative => 'hat vorläufig zugesagt',
-          RsvpStatus.proposeNewTime => 'schlägt eine andere Zeit vor',
-        };
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName $statusText',
-          timestamp: DateTime.now(),
-          type: UiMessageType.calendarRsvp,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('RSVP for $eventIdHex from ${senderHex.substring(0, 8)}: $status');
-      onCalendarRsvpReceived?.call(eventIdHex, senderHex, status);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handleCalendarRsvpV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  /// Handle incoming CALENDAR_UPDATE from the event creator — V3-direct.
-  void _handleCalendarUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final update = proto.CalendarUpdateMsg.fromBuffer(frame.payload);
-      final eventIdHex = bytesToHex(Uint8List.fromList(update.eventId));
-
-      final event = calendarManager.events[eventIdHex];
-      if (event == null) {
-        _log.debug('CALENDAR_UPDATE for unknown event $eventIdHex');
-        return;
-      }
-
-      calendarManager.updateEvent(eventIdHex,
-        title: update.title.isNotEmpty ? update.title : null,
-        description: update.description.isNotEmpty ? update.description : null,
-        location: update.location.isNotEmpty ? update.location : null,
-        startTime: update.startTime.toInt() > 0 ? update.startTime.toInt() : null,
-        endTime: update.endTime.toInt() > 0 ? update.endTime.toInt() : null,
-        allDay: update.allDay,
-        hasCall: update.hasCall,
-        cancelled: update.cancelled,
-        reminders: update.reminders.isNotEmpty
-            ? update.reminders.map((r) => r.minutesBefore).toList()
-            : null,
-      );
-
-      if (event.groupId != null && conversations.containsKey(event.groupId)) {
-        final action = update.cancelled ? 'hat den Termin abgesagt' : 'hat den Termin geändert';
-        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName $action: ${event.title}',
-          timestamp: DateTime.now(),
-          type: UiMessageType.calendarUpdate,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      _log.info('Calendar event updated: $eventIdHex');
-      onCalendarEventUpdated?.call(eventIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handleCalendarUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  /// Handle incoming CALENDAR_DELETE from the event creator — V3-direct.
-  void _handleCalendarDeleteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final del = proto.CalendarDeleteMsg.fromBuffer(frame.payload);
-      final eventIdHex = bytesToHex(Uint8List.fromList(del.eventId));
-
-      final event = calendarManager.events[eventIdHex];
-      if (event != null && event.groupId != null) {
-        final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-        final senderName = _contacts[senderHex]?.displayName ?? senderHex.substring(0, 8);
-        _addMessageToConversation(event.groupId!, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: event.groupId!,
-          senderNodeIdHex: '',
-          text: '$senderName hat den Termin gelöscht: ${event.title}',
-          timestamp: DateTime.now(),
-          type: UiMessageType.calendarDelete,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-        ), isGroup: true);
-      }
-
-      calendarManager.deleteEvent(eventIdHex);
-      _log.info('Calendar event deleted: $eventIdHex');
-      onCalendarEventUpdated?.call(eventIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handleCalendarDeleteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  /// Handle incoming FREE_BUSY_REQUEST — auto-respond with filtered availability. V3-direct.
-  Future<void> _handleFreeBusyRequestV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) async {
-    try {
-      final req = proto.FreeBusyRequestMsg.fromBuffer(frame.payload);
-      final querierHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final requestIdBytes = Uint8List.fromList(req.requestId);
-
-      // Only respond to accepted contacts (KEX Gate already filtered, but double-check)
-      if (_contacts[querierHex]?.status != 'accepted') {
-        _log.debug('FREE_BUSY_REQUEST from non-contact ${querierHex.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      // Generate response — cross-identity merge handled by IPC daemon layer
-      final blocks = calendarManager.generateFreeBusyResponse(
-        queryStart: req.queryStart.toInt(),
-        queryEnd: req.queryEnd.toInt(),
-        querierNodeIdHex: querierHex,
-      );
-
-      // Build response proto
-      final response = proto.FreeBusyResponseMsg()
-        ..requestId = requestIdBytes;
-      for (final block in blocks) {
-        response.blocks.add(proto.FreeBusyBlock()
-          ..start = Int64(block.start)
-          ..end = Int64(block.end)
-          ..level = proto.FreeBusyLevel.valueOf(block.level.index) ?? proto.FreeBusyLevel.FB_TIME_ONLY
-          ..title = block.title ?? ''
-          ..location = block.location ?? '');
-      }
-
-      // Send response
-      await _sendEncryptedPayload(
-        Uint8List.fromList(frame.senderUserId),
-        proto.MessageTypeV3.MTV3_FREE_BUSY_RESPONSE,
-        response.writeToBuffer(),
-      );
-
-      _log.info('Sent FREE_BUSY_RESPONSE to ${querierHex.substring(0, 8)} '
-          '(${blocks.length} blocks)');
-    } catch (e) {
-      _log.warn('_handleFreeBusyRequestV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  /// Handle incoming FREE_BUSY_RESPONSE — V3-direct.
-  void _handleFreeBusyResponseV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final resp = proto.FreeBusyResponseMsg.fromBuffer(frame.payload);
-      final requestIdHex = bytesToHex(Uint8List.fromList(resp.requestId));
-
-      final blocks = <FreeBusyBlockResult>[];
-      for (final b in resp.blocks) {
-        blocks.add(FreeBusyBlockResult(
-          start: b.start.toInt(),
-          end: b.end.toInt(),
-          level: FreeBusyLevel.values[b.level.value.clamp(0, FreeBusyLevel.values.length - 1)],
-          title: b.title.isNotEmpty ? b.title : null,
-          location: b.location.isNotEmpty ? b.location : null,
-        ));
-      }
-
-      // Accumulate responses
-      _freeBusyResults.putIfAbsent(requestIdHex, () => []).addAll(blocks);
-
-      // Notify callback if registered
-      final cb = _freeBusyCallbacks[requestIdHex];
-      if (cb != null) {
-        cb(_freeBusyResults[requestIdHex]!);
-      }
-
-      _log.info('Received FREE_BUSY_RESPONSE for $requestIdHex '
-          '(${blocks.length} blocks)');
-    } catch (e) {
-      _log.warn('_handleFreeBusyResponseV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-  void _handlePollCreateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollCreateMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final poll = _decodePollCreate(msg, senderHex: senderHex);
-
-      // Must reference a known group or channel, otherwise silently drop.
-      if (_pollRecipients(poll.groupId) == null) {
-        _log.debug('POLL_CREATE for unknown entity ${poll.groupId.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      if (pollManager.polls.containsKey(poll.pollId)) {
-        _log.debug('Duplicate POLL_CREATE ${poll.pollId.substring(0, 8)}');
-        return;
-      }
-      pollManager.createPoll(poll);
-
-      if (conversations.containsKey(poll.groupId)) {
-        final name = _contacts[senderHex]?.displayName ?? msg.createdByName;
-        _addMessageToConversation(poll.groupId, UiMessage(
-          id: bytesToHex(SodiumFFI().randomBytes(16)),
-          conversationId: poll.groupId,
-          senderNodeIdHex: senderHex,
-          text: '$name: ${poll.question}',
-          timestamp: DateTime.fromMillisecondsSinceEpoch(poll.createdAt),
-          type: UiMessageType.pollCreate,
-          status: MessageStatus.delivered,
-          isOutgoing: false,
-          pollId: poll.pollId,
-        ), isGroup: _groups.containsKey(poll.groupId), isChannel: _channels.containsKey(poll.groupId));
-      }
-
-      onPollCreated?.call(poll.pollId, poll.groupId, poll.question);
-      onStateChanged?.call();
-      _log.info('Received POLL_CREATE ${poll.pollId.substring(0, 8)} from ${senderHex.substring(0, 8)}');
-    } catch (e) {
-      _log.warn('_handlePollCreateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  void _handlePollVoteV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollVoteMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) {
-        _log.debug('POLL_VOTE for unknown poll $pollIdHex');
-        return;
-      }
-      if (poll.settings.anonymous) {
-        _log.warn('Ignoring non-anonymous POLL_VOTE on anonymous poll $pollIdHex');
-        return;
-      }
-      final record = _decodePollVote(msg, voterIdHex: senderHex, anonymous: false);
-      if (pollManager.recordVote(record)) {
-        onPollTallyUpdated?.call(pollIdHex);
-        onStateChanged?.call();
-
-        // Channel mode: creator re-broadcasts a snapshot so subscribers see totals.
-        if (_channels.containsKey(poll.groupId) &&
-            poll.createdByHex == identity.userIdHex) {
-          _broadcastPollSnapshot(poll);
-        }
-      }
-    } catch (e) {
-      _log.warn('_handlePollVoteV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  void _handlePollVoteAnonymousV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollVoteAnonymousMsg.fromBuffer(frame.payload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-      if (!poll.settings.anonymous) {
-        _log.warn('POLL_VOTE_ANONYMOUS for non-anonymous poll, dropping');
-        return;
-      }
-
-      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
-      final keyImage = Uint8List.fromList(msg.keyImage);
-      final keyImageHex = bytesToHex(keyImage);
-      final payload = Uint8List.fromList(msg.encryptedChoice);
-
-      // Context domain-separates polls so the same voter can participate in
-      // multiple anonymous polls without linkage across them.
-      final context = hexToBytes(pollIdHex);
-      final valid = LinkableRingSignature.verify(
-        message: payload,
-        context: context,
-        keyImage: keyImage,
-        ringMembers: ring,
-        signature: Uint8List.fromList(msg.ringSignature),
-      );
-      if (!valid) {
-        _log.warn('Ring signature invalid for poll $pollIdHex, dropping');
-        return;
-      }
-
-      final seen = _anonymousKeyImages.putIfAbsent(pollIdHex, () => {});
-      if (seen.contains(keyImageHex) && !poll.settings.allowVoteChange) {
-        _log.debug('Duplicate key image for $pollIdHex, dropping');
-        return;
-      }
-      seen.add(keyImageHex);
-
-      final voteMsg = proto.PollVoteMsg.fromBuffer(payload);
-      final record = _decodePollVote(voteMsg, voterIdHex: keyImageHex, anonymous: true);
-      // Override voter identifiers so UI never surfaces identity.
-      record.voterName = '';
-      pollManager.recordVote(PollVoteRecord(
-        pollId: record.pollId,
-        voterIdHex: keyImageHex,
-        voterName: '',
-        selectedOptions: record.selectedOptions,
-        dateResponses: record.dateResponses,
-        scaleValue: record.scaleValue,
-        freeText: record.freeText,
-        votedAt: record.votedAt,
-        anonymous: true,
-      ));
-      onPollTallyUpdated?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handlePollVoteAnonymousV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  void _handlePollUpdateV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollUpdateMsg.fromBuffer(frame.payload);
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      // Permission: creator or group/channel admin/owner.
-      final group = _groups[poll.groupId];
-      final channel = _channels[poll.groupId];
-      final role = group?.members[senderHex]?.role ?? channel?.members[senderHex]?.role;
-      final isCreator = senderHex == poll.createdByHex;
-      final isAdmin = role == 'owner' || role == 'admin';
-      if (!isCreator && !isAdmin) {
-        _log.warn('POLL_UPDATE from non-privileged ${senderHex.substring(0, 8)}, ignoring');
-        return;
-      }
-
-      switch (msg.action) {
-        case proto.PollAction.POLL_ACTION_CLOSE:
-          pollManager.closePoll(pollIdHex);
-          break;
-        case proto.PollAction.POLL_ACTION_REOPEN:
-          pollManager.reopenPoll(pollIdHex);
-          break;
-        case proto.PollAction.POLL_ACTION_ADD_OPTIONS:
-          pollManager.addOptions(
-              pollIdHex,
-              msg.addedOptions
-                  .map((o) => PollOption(
-                        optionId: -1,
-                        label: o.label,
-                        dateStart: o.dateStart.toInt() == 0 ? null : o.dateStart.toInt(),
-                        dateEnd: o.dateEnd.toInt() == 0 ? null : o.dateEnd.toInt(),
-                      ))
-                  .toList());
-          break;
-        case proto.PollAction.POLL_ACTION_REMOVE_OPTIONS:
-          pollManager.removeOptions(pollIdHex, msg.removedOptions.toList());
-          break;
-        case proto.PollAction.POLL_ACTION_EXTEND_DEADLINE:
-          pollManager.extendDeadline(pollIdHex, msg.newDeadline.toInt());
-          break;
-        case proto.PollAction.POLL_ACTION_DELETE:
-          if (SystemChannels.isSystemChannel(poll.groupId)) {
-            final conv = conversations[poll.groupId];
-            conv?.messages.removeWhere((m) => m.pollId == pollIdHex);
-          }
-          pollManager.deletePoll(pollIdHex);
-          _saveConversations();
-          break;
-        default:
-          break;
-      }
-      onPollStateChanged?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handlePollUpdateV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  void _handlePollSnapshotV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollSnapshotMsg.fromBuffer(frame.payload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      final senderHex = bytesToHex(Uint8List.fromList(frame.senderUserId));
-      // Only the creator may publish authoritative snapshots.
-      if (senderHex != poll.createdByHex) {
-        _log.warn('POLL_SNAPSHOT from non-creator, ignoring');
-        return;
-      }
-
-      final optionCounts = <int, int>{};
-      final dateCounts = <int, Map<DateAvailability, int>>{};
-      for (final oc in msg.optionCounts) {
-        if (oc.yesCount + oc.maybeCount + oc.noCount > 0) {
-          dateCounts[oc.optionId] = {
-            DateAvailability.yes: oc.yesCount,
-            DateAvailability.maybe: oc.maybeCount,
-            DateAvailability.no: oc.noCount,
-          };
-        } else {
-          optionCounts[oc.optionId] = oc.count;
-        }
-      }
-
-      poll.cachedSnapshot = PollSnapshotCache(
-        pollId: pollIdHex,
-        totalVotes: msg.totalVotes,
-        optionCounts: optionCounts,
-        dateCounts: dateCounts,
-        scaleAverage: msg.scaleAverage,
-        scaleCount: msg.scaleCount,
-        closed: msg.closed,
-        snapshotAt: msg.snapshotAt.toInt(),
-      );
-      if (msg.closed && !poll.closed) poll.closed = true;
-      poll.updatedAt = DateTime.now().millisecondsSinceEpoch;
-      pollManager.save();
-
-      onPollTallyUpdated?.call(pollIdHex);
-      onStateChanged?.call();
-    } catch (e) {
-      _log.warn('_handlePollSnapshotV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
-
-  void _handlePollRevokeV3(proto.ApplicationFrameV3 frame, Uint8List senderDeviceId, SenderIdentitySnapshot snapshot) {
-    try {
-      final msg = proto.PollVoteRevokeMsg.fromBuffer(frame.payload);
-      final pollIdHex = bytesToHex(Uint8List.fromList(msg.pollId));
-      final poll = pollManager.polls[pollIdHex];
-      if (poll == null) return;
-
-      final ring = msg.ringMembers.map((e) => Uint8List.fromList(e)).toList();
-      final keyImage = Uint8List.fromList(msg.keyImage);
-      final keyImageHex = bytesToHex(keyImage);
-      final context = hexToBytes(pollIdHex);
-      final marker = Uint8List.fromList('revoke'.codeUnits);
-      final valid = LinkableRingSignature.verify(
-        message: marker,
-        context: context,
-        keyImage: keyImage,
-        ringMembers: ring,
-        signature: Uint8List.fromList(msg.ringSignature),
-      );
-      if (!valid) {
-        _log.warn('Revoke signature invalid for poll $pollIdHex, dropping');
-        return;
-      }
-      if (pollManager.revokeAnonymousVote(pollIdHex, keyImageHex)) {
-        _anonymousKeyImages[pollIdHex]?.remove(keyImageHex);
-        onPollTallyUpdated?.call(pollIdHex);
-        onStateChanged?.call();
-      }
-    } catch (e) {
-      _log.warn('_handlePollRevokeV3: $e (sender=${_hexShort(Uint8List.fromList(frame.senderUserId))} device=${_hexShort(senderDeviceId)})');
-    }
-  }
   // ──────────────────────────── V3 Helpers ────────────────────────────
 
   /// Constant-time byte equality (for userId compare in sender-override path).
@@ -16607,43 +13043,6 @@ class CleonaService implements ICleonaService, ContactSeedDataSource {
     }
     return sb.toString();
   }
-}
-
-/// Internal state for an active jury session we initiated.
-class _JurySession {
-  final String juryId;
-  final String reportId;
-  final String channelIdHex;
-  final ReportCategory category;
-  final List<String> jurorNodeIds;
-  final bool isPlausibilityJury;
-  final DateTime createdAt;
-  final int epochDay;
-  final int juryRound;
-  final Uint8List eligibilitySnapshotHash;
-  final Map<String, JuryVoteResult> votes = {};
-  final Map<String, _JurorVerdictSigData> verdictSigs = {};
-  bool isComplete = false;
-
-  _JurySession({
-    required this.juryId,
-    required this.reportId,
-    required this.channelIdHex,
-    required this.category,
-    required this.jurorNodeIds,
-    this.isPlausibilityJury = false,
-    required this.createdAt,
-    required this.epochDay,
-    this.juryRound = 0,
-    required this.eligibilitySnapshotHash,
-  });
-}
-
-class _JurorVerdictSigData {
-  final Uint8List sigEd25519;
-  final Uint8List sigMlDsa;
-  final int vote;
-  _JurorVerdictSigData({required this.sigEd25519, required this.sigMlDsa, required this.vote});
 }
 
 /// §2.2.4: V3-direct adapter (Welle 2A). IdentityPublisher hands us a

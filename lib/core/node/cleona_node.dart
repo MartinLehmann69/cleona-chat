@@ -3277,6 +3277,7 @@ class CleonaNode {
     final routes = dvRouting.routesTo(destHex);
     var attempts = 0;
     const maxRouteAttempts = 3;
+    var directSentBestEffort = false;
     for (final route in routes) {
       if (attempts >= maxRouteAttempts) break;
       if (!route.isAlive) continue;
@@ -3293,8 +3294,28 @@ class CleonaNode {
           'via hop=${bytesToHex(hopId).substring(0, 8)} '
           '${route.isDirect ? "direct" : "relay"} cost=${route.cost}');
       final ok = await _sendV3ViaHop(packet, hopId);
-      if (ok) return true;
+      if (ok) {
+        // §4.6.2 Stale-direct guard: a direct route's kernel-accept is NOT
+        // proof of delivery — the peer may have switched networks (WiFi→
+        // Mobilfunk). Only trust it if we received inbound traffic from the
+        // destination within 30s. Otherwise mark as best-effort and continue
+        // trying relay routes (which go through nodes with fresh addresses).
+        if (route.isDirect) {
+          final destPeer = routingTable.getPeer(deviceId);
+          final inbound = destPeer?.freshestInboundAt;
+          if (inbound == null ||
+              DateTime.now().difference(inbound) > const Duration(seconds: 30)) {
+            _log.info('sendToDevice ${destHex.substring(0, 8)}: direct route '
+                'sent but no recent inbound (${inbound != null ? "${DateTime.now().difference(inbound).inSeconds}s ago" : "never"}) '
+                '— continuing cascade');
+            directSentBestEffort = true;
+            continue;
+          }
+        }
+        return true;
+      }
     }
+    if (directSentBestEffort) return true;
 
     // Confirmed DV neighbor: fire-and-forget direct send, but do NOT stop
     // the cascade. "Confirmed" means we once received a hopCount==0 packet
@@ -3936,7 +3957,7 @@ class CleonaNode {
           existing.addresses.add(PeerAddress(
             ip: ip,
             port: port,
-            type: _classifyAddressType(ip),
+            type: PeerAddress.classifyIp(ip),
           ));
         } else {
           for (final addr in existing.addresses) {
@@ -3969,7 +3990,7 @@ class CleonaNode {
         peer.addresses.add(PeerAddress(
           ip: ip,
           port: port,
-          type: _classifyAddressType(ip),
+          type: PeerAddress.classifyIp(ip),
         ));
       }
       routingTable.addPeer(peer);
@@ -5150,7 +5171,6 @@ class CleonaNode {
     _saveRoutingTable();
     _saveDvRouting();
     _saveConfirmedPeers();
-    _saveConfirmedPeers();
   }
 
   void _debouncedNetworkStateSave() {
@@ -5400,7 +5420,7 @@ class CleonaNode {
       final addr = PeerAddress(
         ip: ip,
         port: port,
-        type: _classifyAddressType(ip),
+        type: PeerAddress.classifyIp(ip),
       );
       addr.recordReceived();
       final key = '$ip:$port';
@@ -5885,11 +5905,6 @@ bool _isCgnat(String ip) {
     if (second >= 64 && second <= 127) return true;
   }
   return ip.startsWith('192.0.0.');
-}
-
-PeerAddressType _classifyAddressType(String ip) {
-  if (ip.contains(':')) return PeerAddressType.ipv6Global;
-  return _isPrivateIp(ip) ? PeerAddressType.ipv4Private : PeerAddressType.ipv4Public;
 }
 
 /// Check if two private IPs are in the same /24 subnet.

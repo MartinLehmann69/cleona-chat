@@ -46,6 +46,7 @@ class CalendarManager {
         }
         _log.info('Loaded ${events.length} calendar events');
       }
+      _loaded = true;
     } catch (e) {
       _log.warn('Failed to load calendar events: $e');
     }
@@ -58,8 +59,6 @@ class CalendarManager {
     } catch (e) {
       _log.warn('Failed to load calendar settings: $e');
     }
-
-    _loaded = true;
   }
 
   void save() {

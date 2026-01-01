@@ -437,21 +437,67 @@ class FtpsTransport extends ArchiveTransport {
   @override
   Future<void> disconnect() async {}
 
+  /// Create a temporary netrc file for curl authentication.
+  /// Returns null if no credentials are configured.
+  /// Caller MUST delete the returned file (and its parent directory) in a
+  /// finally block via [_cleanupNetrc].
+  File? _createNetrcFile() {
+    if (_username == null) return null;
+    final tmpDir = Directory.systemTemp.createTempSync('cleona_ftps_');
+    final netrcFile = File('${tmpDir.path}/.netrc');
+    netrcFile.writeAsStringSync(
+      'machine $_host login $_username password ${_password ?? ''}\n',
+    );
+    // Restrict file permissions on platforms that support chmod/icacls.
+    if (Platform.isLinux || Platform.isMacOS) {
+      Process.runSync('chmod', ['600', netrcFile.path]);
+    } else if (Platform.isWindows) {
+      // icacls: grant only current user full control, remove inherited perms.
+      Process.runSync('icacls', [netrcFile.path, '/inheritance:r',
+          '/grant:r', '%USERNAME%:F']);
+    }
+    // Android/iOS: rely on systemTemp directory permissions (app-private).
+    return netrcFile;
+  }
+
+  /// Safely remove a netrc file and its parent temp directory.
+  void _cleanupNetrc(File? netrcFile) {
+    if (netrcFile == null) return;
+    try {
+      final parentDir = netrcFile.parent;
+      if (netrcFile.existsSync()) netrcFile.deleteSync();
+      if (parentDir.existsSync()) parentDir.deleteSync();
+    } catch (_) {
+      // Swallow: must not mask the original exception in a finally block.
+    }
+  }
+
+  /// Build curl args with --netrc-file (if credentials exist) prepended.
+  List<String> _curlArgs(File? netrcFile, List<String> rest) {
+    return [
+      if (netrcFile != null) ...['--netrc-file', netrcFile.path],
+      ...rest,
+    ];
+  }
+
   @override
   Future<bool> testConnectivity({Duration? timeout}) async {
     final effectiveTimeout = timeout ?? const Duration(seconds: 5);
+    File? netrc;
     try {
-      final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
+      netrc = _createNetrcFile();
       final result = await Process.run(
         'curl',
-        ['--ssl-reqd', '--list-only', '--connect-timeout', '3',
-         'ftps://$userPart$_host:$_port/$_basePath'],
+        _curlArgs(netrc, ['--ssl-reqd', '--list-only', '--connect-timeout', '3',
+         'ftps://$_host:$_port/$_basePath']),
       ).timeout(effectiveTimeout);
       return result.exitCode == 0;
     } on TimeoutException {
       return false;
     } catch (_) {
       return false;
+    } finally {
+      _cleanupNetrc(netrc);
     }
   }
 
@@ -462,15 +508,16 @@ class FtpsTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     final tmpFile = File('${Directory.systemTemp.path}/cleona_ftps_upload_${DateTime.now().millisecondsSinceEpoch}');
+    File? netrc;
     try {
       await tmpFile.writeAsBytes(data);
       onProgress?.call(0, data.length);
 
-      final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
+      netrc = _createNetrcFile();
       final result = await Process.run(
         'curl',
-        ['--ssl-reqd', '-T', tmpFile.path, '--ftp-create-dirs',
-         'ftps://$userPart$_host:$_port/$_basePath$remotePath'],
+        _curlArgs(netrc, ['--ssl-reqd', '-T', tmpFile.path, '--ftp-create-dirs',
+         'ftps://$_host:$_port/$_basePath$remotePath']),
       );
 
       if (result.exitCode != 0) {
@@ -479,6 +526,7 @@ class FtpsTransport extends ArchiveTransport {
       onProgress?.call(data.length, data.length);
     } finally {
       if (tmpFile.existsSync()) tmpFile.deleteSync();
+      _cleanupNetrc(netrc);
     }
   }
 
@@ -488,12 +536,13 @@ class FtpsTransport extends ArchiveTransport {
     ProgressCallback? onProgress,
   }) async {
     final tmpFile = File('${Directory.systemTemp.path}/cleona_ftps_download_${DateTime.now().millisecondsSinceEpoch}');
+    File? netrc;
     try {
-      final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
+      netrc = _createNetrcFile();
       final result = await Process.run(
         'curl',
-        ['--ssl-reqd', '-o', tmpFile.path,
-         'ftps://$userPart$_host:$_port/$_basePath$remotePath'],
+        _curlArgs(netrc, ['--ssl-reqd', '-o', tmpFile.path,
+         'ftps://$_host:$_port/$_basePath$remotePath']),
       );
 
       if (result.exitCode != 0 || !tmpFile.existsSync()) {
@@ -505,50 +554,71 @@ class FtpsTransport extends ArchiveTransport {
       return Uint8List.fromList(data);
     } finally {
       if (tmpFile.existsSync()) tmpFile.deleteSync();
+      _cleanupNetrc(netrc);
     }
   }
 
   @override
   Future<void> createDirectory(String remotePath) async {
-    final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
-    await Process.run(
-      'curl',
-      ['--ssl-reqd', '-Q', 'MKD $remotePath',
-       'ftps://$userPart$_host:$_port/$_basePath'],
-    );
+    File? netrc;
+    try {
+      netrc = _createNetrcFile();
+      await Process.run(
+        'curl',
+        _curlArgs(netrc, ['--ssl-reqd', '-Q', 'MKD $remotePath',
+         'ftps://$_host:$_port/$_basePath']),
+      );
+    } finally {
+      _cleanupNetrc(netrc);
+    }
   }
 
   @override
   Future<bool> fileExists(String remotePath) async {
-    final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
-    final result = await Process.run(
-      'curl',
-      ['--ssl-reqd', '--head', '--silent',
-       'ftps://$userPart$_host:$_port/$_basePath$remotePath'],
-    );
-    return result.exitCode == 0;
+    File? netrc;
+    try {
+      netrc = _createNetrcFile();
+      final result = await Process.run(
+        'curl',
+        _curlArgs(netrc, ['--ssl-reqd', '--head', '--silent',
+         'ftps://$_host:$_port/$_basePath$remotePath']),
+      );
+      return result.exitCode == 0;
+    } finally {
+      _cleanupNetrc(netrc);
+    }
   }
 
   @override
   Future<void> deleteFile(String remotePath) async {
-    final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
-    await Process.run(
-      'curl',
-      ['--ssl-reqd', '-Q', 'DELE $remotePath',
-       'ftps://$userPart$_host:$_port/$_basePath'],
-    );
+    File? netrc;
+    try {
+      netrc = _createNetrcFile();
+      await Process.run(
+        'curl',
+        _curlArgs(netrc, ['--ssl-reqd', '-Q', 'DELE $remotePath',
+         'ftps://$_host:$_port/$_basePath']),
+      );
+    } finally {
+      _cleanupNetrc(netrc);
+    }
   }
 
   @override
   Future<List<String>> listDirectory(String remotePath) async {
-    final userPart = _username != null ? '$_username:${_password ?? ''}@' : '';
-    final result = await Process.run(
-      'curl',
-      ['--ssl-reqd', '--list-only',
-       'ftps://$userPart$_host:$_port/$_basePath$remotePath/'],
-    );
-    if (result.exitCode != 0) return [];
-    return (result.stdout as String).split('\n').where((l) => l.trim().isNotEmpty).toList();
+    File? netrc;
+    try {
+      netrc = _createNetrcFile();
+      final result = await Process.run(
+        'curl',
+        _curlArgs(netrc, ['--ssl-reqd', '--list-only',
+         'ftps://$_host:$_port/$_basePath$remotePath/']),
+      );
+      if (result.exitCode != 0) return [];
+      return (result.stdout as String).split('\n').where((l) => l.trim().isNotEmpty).toList();
+    } finally {
+      _cleanupNetrc(netrc);
+    }
   }
 }
 

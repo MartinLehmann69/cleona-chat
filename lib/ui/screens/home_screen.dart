@@ -1939,14 +1939,30 @@ class _IdentityTabBar extends StatelessWidget {
     final identityMgr = IdentityManager();
     final identities = identityMgr.loadIdentities();
     final activeIdentity = identityMgr.getActiveIdentity();
+    final creatingName = appState.creatingIdentityName;
+    // Total items: existing identities + 1 placeholder if creating.
+    final extraCount = creatingName != null ? 1 : 0;
     return Row(
       children: [
         Expanded(
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 8),
-            itemCount: identities.length,
+            itemCount: identities.length + extraCount,
             itemBuilder: (context, index) {
+              // Placeholder "creating..." chip at the end
+              if (index >= identities.length) {
+                final brightness = Theme.of(context).brightness;
+                final skinColor = Skins.byId(activeIdentity?.skinId)
+                    .effectiveColor(brightness);
+                return Padding(
+                  padding: const EdgeInsets.only(right: 2),
+                  child: _IdentityCreatingTab(
+                    name: creatingName!,
+                    skinColor: skinColor,
+                  ),
+                );
+              }
               final identity = identities[index];
               final isActive = activeIdentity?.id == identity.id;
 
@@ -1975,7 +1991,7 @@ class _IdentityTabBar extends StatelessWidget {
           ),
         ),
         IconButton(
-          onPressed: () => _showCreateDialog(context),
+          onPressed: creatingName != null ? null : () => _showCreateDialog(context),
           icon: Icon(
             Skins.byId(IdentityManager().getActiveIdentity()?.skinId).addIdentityIcon,
             color: Skins.byId(IdentityManager().getActiveIdentity()?.skinId)
@@ -2132,6 +2148,76 @@ class _IdentityTab extends StatelessWidget {
             ],
           ),
         ),
+    );
+  }
+}
+
+// ── Identity Creating Placeholder Tab ─────────────────────────────────
+
+/// Shown in [_IdentityTabBar] while PQ keygen is running for a new identity.
+/// Displays a dimmed chip with the identity name and a small spinner so the
+/// user knows that key generation is in progress.
+class _IdentityCreatingTab extends StatelessWidget {
+  final String name;
+  final Color skinColor;
+
+  const _IdentityCreatingTab({
+    required this.name,
+    required this.skinColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
+    final character = theme.character;
+    final isPhotoMode = character.surfaceRenderMode == SurfaceRenderMode.photo;
+    final isSlateMode = character.surfaceRenderMode == SurfaceRenderMode.cssSlate;
+    final overlayShadows = isPhotoMode
+        ? const <Shadow>[
+            Shadow(color: Color(0xE6000000), blurRadius: 2, offset: Offset(0, 1)),
+            Shadow(color: Color(0x99000000), blurRadius: 6, offset: Offset(0, 2)),
+          ]
+        : null;
+    final textColor = (isPhotoMode || isSlateMode)
+        ? Colors.white.withValues(alpha: 0.5)
+        : colorScheme.onSurfaceVariant.withValues(alpha: 0.6);
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(8)),
+        border: Border.all(
+          color: skinColor.withValues(alpha: 0.4),
+          width: 1,
+          strokeAlign: BorderSide.strokeAlignInside,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Spinner instead of static color dot
+          SizedBox(
+            width: 10,
+            height: 10,
+            child: CircularProgressIndicator(
+              strokeWidth: 1.5,
+              color: skinColor.withValues(alpha: 0.7),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Text(
+            name,
+            style: TextStyle(
+              color: textColor,
+              fontWeight: FontWeight.normal,
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+              shadows: overlayShadows,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -42,6 +42,10 @@ CMAKE_TOOLCHAIN="$NDK_DIR/build/cmake/android.toolchain.cmake"
 # 16KB Page-Alignment (Android 15 Requirement)
 PAGE_SIZE_FLAG="-Wl,-z,max-page-size=16384"
 
+# Pin whisper.cpp version — MUST match iOS/macOS scripts to keep struct layout
+# in sync with Dart FFI (whisper_ffi.dart hardcoded offsets).
+WHISPER_VERSION="v1.7.1"
+
 setup_arch() {
     local arch="$1"
     case "$arch" in
@@ -167,8 +171,8 @@ build_libwhisper() {
     local SRC="$BUILD_DIR/whisper.cpp"
 
     if [ ! -d "$SRC" ]; then
-        echo "  Klone whisper.cpp..."
-        git clone --depth 1 https://github.com/ggerganov/whisper.cpp.git "$SRC"
+        echo "  Klone whisper.cpp ($WHISPER_VERSION)..."
+        git clone --depth 1 --branch "$WHISPER_VERSION" https://github.com/ggerganov/whisper.cpp.git "$SRC"
     fi
 
     local BUILD="$SRC/build-android"

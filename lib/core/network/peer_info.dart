@@ -980,6 +980,17 @@ class PeerInfo {
     return result;
   }
 
+  /// Most recent `lastReceivedAt` across all addresses. `null` if no address
+  /// has ever confirmed inbound traffic.
+  DateTime? get freshestInboundAt {
+    DateTime? best;
+    for (final addr in addresses) {
+      final lr = addr.lastReceivedAt;
+      if (lr != null && (best == null || lr.isAfter(best))) best = lr;
+    }
+    return best;
+  }
+
   /// D4 (§4.3 Replicator & lookup diversity): coarse IP-group key for the
   /// subnet-diversity selection in `RoutingTable.findClosestPeers`.
   ///
