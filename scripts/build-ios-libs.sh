@@ -243,7 +243,7 @@ build_liberasurecode() {
     fi
     cd "$src"
     make distclean 2>/dev/null || true
-    [ -f configure ] || ./autogen.sh
+    ./autogen.sh
     CFLAGS="$CFLAGS -Wno-strict-prototypes -Wno-error" \
     ./configure --host="$CONFIGURE_HOST" \
         --prefix="$INSTALL_DIR/ec" \
@@ -264,7 +264,7 @@ build_libopus() {
     fi
     cd "$src"
     make distclean 2>/dev/null || true
-    [ -f configure ] || ./autogen.sh
+    ./autogen.sh
     ./configure --host="$CONFIGURE_HOST" \
         --prefix="$INSTALL_DIR/opus" \
         --enable-static --disable-shared \

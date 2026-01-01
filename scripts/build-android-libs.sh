@@ -98,7 +98,8 @@ build_libsodium() {
     fi
 
     cd "$SRC"
-    [ -f configure ] || ./autogen.sh
+    make distclean 2>/dev/null || true
+    ./autogen.sh
 
     ./configure \
         --host="$CONFIGURE_HOST" \
