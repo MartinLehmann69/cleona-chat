@@ -113,22 +113,27 @@ jobs:
         run: |
           # dart:ffi uses DynamicLibrary.process() which needs symbols in the
           # Runner binary. CocoaPods vendored_frameworks does not reliably link
-          # static .a XCFrameworks. We inject -force_load directly into the
-          # Pods-Runner xcconfigs after pod install.
-          FWDIR="ios/CleonaNative/Frameworks"
+          # static .a XCFrameworks. We inject -force_load flags into the Xcode
+          # project build settings (not xcconfigs — flutter build ipa overwrites those).
+          FWDIR="$(pwd)/ios/CleonaNative/Frameworks"
           FLAGS=""
           for lib in libsodium liboqs libzstd libopus libwhisper libggml; do
             A="$FWDIR/$lib.xcframework/ios-arm64/$lib.a"
             if [ -f "$A" ]; then
-              FLAGS="$FLAGS -force_load \${PODS_ROOT}/../CleonaNative/Frameworks/$lib.xcframework/ios-arm64/$lib.a"
-              echo "  + $lib"
+              FLAGS="$FLAGS -force_load $A"
+              echo "  + $lib ($A)"
             fi
           done
-          for cfg in ios/Pods/Target\ Support\ Files/Pods-Runner/Pods-Runner.*.xcconfig; do
-            echo "" >> "$cfg"
-            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> "$cfg"
-          done
-          echo "Injected force_load into $(ls ios/Pods/Target\ Support\ Files/Pods-Runner/Pods-Runner.*.xcconfig | wc -l) xcconfigs"
+          if [ -n "$FLAGS" ]; then
+            # Inject into Runner.xcodeproj build settings via PlistBuddy
+            PBXPROJ="ios/Runner.xcodeproj/project.pbxproj"
+            # Append to ALL OTHER_LDFLAGS entries in the project file
+            sed -i '' "s|OTHER_LDFLAGS = \"|OTHER_LDFLAGS = \"$FLAGS |g" "$PBXPROJ" 2>/dev/null || true
+            # If no OTHER_LDFLAGS exists, add via xcconfig fallback
+            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> ios/Flutter/Release.xcconfig
+            echo "OTHER_LDFLAGS = \$(inherited) $FLAGS" >> ios/Flutter/Debug.xcconfig
+            echo "Injected force_load for 6 FFI libraries"
+          fi
 
       - name: Install distribution certificate
         env:
