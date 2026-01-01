@@ -28,8 +28,8 @@ EXCLUDE_PATTERN="native_tray\.dart|native_tray_windows\.dart|native_udp_sender\.
 
 # Collect all FFI symbols from Dart code that runs on iOS.
 SYMBOLS=$(grep -rA1 "lookupFunction\|\.lookup<" "$LIB_DIR" --include="*.dart" \
-  | grep -vP "$EXCLUDE_PATTERN" \
-  | grep -oP "'[a-zA-Z_][a-zA-Z0-9_]*'" \
+  | grep -vE "$EXCLUDE_PATTERN" \
+  | grep -oE "'[a-zA-Z_][a-zA-Z0-9_]*'" \
   | tr -d "'" \
   | sort -u)
 
