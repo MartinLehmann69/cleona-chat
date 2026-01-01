@@ -54,8 +54,46 @@ jobs:
       - name: Compile daemon
         run: dart compile exe lib/service_daemon.dart -o build/cleona-daemon-macos
 
-      - name: Compile init_profile
-        run: dart compile exe scripts/init_profile.dart -o build/init-profile
+      - name: Write init_profile helper
+        run: |
+          cat > /tmp/create_profile.dart << 'DART'
+          import 'dart:io';
+          import 'package:cleona/core/crypto/sodium_ffi.dart';
+          import 'package:cleona/core/crypto/oqs_ffi.dart';
+          import 'package:cleona/core/identity/identity_manager.dart';
+          import 'package:cleona/core/node/identity_context.dart';
+          import 'package:cleona/core/crypto/network_secret.dart';
+          Future<void> main() async {
+            SodiumFFI();
+            OqsFFI().init();
+            final home = Platform.environment['HOME']!;
+            final baseDir = '$home/.cleona';
+            Directory(baseDir).createSync(recursive: true);
+            final mgr = IdentityManager(baseDir: baseDir);
+            if (!mgr.hasMasterSeed()) mgr.generateSeedPhrase();
+            final identity = await mgr.createIdentity('Alice');
+            final masterSeed = mgr.loadMasterSeed();
+            final ctx = IdentityContext(
+              profileDir: identity.profileDir,
+              displayName: 'Alice',
+              networkChannel: NetworkSecret.channel.name,
+              hdIndex: identity.hdIndex,
+              masterSeed: masterSeed,
+            );
+            await ctx.initKeys();
+            final ids = mgr.loadIdentities();
+            for (final id in ids) {
+              if (id.id == identity.id) id.nodeIdHex = ctx.userIdHex;
+            }
+            mgr.saveIdentities(ids);
+            mgr.setActiveIdentity(identity);
+            File('$baseDir/last_profile.json').writeAsStringSync(
+              '{"identityId":"${ids.first.id}","profileDir":"${ids.first.profileDir}"}');
+            File('${ids.first.profileDir}/port').writeAsStringSync('8081');
+            print('Profile created at $baseDir');
+            exit(0);
+          }
+          DART
 
       - name: Assemble macOS app bundle
         run: |
@@ -83,10 +121,12 @@ jobs:
           restore-keys: ios-native-libs-
 
       - name: Build iOS native libs
+        continue-on-error: true
         run: ./scripts/build-ios-libs.sh
         timeout-minutes: 45
 
       - name: Place iOS native archives
+        continue-on-error: true
         run: |
           NATIVE_DIR="ios/CleonaNative"
           XCFW="build/ios-frameworks/libcleona_all.xcframework"
@@ -105,9 +145,11 @@ jobs:
           fi
 
       - name: Install CocoaPods
+        continue-on-error: true
         run: cd ios && pod install --repo-update
 
       - name: Build iOS Simulator app
+        continue-on-error: true
         run: |
           flutter build ios --simulator --debug --no-codesign 2>&1 || true
           find build/ios -name "Runner.app" -type d 2>/dev/null
@@ -126,6 +168,7 @@ jobs:
       #  Create demo profile
       # ════════════════════════════════════════════════════════════════
       - name: Make native libs available for init-profile
+        if: always()
         run: |
           sudo mkdir -p /usr/local/lib
           for f in build/macos-libs/arm64/*.dylib; do
@@ -133,16 +176,17 @@ jobs:
           done
 
       - name: Create demo profile
+        if: always()
         run: |
-          PROFILE_DIR="$HOME/.cleona"
-          ./build/init-profile "$PROFILE_DIR" "Alice" 8081
+          DYLD_LIBRARY_PATH=/usr/local/lib dart --packages=.dart_tool/package_config.json /tmp/create_profile.dart
           echo "=== Profile ==="
-          ls -la "$PROFILE_DIR/"
+          ls -la "$HOME/.cleona/"
 
       # ════════════════════════════════════════════════════════════════
       #  macOS Screenshots
       # ════════════════════════════════════════════════════════════════
       - name: Take macOS screenshots
+        if: always()
         run: |
           set +e
           APP="build/macos/Build/Products/Debug/Cleona.app"
@@ -227,6 +271,7 @@ jobs:
       #  iOS Simulator Screenshots
       # ════════════════════════════════════════════════════════════════
       - name: Take iOS screenshots
+        if: always()
         run: |
           set +e
           SCREENSHOTS="build/screenshots/ios"
