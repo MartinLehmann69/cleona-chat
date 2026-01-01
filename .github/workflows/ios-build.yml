@@ -260,6 +260,49 @@ jobs:
           ls -la build/ios/ipa/ 2>/dev/null || echo "no ipa dir"
           find build/ios -name "*.ipa" -o -name "*.xcarchive" 2>/dev/null
 
+      - name: Verify Info.plist privacy keys vs linked frameworks
+        run: |
+          RUNNER=$(find build/ios -path "*/Runner.app/Runner" -not -name "*.plist" -type f 2>/dev/null | head -1)
+          if [ -z "$RUNNER" ]; then
+            echo "::error::Runner binary not found — cannot verify privacy keys"
+            exit 1
+          fi
+
+          PLIST="ios/Runner/Info.plist"
+          LINKED=$(otool -L "$RUNNER" 2>/dev/null || true)
+          echo "=== Linked frameworks ==="
+          echo "$LINKED" | grep '\.framework' | sed 's/^[[:space:]]*/  /'
+          echo ""
+
+          FAIL=0
+          check_key() {
+            local fw="$1" key="$2"
+            if echo "$LINKED" | grep -q "${fw}.framework"; then
+              if grep -q "<key>${key}</key>" "$PLIST"; then
+                echo "OK: ${fw}.framework -> ${key}"
+              else
+                echo "::error::ITMS-90683: ${fw}.framework linked but ${key} missing from Info.plist"
+                FAIL=1
+              fi
+            fi
+          }
+
+          check_key CoreLocation   NSLocationWhenInUseUsageDescription
+          check_key AVFoundation   NSCameraUsageDescription
+          check_key AVFoundation   NSMicrophoneUsageDescription
+          check_key Photos         NSPhotoLibraryUsageDescription
+          check_key CoreNFC        NFCReaderUsageDescription
+          check_key CoreBluetooth  NSBluetoothAlwaysUsageDescription
+          check_key Contacts       NSContactsUsageDescription
+          check_key EventKit       NSCalendarsFullAccessUsageDescription
+          check_key Speech         NSSpeechRecognitionUsageDescription
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "::error::Add missing privacy keys to ios/Runner/Info.plist before uploading"
+            exit 1
+          fi
+          echo "All required privacy keys present for linked frameworks"
+
       - name: Upload to TestFlight
         env:
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -298,7 +341,20 @@ jobs:
           end
           FASTFILE
 
-          IPA_PATH="$IPA" fastlane upload_testflight
+          MAX_RETRIES=3
+          for ATTEMPT in $(seq 1 $MAX_RETRIES); do
+            echo "TestFlight upload attempt $ATTEMPT/$MAX_RETRIES..."
+            if IPA_PATH="$IPA" fastlane upload_testflight; then
+              echo "Upload successful"
+              exit 0
+            fi
+            if [ "$ATTEMPT" -eq "$MAX_RETRIES" ]; then
+              echo "::error::TestFlight upload failed after $MAX_RETRIES attempts"
+              exit 1
+            fi
+            echo "::warning::Upload attempt $ATTEMPT failed (App Store Connect transient error) — retrying in 30s..."
+            sleep 30
+          done
 
       - name: Upload IPA artifact
         if: always()

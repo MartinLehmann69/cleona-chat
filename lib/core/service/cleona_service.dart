@@ -475,7 +475,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.145';
+  static const String kCurrentAppVersion = '3.1.146';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -5105,7 +5105,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
 
-    conv.messages.add(msg);
+    int insertIdx = conv.messages.length;
+    for (int i = conv.messages.length - 1; i >= 0; i--) {
+      if (conv.messages[i].timestamp.compareTo(msg.timestamp) <= 0) {
+        insertIdx = i + 1;
+        break;
+      }
+      if (i == 0) insertIdx = 0;
+    }
+    conv.messages.insert(insertIdx, msg);
     conv.lastActivity = msg.timestamp;
     if (!msg.isOutgoing &&
         !(_isAppResumed && _activeConversationId == conversationId)) {
@@ -9489,7 +9497,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       );
 
       if (conv != null) {
-        conv.messages.add(msg);
+        int insertIdx = conv.messages.length;
+        for (int i = conv.messages.length - 1; i >= 0; i--) {
+          if (conv.messages[i].timestamp.compareTo(msg.timestamp) <= 0) {
+            insertIdx = i + 1;
+            break;
+          }
+          if (i == 0) insertIdx = 0;
+        }
+        conv.messages.insert(insertIdx, msg);
         conv.lastActivity = timestamp;
         _saveConversations();
         onStateChanged?.call();

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
+import 'package:cleona/core/crypto/keyring_service.dart';
 import 'package:cleona/core/crypto/network_secret.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/oqs_ffi.dart';
@@ -881,18 +882,28 @@ class _MultiServiceDaemon {
       File('${config.baseDir}/cleona.ready').writeAsStringSync('$pid');
     } catch (_) { /* non-fatal */ }
 
-    // Socket watchdog: if the IPC socket inode is deleted externally (e.g. by
-    // a test recovery script that rm's *.sock while the daemon holds the fd),
-    // new IPC connections silently fail. Recreate the socket on the same path.
-    if (!Platform.isWindows) {
-      _socketWatchdog = Timer.periodic(const Duration(seconds: 30), (_) {
-        if (!_running || _ipcServer == null) return;
+    // Socket + profile watchdog: periodic integrity check for critical files.
+    // (1) IPC socket: if deleted externally (e.g. by a test script), new IPC
+    //     connections silently fail. Recreate on the same path.
+    // (2) identities.json + master_seed keyring: if the profile directory is
+    //     rm'd while the daemon is running (e.g. E2E cleanup racing against
+    //     systemd Restart=always), the daemon continues from RAM but loses all
+    //     on-disk identity data. On next restart → "Keine Identitaeten". The
+    //     watchdog re-persists from RAM before that restart can happen.
+    _socketWatchdog = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (!_running) return;
+      // (1) Socket watchdog
+      if (!Platform.isWindows && _ipcServer != null) {
         if (!File(socketPath).existsSync()) {
           log.warn('IPC socket deleted externally — recreating');
           _ipcServer!.rebindSocket();
         }
-      });
-    }
+      }
+      // (2) Profile watchdog — only when services are loaded
+      if (_services.isNotEmpty) {
+        _checkProfileIntegrity(mgr, identities);
+      }
+    });
   }
 
   // Boot-window gate read by V3 ApplicationFrame / InfrastructureFrame hooks
@@ -1081,6 +1092,38 @@ class _MultiServiceDaemon {
     }).catchError((e) {
       log.debug('Identity registry DHT publish error: $e');
     });
+  }
+
+  void _checkProfileIntegrity(IdentityManager mgr, List<Identity> identities) {
+    final idFile = File('${config.baseDir}/identities.json');
+    if (!idFile.existsSync()) {
+      log.warn('PROFILE WATCHDOG: identities.json deleted externally — '
+          're-persisting ${identities.length} identities from RAM');
+      try {
+        Directory(config.baseDir).createSync(recursive: true);
+        mgr.saveIdentities(identities);
+        log.info('PROFILE WATCHDOG: identities.json restored');
+      } catch (e) {
+        log.error('PROFILE WATCHDOG: failed to restore identities.json: $e');
+      }
+    }
+
+    if (KeyringService.isInitialized) {
+      final firstCtx = _contexts.values.firstOrNull;
+      if (firstCtx != null && firstCtx.masterSeed != null) {
+        final ks = KeyringService.instance;
+        if (ks.load('master_seed') == null) {
+          log.warn('PROFILE WATCHDOG: master_seed keyring deleted externally — '
+              're-persisting from RAM');
+          try {
+            ks.store('master_seed', firstCtx.masterSeed!);
+            log.info('PROFILE WATCHDOG: master_seed keyring restored');
+          } catch (e) {
+            log.error('PROFILE WATCHDOG: failed to restore master_seed: $e');
+          }
+        }
+      }
+    }
   }
 
   Future<void> stopAll() async {

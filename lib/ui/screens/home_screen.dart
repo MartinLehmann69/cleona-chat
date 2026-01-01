@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show SystemNavigator;
 import 'package:provider/provider.dart';
 import 'package:cleona/main.dart';
 import 'package:cleona/core/identity/identity_manager.dart';
@@ -250,7 +252,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     final groupUnread = groupConvs.fold<int>(0, (s, c) => s + c.unreadCount);
     final channelUnread = channelConvs.fold<int>(0, (s, c) => s + c.unreadCount);
 
-    return AppBarScaffold(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && Platform.isAndroid) {
+          SystemNavigator.pop();
+        }
+      },
+      child: AppBarScaffold(
       title: 'Cleona',
       subtitle: service.displayName,
       actions: [
@@ -374,6 +383,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         ],
       ),
       floatingActionButton: _buildFab(context, service),
+    ),
     );
   }
 

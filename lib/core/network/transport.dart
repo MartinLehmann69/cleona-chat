@@ -157,6 +157,7 @@ class Transport {
   int _lastUdpReceiveMs = 0;
   int _startedAtMs = 0;
   bool _selfProbeAcked = false;
+  bool _staleProbeInFlight = false;
   int externalPacketsReceived = 0;
   bool firewallWarningEmitted = false;
   /// Plain TCP listeners (§19.6.6 First-Byte-Sniffing). No longer a
@@ -1876,10 +1877,21 @@ class Transport {
     if (silenceMs > 30000) {
       final sinceLast = now - _lastReconnectMs;
       if (sinceLast < 60000) return;
-      _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence) — triggering recovery');
+      if (!_staleProbeInFlight) {
+        _staleProbeInFlight = true;
+        _sendSelfProbe();
+        return;
+      }
+      // Self-probe was sent on the previous tick but _lastUdpReceiveMs did
+      // not advance — the IOCP socket is genuinely dead.
+      _staleProbeInFlight = false;
+      _log.warn('UDP receive stale (${silenceMs ~/ 1000}s silence, '
+          'self-probe unreceived) — triggering recovery');
       _lastUdpReceiveMs = now;
       _lastReconnectMs = now;
       onUdpSocketDead?.call();
+    } else {
+      _staleProbeInFlight = false;
     }
   }
 
@@ -1920,6 +1932,7 @@ class Transport {
       _deadEdge.noteReconnectCompleted();
       _lastUdpReceiveMs = 0;
       _selfProbeAcked = false;
+      _staleProbeInFlight = false;
       _startedAtMs = DateTime.now().millisecondsSinceEpoch;
       if (Platform.isWindows) _sendSelfProbe();
       // iOS: old fd is stale after socket close+reopen — must rescan.

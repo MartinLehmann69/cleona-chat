@@ -10,7 +10,7 @@
 - **Clear API separation**: `service.sendToUser(userId)` for identity addressing, `node.sendToDevice(deviceId)` for pure routing
 - **Privacy improvement**: relays no longer see UserIDs — only device-to-device topology
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:976ba5c94f77, 2026-07-16). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v3_0.md (sha256:6ea64b6c88ea, 2026-07-17). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 - **Default-Gateway resilience**: re-enabled as a routing-layer fallback when the DV routing table does not know the target device
@@ -1244,6 +1244,8 @@ files/.cleona/                                (Android, in app-private storage)
 - `SecureMemory` utilities (`secure_memory.dart`): `SecureMemory.zero()` for Dart `Uint8List`, `zeroNative()` for FFI `Pointer<Uint8>`, `SecureKeyHolder` for RAII-style automatic zeroing on dispose. Applied to 9 OQS key locations in `oqs_ffi.dart` via `_zeroAndFree`.
 - **Constant-time comparison** (`constant_time.dart`): XOR-accumulation comparison function with `@SecAudited` annotation, replacing inline `!=` comparisons in security-critical paths (linkable ring signature key image check, network secret HMAC verification, IPC auth token check, CalDAV server auth). Prevents timing side-channel leakage.
 - pubkeys live in normal heap (no secret)
+
+**Profile Watchdog** (defence-in-depth): the daemon's existing 30-second socket-watchdog timer also verifies that critical profile files still exist on disk. If `identities.json` is missing, the watchdog re-persists all loaded identities from RAM via `IdentityManager.saveIdentities()`. If the master-seed keyring entry is missing (file-based fallback only, checked via `KeyringService.load('master_seed')`), the watchdog re-persists it from `IdentityContext.masterSeed`. Both recoveries log at WARN level. This guards against external deletion (e.g. a script running `rm -rf` on the profile directory while the daemon holds its state in RAM) — without the watchdog, the next daemon restart would find an empty profile and lose all identities irreversibly.
 
 **Secret-Rotation** (§13.2): network_secret may be rotated by the maintainer. The daemon holds a dual-secret window during the transition phase.
 

@@ -72,6 +72,8 @@
 	<string>Cleona needs permission to save images to your photo library.</string>
 	<key>NFCReaderUsageDescription</key>
 	<string>Cleona uses NFC for quick contact exchange.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Cleona does not use your location. This permission is required by a third-party library used for QR code scanning.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Cleona uses the local network to discover nearby peers.</string>
 	<key>NSBonjourServices</key>

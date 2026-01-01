@@ -643,12 +643,6 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    // Zurück-Taste = in den Hintergrund statt beenden
-    @Deprecated("Use onBackPressedDispatcher")
-    override fun onBackPressed() {
-        moveTaskToBack(true)
-    }
-
     /// Decode any audio format (AAC/M4A/OGG/MP3) to WAV (16kHz, mono, PCM16)
     /// using Android's MediaExtractor + MediaCodec. No ffmpeg needed.
     private fun decodeAudioToWav(inputPath: String, outputPath: String): Boolean {
