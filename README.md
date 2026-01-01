@@ -16,7 +16,7 @@ Cleona Chat is a peer-to-peer messenger that operates entirely without central s
 
 ### Messaging
 - Text, images, video, audio, files — all end-to-end encrypted
-- Message editing and deletion (15-minute window)
+- Message editing (configurable window) and deletion (unbounded)
 - Emoji reactions, reply/quoting, read receipts, typing indicators
 - Voice messages with source-side transcription (whisper.cpp)
 - Inline media preview, pinch-to-zoom, video/audio player
@@ -27,8 +27,20 @@ Cleona Chat is a peer-to-peer messenger that operates entirely without central s
 ### Groups & Channels
 - Groups with pairwise fan-out encryption and 3-role system
 - Public channels with DHT-based discovery and search
+- System channels (Bug Log, Feature Requests)
 - Decentralized moderation with jury system
 - Content rating and language filtering
+
+### Calendar
+- Multi-identity calendar with encrypted persistence and P2P event sharing
+- 5 views (day/week/month/year + tasks), recurring events (RFC 5545 RRULE)
+- Free/busy protocol, RSVP, iCal import/export, PDF print
+- External sync: CalDAV, Google Calendar, local ICS, Android CalendarContract
+
+### Polls
+- 5 poll types (single/multiple choice, date poll, scale, free text)
+- Anonymous voting via linkable ring signatures
+- Date poll to calendar event bridge
 
 ### Voice & Video Calls
 - 1:1 and group audio/video calls
@@ -46,11 +58,17 @@ Cleona Chat is a peer-to-peer messenger that operates entirely without central s
 
 ### Identity & Recovery
 - Multiple identities via HD wallet derivation from a single seed
+- Multi-device support (max 5 devices, device revocation, emergency key rotation)
 - 24-word seed phrase backup
 - Restore broadcast to contacts (one online contact is enough)
 - Shamir Secret Sharing (3-of-5) for guardian-based recovery
 - Contact verification levels (4 tiers)
 - NFC contact exchange
+
+### Software Distribution
+- Censorship-resistant in-network binary updates (erasure-coded)
+- Nostr binary discovery, embedded HTTP server, invite links
+- Physical transfer support (USB/LAN)
 
 ### Privacy & Security
 - Per-message KEM encryption (no session state, no desync)
@@ -60,10 +78,11 @@ Cleona Chat is a peer-to-peer messenger that operates entirely without central s
 - No telemetry, no analytics, no tracking
 
 ### Platforms
-- Linux Desktop (.deb, .rpm, AppImage)
-- Windows Desktop (installer)
-- Android (APK, Google Play planned)
-- iOS (planned)
+- Linux Desktop (.deb, .tar.gz)
+- Windows Desktop (.zip)
+- Android (APK)
+- iOS (IPA via TestFlight)
+- macOS (DMG, notarized)
 
 ### Internationalization
 - 33 languages including RTL support
@@ -90,6 +109,18 @@ flutter build apk --release
 ### Windows
 ```bash
 flutter build windows --release
+```
+
+### iOS
+```bash
+./scripts/build-ios-libs.sh    # Build native libs
+flutter build ipa              # Build IPA
+```
+
+### macOS
+```bash
+./scripts/build-macos-libs.sh  # Build native libs
+flutter build macos --release  # Build app
 ```
 
 ## Verifying Releases

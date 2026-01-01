@@ -1,6 +1,6 @@
 # Cleona Chat -- Benutzerhandbuch
 
-Version 3.1 | Stand Juni 2026
+Version 3.1.125 | Stand Juli 2026
 
 ---
 
@@ -20,7 +20,8 @@ Version 3.1 | Stand Juni 2026
 12. [Wiederherstellung](#12-wiederherstellung)
 13. [Einstellungen](#13-einstellungen)
 14. [Sicherheit](#14-sicherheit)
-15. [Haeufige Fragen](#15-haeufige-fragen)
+15. [Software-Updates](#15-software-updates)
+16. [Haeufige Fragen](#16-haeufige-fragen)
 
 ---
 
@@ -258,16 +259,14 @@ klar ist.
 
 ### Nachrichten bearbeiten und loeschen
 
-Du kannst deine eigenen Nachrichten innerhalb von 15 Minuten nach dem Senden
-bearbeiten oder loeschen:
-
 - **Bearbeiten:** Drei-Punkte-Menue der Nachricht, dann "Bearbeiten".
   Aendere den Text und sende ihn erneut. Dein Gegenueber sieht, dass die
-  Nachricht bearbeitet wurde.
+  Nachricht bearbeitet wurde. Bearbeiten ist innerhalb von 15 Minuten nach
+  dem Senden moeglich.
 - **Loeschen:** Drei-Punkte-Menue der Nachricht, dann "Loeschen". Die
-  Nachricht wird bei dir und deinem Gegenueber entfernt.
-
-Nach Ablauf der 15 Minuten sind Bearbeiten und Loeschen nicht mehr moeglich.
+  Nachricht wird bei dir und deinem Gegenueber entfernt. Du kannst deine
+  eigenen Nachrichten jederzeit loeschen -- es gibt kein Zeitfenster fuer
+  das Loeschen.
 
 ### Emoji-Reaktionen
 
@@ -388,6 +387,23 @@ werden von zufaellig ausgewaehlten Mitgliedern des Netzwerks bewertet (eine Art
 "Geschworenengericht"). Wird ein Verstoss festgestellt, erhaelt der Kanal eine
 Warnung. Bei wiederholten Verstoessen wird er im Suchindex herabgestuft oder
 gesperrt.
+
+### System-Kanaele
+
+Cleona verfuegt ueber zwei eingebaute System-Kanaele:
+
+- **Bug Log:** Wenn Cleona einen Fehler erkennt, fragt es dich, ob du einen
+  anonymisierten Fehlerbericht senden moechtest. Diese Berichte landen im
+  Bug-Log-Kanal, wo sie von der Community eingesehen werden koennen. Es
+  werden keine persoenlichen Daten uebertragen -- nur technische
+  Fehlerbeschreibungen. Du kannst auch manuell einen Log-Report senden
+  (mit Vorschau-Dialog und expliziter Zustimmung).
+- **Feature Requests:** Hier koennen Nutzer Funktionswuensche einreichen
+  und fuer bestehende Vorschlaege abstimmen. Die Vorschlaege werden nach
+  Stimmen sortiert.
+
+Beide System-Kanaele haben ein Groessenlimit von 25 MB und werden durch
+das Jury-Moderationssystem ueberwacht.
 
 ---
 
@@ -853,7 +869,56 @@ den Netzwerkverkehr abhoeren koennen.
 
 ---
 
-## 15. Haeufige Fragen
+## 15. Software-Updates
+
+### Wie bekomme ich Updates?
+
+Cleona kann auf verschiedenen Wegen aktualisiert werden. Das Ziel ist, dass
+du auch dann Updates erhalten kannst, wenn einzelne Vertriebswege ausfallen
+oder gesperrt werden:
+
+1. **App Store / Play Store:** Wenn du Cleona ueber einen App Store
+   installiert hast, erhaeltst du Updates wie gewohnt ueber den Store.
+2. **GitHub Releases:** Auf der GitHub-Seite des Projekts findest du
+   signierte Installationspakete fuer alle Plattformen.
+3. **In-Network-Updates:** Wenn ein anderer Cleona-Nutzer in deinem Netzwerk
+   bereits die neueste Version hat, kann Cleona das Update direkt ueber das
+   P2P-Netzwerk beziehen -- ohne externen Server. Dabei wird die neue
+   Version in fehlerkorrigierte Fragmente zerlegt und ueber mehrere Knoten
+   verteilt. Dein Geraet sammelt genug Fragmente und setzt das Update
+   zusammen. Die Echtheit wird durch eine Ed25519-Signatur des Entwicklers
+   geprueft.
+4. **Einladungslinks:** Du kannst Einladungslinks erstellen, die alles
+   enthalten, was ein neuer Nutzer braucht, um Cleona zu installieren und
+   sich mit dem Netzwerk zu verbinden.
+5. **Physischer Transfer:** In Umgebungen ohne Internet kannst du Cleona
+   per USB-Stick oder im lokalen Netzwerk an andere weitergeben.
+
+### Update-Benachrichtigung
+
+Wenn ein neues Update verfuegbar ist, zeigt Cleona dir eine Benachrichtigung
+auf dem Startbildschirm. Wenn das Update auch ueber das Netzwerk verfuegbar
+ist (In-Network-Update), hast du die Wahl, es direkt aus dem Netzwerk
+herunterzuladen.
+
+### Binaer-Verteilung
+
+Standardmaessig hilft dein Geraet dabei, Updates an andere Nutzer im
+Netzwerk weiterzugeben. Wenn du das nicht moechtest, kannst du diese
+Funktion in den Einstellungen unter "Netzwerk" deaktivieren. Die
+Speichernutzung fuer Update-Fragmente ist begrenzt (5 MB auf Mobilgeraeten,
+20 MB auf Desktop-Geraeten) und wird regelmaessig bereinigt.
+
+### Signaturpruefung
+
+Jedes Update wird kryptografisch signiert. Cleona prueft die Signatur
+automatisch, bevor ein Update installiert wird. So ist sichergestellt, dass
+nur Updates vom offiziellen Entwickler akzeptiert werden -- selbst wenn das
+Update ueber das P2P-Netzwerk bezogen wurde.
+
+---
+
+## 16. Haeufige Fragen
 
 ### "Kann ich Cleona ohne Internet nutzen?"
 
@@ -934,6 +999,16 @@ einen sicheren Pairing-Prozess verknuepft. Alle Geraete teilen dieselbe
 Identitaet, Kontakte und Unterhaltungen. Siehe das Multi-Device-Kapitel fuer
 Details.
 
+### "Wie bekomme ich Updates wenn der App Store gesperrt ist?"
+
+Cleona kann Updates direkt ueber das P2P-Netzwerk beziehen, ohne auf einen
+App Store, eine Website oder einen Download-Server angewiesen zu sein. Wenn
+ein anderer Nutzer im Netzwerk die neueste Version hat, kann dein Geraet das
+Update von dort laden. Die Echtheit wird durch eine digitale Signatur des
+Entwicklers geprueft. Alternativ kann dir ein Kontakt die App per
+Einladungslink oder USB-Stick weitergeben. Mehr dazu im Kapitel
+"Software-Updates".
+
 ---
 
 ## Hilfe und Kontakt
@@ -945,5 +1020,5 @@ Gemeinschaft, die gerne hilft.
 
 ---
 
-*Dieses Handbuch beschreibt Cleona Chat Version 3.1. Einzelne Funktionen
+*Dieses Handbuch beschreibt Cleona Chat Version 3.1.125. Einzelne Funktionen
 koennen sich in neueren Versionen aendern oder erweitern.*

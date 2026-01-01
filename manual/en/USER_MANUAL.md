@@ -1,6 +1,6 @@
 # Cleona Chat -- User Manual
 
-Version 3.1 | June 2026
+Version 3.1.125 | July 2026
 
 ---
 
@@ -20,7 +20,8 @@ Version 3.1 | June 2026
 12. [Recovery](#12-recovery)
 13. [Settings](#13-settings)
 14. [Security](#14-security)
-15. [FAQ](#15-faq)
+15. [Software Updates](#15-software-updates)
+16. [FAQ](#16-faq)
 
 ---
 
@@ -193,11 +194,13 @@ can see what you are referring to.
 
 ### Editing and Deleting Messages
 
-Made a mistake? You can edit or delete your own messages within 15 minutes of
-sending them. Use the three-dot menu on the message and choose "Edit" or "Delete."
+Made a mistake? You can edit your own messages within 15 minutes of sending
+them. Use the three-dot menu on the message and choose "Edit." Edits are
+visible to the recipient (the message updates in place).
 
-Edits are visible to the recipient (the message updates in place). Deletions
-remove the message from both sides.
+You can delete your own messages at any time -- there is no time limit for
+deletion. Use the three-dot menu and choose "Delete." Deletions remove the
+message from both sides.
 
 ### Emoji Reactions
 
@@ -289,6 +292,21 @@ If you see content that violates community standards, you can report it. Reports
 are handled by a decentralized jury system -- a randomly selected group of peers
 reviews the report and decides on action. There is no central authority making
 these decisions.
+
+### System Channels
+
+Cleona includes two built-in system channels:
+
+- **Bug Log:** When Cleona detects an error, it asks whether you want to
+  send an anonymized crash report. These reports appear in the Bug Log
+  channel where the community can review them. No personal data is
+  transmitted -- only technical error descriptions. You can also manually
+  submit a log report (with a preview dialog and explicit consent).
+- **Feature Requests:** Users can submit feature requests and vote on
+  existing proposals. Proposals are sorted by vote count.
+
+Both system channels have a 25 MB size limit and are moderated by the jury
+system.
 
 ---
 
@@ -683,7 +701,52 @@ injecting fake messages or eavesdropping on network traffic.
 
 ---
 
-## 15. FAQ
+## 15. Software Updates
+
+### How Do I Get Updates?
+
+Cleona can be updated through multiple channels. The goal is to ensure you
+can receive updates even if individual distribution channels are blocked or
+unavailable:
+
+1. **App Store / Play Store:** If you installed Cleona from an app store,
+   updates arrive through the store as usual.
+2. **GitHub Releases:** The project's GitHub page provides signed
+   installation packages for all platforms.
+3. **In-Network Updates:** If another Cleona user on your network already
+   has the latest version, Cleona can download the update directly over the
+   P2P network -- no external server required. The new version is split into
+   error-correcting fragments and distributed across multiple nodes. Your
+   device collects enough fragments to reconstruct the update. Authenticity
+   is verified via the developer's Ed25519 signature.
+4. **Invite Links:** You can create invite links that contain everything a
+   new user needs to install Cleona and connect to the network.
+5. **Physical Transfer:** In environments without internet, you can share
+   Cleona via USB drive or local network.
+
+### Update Notifications
+
+When a new update is available, Cleona shows a notification on the home
+screen. If the update is also available via the network (in-network update),
+you can choose to download it directly from the network.
+
+### Binary Distribution
+
+By default, your device helps distribute updates to other users on the
+network. If you prefer not to participate, you can disable this in Settings
+under "Network." Storage used for update fragments is limited (5 MB on
+mobile, 20 MB on desktop) and cleaned up regularly.
+
+### Signature Verification
+
+Every update is cryptographically signed. Cleona verifies the signature
+automatically before installing any update. This ensures that only updates
+from the official developer are accepted -- even when the update was
+obtained via the P2P network.
+
+---
+
+## 16. FAQ
 
 **Can I use Cleona without internet?**
 
@@ -830,6 +893,17 @@ Yes, but you cannot transfer your WhatsApp chats. Cleona and WhatsApp are
 fundamentally different systems. You need to add your contacts individually in
 Cleona. The easiest way is to share your cleona:// link in a WhatsApp group and
 ask others to add you.
+
+---
+
+**How do I get updates if the app store is blocked?**
+
+Cleona can receive updates directly over the P2P network without relying on
+any app store, website, or download server. If another user on the network
+has the latest version, your device can download the update from them.
+Authenticity is verified via the developer's digital signature. Alternatively,
+a contact can share the app via an invite link or USB drive. See the Software
+Updates chapter for details.
 
 ---
 
