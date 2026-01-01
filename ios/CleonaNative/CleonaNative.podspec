@@ -31,7 +31,12 @@ Pod::Spec.new do |s|
 
   s.frameworks = 'AudioToolbox', 'CoreFoundation', 'AVFoundation', 'Accelerate', 'Metal', 'MetalKit'
 
+  # Force-load all symbols from static archives so dart:ffi
+  # DynamicLibrary.process() can find them at runtime.
   s.pod_target_xcconfig = {
+    'OTHER_LDFLAGS' => '-ObjC -all_load',
+  }
+  s.user_target_xcconfig = {
     'OTHER_LDFLAGS' => '-ObjC -all_load',
   }
 end
