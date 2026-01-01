@@ -33,7 +33,11 @@
 /// A separate file because `host.dart` stands at the 400-line limit.
 library;
 
+import 'dart:io';
+
 import 'package:mycelium/neighbour_keys.dart';
+import 'package:mycelium/outside_address.dart' show fromOutsideReachable;
+import 'package:mycelium/own_segment.dart' show withinOwnSegment;
 import 'package:mycelium/card_address.dart';
 import 'package:mycelium/envelope.dart' show Address;
 import 'package:mycelium/host.dart';
@@ -89,17 +93,45 @@ extension HostContactSeats on Host {
   /// those of [fixed] with a contact seat that are devices of ITS contacts
   /// (≤ 3, in seat order); where there is none, the card's seat — unless
   /// that is the device of another identity's contact; else nothing.
-  List<CardAddress> namedTo(Mailbox p, List<Neighbour> fixed) {
+  ///
+  /// With a reader [to] — the list in a message or acknowledgement — each
+  /// under an address [to] can use (§9.2, D-92 B, [usableAddress]); one
+  /// known under no such address is left out. Without [to] (the `0x23`, the
+  /// acceptance, the own devices) as before S412: [Neighbour.asCardAddress].
+  List<CardAddress> namedTo(Mailbox p, List<Neighbour> fixed, {Address? to}) {
     bool own(Neighbour n) => p.contacts.any((k) => deviceOfContact(k, n));
-    final seats = [
-      for (final n in fixed)
-        if (n.contactSeat > 0 && own(n)) node.keyedOf(n, n.asCardAddress),
-    ];
+    final inside = to != null && readerInSegment(p.contactOrNull(identifierFrom(to)));
+    final open = node.neighbourhood.openNetwork; // the ONE classification
+    List<CardAddress> named(bool Function(Neighbour n) which) => [
+          for (final n in fixed)
+            if (which(n))
+              if ((to == null ? n.asCardAddress : usableAddress(n, inside, open)) case final a?)
+                node.keyedOf(n, a),
+        ];
+    final seats = named((n) => n.contactSeat > 0 && own(n));
     if (seats.isNotEmpty) return seats;
-    return [
-      for (final n in fixed)
-        if (n.fixed && (own(n) || !node.neighbourhood.isContactDevice(n)))
-          node.keyedOf(n, n.asCardAddress),
-    ];
+    return named((n) => n.fixed && (own(n) || !node.neighbourhood.isContactDevice(n)));
   }
 }
+
+/// Whether the contact [k] is inside this device's own segment: the address
+/// a packet of it last came from is a segment address of this device's
+/// network (§7.2) — evidence, not its card (two homes share 192.168.178.x).
+bool readerInSegment(Contact? k) => switch (k?.lastSeen) {
+      final s? => _segment(InternetAddress.fromRawAddress(s.address)),
+      null => false,
+    };
+
+bool _segment(InternetAddress a) => !a.isLoopback && withinOwnSegment(a);
+
+/// The address of [n] a reader can use (§9.2, D-92 B): to a reader inside
+/// the own segment a confirmed segment address first, to everyone a confirmed
+/// address reachable from the open network (§15.2) — never a loopback, never
+/// a private address to a reader outside. `null`: none, [n] is left out.
+/// "Reachable from the open network" is [open] — the node passes its
+/// `Neighbourhood.openNetwork`, which in the product is always
+/// [fromOutsideReachable]; probes on 127.0.0.1 let the loopback play it.
+CardAddress? usableAddress(Neighbour n, bool readerInside,
+        [bool Function(InternetAddress a) open = fromOutsideReachable]) =>
+    (readerInside ? n.cardAddress((a) => a.confirmedEver && _segment(a.address)) : null) ??
+    n.cardAddress((a) => a.confirmedEver && open(a.address));

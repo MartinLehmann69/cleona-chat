@@ -28,23 +28,29 @@ typedef Join = ({List<Neighbour> joined, Neighbour whole});
 /// same node identifier in answers within one run (`Readiness.nodeLearn`
 /// passes them as [own], S407-N2).
 ///
+/// [keepFrom]: [from]:[port] is stamped right after the join (a move,
+/// `node_roam.dart`, §11.8.6) — the cap of addresses never takes it; the
+/// oldest other stamp gives way instead, so the newest address stays.
+///
 /// `null` if [from]:[port] is not among [own]: then nothing here is bound
 /// (V4: "in a sealed packet that comes from one of them").
 Join? joinOwn(List<Neighbour> list, InternetAddress from, int port,
     List<CardAddress> own, bool Function(InternetAddress a) speaks,
-    bool Function(InternetAddress a, int port) possible) {
+    bool Function(InternetAddress a, int port) possible,
+    [bool keepFrom = false]) {
   final src = CardAddress(from.rawAddress, port);
   if (!speaks(from) || !own.any((o) => o.equal(src))) return null;
   final joined = [
     for (final n in list)
       if (n.has(from, port) || own.any(n.knows)) n
   ];
-  final addresses = <NeighbourAddress>[
+  final all = <NeighbourAddress>[
     for (final n in joined) ...n.addresses,
     for (final o in own)
       if (speaks(ip(o)) && possible(ip(o), o.port))
         NeighbourAddress(ip(o), o.port, kUnconfirmed),
   ];
+  final addresses = keepFrom ? _roomFor(all, from, port) : all;
   // The joined names first: a name that waits with its stamp keeps it.
   final names = <NeighbourAddress>[
     for (final n in joined) ...n.names,
@@ -67,6 +73,28 @@ Join? joinOwn(List<Neighbour> list, InternetAddress from, int port,
             : joined.map((n) => n.contactSeat).firstWhere((s) => s > 0, orElse: () => 0),
         id: lead.isEmpty ? null : lead.first.id),
   );
+}
+
+/// [l] without duplicates (the first copy stays, as `Neighbour.of` does),
+/// cut to [kAddressesPerNeighbour] so that [a]:[p] stays: the other address
+/// whose stamp is oldest gives way, among equal stamps the last of them —
+/// the one `Neighbour.of` would cut first.
+List<NeighbourAddress> _roomFor(
+    List<NeighbourAddress> l, InternetAddress a, int p) {
+  final out = <NeighbourAddress>[];
+  for (final x in l) {
+    if (!out.any((y) => y.key == x.key)) out.add(x);
+  }
+  while (out.length > kAddressesPerNeighbour) {
+    var i = -1;
+    for (var j = 0; j < out.length; j++) {
+      if (out[j].isAt(a, p)) continue;
+      if (i < 0 || !out[j].last.isAfter(out[i].last)) i = j;
+    }
+    if (i < 0) break;
+    out.removeAt(i);
+  }
+  return out;
 }
 
 /// What the cap of addresses (`kAddressesPerNeighbour`) took from [before]:

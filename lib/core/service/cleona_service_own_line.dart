@@ -20,7 +20,9 @@ part of 'cleona_service.dart';
 /// The contact deliveries mirrored to the other own devices (§14.2, Type 18):
 /// the conversation itself. Not mirrored (open, `S398-B4-BAU.md`): media and
 /// voice (their objects travel lanes 2/3 with their own receipts, §9.4),
-/// group/channel membership, contact requests, key rotation. The chat
+/// channel membership, contact requests, key rotation; group and channel
+/// joins travel as Type 6 / Type 22 (§14.7). A change of a group's members is
+/// mirrored (§14.7, D-91). The chat
 /// configuration is mirrored (§21.5.4, D-72). A call signal
 /// is mirrored too, but on steps 1 and 3 and not through the post box
 /// (§17.2, D-46, `_kCallSignalTypes`, `cleona_service_own_ring.dart`).
@@ -40,6 +42,13 @@ const _kMirrored = <proto.MessageType>{
   // a co-member who is no contact (group pair, `_handleDeliveryMirror`). The
   // own changes travel as Type 2 (`_ownChatConfigMirror`).
   proto.MessageType.MT_CHAT_CONFIG_UPDATE,
+  // §14.7, D-91: "A change of a group's members that one device receives is
+  // mirrored like any contact delivery (Type 18), whether or not the
+  // identity has joined" — from a contact, or over a group pair
+  // (`_handleDeliveryMirror`). The receiving device applies it as a direct
+  // one (`_groupMembersChangeReceived`: authority gate, epoch rule, the
+  // entry's signatures).
+  proto.MessageType.MT_GROUP_MEMBERS_CHANGE,
 };
 
 extension CleonaServiceOwnLine on CleonaService {
@@ -477,9 +486,19 @@ extension CleonaServiceOwnLine on CleonaService {
         frame.messageType == proto.MessageType.MT_CALL_MISSED &&
             !isContact &&
             _groupPairAdmits(frame, bytesToHex(sender));
+    // D-91: a membership change from an owner or admin who is no contact
+    // came over the group pair of a joined group — admitted the same way.
+    // A group this device does not hold has nothing to change.
+    final membersOverPair =
+        frame.messageType == proto.MessageType.MT_GROUP_MEMBERS_CHANGE &&
+            !isContact &&
+            _groupPairAdmits(frame, bytesToHex(sender));
     if (!(callSignal ||
             _kMirrored.contains(frame.messageType) &&
-                (isContact || configOverPair || missedOverPair)) ||
+                (isContact ||
+                    configOverPair ||
+                    missedOverPair ||
+                    membersOverPair)) ||
         !constantTimeEquals(
             Uint8List.fromList(frame.recipientUserId), identity.userId)) {
       _log.warn('Twin DELIVERY_MIRROR: ${frame.messageType.name} from '

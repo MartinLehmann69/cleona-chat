@@ -34,6 +34,7 @@ import 'package:cleona/ui/components/group_alone_dialog.dart';
 import 'package:cleona/ui/components/forward_picker.dart';
 import 'package:cleona/ui/components/media_consent_dialog.dart';
 import 'package:cleona/ui/components/message_bubble.dart';
+import 'package:cleona/ui/components/message_boundary_nav.dart';
 import 'package:cleona/ui/components/app_bar_scaffold.dart';
 import 'package:cleona/ui/components/contact_name.dart';
 import 'package:cleona/ui/components/system_notice_text.dart';
@@ -374,7 +375,9 @@ class _ChatScreenState extends State<ChatScreen> {
   // Scroll navigation overlay state — ValueNotifier so toggling rebuilds only
   // the overlay, not the entire chat screen (message list, input area, etc.).
   final _scrollNavNotifier = ValueNotifier<bool>(false);
-  int _navMessageIndex = -1;
+  // Up/down step to the next message edge, measured on the built items
+  // (docs/UI.md "Chat-Scroll-Navigation").
+  final _boundaryNav = MessageBoundaryNav();
   int _messageCountWhenScrolledUp = -1;
   bool _suppressScrollNav = false;
 
@@ -514,17 +517,11 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _scrollToMessage(int index) {
-    // Approximate: each message ~72px height
-    final offset = index * 72.0;
-    if (_scrollController.hasClients) {
-      _scrollController.animateTo(
-        offset,
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
-    }
-  }
+  /// Puts the search hit [index] at the top edge of the list (or, near the
+  /// end, fully visible), measured on the built items; a hit that is not
+  /// built yet is approached in bounded steps.
+  void _scrollToMessage(int index) =>
+      _boundaryNav.revealIndex(_scrollController, index);
 
   void _navigateSearchResult(int delta, List<UiMessage> messages) {
     if (_searchMatchIndices.isEmpty) return;
@@ -603,12 +600,26 @@ class _ChatScreenState extends State<ChatScreen> {
     // message (ListView.builder's lazy maxScrollExtent makes the initState()
     // scroll unreliable for long histories).
     if (messages.length != _lastRenderedMessageCount) {
-      final isFirstRender = _lastRenderedMessageCount < 0;
-      final grew = messages.length > _lastRenderedMessageCount;
+      final previousCount = _lastRenderedMessageCount;
+      final isFirstRender = previousCount < 0;
+      final grew = messages.length > previousCount;
       _lastRenderedMessageCount = messages.length;
       final lastIsOutgoing = grew && messages.isNotEmpty && messages.last.isOutgoing;
       if ((isFirstRender || grew) && (isFirstRender || lastIsOutgoing || _isNearBottom())) {
         _scrollToBottomAfterBuild();
+      } else if (grew) {
+        // The reader is away from the end and the new message lands below
+        // the viewport. A change of the content extent notifies no scroll
+        // listener (Flutter SDK, class documentation of ScrollPosition), so
+        // the jump-down overlay is re-evaluated after layout. Its badge
+        // counts from what the reader had before this arrival
+        // (S412-RCA-LAUF8-A-OBERFLAECHE.md A-1).
+        if (_messageCountWhenScrolledUp < 0) {
+          _messageCountWhenScrolledUp = previousCount;
+        }
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _onScrollChanged();
+        });
       }
     }
 
@@ -693,7 +704,7 @@ class _ChatScreenState extends State<ChatScreen> {
                                 index > 0 ? messages[index - 1].timestamp : null,
                                 msg.timestamp)) {
                               final cs = Theme.of(context).colorScheme;
-                              return Column(
+                              return _boundaryNav.anchor(index: index, child: Column(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   Center(
@@ -715,9 +726,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                   ),
                                   bubble,
                                 ],
-                              );
+                              ));
                             }
-                            return bubble;
+                            return _boundaryNav.anchor(index: index, child: bubble);
                           },
                         ),
                     ),
@@ -3150,59 +3161,27 @@ class _ChatScreenState extends State<ChatScreen> {
     final isShowing = _scrollNavNotifier.value;
     // Hysteresis: show at 200px, hide at 80px — prevents rapid toggling
     // when the user scrolls near the threshold.
+    // The badge base is kept when an arrival below the viewport already set
+    // it (build()), and dropped whenever the reader is back at the end.
     if (!isShowing && distFromBottom >= 200) {
-      _messageCountWhenScrolledUp = _lastRenderedMessageCount;
+      if (_messageCountWhenScrolledUp < 0) {
+        _messageCountWhenScrolledUp = _lastRenderedMessageCount;
+      }
       _scrollNavNotifier.value = true;
-    } else if (isShowing && distFromBottom < 80) {
-      _navMessageIndex = -1;
+    } else if (distFromBottom < 80) {
+      if (isShowing) {
+        _boundaryNav.reset();
+        _scrollNavNotifier.value = false;
+      }
       _messageCountWhenScrolledUp = -1;
-      _scrollNavNotifier.value = false;
     }
   }
 
-  int _estimateCurrentTopIndex() {
-    if (!_scrollController.hasClients) return 0;
-    final total = _lastRenderedMessageCount;
-    if (total <= 1) return 0;
-    final offset = _scrollController.offset;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    if (maxExtent <= 0) return 0;
-    return (offset / maxExtent * (total - 1)).round().clamp(0, total - 1);
-  }
+  void _scrollToPrevMessage() =>
+      _boundaryNav.step(_scrollController, forward: false);
 
-  void _scrollToMessageByIndex(int index) {
-    if (!_scrollController.hasClients) return;
-    final total = _lastRenderedMessageCount;
-    if (total <= 1) return;
-    final maxExtent = _scrollController.position.maxScrollExtent;
-    final offset = (index / (total - 1)) * maxExtent;
-    _scrollController.animateTo(
-      offset.clamp(0.0, maxExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-    );
-  }
-
-  void _scrollToPrevMessage() {
-    if (_navMessageIndex < 0) {
-      _navMessageIndex = _estimateCurrentTopIndex();
-    }
-    if (_navMessageIndex > 0) {
-      _navMessageIndex--;
-      _scrollToMessageByIndex(_navMessageIndex);
-    }
-  }
-
-  void _scrollToNextMessage() {
-    if (_navMessageIndex < 0) {
-      _navMessageIndex = _estimateCurrentTopIndex();
-    }
-    final total = _lastRenderedMessageCount;
-    if (_navMessageIndex < total - 1) {
-      _navMessageIndex++;
-      _scrollToMessageByIndex(_navMessageIndex);
-    }
-  }
+  void _scrollToNextMessage() =>
+      _boundaryNav.step(_scrollController, forward: true);
 
   Widget _buildScrollNavOverlay(BuildContext context, int messageCount) {
     final cs = Theme.of(context).colorScheme;
@@ -3246,7 +3225,7 @@ class _ChatScreenState extends State<ChatScreen> {
               child: InkWell(
                 customBorder: const CircleBorder(),
                 onTap: () {
-                  _navMessageIndex = -1;
+                  _boundaryNav.reset();
                   _messageCountWhenScrolledUp = -1;
                   _scrollNavNotifier.value = false;
                   _jumpToBottomRepeatedly(remainingAttempts: 4);

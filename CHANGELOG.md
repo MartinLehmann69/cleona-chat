@@ -1,5 +1,82 @@
 # Cleona Chat — Changelog
 
+## 4.2.5
+
+### Calls
+- Group calls of seven or more participants: a participant that forwards media for others is no longer held to a fixed frame and byte budget; forwarding is bounded only by a limit the line has actually shown, so nobody loses half of the sound on a long chain
+- The call screen on the desktop no longer closes right after a group call starts
+- The labels in the group call screen can be clicked
+
+### Delivery
+- A device with several addresses keeps one connection per counterpart, and the neighbour list holds only addresses that can be used
+- A neighbour that moved to a new address keeps its identity
+- A packet that arrives under an unexpected link is no longer dropped silently; the path request decides
+- A multi-part transfer keeps its parts ready for the receiver after the send has ended
+- The neighbour list follows one source for "answers", and an unknown sender is asked who it is
+- A direct copy of a request carries the answer even when a forwarded copy arrived first
+- One receipt per message; a holder no longer hands out what was deleted
+- A resent message stays one entry at its holder; short-lived messages go only once over the local network and through a neighbour
+
+### Groups and devices
+- Member changes of a group are mirrored to your other devices
+- A second identity added while the app runs no longer ends the background service
+- Beta and live can be installed side by side on the desktop
+
+### Updates
+- A delta update no longer stops on the beta Android package, and an offer no longer stays stuck after an interrupted install
+- Installing a package keeps a user copy; the install button and error notes are clearer; the network channel is part of the manifest
+- A failed install ends the window's wait
+
+### Chat and UI
+- Chat search jumps exactly to the hit; message up/down stops at the next message boundary; the "to the end" button also appears when a new arrival extends the list
+- Redeeming an invitation shows the waiting contact at once
+- The answer to "Reconnect" is shown in the connection sheet
+- Calendar day view opens at the start hour with all-day events fixed above
+- Network statistics and the connection sheet show the same neighbours
+- Media reader over loopback allowed on Android; preview images have a fixed height
+
+### Platforms
+- iOS: the location usage description is back in the app (a dependency links CoreLocation); 4.2.4 had no iOS build for this reason
+- Linux: Wi-Fi name read through `iw`
+
+## 4.2.4
+
+### Calls
+- Group calls: media pairs between participants, a broker only when a direct pair cannot form; from seven participants the participants build a forwarding tree themselves
+- Loss and liveness are measured per media pair; video adapts to measured loss
+- A call only with consent: the "Allow calls" switch per contact, with its price explained
+- An incoming call rings on every reachable own device
+- Missed calls, also for group calls; busy counts as missed; ringing is shown only after the callee confirmed it rings
+- Group video up to six participants; each tile says when there is no common contact or no free forwarding
+- Linux echo cancellation on webrtc-audio-processing 1.3 (AEC3)
+
+### Groups and channels
+- Groups and private channels from 17 members on a shared key; announcement mode for groups
+- Owner and admins change name, description and picture of a group or private channel
+- A new member receives all settings on joining; chat settings follow you to all your own devices
+- Member changes are sent as changes; local settings survive a member update
+
+### Delivery
+- Pair tag instead of a signature in the envelope
+- Many fixes to neighbours, post boxes and the ladder of ways: a failed holder makes room for the next, a sender that is itself a fixed neighbour of the receiver keeps the post, network change and "app opened" resend what was neither acknowledged nor deposited
+- Nostr entries are checked outside the event loop
+
+### Updates
+- Update objects only complete, no fragments; the update store counts against the bulk cache
+- A window that crashes after an update is rolled back (Linux, Windows)
+- The browser download follows the chain of origin node and further addresses
+
+### Media, archive and transcription
+- Archived media show their preview in the chat
+- Bulk cache size as a device setting in tiers
+- Whisper models pinned and checked by SHA-256 before use
+
+### UI and languages
+- Setting "Open links" (normal / prefer private / ask each time)
+- Calendar views in the language of the app; group calendar invitations show the event card
+- Edit with focus, "(edited HH:MM)", Android notices in the app language
+- Linux: crypto libraries without developer packages — libsodium and libzstd from the system, liboqs in the bundle
+
 ## 4.2.3
 
 ### Updates

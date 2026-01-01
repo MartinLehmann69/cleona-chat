@@ -19,8 +19,9 @@
 /// for more than 2 s, [renewIfSilent]) — never by cover. **No protection
 /// against replay** here; the layers above discard duplicates (§9.2).
 ///
-/// **Not WHO the neighbour is:** the handshake is anonymous; the envelope
-/// decides that. A moved neighbour is found under its old link (`shell_roam.dart`).
+/// **Not WHO the neighbour is:** the handshake is anonymous; the envelope decides that. A moved
+/// neighbour is found under its old link (`shell_roam.dart`), a node under several addresses
+/// holds one link (`shell_counterpart.dart`, D-92).
 library;
 
 import 'dart:async';
@@ -30,6 +31,7 @@ import 'dart:typed_data';
 import 'package:cleona/core/link/link_kdf.dart';
 import 'package:mycelium/wire.dart';
 import 'package:mycelium/shell_start.dart';
+import 'package:mycelium/shell_counterpart.dart';
 import 'package:mycelium/shell_link.dart';
 import 'package:mycelium/shell_roam.dart';
 import 'package:mycelium/trace.dart' show traceOn;
@@ -53,7 +55,6 @@ class Shell implements PacketRoute {
   final Map<String, DateTime> _freshStartLast = {};
   final Map<String, Timer> _deadlines = {};
   final Map<String, int> _attempt = {};
-
   /// Running fresh starts ([_freshStart]): the only handshakes started
   /// WITHOUT repetition, and the ones [kFreshStartConcurrent] counts (C-12).
   /// A real send wish meeting one makes it its own and it leaves ([_start]).
@@ -73,24 +74,18 @@ class Shell implements PacketRoute {
   Silent? onHeard; // §11.8.6: a packet opened under this address's own link
   Moved? onMoved; // §11.8.6: opened under ANOTHER address's link (`shell_roam.dart`)
   Silent? onCalled; // §11.8.6: a handshake from there set up a link here
-  /// A move (`shell_roam.dart`): [to] borrows [old]'s link; `false` if none.
-  bool roamValidate(InternetAddress to, int toPort, InternetAddress old, int oldPort) {
-    final l = _links[shellWho(old, oldPort)], w = shellWho(to, toPort);
-    if (l == null || _links.containsKey(w)) return false;
-    _links[w] = l;
-    return true;
-  }
-
-  /// The path request failed: [to] loses the borrowed link again.
-  void roamEnd(InternetAddress to, int toPort, InternetAddress old, int oldPort) {
-    final w = shellWho(to, toPort);
-    if (identical(_links[w], _links[shellWho(old, oldPort)])) _links.remove(w);
-  }
+  Silent? onSelf; // D-92 A.4: the own flight 1 came back — that address is this node
+  SameNode? sameNode; // §11.8.7, D-92 A.3: one link per counterpart (`shell_counterpart.dart`)
+  /// A move (`shell_roam.dart`): [to] borrows [old]'s link; `false` if none ([roamEnd] gives it back).
+  bool roamValidate(InternetAddress to, int toPort, InternetAddress old, int oldPort) =>
+      roamLend(_links, shellWho(to, toPort), shellWho(old, oldPort));
+  void roamEnd(InternetAddress to, int toPort, InternetAddress old, int oldPort) =>
+      roamUnlend(_links, shellWho(to, toPort), shellWho(old, oldPort));
+  Iterable<String> _same(InternetAddress a, int p) =>
+      [for (final o in sameNode?.call(a, p) ?? const []) shellWho(o.$1, o.$2)];
 
   Shell(this._bottom,
-      {void Function(String)? report,
-      this.silence = kLinkSilence,
-      DateTime Function()? clock})
+      {void Function(String)? report, this.silence = kLinkSilence, DateTime Function()? clock})
       : _report = report ?? ((String s) => stderr.writeln(s)),
         _now = clock ?? DateTime.now {
     _bottom.listen(_onPacket);
@@ -108,8 +103,7 @@ class Shell implements PacketRoute {
     final w = shellWho(target, targetPort);
     final l = _links[w];
     if (l == null || _now().difference(l.heard) <= kCompanionAfter) return;
-    _links.remove(w); // nothing re-sent under the new key (§11.3a, S407)
-    _answered.remove(w);
+    linkDrop(_links, l, _answered.remove); // nothing re-sent under the new key (§11.3a, S407)
     _report('Shell: $w silent for > 2 s — new handshake for a request');
   }
 
@@ -138,7 +132,7 @@ class Shell implements PacketRoute {
       return false;
     }
     final w = shellWho(target, targetPort);
-    final l = _links[w];
+    final l = nodeLink(_links, w, _same(target, targetPort)); // D-92 A.3
     if (l != null) {
       final now = _now();
       // Cover and keep-alive never renew (F29-A, V4.2 §11.6): towards a
@@ -147,22 +141,19 @@ class Shell implements PacketRoute {
       if (cover || !renewDue(l, now, silence)) {
         l.last = now;
         if (!cover) l.lastReal = now; // own cover is no sign of life (S406 V-1)
-        // Cover is never kept — it carries nothing on which anything
-        // waits, and a repeated cover packet would be a pattern on the
-        // wire. Empty payload likewise (probes, edge cases).
+        // Cover is never kept — nothing waits on it, and a repeated cover
+        // packet would be a pattern on the wire. Empty payload likewise.
         if (!cover && payload.isNotEmpty) {
           companion(l, now, () => _to || _links[w] != l || // F28-1
               _bottom.send(pack(Uint8List(0), l.sendKey), target, targetPort));
         }
-        return _bottom.send(
-            pack(payload, l.sendKey), target, targetPort);
+        return _bottom.send(pack(payload, l.sendKey), target, targetPort);
       }
       // Expired: see [kLinkSilence]. First gone, then new — otherwise the
       // branch below takes the old key again. What went out under the old
       // key is NOT sent again (S407, §11.3a): the one repeat path is the
       // transport's silence rule, for the packets that expect an answer.
-      _links.remove(w);
-      _answered.remove(w);
+      linkDrop(_links, l, _answered.remove); // under every address (D-92)
       _report('Shell: key to $w has been unconfirmed for ${silence.inSeconds} s '
           '— new handshake');
     }
@@ -180,17 +171,13 @@ class Shell implements PacketRoute {
   }
 
   @override
-  void listen(
-      void Function(Uint8List packet, InternetAddress from, int fromPort) onPacket) {
-    _further = onPacket;
-  }
+  void listen(void Function(Uint8List packet, InternetAddress from, int fromPort) onPacket) =>
+      _further = onPacket;
 
   /// Ends the own timers; the [Wire] stays with the caller.
   void close() {
     _to = true;
-    for (final t in _deadlines.values) {
-      t.cancel();
-    }
+    for (final t in _deadlines.values) { t.cancel(); }
     _deadlines.clear();
     _running.clear();
     _oneShot.clear();
@@ -258,7 +245,8 @@ class Shell implements PacketRoute {
   }
 
   /// [w]'s start ended without a link: the address has failed (§11.3a).
-  void _fail(String w, InternetAddress target, int targetPort, String why) {
+  void _fail(String w, InternetAddress target, int targetPort, String why, {bool self = false}) {
+    if (self) onSelf?.call(target, targetPort);
     _forget(w);
     final q = _waiting.remove(w);
     dropped += q?.length ?? 0;
@@ -272,8 +260,7 @@ class Shell implements PacketRoute {
 
   void _onPacket(Uint8List p, InternetAddress from, int fromPort) {
     // On the data port lies NOTHING other than a shell. Whatever has a
-    // different length is not an old format — mycelium has not been
-    // shipped —, but foreign traffic.
+    // different length is foreign traffic, not an old format.
     if (p.length != kShellSize) return;
     final w = shellWho(from, fromPort);
     final l = _links[w];
@@ -284,28 +271,33 @@ class Shell implements PacketRoute {
         l.last = l.heard;
         l.companionSpent = false; // a new silence starts ([kCompanionAfter])
         onHeard?.call(from, fromPort); // authenticated: only under this address's key
-        // Empty = cover. It does not go upwards; §5.1 „no code path
-        // connects it to the send path".
+        // Empty = cover; it does not go upwards (§5.1).
         if (content.isNotEmpty) _further?.call(content, from, fromPort);
         return;
       }
+      // D-92 A.5, once per key: "nothing arrived" is not "nothing opened".
+      if (traceOn && l.unopenedFirst()) _report('TRACE shell packet from $w does not open under the key that stands there');
     }
     final b = _running[w];
-    if (b != null) {
-      final k = complete(b, p);
-      if (k != null) {
-        _forget(w);
-        _setUp(w, k, caller: true, target: from, targetPort: fromPort);
-        return;
-      }
+    final k = b == null ? null : complete(b, p);
+    // §11.8.7: the answer is bound to its handshake, not to an address (D-92 A.2).
+    final x = k != null ? (w, k) : answerElsewhere(_running, p, w, fromPort);
+    if (x != null) {
+      final t = whoAddress(x.$1)!;
+      _forget(x.$1);
+      return _setUp(x.$1, x.$2, caller: true, target: t.$1, targetPort: t.$2, also: w);
     }
     // A moved counterpart's packet opens under its old link (§11.8.6): read
-    // as any packet; only the answer to the path request adopts the address.
-    final moved = l == null && onMoved != null ? roamOpen(_links, p, w) : null;
+    // as any packet; only the answer to the path request adopts the address
+    // (tried under a dead key too: unreadable means under none, §11.8.7).
+    final moved = l != null || onMoved != null ? roamOpen(_links, p, w) : null;
     final old = moved == null ? null : whoAddress(moved);
     if (old != null) {
-      onMoved!(old.$1, old.$2, from, fromPort); // may lend the link (§11.8.6)
-      if (_links.containsKey(w)) return _onPacket(p, from, fromPort);
+      final m = onMoved; // joined by the list, or the path request decides
+      if (roamReceive(_links, w, moved!, l, _same(from, fromPort),
+          m == null ? null : () => m(old.$1, old.$2, from, fromPort))) {
+        _onPacket(p, from, fromPort);
+      }
       return;
     }
     _assemble(w, p, from, fromPort);
@@ -336,7 +328,9 @@ class Shell implements PacketRoute {
   }
 
   void _freshStart(String w, InternetAddress from, int fromPort) {
-    if (_running.containsKey(w) || _links.containsKey(w)) return;
+    // §11.8.7: "open under no key" — a link that does not open them is no
+    // key for them (D-92 A.1); until S412 it stopped the heal (RCA B-1).
+    if (_running.containsKey(w)) return;
     if (_oneShot.length >= kFreshStartConcurrent) return; // own: not (C-12)
     final now = _now();
     _freshStartLast
@@ -350,7 +344,8 @@ class Shell implements PacketRoute {
       InternetAddress from, int fromPort) {
     final uniformA = Uint8List.sublistView(partA, 0, kUniform);
     final mine = startOf(_running, uniformA), to = mine == null ? null : whoAddress(mine); // own flight 1 back
-    if (to != null) return _fail(mine!, to.$1, to.$2, 'is this node itself (own handshake back from $w)');
+    // D-92 A.4: remembered until a network change ([onSelf]).
+    if (to != null) return _fail(mine!, to.$1, to.$2, 'is this node itself (own handshake back from $w)', self: true);
 
     // Tie: both started at the same time. The decision is made by the
     // smaller Elligator share, and in the same way on BOTH sides — otherwise
@@ -379,14 +374,16 @@ class Shell implements PacketRoute {
   void _setUp(String w, Uint8List linkKey,
       {required bool caller,
       required InternetAddress target,
-      required int targetPort}) {
+      required int targetPort,
+      String? also}) {
     // The caller sends under `cell/init` and listens on `cell/resp`, the
     // callee the other way round: two directions never share a
     // nonce space (`link_kdf.dart`).
     final init = LinkKdf.deriveCellKeyInit(linkKey);
     final resp = LinkKdf.deriveCellKeyResp(linkKey);
-    _links[w] = Link(caller ? init : resp, caller ? resp : init,
-        _now());
+    final n = Link(caller ? init : resp, caller ? resp : init, _now());
+    linkPut(_links, w, n); // under every address of the counterpart (D-92)
+    if (also != null && also != w) linkPut(_links, also, n);
     handshakesDone++;
     if (traceOn) _report('TRACE shell link to $w set up as ${caller ? "caller" : "callee"}');
     capLinks(_links, _answered.remove);

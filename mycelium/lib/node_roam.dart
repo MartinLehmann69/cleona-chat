@@ -23,6 +23,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart';
+import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/who_question.dart';
@@ -88,18 +89,25 @@ bool _pathCheck(Node k, InternetAddress a, int p,
 
 /// §11.8: "a packet under its link arrives from the second and is confirmed
 /// there" — the address joins the neighbour of the old one, as [Readiness.
-/// nodeLearn] does. Stamp first: the newest address never gives way to the
-/// cap of addresses. Without the old address in the list it simply returns.
+/// nodeLearn] does: joined first, then stamped, so the neighbour stays the
+/// node it was — its id, its seat, its open place (§11.8 "a neighbour is a
+/// node, not an address"). Stamped first, the confirmation made the address
+/// a neighbour of its own, and the join kept that new id: a fixed neighbour
+/// that moved counted as a new one (`host_network.dart`, `0x24`). The cap of
+/// addresses never takes the new address (`keepFrom`): the newest address
+/// never gives way. Without the old address in the list it simply returns.
 void _moved(Node k, InternetAddress a, int p, InternetAddress old, int oldPort) {
   final n = k.neighbourhood;
-  final oldIsListed = n.holding(old, oldPort) != null;
   k.readiness.together(() {
-    k.readiness.returned(a, p);
-    if (!oldIsListed || n.holding(a, p) == null) return;
-    n.ownAddresses(a, p, [
-      CardAddress(Uint8List.fromList(a.rawAddress), p),
-      CardAddress(Uint8List.fromList(old.rawAddress), oldPort),
-    ]);
+    if (n.holding(old, oldPort) != null &&
+        Neighbourhood.possible(a, p) &&
+        n.speaks(a)) {
+      n.ownAddresses(a, p, [
+        CardAddress(Uint8List.fromList(a.rawAddress), p),
+        CardAddress(Uint8List.fromList(old.rawAddress), oldPort),
+      ], keepFrom: true);
+    }
+    k.readiness.returned(a, p); // stamps it — inside the old neighbour now
   });
 }
 

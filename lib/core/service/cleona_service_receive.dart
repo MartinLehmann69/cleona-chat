@@ -442,7 +442,9 @@ extension ReceivePathOps on CleonaService {
       // §16.2.2 — `cleona_service_group_list.dart`.
       case proto.MessageType.MT_GROUP_MEMBERS_CHANGE:
         // A 4.2.3 device does not know the kind (stand-in of a probe).
-        if (!channelReceiveAs423) _groupMembersChangeReceived(event);
+        if (!channelReceiveAs423) {
+          _groupMembersChangeReceived(event, mirrored: mirrored);
+        }
         break;
       // §16.2.5 — `cleona_service_shared_key*.dart`. A 4.2.3 device does not
       // know the kinds (stand-ins of a probe: `channelReceiveAs423`,

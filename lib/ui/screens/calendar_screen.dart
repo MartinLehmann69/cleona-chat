@@ -141,7 +141,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
           // Calendar view
           Expanded(
             child: switch (_currentView) {
-              CalendarView.day => _DayView(
+              CalendarView.day => CalendarDayView(
                   date: _selectedDate,
                   occurrences: allOccurrences,
                   colorScheme: colorScheme,
@@ -720,57 +720,182 @@ class _CalendarScreenState extends State<CalendarScreen> {
 
 // ── Day View ─────────────────────────────────────────────────────────────
 
-class _DayView extends StatelessWidget {
+/// The hour row the day view opens at (S412, owner decision E2 = A,
+/// 04.11.2026).
+///
+/// Today: the row of the next timed event that starts later than [now];
+/// without one, the row of [now]. Any other day: the row of its first timed
+/// event, where an event that began the day before yields row 0; without
+/// one, 08:00. All-day events never count — they stand above the hour rows.
+///
+/// The row is computed as [_HourRow] slices the day (`dayStart + hour * 1 h`),
+/// so the row opened at is exactly the row that shows the event.
+@visibleForTesting
+int dayViewStartHour({
+  required DateTime day,
+  required DateTime now,
+  required List<CalendarOccurrence> occurrences,
+}) {
+  const hourMs = 60 * 60 * 1000;
+  final dayStart = DateTime(day.year, day.month, day.day).millisecondsSinceEpoch;
+  final dayEnd = dayStart + 24 * hourMs;
+  int rowOf(int ms) => ((ms - dayStart) ~/ hourMs).clamp(0, 23);
+
+  final timedStarts = <int>[
+    for (final o in occurrences)
+      if (!o.event.allDay &&
+          o.occurrenceEnd > dayStart &&
+          o.occurrenceStart < dayEnd)
+        o.occurrenceStart,
+  ];
+
+  final isToday =
+      day.year == now.year && day.month == now.month && day.day == now.day;
+  if (isToday) {
+    final nowMs = now.millisecondsSinceEpoch;
+    final upcoming = timedStarts.where((s) => s > nowMs).toList();
+    return upcoming.isEmpty ? rowOf(nowMs) : rowOf(upcoming.reduce(min));
+  }
+  return timedStarts.isEmpty ? 8 : rowOf(timedStarts.reduce(min));
+}
+
+/// The hour timeline of one day. Opens at [dayViewStartHour]; a new [date]
+/// (prev/next, "today") opens anew, any other rebuild keeps the position the
+/// user scrolled to.
+@visibleForTesting
+class CalendarDayView extends StatefulWidget {
   final DateTime date;
   final List<CalendarOccurrence> occurrences;
   final ColorScheme colorScheme;
   final void Function(CalendarOccurrence) onEventTap;
 
-  const _DayView({
+  /// Source of "now"; settable only so the smoke can fix the time.
+  final DateTime Function() clock;
+
+  const CalendarDayView({
+    super.key,
     required this.date,
     required this.occurrences,
     required this.colorScheme,
     required this.onEventTap,
+    this.clock = DateTime.now,
   });
 
   @override
+  State<CalendarDayView> createState() => _CalendarDayViewState();
+}
+
+class _CalendarDayViewState extends State<CalendarDayView> {
+  final ScrollController _controller = ScrollController();
+
+  // Marks the row to open at. Rows grow with their events (`_HourRow` has a
+  // minimum height of 48 and stacks one block per event), so the offset is
+  // not `hour * fixed height`: the row itself is scrolled to the top.
+  final GlobalKey _startRowKey = GlobalKey();
+  late int _startHour;
+
+  @override
+  void initState() {
+    super.initState();
+    _openAtStartHour();
+  }
+
+  @override
+  void didUpdateWidget(CalendarDayView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.date != oldWidget.date) _openAtStartHour();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _openAtStartHour() {
+    _startHour = dayViewStartHour(
+      day: widget.date,
+      now: widget.clock(),
+      occurrences: widget.occurrences,
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_controller.hasClients) return;
+      final row = _startRowKey.currentContext;
+      if (row == null) return;
+      // Clamped to the scroll extent: a late row ends at the bottom edge.
+      Scrollable.ensureVisible(row, alignment: 0);
+    });
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final colorScheme = widget.colorScheme;
+    final onEventTap = widget.onEventTap;
+    final date = widget.date;
     final dayStart = DateTime(date.year, date.month, date.day).millisecondsSinceEpoch;
     final dayEnd = dayStart + 24 * 60 * 60 * 1000;
-    final dayOccs = occurrences
+    final dayOccs = widget.occurrences
         .where((o) => o.occurrenceEnd > dayStart && o.occurrenceStart < dayEnd)
         .toList();
 
-    // All-day events at the top
     final allDay = dayOccs.where((o) => o.event.allDay).toList();
     final timed = dayOccs.where((o) => !o.event.allDay).toList();
 
-    return ListView(
-      children: [
-        // All-day events
-        if (allDay.isNotEmpty)
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Wrap(
-              spacing: 4,
-              children: allDay.map((o) => _AllDayChip(
-                occurrence: o,
-                colorScheme: colorScheme,
-                onTap: () => onEventTap(o),
-              )).toList(),
+    // A Column, not a lazy ListView: every row is laid out, so the start row
+    // has a context to scroll to even when it lies far below the window.
+    // 24 small rows cost nothing to build.
+    final hours = SingleChildScrollView(
+      controller: _controller,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var hour = 0; hour < 24; hour++)
+            _HourRow(
+              key: hour == _startHour ? _startRowKey : null,
+              hour: hour,
+              dayStart: dayStart,
+              events: timed,
+              colorScheme: colorScheme,
+              onEventTap: onEventTap,
             ),
-          ),
-        if (allDay.isNotEmpty) const Divider(height: 1),
-        // Hourly timeline
-        for (var hour = 0; hour < 24; hour++)
-          _HourRow(
-            hour: hour,
-            dayStart: dayStart,
-            events: timed,
-            colorScheme: colorScheme,
-            onEventTap: onEventTap,
-          ),
-      ],
+        ],
+      ),
+    );
+
+    // Owner decision 04.11.2026 (variant B): all-day events stand fixed above
+    // the hours and do not scroll with them, since the view now opens at a
+    // later hour and a birthday must not sit above the window. The area is
+    // at most a quarter of the view's height, so the hours keep three
+    // quarters; beyond that it scrolls on its own (`primary: false`, so it
+    // never takes the PrimaryScrollController on Android/iOS). Without an
+    // all-day event there is no area and no divider at all. The hours stay
+    // the last child in both cases, so when the first all-day event arrives
+    // the Column's children are matched from the end and the hour list keeps
+    // its scroll position.
+    return LayoutBuilder(
+      builder: (context, constraints) => Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (allDay.isNotEmpty)
+            ConstrainedBox(
+              constraints: BoxConstraints(maxHeight: constraints.maxHeight / 4),
+              child: SingleChildScrollView(
+                primary: false,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Wrap(
+                  spacing: 4,
+                  children: allDay.map((o) => _AllDayChip(
+                    occurrence: o,
+                    colorScheme: colorScheme,
+                    onTap: () => onEventTap(o),
+                  )).toList(),
+                ),
+              ),
+            ),
+          if (allDay.isNotEmpty) const Divider(height: 1),
+          Expanded(child: hours),
+        ],
+      ),
     );
   }
 }
@@ -783,6 +908,7 @@ class _HourRow extends StatelessWidget {
   final void Function(CalendarOccurrence) onEventTap;
 
   const _HourRow({
+    super.key,
     required this.hour,
     required this.dayStart,
     required this.events,

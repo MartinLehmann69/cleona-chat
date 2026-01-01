@@ -8,10 +8,10 @@
 /// | layer | where | what |
 /// |---|---|---|
 /// | `shell` | `shell.dart` | a handshake started, a link set up (events, not datagrams) |
-/// | `split` | `split.dart` | a transmission failed and was dropped |
+/// | `split` | `split.dart`, `split_trace.dart` | a transmission failed and was dropped; since S412 (D-1) only where something went wrong: a re-request round, parts the socket did not take, a request for an unknown transmission, a sender's end other than a clean delivery |
 /// | `assign` | `node_helpers.dart` | a first-contact packet arriving: origin, direct/forwarded/collected, who takes it or why nobody |
 /// | `ladder` | `ladder.dart` | each step of a sending with its target, delivered, given up |
-/// | `step3` | `CodeRoute.recording` | `0x20`–`0x25` in/out with code, hop count, next addresses, inner packet |
+/// | `step3` | `CodeRoute.recording` | `0x20`–`0x25` in/out with code, hop count, next addresses, inner packet; the end of a forwarder's hand-on of two or more parts (`split_trace.dart`, S412) |
 /// | `card`, `seat` | `trace_first_contact.dart`, `host_network.dart` | a card field by field when issued and when read; who holds which seat and why the card names no neighbour |
 /// | `contact` | `memory.dart` | every change of a contact's last observed address |
 ///

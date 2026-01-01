@@ -200,6 +200,15 @@ class Link {
   /// A companion waits for the end of this event-loop turn.
   bool companionPending = false;
 
+  /// The diagnostic line "does not open under the key that stands there" was
+  /// written for this key (D-92 A.5): once per key, not per packet — without
+  /// it "nothing arrived" and "all arrived, nothing opened" look the same
+  /// (S412 measurement E-2).
+  bool unopenedSaid = false;
+
+  /// `true` the first time only — then [unopenedSaid] is set.
+  bool unopenedFirst() => !unopenedSaid && (unopenedSaid = true);
+
   Link(this.sendKey, this.receiveKey, this.heard)
       : last = heard,
         lastReal = heard;

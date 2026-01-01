@@ -137,9 +137,7 @@ extension MailboxPair on Mailbox {
     final p = k == null ? groupPairOrNull(id) : null;
     final address = k?.address ?? p?.address;
     final s = k?.pairRandom ?? p?.pairRandom;
-    if (address == null || s == null || address.foundingEd25519Pk == null) {
-      return null;
-    }
+    if (address == null || s == null || address.foundingEd25519Pk == null) return null;
     return (
       kAB: pairSecret(identity.postBox, address, s),
       neighbours: k?.neighbours ?? p!.neighbours,
@@ -148,9 +146,11 @@ extension MailboxPair on Mailbox {
   }
 
   /// The fixed neighbours this identity names to its contacts (D3):
-  /// `host_contact_seats.dart`, [HostContactSeats.namedTo].
-  List<CardAddress> get ownNeighbours =>
-      host.namedTo(this, node.neighbourhood.fixedNeighbours);
+  /// `host_contact_seats.dart`, [HostContactSeats.namedTo]; for the list in a
+  /// message or acknowledgement as the reader [to] can use them (§9.2, D-92 B).
+  List<CardAddress> get ownNeighbours => host.namedTo(this, node.neighbourhood.fixedNeighbours);
+  List<CardAddress> ownNeighboursFor(Address to) =>
+      host.namedTo(this, node.neighbourhood.fixedNeighbours, to: to);
 
   /// A peer's fixed neighbours arrived sealed in a message or an
   /// acknowledgement (§9.2). Only for a KNOWN contact, and only when they

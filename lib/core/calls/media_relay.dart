@@ -2,51 +2,17 @@ import 'dart:typed_data';
 import 'package:cleona/core/calls/overlay_tree.dart';
 import 'package:cleona/generated/proto/transport.pb.dart' as proto;
 
-/// Per-call relay budget to prevent abuse.
-class RelayBudget {
-  final int maxBytesPerSecond;
-  final int maxFramesPerSecond;
-
-  int _bytesThisSecond = 0;
-  int _framesThisSecond = 0;
-  DateTime _windowStart = DateTime.now();
-
-  RelayBudget({
-    this.maxBytesPerSecond = 500000, // 500 KB/s (enough for audio + video)
-    this.maxFramesPerSecond = 200, // 200 frames/s (4 streams × 50 fps)
-  });
-
-  /// Check if relaying a frame of [size] bytes is within budget.
-  bool canRelay(int size) {
-    _rollWindow();
-    return _bytesThisSecond + size <= maxBytesPerSecond &&
-        _framesThisSecond < maxFramesPerSecond;
-  }
-
-  /// Record a relayed frame.
-  void recordRelay(int size) {
-    _rollWindow();
-    _bytesThisSecond += size;
-    _framesThisSecond++;
-  }
-
-  void _rollWindow() {
-    final now = DateTime.now();
-    if (now.difference(_windowStart).inMilliseconds >= 1000) {
-      _bytesThisSecond = 0;
-      _framesThisSecond = 0;
-      _windowStart = now;
-    }
-  }
-
-  /// Current utilization (0.0 to 1.0).
-  double get utilization {
-    _rollWindow();
-    final byteRatio = _bytesThisSecond / maxBytesPerSecond;
-    final frameRatio = _framesThisSecond / maxFramesPerSecond;
-    return byteRatio > frameRatio ? byteRatio : frameRatio;
-  }
-}
+// ── UNTIL S412 A FIXED `RelayBudget` STOOD HERE (34.T05) ─────────────────
+//
+// 200 frames/s and 500 KB/s per node, own frames counted, every frame above
+// it dropped without a log line (since V3.1.20, `315faa53`). In the crystal
+// at 7 participants an inner node forwards about 350 frames/s; every path
+// over two inner nodes lost a third of its voice twice (E2E run 9: 141..159
+// of at least 200 frames). §17.7: "a node's room is unbounded until its line
+// has shown a limit" — and that limit is measured (`LineLimitJudge` in
+// `loss_report.dart` -> `GroupCallManager.lineLimitShown`, which decides
+// broker and crystal again). A fixed number beside it is a second, wrong
+// limit, as [PairRelay] already says for the broker.
 
 /// Tracks last-seen time per tree child for crash detection.
 class ChildHealthTracker {
@@ -85,7 +51,7 @@ class ChildHealthTracker {
 /// for that sender ([targetsFor], from `GroupCallBroker.forwardTargets`);
 /// video only to pairs whose video it carries.
 ///
-/// No [RelayBudget] here: what a broker may carry it decided when it was
+/// No per-second cap here: what a broker may carry it decided when it was
 /// bound (its capacity under `f_i`), not frame by frame — a per-second cap
 /// would cut the voice of pairs it has confirmed.
 class PairRelay {
@@ -122,11 +88,11 @@ class PairRelay {
 /// A frame that arrives over one tree link goes out over every other
 /// tree link (§17.7) — parent, children and, at a cluster head, the LAN
 /// members. LAN members can be reached one by one or by one multicast
-/// ([onSendMulticast]).
+/// ([onSendMulticast]). No fixed rate cap: the room of a node is bounded by
+/// what its line has shown (§17.7), not by a number here.
 class MediaRelay {
   final OverlayTree tree;
   final String ownNodeIdHex;
-  final RelayBudget budget;
   final ChildHealthTracker healthTracker = ChildHealthTracker();
 
   // Callback: send frame to a specific peer via unicast. [type] is the
@@ -147,13 +113,11 @@ class MediaRelay {
   // Stats
   int framesRelayed = 0;
   int bytesRelayed = 0;
-  int framesDropped = 0;
 
   MediaRelay({
     required this.tree,
     required this.ownNodeIdHex,
-    RelayBudget? budget,
-  }) : budget = budget ?? RelayBudget();
+  });
 
   /// Forward a media frame over every tree link except the one it came by
   /// (§17.7).
@@ -192,11 +156,6 @@ class MediaRelay {
     final targetCount = unicastTargets.length + (multicast ? lan.length : 0);
     if (targetCount == 0) return 0;
 
-    if (!budget.canRelay(frame.length)) {
-      framesDropped++;
-      return 0;
-    }
-
     var sent = 0;
     for (final target in unicastTargets) {
       onSendUnicast?.call(target, frame, type);
@@ -208,7 +167,6 @@ class MediaRelay {
     }
 
     if (sent > 0) {
-      budget.recordRelay(frame.length * sent);
       framesRelayed++;
       bytesRelayed += frame.length * sent;
     }
@@ -236,6 +194,5 @@ class MediaRelay {
     healthTracker.clear();
     framesRelayed = 0;
     bytesRelayed = 0;
-    framesDropped = 0;
   }
 }

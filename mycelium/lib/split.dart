@@ -9,6 +9,7 @@ import 'package:mycelium/silence.dart' show kSendingsAtMost;
 import 'package:mycelium/send_batch.dart';
 import 'package:mycelium/split_flow.dart';
 import 'package:mycelium/split_missing.dart';
+import 'package:mycelium/split_trace.dart';
 import 'package:mycelium/trace.dart' show traceSplitFailed;
 import 'package:mycelium/wire.dart';
 import 'package:mycelium/shell_start.dart' show kPayloadAtMost;
@@ -45,7 +46,8 @@ const int kMaxPayload = kMaxPacket - kHeader; // 1158
 const Duration kRestPeriod = Duration(milliseconds: 300);
 
 /// §11.3: without end mark and without request a transmission counts as ended
-/// this long after its last part — quiet period plus one answer deadline, 1.1 s.
+/// for its flow this long after its last part — quiet period plus one answer
+/// deadline, 1.1 s; its parts still answer a request until [kDropAfter] (D-90).
 Duration endedAfter(Duration restPeriod) => restPeriod + kAnswerDeadline;
 
 /// After this many re-request rounds IN A ROW that brought no new part the
@@ -59,7 +61,6 @@ const int kAtMostAttempts = kSendingsAtMost;
 /// all) part packets keep postponing the quiet period without an
 /// attempt ever being counted.
 const Duration kDropAfter = Duration(seconds: 30);
-
 
 /// One event-loop turn: lets read events (§11.1) in between two batches.
 Future<void> _yield() => Future<void>(() {});
@@ -107,6 +108,7 @@ class _IncomingShipment {
   final Map<int, Uint8List> parts = {};
   int attempt = 0; // rounds in a row without progress (D-43)
   int heldAtRequest = 0; // parts held when the last request went out
+  int rounds = 0; // requests sent, for the TRACE line only (S412 D-1)
   Timer? restTimer;
   Timer? dropTimer;
   _IncomingShipment(this.identifier, this.count, this.from, this.fromPort);
@@ -224,7 +226,9 @@ class Splitter {
           ? flow.heldSingle(target, targetPort)
           : Future.value(SendEnd.sent);
     }
-    return flow.offer(parts, target, targetPort, data.length, foreign: foreign);
+    final end = flow.offer(parts, target, targetPort, data.length, foreign: foreign);
+    traceTransmissionTag(end, parts.first, parts.length); // the forwarder's line
+    return end;
   }
 
   /// Hands all parts of [t] to the wire, [kSendBatch] per event-loop turn
@@ -239,11 +243,12 @@ class Splitter {
           await _yield();
           if (t.cut) return;
         }
-        _wire.send(t.parts[i], t.target, t.targetPort);
+        if (!_wire.send(t.parts[i], t.target, t.targetPort)) t.notTaken++;
       }
     } finally {
       _loopEnd();
     }
+    traceSplitNotTaken(_say, t, t.notTaken);
     flow.active(t); // the last part has left: the quiet clock counts from here
   }
 
@@ -328,24 +333,21 @@ class Splitter {
     if (s.parts.length > s.heldAtRequest) s.attempt = 0;
     if (s.attempt >= atMostAttempts) return _fail(key, s);
     s.attempt++;
+    traceSplitRound(_say, s.identifier, ++s.rounds, s.attempt, s.parts.length, s.count, s.from, s.fromPort);
     s.heldAtRequest = s.parts.length;
     _wire.send(buildMissingRequest(s.identifier, missing), s.from, s.fromPort);
     s.restTimer = Timer(restPeriod, () => _onRest(key));
   }
 
-  /// A request for the running transmission to that hop: an empty one is
-  /// its end mark, otherwise the named parts go out again (§11.3) —
-  /// [kSendBatch] per event-loop turn, as in [_sendLoop].
+  /// A request for the running transmission to that hop, or for the one
+  /// kept after its end (D-90): an empty one is its end mark, otherwise the
+  /// named parts go out again (§11.3) — [kSendBatch] per event-loop turn.
   Future<void> _onMissingRequest(
       Uint8List identifier, int countMissing, Uint8List packet, InternetAddress from, int fromPort) async {
-    final hop = hopKey(from, fromPort);
-    final t = flow.runningFor(hop, identifier);
-    if (t == null) return; // we do not know (any more)
-    if (countMissing == 0) {
-      flow.endMark(hop); // the recipient holds it whole
-      return;
-    }
-    flow.active(t);
+    final t = flow.answerableFor(hopKey(from, fromPort), identifier);
+    if (t == null) return traceSplitUnknownRequest(_say, identifier, countMissing, from, fromPort);
+    if (countMissing == 0) return flow.endMark(t); // the recipient holds it whole
+    flow.asked(t);
     final bd = ByteData.sublistView(packet);
     var sent = 0;
     _loops++;
@@ -359,8 +361,9 @@ class Splitter {
           await _yield();
           if (t.cut || t.how == SendEnd.delivered) return;
         }
-        _wire.send(t.parts[seqNo], t.target, t.targetPort);
+        if (!_wire.send(t.parts[seqNo], t.target, t.targetPort)) t.notTaken++;
         sent++;
+        t.again++;
       }
     } finally {
       _loopEnd();

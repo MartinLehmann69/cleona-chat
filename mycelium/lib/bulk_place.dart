@@ -26,6 +26,7 @@ import 'dart:typed_data';
 
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:mycelium/bulk_piece.dart';
+import 'package:mycelium/bulk_place_trace.dart';
 import 'package:mycelium/card.dart' show CardAddress;
 import 'package:mycelium/silence.dart';
 import 'package:mycelium/media.dart'
@@ -78,8 +79,7 @@ class BulkPlaced {
   final String? reason;
 
   BulkPlaced(this.transferKey, this.tag, this.length, this.sha256, this.holders,
-      this.pieces, this.unplaced, this.decodable, this.packets, this.bytes,
-      this.took, this.reason);
+      this.pieces, this.unplaced, this.decodable, this.packets, this.bytes, this.took, this.reason);
 
   /// No holder accepted anything.
   bool get failed => holders.isEmpty;
@@ -97,8 +97,7 @@ class _Job {
   final void Function(List<CardAddress?> assigned)? onAssigned;
   final Set<int>? only;
   final done = Completer<BulkPlaced>();
-  _Job(this.object, this.holders, this.progress, this.transferKey, this.resume,
-      this.onAssigned, this.only);
+  _Job(this.object, this.holders, this.progress, this.transferKey, this.resume, this.onAssigned, this.only);
 }
 
 class _Final {
@@ -160,12 +159,10 @@ class BulkPlacer {
     if (resume != null && transferKey == null) {
       throw ArgumentError('resuming needs the K_T');
     }
-    final job = _Job(object, holdersInOrder, progress, transferKey, resume,
-        onAssigned, only);
+    final job = _Job(object, holdersInOrder, progress, transferKey, resume, onAssigned, only);
     if (_waiting.length >= kPlaceWaitingAtMost) {
       final old = _waiting.removeAt(0);
-      old.done.complete(_nothing(old.object, 'displaced — more than '
-          '$kPlaceWaitingAtMost transfers waiting (§20.2)'));
+      old.done.complete(_nothing(old.object, 'displaced — more than $kPlaceWaitingAtMost transfers waiting (§20.2)'));
     }
     _waiting.add(job);
     _next();
@@ -176,8 +173,7 @@ class BulkPlacer {
     if (_running || _waiting.isEmpty) return;
     _running = true;
     final job = _waiting.removeAt(0);
-    _run(job).then(job.done.complete, onError: job.done.completeError)
-        .whenComplete(() {
+    _run(job).then(job.done.complete, onError: job.done.completeError).whenComplete(() {
       _running = false;
       _next();
     });
@@ -200,6 +196,10 @@ class BulkPlacer {
       if (_classes.length > kClassesAtMost) {
         _classes.remove(_classes.keys.first);
       }
+    } else {
+      final t = '${tagHex(x.tag)}@';
+      return bulkTraceStray(report, x.tag, from, x.count,
+          [for (final k in [..._opens.keys, ..._finals.keys]) if (k.startsWith(t)) k.substring(t.length)]);
     }
     // An open is answered with its count or 0; a count in between is the
     // final count of an EARLIER intake (a resumed run, S398-W1) — not it.
@@ -226,9 +226,7 @@ class BulkPlacer {
     final tag = bulkTag(kT);
     final seal = bulkSealKey(kT);
     final r = job.resume != null && job.resume!.assigned.isNotEmpty &&
-            job.resume!.assigned.length <= kHoldersAtMost
-        ? job.resume
-        : null;
+            job.resume!.assigned.length <= kHoldersAtMost ? job.resume : null;
     final old = r?.assigned ?? const <CardAddress?>[];
     final candidates = <CardAddress>[];
     for (final c in job.holders) {
@@ -240,14 +238,14 @@ class BulkPlacer {
     // Resumed: the SAME number of shares, or piece i would change holder.
     final h = r != null ? old.length : min(kHoldersAtMost, candidates.length);
     if (h == 0) return _nothing(job.object, 'no holder known');
+    bulkTraceCandidates(report, tag, candidates, h, resumed: r != null);
     bool wanted(int i) => job.only?.contains(i ~/ kPiecesPerStripe) ?? true;
     final counts = List<int>.filled(h, 0);
     for (var i = 0; i < n; i++) {
       if (wanted(i)) counts[i % h]++;
     }
     if (counts.first > 0xFFFF) {
-      return _nothing(job.object, '${counts.first} pieces for one holder — '
-          'more than an open can announce (u16)');
+      return _nothing(job.object, '${counts.first} pieces for one holder — more than an open can announce (u16)');
     }
     var packets = 0;
     var cursor = r != null ? 0 : h;
@@ -297,8 +295,7 @@ class BulkPlacer {
         }
       }
     }
-    final total = [for (var j = 0; j < h; j++) if (assigned[j] != null) counts[j]]
-        .fold(0, (a, b) => a + b);
+    final total = [for (var j = 0; j < h; j++) if (assigned[j] != null) counts[j]].fold(0, (a, b) => a + b);
     // One final count per ADDRESS: a holder reports what it holds under the
     // tag, all its shares together.
     final perAddress = <String, (CardAddress, int)>{};
@@ -395,6 +392,7 @@ class BulkPlacer {
         what: 'media hold 0x52');
     final accepted = at == null ? 0 : await answer.future;
     _opens.remove(key);
+    if (accepted < count || accepted == 0) bulkTraceRefused(report, tag, to, at == null ? null : accepted, count);
     return accepted >= count && accepted > 0;
   }
 }

@@ -611,6 +611,15 @@ class _ParticipantTile extends StatelessWidget {
 
 // ── Button Widget ─────────────────────────────────────────────────────
 
+@visibleForTesting
+Widget groupCallButtonForTesting(
+        {required IconData icon,
+        required String label,
+        Color? color,
+        required VoidCallback? onPressed}) =>
+    _GroupCallButton(
+        icon: icon, label: label, color: color, onPressed: onPressed);
+
 class _GroupCallButton extends StatelessWidget {
   final IconData icon;
   final String label;
@@ -640,29 +649,40 @@ class _GroupCallButton extends StatelessWidget {
             ? Theme.of(context).colorScheme.onPrimaryContainer
             : Theme.of(context).colorScheme.onSurface);
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Semantics(
-          button: true,
-          label: label,
-          child: SizedBox(
-            width: size,
-            height: size,
-            child: FloatingActionButton(
-              heroTag: 'gc_$label',
-              backgroundColor: bgColor,
-              onPressed: onPressed,
-              child: Icon(icon, color: fgColor, size: size * 0.45),
+    // The label belongs to the button: a tap on it (or on the gap) acts like
+    // a tap on the round button, as in the 1:1 call (`call_screen.dart`
+    // `_CallButton`). The round button keeps the one semantics node with the
+    // label; the detector and the label text add none of their own.
+    return GestureDetector(
+      onTap: onPressed,
+      behavior: HitTestBehavior.opaque,
+      excludeFromSemantics: true,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Semantics(
+            button: true,
+            label: label,
+            child: SizedBox(
+              width: size,
+              height: size,
+              child: FloatingActionButton(
+                heroTag: 'gc_$label',
+                backgroundColor: bgColor,
+                onPressed: onPressed,
+                child: Icon(icon, color: fgColor, size: size * 0.45),
+              ),
             ),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: Theme.of(context).textTheme.bodySmall,
-        ),
-      ],
+          const SizedBox(height: 4),
+          ExcludeSemantics(
+            child: Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -48,6 +48,7 @@ import 'package:mycelium/ladder.dart' show Shipment;
 import 'package:mycelium/pair.dart';
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/split.dart' show kMaxPayload, SendEnd;
+import 'package:mycelium/split_trace.dart' show traceHandOn;
 import 'package:mycelium/forward.dart';
 import 'package:mycelium/forward_family.dart';
 
@@ -124,10 +125,9 @@ class CodeRoute {
       neighbours: () => _k.neighbourhood.asEntries,
       isSelf: (a, port) => isSelf(_k, a, port),
       nextStep: (next, from, port) => familyStep(_k, next, from, port), // V5
-      // What the forwarder hands on is others' traffic, bounded per target
-      // (§20.2); beyond the bound it answers 0x21 (§8.1, 2).
-      send: (p, target, port) => _out(
-          p, CardAddress(Uint8List.fromList(target.rawAddress), port), foreign: true),
+      // Others' traffic, bounded per target (§20.2; beyond it 0x21, §8.1, 2); its end is only watched for TRACE (S412 D-1).
+      send: (p, target, port) => traceHandOn(_k.report, p, target, port, _out(
+          p, CardAddress(Uint8List.fromList(target.rawAddress), port), foreign: true)),
       full: _k.flowRefuses,
       onTarget: _onTarget,
       onSuchTarget: _onSuchTarget,

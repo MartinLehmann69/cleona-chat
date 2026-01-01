@@ -17,6 +17,7 @@ import 'package:mycelium/node_amendment.dart';
 import 'package:mycelium/node_enrolment.dart' show NodeEnrolment;
 import 'package:mycelium/node_invitation.dart';
 import 'package:mycelium/node.dart';
+import 'package:mycelium/own_proven.dart' show ownProven;
 import 'package:mycelium/board_proof.dart';
 import 'package:mycelium/board_node.dart';
 import 'package:mycelium/kinds.dart' as kinds;
@@ -216,7 +217,8 @@ bool ownTarget(Node k, CardAddress to) {
           interfaces.any((s) => s.addresses.any((x) => x.address == a.address)))) {
     return true;
   }
-  return k.publicAddress?.equal(to) ?? false;
+  // And what the shell proved since the last network change (D-92 A.4).
+  return (k.publicAddress?.equal(to) ?? false) || ownProven(k, to);
 }
 
 /// Must be called once before the first card generation —

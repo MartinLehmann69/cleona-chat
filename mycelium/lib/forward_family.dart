@@ -16,8 +16,10 @@
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:mycelium/card_address.dart';
+import 'package:mycelium/own_proven.dart' show ownProven;
 import 'package:mycelium/forward.dart' show NextStep;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart' show interfaces;
@@ -44,8 +46,10 @@ NextStep? familyStep(
   return null;
 }
 
-/// Is [a]:[port] this node itself? Loopback or an own interface, own port.
+/// Is [a]:[port] this node itself? Loopback or an own interface, own port —
+/// or an address the shell proved to be this node (D-92 A.4, `own_proven.dart`).
 bool isSelf(Node k, InternetAddress a, int port) =>
-    port == k.port &&
-    (a.isLoopback ||
-        interfaces.any((s) => s.addresses.any((x) => x.address == a.address)));
+    (port == k.port &&
+        (a.isLoopback ||
+            interfaces.any((s) => s.addresses.any((x) => x.address == a.address)))) ||
+    ownProven(k, CardAddress(Uint8List.fromList(a.rawAddress), port));

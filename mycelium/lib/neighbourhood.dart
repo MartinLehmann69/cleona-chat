@@ -205,11 +205,11 @@ class Neighbourhood {
 
   /// §5.5/§11.8a, V2–V4: [from]:[port] named [own] as its own (sealed packet,
   /// or one identifier in answers, `Readiness.nodeLearn`) — ONE neighbour. `bound: false`:
-  /// not sent from one of them, the caller takes them as hints. `fresh`: a
-  /// new neighbour arose — below the optimum only, a hint never displaces.
-  ({bool bound, bool fresh}) ownAddresses(
-      InternetAddress from, int port, List<CardAddress> own) {
-    final j = joinOwn(_list, from, port, own, speaks, possible);
+  /// not sent from one of them, the caller takes them as hints. `fresh`: a new neighbour
+  /// arose — below the optimum only, a hint never displaces. [keepFrom]: [joinOwn].
+  ({bool bound, bool fresh}) ownAddresses(InternetAddress from, int port,
+      List<CardAddress> own, {bool keepFrom = false}) {
+    final j = joinOwn(_list, from, port, own, speaks, possible, keepFrom);
     if (j == null) return (bound: false, fresh: false);
     if (j.joined.isEmpty && count >= atMost) return (bound: true, fresh: false);
     _list.removeWhere((n) => j.joined.any((x) => x.id == n.id));

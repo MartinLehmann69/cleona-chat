@@ -16,7 +16,8 @@ import 'package:mycelium/neighbourhood.dart' show Neighbourhood;
 ///   1. the readiness state and the answering neighbours (§22.7.1), one row
 ///      each: address families, fixed or not, last confirmed. Never an
 ///      address, a node identifier or a contact (§25.7).
-///   2. Debounced Reconnect button
+///   2. Debounced Reconnect button; its answer is a SnackBar on the sheet
+///      (own ScaffoldMessenger, see [_ConnectionSheetState._messenger]).
 ///
 /// No manual address entry and no peer bundle: the sources of the first
 /// neighbour are closed (§11.8, §11.8a) — S399 P1 part C.
@@ -42,7 +43,15 @@ class _ConnectionSheet extends StatefulWidget {
 class _ConnectionSheetState extends State<_ConnectionSheet> {
   // Reconnect state
   bool _reconnecting = false;
-  String? _reconnectResult; // displayed after reconnect finishes
+
+  /// The sheet's own messenger. The answer to "reconnect" is a SnackBar
+  /// (owner decision 04.11.2026, S412 E3 = A). The root ScaffoldMessenger
+  /// would put it into the Scaffold of the page BELOW this modal route —
+  /// behind the barrier and under the sheet, out of sight. The sheet
+  /// therefore carries its own ScaffoldMessenger + transparent Scaffold, and
+  /// the SnackBar stands at the bottom edge of the sheet, which is the bottom
+  /// of the screen above the system bar (SafeArea in [build]).
+  final _messenger = GlobalKey<ScaffoldMessengerState>();
 
   // Refreshed on open, reactively on every service state change — a readiness
   // edge is one (`mycelium_seam.dart`, `readinessChanged`) — and at the 5-s
@@ -103,10 +112,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
 
   Future<void> _onReconnect() async {
     if (_reconnecting) return;
-    setState(() {
-      _reconnecting = true;
-      _reconnectResult = null;
-    });
+    setState(() => _reconnecting = true);
     final locale = AppLocale.read(context);
     try {
       // §25.7: the edge "network change" (§11.8.2) through its one entry —
@@ -119,27 +125,34 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
       final remaining = result['remainingSeconds'] as int? ?? 0;
 
       // The edge runs behind the answer: what it finds arrives as readiness
-      // edges and fills the list. This line claims no result (§25.2 rule 4).
-      setState(() => _reconnectResult = debounced
+      // edges and fills the list. This notice claims no result (§25.2 rule 4).
+      _notify(debounced
           ? locale
               .get('connection_sheet_reconnect_debounced')
               .replaceAll('{s}', '$remaining')
           : locale.get('connection_sheet_reconnect_started'));
     } catch (e) {
-      if (mounted) setState(() => _reconnectResult = '$e');
+      if (mounted) _notify('$e');
     } finally {
       if (mounted) setState(() => _reconnecting = false);
     }
+  }
+
+  /// One place for the answer: a SnackBar on the sheet that leaves by itself
+  /// (default duration, 4 s). It does not depend on the scroll position — the
+  /// reconnect empties and refills the neighbour list, and the list stands
+  /// at its top again (S412 RCA B-3). A second click replaces the notice
+  /// instead of queueing behind it.
+  void _notify(String text) {
+    _messenger.currentState
+      ?..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text)));
   }
 
   // ── Build ────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
-    final locale = AppLocale.read(context);
-    final colorScheme = Theme.of(context).colorScheme;
-    final neighbours = _stats.neighbours;
-
     return SafeArea(
       top: false,
       child: DraggableScrollableSheet(
@@ -147,7 +160,26 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
         initialChildSize: 0.75,
         minChildSize: 0.4,
         maxChildSize: 0.95,
-        builder: (ctx, scrollController) => Column(
+        // The messenger and its Scaffold sit INSIDE the draggable sheet, so
+        // they cover exactly the sheet: the area above it stays the modal
+        // barrier (a tap there still closes the sheet), and the SnackBar
+        // follows the sheet's bottom edge at every drag size.
+        builder: (ctx, scrollController) => ScaffoldMessenger(
+          key: _messenger,
+          child: Scaffold(
+            backgroundColor: Colors.transparent,
+            body: _content(context, scrollController),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _content(BuildContext context, ScrollController scrollController) {
+    final locale = AppLocale.read(context);
+    final colorScheme = Theme.of(context).colorScheme;
+    final neighbours = _stats.neighbours;
+    return Column(
           children: [
             // Drag handle
             const SizedBox(height: 8),
@@ -233,16 +265,6 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
                               : const Icon(Icons.refresh),
                           label: Text(locale.get('connection_sheet_reconnect')),
                         ),
-                        if (_reconnectResult != null) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            _reconnectResult!,
-                            style: TextStyle(
-                              fontSize: 13,
-                              color: colorScheme.onSurfaceVariant,
-                            ),
-                          ),
-                        ],
                       ],
                     ),
                   ),
@@ -252,9 +274,7 @@ class _ConnectionSheetState extends State<_ConnectionSheet> {
               ),
             ),
           ],
-        ),
-      ),
-    );
+        );
   }
 }
 

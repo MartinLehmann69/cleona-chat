@@ -165,7 +165,13 @@ extension CleonaServiceGroupList on CleonaService {
   /// MT_GROUP_MEMBERS_CHANGE (§16.2.2): a membership change of a group as
   /// a change, from an owner or admin of the OLD state (authority gate; the
   /// sender of a leg is fixed by the pairwise seal, no inner signature).
-  void _groupMembersChangeReceived(HarvestEvent event) {
+  ///
+  /// [mirrored]: another own device collected the change and mirrored it
+  /// (§14.7 Type 18, D-91). It is applied as here; only the owner's duty
+  /// after a departure (the next shared-key generation, §16.2.5) stays with
+  /// the collecting device — two devices of one owner must not draw two.
+  void _groupMembersChangeReceived(HarvestEvent event,
+      {bool mirrored = false}) {
     final senderHex = event.senderUserId.hex;
     final proto.GroupMembersChange ch;
     try {
@@ -286,7 +292,8 @@ extension CleonaServiceGroupList on CleonaService {
     unawaited(_capabilityNoticesDue());
     // §16.2.5 "Leaving and removal": the owner left and passed the role to
     // this device — it draws the next generation, as after a GROUP_LEAVE.
-    if (oldOwner != meHex &&
+    if (!mirrored &&
+        oldOwner != meHex &&
         g.ownerNodeIdHex == meHex &&
         !g.members.containsKey(oldOwner)) {
       unawaited(_skDeparted(gid));

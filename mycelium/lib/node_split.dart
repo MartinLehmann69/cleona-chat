@@ -14,7 +14,9 @@ import 'package:mycelium/card_address.dart' show CardAddress;
 import 'package:mycelium/kinds.dart' as kinds;
 import 'package:mycelium/node.dart';
 import 'package:mycelium/node_helpers.dart' show ownTarget;
+import 'package:mycelium/neighbour.dart' show NeighbourAddress;
 import 'package:mycelium/node_roam.dart';
+import 'package:mycelium/own_proven.dart' show ownProvenNote;
 import 'package:mycelium/node_silence.dart';
 import 'package:mycelium/shell.dart';
 import 'package:mycelium/split.dart';
@@ -54,6 +56,12 @@ Splitter nodeSplitter(Node k, Shell shell) {
   // (S405, owner decision 06.10.2026: variant B + C).
   shell.onHeard = (a, p) => nodeHeard(k, a, p); // §11.8.6: one path request
   shell.onMoved = (o, op, to, tp) => nodeMoved(k, shell, o, op, to, tp); // §11.8.6
+  shell.onSelf = (a, p) => ownProvenNote(k, a, p); // D-92 A.4
+  // §11.8.7, D-92 A.3: an address the list joins to a node uses that node's link.
+  shell.sameNode = (a, p) => [
+        for (final x in k.neighbourhood.holding(a, p)?.addresses ?? const <NeighbourAddress>[])
+          if (!x.isAt(a, p)) (x.address, x.port)
+      ];
   shell.onSilent = (target, port) {
     k.silence.failedAddress(target, port, 'handshake');
     k.codeRoute.retry.silent(target, port);

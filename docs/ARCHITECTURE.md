@@ -1,6 +1,6 @@
 # Cleona Chat — Architecture & Technical Specification 4.2
 
-<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:9e39828ac741, 2026-11-04). -->
+<!-- AUTO-GENERATED from Cleona_Chat_Architecture_v4_2.md (sha256:facec63a4359, 2026-11-05). -->
 <!-- Edits to this file will be overwritten. Edit the master in Cleona/. -->
 
 > **What this document is.** The complete, normative description of
@@ -2442,7 +2442,11 @@ on return (§9.5).
 
 Every non-ephemeral message is acknowledged by exactly one packet from
 the recipient, carrying the message identifier and the recipient's current
-fixed neighbours (§5.2, §8.1), nothing else. Ordinary messages carry the
+fixed neighbours (§5.2, §8.1), nothing else. The list names each fixed
+neighbour under an address the reader can use: to a contact inside the own
+segment its segment address, to everyone else only an address reachable
+from the open network (§15.2), with the record key where known (§11.9); a
+fixed neighbour known under no such address is left out. Ordinary messages carry the
 same list, sealed, right behind their identifier; a contact keeps the
 latest list it heard. An identity names to its contacts only fixed
 neighbours that are its own contacts, otherwise the invitation neighbour — a
@@ -2957,7 +2961,7 @@ transmission to that recipient (§20.2).
 | when the request and its repeats bring no new part, or after 30 s | the transmission fails and the caller is told |
 | incomplete transmissions discarded after | 30 s |
 | end mark | an empty request (no missing index), once per complete transmission of two or more parts |
-| sender without end mark or request | treats the transmission as ended 1.1 s after its last part (quiet period 300 ms + one answer deadline, §11.6) |
+| sender without end mark or request | treats the transmission as ended for its flow 1.1 s after its last part (quiet period 300 ms + one answer deadline, §11.6); it still answers a request for it until the end mark, or until 30 s after the transmission began — a part handed to the socket has not yet left the device |
 
 There is no timer that runs while parts are arriving, and no
 per-part acknowledgement. A transmission that never completes fails
@@ -3252,7 +3256,12 @@ answer.
 Packets between two nodes travel under a pairwise **link**: the anonymous
 shell of §4.2, set up by one shell handshake and held in memory only
 (§11.6). A link names a counterpart, not a person: who the counterpart is,
-the envelope decides (§4.3).
+the envelope decides (§4.3). A node holds one link per counterpart: an
+address its list joins to a neighbour that holds a link (§11.8) uses that
+link, and no second handshake is started to it. The answer to a handshake
+is bound to that handshake (§4.2), not to an address: arriving from another
+address under the same port, it is the answer all the same, and the link
+stands under both.
 
 - **Whether the counterpart of a link lives** is judged only by what
   arrives from it; its cover counts. This node's own cover and keep-alive
@@ -4905,7 +4914,7 @@ the wire's permanently different.*
 | 15 | PREKEY_CONSUMED | consumption notice: this one-time prekey has been used, delete it (§14.3) |
 | 16 | DEVICE_SET_CHANGED | device-set change with the **package of wrapped new shared keys** — one packet per remaining device, placed in the **old** line. On lock-out, the rotated user KEM secret key and the identity signing secret keys travel along underneath it — they are placed under the new shared key (§14.4) |
 | 17 | TWIN_IDENTITY_DELETED | the identity was deleted on another of the user's own devices (§21.5.2). The receiving device wipes its local copy **in full** — the store (`messages.db` and its journals), which holds the identity's keys with everything else it owns (§21.4.1) — and its host then removes the identity entry and the profile directory, attachments included. **If it was the last identity on that device, the device ends with zero identities and returns to the first-start state; it does not exit.** No second broadcast to the contacts goes out: the deletion already reached them from the deleting device (§15.7) |
-| 18 | DELIVERY_MIRROR | a delivery from a contact — or, over a group pair (§4.3), a group's or channel's settings change and a call signal of that group (§16.2.2, §17.2) — mirrored by the own device that collected it to the other own devices (§14.2) — the other devices show it as if they had received it themselves and do not acknowledge it again |
+| 18 | DELIVERY_MIRROR | a delivery from a contact — or, over a group pair (§4.3), a group's or channel's settings change, a change of a group's members (D-91) and a call signal of that group (§16.2.2, §17.2) — mirrored by the own device that collected it to the other own devices (§14.2) — the other devices show it as if they had received it themselves and do not acknowledge it again |
 | 19 | KEM_ROTATED | the routine KEM rotation of the identity (§4.5.4): the new generation's secret keys (X25519 + ML-KEM-768) with its time, placed by the rotating device to each other own device before the announcement to contacts; the receiving device takes it as its current generation and opens the cells it parked |
 | 20 | RECONCILE | the initial reconciliation (§14.6.3): header, manifest block, fetch, deliver, progress, cancel — device-scoped |
 | 21 | GROUP_LEFT | the identity left a group (§16.2.2) — group identifier and the membership epoch at leaving; the receiving device removes the conversation and sets the same mark. A post the leaving device discarded is not forwarded to the other own devices |
@@ -4928,7 +4937,9 @@ class for it is excluded for the same reason as for the recovery bundle
 `CONTACT_ADDED`, and the existence of a conversation follows from the
 first message. Group and channel joins run over their own protocols
 (§16); what they leave on one device reaches the other own devices as
-Type 6 or Type 22 (owner decision 08.10.2026).
+Type 6 or Type 22 (owner decision 08.10.2026). A change of a group's
+members that one device receives is mirrored like any contact delivery
+(Type 18), whether or not the identity has joined.
 
 **Transport and mode.**
 

@@ -112,7 +112,7 @@ extension NeighbourKeysContact on Mailbox {
   /// The own fixed neighbours as a message or acknowledgement to [to]
   /// names them (§9.2), and whether with keys.
   ({List<CardAddress> list, bool keys}) namedFor(Address to) =>
-      (list: ownNeighbours, keys: readsKeysOf(to));
+      (list: ownNeighboursFor(to), keys: readsKeysOf(to)); // D-92 B
 
   /// A list came from [from] in a message or acknowledgement; [keyed]: it
   /// carried the bit.

@@ -17,6 +17,13 @@
 ///   [SendEnd.unreachable], with one report; the ladder carries on its other
 ///   steps (§7.1).
 ///
+/// **Ended for its flow is not forgotten** (§11.3 last row, D-90): one that
+/// ended [SendEnd.unconfirmed] is kept, at most ONE per hop (the last), and
+/// answers requests until its end mark, the hop giving up, or 30 s after it
+/// began. Its caller's verdict stands; it moves no clock of the next one and
+/// its end mark ends only itself; not in the bound of others (it holds up
+/// nobody). Released at the next event of the flow — no clock of its own.
+///
 /// **Nothing is evicted** (§20.2). Single-part packets never wait. The
 /// node's own transmissions wait in order, without a bound: what the node
 /// has accepted for sending (R-1). Others' transmissions — forwarding
@@ -34,6 +41,8 @@ import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
+
+import 'package:mycelium/split_trace.dart' show traceSplitEnd, traceSplitKeptEnd;
 
 /// How a send ended — what the caller of `Splitter.send` learns.
 enum SendEnd {
@@ -83,6 +92,17 @@ class Transmission {
   /// How it ended; `null` while it runs or waits.
   SendEnd? how;
 
+  /// Read only by the TRACE line of its end (`split_trace.dart`, S412 D-1):
+  /// when parts last went to the shell, requests answered, parts sent again,
+  /// parts the socket did not take.
+  DateTime lastOut = DateTime(0);
+  int requests = 0, again = 0, notTaken = 0;
+
+  /// Requests answered after it ended for its flow (D-90) — read only by
+  /// the TRACE line of its release.
+  int late = 0;
+  DateTime get started => _started;
+
   /// The hop gave up, or the drop deadline passed: a send loop still handing
   /// parts to the shell stops. The node's stop does not set it (R-1).
   bool cut = false;
@@ -113,9 +133,13 @@ class _Row {
   int foreignBytes = 0;
   Timer? quiet;
 
+  /// The last transmission that ended unconfirmed, still answerable (D-90).
+  Transmission? kept;
+
   /// Single parts the shell holds for this hop's handshake.
   final List<Completer<SendEnd>> held = [];
-  bool get empty => running == null && waiting.isEmpty && held.isEmpty;
+  bool get empty =>
+      running == null && waiting.isEmpty && held.isEmpty && kept == null;
 }
 
 class SplitFlow {
@@ -145,6 +169,10 @@ class SplitFlow {
   /// Waiting transmissions, all hops.
   int get waiting => _rows.values.fold(0, (a, r) => a + r.waiting.length);
 
+  /// Hops whose last ended transmission is still held in memory (D-90) —
+  /// for probes, read only.
+  int get kept => _rows.values.where((r) => r.kept != null).length;
+
   /// Whether others' transmission of [bytes] to [target]:[port] is beyond
   /// the bound (§20.2): it would wait, and the row of others is full. The
   /// forwarder asks this before it hands a packet on (§8.1).
@@ -157,6 +185,7 @@ class SplitFlow {
 
   Future<SendEnd> offer(List<Uint8List> parts, InternetAddress target, int port,
       int bytes, {bool foreign = false}) {
+    _sweep();
     if (foreign && refuses(target, port, bytes)) {
       refused++;
       _report('Split: others\' transmission of $bytes B to '
@@ -186,23 +215,43 @@ class SplitFlow {
     return c.future;
   }
 
-  /// The running transmission to [hop] with [identifier], if any.
-  Transmission? runningFor(String hop, Uint8List identifier) {
-    final t = _rows[hop]?.running;
-    return t != null && t.isIdentifier(identifier) ? t : null;
+  /// The transmission to [hop] with [identifier] whose parts still answer a
+  /// request: the running one, or the one kept after it ended (D-90).
+  Transmission? answerableFor(String hop, Uint8List identifier) {
+    final row = _rows[hop];
+    if (row == null) return null;
+    final t = row.running;
+    if (t != null && t.isIdentifier(identifier)) return t;
+    final k = _kept(hop, row);
+    return k != null && k.isIdentifier(identifier) ? k : null;
+  }
+
+  /// A request for parts of [t] is answered — counted for its TRACE line.
+  void asked(Transmission t) {
+    if (identical(_rows[t.hop]?.running, t)) {
+      t.requests++;
+    } else {
+      t.late++;
+    }
+    active(t);
   }
 
   /// Parts of [t] went to the shell (its start, or an answer to a request):
-  /// the quiet clock starts anew — if [t] still runs.
+  /// the quiet clock starts anew — if [t] still runs. A kept one moves no
+  /// clock: the flow has gone on to the next.
   void active(Transmission t) {
+    t.lastOut = DateTime.now();
     final row = _rows[t.hop];
     if (row != null && identical(row.running, t)) _quiet(t.hop, row);
   }
 
-  /// The end mark of the running transmission of [hop] arrived.
-  void endMark(String hop) {
-    final row = _rows[hop];
-    if (row != null) _finish(hop, row, SendEnd.delivered);
+  /// The end mark of [t] arrived: the running one is delivered and the next
+  /// starts; a kept one is released and touches nothing else.
+  void endMark(Transmission t) {
+    final row = _rows[t.hop];
+    if (row == null) return;
+    if (identical(row.running, t)) return _finish(t.hop, row, SendEnd.delivered);
+    if (identical(row.kept, t)) _release(t.hop, row, 'its end mark');
   }
 
   /// The shell's handshake with [hop] completed: what it held has left.
@@ -226,6 +275,12 @@ class SplitFlow {
     final row = _rows.remove(hop);
     if (row == null) return;
     row.quiet?.cancel();
+    final k = row.kept;
+    if (k != null) {
+      row.kept = null;
+      k.cut = true;
+      traceSplitKeptEnd(_report, k, 'the hop not answering');
+    }
     for (final c in row.held) {
       c.complete(SendEnd.unreachable);
     }
@@ -246,6 +301,7 @@ class SplitFlow {
   void close() {
     for (final row in _rows.values) {
       row.quiet?.cancel();
+      row.kept?.cut = true;
       for (final t in [if (row.running != null) row.running!, ...row.waiting]) {
         t._close(SendEnd.unreachable);
       }
@@ -282,6 +338,7 @@ class SplitFlow {
   void _finish(String hop, _Row row, SendEnd how) {
     final t = row.running;
     if (t == null) return;
+    _sweep(); // the transmission clock frees what is kept elsewhere (D-90)
     row.quiet?.cancel();
     row.quiet = null;
     row.running = null;
@@ -289,7 +346,9 @@ class SplitFlow {
       delivered++;
     } else {
       unconfirmed++;
+      if (!t.cut) _keep(row, t); // still answerable until its 30 s (D-90)
     }
+    traceSplitEnd(_report, t, how); // only when it was not clean (S412 D-1)
     t._close(how);
     if (row.waiting.isEmpty) {
       if (row.empty) _rows.remove(hop);
@@ -301,5 +360,40 @@ class SplitFlow {
       row.foreignBytes -= next.bytes;
     }
     _run(row, next);
+  }
+
+  /// [t] ended unconfirmed and is kept; an earlier kept one gives way (D-90).
+  void _keep(_Row row, Transmission t) {
+    final before = row.kept;
+    row.kept = t;
+    if (before == null) return;
+    before.cut = true;
+    traceSplitKeptEnd(_report, before, 'a later one ending');
+  }
+
+  /// [row]'s kept one while answerable; released [dropAfter] after it began.
+  Transmission? _kept(String hop, _Row row) {
+    final k = row.kept;
+    if (k == null) return null;
+    if (DateTime.now().difference(k.started) <= dropAfter) return k;
+    _release(hop, row, '${dropAfter.inSeconds} s since it began');
+    return null;
+  }
+
+  void _release(String hop, _Row row, String why) {
+    final k = row.kept;
+    if (k == null) return;
+    row.kept = null;
+    k.cut = true; // an answer still being handed out stops
+    traceSplitKeptEnd(_report, k, why);
+    if (row.empty) _rows.remove(hop);
+  }
+
+  /// Releases every kept one past its 30 s — at an event, never on a clock.
+  void _sweep() {
+    for (final hop in _rows.keys.toList()) {
+      final row = _rows[hop];
+      if (row != null) _kept(hop, row);
+    }
   }
 }
