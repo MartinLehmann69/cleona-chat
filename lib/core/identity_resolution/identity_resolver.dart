@@ -141,6 +141,27 @@ class IdentityResolver {
   /// durch eine gueltige Rotationskette.
   final Map<String, Uint8List> _anchoredPkByUserHex = {};
 
+  /// D1/§8.1.1 — User-Signaturschluessel aus einem VERIFIZIERTEN
+  /// AuthManifest, nach userIdHex. Nur befuellt bei
+  /// [AnchorStatus.verified], d.h. `verifySelfCertified` hat das Paar
+  /// ueber `deriveUserId` an genau diese userId gebunden — die Schluessel
+  /// sind damit selbstzertifiziert und ohne weiteren Anker verwendbar.
+  ///
+  /// Zweck: Beim First-CR kennt der Sender die User-Sig-Keys des
+  /// Empfaengers noch nicht (der Kontakt steht auf `pending_outgoing`, die
+  /// Keys kommen erst mit der CR-Response). Das DELIVERY_RECEIPT auf die
+  /// First-CR ist damit strukturell nicht verifizierbar und wird still
+  /// verworfen — der 15-s-ACK-Gate laeuft ab und FIRST_CR_STORE feuert
+  /// gegen einen erreichbaren Empfaenger (§5.5b). Werden die PKs hier
+  /// vorher gepinnt, verifiziert das Receipt ueber den NORMALEN Pfad.
+  final Map<String, ({Uint8List edPk, Uint8List mlDsaPk})>
+      _userSigPksByUserHex = {};
+
+  /// Selbstzertifizierte User-Sig-PKs eines Users, sofern ein verifiziertes
+  /// AuthManifest gesehen wurde. `null` = kein Manifest / legacy-unverified.
+  ({Uint8List edPk, Uint8List mlDsaPk})? userSigPks(Uint8List userId) =>
+      _userSigPksByUserHex[bytesToHex(userId)];
+
   /// Einmal-pro-User-Guard fuer das Legacy-Fallback-Log (Transition).
   final Set<String> _legacyLoggedFor = {};
 
@@ -500,6 +521,16 @@ class IdentityResolver {
       if (!_anchoredPkByUserHex.containsKey(userHex)) {
         _log.info('D1: AuthManifest fuer ${userHex.substring(0, 16)}... '
             'verified (anchor gebunden, seq=${bestVerified.sequenceNumber})');
+      }
+      // §8.1.1 — beide Sig-PKs merken. `verified` heisst: das Paar ist per
+      // deriveUserId an diese userId gebunden, ein Fremd-Manifest kommt hier
+      // nicht an (Bindungs-Check A2 weiter oben verwirft es vorher).
+      if (bestVerified.userEd25519Pk.isNotEmpty &&
+          bestVerified.userMlDsaPk.isNotEmpty) {
+        _userSigPksByUserHex[userHex] = (
+          edPk: bestVerified.userEd25519Pk,
+          mlDsaPk: bestVerified.userMlDsaPk,
+        );
       }
       return _AuthLookup(bestVerified, bestVerified.userEd25519Pk);
     }

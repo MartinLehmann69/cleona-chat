@@ -62,8 +62,13 @@ enum InfrastructureVerifyError {
 class InfrastructureVerifyResult {
   final proto.InfrastructureFrameV3? frame;
   final InfrastructureVerifyError? error;
-  const InfrastructureVerifyResult.ok(this.frame) : error = null;
-  const InfrastructureVerifyResult.fail(this.error) : frame = null;
+  final bool legacyBootAccepted;
+  const InfrastructureVerifyResult.ok(this.frame,
+      {this.legacyBootAccepted = false})
+      : error = null;
+  const InfrastructureVerifyResult.fail(this.error)
+      : frame = null,
+        legacyBootAccepted = false;
   bool get success => frame != null;
 }
 
@@ -246,6 +251,22 @@ class V3FrameCodec {
   /// `precomputedPow` allows callers to pass PoW computed asynchronously
   /// (via [ProofOfWork.computeAsync]) to avoid blocking the main thread.
   /// When set, `skipPoW` is ignored and the pre-computed PoW is used.
+  /// §2.3.1 — the UDP port this daemon actually listens on, stamped into
+  /// every outgoing packet as `senderDataPort`.
+  ///
+  /// Static because the port is daemon-global: one daemon owns exactly one
+  /// data port, shared by all hosted identities (§3.1). `CleonaNode.start()`
+  /// sets it once the transport is bound; 0 means "not yet known" and the
+  /// field is then omitted, which receivers read as "legacy peer" and fall
+  /// back to the observed UDP source port.
+  ///
+  /// Why this exists: the Windows send socket binds ephemerally
+  /// (`transport.dart`, `localPort: 0`), so the UDP header never carries the
+  /// listening port there. Receivers used to learn that ephemeral port as a
+  /// reachable address — measured: 15 addresses on a single peer, 14 of them
+  /// dead with ~900 failed send attempts.
+  static int localDataPort = 0;
+
   static proto.NetworkPacketV3 buildOuter({
     required Uint8List nextHopDeviceId,
     required Uint8List senderDeviceId,
@@ -269,6 +290,13 @@ class V3FrameCodec {
       ..hopCount = hopCount
       ..payloadType = payloadType
       ..payload = innerPayload;
+
+    // Set before signing — the field is inside the Outer-Device-Sig scope
+    // (only ttl / hopCount / visitedDeviceIds / sigs / networkTag are
+    // excluded below), so a relay cannot forge or strip it undetected.
+    if (localDataPort > 0) {
+      packet.senderDataPort = localDataPort;
+    }
 
     if (precomputedPow != null) {
       packet.pow = precomputedPow;
@@ -518,6 +546,11 @@ class V3FrameCodec {
     required Uint8List recipientDeviceX25519Pk,
     required Uint8List recipientDeviceMlKemPk,
     Uint8List? messageId,
+    /// §2.3.5 — set on RESPONSES only: the `messageId` of the request being
+    /// answered. `DhtRpc` correlates on this instead of the ambiguous
+    /// `(peer, requestType)` tuple. Leaving it null keeps the pre-V3.1.159
+    /// behaviour and is what request frames do.
+    Uint8List? inReplyTo,
     int ttl = 64,
     int hopCount = 0,
     int flags = 0,
@@ -538,6 +571,9 @@ class V3FrameCodec {
       ..messageId = messageId ?? _newMessageId()
       ..messageType = messageType
       ..payload = payload;
+    if (inReplyTo != null && inReplyTo.isNotEmpty) {
+      inner.inReplyTo = inReplyTo;
+    }
 
     // [2'] Serialize. No User-Sig fields — Outer Device-Sig provides
     //      routing-authenticity (§2.3.5).
@@ -609,6 +645,10 @@ class V3FrameCodec {
     required proto.MessageTypeV3 messageType,
     required Uint8List payload,
     Uint8List? messageId,
+    /// §2.3.5 — see [buildInfrastructureFrame]. Most DhtRpc responses
+    /// (DHT_PONG, FIND_NODE_RESPONSE, IDENTITY_*_RESPONSE) travel the BOOT
+    /// path, so the correlator has to exist here too.
+    Uint8List? inReplyTo,
     int ttl = 64,
     int hopCount = 0,
     int flags = 0,
@@ -628,6 +668,9 @@ class V3FrameCodec {
       ..messageId = messageId ?? _newMessageId()
       ..messageType = messageType
       ..payload = payload;
+    if (inReplyTo != null && inReplyTo.isNotEmpty) {
+      inner.inReplyTo = inReplyTo;
+    }
 
     // Serialize plaintext — outer.payload is the bare InfrastructureFrameV3
     // bytes, NOT a PerMessageKemV3 wrapper. No zstd, no KEM.
@@ -787,9 +830,19 @@ class V3FrameCodec {
     // selector is intentionally NOT used here — a sender that wraps a
     // non-BOOT type in BOOTSTRAP_INFRASTRUCTURE_FRAME is attempting
     // cross-layer abuse and must be dropped.
+    //
+    // Transition window (S282): old senders (≤3.1.158) still send storage
+    // types (FRAGMENT_STORE/PEER_STORE etc.) via BOOT — accept but flag.
+    final bool legacyBoot;
     if (!isBootstrapMessageTypeV3(frame.messageType)) {
-      return const InfrastructureVerifyResult.fail(
-          InfrastructureVerifyError.selectorMismatch);
+      if (_isLegacyBootStorageType(frame.messageType)) {
+        legacyBoot = true;
+      } else {
+        return const InfrastructureVerifyResult.fail(
+            InfrastructureVerifyError.selectorMismatch);
+      }
+    } else {
+      legacyBoot = false;
     }
 
     // Validate recipientDeviceId == self.deviceId (§3.1: daemon-global).
@@ -804,7 +857,8 @@ class V3FrameCodec {
             InfrastructureVerifyError.recipientMismatch);
       }
     }
-    return InfrastructureVerifyResult.ok(frame);
+    return InfrastructureVerifyResult.ok(frame,
+        legacyBootAccepted: legacyBoot);
   }
 
   /// Generate a 16-byte UUID v4-shaped messageId for InfrastructureFrameV3.
@@ -1010,23 +1064,29 @@ bool isBootstrapMessageTypeV3(proto.MessageTypeV3 type) {
     case proto.MessageTypeV3.MTV3_HOLE_PUNCH_NOTIFY:
     case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PING:
     case proto.MessageTypeV3.MTV3_HOLE_PUNCH_PONG:
-    // Reed-Solomon fragment storage + S&F peer storage — payloads are
-    // already User-KEM-encrypted; the outer Device-KEM wrapper only hides
-    // the storage metadata ("store fragment X for recipient Y"). In the
-    // Closed-Network model (HMAC + Device-Sig on every packet) this
-    // metadata leakage is acceptable. Putting these on the BOOT path
-    // eliminates the Device-KEM cold-start race: Layer 3 offline delivery
-    // works immediately after neighbor discovery, before KEM_PUBLISH
-    // records have propagated.
-    case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
-    case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
-    case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
-    case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
-    case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
-    case proto.MessageTypeV3.MTV3_PEER_STORE:
-    case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
-    case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
-    case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
+    // NOTE — fragment storage and S&F peer storage are deliberately NOT here.
+    // They were added to this list by 30485b6d (2026-05-21), an identity/QR
+    // bugfix, as a side effect: the goal was to dodge the Device-KEM cold-start
+    // race so Layer-3 offline delivery works before KEM_PUBLISH records have
+    // propagated. The removed comment argued the payloads are "already
+    // User-KEM-encrypted" so only storage metadata leaks. That holds for
+    // message delivery — the fragment is a shard of an end-to-end encrypted
+    // NetworkPacketV3 — but NOT for Guardian recovery: guardian_service.dart
+    // puts the RAW Shamir share of the 32-byte master seed into
+    // FragmentStore.fragmentData and states in its own doc comment that "the
+    // frame has no inner KEM wrap — the frame-level encap is the only
+    // confidentiality layer". On the BOOT path that layer does not exist, so
+    // every relay hop and every passive observer holding the network secret
+    // (i.e. every official build) could read the share; three of five
+    // reconstruct the master seed.
+    //
+    // The architecture never sanctioned this: the normative §2.3.5 selector
+    // table lists fragment storage and peer storage as KEM, and defines BOOT as
+    // "only where requiring Device-KEM-PK creates a chicken-and-egg loop" —
+    // which storage does not. The cold-start race that motivated the shortcut
+    // is now solved without giving up confidentiality: want_kem_record on the
+    // DHT_PING (§5.10.2) supplies the DeviceKemRecord in one RTT.
+    //
     // Deferred Key Exchange (rev3 §8.1.1) — must be BOOT: sender needs
     // recipient's Device-KEM-PK and cannot KEM-encrypt without it.
     case proto.MessageTypeV3.MTV3_DEVICE_KEM_REQUEST:
@@ -1056,6 +1116,28 @@ bool isBootstrapMessageTypeV3(proto.MessageTypeV3 type) {
       assert(isInfrastructureMessageTypeV3(type),
           'BOOT-subset entry $type missing from §2.3.5 selector — '
           'isInfrastructureMessageTypeV3 must be a superset');
+      return true;
+    default:
+      return false;
+  }
+}
+
+/// Transition window (S282): storage types that old senders (<=3.1.158)
+/// still send via BOOT. Receivers accept them to avoid breaking S&F,
+/// Reed-Solomon placement and Guardian recovery during the rollout.
+/// Remove once minRequiredVersion >= the first version that sends these
+/// exclusively via KEM (§19.5.7 gate).
+bool _isLegacyBootStorageType(proto.MessageTypeV3 type) {
+  switch (type) {
+    case proto.MessageTypeV3.MTV3_FRAGMENT_STORE:
+    case proto.MessageTypeV3.MTV3_FRAGMENT_STORE_ACK:
+    case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE:
+    case proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE_RESPONSE:
+    case proto.MessageTypeV3.MTV3_FRAGMENT_DELETE:
+    case proto.MessageTypeV3.MTV3_PEER_STORE:
+    case proto.MessageTypeV3.MTV3_PEER_STORE_ACK:
+    case proto.MessageTypeV3.MTV3_PEER_RETRIEVE:
+    case proto.MessageTypeV3.MTV3_PEER_RETRIEVE_RESPONSE:
       return true;
     default:
       return false;

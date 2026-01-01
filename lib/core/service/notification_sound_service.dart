@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -90,7 +91,17 @@ class NotificationSoundService {
   NotificationSettings _settings = NotificationSettings();
   String? _profileDir;
   String? _soundsDir;
-  Process? _loopingProcess;
+
+  /// Looping playback is driven from Dart, not from a shell/PowerShell loop:
+  /// each iteration spawns exactly ONE player process whose PID we own, so
+  /// [Process.kill] actually reaches the player. A `bash -c 'while true; ...'`
+  /// wrapper could not be stopped reliably — Dart starts children without
+  /// setpgid, so the shell is no process-group leader and a hung player
+  /// survived kill() as well as a SIGKILL of the daemon.
+  bool _loopActive = false;
+  int _loopGeneration = 0;
+  Process? _currentPlayer;
+
   bool _vibrateLoopActive = false;
 
   /// Android: callback for one-shot sound playback via platform channel.
@@ -232,23 +243,56 @@ class NotificationSoundService {
     if (_soundsDir == null) return;
     final path = '$_soundsDir/$filename';
     if (!File(path).existsSync()) return;
-    try {
-      if (Platform.isWindows) {
-        // Windows: loop via PowerShell
-        final wavPath = path.replaceAll('.ogg', '.wav');
-        if (File(wavPath).existsSync()) {
-          _loopingProcess = await Process.start('powershell', ['-NoProfile', '-Command',
-            'while(\$true){(New-Object Media.SoundPlayer "$wavPath").PlaySync();Start-Sleep -Milliseconds 500}']);
+
+    final String executable;
+    final List<String> args;
+    if (Platform.isWindows) {
+      // Windows: one PlaySync() per iteration — the repetition happens in Dart.
+      final wavPath = path.replaceAll('.ogg', '.wav');
+      if (!File(wavPath).existsSync()) return;
+      executable = 'powershell';
+      args = ['-NoProfile', '-Command',
+        '(New-Object Media.SoundPlayer "$wavPath").PlaySync()'];
+    } else {
+      final player = _getAudioPlayer();
+      executable = player;
+      // Same argument construction as _playOnce/_playOnceSync — a real argument
+      // list, no shell interpolation.
+      args = player == 'paplay'
+          ? ['--volume=${(_settings.callVolume * 65536).round()}', path]
+          : [path]; // pw-play doesn't support --volume
+    }
+
+    _loopActive = true;
+    final generation = ++_loopGeneration;
+    _log.debug('_startLoop: player=$executable path=$path gen=$generation');
+    unawaited(_runPlaybackLoop(executable, args, generation));
+  }
+
+  /// Repeat playback until [_stopLoop] clears the flag or a newer loop starts.
+  /// [generation] guards against two loops running in parallel when
+  /// [_startLoop] is called again while an older iteration is still sleeping.
+  Future<void> _runPlaybackLoop(
+      String executable, List<String> args, int generation) async {
+    while (_loopActive && generation == _loopGeneration) {
+      try {
+        final proc = await Process.start(executable, args);
+        if (!_loopActive || generation != _loopGeneration) {
+          // Stopped while the process was starting — don't leave it playing.
+          proc.kill();
+          return;
         }
+        _currentPlayer = proc;
+        await proc.exitCode;
+        if (identical(_currentPlayer, proc)) _currentPlayer = null;
+      } catch (e) {
+        // Player binary missing or not startable — do not spin on it.
+        _log.warn('_runPlaybackLoop: start failed player=$executable error=$e');
         return;
       }
-      final player = _getAudioPlayer();
-      final args = player == 'paplay'
-          ? '--volume=${(_settings.callVolume * 65536).round()} "$path"'
-          : '"$path"';
-      _loopingProcess = await Process.start('bash', ['-c',
-        'while true; do $player $args; sleep 0.5; done']);
-    } catch (_) {}
+      if (!_loopActive || generation != _loopGeneration) return;
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
   }
 
   /// Stop the looping sound.
@@ -260,10 +304,11 @@ class NotificationSoundService {
       }
       return;
     }
-    if (_loopingProcess != null) {
-      _loopingProcess!.kill();
-      _loopingProcess = null;
-    }
+    _loopActive = false;
+    _loopGeneration++; // invalidate any loop iteration still in flight
+    final proc = _currentPlayer;
+    _currentPlayer = null;
+    proc?.kill();
   }
 
   /// Play short message notification sound.

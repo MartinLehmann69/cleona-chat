@@ -788,6 +788,8 @@ class CleonaAppState extends ChangeNotifier with WidgetsBindingObserver {
         IosBackgroundFetch.scheduleBackgroundFetch();
       }
     } else if (isResumed) {
+      // Android 14: user can dismiss FGS notification; re-push on resume.
+      if (Platform.isAndroid) _lastNotificationText = '';
       // After Doze/background: network may have changed, re-discover peers.
       // Protected seed peers survived pruning — now ping them to reconnect.
       // Guard: node must be running (transport/natTraversal are late-initialized).

@@ -10,6 +10,7 @@ import 'package:printing/printing.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:cleona/core/crypto/network_secret.dart';
+import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
 import 'package:cleona/ui/screens/donation_screen.dart';
 import 'package:cleona/core/service/notification_sound_service.dart';
 import 'package:cleona/core/archive/whisper_ffi.dart';
@@ -97,6 +98,15 @@ class SettingsScreen extends StatelessWidget {
                   setDialogState(() => error = '1024–65535');
                   return;
                 }
+                // §4.5.2 invariant: the data port must never equal the fixed
+                // LAN-discovery port. The daemon rejects it too, but the IPC
+                // error text never reaches the user (setPort returns a plain
+                // bool), so the reason has to be given here.
+                if (newPort == LocalDiscovery.discoveryPort) {
+                  setDialogState(
+                      () => error = locale.get('port_reserved_discovery'));
+                  return;
+                }
                 if (newPort == service.port) {
                   Navigator.pop(ctx);
                   return;
@@ -106,7 +116,8 @@ class SettingsScreen extends StatelessWidget {
                   Navigator.pop(ctx);
                   if (!ok) {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Port $newPort nicht verfügbar')),
+                      SnackBar(content: Text(locale.tr(
+                          'port_unavailable', {'port': '$newPort'}))),
                     );
                   }
                 }

@@ -124,6 +124,24 @@ CLEONA_AUDIO_API void cleona_audio_destroy(cleona_audio_engine_t* e) {
     free(e);
 }
 
+// === Capture processing chain ============================================
+//
+// Extracted so the offline AEC measurement
+// (cleona_audio_process_frame_for_test / test/test_aec.c) provably runs the
+// SAME code as the live capture callback. A reimplementation in the test
+// would measure a lookalike, not the shipped path — and the open question
+// (does speex still help once the platform AEC has already cancelled?) turns
+// on the exact filter configuration, so "lookalike" is not good enough.
+static void process_capture_frame(cleona_audio_engine_t* e,
+                                  const int16_t* near_in,
+                                  const int16_t* far_ref,
+                                  int16_t* out) {
+    speex_echo_cancellation(e->aec, near_in, far_ref, out);
+    if (atomic_load(&e->ns_enabled)) {
+        speex_preprocess_run(e->preproc, out);
+    }
+}
+
 // === miniaudio Audio-Thread Callbacks =====================================
 
 static void capture_callback(ma_device* dev, void* output_unused, const void* input, ma_uint32 frame_count) {
@@ -146,10 +164,7 @@ static void capture_callback(ma_device* dev, void* output_unused, const void* in
         if (!cleona_ring_try_read(&e->far_end_ring, e->far_end_scratch)) {
             memset(e->far_end_scratch, 0, (size_t)e->frame_bytes);
         }
-        speex_echo_cancellation(e->aec, src, e->far_end_scratch, cleaned);
-        if (atomic_load(&e->ns_enabled)) {
-            speex_preprocess_run(e->preproc, cleaned);
-        }
+        process_capture_frame(e, src, e->far_end_scratch, cleaned);
         cleona_ring_try_write(&e->capture_ring, cleaned);
     } else {
         if (atomic_load(&e->ns_enabled)) {
@@ -161,6 +176,23 @@ static void capture_callback(ma_device* dev, void* output_unused, const void* in
             cleona_ring_try_write(&e->capture_ring, src);
         }
     }
+}
+
+CLEONA_AUDIO_API int32_t cleona_audio_process_frame_for_test(
+    cleona_audio_engine_t* e,
+    const int16_t* near_in,
+    const int16_t* far_in,
+    int16_t* out
+) {
+    if (!e || !near_in || !out) return -1;
+    if (!atomic_load(&e->aec_enabled)) return -2;
+    if (far_in) {
+        memcpy(e->far_end_scratch, far_in, (size_t)e->frame_bytes);
+    } else {
+        memset(e->far_end_scratch, 0, (size_t)e->frame_bytes);
+    }
+    process_capture_frame(e, near_in, e->far_end_scratch, out);
+    return 0;
 }
 
 static void playback_callback(ma_device* dev, void* output, const void* input_unused, ma_uint32 frame_count) {

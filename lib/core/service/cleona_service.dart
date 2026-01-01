@@ -480,7 +480,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
   /// The current app version string. Single source of truth, also consumed
   /// by `lib/main.dart` for the Sec H-5 hard-block startup check (T13).
-  static const String kCurrentAppVersion = '3.1.158';
+  static const String kCurrentAppVersion = '3.1.159';
 
   static Future<String?> Function()? apkPathResolver;
 
@@ -881,6 +881,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
 
       _selfPublishManifest();
+      // F2: delayed push — _selfPublishManifest above runs before UDP is
+      // listening (0 peers in k-bucket). Re-push once at T+90s when routing
+      // has converged. Only pushes when manifest is newer than running version
+      // to avoid unnecessary traffic on nodes already up-to-date.
+      Timer(const Duration(seconds: 90), () {
+        final m = _latestManifest;
+        if (m != null &&
+            UpdateChecker(log: _log).isNewer(m.version, kCurrentAppVersion)) {
+          final json = jsonEncode(m.toJson());
+          _pushManifestToPeers(Uint8List.fromList(utf8.encode(json)));
+        }
+      });
 
       // §19.6 fragment GC — prune old/excess fragment data once per hour,
       // and once immediately at startup to clean up stale data from
@@ -1042,7 +1054,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     final prevEndpointConfirmed = node.onContactEndpointConfirmed;
     node.onContactEndpointConfirmed = (contactUserIdHex) {
       prevEndpointConfirmed?.call(contactUserIdHex);
-      unawaited(_flushOutbox());
+      unawaited(_flushOutbox(trigger: 'contact-endpoint-confirmed'));
     };
 
     // §5.4 V3.1.138: when a peer transitions to confirmed, re-arm proactive
@@ -1161,8 +1173,14 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // seit der Resolver-Logger einen profileDir hat.
       final oldPkHex = storedPk != null
           ? bytesToHex(storedPk).substring(0, 16) : '<null>';
-      contact.ed25519Pk = Uint8List.fromList(embeddedPk);
-      contact.mlDsaPk = Uint8List.fromList(manifest.userMlDsaPk);
+      if (!_setContactTrustAnchor(
+          contact,
+          userHex,
+          Uint8List.fromList(embeddedPk),
+          Uint8List.fromList(manifest.userMlDsaPk),
+          source: 'D1 self-heal')) {
+        return;
+      }
       _saveContacts();
       _log.warn('D1 self-heal: contact ${userHex.substring(0, 8)} stored key '
           '$oldPkHex… replaced with AuthManifest key '
@@ -1352,6 +1370,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
     }
     Timer(const Duration(seconds: 30), _checkForUpdates); // Initial check after 30s
+    Timer(const Duration(minutes: 5), _checkForUpdates); // F3: one retry for mobile
     _updateCheckTimer = Timer.periodic(const Duration(hours: 6), (_) => _checkForUpdates());
 
     // §27.9 NAT-Troubleshooting-Wizard trigger (10-min hold, 1-min tick).
@@ -1752,7 +1771,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
     // Sender side: flush parked outbox entries — the recipient (or a relay
     // toward it) just came online, so L1/L2/L3 may now succeed.
-    unawaited(_flushOutbox());
+    unawaited(_flushOutbox(trigger: 'peer-came-online'));
 
     // Store-host side: proactively push S&F messages to the newly confirmed
     // peer (they may be the intended recipient).
@@ -3636,6 +3655,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
                 hopCount: wasRelay ? 2 : 1),
             viaNextHopHex: res.viaHopHex,
+            // S281: direct/relay discriminator for address scoring in
+            // _handleTimeout — same value the timeout above already uses.
+            estimatedHops: wasRelay ? 2 : 1,
             serializedPacket: serializedPacket,
             recipientUserId: recipientUserId,
           ));
@@ -3693,6 +3715,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientUserId),
               hopCount: wasRelay ? 2 : 1),
           viaNextHopHex: res.viaHopHex,
+          // S281: direct/relay discriminator for address scoring in
+          // _handleTimeout — same value the timeout above already uses.
+          estimatedHops: wasRelay ? 2 : 1,
           serializedPacket: serializedPacket,
           recipientUserId: recipientUserId,
         ));
@@ -3831,11 +3856,27 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final completer = Completer<bool>();
         _pendingPeerStoreAcks[sidHex] = completer;
         attempted++;
+        // Evaluate the send result instead of discarding it. A store that
+        // never left the machine — no route, or no Device-KEM record for
+        // this storage peer (§2.4.1) — is otherwise indistinguishable from
+        // a lost ACK: both surface as an 8 s timeout and both end up in the
+        // same "0/N stores ACCEPTED" line. That ambiguity is why the
+        // 2026-07-27 field failure could not be attributed. Failing fast
+        // also lets the next wave start immediately instead of burning the
+        // full timeout on a peer we demonstrably never reached.
         unawaited(node.sendInfraTo(
           messageType: proto.MessageTypeV3.MTV3_PEER_STORE,
           innerPayload: Uint8List.fromList(peerStore.writeToBuffer()),
           recipientDeviceId: deviceId,
-        ));
+        ).then((sent) {
+          if (sent) return;
+          final pending = _pendingPeerStoreAcks.remove(sidHex);
+          if (pending != null && !pending.isCompleted) {
+            _log.info('S&F: store to ${_hexShort(deviceId)} never dispatched '
+                '(no route or no Device-KEM record) — not waiting for ACK');
+            pending.complete(false);
+          }
+        }));
         waits.add(completer.future.timeout(_peerStoreAckTimeout,
             onTimeout: () {
           _pendingPeerStoreAcks.remove(sidHex);
@@ -4154,11 +4195,20 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// Add a peer by IP:port. Sends a PING to verify reachability.
   ///
   /// This is the "Manual Peer Entry" fallback for advanced users and debugging
-  /// as described in the architecture. The peer is added to the routing table
-  /// and pinged. If the PONG arrives, the peer is confirmed and becomes part
-  /// of the normal DV routing.
+  /// (§4.5). It is **asynchronous by nature**: nothing is added to the routing
+  /// table by this call, and a DHT_PING is normally not sent either, because
+  /// an `InfrastructureFrameV3` needs a recipient deviceId that a bare
+  /// `ip:port` does not supply. What this call does is send plaintext
+  /// discovery probes. Registration happens later, when the target answers:
+  /// `CleonaNode._onDiscoveryReceived` creates the `PeerInfo` and fires the
+  /// ping from there.
   ///
-  /// Returns true if the PING was sent (does not wait for PONG).
+  /// The previous doc claimed "the peer is added to the routing table and
+  /// pinged" — measured 2026-07-28, neither half held at call time:
+  /// `routingTablePeers` was unchanged and `_sendPing` skipped.
+  ///
+  /// Returns true if at least one probe was emitted — NOT that the peer was
+  /// reached, added, or pinged.
   @override
   bool addManualPeer(String ip, int port) {
     if (ip.isEmpty || port <= 0 || port > 65535) {
@@ -4188,9 +4238,15 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // Cross-NAT: LAN-Discovery probes fail across CGNAT (no pinhole on
     // discovery port 41338). Also send a V3 DHT_PING to the data port —
     // works if the target is a KNOWN peer whose addresses include ip:port.
-    node.sendPing(ip, port);
-    _log.info('Manual peer entry: LAN-Discovery probe + V3 PING sent to $ip:$port '
-        '(discoveryPort=${LocalDiscovery.discoveryPort})');
+    // Report what actually happened. The old line announced "V3 PING sent"
+    // unconditionally, 30 microseconds after _sendPing had skipped — which is
+    // how the gap survived unnoticed in the field logs for so long.
+    unawaited(node.sendPing(ip, port).then((pinged) {
+      _log.info('Manual peer entry: discovery probe sent to $ip:$port '
+          '(discoveryPort=${LocalDiscovery.discoveryPort}); '
+          '${pinged ? "V3 PING also sent (address already known)" : "no V3 PING "
+              "— address not in routing table yet, waiting for the probe answer"}');
+    }));
     return true;
   }
 
@@ -4522,17 +4578,55 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       recipientDeviceX25519Pk: dxk,
       recipientDeviceMlKemPk: dmk,
     );
-    final ok = await node.sendToDevice(packet, recipientDeviceId);
+    final firstCrMsgIdHex = bytesToHex(Uint8List.fromList(innerFrame.messageId));
+
+    // §8.1.1 / §4.3 — pin the recipient's self-certified user signature keys
+    // BEFORE the send so the DELIVERY_RECEIPT answering this CR verifies on
+    // the normal path. Without them the receipt fails inner verify with
+    // `userPubkeysMissing` and is silently dropped; the 15 s gate below then
+    // fires FIRST_CR_STORE against a recipient that is online and already
+    // holds the CR, and every retry arms a fresh gate (~8 kB per seed peer
+    // per round — Arbeitsregel 5).
+    _pinRecipientUserSigPks(recipientUserId, recipientUserIdHex);
+
+    final sendResult = await node.sendToDeviceTracked(packet, recipientDeviceId);
+    final ok = sendResult.ok;
     _log.event('CR SENT (First-CR) to '
         '${recipientUserIdHex.substring(0, 8)} (device='
         '${bytesToHex(recipientDeviceId).substring(0, 8)}) ok=$ok');
+
+    // §5.8 RUDP-Light — CONTACT_REQUEST is ack-worthy (`isAckWorthyV3`), but
+    // the First-CR path used untracked `sendToDevice`: no tracker entry, so
+    // no timeout ever fired, so a silently dropped CR never marked its route
+    // DOWN and each retry replayed over the very same dead path (gui-01a WIN
+    // 1c.03 — 90 s, three attempts, one route).
+    //
+    // Deliberately WITHOUT `serializedPacket`/`recipientUserId`: those arm
+    // the tracker's own retry + offline cascade, and the offline path for a
+    // First-CR is §5.5b, owned by the gate below. What we want here is only
+    // the surgical part — address scoring plus 3× timeout → Route DOWN.
+    if (ok) {
+      final destDevHex = bytesToHex(recipientDeviceId);
+      final wasRelay =
+          sendResult.viaHopHex != null && sendResult.viaHopHex != destDevHex;
+      unawaited(node.ackTracker.trackSend(
+        firstCrMsgIdHex,
+        recipientUserIdHex,
+        const <PeerAddress>[],
+        AckTracker.computeTimeout(node.dhtRpc.getRtt(recipientDeviceId),
+            hopCount: wasRelay ? 2 : 1),
+        viaNextHopHex: sendResult.viaHopHex,
+        // S281: direct/relay discriminator for address scoring in
+        // _handleTimeout — same value the timeout above already uses.
+        estimatedHops: wasRelay ? 2 : 1,
+      ));
+    }
 
     // §5.5b First-CR ACK gate: wait 15s for DELIVERY_RECEIPT before
     // falling back to FIRST_CR_STORE on seed peers. If the recipient is
     // online and reachable, the receipt cancels the timer (see
     // _handleDeliveryReceiptV3). If not, the timer fires and deposits
     // the CR on seed peers for offline retrieval.
-    final firstCrMsgIdHex = bytesToHex(Uint8List.fromList(innerFrame.messageId));
     final crBlob = Uint8List.fromList(packet.writeToBuffer());
     _firstCrAckGates[firstCrMsgIdHex]?.cancel();
     _firstCrAckGates[firstCrMsgIdHex] = Timer(const Duration(seconds: 15), () {
@@ -4553,6 +4647,86 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // timer handles delivery even when the routing table isn't warm yet.
     _startCrRetryTimer();
     return true;
+  }
+
+  /// §8.1.1 / §4.3 — pin the recipient's **self-certified** user signature
+  /// keys onto the `pending_outgoing` contact.
+  ///
+  /// Source is a verified AuthManifest: `verifySelfCertified` binds the
+  /// Ed25519/ML-DSA pair to the manifest's `userId` via `deriveUserId`, and
+  /// the resolver additionally rejects manifests answering for a different
+  /// userId than the one asked for (A2). The anchor therefore says exactly
+  /// "these are the keys of the identity I intend to contact" — the same
+  /// anchor §4.3 uses everywhere else, not a new trust assumption.
+  ///
+  /// Why it is needed: the First-CR DELIVERY_RECEIPT is signed with the
+  /// recipient's *user* keys, which the sender only learns from the
+  /// CR-Response — i.e. after the receipt. Inner verify therefore fails with
+  /// `userPubkeysMissing`, the receipt is dropped, and the §5.5b gate fires
+  /// FIRST_CR_STORE against an online recipient.
+  ///
+  /// Interaction with RC-1: if the later CR-Response carries different keys
+  /// than the manifest did, the existing key-change path fires and resets the
+  /// verification level (§8.3). That is the desired outcome — DHT anchor and
+  /// CRR disagreeing is a genuine anomaly, not noise.
+  void _pinRecipientUserSigPks(
+      Uint8List recipientUserId, String recipientUserIdHex) {
+    final contact = _contacts[recipientUserIdHex];
+    if (contact == null) return;
+    if (contact.ed25519Pk != null &&
+        contact.ed25519Pk!.isNotEmpty &&
+        contact.mlDsaPk != null &&
+        contact.mlDsaPk!.isNotEmpty) {
+      return; // already anchored — never overwrite here
+    }
+
+    void apply(({Uint8List edPk, Uint8List mlDsaPk}) pks, String how) {
+      final c = _contacts[recipientUserIdHex];
+      if (c == null) return;
+      if (c.ed25519Pk != null &&
+          c.ed25519Pk!.isNotEmpty &&
+          c.mlDsaPk != null &&
+          c.mlDsaPk!.isNotEmpty) {
+        return;
+      }
+      // Hybrid pair written together — a half-written record can never be
+      // verified again (the historical failure mode behind the S280
+      // contact-key corruption).
+      if (!_setContactTrustAnchor(c, recipientUserIdHex, pks.edPk, pks.mlDsaPk,
+          source: 'AuthManifest pin (\$how)')) {
+        return;
+      }
+      _saveContacts();
+      _log.info('§8.1.1: pinned self-certified user sig keys for '
+          '${recipientUserIdHex.substring(0, 8)} ($how) — First-CR receipt '
+          'is now verifiable');
+    }
+
+    final cached = node.identityResolver.userSigPks(recipientUserId);
+    if (cached != null) {
+      apply(cached, 'resolver cache');
+      return;
+    }
+
+    // Full-seed path never ran a resolve (dxk/dmk came from the ContactSeed).
+    // Kick one off and pin whatever lands. Fire-and-forget so first contact
+    // is not delayed by a DHT round-trip — the resolver de-duplicates
+    // in-flight lookups, so a concurrent resolve costs nothing extra.
+    //
+    // Residual race, deliberately accepted: a recipient that answers faster
+    // than the lookup completes still loses its first receipt and takes one
+    // FIRST_CR_STORE round. That degrades to the documented offline
+    // behaviour instead of failing, and the CR retry closes it.
+    unawaited(node.identityResolver
+        .resolve(recipientUserId)
+        .then((_) {
+          final late = node.identityResolver.userSigPks(recipientUserId);
+          if (late != null) apply(late, 'DHT lookup');
+        })
+        .catchError((Object e) {
+          _log.debug('§8.1.1: user-sig-pk resolve for '
+              '${recipientUserIdHex.substring(0, 8)} failed: $e');
+        }));
   }
 
   // ── §5.5b First-CR-Store on seed peers ───────────────────────────────────
@@ -5082,6 +5256,21 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final hasV2Seed = ci.seedEpB64 != null;
       final isSeedless = ci.seedDeviceIdHex == null ||
           (!hasV1Seed && !hasV2Seed);
+
+      // §5.8 / §8.1.1 step 4 — a DELIVERY_RECEIPT proves the CR reached the
+      // recipient. Replaying an ~8 kB CR every 10 minutes after that is pure
+      // noise (Arbeitsregel 5): the ball is in the recipient's court until
+      // they accept or reject. A slow re-offer stays for the case where the
+      // CR was discarded without an answer.
+      //
+      // This only became reachable with the receipt fix — before it, the
+      // First-CR receipt was dropped at inner verify and `lastAckedAt` was
+      // never set for a pending_outgoing contact.
+      final ackedAt = ci.lastAckedAt;
+      if (ackedAt != null &&
+          now.difference(ackedAt) < const Duration(hours: 24)) {
+        continue;
+      }
 
       // Exponential backoff: 10s, 20s, 40s, …, capped at 600s (seed) or
       // 1200s (seedless DHT re-resolve — cheaper per attempt, longer tail).
@@ -7105,7 +7294,7 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // IMPORTANT: NO timer is involved here.  The flush happens exactly once per
     // onNetworkChanged event (= a real network interface transition), NOT
     // periodically.
-    unawaited(_flushOutbox());
+    unawaited(_flushOutbox(trigger: 'network-change'));
     unawaited(_flushPendingMembershipResends());
   }
 
@@ -7152,9 +7341,107 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       }
       _contactsLoaded = true;
       _log.info('Loaded ${_contacts.length} contacts, ${_deletedContacts.length} deleted');
+      _auditContactTrustAnchors();
     } catch (e) {
       _log.warn('Failed to load contacts: $e');
     }
+  }
+
+  /// §8.3 — load-time audit of every contact's trust anchor.
+  ///
+  /// Two invariants, both observed as real failure modes:
+  ///   1. The anchor must not be one of OUR OWN user keys. There is no state
+  ///      in which that is legitimate — you cannot verify a peer's signature
+  ///      with your own key — yet S280 produced exactly that via a DhtRpc
+  ///      response mix-up, and nothing noticed for days.
+  ///   2. The hybrid pair is all-or-nothing. Older code wrote `ed25519Pk`
+  ///      without `mlDsaPk`; such a record can never verify again, because
+  ///      `decryptAndVerifyInner` requires both.
+  ///
+  /// Violations quarantine the record (see [ContactInfo.trustAnchorQuarantined])
+  /// instead of clearing it — clearing would open the §8.1.1 "Restluecke A"
+  /// silent-refill path to the next incoming CR.
+  void _auditContactTrustAnchors() {
+    final ownPks = node.hostedUserEd25519Pks.toList();
+    var changed = 0;
+    for (final entry in _contacts.entries) {
+      final c = entry.value;
+      if (c.trustAnchorQuarantined) continue;
+      final ed = c.ed25519Pk;
+      final ml = c.mlDsaPk;
+
+      if (ed != null &&
+          ed.isNotEmpty &&
+          ownPks.any((own) => constantTimeEquals(ed, own))) {
+        c.trustAnchorQuarantined = true;
+        c.trustAnchorQuarantineReason = 'anchor equals a locally hosted identity key';
+        _log.error('CONTACT ANCHOR CORRUPT: ${entry.key.substring(0, 8)} '
+            'carries one of OUR OWN user keys — quarantined. Every message '
+            'from this contact would fail user-sig verify silently.');
+        changed++;
+        continue;
+      }
+
+      final edSet = ed != null && ed.isNotEmpty;
+      final mlSet = ml != null && ml.isNotEmpty;
+      if (edSet != mlSet) {
+        c.trustAnchorQuarantined = true;
+        c.trustAnchorQuarantineReason =
+            'hybrid pair incomplete (ed25519=${edSet ? "set" : "missing"}, '
+            'mlDsa=${mlSet ? "set" : "missing"})';
+        _log.error('CONTACT ANCHOR CORRUPT: ${entry.key.substring(0, 8)} has '
+            'a half-written hybrid key pair — quarantined, it can never '
+            'verify.');
+        changed++;
+      }
+    }
+    if (changed > 0) {
+      _saveContacts();
+      _log.warn('§8.3: $changed contact(s) quarantined by the anchor audit — '
+          're-verification required before they can be used again.');
+    }
+  }
+
+  /// §8.3 — the single place that writes a contact's user trust anchor.
+  ///
+  /// Enforces the same two invariants as [_auditContactTrustAnchors] BEFORE
+  /// the write, so a corrupt anchor is never persisted in the first place.
+  /// Returns true when the anchor was written.
+  ///
+  /// [source] names the caller for the log (CR, CRR, key-rotation, restore,
+  /// D1 self-heal, …) — the S280 post-mortem could not tell which path had
+  /// written the bad record.
+  bool _setContactTrustAnchor(
+    ContactInfo contact,
+    String contactHex,
+    Uint8List? edPk,
+    Uint8List? mlDsaPk, {
+    required String source,
+  }) {
+    final edOk = edPk != null && edPk.isNotEmpty;
+    final mlOk = mlDsaPk != null && mlDsaPk.isNotEmpty;
+    if (edOk != mlOk) {
+      _log.warn('§8.3: refusing half-written anchor for '
+          '${contactHex.substring(0, 8)} from $source '
+          '(ed25519=${edOk ? "set" : "missing"}, mlDsa=${mlOk ? "set" : "missing"})');
+      return false;
+    }
+    if (!edOk) return false; // nothing to write
+
+    if (node.hostedUserEd25519Pks
+        .any((own) => constantTimeEquals(edPk, own))) {
+      contact.trustAnchorQuarantined = true;
+      contact.trustAnchorQuarantineReason =
+          'write attempt with a locally hosted identity key ($source)';
+      _log.error('§8.3: BLOCKED anchor write for ${contactHex.substring(0, 8)} '
+          'from $source — the key is one of ours. Record quarantined.');
+      _saveContacts();
+      return false;
+    }
+
+    contact.ed25519Pk = edPk;
+    contact.mlDsaPk = mlDsaPk;
+    return true;
   }
 
   void _saveContacts() {
@@ -7326,10 +7613,16 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
   /// entry is removed and the message status is upgraded.  On continued
   /// failure (still zero peers) the entry is retained for the next edge.
   /// With [onlyUserIdHex] (F3′) the flush is scoped to that recipient.
-  Future<void> _flushOutbox({String? onlyUserIdHex}) async {
+  /// [trigger] names the §5.1 edge that caused this flush. It exists purely
+  /// for diagnosability: the log line used to say "network-change edge" for
+  /// every unscoped flush, so a log showing four flushes in nine hours gave
+  /// no way to tell an interface transition apart from a peer that just came
+  /// online — three different causes, one indistinguishable label.
+  Future<void> _flushOutbox(
+      {String? onlyUserIdHex, String trigger = 'unspecified'}) async {
     if (_outbox.isEmpty) return;
     _log.info('Outbox flush: ${_outbox.length} entries on '
-        '${onlyUserIdHex == null ? "network-change edge" : "F3-edge for ${onlyUserIdHex.substring(0, 8)}"}');
+        '${onlyUserIdHex == null ? "$trigger edge" : "F3-edge for ${onlyUserIdHex.substring(0, 8)}"}');
     final toRemove = <String>[];
     // Snapshot: a DELIVERY_RECEIPT for a just-flushed entry mutates _outbox
     // (_handleDeliveryReceiptV3 → remove) while this loop is suspended at an
@@ -7396,6 +7689,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             const <PeerAddress>[],
             timeout,
             viaNextHopHex: sentViaHopHex,
+            // S281: direct/relay discriminator for address scoring in
+            // _handleTimeout — same value the timeout above already uses.
+            estimatedHops: wasRelay ? 2 : 1,
             serializedPacket: canonicalBytes,
             recipientUserId: recipientUserId,
           ));
@@ -10100,7 +10396,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     // Keys are always applied (SR-1: visibility, not prevention).
-    contact.ed25519Pk = newEd25519Pk;
+    // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+    _setContactTrustAnchor(contact, senderHex, newEd25519Pk, newMlDsaPk,
+        source: 'key rotation');
     contact.mlDsaPk = newMlDsaPk;
     contact.x25519Pk = newX25519Pk;
     contact.mlKemPk = newMlKemPk;
@@ -10591,10 +10889,12 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       // Update contact with new keys and node ID
       _contacts.remove(oldNodeIdHex);
       contact.nodeId = Uint8List.fromList(rb.newNodeId);
-      contact.ed25519Pk = Uint8List.fromList(rb.newEd25519Pk);
+      _setContactTrustAnchor(contact, newNodeIdHex,
+          Uint8List.fromList(rb.newEd25519Pk),
+          Uint8List.fromList(rb.newMlDsaPk),
+          source: 'restore broadcast');
       contact.x25519Pk = Uint8List.fromList(rb.newX25519Pk);
       contact.mlKemPk = Uint8List.fromList(rb.newMlKemPk);
-      contact.mlDsaPk = Uint8List.fromList(rb.newMlDsaPk);
       if (rb.displayName.isNotEmpty) contact.displayName = rb.displayName;
       // H-2 Part B (§8.3, SR-1-consistent): if the restore changed the
       // contact's identity key, run Key-Change-Detection — reset the
@@ -10774,7 +11074,11 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         final channelInfo = proto.RestoreChannelInfo()
           ..channelId = hexToBytes(channel.channelIdHex)
           ..name = channel.name
-          ..ownerNodeIdHex = channel.ownerNodeIdHex;
+          ..ownerNodeIdHex = channel.ownerNodeIdHex
+          // NSFW rating travels with the restore payload (proto field 6). Until
+          // the field existed the recovering side could only fall back to the
+          // ChannelInfo default, so an adult channel silently lost its flag.
+          ..isAdult = channel.isAdult;
         if (channel.description != null) channelInfo.description = channel.description!;
 
         for (final member in channel.members.values) {
@@ -10952,6 +11256,10 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
             description: ci.description.isNotEmpty ? ci.description : null,
             ownerNodeIdHex: ci.ownerNodeIdHex,
             members: members,
+            // Carry the sender's NSFW rating instead of inheriting a default.
+            // A sender still on the old build leaves field 6 unset and this
+            // reads the protobuf default false — same as before the change.
+            isAdult: ci.isAdult,
           );
           channelsRestored++;
         }
@@ -12576,6 +12884,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         const <PeerAddress>[],
         timeout,
         viaNextHopHex: firstOkViaHopHex,
+        // S281: direct/relay discriminator for address scoring in
+        // _handleTimeout — same value the timeout above already uses.
+        estimatedHops: wasRelay ? 2 : 1,
         serializedPacket: canonicalBytes,
         recipientUserId: recipientUserId,
       ));
@@ -13171,13 +13482,19 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     }
 
     final innerPayload = Uint8List.fromList(packet.payload);
+    // §8.3 — a quarantined anchor must never be used for verification. It is
+    // by definition wrong, so verifying against it can only produce false
+    // negatives (every frame from that contact silently dropped) or, worse,
+    // a false positive against a key that is not theirs.
     Uint8List lookupEd25519(Uint8List sid) {
       final c = _contacts[bytesToHex(sid)];
-      return c?.ed25519Pk ?? Uint8List(0);
+      if (c == null || c.trustAnchorQuarantined) return Uint8List(0);
+      return c.ed25519Pk ?? Uint8List(0);
     }
     Uint8List lookupMlDsa(Uint8List sid) {
       final c = _contacts[bytesToHex(sid)];
-      return c?.mlDsaPk ?? Uint8List(0);
+      if (c == null || c.trustAnchorQuarantined) return Uint8List(0);
+      return c.mlDsaPk ?? Uint8List(0);
     }
     ({Uint8List edPk, Uint8List mlDsaPk})? trustBootstrap(
         proto.ApplicationFrameV3 f) {
@@ -13348,10 +13665,32 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
     // default false — a receipt then never confirms a direct route.
     bool wasDirect = false,
   }) async {
-    // Receive-side dedup (Architecture §5.8 RUDP-Light): drop duplicate
-    // frames silently. The same logical message can arrive via Direct +
-    // Reed-Solomon reassembly + S&F mutual peer; without dedup the user
-    // sees the message thrice and the sender gets three DELIVERY_RECEIPTs.
+    // Receive-side dedup (Architecture §5.8 RUDP-Light): suppress the PAYLOAD
+    // of duplicate frames. The same logical message can arrive via Direct +
+    // Reed-Solomon reassembly + S&F mutual peer; without dedup the user sees
+    // the message thrice.
+    //
+    // The DELIVERY_RECEIPT is NOT suppressed. The architecture's canonical
+    // receiver pipeline (§ "service.handleApplicationFrame", step [b]) reads:
+    //
+    //     ├─ [b] Dedup: messageId already seen?
+    //     │      → if yes: send DELIVERY_RECEIPT (idempotent), then drop
+    //
+    // Returning early here — as this code did until 2026-07-28 — skipped the
+    // receipt in step [d] and made every RUDP-Light retry structurally
+    // unacknowledgeable: a lost receipt causes a retry, the retry is seen as a
+    // duplicate, the duplicate is dropped without a receipt, and the sender
+    // escalates to 3x timeout → Route DOWN → exponential address backoff up to
+    // 5 minutes on addresses that were working the whole time. Measured on
+    // node202: 346 ACK timeouts, all for a single peer, while direct UDP
+    // between the two flowed in the same second.
+    //
+    // A duplicate is the strongest available proof that the message arrived,
+    // so re-acking is both correct and cheaper than what it replaces: one
+    // ~200-byte receipt instead of an unbounded retry cycle (working rule 5).
+    // Deliberately NOT rate-limited — a time window would leave retries inside
+    // it unacknowledged and would recreate exactly this bug.
+    //
     // Inner.messageId is set by `sendToUser` (16-byte UUID v4); empty
     // messageIds fall through (transitional path until all senders are
     // wired — receipt-emit just won't happen for those).
@@ -13359,7 +13698,18 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
       final msgIdHex = bytesToHex(Uint8List.fromList(frame.messageId));
       if (_processedMessageIds.contains(msgIdHex)) {
         _log.debug('handleApplicationFrame: duplicate ${frame.messageType.name} '
-            'msgId=${msgIdHex.substring(0, 8)} — dropped');
+            'msgId=${msgIdHex.substring(0, 8)} — re-acking, payload dropped');
+        if (AckTracker.isAckWorthyV3(frame.messageType) &&
+            frame.senderUserId.isNotEmpty) {
+          final senderUserId = Uint8List.fromList(frame.senderUserId);
+          if (!constantTimeEquals(senderUserId, identity.userId)) {
+            _sendDeliveryReceiptV3(
+              recipientUserId: senderUserId,
+              messageId: Uint8List.fromList(frame.messageId),
+              senderDeviceId: senderDeviceId,
+            );
+          }
+        }
         return;
       }
       _processedMessageIds.add(msgIdHex);
@@ -15042,12 +15392,31 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
 
         // Restlücke A: accepted contact with empty stored key — fill keys
         // silently instead of downgrading to pending (never overwrite accepted→pending)
+        //
+        // §8.3 hardening: NOT for a quarantined record. The outer device
+        // signature gating this branch is the sender's own — it proves who
+        // sent the CR, not that they are the contact we think they are. For
+        // a record whose anchor we already know to be broken, a silent refill
+        // would hand the next CR a free overwrite of the trust anchor.
+        // Such a contact must go through the explicit inbox confirmation.
+        if (existing.trustAnchorQuarantined) {
+          _log.warn('§8.3: CR from ${senderHex.substring(0, 8)} hits a '
+              'QUARANTINED contact — no silent key fill, user confirmation '
+              'required (${existing.trustAnchorQuarantineReason})');
+          return;
+        }
         if (storedEd25519 == null || storedEd25519.isEmpty) {
           existing.displayName = cr.displayName;
-          existing.ed25519Pk = incomingEd25519;
+          if (!_setContactTrustAnchor(
+              existing,
+              senderHex,
+              incomingEd25519,
+              Uint8List.fromList(cr.mlDsaPublicKey),
+              source: 'CR/Restluecke-A')) {
+            return;
+          }
           existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
           existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
-          existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
           if (cr.profilePicture.isNotEmpty) {
             existing.profilePictureBase64 = base64Encode(cr.profilePicture);
           }
@@ -15062,7 +15431,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // Same-Seed-Reinstall: keys unchanged — silent refresh
         else if (constantTimeEquals(storedEd25519, incomingEd25519)) {
           existing.displayName = cr.displayName;
-          existing.ed25519Pk = incomingEd25519;
+          // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+          _setContactTrustAnchor(existing, senderHex, incomingEd25519, Uint8List.fromList(cr.mlDsaPublicKey),
+              source: 'CR/same-seed-refill');
           existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
           existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
           existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
@@ -15082,7 +15453,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           final prevLevel = existing.verificationLevel;
           final keyChange = onIdentityRotation(prevLevel);
           existing.displayName = cr.displayName;
-          existing.ed25519Pk = incomingEd25519;
+          // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+          _setContactTrustAnchor(existing, senderHex, incomingEd25519, Uint8List.fromList(cr.mlDsaPublicKey),
+              source: 'CR/same-key-refresh');
           existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
           existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
           existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
@@ -15120,7 +15493,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         // Bidirectional CR: we sent them a CR AND they sent us one.
         // Auto-accept: both sides want to connect.
         existing.displayName = cr.displayName;
-        existing.ed25519Pk = Uint8List.fromList(cr.ed25519PublicKey);
+        // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+        _setContactTrustAnchor(existing, senderHex, Uint8List.fromList(cr.ed25519PublicKey), Uint8List.fromList(cr.mlDsaPublicKey),
+            source: 'CR/key-change');
         existing.x25519Pk = Uint8List.fromList(cr.x25519PublicKey);
         existing.mlKemPk = Uint8List.fromList(cr.mlKemPublicKey);
         existing.mlDsaPk = Uint8List.fromList(cr.mlDsaPublicKey);
@@ -15271,7 +15646,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
           final identityKeyChanged = oldEd25519 == null || oldEd25519.isEmpty ||
               !constantTimeEquals(oldEd25519, incomingEd25519);
 
-          existing.ed25519Pk = incomingEd25519;
+          // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+          _setContactTrustAnchor(existing, senderHex, incomingEd25519, Uint8List.fromList(resp.mlDsaPublicKey),
+              source: 'CRR/already-accepted');
           existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
           existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
           existing.mlDsaPk = Uint8List.fromList(resp.mlDsaPublicKey);
@@ -15310,7 +15687,9 @@ class CleonaService implements ICleonaService, ContactSeedDataSource, ServiceCon
         }
 
         // First acceptance path
-        existing.ed25519Pk = Uint8List.fromList(resp.ed25519PublicKey);
+        // §8.3: zentraler Setter — prueft Eigen-Key und Hybrid-Paar.
+        _setContactTrustAnchor(existing, senderHex, Uint8List.fromList(resp.ed25519PublicKey), Uint8List.fromList(resp.mlDsaPublicKey),
+            source: 'CRR/first-accept');
         existing.x25519Pk = Uint8List.fromList(resp.x25519PublicKey);
         existing.mlKemPk = Uint8List.fromList(resp.mlKemPublicKey);
         existing.mlDsaPk = Uint8List.fromList(resp.mlDsaPublicKey);

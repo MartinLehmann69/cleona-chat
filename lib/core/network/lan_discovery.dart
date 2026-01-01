@@ -798,7 +798,15 @@ class MulticastDiscovery {
 
     if (_bytesEqual(peerId, nodeId)) return;
 
-    onDiscovered?.call(peerId, peerPort, datagram.address, datagram.port);
+    // This socket binds anyIPv6 WITHOUT IPV6_V6ONLY and shares port 41338
+    // with LocalDiscovery's anyIPv4 socket via SO_REUSEPORT — the kernel may
+    // deliver an IPv4 sender's datagram here, reported as v4-mapped
+    // ('::ffff:a.b.c.d'). Passed through raw, that string poisons the peer's
+    // address list in `_touchPeer` (classified ipv6Global, send priority 2,
+    // wrong socket family on send — bootstrap logged 1426x
+    // '::ffff:192.168.10.92:41338'). Normalise before the callback.
+    onDiscovered?.call(peerId, peerPort,
+        Transport.normalizeRemoteAddress(datagram.address), datagram.port);
   }
 
   void _sendBurst(int count) {

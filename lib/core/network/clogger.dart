@@ -3,7 +3,19 @@ import 'dart:io';
 
 import 'package:cleona/core/crypto/network_secret.dart';
 
-enum LogLevel { debug, info, warn, error }
+/// Log levels, ordered by increasing severity.
+///
+/// [trace] sits below [debug] and exists for one purpose: per-destination
+/// send-path decisions whose content is constant for a whole round (default-
+/// gateway skip, fire-and-forget cut-off, relay cooldown). A node with a few
+/// hundred peers emits these hundreds of times in milliseconds. They stay in
+/// the log file — where they are genuinely useful for field RCA — but are
+/// kept out of the crash-reporter ring, which holds only 500 lines and feeds
+/// the 200-line tail of every bug report (§9.5.8). Without the split, a
+/// single DHT round fills the whole report window and the actual incident
+/// scrolls out. Same rationale as the module-based transport filter in
+/// [getReportLines], but resolved per call site instead of per module.
+enum LogLevel { trace, debug, info, warn, error }
 
 /// Per-directory sink state for segment rotation (S120 log retention).
 class _LogSinkState {
@@ -115,6 +127,9 @@ class CLogger {
     return _instances.putIfAbsent(key, () => CLogger(module, profileDir: profileDir));
   }
 
+  /// File-only logging for high-frequency, low-information send-path lines.
+  /// See [LogLevel.trace] for why these must not reach the report ring.
+  void trace(String msg) => _log(LogLevel.trace, msg);
   void debug(String msg) => _log(LogLevel.debug, msg);
   void info(String msg) => _log(LogLevel.info, msg);
   void warn(String msg) => _log(LogLevel.warn, msg);
@@ -138,11 +153,11 @@ class CLogger {
     final levelStr = level.name.toUpperCase().padRight(5);
     final line = '$ts [$levelStr] [$module] $msg';
 
-    // DEBUG only goes to the file buffer — console output is INFO+.
+    // TRACE and DEBUG only go to the file buffer — console output is INFO+.
     // On Android this avoids main-thread I/O flooding; on Windows it
     // prevents the console window from scrolling endlessly with packet-
     // level noise that makes the machine look like "die Hölle ist los".
-    if (level != LogLevel.debug) {
+    if (level != LogLevel.debug && level != LogLevel.trace) {
       try {
         // ignore: avoid_print
         print(line);
@@ -157,9 +172,16 @@ class CLogger {
       try { stderr.writeln(line); } catch (_) {}
     }
 
-    // Ring buffer for crash reporter
-    _ring.add(line);
-    if (_ring.length > _ringCapacity) _ring.removeAt(0);
+    // Ring buffer for crash reporter. TRACE is deliberately excluded: the
+    // ring holds 500 lines and feeds the 200-line report tail (§9.5.8), so
+    // a few hundred per-destination send-path lines would evict everything
+    // diagnostically useful within milliseconds. Field evidence (bug report
+    // 2026-07-27): 155 of 199 report lines were two such messages and the
+    // report covered only 3.5 s. The lines remain in the file buffer below.
+    if (level != LogLevel.trace) {
+      _ring.add(line);
+      if (_ring.length > _ringCapacity) _ring.removeAt(0);
+    }
 
     // Buffer for file write
     final buffer = profileDir != null ? _buffers[profileDir] : null;

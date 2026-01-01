@@ -56,8 +56,18 @@ class CleonaForegroundService : Service() {
             instance?.wakeLock?.acquire(30_000L)
         }
 
+        // Cached title/text so createNotification() renders the last known
+        // live status instead of the hard-coded default after onStartCommand
+        // re-issues startForeground (Android 14 dismiss restore path).
+        @Volatile var cachedTitle: String = "Cleona Chat"
+            private set
+        @Volatile var cachedText: String = "Verbinde…"
+            private set
+
         /// Update the foreground notification text from anywhere.
         fun updateNotification(context: Context, title: String, text: String) {
+            cachedTitle = title
+            cachedText = text
             val intent = Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
             }
@@ -258,8 +268,8 @@ class CleonaForegroundService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Cleona Chat")
-            .setContentText("Verbinde\u2026")
+            .setContentTitle(cachedTitle)
+            .setContentText(cachedText)
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setContentIntent(pendingIntent)

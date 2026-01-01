@@ -202,6 +202,16 @@ class CleonaNode {
     return _identitiesByDeviceId[bytesToHex(deviceId)];
   }
 
+  /// §8.3 — User-Ed25519-PKs ALLER auf diesem Daemon gehosteten Identitaeten.
+  ///
+  /// Wird fuer die Kontakt-Invariante gebraucht: ein Kontakt-Trust-Anchor darf
+  /// niemals der eigene Schluessel sein. Die Pruefung muss ueber alle
+  /// gehosteten Identitaeten laufen, nicht nur ueber die ladende — der
+  /// S280-Vorfall entstand auf einem Multi-Identity-Knoten (Bob/Charly),
+  /// und ein Kontakt von Bob mit Charlys Schluessel waere genauso kaputt.
+  Iterable<Uint8List> get hostedUserEd25519Pks =>
+      _identities.values.map((ctx) => ctx.ed25519PublicKey);
+
   /// All identities hosted on [deviceId] (may be >1 after C-1/§3.1 made
   /// deviceNodeId daemon-global — two identities share one device).
   /// Used by service-routed handlers that carry recipientUserId in the payload.
@@ -822,6 +832,16 @@ class CleonaNode {
       final peer = routingTable.getPeer(hexToBytes(hex));
       return peer?.idPowVerified ?? false;
     };
+    // §4.4: let gateway election see what the send path sees. Same predicate
+    // as the GW skip in sendToDevice, so a neighbor can no longer be elected
+    // gateway and then be skipped on every single send without anything
+    // demoting it. A peer that is not in the routing table at all counts as
+    // unreachable — sendToDevice cannot use it either.
+    dvRouting.isHopReachable = (hex) {
+      final peer = routingTable.getPeer(hexToBytes(hex));
+      if (peer == null) return false;
+      return _isHopReachableFromHere(peer);
+    };
     dvRouting.isDirectRouteAdvertisable = (destHex) {
       final peer = routingTable.getPeer(hexToBytes(destHex));
       if (peer == null) return false;
@@ -843,11 +863,14 @@ class CleonaNode {
     // pipeline directly via `_sendInfra`.
     dhtRpc = DhtRpc(profileDir: profileDir);
     dhtRpc.sendFunction = (proto.MessageTypeV3 type, Uint8List body,
-            PeerInfo peer) =>
+            PeerInfo peer, Uint8List messageId) =>
         _sendInfra(
           messageType: type,
           innerPayload: body,
           recipientDeviceId: Uint8List.fromList(peer.nodeId),
+          // §2.3.5 — DhtRpc owns the correlator; the responder echoes it in
+          // `inReplyTo` and the pending-table matches on it.
+          messageId: messageId,
         );
 
     // Init RUDP Light ACK tracker (uses shared RTT from DhtRpc)
@@ -1280,6 +1303,15 @@ class CleonaNode {
 
     await transport.start();
 
+    // §2.3.1 — publish our real listening port to the frame codec so every
+    // outgoing packet carries `senderDataPort`. Must happen after
+    // transport.start() because a runtime port change (or a port of 0 at
+    // construction time) is only resolved there. Receivers use it instead of
+    // the observed UDP source port when the source IP is private; the
+    // Windows send socket binds ephemerally, so the header port is wrong
+    // there and used to pollute peer address lists.
+    V3FrameCodec.localDataPort = port;
+
     // Init LAN discovery — Phase 2: broadcast deviceNodeId (per-device routing)
     localDiscovery = LocalDiscovery(
       nodeId: primaryIdentity.deviceNodeId,
@@ -1297,6 +1329,14 @@ class CleonaNode {
 
     await localDiscovery.start();
     await multicastDiscovery.start();
+
+    // §4.5.2: re-check the one-socket-per-data-port invariant now that the
+    // discovery sockets exist. The check inside `transport.start()` runs
+    // before this point and therefore cannot see a discovery/data-port
+    // collision — at that moment only the transport socket is bound. Since
+    // every socket involved sets SO_REUSEADDR, a collision produces no
+    // exception; this is the only place it becomes observable.
+    transport.verifyDataPortInvariant(phase: 'post-discovery');
 
     // Register self in routing table's peer manager
     _registerSelf();
@@ -1861,7 +1901,23 @@ class CleonaNode {
       // (routes=1)" / "Welcome skipped — not in routing table". Mirroring the
       // discovery-side behaviour here keeps the two tables in sync regardless
       // of the discovery channel that brought the peer in.
-      _touchPeer(senderDeviceId, from.address, fromPort,
+      // §2.3.1 — the UDP source port is not necessarily the port the sender
+      // listens on: the Windows send socket binds ephemerally
+      // (`transport.dart`, `localPort: 0`). Prefer the signed
+      // `senderDataPort` advertisement, but ONLY when the source IP is
+      // private. Behind NAT/CGNAT the observed port is the one the mapping
+      // was created for and stays authoritative — it is the only port with a
+      // hole-punch return path.
+      //
+      // Crediting the inbound liveness to the advertised address mirrors
+      // `_onDiscoveryReceived`, which has always used the payload-advertised
+      // port rather than the wire port for exactly this reason.
+      final advertisedPort = packet.senderDataPort;
+      final effectivePort =
+          (advertisedPort > 0 && _isPrivateIp(from.address))
+              ? advertisedPort
+              : fromPort;
+      _touchPeer(senderDeviceId, from.address, effectivePort,
           isAuthoritative: true, isUdp: isUdp);
 
       _debouncedNetworkStateSave();
@@ -2122,9 +2178,16 @@ class CleonaNode {
             '(sender=${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)})');
         return;
       }
-      _log.info(
-          'V3 BOOT recv: ${frame.messageType.name} '
-          'from ${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)}');
+      if (result.legacyBootAccepted) {
+        _log.warn(
+            'V3 BOOT legacy-accept: ${frame.messageType.name} '
+            'from ${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)} '
+            '— old sender (<=3.1.158) sent storage type via BOOT instead of KEM');
+      } else {
+        _log.info(
+            'V3 BOOT recv: ${frame.messageType.name} '
+            'from ${bytesToHex(Uint8List.fromList(packet.senderDeviceId)).substring(0, 8)}');
+      }
       final senderDeviceId = Uint8List.fromList(packet.senderDeviceId);
       if (_dispatchInfrastructureFrameLocal(
           frame, senderDeviceId, from, fromPort, wasDirect)) {
@@ -2410,6 +2473,8 @@ class CleonaNode {
             messageType: proto.MessageTypeV3.MTV3_IDENTITY_AUTH_RESPONSE,
             innerPayload: Uint8List.fromList(m.toProto().writeToBuffer()),
             recipientDeviceId: senderDeviceId,
+            // §2.3.5 — echo the request correlator so the caller can match.
+            inReplyTo: Uint8List.fromList(frame.messageId),
           );
         } catch (e) {
           _log.debug('AUTH_RETRIEVE drop: parse/lookup error: $e');
@@ -2426,6 +2491,8 @@ class CleonaNode {
             messageType: proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE,
             innerPayload: Uint8List.fromList(r.toProto().writeToBuffer()),
             recipientDeviceId: senderDeviceId,
+            // §2.3.5 — echo the request correlator so the caller can match.
+            inReplyTo: Uint8List.fromList(frame.messageId),
           );
         } catch (e) {
           _log.debug('LIVE_RETRIEVE drop: parse/lookup error: $e');
@@ -2442,6 +2509,8 @@ class CleonaNode {
             messageType: proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE,
             innerPayload: Uint8List.fromList(r.toProto().writeToBuffer()),
             recipientDeviceId: senderDeviceId,
+            // §2.3.5 — echo the request correlator so the caller can match.
+            inReplyTo: Uint8List.fromList(frame.messageId),
           );
         } catch (e) {
           _log.debug('KEM_RETRIEVE drop: parse/lookup error: $e');
@@ -2457,6 +2526,35 @@ class CleonaNode {
       case proto.MessageTypeV3.MTV3_IDENTITY_LIVE_RESPONSE:
       case proto.MessageTypeV3.MTV3_IDENTITY_KEM_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_PONG:
+        // §5.10.2 first-contact KEM bootstrap: a PONG may carry the
+        // responder's DeviceKemRecord because we asked for it via
+        // want_kem_record. Feed it through the SAME entry point that an
+        // IDENTITY_KEM_PUBLISH takes — handleKemPublish anchors the record
+        // against a known AuthManifest where one exists, enforces the
+        // monotonic sequence number against replay, and persists it. Routing
+        // it through a separate path here would create a second trust rule for
+        // the same record, which is exactly what the architecture forbids.
+        // Where no anchor exists yet — the common case at first contact — the
+        // record is accepted on the same transition terms as a DHT-fetched
+        // one, no weaker.
+        if (frame.payload.isNotEmpty) {
+          try {
+            final pong = proto.DhtPong.fromBuffer(frame.payload);
+            if (pong.hasKemRecord()) {
+              final rec = DeviceKemRecord.fromProto(pong.kemRecord);
+              identityDhtHandler.handleKemPublish(rec);
+              _log.info('§5.10.2: DeviceKemRecord received on PONG from '
+                  '${bytesToHex(senderDeviceId).substring(0, 8)} — cached');
+            }
+          } catch (e) {
+            // Unparseable or malformed record: the PONG itself is still a
+            // valid liveness signal, so fall through to the bridge below.
+            _log.debug('§5.10.2: PONG kem_record ignored ($e)');
+          }
+        }
+        _bridgeInfraResponseToDhtRpc(frame.messageType, frame, from, fromPort,
+            wasDirect: wasDirect);
+        return true;
       case proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_FIND_VALUE_RESPONSE:
       case proto.MessageTypeV3.MTV3_DHT_STORE_RESPONSE:
@@ -2579,12 +2677,45 @@ class CleonaNode {
       // V3 STUN echo: report the sender's source address back so they can
       // learn their public/NAT'd address via natTraversal.addObservation().
       // Mirrors the V2 _handlePing which set observedIp/observedPort.
-      final pongPayload = (proto.DhtPong()
+      final pong = proto.DhtPong()
         ..senderId = primaryIdentity.deviceNodeId
         ..timestamp = Int64(DateTime.now().millisecondsSinceEpoch)
         ..observedIp = from.address
-        ..observedPort = fromPort)
-          .writeToBuffer();
+        ..observedPort = fromPort;
+
+      // §5.10.2 first-contact KEM bootstrap: attach our own signed
+      // DeviceKemRecord when — and only when — the prober asked for it. A peer
+      // that knows us by address alone cannot obtain it any other way: the
+      // record is otherwise distributed through the 2D-DHT (§3.5b), which is
+      // exactly what such a peer has not reached yet, so every KEM-path
+      // message to us would keep hitting the sender-side drop for a missing
+      // PK. Opt-in rather than unconditional because the record is ~1.4 KB and
+      // pushes this PONG onto the fragmentation path — a cost worth paying for
+      // the one exchange that needs it, and not for the bootstrap node's
+      // steady stream of ordinary pings.
+      var wantKem = false;
+      try {
+        wantKem = proto.DhtPing.fromBuffer(frame.payload).wantKemRecord;
+      } catch (_) {
+        // Unparseable body — answer the plain PONG below.
+      }
+      if (wantKem) {
+        final own = identityDhtHandler.getKemRecord(
+            primaryIdentity.userId, primaryIdentity.deviceNodeId);
+        if (own != null && !own.isExpired()) {
+          pong.kemRecord = own.toProto();
+          _log.info('§5.10.2: want_kem_record → attaching own DeviceKemRecord '
+              'to PONG for ${bytesToHex(senderDeviceId).substring(0, 8)}');
+        } else {
+          // Nothing to attach. The prober falls back to the DHT lookup once it
+          // has any route at all; saying so here keeps that visible instead of
+          // looking like the feature silently did nothing.
+          _log.info('§5.10.2: want_kem_record but own record is '
+              '${own == null ? "absent" : "expired"} — PONG without record');
+        }
+      }
+
+      final pongPayload = pong.writeToBuffer();
       // Send PONG directly back to the sender's source address. This
       // bypasses the routing-table lookup in sendToDevice — critical when
       // the sender is a DV neighbor but not in the routing table (k-bucket
@@ -2594,6 +2725,9 @@ class CleonaNode {
         messageType: proto.MessageTypeV3.MTV3_DHT_PONG,
         innerPayload: pongPayload,
         recipientDeviceId: senderDeviceId,
+        // §2.3.5 — echo the request's correlator so the sender's DhtRpc can
+        // match this PONG to the exact PING it belongs to.
+        inReplyTo: Uint8List.fromList(frame.messageId),
         addr: from,
         port: fromPort,
       );
@@ -2603,6 +2737,8 @@ class CleonaNode {
         messageType: proto.MessageTypeV3.MTV3_DHT_PONG,
         innerPayload: pongPayload,
         recipientDeviceId: senderDeviceId,
+        // §2.3.5 — echo the request correlator so the caller can match.
+        inReplyTo: Uint8List.fromList(frame.messageId),
       );
 
       // §5.12 hot-path — if the ping is a Stale-PK recovery probe (§5.10.2),
@@ -2638,6 +2774,8 @@ class CleonaNode {
         messageType: proto.MessageTypeV3.MTV3_DHT_FIND_NODE_RESPONSE,
         innerPayload: response.writeToBuffer(),
         recipientDeviceId: senderDeviceId,
+        // §2.3.5 — echo the request correlator so the caller can match.
+        inReplyTo: Uint8List.fromList(frame.messageId),
       );
     } catch (e) {
       _log.debug('DHT_FIND_NODE handler error: $e');
@@ -3516,6 +3654,8 @@ class CleonaNode {
         messageType: proto.MessageTypeV3.MTV3_REACHABILITY_RESPONSE,
         innerPayload: response.writeToBuffer(),
         recipientDeviceId: senderDeviceId,
+        // §2.3.5 — echo the request correlator so the caller can match.
+        inReplyTo: Uint8List.fromList(frame.messageId),
       );
       _log.debug('Reachability query for ${targetHex.substring(0, 8)}: '
           'canReach=${peer != null && confirmed}');
@@ -3766,6 +3906,9 @@ class CleonaNode {
       Uint8List.fromList(frame.senderDeviceId),
       from.address,
       fromPort,
+      // §2.3.5 — empty for peers before V3.1.159; DhtRpc then falls back to
+      // the legacy (peer, type) matching.
+      inReplyTo: Uint8List.fromList(frame.inReplyTo),
     );
   }
 
@@ -3913,7 +4056,11 @@ class CleonaNode {
       {String? excludeNextHopHex,
       bool isRelay = false,
       bool expectsReply = true,
+      bool? allowNeighborSpray,
       bool paced = true}) async {
+    // Defaults to `expectsReply` so every existing caller keeps its current
+    // behaviour; only callers that pass it explicitly decouple the two.
+    final spray = allowNeighborSpray ?? expectsReply;
     final destHex = bytesToHex(deviceId);
     final myDeviceId = primaryIdentity.deviceNodeId;
     // §5.10.4 — bump the per-peer unACK'd counter BEFORE the send. Every
@@ -4087,17 +4234,24 @@ class CleonaNode {
         // D3 Phase 2: skip GW if not admission-PoW verified.
         // §13.1.2 exception: isProtectedSeed peers (ContactSeed §8.1.1)
         // are exempt — bounded (≤5), ephemeral, integrity-anchored.
+        // The three skip branches below are TRACE, not DEBUG: the gateway is
+        // the same for every destination in a round, so these lines repeat
+        // once per peer while carrying identical information. The per-round
+        // state change is reported once at INFO by _noteGatewayUsability().
         if (!gwPeer.idPowVerified && !gwPeer.isProtectedSeed) {
-          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+          _noteGatewayUsability(gwHex, false, 'not admission-verified');
+          _log.trace('sendToDevice ${destHex.substring(0, 8)}: GW '
               '${gwHex.substring(0, 8)} skipped — not admission-verified');
         // §4.7 Relay-Candidate Reachability Filter: skip GW if unreachable from us.
         } else if (!_isHopReachableFromHere(gwPeer)) {
-          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+          _noteGatewayUsability(gwHex, false, 'no reachable address');
+          _log.trace('sendToDevice ${destHex.substring(0, 8)}: GW '
               '${gwHex.substring(0, 8)} skipped — not reachable from current network');
         } else if (needsDualStack && !_hopIsDualStack(gwPeer)) {
-          _log.debug('sendToDevice ${destHex.substring(0, 8)}: GW '
+          _log.trace('sendToDevice ${destHex.substring(0, 8)}: GW '
               '${gwHex.substring(0, 8)} skipped — cross-family send requires dual-stack hop');
         } else {
+          _noteGatewayUsability(gwHex, true, null);
           _log.info('sendToDevice ${destHex.substring(0, 8)}: '
               'fall through to default-GW ${gwHex.substring(0, 8)}');
           final ok = await _sendV3ViaHop(packet, gwBytes, paced: paced);
@@ -4112,8 +4266,10 @@ class CleonaNode {
     // messages (user messages, CR delivers) where delivery matters.
     // Without this gate, 174 DHT peers × 18 neighbors = 3000+ relay
     // attempts per round — O(peers × neighbors) traffic for zero benefit.
-    if (!expectsReply) {
-      _log.debug('sendToDevice ${destHex.substring(0, 8)}: fire-and-forget '
+    if (!spray) {
+      // TRACE: fires once per destination in a round and the reason is a
+      // property of the message type, not of this destination.
+      _log.trace('sendToDevice ${destHex.substring(0, 8)}: fire-and-forget '
           '— skipping neighbor relay spray');
       return (ok: false, viaHopHex: null);
     }
@@ -4141,7 +4297,7 @@ class CleonaNode {
       // S269: skip neighbors that already failed as relay for this destination
       final destPeer = routingTable.getPeer(deviceId);
       if (destPeer != null && destPeer.isRelayInCooldown(neighborHex)) {
-        _log.debug('sendToDevice ${destHex.substring(0, 8)}: '
+        _log.trace('sendToDevice ${destHex.substring(0, 8)}: '
             'neighbor ${neighborHex.substring(0, 8)} in relay cooldown — skipped');
         continue;
       }
@@ -4165,11 +4321,13 @@ class CleonaNode {
           {String? excludeNextHopHex,
           bool isRelay = false,
           bool expectsReply = true,
+          bool? allowNeighborSpray,
           bool paced = true}) async =>
       (await sendToDeviceTracked(packet, deviceId,
               excludeNextHopHex: excludeNextHopHex,
               isRelay: isRelay,
               expectsReply: expectsReply,
+              allowNeighborSpray: allowNeighborSpray,
               paced: paced))
           .ok;
 
@@ -4189,6 +4347,47 @@ class CleonaNode {
   final Map<String, ({int count, DateTime windowStart})> _hopSendBudget = {};
   static const int _hopSendBudgetLimit = 150;
   static const Duration _hopSendBudgetWindow = Duration(seconds: 10);
+
+  /// §4.6 — how many of a hop's addresses one send may fan out to before the
+  /// remainder is treated as fallback-only. `allConnectionTargets()` puts
+  /// receive-confirmed addresses first and sorts the rest by effectiveScore,
+  /// so three covers "the proven one plus two plausible alternatives".
+  /// Higher values only buy coverage for address lists that are polluted in
+  /// the first place — which §2.3.1 `senderDataPort` and the address-prune
+  /// fix address at the source.
+  static const int _maxSprayTargets = 3;
+
+  /// Count of InfrastructureFrames dropped for a missing Device-KEM record,
+  /// keyed by message type name. Diagnostic only — see the drop site in
+  /// [_buildInfraPacket] for why this needs to be visible at all.
+  final Map<String, int> _kemDropsByType = {};
+
+  /// Last reported default-gateway usability, keyed by gateway hex. `null`
+  /// means nothing reported yet for that gateway.
+  String? _gwUsabilityReportedFor;
+  bool? _gwUsabilityReportedState;
+
+  /// Report a default-gateway usability *change* once, at INFO.
+  ///
+  /// The per-destination skip lines are TRACE and therefore never reach a bug
+  /// report. That is intentional — they repeat once per peer with identical
+  /// content — but the underlying fact ("the elected gateway cannot be used")
+  /// is genuinely diagnostic and must survive. This is the edge: one line per
+  /// transition, plus one whenever the elected gateway itself changes.
+  void _noteGatewayUsability(String gwHex, bool usable, String? reason) {
+    if (_gwUsabilityReportedFor == gwHex &&
+        _gwUsabilityReportedState == usable) {
+      return;
+    }
+    _gwUsabilityReportedFor = gwHex;
+    _gwUsabilityReportedState = usable;
+    if (usable) {
+      _log.info('Default-GW ${gwHex.substring(0, 8)} usable again');
+    } else {
+      _log.info('Default-GW ${gwHex.substring(0, 8)} UNUSABLE ($reason) — '
+          'every fall-through to it is skipped until this changes');
+    }
+  }
 
   Future<bool> _sendV3ViaHop(
       proto.NetworkPacketV3 packet, Uint8List hopDeviceId,
@@ -4297,23 +4496,55 @@ class CleonaNode {
     }
     var udpSentAny = false;
     var udpSocketError = false;
-    for (final addr in targets) {
-      try {
-        final ok = await transport.sendUdpSerialized(
-            serialized, InternetAddress(addr.ip), addr.port);
-        if (ok) {
-          udpSentAny = true;
-          // Confirmed peers with recent bidirectional proof: early-return
-          // on the first proven address — skip remaining targets.
-          if (isConfirmed && addr.lastReceivedAt != null &&
-              DateTime.now().difference(addr.lastReceivedAt!) < const Duration(minutes: 2)) {
-            return true;
+
+    // §4.6 / Arbeitsregel 5 — spray cap. Without the early-return below (peer
+    // idle >2 min, or not direct-confirmed) this loop used to emit ONE PACKET
+    // PER STORED ADDRESS. Measured on a live node: a single peer had 15
+    // addresses, 14 of them long dead, with ~900 accumulated failed sends —
+    // every idle message to that peer went out 15 times.
+    //
+    // `allConnectionTargets()` sorts receive-confirmed first, then by
+    // effectiveScore, and addresses in backoff are already filtered out
+    // above, so a working address is at the top of the list by construction.
+    // Sending to the first [_maxSprayTargets] is therefore no loss of
+    // reachability. The remainder stays available as a fallback for the case
+    // where not a single one of them could even be handed to the socket.
+    Future<void> sendTo(Iterable<PeerAddress> addrs) async {
+      for (final addr in addrs) {
+        try {
+          final ok = await transport.sendUdpSerialized(
+              serialized, InternetAddress(addr.ip), addr.port);
+          if (ok) {
+            udpSentAny = true;
+            // Confirmed peers with recent bidirectional proof: early-return
+            // on the first proven address — skip remaining targets.
+            if (isConfirmed && addr.lastReceivedAt != null &&
+                DateTime.now().difference(addr.lastReceivedAt!) <
+                    const Duration(minutes: 2)) {
+              return;
+            }
           }
+        } catch (e) {
+          udpSocketError = true;
+          _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to '
+              '${addr.ip}:${addr.port} failed: $e');
         }
-      } catch (e) {
-        udpSocketError = true;
-        _log.info('_sendV3ViaHop ${hopHex.substring(0, 8)}: UDP to ${addr.ip}:${addr.port} failed: $e');
       }
+    }
+
+    final primary = targets.take(_maxSprayTargets).toList();
+    await sendTo(primary);
+    if (udpSentAny) {
+      // Never silently truncate coverage — say what was skipped.
+      if (targets.length > primary.length) {
+        _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: spray capped at '
+            '${primary.length}/${targets.length} targets');
+      }
+    } else if (targets.length > primary.length) {
+      _log.debug('_sendV3ViaHop ${hopHex.substring(0, 8)}: top '
+          '${primary.length} targets unusable — falling back to the '
+          'remaining ${targets.length - primary.length}');
+      await sendTo(targets.skip(_maxSprayTargets));
     }
 
     // Confirmed peer + UDP sent = success. DELIVERY_RECEIPT (RUDP-Light)
@@ -4442,6 +4673,10 @@ class CleonaNode {
     required proto.MessageTypeV3 messageType,
     required Uint8List innerPayload,
     required Uint8List recipientDeviceId,
+    // §2.3.5: [messageId] lets DhtRpc own the correlator for requests;
+    // [inReplyTo] carries it back on responses.
+    Uint8List? messageId,
+    Uint8List? inReplyTo,
   }) {
     if (!isInfrastructureMessageTypeV3(messageType)) {
       _log.warn('_buildInfraPacket: messageType $messageType not in §2.3.5 '
@@ -4466,6 +4701,8 @@ class CleonaNode {
         senderDeviceKeys: _deviceKeys.sig,
         messageType: messageType,
         payload: innerPayload,
+        messageId: messageId,
+        inReplyTo: inReplyTo,
       );
     }
     // KEM path: the recipient's Device-KEM-PK MUST be in the cache. If
@@ -4474,9 +4711,33 @@ class CleonaNode {
     // list of types that legitimately need to operate without a known PK.
     final pks = _lookupDeviceKemPk(recipientDeviceId);
     if (pks == null) {
-      _log.debug(
-          '_buildInfraPacket: no Device-KEM-PK for ${bytesToHex(recipientDeviceId).substring(0, 8)} '
-          '— dropping ${messageType.name}');
+      // INFO, not DEBUG, and counted per message type. This drop is silent
+      // to the caller — _sendInfra returns false and most call sites use
+      // `unawaited`, so nothing upstream learns that the message never left
+      // the machine. Field evidence (2026-07-28) showed 343 drops on the
+      // bootstrap and 753 on Node2 over two days, every single one a
+      // CHANNEL_INDEX_EXCHANGE: channel-index gossip was failing wholesale
+      // without a single visible symptom. At DEBUG the lines also compete
+      // for the 200-line bug-report window (§9.5.8), so a field report
+      // rarely contains them. The per-type counter makes the pattern
+      // readable without logging every occurrence at full volume.
+      final t = messageType.name;
+      final n = (_kemDropsByType[t] ?? 0) + 1;
+      _kemDropsByType[t] = n;
+      // Throttled: a fan-out to K replicators can drop K times in one burst,
+      // and flooding INFO would recreate exactly the report-window problem
+      // §9.5.8 just solved. First three per type, then every 25th — enough
+      // to notice the condition and to read its magnitude from the counter.
+      // Every occurrence still lands in the log file at TRACE.
+      if (n <= 3 || n % 25 == 0) {
+        _log.info(
+            '_buildInfraPacket: no Device-KEM-PK for ${bytesToHex(recipientDeviceId).substring(0, 8)} '
+            '— dropping $t (drop #$n for this type since start)');
+      } else {
+        _log.trace(
+            '_buildInfraPacket: no Device-KEM-PK for ${bytesToHex(recipientDeviceId).substring(0, 8)} '
+            '— dropping $t (drop #$n)');
+      }
       return null;
     }
     return V3FrameCodec.buildInfrastructureFrame(
@@ -4487,6 +4748,8 @@ class CleonaNode {
       payload: innerPayload,
       recipientDeviceX25519Pk: pks.x25519Pk,
       recipientDeviceMlKemPk: pks.mlKemPk,
+      messageId: messageId,
+      inReplyTo: inReplyTo,
     );
   }
 
@@ -4498,16 +4761,48 @@ class CleonaNode {
     required proto.MessageTypeV3 messageType,
     required Uint8List innerPayload,
     required Uint8List recipientDeviceId,
+    Uint8List? messageId,
+    Uint8List? inReplyTo,
   }) async {
     final packet = _buildInfraPacket(
       messageType: messageType,
       innerPayload: innerPayload,
       recipientDeviceId: recipientDeviceId,
+      messageId: messageId,
+      inReplyTo: inReplyTo,
     );
     if (packet == null) return false;
     return sendToDevice(packet, recipientDeviceId,
-        expectsReply: _isRequestResponseType(messageType));
+        expectsReply: _isRequestResponseType(messageType),
+        allowNeighborSpray: _needsRelayFallback(messageType));
   }
+
+  /// Whether a message type may fall back to the neighbour relay spray when
+  /// DV routes, the direct target and the default gateway have all failed.
+  ///
+  /// This is deliberately NOT the same predicate as [_isRequestResponseType].
+  /// That one governs the §5.10.4 unacked-packet counter, where counting
+  /// three S&F stores per message would trigger premature mesh-refresh
+  /// cycles. Relay eligibility is a different question: it asks whether
+  /// delivery of *this* packet matters enough to spend up to five relay
+  /// attempts on it.
+  ///
+  /// `PEER_STORE` and `FRAGMENT_STORE` are classified fire-and-forget for
+  /// the counter, but §5.5 defines their placement as ACK-verified — the
+  /// receiver answers every store, and the sender blocks up to 8 s waiting
+  /// for that answer before declaring the placement failed. Cutting the
+  /// cascade short for them removes the one tier that still carries CGNAT
+  /// and mobile senders, and it does so on the offline path, which only
+  /// runs *because* direct delivery already failed.
+  ///
+  /// Note this is a hardening, not a proven fix for any observed incident:
+  /// the 0/3 placement failure in the 2026-07-27 field report has at least
+  /// two other candidate causes that this change does not address.
+  static bool _needsRelayFallback(proto.MessageTypeV3 type) =>
+      _isRequestResponseType(type) ||
+      type == proto.MessageTypeV3.MTV3_PEER_STORE ||
+      type == proto.MessageTypeV3.MTV3_FRAGMENT_STORE ||
+      type == proto.MessageTypeV3.MTV3_FRAGMENT_RETRIEVE;
 
   /// True for message types that expect a reply (request/response patterns).
   /// False for fire-and-forget DHT publishes and stores — these should not
@@ -4601,11 +4896,13 @@ class CleonaNode {
     required Uint8List recipientDeviceId,
     required InternetAddress addr,
     required int port,
+    Uint8List? inReplyTo,
   }) async {
     final packet = _buildInfraPacket(
       messageType: messageType,
       innerPayload: innerPayload,
       recipientDeviceId: recipientDeviceId,
+      inReplyTo: inReplyTo,
     );
     if (packet == null) return false;
     packet.nextHopDeviceId = recipientDeviceId;
@@ -4908,18 +5205,24 @@ class CleonaNode {
   }
 
   /// Public ping — used by service layer (e.g. QR seed peer bootstrap).
-  void sendPing(String ip, int port) => _sendPing(ip, port);
+  ///
+  /// Returns `true` when a DHT_PING actually went out. An address that is not
+  /// yet in the routing table yields `false` — see [_sendPing]. Callers that
+  /// log about "a ping was sent" must consult this instead of assuming.
+  Future<bool> sendPing(String ip, int port) => _sendPing(ip, port);
 
-  Future<void> _sendPing(String ip, int port) async {
+  /// Returns `true` if a DHT_PING was emitted, `false` if the address is not
+  /// (yet) resolvable to a known device.
+  Future<bool> _sendPing(String ip, int port) async {
     // Welle 5 INFRASTRUCTURE_FRAME path. DHT_PING is sent unsolicited to
     // a freshly-discovered IP:port pair where we may not yet know the
     // recipient's deviceId — Kademlia-style discovery probes work that
     // way. We try to look the peer up by address; on miss we cannot
-    // build an InfraFrame (no deviceId → no Device-KEM-PK) and silently
-    // skip the ping. The catch-up path (_handleHello / _handlePong)
-    // populates the routing table on the first reverse-direction
-    // packet, after which subsequent pings have a deviceId to encrypt
-    // against.
+    // build an InfraFrame (no deviceId to address it to) and skip the
+    // ping. The catch-up path populates the routing table on the first
+    // reverse-direction packet — for Manual Peer Entry that is the
+    // discovery probe's answer, which lands in _onDiscoveryReceived and
+    // triggers the ping from there (§4.5).
     //
     // TODO (Hauptthread merge — Welle 5 Subagent A+B): when DeviceKEM is
     // a first-class field on PeerInfo and discovery responses include
@@ -4939,11 +5242,18 @@ class CleonaNode {
     if (recipient == null) {
       _log.debug('_sendPing: no peer at $ip:$port — skipping discovery ping '
           '(deviceId unknown until reverse-direction packet)');
-      return;
+      return false;
     }
-
     final ping = proto.DhtPing()
-      ..senderId = primaryIdentity.deviceNodeId;
+      ..senderId = primaryIdentity.deviceNodeId
+      // §5.10.2: ask for the responder's DeviceKemRecord only when we do not
+      // already hold it. Without that record every KEM-path message to this
+      // device is dropped sender-side (_buildInfraPacket), and for a peer we
+      // just learned by address the DHT lookup that would supply it is not yet
+      // possible — the DHT is what we cannot reach yet. A peer we can already
+      // encrypt to never sets the flag, so the ~1.4 KB answer stays confined
+      // to genuine first contact.
+      ..wantKemRecord = _lookupDeviceKemPk(recipient.nodeId) == null;
 
     await sendInfraDirect(
       messageType: proto.MessageTypeV3.MTV3_DHT_PING,
@@ -4952,6 +5262,7 @@ class CleonaNode {
       addr: InternetAddress(ip),
       port: port,
     );
+    return true;
   }
 
   /// Check if a hex ID belongs to any registered local identity.
@@ -6058,6 +6369,43 @@ class CleonaNode {
     if (newPort == port) return;
     await transport.rebind(newPort);
     port = newPort;
+    // §2.3.1 — keep the advertised data port in sync with the actual bind,
+    // otherwise every packet after a runtime port change would advertise the
+    // old port and peers on the LAN would learn a dead address.
+    V3FrameCodec.localDataPort = newPort;
+
+    // §4.5.1 — the same staleness applies to LAN discovery, through a
+    // different channel. The 38-byte CLEO frame carries our data port in
+    // bytes 36-37, and both discovery classes hold that value in a `final
+    // nodePort` fixed at construction time. Rebinding the transport alone
+    // leaves every subsequent broadcast, multicast and unicast probe
+    // advertising the OLD port — peers that discover us afterwards store an
+    // address we no longer listen on, and keep it until we restart. The
+    // V3FrameCodec fix above only covers peers that already exchange V3
+    // packets with us; discovery is precisely the path used by peers that
+    // do not yet. Recreate both instances so the advertised port follows
+    // the bind.
+    localDiscovery.stop();
+    multicastDiscovery.stop();
+    localDiscovery = LocalDiscovery(
+      nodeId: primaryIdentity.deviceNodeId,
+      nodePort: port,
+      profileDir: profileDir,
+    );
+    localDiscovery.onDiscovered = _onPeerDiscovered;
+    multicastDiscovery = MulticastDiscovery(
+      nodeId: primaryIdentity.deviceNodeId,
+      nodePort: port,
+      profileDir: profileDir,
+    );
+    multicastDiscovery.onDiscovered = _onPeerDiscovered;
+    await localDiscovery.start();
+    await multicastDiscovery.start();
+    // The new bind may collide with the discovery port (§4.5.2). The IPC
+    // gate rejects that value, but changePort is also reachable from other
+    // callers, so re-check once both socket sets are up.
+    transport.verifyDataPortInvariant(phase: 'post-port-change');
+
     _log.info('Port changed to $newPort, broadcasting to peers');
     _broadcastAddressUpdate(force: true);
   }

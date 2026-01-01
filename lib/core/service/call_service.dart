@@ -116,12 +116,8 @@ class CallService {
     };
 
     _ctx.node.onRouteDownForCalls = (peerHex) {
-      final session = callManager.currentCall;
-      if (session == null) return;
-      final cachedDevHex = session.cachedRoute?.nodeIdHex;
-      if (session.peerNodeIdHex == peerHex || cachedDevHex == peerHex) {
-        session.invalidateCachedRoute();
-      }
+      // 1:1 calls send directly to peerDeviceId — no cachedRoute to
+      // invalidate. The hook remains for future group-call integration.
     };
 
     groupCallManager = GroupCallManager(
@@ -540,37 +536,25 @@ class CallService {
     if (session.state == CallState.ended) return;
     final peerUserId = hexToBytes(session.peerNodeIdHex);
 
-    // --- Contact KEM pubkeys gate whether we can send at all --------------
-    // Not needed for the plaintext inner itself, but the graceful-
-    // degradation fallback below (`sendToUser`) needs them just as much as
-    // the old KEM-inner path did — no KEM pubkeys, no usable send path.
-    final contact = _ctx.contacts[session.peerNodeIdHex];
-    if (contact == null || contact.x25519Pk == null || contact.mlKemPk == null) {
-      // Graceful degradation: fall back to full sendToUser path.
+    // --- Resolve peer device directly (§10.3) ------------------------------
+    // peerDeviceId is pinned at handshake time (CALL_INVITE → callee,
+    // CALL_ANSWER → caller) to the exact device that performed the
+    // key-exchange. sendToDevice resolves direct/relay routes internally.
+    //
+    // The previous code looked up the route via getPeer(userId) /
+    // getPeerByUserId(userId). getPeer keys on deviceNodeId (not userId),
+    // so the first leg always missed. getPeerByUserId depends on a
+    // secondary index that is only populated via DHT Liveness Records or
+    // explicit setPeerUserId calls — empty for direct-LAN peers. When both
+    // missed, every audio frame (50/s) fell back to sendToUser with full
+    // KEM+ML-DSA+PoW (50-500ms each) → effectively silent.
+    final peerDeviceId = session.peerDeviceId;
+    if (peerDeviceId == null) {
       unawaited(_ctx.sendToUser(
         recipientUserId: peerUserId,
         messageType: messageType,
         payload: encryptedFrame,
-      ));
-      return;
-    }
-
-    // --- Resolve peer device route ----------------------------------------
-    if (session.cachedRoute == null) {
-      final peer = _ctx.node.routingTable.getPeer(peerUserId) ??
-          _ctx.node.routingTable.getPeerByUserId(peerUserId);
-      if (peer != null) {
-        session.cachedRoute = peer;
-        session.cachedRouteAt = DateTime.now();
-      }
-    }
-    final peer = session.cachedRoute;
-    if (peer == null) {
-      // No route yet — fall back to sendToUser which runs the full cascade.
-      unawaited(_ctx.sendToUser(
-        recipientUserId: peerUserId,
-        messageType: messageType,
-        payload: encryptedFrame,
+        skipL3: true,
       ));
       return;
     }
@@ -587,7 +571,7 @@ class CallService {
 
     // --- Build V3 outer (NetworkPacket, Ed25519-only device sig, no PoW) --
     final outer = V3FrameCodec.buildOuter(
-      nextHopDeviceId: peer.nodeId,
+      nextHopDeviceId: peerDeviceId,
       senderDeviceId: _ctx.node.primaryIdentity.deviceNodeId,
       deviceKeys: _ctx.node.deviceKeyPair,
       innerPayload: inner.writeToBuffer(),
@@ -603,7 +587,7 @@ class CallService {
     //                   it in `_unackedPacketsToPeer` would trip the §5.10.4
     //                   Mesh-Refresh threshold (6) within ~120 ms of call
     //                   audio and spray every frame over 5 relay neighbors.
-    unawaited(_ctx.node.sendToDevice(outer, peer.nodeId,
+    unawaited(_ctx.node.sendToDevice(outer, peerDeviceId,
         paced: false, expectsReply: false));
   }
 

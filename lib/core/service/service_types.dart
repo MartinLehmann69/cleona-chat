@@ -815,7 +815,21 @@ class ChannelInfo {
     required this.ownerNodeIdHex,
     DateTime? createdAt,
     this.isPublic = false,
-    this.isAdult = true,
+    // false, matching fromJson and the compact wire format: toJson writes
+    // 'isAdult' ONLY when true, so absence means "not adult" by definition.
+    // The default of true was not merely a trap — it fired: the Restore
+    // Broadcast channel restore (cleona_service.dart:11221) omits the argument,
+    // because RestoreChannelInfo carries no is_adult field at all
+    // (proto/cleona.proto:418). Every channel recovered through the canonical
+    // recovery path was therefore flagged 18+, persisted that way by
+    // _saveChannels(), shown with the red 18+ badge (chat_screen.dart:1777),
+    // filtered out of every default channel search for all other users
+    // (channel_index.dart:119) and propagated into signed CHANNEL_INVITEs
+    // (cleona_service.dart:6626). Verified 2026-07-28.
+    //
+    // Restoring a genuinely adult channel still loses the flag — that needs the
+    // proto field and is a separate, protocol-level decision.
+    this.isAdult = false,
     this.language = 'de',
     this.category = 'general',
     this.badBadgeLevel = 0,
@@ -915,7 +929,16 @@ class ChannelIndexEntry {
     required this.name,
     required this.language,
     this.category = 'general',
-    this.isAdult = true,
+    // false, matching fromJson and the compact wire format: toJson writes 'a'
+    // ONLY when isAdult is true, so absence means "not adult" by definition.
+    // A constructor default of true contradicted that contract — the same
+    // logical entry was classified differently depending on whether it was
+    // built in code or read from JSON, and a code-built entry silently
+    // disappeared from search(), which filters !isAdult unless includeAdult is
+    // set (channel_index.dart:119-121). Verified 2026-07-28: all four
+    // production call sites pass the flag explicitly, so this is a no-op for
+    // them and closes the trap for the next one.
+    this.isAdult = false,
     this.description,
     this.subscriberCount = 0,
     this.badBadgeLevel = 0,
@@ -1227,6 +1250,26 @@ class ContactInfo {
   /// rev3: userEd25519Pk trust-anchor from v2 ContactSeed (base64url, no padding).
   String? seedEpB64;
 
+  /// §8.3 — the stored trust anchor violated an invariant and must not be
+  /// used. Set by the central anchor setter and by the load-time audit;
+  /// cleared only by an explicitly confirmed re-anchor.
+  ///
+  /// Quarantine rather than deletion: an empty anchor is silently re-filled
+  /// by the §8.1.1 "Restluecke A" branch from any incoming CR whose outer
+  /// device signature verifies — and that signature is the sender's own.
+  /// Deleting a corrupt anchor would therefore hand the next CR a free
+  /// overwrite. A quarantined record blocks verification AND the silent
+  /// re-fill until a human confirms.
+  ///
+  /// Background: in S280 a DhtRpc response mix-up wrote a node's OWN
+  /// Ed25519 pubkey into a contact record. Every message from that contact
+  /// then decrypted and died at the user-signature check, DELIVERY_RECEIPTs
+  /// included — silently, for days.
+  bool trustAnchorQuarantined;
+
+  /// Human-readable reason for [trustAnchorQuarantined] (log + UI).
+  String? trustAnchorQuarantineReason;
+
   /// Returns localAlias if set, otherwise the contact's own displayName.
   String get effectiveName => localAlias ?? displayName;
 
@@ -1254,6 +1297,8 @@ class ContactInfo {
     this.seedDxkB64,
     this.seedDmkB64,
     this.seedEpB64,
+    this.trustAnchorQuarantined = false,
+    this.trustAnchorQuarantineReason,
   }) : deviceNodeIds = deviceNodeIds ?? {};
 
   String get nodeIdHex => bytesToHex(nodeId);
@@ -1282,6 +1327,9 @@ class ContactInfo {
         if (seedDxkB64 != null) 'seedDxkB64': seedDxkB64,
         if (seedDmkB64 != null) 'seedDmkB64': seedDmkB64,
         if (seedEpB64 != null) 'seedEpB64': seedEpB64,
+        if (trustAnchorQuarantined) 'trustAnchorQuarantined': true,
+        if (trustAnchorQuarantineReason != null)
+          'trustAnchorQuarantineReason': trustAnchorQuarantineReason,
       };
 
   static ContactInfo fromJson(Map<String, dynamic> json) => ContactInfo(
@@ -1322,6 +1370,10 @@ class ContactInfo {
         seedDxkB64: json['seedDxkB64'] as String?,
         seedDmkB64: json['seedDmkB64'] as String?,
         seedEpB64: json['seedEpB64'] as String?,
+        trustAnchorQuarantined:
+            json['trustAnchorQuarantined'] as bool? ?? false,
+        trustAnchorQuarantineReason:
+            json['trustAnchorQuarantineReason'] as String?,
       );
 }
 

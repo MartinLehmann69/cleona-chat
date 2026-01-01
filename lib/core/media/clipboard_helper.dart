@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
@@ -58,6 +59,72 @@ class ClipboardHelper {
   static const MethodChannel _androidChannel =
       MethodChannel('chat.cleona/clipboard');
 
+  /// Default timeout for clipboard helper processes. `xclip -o` answers in
+  /// milliseconds; this budget is about detecting a dead selection owner, not
+  /// about data volume.
+  static const Duration _defaultProcessTimeout = Duration(seconds: 3);
+
+  /// Run an external process with a hard timeout.
+  ///
+  /// [Process.run] has no timeout parameter, and `xclip -o` blocks forever when
+  /// the owner of the X selection never answers: the future never completes and
+  /// the process stays behind as an orphan. Wrapping [Process.run] in
+  /// `.timeout()` only unblocks the caller — the child is leaked because there
+  /// is no handle to kill. This helper keeps the [Process] handle and SIGKILLs
+  /// the child when the timeout fires.
+  ///
+  /// Returns `null` on timeout or when the process cannot be started; callers
+  /// must treat that exactly like a non-zero exit code.
+  /// With [binaryStdout] the stdout bytes are returned unchanged (no character
+  /// decoding), matching `Process.run(..., stdoutEncoding: null)`.
+  static Future<ProcessResult?> _runWithTimeout(
+    String executable,
+    List<String> args, {
+    Duration timeout = _defaultProcessTimeout,
+    bool binaryStdout = false,
+  }) async {
+    final Process proc;
+    try {
+      proc = await Process.start(executable, args);
+    } catch (_) {
+      return null;
+    }
+    final stdoutBytes = <int>[];
+    final stderrBytes = <int>[];
+    // Drain both pipes concurrently — an undrained pipe buffer would block the
+    // child even without a hanging selection owner.
+    final stdoutDone = proc.stdout.listen(stdoutBytes.addAll).asFuture<void>();
+    final stderrDone = proc.stderr.listen(stderrBytes.addAll).asFuture<void>();
+    var exitCode = -1;
+    try {
+      await Future.wait<void>([
+        proc.exitCode.then<void>((c) => exitCode = c),
+        stdoutDone,
+        stderrDone,
+      ]).timeout(timeout);
+    } on TimeoutException {
+      proc.kill(ProcessSignal.sigkill);
+      return null;
+    } catch (_) {
+      proc.kill(ProcessSignal.sigkill);
+      return null;
+    }
+    return ProcessResult(
+      proc.pid,
+      exitCode,
+      binaryStdout ? stdoutBytes : _decodeBytes(stdoutBytes),
+      _decodeBytes(stderrBytes),
+    );
+  }
+
+  static String _decodeBytes(List<int> bytes) {
+    try {
+      return systemEncoding.decode(bytes);
+    } catch (_) {
+      return String.fromCharCodes(bytes);
+    }
+  }
+
   /// Detect which clipboard tool is available (cached).
   ///
   /// Probes connectivity, not just binary existence: `which wl-paste` returns 0
@@ -67,14 +134,15 @@ class ClipboardHelper {
   static Future<String?> _detectTool() async {
     if (_cachedTool != null) return _cachedTool;
     try {
-      final which = await Process.run('which', ['wl-paste']);
-      if (which.exitCode == 0) {
+      final which = await _runWithTimeout('which', ['wl-paste']);
+      if (which != null && which.exitCode == 0) {
         // Probe: wl-paste --list-types exits 0 when connected (even on an
         // empty clipboard).  It exits 1 with stderr when no compositor is
-        // reachable.  A 2-second timeout guards against hangs.
-        final probe = await Process.run('wl-paste', ['--list-types'])
-            .timeout(const Duration(seconds: 2));
-        if (probe.exitCode == 0) {
+        // reachable.  A 2-second timeout guards against hangs — and kills the
+        // stuck wl-paste instead of leaking it.
+        final probe = await _runWithTimeout('wl-paste', ['--list-types'],
+            timeout: const Duration(seconds: 2));
+        if (probe != null && probe.exitCode == 0) {
           _cachedTool = 'wl-paste';
           return _cachedTool;
         }
@@ -82,8 +150,8 @@ class ClipboardHelper {
       }
     } catch (_) {}
     try {
-      final result = await Process.run('which', ['xclip']);
-      if (result.exitCode == 0) {
+      final result = await _runWithTimeout('which', ['xclip']);
+      if (result != null && result.exitCode == 0) {
         _cachedTool = 'xclip';
         return _cachedTool;
       }
@@ -148,7 +216,7 @@ class ClipboardHelper {
   static Future<ClipboardContent> _getMacOSContent() async {
     // Check for file references (Finder Copy)
     try {
-      final result = await Process.run('osascript', [
+      final result = await _runWithTimeout('osascript', [
         '-e',
         'try',
         '-e', 'set theFiles to the clipboard as {«class furl»}',
@@ -160,7 +228,7 @@ class ClipboardHelper {
         '-e', 'return thePaths as text',
         '-e', 'end try',
       ]);
-      final out = (result.stdout as String?)?.trim() ?? '';
+      final out = (result?.stdout as String?)?.trim() ?? '';
       if (out.isNotEmpty) {
         for (final raw in out.split('\n')) {
           final path = raw.trim();
@@ -183,8 +251,8 @@ class ClipboardHelper {
 
     // Text via pbpaste
     try {
-      final result = await Process.run('pbpaste', const []);
-      if (result.exitCode == 0) {
+      final result = await _runWithTimeout('pbpaste', const []);
+      if (result != null && result.exitCode == 0) {
         final text = (result.stdout as String?) ?? '';
         if (text.isNotEmpty) {
           return ClipboardContent(isText: true, text: text);
@@ -353,14 +421,15 @@ class ClipboardHelper {
   static Future<List<String>> _listTypes(String tool) async {
     try {
       if (tool == 'wl-paste') {
-        final result = await Process.run('wl-paste', ['--list-types']);
-        if (result.exitCode == 0) {
+        final result = await _runWithTimeout('wl-paste', ['--list-types']);
+        if (result != null && result.exitCode == 0) {
           return result.stdout.toString().trim().split('\n').where((s) => s.isNotEmpty).toList();
         }
       } else {
         // xclip: query targets
-        final result = await Process.run('xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o']);
-        if (result.exitCode == 0) {
+        final result = await _runWithTimeout(
+            'xclip', ['-selection', 'clipboard', '-t', 'TARGETS', '-o']);
+        if (result != null && result.exitCode == 0) {
           return result.stdout.toString().trim().split('\n').where((s) => s.isNotEmpty).toList();
         }
       }
@@ -372,16 +441,17 @@ class ClipboardHelper {
   static Future<Uint8List?> _extractBinary(String tool, String mimeType) async {
     try {
       if (tool == 'wl-paste') {
-        final result = await Process.run('wl-paste', ['--type', mimeType], stdoutEncoding: null);
-        if (result.exitCode == 0) {
+        final result = await _runWithTimeout('wl-paste', ['--type', mimeType],
+            binaryStdout: true);
+        if (result != null && result.exitCode == 0) {
           return Uint8List.fromList(result.stdout as List<int>);
         }
       } else {
-        final result = await Process.run(
+        final result = await _runWithTimeout(
           'xclip', ['-selection', 'clipboard', '-t', mimeType, '-o'],
-          stdoutEncoding: null,
+          binaryStdout: true,
         );
-        if (result.exitCode == 0) {
+        if (result != null && result.exitCode == 0) {
           return Uint8List.fromList(result.stdout as List<int>);
         }
       }

@@ -722,7 +722,7 @@ class ContactSeedBuilder {
   }) {
     if (!isReady) return null;
     final snap = _ensureSnapshot();
-    return ContactSeed(
+    final seed = ContactSeed(
       nodeIdHex: nodeIdHex,
       displayName: displayName,
       ownAddresses: snap.ownAddresses,
@@ -736,6 +736,19 @@ class ContactSeedBuilder {
       createdAtMs: _createdAtMs!,
       rendezvousNonce: _rendezvousNonce,
     );
+    // Self-check before handing the seed out. §8.1.1 requires the seed to be
+    // self-certifying: SHA-256(network_secret || anchor) must reproduce the
+    // advertised userId. A caller that mixes identities — advertised nodeId
+    // from one, anchor keys from another — produces a seed that every scanner
+    // rejects, and the rejection happens silently on the far side where nobody
+    // is watching. Failing here turns a broken QR into a visible loading state
+    // instead of an unusable code. Observed 2026-07-28 on a multi-identity
+    // node: the exported URI carried Alice's nodeId with AllyCat's anchor.
+    // `== false` and not `!`: verifyIntegrity() returns bool? — null means
+    // "no anchor in this seed, nothing to check" (a legitimate compact QR),
+    // which must not be treated as a failure. Only a definite false is one.
+    if (seed.verifyIntegrity() == false) return null;
+    return seed;
   }
 
   /// Force a snapshot rebuild (e.g. after significant network change).

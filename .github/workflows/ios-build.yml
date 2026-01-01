@@ -138,7 +138,18 @@ jobs:
         timeout-minutes: 50
         run: |
           # ── Native libs in background (the long-running part) ──
-          ./scripts/build-ios-libs.sh > /tmp/ios-native-build.log 2>&1 &
+          # --device-only: this workflow produces the IPA, and the IPA links
+          # exactly one archive -- CleonaNative.podspec force-loads
+          # libcleona_all_device.a and nothing else. The simulator slice built
+          # here was therefore never linked by anything this job produces, yet
+          # it doubled the native build (10 libs per platform, autoconf
+          # configure included). Release runs deliberately bypass the cache
+          # since S280, so it was paid on every single release.
+          # NOTE: .github/workflows/screenshots.yml DOES need the simulator
+          # slice -- it builds with -sdk iphonesimulator and boots a real
+          # simulator. That workflow builds its own native libs and must keep
+          # calling build-ios-libs.sh without this flag.
+          ./scripts/build-ios-libs.sh --device-only > /tmp/ios-native-build.log 2>&1 &
           NATIVE_PID=$!
           echo "Native libs building in background (PID: $NATIVE_PID)"
 

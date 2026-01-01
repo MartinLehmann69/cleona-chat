@@ -74,6 +74,22 @@ CLEONA_AUDIO_API int32_t cleona_audio_set_speaker(cleona_audio_engine_t* engine,
 
 // === DSP toggles (default: AEC on, NS on, AGC off) ========================
 
+// Offline hook for the AEC measurement (test/test_aec.c). Runs EXACTLY the
+// processing chain of the live capture callback — same speex echo state, same
+// preprocess chain, same parameters — on a caller-supplied near/far frame
+// pair, bypassing miniaudio and the rings. No audio devices required.
+//
+// [near_in] and [out] hold frame_samples samples; [far_in] may be NULL for a
+// silent reference. Returns 0 on success, -1 on bad arguments, -2 when AEC is
+// disabled on this engine (the chain would be a no-op then).
+//
+// Not for production use — the live path reads its reference from far_end_ring.
+CLEONA_AUDIO_API int32_t cleona_audio_process_frame_for_test(
+    cleona_audio_engine_t* engine,
+    const int16_t* near_in,
+    const int16_t* far_in,
+    int16_t* out);
+
 CLEONA_AUDIO_API void cleona_audio_set_aec(cleona_audio_engine_t* engine, int32_t enabled);
 CLEONA_AUDIO_API void cleona_audio_set_ns (cleona_audio_engine_t* engine, int32_t enabled);
 CLEONA_AUDIO_API void cleona_audio_set_agc(cleona_audio_engine_t* engine, int32_t enabled);

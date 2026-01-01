@@ -10,6 +10,7 @@ import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/crypto/seed_phrase.dart';
 import 'package:cleona/core/platform/app_paths.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/lan_discovery.dart';
 import 'package:cleona/core/storage/atomic_json_writer.dart';
 
 /// Thrown when identities.json is corrupt but identity directories exist on
@@ -84,6 +85,31 @@ class Identity {
 class IdentityManager {
   final String baseDir; // ~/.cleona
   int _maxHdIndex = -1;
+
+  /// Draw a random UDP data port for a new identity.
+  ///
+  /// §4.5.2 invariant `nodePort != discoveryPort`: the LAN-discovery sockets
+  /// bind the fixed port 41338. If a node's *data* port were the same value,
+  /// Transport and LocalDiscovery/MulticastDiscovery would all bind 41338 —
+  /// and because every one of them sets `SO_REUSEADDR`, the bind succeeds
+  /// silently instead of failing. From then on the kernel splits inbound
+  /// traffic between the sockets: V3 packets landing on a discovery socket
+  /// die at the 38-byte length check, discovery frames landing on the
+  /// transport socket die at the HMAC check. Sending stays intact, so the
+  /// node looks healthy to everyone else while its own reception is lossy.
+  ///
+  /// The exclusion costs one value out of 55 000 — the port stays random per
+  /// node, which is what keeps Cleona from being blockable by a single port
+  /// rule. It also removes a fingerprinting surface: a node whose data port
+  /// equals the publicly documented discovery port announces itself as
+  /// Cleona to any scanner.
+  static int drawDataPort() {
+    int port;
+    do {
+      port = 10000 + Random().nextInt(55000);
+    } while (port == LocalDiscovery.discoveryPort);
+    return port;
+  }
 
   IdentityManager({String? baseDir})
       : baseDir = baseDir ?? AppPaths.dataDir;
@@ -308,7 +334,43 @@ class IdentityManager {
       }
       _maxHdIndex = computed;
     }
+    _healDiscoveryPortCollisions(identities);
     return identities;
+  }
+
+  /// §4.5.2 self-heal: an identity created before the discovery-port
+  /// exclusion existed (or set manually via an older build) may carry
+  /// `port == discoveryPort`. Such a node binds the transport socket on the
+  /// same port as its own LAN-discovery sockets; the bind succeeds silently
+  /// because all of them use `SO_REUSEADDR`, and the kernel then splits
+  /// inbound datagrams between them so that a share of all traffic is
+  /// dropped without any error surfacing. Sender-side fixes cannot repair an
+  /// already-persisted port, so it is re-drawn here on load.
+  ///
+  /// The port change propagates like any other one: peers relearn the node
+  /// through discovery and the address broadcast. Doing this at load time
+  /// (rather than at bind time) keeps `identities.json` and the per-profile
+  /// `port` file consistent before anything reads them.
+  void _healDiscoveryPortCollisions(List<Identity> identities) {
+    var healed = false;
+    for (final identity in identities) {
+      if (identity.port != LocalDiscovery.discoveryPort) continue;
+      final oldPort = identity.port;
+      identity.port = drawDataPort();
+      healed = true;
+      try {
+        File('${identity.profileDir}/port')
+            .writeAsStringSync('${identity.port}');
+      } catch (e) {
+        CLogger.get('identity').warn(
+            'Port self-heal: could not persist new port for ${identity.id}: $e');
+      }
+      CLogger.get('identity').warn(
+          'Port self-heal: identity ${identity.id} used the LAN-discovery '
+          'port $oldPort as its data port (§4.5.2 invariant violated) — '
+          're-drawn to ${identity.port}');
+    }
+    if (healed) saveIdentities(identities);
   }
 
   /// Atomically save identities list (tmp+rename, sidecar-recovery on read).
@@ -368,7 +430,7 @@ class IdentityManager {
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';
-    final port = 10000 + Random().nextInt(55000);
+    final port = drawDataPort();
 
     Directory(profileDir).createSync(recursive: true);
 
@@ -410,7 +472,7 @@ class IdentityManager {
     final nextNum = _nextIdentityNum(identities);
     final id = 'identity-$nextNum';
     final profileDir = '$baseDir/identities/$id';
-    final port = 10000 + Random().nextInt(55000);
+    final port = drawDataPort();
 
     Directory(profileDir).createSync(recursive: true);
     File('$profileDir/port').writeAsStringSync('$port');
@@ -567,6 +629,17 @@ class IdentityManager {
 
   /// Update the port for ALL identities (shared single port).
   void updatePort(int newPort) {
+    // §4.5.2 invariant: never persist the LAN-discovery port as a data port.
+    // The IPC handler rejects this before calling us; this is the last line
+    // of defence so no future caller can write the collision to disk, where
+    // it would survive restarts and be re-advertised in every discovery
+    // frame.
+    if (newPort == LocalDiscovery.discoveryPort) {
+      CLogger.get('identity').warn(
+          'updatePort: refusing to persist the LAN-discovery port $newPort '
+          'as data port (§4.5.2 invariant)');
+      return;
+    }
     final identities = loadIdentities();
     for (final identity in identities) {
       identity.port = newPort;

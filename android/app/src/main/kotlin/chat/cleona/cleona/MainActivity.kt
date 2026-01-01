@@ -158,6 +158,20 @@ class MainActivity : FlutterActivity() {
                         }
                     }.start()
                 }
+                // Read-only AEC/NS introspection (S281). Pure diagnostics —
+                // never enables/disables an effect. See AudioDiagnostics.kt
+                // for what this can and cannot observe.
+                "getAudioDiagnostics" -> {
+                    val probe = call.argument<Boolean>("probe") ?: true
+                    Thread {
+                        val map: Map<String, Any?> = try {
+                            AudioDiagnostics.collect(applicationContext, probe)
+                        } catch (e: Exception) {
+                            mapOf("error" to "${e.javaClass.simpleName}:${e.message}")
+                        }
+                        runOnUiThread { result.success(map) }
+                    }.start()
+                }
                 else -> result.notImplemented()
             }
         }
@@ -458,17 +472,15 @@ class MainActivity : FlutterActivity() {
         handleDeepLinkIntent(intent)
     }
 
-    // §16.2 lifecycle invariant: the FGS must be (re)started whenever the
-    // Activity comes to the foreground and the service is not running —
-    // e.g. after the OS reclaimed it while the app was backgrounded. The
-    // singleton probe is same-process and free; no re-bind storm.
+    // §16.2 lifecycle invariant: always re-issue startForegroundService so
+    // onStartCommand → startForeground restores the notification after
+    // Android 14 user-dismiss or background START_STICKY restart failure.
     override fun onResume() {
         super.onResume()
         ensureForegroundService()
     }
 
     private fun ensureForegroundService() {
-        if (CleonaForegroundService.instance != null) return
         startForegroundService(Intent(this, CleonaForegroundService::class.java))
     }
 

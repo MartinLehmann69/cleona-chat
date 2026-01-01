@@ -8,6 +8,7 @@ import 'package:cleona/core/identity/identity_manager.dart';
 import 'package:cleona/core/ipc/ipc_messages.dart';
 import 'package:cleona/core/moderation/moderation_config.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/network/lan_discovery.dart' show LocalDiscovery;
 import 'package:cleona/core/network/multi_interface.dart' show MultiInterfaceManager;
 import 'package:cleona/core/network/peer_info.dart' show hexToBytes, bytesToHex;
 import 'package:cleona/core/network/peer_reputation.dart' show PeerReputation;
@@ -1888,6 +1889,18 @@ class IpcServer {
             _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Port must be 1024-65535'));
             break;
           }
+          // §4.5.2 invariant `nodePort != discoveryPort`: binding the data
+          // port on the fixed LAN-discovery port makes Transport and the
+          // discovery sockets share it. All of them set SO_REUSEADDR, so the
+          // bind succeeds without an error and the kernel then splits inbound
+          // datagrams between them — a share of all traffic is dropped
+          // silently while sending keeps working, which makes the node look
+          // healthy to its peers.
+          if (newPort == LocalDiscovery.discoveryPort) {
+            _sendResponse(client, IpcResponse(id: req.id, success: false,
+                error: 'Port $newPort is reserved for LAN discovery'));
+            break;
+          }
           try {
             await portService.node.changePort(newPort);
             // Persist in identities.json so daemon uses new port on restart
@@ -1895,7 +1908,11 @@ class IpcServer {
             mgr.updatePort(newPort);
             _sendResponse(client, IpcResponse(id: req.id, success: true, data: {'port': newPort}));
           } on SocketException catch (e) {
-            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Port $newPort nicht verfügbar: $e'));
+            // English like every other IPC error string — these are protocol
+            // diagnostics, not user-facing text. The GUI never displays them
+            // (setPort discards the message and returns a bare bool); the
+            // translated user message lives in the port dialog.
+            _sendResponse(client, IpcResponse(id: req.id, success: false, error: 'Port $newPort unavailable: $e'));
           }
           break;
 

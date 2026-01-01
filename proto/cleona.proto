@@ -145,6 +145,15 @@ message DhtPing {
   // its own PeerInfo (current signing keys), so the prober heals the cached
   // PK in 1 RTT instead of waiting for a periodic peer exchange.
   bool pk_recovery_hint = 3;
+  // §5.10.2 First-contact KEM bootstrap. Set ONLY when our own
+  // DeviceKemRecord lookup for this device just missed — a peer that already
+  // holds the record never asks. The responder then attaches its signed
+  // DeviceKemRecord to the DHT_PONG, which is the only way a peer known by
+  // address alone can ever send a KEM-path message: that record is otherwise
+  // distributed through the 2D-DHT only, and the DHT is precisely what such a
+  // peer cannot reach yet. Opt-in rather than unconditional because the record
+  // is ~1.4 KB and pushes the PONG onto the fragmentation path (§2.6).
+  bool want_kem_record = 4;
 }
 
 message DhtPong {
@@ -153,6 +162,12 @@ message DhtPong {
   string observed_ip = 3;       // reporter's view of sender's public IP
   uint32 observed_port = 4;
   repeated bytes additional_node_ids = 5; // secondary identity node IDs on same port
+  // §5.10.2 — present only when the ping carried want_kem_record.
+  // Self-authenticating (§4.3): verified against the claimed user master
+  // Ed25519 key exactly like a DHT-fetched record, and cached in the same
+  // replica cache. No transport condition is needed: DHT_PING is in the BOOT
+  // allow-list and is therefore always plaintext.
+  DeviceKemRecordV3 kem_record = 6;
 }
 
 message DhtFindNode {
@@ -421,6 +436,14 @@ message RestoreChannelInfo {
   string description = 3;
   string owner_node_id_hex = 4;
   repeated RestoreChannelMember members = 5;
+  // NSFW rating. Without this field the restore path could not carry the flag
+  // at all, so a recovered channel always fell back to the ChannelInfo
+  // constructor default. Per architecture §9.2.2 a channel marked not safe for
+  // minors is invisible to identities without the isAdult flag, so losing the
+  // flag on recovery would expose an adult channel to exactly those users.
+  // Field 6 is additive: old senders leave it unset and new readers see the
+  // protobuf default false, which is the pre-existing behaviour.
+  bool is_adult = 6;
 }
 
 message RestoreChannelMember {
@@ -1535,6 +1558,22 @@ message NetworkPacketV3 {
   // Receiver drops if own deviceId is in the list. Backward-compatible:
   // old nodes ignore the field but preserve it on forward (protobuf default).
   repeated bytes visited_device_ids = 14;
+
+  // §2.3.1 (V3.1.159): der Port, auf dem der Sender TATSAECHLICH lauscht.
+  // Der Empfaenger darf ihn dem beobachteten UDP-Quellport nur dann
+  // vorziehen, wenn die Quell-IP PRIVAT ist (RFC1918 / ULA / link-local).
+  // Hinter NAT/CGNAT bleibt der beobachtete Port autoritativ — nur fuer ihn
+  // existiert ein Hole-Punch-Rueckweg.
+  //
+  // Grund: Der Windows-Sende-Socket bindet bewusst ephemer
+  // (transport.dart, localPort:0), der UDP-Header traegt dort also nie den
+  // Listening-Port. Gemessen: ein einzelner Peer mit 15 gelernten Adressen,
+  // davon 14 tot und ~900 fehlgeschlagenen Sendeversuchen.
+  //
+  // Das Feld liegt im Signatur-Umfang des Outer-Device-Sig (ausgenommen sind
+  // nur ttl, hop_count, visited_device_ids, die Sigs und network_tag) — ein
+  // Relay kann es nicht faelschen. 0 = unbekannt (Peer vor V3.1.159).
+  uint32 sender_data_port  = 15;
 }
 
 enum PayloadTypeV3 {
@@ -1620,6 +1659,18 @@ message InfrastructureFrameV3 {
   MessageTypeV3 message_type        = 6;   // restricted to §2.3.5 selector list
   bytes         payload             = 7;   // type-specific protobuf
                                             // (CR-Bootstrap-Spezialfall: serialized ApplicationFrameV3-bytes)
+
+  // §2.3.5 RPC-Korrelation: jede Response-Zeile der Selektor-Liste MUSS die
+  // message_id des Requests hier zurueckspiegeln. Der Empfaenger korreliert
+  // primaer ueber dieses Feld; ist es leer, faellt er auf das (Peer, Typ)-
+  // Tupel zurueck. Der Fallback ist der Rolling-Upgrade-Pfad fuer Peers vor
+  // V3.1.159 und bleibt, bis alle Knoten das Feld setzen.
+  //
+  // Ohne Korrelator vertauschen zwei gleichzeitige Requests desselben Typs an
+  // denselben Peer ihre Antworten (Kademlia-Alltag: zwei FIND_NODE auf
+  // verschiedene Targets). In S280 hat genau das einen Kontakt-Trust-Anchor
+  // ueberschrieben.
+  bytes         in_reply_to         = 8;   // 16 bytes — echo of request message_id
 }
 
 // ── MessageType V3 (Numbering aus Appendix A.4) ─────────────────────────

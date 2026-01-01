@@ -216,14 +216,16 @@ class IdentityContext {
     this.masterSeed,
     DateTime? createdAt,
     this.isAdult = false,
-  })  : _baseDir = baseDir ?? _resolveBaseDir(profileDir),
+  })  : _baseDir = baseDir ?? _resolveBaseDir(),
         createdAt = createdAt ?? DateTime.now(),
         _log = CLogger.get('identity', profileDir: profileDir);
 
-  static String _resolveBaseDir(String profileDir) {
-    final home = AppPaths.home;
-    return '$home/.cleona';
-  }
+  /// Daemon-global default base dir (§3.1). Deliberately takes no
+  /// `profileDir`: the base dir is per-DEVICE, never per-profile. Callers
+  /// that need isolation (tests, multi-device scenarios) MUST pass an
+  /// explicit `baseDir` — setting only `profileDir` does not isolate
+  /// device keys, db.key or device_kem_public.json.
+  static String _resolveBaseDir() => '${AppPaths.home}/.cleona';
 
   // ── Shared startup sequence (S106 fix) ──────────────────────────────
   // Single source of truth for crypto init + IdentityContext creation.

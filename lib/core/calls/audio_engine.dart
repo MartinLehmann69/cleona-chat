@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 import 'package:cleona/core/crypto/sodium_ffi.dart';
 import 'package:cleona/core/network/clogger.dart';
+import 'package:cleona/core/calls/android_audio_diagnostics.dart';
 import 'package:cleona/core/calls/audio_engine_shim.dart';
 import 'package:cleona/core/calls/jitter_buffer.dart';
 
@@ -161,6 +162,19 @@ class AudioEngine {
   Future<bool> start() async {
     if (_running) return true;
 
+    // S281 — one-shot introspection of the platform AEC/NS stack. Collected
+    // BEFORE the native device is opened, because the probe constructs a
+    // throwaway AudioRecord session and doing that while miniaudio holds the
+    // capture device would be needless contention. Emitted further down as a
+    // single line, once the chosen miniaudio backend is known.
+    // Read-only, no behaviour change; null on every non-Android host.
+    String? androidDiag;
+    try {
+      androidDiag = await AndroidAudioDiagnostics.summarize();
+    } catch (e) {
+      _log.debug('Audio diagnostics failed: $e');
+    }
+
     // Single engine for both capture and playback — AEC needs the
     // far_end_ring to connect playback output to the capture callback.
     _engine = _shim.create(
@@ -198,7 +212,61 @@ class AudioEngine {
     _running = true;
     _log.info(
         'Audio engine started (shared engine, AEC active)');
+    // S281 — the platform-AEC line, completed with the backend miniaudio
+    // actually picked. The backend matters for the AEC question: the
+    // `voice_communication` input preset requested in cleona_audio.c is
+    // handed to AAudio/OpenSL respectively, and only the platform decides
+    // whether that maps onto a pre-processed input path.
+    if (androidDiag != null) {
+      _log.info('$androidDiag ${_backendSuffix()}');
+    }
     return true;
+  }
+
+  /// `backend=capture:aaudio/playback:aaudio` — read-only stats snapshot from
+  /// the native shim (S281 diagnostics). Never throws: on any failure the
+  /// suffix degrades to `backend=unavailable` so the AEC line still lands.
+  String _backendSuffix() {
+    final e = _engine;
+    if (e == null || e.address == 0) return 'backend=unavailable';
+    Pointer<CleonaAudioStats>? statsPtr;
+    try {
+      statsPtr = calloc<CleonaAudioStats>();
+      _shim.getStats(e, statsPtr);
+      final cap = _backendName(statsPtr.ref.captureBackend);
+      final play = _backendName(statsPtr.ref.playbackBackend);
+      return 'backend=capture:$cap/playback:$play';
+    } catch (_) {
+      return 'backend=unavailable';
+    } finally {
+      if (statsPtr != null) {
+        try {
+          calloc.free(statsPtr);
+        } catch (_) {}
+      }
+    }
+  }
+
+  /// Enum from `cleona_audio.h` (`cleona_audio_stats.capture_backend`).
+  static String _backendName(int v) {
+    switch (v) {
+      case 1:
+        return 'alsa';
+      case 2:
+        return 'pulse';
+      case 3:
+        return 'wasapi';
+      case 4:
+        return 'aaudio';
+      case 5:
+        return 'opensl';
+      case 6:
+        return 'coreaudio';
+      case 0:
+        return 'none';
+      default:
+        return 'unknown-$v';
+    }
   }
 
   Future<bool> _startCaptureIsolate() async {

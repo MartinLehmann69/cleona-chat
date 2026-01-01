@@ -67,9 +67,37 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
     COMMENT "Copying cleona_net.dll into Windows bundle"
 )
 
+# === cleona_pow shim (cleona_pow.dll) ===
+# PoW SHA-256 iteration loop. Without it proof_of_work.dart falls back to the
+# Dart loop — measured ~561 ms median at difficulty 20 versus <10 ms native.
+# Built from native/cleona_pow/ and copied next to cleona.exe, where
+# proof_of_work.dart looks for "cleona_pow.dll".
+#
+# The subdirectory also resolves the libsodium MSVC package (import library +
+# matching DLL) and exports CLEONA_SODIUM_DLL, which the libsodium bundle copy
+# below prefers — that is what keeps libsodium.lib and libsodium.dll from
+# drifting apart. It must therefore be added BEFORE the NATIVE_DLLS block.
+add_subdirectory("${CMAKE_SOURCE_DIR}/../native/cleona_pow" "${CMAKE_BINARY_DIR}/cleona_pow_build")
+add_dependencies(${BINARY_NAME} cleona_pow)
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:cleona_pow>
+            $<TARGET_FILE_DIR:${BINARY_NAME}>
+    COMMENT "Copying cleona_pow.dll into Windows bundle"
+)
+
 # Copy native DLLs (libsodium, liboqs, libzstd) to the build output directory.
+# libsodium comes out of the provisioned MSVC package when cleona_pow resolved
+# one (same archive as libsodium.lib — see native/cleona_pow/CMakeLists.txt);
+# the hand-placed windows/runner/libsodium.dll stays as fallback.
+if(CLEONA_SODIUM_DLL AND EXISTS "${CLEONA_SODIUM_DLL}")
+  set(SODIUM_DLL_SRC "${CLEONA_SODIUM_DLL}")
+  message(STATUS "runner: libsodium.dll from provisioned package (${CLEONA_SODIUM_DLL})")
+else()
+  set(SODIUM_DLL_SRC "${CMAKE_CURRENT_SOURCE_DIR}/libsodium.dll")
+endif()
 set(NATIVE_DLLS
-  "${CMAKE_CURRENT_SOURCE_DIR}/libsodium.dll"
+  "${SODIUM_DLL_SRC}"
   "${CMAKE_CURRENT_SOURCE_DIR}/liboqs.dll"
   "${CMAKE_CURRENT_SOURCE_DIR}/libzstd.dll"
 )

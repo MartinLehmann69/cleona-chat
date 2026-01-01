@@ -459,7 +459,16 @@ build_libcleona_net() {
 }
 
 # --- Main ---
-TARGET="${1:-all}"
+# Every remaining argument is a target. This used to be `TARGET="${1:-all}"`,
+# which read the FIRST argument and silently discarded the rest: an invocation
+# like `--arch x86_64 sodium pow` built libsodium, never touched libcleona_pow,
+# and still exited 0, because the closing alignment check passes regardless of
+# what was built. A caller had no way to notice the dropped target — the script
+# reported success for work it had not done. Both targets are needed together in
+# practice: libcleona_pow links against libsodium from the temp prefix, so
+# `sodium pow` is the only self-contained way to refresh pow.
+TARGETS=("$@")
+[ ${#TARGETS[@]} -eq 0 ] && TARGETS=("all")
 
 build_target() {
     case "$TARGET" in
@@ -495,17 +504,23 @@ build_target() {
     esac
 }
 
+build_all_targets() {
+    for TARGET in "${TARGETS[@]}"; do
+        build_target
+        echo ""
+    done
+}
+
 if [ "$ARCH" = "all" ]; then
     for a in arm64-v8a x86_64; do
         echo "╔══════════════════════════════════════╗"
         echo "║  Architektur: $a"
         echo "╚══════════════════════════════════════╝"
         setup_arch "$a"
-        build_target
-        echo ""
+        build_all_targets
     done
 else
-    build_target
+    build_all_targets
 fi
 
 echo ""

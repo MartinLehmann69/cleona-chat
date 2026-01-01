@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 import 'dart:typed_data';
 import 'package:cleona/core/network/clogger.dart';
 import 'package:cleona/core/network/peer_info.dart';
@@ -31,9 +32,21 @@ class DhtRpc {
   /// `(type, body, peer)` and the wireup in `cleona_node._init` plumbs that
   /// through the §2.3.5 InfrastructureFrame pipeline (Outer Device-Sig +
   /// KEM-AEAD inner).
-  Future<bool> Function(
-          proto.MessageTypeV3 type, Uint8List body, PeerInfo peer)?
-      sendFunction;
+  /// `messageId` is generated here and MUST end up in the outgoing
+  /// InfrastructureFrame's `messageId` field — it is the correlator the
+  /// responder echoes back in `inReplyTo` (§2.3.5).
+  Future<bool> Function(proto.MessageTypeV3 type, Uint8List body, PeerInfo peer,
+      Uint8List messageId)? sendFunction;
+
+  final Random _rand = Random.secure();
+
+  Uint8List _newMessageId() {
+    final b = Uint8List(16);
+    for (var i = 0; i < 16; i++) {
+      b[i] = _rand.nextInt(256);
+    }
+    return b;
+  }
 
   /// RTT tracking per peer (exponential moving average).
   final Map<String, Duration> _rttMap = {};
@@ -59,6 +72,13 @@ class DhtRpc {
     PeerInfo peer, {
     Duration? timeout,
   }) async {
+    // §2.3.5 — primary correlator. The legacy `(peer, type)` and
+    // `(ip:port, type)` keys stay registered as a fallback for peers that do
+    // not yet echo `inReplyTo`, but they are ambiguous by construction: two
+    // concurrent lookups of the same type to the same peer (two FIND_NODE on
+    // different targets — Kademlia routine) collide on them.
+    final messageId = _newMessageId();
+    final msgKey = bytesToHex(messageId);
     final rpcKey = _rpcKey(peer.nodeId, requestType);
     final rtt = _rttMap[bytesToHex(peer.nodeId)] ?? const Duration(seconds: 1);
     final effectiveTimeout =
@@ -75,24 +95,30 @@ class DhtRpc {
         completer.completeError(TimeoutException(
             'DHT RPC timeout to ${peer.nodeIdHex.substring(0, 8)}'));
       }
-      _pending.remove(rpcKey);
+      // Remove exactly OUR entries. The previous `_pending.remove(rpcKey)`
+      // removed whatever sat under the shared key — after a second request
+      // to the same (peer, type) had overwritten it, the expiring timer of
+      // the FIRST request deregistered the SECOND one, which then always ran
+      // into a timeout even though its response was on the wire.
+      _dropEntriesOf(completer);
     });
 
-    _pending[rpcKey] = _PendingRpc(completer, timer);
+    final entry = _PendingRpc(completer, timer);
+    _pending[msgKey] = entry;
 
-    // Also register wildcard keys for all addresses so the response-side
-    // matcher can find us by remote-address even when senderId in the
-    // response doesn't match the peer's nodeId.
-    final targets = peer.allConnectionTargets();
-    for (final addr in targets) {
-      final altKey = '${addr.ip}:${addr.port}:${requestType.value}';
-      _pending[altKey] = _PendingRpc(completer, timer);
+    // Legacy fallback keys. An overwrite here must not leave the previous
+    // caller hanging: its primary messageId key survives, so it can still be
+    // matched by an `inReplyTo`-capable responder — and if the responder is
+    // legacy, its own timer resolves it.
+    _pending[rpcKey] = entry;
+    for (final addr in peer.allConnectionTargets()) {
+      _pending['${addr.ip}:${addr.port}:${requestType.value}'] = entry;
     }
 
-    final sent = await sendFunction?.call(requestType, body, peer);
+    final sent = await sendFunction?.call(requestType, body, peer, messageId);
     if (sent != true) {
       timer.cancel();
-      _pending.remove(rpcKey);
+      _dropEntriesOf(completer);
       return null;
     }
 
@@ -123,26 +149,42 @@ class DhtRpc {
     Uint8List payload,
     Uint8List senderDeviceId,
     String remoteAddress,
-    int remotePort,
-  ) {
+    int remotePort, {
+    Uint8List? inReplyTo,
+  }) {
     final requestType = _requestTypeFor(responseType);
-    // Try multiple keys for matching.
-    final keys = [
+    // §2.3.5 — `inReplyTo` first. It is unambiguous; the two tuple keys below
+    // are the pre-V3.1.159 fallback and can match the wrong pending request
+    // when two same-type lookups to the same peer are in flight.
+    final keys = <String>[
+      if (inReplyTo != null && inReplyTo.isNotEmpty) bytesToHex(inReplyTo),
       _rpcKey(senderDeviceId, requestType),
       '$remoteAddress:$remotePort:${requestType.value}',
     ];
 
     for (final key in keys) {
-      final pending = _pending.remove(key);
+      final pending = _pending[key];
       if (pending != null && !pending.completer.isCompleted) {
         pending.timer.cancel();
         pending.completer.complete((type: responseType, payload: payload));
-        // Clean up all aliases
-        _pending.removeWhere((k, v) => v.completer == pending.completer);
+        _dropEntriesOf(pending.completer);
         return true;
       }
     }
+    // Stale aliases of an already-completed request: drop them so a late
+    // duplicate cannot keep resurfacing.
+    for (final key in keys) {
+      final p = _pending[key];
+      if (p != null && p.completer.isCompleted) _pending.remove(key);
+    }
     return false;
+  }
+
+  /// Remove every pending entry (primary key + all legacy aliases) that
+  /// belongs to [c]. Identity comparison, not equality — two different
+  /// requests never share a completer.
+  void _dropEntriesOf(Completer<DhtRpcResponse> c) {
+    _pending.removeWhere((_, v) => identical(v.completer, c));
   }
 
   void _updateRtt(Uint8List nodeId, Duration rtt) {

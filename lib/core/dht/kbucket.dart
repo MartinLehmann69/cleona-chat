@@ -812,6 +812,27 @@ class RoutingTable {
     final localIps = currentLocalIps.toList();
     var pruned = 0;
     for (final peer in allPeers) {
+      // Heal legacy v4-mapped records ('::ffff:a.b.c.d') that entered the
+      // table through paths older than the ingress normalisation (persisted
+      // pre-fix state is already healed by PeerInfo.fromJson — this is
+      // defence-in-depth for any other ingestion path). Without this, the
+      // mapped form dodges BOTH prune branches below: isCarrierNAT only
+      // string-matches '100.'/'192.0.0.', and the private-IPv4 branch is
+      // guarded by `!addr.ip.contains(':')`. Normalise first so the healed
+      // dotted form is subject to the same audit as everything else; then
+      // merge twins so the dotted original's history survives.
+      var changed = false;
+      for (final addr in peer.addresses) {
+        final normalized = PeerAddress.normalizeIp(addr.ip);
+        if (normalized != addr.ip) {
+          addr.ip = normalized;
+          addr.type = PeerAddress.classifyIp(normalized);
+          changed = true;
+        }
+      }
+      if (changed) {
+        pruned += PeerAddress.dedupeAddressList(peer.addresses);
+      }
       peer.addresses.removeWhere((addr) {
         if (PeerAddress.isCarrierNAT(addr.ip)) {
           pruned++;

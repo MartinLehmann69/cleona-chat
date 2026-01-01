@@ -111,6 +111,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showNatWizardDialog(service);
       });
+      _forceFrameForScheduledDialog();
     };
     service.onNatWizardUserRequested = () {
       if (!mounted) return;
@@ -118,7 +119,23 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _showNatWizardDialog(service);
       });
+      _forceFrameForScheduledDialog();
     };
+  }
+
+  /// `addPostFrameCallback` registers a callback for the next frame — it does
+  /// NOT schedule one. On an idle desktop instance no further frame may be
+  /// produced for a long time, and the callback simply never runs.
+  ///
+  /// Measured on Node1, 2026-07-28: at every NAT-wizard trigger the scheduler
+  /// reported `SchedulerPhase.idle` with `hasScheduledFrame=false`, and the
+  /// callback only fired once some unrelated action redrew the app — 17 s,
+  /// 44 s and once over 60 s later. The E2E assertion window is 3-5 s, which
+  /// is why the first trigger of a session appeared to work (a navigation had
+  /// just redrawn) and every later one did not. It was never a latch problem:
+  /// `_natWizardShown` was false on entry in all measured runs.
+  void _forceFrameForScheduledDialog() {
+    WidgetsBinding.instance.scheduleFrame();
   }
 
   void _showNatWizardDialog(ICleonaService service) {
@@ -460,6 +477,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   TextField(
                     controller: nameController,
                     autofocus: true,
+                    // Rebuild on every keystroke so the Create button can
+                    // reflect the name field. Without it the button's enabled
+                    // state is only re-evaluated when a member checkbox
+                    // toggles, and a user who types a name after selecting
+                    // members still faces a disabled button.
+                    onChanged: (_) => setDialogState(() {}),
                     decoration: InputDecoration(
                       labelText: locale.get('group_name_label'),
                       border: const OutlineInputBorder(),
@@ -500,14 +523,21 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: Text(locale.get('cancel')),
             ),
             FilledButton(
-              onPressed: selected.isEmpty
-                  ? null
-                  : () async {
-                      final name = nameController.text.trim();
-                      if (name.isEmpty) return;
-                      Navigator.pop(ctx);
-                      await service.createGroup(name, selected.toList());
-                    },
+              // The button's enabled state must mirror what the callback
+              // actually requires. It used to hang on the member selection
+              // alone while the callback additionally demanded a non-empty
+              // name — so with members picked and the name field empty the
+              // button looked enabled, and clicking it silently did nothing:
+              // no error, no field highlight, no snackbar, the dialog just
+              // stayed open. Verified by screenshot 2026-07-28.
+              onPressed:
+                  (selected.isEmpty || nameController.text.trim().isEmpty)
+                      ? null
+                      : () async {
+                          Navigator.pop(ctx);
+                          await service.createGroup(
+                              nameController.text.trim(), selected.toList());
+                        },
               child: Text(locale.get('create')),
             ),
           ],
@@ -547,6 +577,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   TextField(
                     controller: nameController,
                     autofocus: true,
+                    // Rebuild per keystroke so the Create button tracks the
+                    // name field — see the group dialog for the rationale.
+                    onChanged: (_) => setDialogState(() {}),
                     decoration: InputDecoration(
                       labelText: locale.get('channel_name_label'),
                       border: const OutlineInputBorder(),
@@ -649,11 +682,14 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: Text(locale.get('cancel')),
             ),
             FilledButton(
-              onPressed: (!isPublic && selected.isEmpty)
+              // Same defect as the group dialog: the enabled state ignored the
+              // name while the callback required it, so the button was
+              // clickable and silently did nothing.
+              onPressed: ((!isPublic && selected.isEmpty) ||
+                      nameController.text.trim().isEmpty)
                   ? null
                   : () async {
                       final name = nameController.text.trim();
-                      if (name.isEmpty) return;
                       Navigator.pop(ctx);
                       final desc = descController.text.trim();
                       await service.createChannel(name, selected.toList(),

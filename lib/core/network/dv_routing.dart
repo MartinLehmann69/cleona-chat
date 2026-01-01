@@ -78,6 +78,19 @@ class DvRoutingTable {
   // Injected by CleonaNode after construction.
   bool Function(String nodeIdHex)? isAdmitted;
 
+  // §4.4: callback to query whether a neighbor currently has any address we
+  // can actually send to (not in backoff, reachable from the current
+  // network). Injected by CleonaNode after construction; DvRoutingTable has
+  // no access to PeerInfo itself.
+  //
+  // Without this, gateway election scores pure DV topology and can elect a
+  // neighbor whose every address is unusable. The send path re-checks and
+  // skips it — but the skip produces no ACK timeout, so nothing ever demotes
+  // it: markRouteDown needs timeouts, evictStalePeers needs zero alive
+  // routes (the gateway has many), and startup re-elects from the persisted
+  // topology. The result is a self-preserving dead gateway.
+  bool Function(String nodeIdHex)? isHopReachable;
+
   DvRoutingTable({required this.ownNodeId})
       : _ownHex = bytesToHex(ownNodeId);
 
@@ -883,21 +896,40 @@ class DvRoutingTable {
     final scores = <String, _GatewayScore>{};
     for (final neighborHex in _neighbors.keys) {
       final rc = neighborRouteCount[neighborHex] ?? 0;
+      final admitted = isAdmitted?.call(neighborHex) ?? false;
       scores[neighborHex] = _GatewayScore(
         routeCount: rc,
         uniqueCoverage: uniqueCoverage[neighborHex] ?? 0,
         avgCost: rc > 0 ? (neighborTotalCost[neighborHex] ?? 0) / rc : 999999,
         newestConfirm: neighborNewestConfirm[neighborHex] ?? DateTime(2000),
         relayConfirmed: _relayConfirmedNeighbors.contains(neighborHex),
-        admitted: isAdmitted?.call(neighborHex) ?? false,
+        admitted: admitted,
+        // Combined with `admitted` rather than ranked above it: sendToDevice
+        // skips a non-admitted gateway through a separate gate, so an
+        // otherwise-reachable but non-admitted neighbor produces exactly the
+        // same dead-gateway symptom. When no reachability callback is wired
+        // (tests, early startup) default to true so behaviour is unchanged.
+        usable: admitted && (isHopReachable?.call(neighborHex) ?? true),
       );
     }
 
-    // Sort: admitted → relay-confirmed → unique coverage → route count → cost → recency
+    // Sort: usable → relay-confirmed → unique coverage → route count → cost
+    //     → recency → incumbent.
+    //
+    // `usable` is a sort criterion, NOT a hard filter: if no neighbor is
+    // usable right now, one is still elected so the gateway tier of the
+    // cascade does not disappear entirely.
+    //
+    // The incumbent tie-break is required, not cosmetic. `isHopReachable`
+    // reads address backoff, which flips on a five-second granularity, while
+    // updateDefaultGateway() runs on every changed route update — in a large
+    // mesh several times per minute. Without stickiness the election would
+    // oscillate between equally-scored neighbors on backoff noise alone.
+    final incumbent = _defaultGatewayHex;
     final sorted = scores.entries.toList()
       ..sort((a, b) {
-        if (a.value.admitted != b.value.admitted) {
-          return a.value.admitted ? -1 : 1;
+        if (a.value.usable != b.value.usable) {
+          return a.value.usable ? -1 : 1;
         }
         if (a.value.relayConfirmed != b.value.relayConfirmed) {
           return a.value.relayConfirmed ? -1 : 1;
@@ -908,7 +940,13 @@ class DvRoutingTable {
         if (routeCmp != 0) return routeCmp;
         final costCmp = a.value.avgCost.compareTo(b.value.avgCost);
         if (costCmp != 0) return costCmp;
-        return b.value.newestConfirm.compareTo(a.value.newestConfirm);
+        final recCmp = b.value.newestConfirm.compareTo(a.value.newestConfirm);
+        if (recCmp != 0) return recCmp;
+        if (incumbent != null && a.key != b.key) {
+          if (a.key == incumbent) return -1;
+          if (b.key == incumbent) return 1;
+        }
+        return 0;
       });
 
     _defaultGatewayHex = sorted.isNotEmpty ? sorted.first.key : null;
@@ -1268,6 +1306,10 @@ class _GatewayScore {
   final DateTime newestConfirm;
   final bool relayConfirmed;
   final bool admitted;
+  /// §4.4: admitted AND at least one currently sendable address. Both
+  /// conditions are re-checked by `sendToDevice` before the gateway is used,
+  /// so a neighbor failing either can never actually serve as gateway.
+  final bool usable;
 
   _GatewayScore({
     required this.routeCount,
@@ -1276,5 +1318,6 @@ class _GatewayScore {
     required this.newestConfirm,
     required this.relayConfirmed,
     required this.admitted,
+    required this.usable,
   });
 }

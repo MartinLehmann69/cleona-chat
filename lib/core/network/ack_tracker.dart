@@ -14,10 +14,17 @@ class _PendingAck {
   final Timer timer;
   final Completer<bool> completer;
 
-  /// null = direct send, non-null = relay nextHop nodeIdHex.
+  /// The next hop this send actually went through, as a device nodeIdHex.
+  ///
+  /// NOT a direct/relay discriminator: callers set it for direct sends too,
+  /// where it equals the destination device. Use [estimatedHops] to tell the
+  /// two apart. (The old "null = direct" contract documented here was broken
+  /// by the callers and is not recoverable — `recipientUserIdHex` is a USER
+  /// id while this is a DEVICE id, so the tracker cannot compare them.)
   final String? viaNextHopHex;
 
-  /// 1 = direct, 2+ = relay (used for timeout calculation).
+  /// 1 = direct, 2+ = relay. Drives the timeout calculation at the caller
+  /// and, since S281, the address-scoring decision in `_handleTimeout`.
   final int estimatedHops;
 
   /// Serialized `NetworkPacketV3` for re-queue on ACK timeout (RUDP Light retry).
@@ -267,11 +274,29 @@ class AckTracker {
     // NOT the recipient. Penalizing the recipient's addresses for a failed
     // relay-hop send (or for a send that never left the machine) corrupts
     // the address-level scoring.
-    var failAddrs = entry.usedAddresses;
-    if (failAddrs.isEmpty &&
-        onResolveAddresses != null &&
-        entry.viaNextHopHex != null) {
-      failAddrs = onResolveAddresses!(entry.viaNextHopHex!);
+    // S281: the rule above is now enforced instead of merely described.
+    // Previously it held only as long as `usedAddresses` happened to be
+    // empty — which every production caller does, so the defect was latent:
+    // a caller passing the RECIPIENT's addresses together with a relay hop
+    // got exactly the corruption the comment warns about. `estimatedHops`
+    // is the field that was declared for this distinction ("1 = direct,
+    // 2+ = relay") and never wired up; the callers already compute the
+    // value for `computeTimeout` and now hand it over.
+    final List<PeerAddress> hopAddrs =
+        (onResolveAddresses != null && entry.viaNextHopHex != null)
+            ? onResolveAddresses!(entry.viaNextHopHex!)
+            : const <PeerAddress>[];
+    final List<PeerAddress> failAddrs;
+    if (entry.estimatedHops > 1) {
+      // Relay: the failure is not attributable — the final recipient may be
+      // unreachable, or the hop. Only the hop's addresses may be scored,
+      // never the recipient's.
+      failAddrs = hopAddrs;
+    } else {
+      // Direct: the addresses actually used are the negative signal. Falls
+      // back to the hop's addresses when the caller passed none — for a
+      // direct send the hop IS the destination.
+      failAddrs = entry.usedAddresses.isNotEmpty ? entry.usedAddresses : hopAddrs;
     }
     for (final addr in failAddrs) {
       addr.recordFailure();
@@ -291,8 +316,16 @@ class AckTracker {
     final via = entry.viaNextHopHex != null
         ? ' via ${entry.viaNextHopHex!.substring(0, 8)}'
         : '';
+    // Log the list that was ACTUALLY scored (failAddrs), not the raw
+    // entry.usedAddresses: when the send had no address list (e.g. the
+    // outbox flush calls trackSend with `const <PeerAddress>[]`) the hop
+    // fallback above resolves the addresses from the routing table, and
+    // reporting usedAddresses.length would print "0 addresses marked"
+    // for every single one of those timeouts. The source tag makes the
+    // two cases distinguishable in the log.
     _log.debug('ACK timeout for $msgShort to $rcpShort$via — '
-        '${entry.usedAddresses.length} addresses marked unreachable '
+        '${failAddrs.length} addresses marked unreachable '
+        '(${entry.usedAddresses.isEmpty ? "resolved via hop-fallback" : "from send"}) '
         '(route failures: $routeFailures/3)');
 
     // Notify service layer to downgrade message status (RUDP Light).

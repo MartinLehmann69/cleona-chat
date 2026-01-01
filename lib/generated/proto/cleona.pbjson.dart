@@ -671,13 +671,15 @@ const DhtPing$json = {
     {'1': 'sender_id', '3': 1, '4': 1, '5': 12, '10': 'senderId'},
     {'1': 'timestamp', '3': 2, '4': 1, '5': 4, '10': 'timestamp'},
     {'1': 'pk_recovery_hint', '3': 3, '4': 1, '5': 8, '10': 'pkRecoveryHint'},
+    {'1': 'want_kem_record', '3': 4, '4': 1, '5': 8, '10': 'wantKemRecord'},
   ],
 };
 
 /// Descriptor for `DhtPing`. Decode as a `google.protobuf.DescriptorProto`.
 final $typed_data.Uint8List dhtPingDescriptor = $convert.base64Decode(
     'CgdEaHRQaW5nEhsKCXNlbmRlcl9pZBgBIAEoDFIIc2VuZGVySWQSHAoJdGltZXN0YW1wGAIgAS'
-    'gEUgl0aW1lc3RhbXASKAoQcGtfcmVjb3ZlcnlfaGludBgDIAEoCFIOcGtSZWNvdmVyeUhpbnQ=');
+    'gEUgl0aW1lc3RhbXASKAoQcGtfcmVjb3ZlcnlfaGludBgDIAEoCFIOcGtSZWNvdmVyeUhpbnQS'
+    'JgoPd2FudF9rZW1fcmVjb3JkGAQgASgIUg13YW50S2VtUmVjb3Jk');
 
 @$core.Deprecated('Use dhtPongDescriptor instead')
 const DhtPong$json = {
@@ -688,6 +690,7 @@ const DhtPong$json = {
     {'1': 'observed_ip', '3': 3, '4': 1, '5': 9, '10': 'observedIp'},
     {'1': 'observed_port', '3': 4, '4': 1, '5': 13, '10': 'observedPort'},
     {'1': 'additional_node_ids', '3': 5, '4': 3, '5': 12, '10': 'additionalNodeIds'},
+    {'1': 'kem_record', '3': 6, '4': 1, '5': 11, '6': '.cleona.DeviceKemRecordV3', '10': 'kemRecord'},
   ],
 };
 
@@ -696,7 +699,8 @@ final $typed_data.Uint8List dhtPongDescriptor = $convert.base64Decode(
     'CgdEaHRQb25nEhsKCXNlbmRlcl9pZBgBIAEoDFIIc2VuZGVySWQSHAoJdGltZXN0YW1wGAIgAS'
     'gEUgl0aW1lc3RhbXASHwoLb2JzZXJ2ZWRfaXAYAyABKAlSCm9ic2VydmVkSXASIwoNb2JzZXJ2'
     'ZWRfcG9ydBgEIAEoDVIMb2JzZXJ2ZWRQb3J0Ei4KE2FkZGl0aW9uYWxfbm9kZV9pZHMYBSADKA'
-    'xSEWFkZGl0aW9uYWxOb2RlSWRz');
+    'xSEWFkZGl0aW9uYWxOb2RlSWRzEjgKCmtlbV9yZWNvcmQYBiABKAsyGS5jbGVvbmEuRGV2aWNl'
+    'S2VtUmVjb3JkVjNSCWtlbVJlY29yZA==');
 
 @$core.Deprecated('Use dhtFindNodeDescriptor instead')
 const DhtFindNode$json = {
@@ -1275,6 +1279,7 @@ const RestoreChannelInfo$json = {
     {'1': 'description', '3': 3, '4': 1, '5': 9, '10': 'description'},
     {'1': 'owner_node_id_hex', '3': 4, '4': 1, '5': 9, '10': 'ownerNodeIdHex'},
     {'1': 'members', '3': 5, '4': 3, '5': 11, '6': '.cleona.RestoreChannelMember', '10': 'members'},
+    {'1': 'is_adult', '3': 6, '4': 1, '5': 8, '10': 'isAdult'},
   ],
 };
 
@@ -1283,7 +1288,8 @@ final $typed_data.Uint8List restoreChannelInfoDescriptor = $convert.base64Decode
     'ChJSZXN0b3JlQ2hhbm5lbEluZm8SHQoKY2hhbm5lbF9pZBgBIAEoDFIJY2hhbm5lbElkEhIKBG'
     '5hbWUYAiABKAlSBG5hbWUSIAoLZGVzY3JpcHRpb24YAyABKAlSC2Rlc2NyaXB0aW9uEikKEW93'
     'bmVyX25vZGVfaWRfaGV4GAQgASgJUg5vd25lck5vZGVJZEhleBI2CgdtZW1iZXJzGAUgAygLMh'
-    'wuY2xlb25hLlJlc3RvcmVDaGFubmVsTWVtYmVyUgdtZW1iZXJz');
+    'wuY2xlb25hLlJlc3RvcmVDaGFubmVsTWVtYmVyUgdtZW1iZXJzEhkKCGlzX2FkdWx0GAYgASgI'
+    'Ugdpc0FkdWx0');
 
 @$core.Deprecated('Use restoreChannelMemberDescriptor instead')
 const RestoreChannelMember$json = {
@@ -3260,6 +3266,7 @@ const NetworkPacketV3$json = {
     {'1': 'payload_type', '3': 12, '4': 1, '5': 14, '6': '.cleona.PayloadTypeV3', '10': 'payloadType'},
     {'1': 'payload', '3': 13, '4': 1, '5': 12, '10': 'payload'},
     {'1': 'visited_device_ids', '3': 14, '4': 3, '5': 12, '10': 'visitedDeviceIds'},
+    {'1': 'sender_data_port', '3': 15, '4': 1, '5': 13, '10': 'senderDataPort'},
   ],
 };
 
@@ -3274,7 +3281,8 @@ final $typed_data.Uint8List networkPacketV3Descriptor = $convert.base64Decode(
     'DFIQZGV2aWNlRWQyNTUxOVNpZxIpChFkZXZpY2VfbWxfZHNhX3NpZxgLIAEoDFIOZGV2aWNlTW'
     'xEc2FTaWcSOAoMcGF5bG9hZF90eXBlGAwgASgOMhUuY2xlb25hLlBheWxvYWRUeXBlVjNSC3Bh'
     'eWxvYWRUeXBlEhgKB3BheWxvYWQYDSABKAxSB3BheWxvYWQSLAoSdmlzaXRlZF9kZXZpY2VfaW'
-    'RzGA4gAygMUhB2aXNpdGVkRGV2aWNlSWRz');
+    'RzGA4gAygMUhB2aXNpdGVkRGV2aWNlSWRzEigKEHNlbmRlcl9kYXRhX3BvcnQYDyABKA1SDnNl'
+    'bmRlckRhdGFQb3J0');
 
 @$core.Deprecated('Use applicationFrameV3Descriptor instead')
 const ApplicationFrameV3$json = {
@@ -3348,6 +3356,7 @@ const InfrastructureFrameV3$json = {
     {'1': 'message_id', '3': 5, '4': 1, '5': 12, '10': 'messageId'},
     {'1': 'message_type', '3': 6, '4': 1, '5': 14, '6': '.cleona.MessageTypeV3', '10': 'messageType'},
     {'1': 'payload', '3': 7, '4': 1, '5': 12, '10': 'payload'},
+    {'1': 'in_reply_to', '3': 8, '4': 1, '5': 12, '10': 'inReplyTo'},
   ],
 };
 
@@ -3358,7 +3367,7 @@ final $typed_data.Uint8List infrastructureFrameV3Descriptor = $convert.base64Dec
     'aWNlX2lkGAMgASgMUg5zZW5kZXJEZXZpY2VJZBIhCgx0aW1lc3RhbXBfbXMYBCABKARSC3RpbW'
     'VzdGFtcE1zEh0KCm1lc3NhZ2VfaWQYBSABKAxSCW1lc3NhZ2VJZBI4CgxtZXNzYWdlX3R5cGUY'
     'BiABKA4yFS5jbGVvbmEuTWVzc2FnZVR5cGVWM1ILbWVzc2FnZVR5cGUSGAoHcGF5bG9hZBgHIA'
-    'EoDFIHcGF5bG9hZA==');
+    'EoDFIHcGF5bG9hZBIeCgtpbl9yZXBseV90bxgIIAEoDFIJaW5SZXBseVRv');
 
 @$core.Deprecated('Use textMessageV3Descriptor instead')
 const TextMessageV3$json = {

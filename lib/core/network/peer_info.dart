@@ -1,4 +1,4 @@
-import 'dart:io' show InternetAddress;
+import 'dart:io' show InternetAddress, InternetAddressType;
 import 'dart:math' show exp;
 import 'dart:typed_data';
 import 'package:fixnum/fixnum.dart';
@@ -126,16 +126,26 @@ class PeerAddress {
   }
 
   static PeerAddress? fromProto(proto.PeerAddressProto p) {
-    final ip = p.ip.trim();
+    // Gossip healing: peers running older builds still advertise v4-mapped
+    // addresses ('::ffff:a.b.c.d') they learned from their dual-stack
+    // sockets. Normalise BEFORE validation so '::ffff:0.0.0.0' is rejected
+    // like plain 0.0.0.0 (an EINVAL destination that kills the UDP socket).
+    final rawIp = p.ip.trim();
+    final ip = normalizeIp(rawIp);
     if (ip.isEmpty || ip == '0.0.0.0' || ip == '::' || p.port <= 0) return null;
     // Migration on load: older peers (and even older code in this peer)
     // sent every IPv6 address as IPV6_GLOBAL. Re-classify against actual
     // textual prefix so that ULA/LinkLocal/SiteLocal records that were
-    // mislabelled on the wire get healed transparently.
+    // mislabelled on the wire get healed transparently. A normalised
+    // (formerly v4-mapped) address is re-classified unconditionally — its
+    // wire type is unreliable either way (field data shows the same mapped
+    // endpoint arriving as ipv6Global on one path and ipv4Public on
+    // another).
     var type = _typeFromProto(p.addressType);
     final classified = classifyIp(ip);
-    if (type == PeerAddressType.ipv6Global &&
-        classified != PeerAddressType.ipv6Global) {
+    if (ip != rawIp ||
+        (type == PeerAddressType.ipv6Global &&
+            classified != PeerAddressType.ipv6Global)) {
       type = classified;
     }
     // Bug 4: never trust the wire's success/fail/score numbers. They
@@ -231,6 +241,112 @@ class PeerAddress {
     // link-local sentinel so reachability filters drop it.
     if (lower.startsWith('ff')) return PeerAddressType.ipv6LinkLocal;
     return PeerAddressType.ipv6Global;
+  }
+
+  /// Collapse an IPv4-mapped IPv6 textual address (`::ffff:a.b.c.d`,
+  /// RFC 4291 §2.5.5.2) to its plain dotted IPv4 form. Everything else is
+  /// returned unchanged.
+  ///
+  /// Why this exists (field evidence 2026-07): dual-stack sockets
+  /// (`anyIPv6` without `IPV6_V6ONLY`) report IPv4 senders in the mapped
+  /// form. Stored verbatim, the string contains ':' and therefore walks
+  /// every IPv6 code path — `classifyIp` says `ipv6Global`, [priority]
+  /// ranks it 2 (before public IPv4), `isReachableFromCurrentNetwork`
+  /// never applies the RFC1918 filter, and `Transport._socketFor` picks
+  /// the IPv6 socket. Result on a mobile node: `::ffff:192.0.2.202`
+  /// is the FIRST send target and fails every time, while the identical
+  /// endpoint exists a second time in dotted form with thousands of
+  /// successes (routing-table snapshot of a LAN node: `::ffff:192.0.2.15`
+  /// score 0.5/0 successes next to `192.0.2.15` score 0.988/11890).
+  /// Normalising at every ingress point keeps exactly one — working —
+  /// representation per endpoint.
+  ///
+  /// The rare hex-tail form (`::ffff:c0a8:aca`) is left untouched: Dart's
+  /// `InternetAddress` always renders mapped addresses with a dotted tail,
+  /// so hex tails cannot originate from our own stack, and guessing at
+  /// them risks mangling unrelated 2001-style globals.
+  static String normalizeIp(String ip) {
+    final lower = ip.trim().toLowerCase();
+    if (!lower.startsWith('::ffff:')) return ip;
+    final tail = lower.substring(7);
+    if (!tail.contains('.')) return ip;
+    // Defensive: only accept a tail that actually parses as IPv4 —
+    // '::ffff:garbage.x' must not become a bogus dotted "address".
+    final parsed = InternetAddress.tryParse(tail);
+    if (parsed == null || parsed.type != InternetAddressType.IPv4) return ip;
+    return tail;
+  }
+
+  /// Fold the POSITIVE observation history of [other] into this record.
+  /// Used when a v4-mapped twin and its dotted original collapse onto the
+  /// same `ip:port` key after [normalizeIp] — the two records describe the
+  /// same physical endpoint, so successes and receive confirmations are
+  /// additive. Failures are deliberately NOT folded in: the mapped twin's
+  /// failures are artifacts of the wrong address-family path (IPv6 socket,
+  /// no mobile fallback), not evidence against the endpoint itself.
+  void absorbPositiveHistory(PeerAddress other) {
+    successCount += other.successCount;
+    if (successCount + failCount > 0) {
+      score = successCount / (successCount + failCount);
+    }
+    final otherSuccess = other.lastSuccess;
+    if (otherSuccess != null &&
+        (lastSuccess == null || otherSuccess.isAfter(lastSuccess!))) {
+      lastSuccess = otherSuccess;
+      // A success newer than our last attempt supersedes the failure streak.
+      if (lastAttempt == null || otherSuccess.isAfter(lastAttempt!)) {
+        consecutiveFailures = 0;
+      }
+    }
+    final otherReceived = other.lastReceivedAt;
+    if (otherReceived != null &&
+        (lastReceivedAt == null || otherReceived.isAfter(lastReceivedAt!))) {
+      lastReceivedAt = otherReceived;
+    }
+    final otherStable = other.stableSince;
+    if (otherStable != null &&
+        (stableSince == null || otherStable.isBefore(stableSince!))) {
+      stableSince = otherStable;
+    }
+  }
+
+  /// Merge records in [addresses] that share the same `ip:port` key (which
+  /// only happens after [normalizeIp] collapsed a v4-mapped twin onto its
+  /// dotted original). The record with the richer positive history survives
+  /// and absorbs the other's positive evidence via [absorbPositiveHistory].
+  /// Returns the number of removed duplicates.
+  static int dedupeAddressList(List<PeerAddress> addresses) {
+    if (addresses.length < 2) return 0;
+    final byKey = <String, PeerAddress>{};
+    final result = <PeerAddress>[];
+    var removed = 0;
+    for (final a in addresses) {
+      final key = '${a.ip}:${a.port}';
+      final existing = byKey[key];
+      if (existing == null) {
+        byKey[key] = a;
+        result.add(a);
+        continue;
+      }
+      removed++;
+      final epoch = DateTime.fromMillisecondsSinceEpoch(0);
+      final aBetter = a.successCount > existing.successCount ||
+          (a.successCount == existing.successCount &&
+              (a.lastSuccess ?? epoch).isAfter(existing.lastSuccess ?? epoch));
+      if (aBetter) {
+        a.absorbPositiveHistory(existing);
+        byKey[key] = a;
+        result[result.indexOf(existing)] = a;
+      } else {
+        existing.absorbPositiveHistory(a);
+      }
+    }
+    if (removed > 0) {
+      addresses
+        ..clear()
+        ..addAll(result);
+    }
+    return removed;
   }
 
   /// Current local IPs — set by CleonaNode on start and network change.
@@ -979,7 +1095,14 @@ class PeerInfo {
       final ls = addr.lastSuccess;
       if (ls == null) {
         final la = addr.lastAttempt;
-        return la != null && la.isBefore(cutoff);
+        if (la != null) return la.isBefore(cutoff);
+        // Legacy records (written before V3.1.159 persisted the timestamps)
+        // come back with both timestamps null and were therefore unprunable
+        // for their entire lifetime. A record that has been attempted and
+        // never once succeeded is dead by definition — `recordFailure` always
+        // sets `lastAttempt`, so at runtime this combination cannot occur and
+        // the rule only ever fires on the legacy backlog.
+        return addr.failCount > 0 && addr.successCount == 0;
       }
       return ls.isBefore(cutoff);
     });
@@ -1256,6 +1379,12 @@ class PeerInfo {
       }
     }
     ip = ip.trim();
+    // Collapse v4-mapped IPv6 ('::ffff:a.b.c.d') to dotted IPv4 — legacy
+    // publicIp/localIp fields persisted or gossiped by older builds may
+    // carry the mapped form (see PeerAddress.normalizeIp for why it is
+    // poison). Must run before the 0.0.0.0 check so '::ffff:0.0.0.0' is
+    // rejected too.
+    ip = PeerAddress.normalizeIp(ip);
     // Reject addresses that are never valid send targets.
     // 0.0.0.0 as destination causes SocketException(EINVAL) which kills
     // the entire Dart UDP socket — no further sends possible.
@@ -1302,6 +1431,19 @@ class PeerInfo {
         'score': a.score,
         'successCount': a.successCount,
         'failCount': a.failCount,
+        // §4.6 — these three MUST be persisted. `pruneStaleAddresses` keys on
+        // `lastSuccess`, falling back to `lastAttempt`; if both come back null
+        // after a restart the prune predicate can never fire again and dead
+        // addresses accumulate without bound (measured: 15 addresses on one
+        // peer, 14 dead, ~900 failed sends). `consecutiveFailures` drives the
+        // exponential backoff — without it every restart re-sprays known-dead
+        // addresses at full rate.
+        if (a.lastSuccess != null)
+          'lastSuccess': a.lastSuccess!.millisecondsSinceEpoch,
+        if (a.lastAttempt != null)
+          'lastAttempt': a.lastAttempt!.millisecondsSinceEpoch,
+        if (a.consecutiveFailures > 0)
+          'consecutiveFailures': a.consecutiveFailures,
         if (a.lastReceivedAt != null)
           'lastReceivedAt': a.lastReceivedAt!.millisecondsSinceEpoch,
         if (a.stableSince != null)
@@ -1340,31 +1482,7 @@ class PeerInfo {
         (e) => e.name == (json['pkSource'] as String? ?? 'none'),
         orElse: () => PkSource.none,
       ),
-      addresses: (json['addresses'] as List<dynamic>?)?.map((a) {
-        final m = a as Map<String, dynamic>;
-        final ip = (m['ip'] as String).trim();
-        final port = m['port'] as int;
-        if (ip.isEmpty || ip == '0.0.0.0' || port <= 0) return null;
-        final lrMs = m['lastReceivedAt'] as int?;
-        final ssMs = m['stableSince'] as int?;
-        return PeerAddress(
-          ip: ip,
-          port: port,
-          type: PeerAddressType.values.firstWhere(
-            (e) => e.name == (m['type'] as String? ?? 'ipv4Public'),
-            orElse: () => PeerAddressType.ipv4Public,
-          ),
-          score: (m['score'] as num?)?.toDouble() ?? 0.5,
-          successCount: m['successCount'] as int? ?? 0,
-          failCount: m['failCount'] as int? ?? 0,
-          lastReceivedAt: lrMs != null
-              ? DateTime.fromMillisecondsSinceEpoch(lrMs)
-              : null,
-          stableSince: ssMs != null
-              ? DateTime.fromMillisecondsSinceEpoch(ssMs)
-              : null,
-        );
-      }).whereType<PeerAddress>().toList() ?? [],
+      addresses: _addressesFromJson(json['addresses'] as List<dynamic>?),
       deviceIdPowNonce: json['deviceIdPowNonce'] != null
           ? _hexToBytes(json['deviceIdPowNonce'] as String)
           : null,
@@ -1372,6 +1490,62 @@ class PeerInfo {
       ..isProtectedSeed = json['isProtectedSeed'] as bool? ?? false
       ..idPowVerified = json['idPowVerified'] as bool? ?? false
       ..addressChangeCount = json['addressChangeCount'] as int? ?? 0;
+  }
+
+  /// Parse the persisted address list, healing legacy v4-mapped records.
+  /// Older builds persisted '::ffff:a.b.c.d' entries (field data: Node1 held
+  /// the mapped and the dotted form of the SAME bootstrap endpoint side by
+  /// side, the mapped one with zero successes but higher send priority).
+  /// Normalising here collapses them; [PeerAddress.dedupeAddressList] then
+  /// merges the twins so the dotted entry's history is preserved.
+  static List<PeerAddress> _addressesFromJson(List<dynamic>? raw) {
+    final list = raw?.map((a) {
+        final m = a as Map<String, dynamic>;
+        final rawIp = (m['ip'] as String).trim();
+        final ip = PeerAddress.normalizeIp(rawIp);
+        final port = m['port'] as int;
+        if (ip.isEmpty || ip == '0.0.0.0' || port <= 0) return null;
+        final lrMs = m['lastReceivedAt'] as int?;
+        final ssMs = m['stableSince'] as int?;
+        final lsMs = m['lastSuccess'] as int?;
+        final laMs = m['lastAttempt'] as int?;
+        // A normalised (formerly mapped) record's persisted type is one of
+        // the poison symptoms ('ipv6Global' or even 'ipv4Public' depending
+        // on the entry path) — re-classify from the healed string.
+        final storedType = PeerAddressType.values.firstWhere(
+          (e) => e.name == (m['type'] as String? ?? 'ipv4Public'),
+          orElse: () => PeerAddressType.ipv4Public,
+        );
+        return PeerAddress(
+          ip: ip,
+          port: port,
+          type: ip != rawIp ? PeerAddress.classifyIp(ip) : storedType,
+          score: (m['score'] as num?)?.toDouble() ?? 0.5,
+          successCount: m['successCount'] as int? ?? 0,
+          failCount: m['failCount'] as int? ?? 0,
+          // §4.6 — see toJson(): without these the prune predicate is dead
+          // after the first restart and the backoff resets to zero. Records
+          // written before V3.1.159 simply lack the keys and stay null,
+          // which is the pre-existing behaviour.
+          lastSuccess: lsMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(lsMs)
+              : null,
+          lastAttempt: laMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(laMs)
+              : null,
+          consecutiveFailures: m['consecutiveFailures'] as int? ?? 0,
+          lastReceivedAt: lrMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(lrMs)
+              : null,
+          stableSince: ssMs != null
+              ? DateTime.fromMillisecondsSinceEpoch(ssMs)
+              : null,
+        );
+      }).whereType<PeerAddress>().toList() ?? <PeerAddress>[];
+    // Merge mapped/dotted twins that collapsed onto the same ip:port —
+    // the surviving record keeps (and absorbs) the accumulated history.
+    PeerAddress.dedupeAddressList(list);
+    return list;
   }
 
   @override

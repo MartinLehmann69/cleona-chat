@@ -1116,6 +1116,7 @@ class DhtPing extends $pb.GeneratedMessage {
     $core.List<$core.int>? senderId,
     $fixnum.Int64? timestamp,
     $core.bool? pkRecoveryHint,
+    $core.bool? wantKemRecord,
   }) {
     final $result = create();
     if (senderId != null) {
@@ -1127,6 +1128,9 @@ class DhtPing extends $pb.GeneratedMessage {
     if (pkRecoveryHint != null) {
       $result.pkRecoveryHint = pkRecoveryHint;
     }
+    if (wantKemRecord != null) {
+      $result.wantKemRecord = wantKemRecord;
+    }
     return $result;
   }
   DhtPing._() : super();
@@ -1137,6 +1141,7 @@ class DhtPing extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(1, _omitFieldNames ? '' : 'senderId', $pb.PbFieldType.OY)
     ..a<$fixnum.Int64>(2, _omitFieldNames ? '' : 'timestamp', $pb.PbFieldType.OU6, defaultOrMaker: $fixnum.Int64.ZERO)
     ..aOB(3, _omitFieldNames ? '' : 'pkRecoveryHint')
+    ..aOB(4, _omitFieldNames ? '' : 'wantKemRecord')
     ..hasRequiredFields = false
   ;
 
@@ -1192,6 +1197,23 @@ class DhtPing extends $pb.GeneratedMessage {
   $core.bool hasPkRecoveryHint() => $_has(2);
   @$pb.TagNumber(3)
   void clearPkRecoveryHint() => clearField(3);
+
+  /// §5.10.2 First-contact KEM bootstrap. Set ONLY when our own
+  /// DeviceKemRecord lookup for this device just missed — a peer that already
+  /// holds the record never asks. The responder then attaches its signed
+  /// DeviceKemRecord to the DHT_PONG, which is the only way a peer known by
+  /// address alone can ever send a KEM-path message: that record is otherwise
+  /// distributed through the 2D-DHT only, and the DHT is precisely what such a
+  /// peer cannot reach yet. Opt-in rather than unconditional because the record
+  /// is ~1.4 KB and pushes the PONG onto the fragmentation path (§2.6).
+  @$pb.TagNumber(4)
+  $core.bool get wantKemRecord => $_getBF(3);
+  @$pb.TagNumber(4)
+  set wantKemRecord($core.bool v) { $_setBool(3, v); }
+  @$pb.TagNumber(4)
+  $core.bool hasWantKemRecord() => $_has(3);
+  @$pb.TagNumber(4)
+  void clearWantKemRecord() => clearField(4);
 }
 
 class DhtPong extends $pb.GeneratedMessage {
@@ -1201,6 +1223,7 @@ class DhtPong extends $pb.GeneratedMessage {
     $core.String? observedIp,
     $core.int? observedPort,
     $core.Iterable<$core.List<$core.int>>? additionalNodeIds,
+    DeviceKemRecordV3? kemRecord,
   }) {
     final $result = create();
     if (senderId != null) {
@@ -1218,6 +1241,9 @@ class DhtPong extends $pb.GeneratedMessage {
     if (additionalNodeIds != null) {
       $result.additionalNodeIds.addAll(additionalNodeIds);
     }
+    if (kemRecord != null) {
+      $result.kemRecord = kemRecord;
+    }
     return $result;
   }
   DhtPong._() : super();
@@ -1230,6 +1256,7 @@ class DhtPong extends $pb.GeneratedMessage {
     ..aOS(3, _omitFieldNames ? '' : 'observedIp')
     ..a<$core.int>(4, _omitFieldNames ? '' : 'observedPort', $pb.PbFieldType.OU3)
     ..p<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'additionalNodeIds', $pb.PbFieldType.PY)
+    ..aOM<DeviceKemRecordV3>(6, _omitFieldNames ? '' : 'kemRecord', subBuilder: DeviceKemRecordV3.create)
     ..hasRequiredFields = false
   ;
 
@@ -1292,6 +1319,22 @@ class DhtPong extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(5)
   $core.List<$core.List<$core.int>> get additionalNodeIds => $_getList(4);
+
+  /// §5.10.2 — present only when the ping carried want_kem_record AND arrived on
+  /// the BOOT path. Self-authenticating (§4.3): verified against the claimed
+  /// user master Ed25519 key exactly like a DHT-fetched record, and cached in
+  /// the same replica cache. Absent on the KEM path, where the sender provably
+  /// already had the key.
+  @$pb.TagNumber(6)
+  DeviceKemRecordV3 get kemRecord => $_getN(5);
+  @$pb.TagNumber(6)
+  set kemRecord(DeviceKemRecordV3 v) { setField(6, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasKemRecord() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearKemRecord() => clearField(6);
+  @$pb.TagNumber(6)
+  DeviceKemRecordV3 ensureKemRecord() => $_ensure(5);
 }
 
 class DhtFindNode extends $pb.GeneratedMessage {
@@ -4285,6 +4328,7 @@ class RestoreChannelInfo extends $pb.GeneratedMessage {
     $core.String? description,
     $core.String? ownerNodeIdHex,
     $core.Iterable<RestoreChannelMember>? members,
+    $core.bool? isAdult,
   }) {
     final $result = create();
     if (channelId != null) {
@@ -4302,6 +4346,9 @@ class RestoreChannelInfo extends $pb.GeneratedMessage {
     if (members != null) {
       $result.members.addAll(members);
     }
+    if (isAdult != null) {
+      $result.isAdult = isAdult;
+    }
     return $result;
   }
   RestoreChannelInfo._() : super();
@@ -4314,6 +4361,7 @@ class RestoreChannelInfo extends $pb.GeneratedMessage {
     ..aOS(3, _omitFieldNames ? '' : 'description')
     ..aOS(4, _omitFieldNames ? '' : 'ownerNodeIdHex')
     ..pc<RestoreChannelMember>(5, _omitFieldNames ? '' : 'members', $pb.PbFieldType.PM, subBuilder: RestoreChannelMember.create)
+    ..aOB(6, _omitFieldNames ? '' : 'isAdult')
     ..hasRequiredFields = false
   ;
 
@@ -4376,6 +4424,22 @@ class RestoreChannelInfo extends $pb.GeneratedMessage {
 
   @$pb.TagNumber(5)
   $core.List<RestoreChannelMember> get members => $_getList(4);
+
+  /// NSFW rating. Without this field the restore path could not carry the flag
+  /// at all, so a recovered channel always fell back to the ChannelInfo
+  /// constructor default. Per architecture §9.2.2 a channel marked not safe for
+  /// minors is invisible to identities without the isAdult flag, so losing the
+  /// flag on recovery would expose an adult channel to exactly those users.
+  /// Field 6 is additive: old senders leave it unset and new readers see the
+  /// protobuf default false, which is the pre-existing behaviour.
+  @$pb.TagNumber(6)
+  $core.bool get isAdult => $_getBF(5);
+  @$pb.TagNumber(6)
+  set isAdult($core.bool v) { $_setBool(5, v); }
+  @$pb.TagNumber(6)
+  $core.bool hasIsAdult() => $_has(5);
+  @$pb.TagNumber(6)
+  void clearIsAdult() => clearField(6);
 }
 
 class RestoreChannelMember extends $pb.GeneratedMessage {
@@ -15101,6 +15165,7 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     PayloadTypeV3? payloadType,
     $core.List<$core.int>? payload,
     $core.Iterable<$core.List<$core.int>>? visitedDeviceIds,
+    $core.int? senderDataPort,
   }) {
     final $result = create();
     if (version != null) {
@@ -15145,6 +15210,9 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     if (visitedDeviceIds != null) {
       $result.visitedDeviceIds.addAll(visitedDeviceIds);
     }
+    if (senderDataPort != null) {
+      $result.senderDataPort = senderDataPort;
+    }
     return $result;
   }
   NetworkPacketV3._() : super();
@@ -15166,6 +15234,7 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
     ..e<PayloadTypeV3>(12, _omitFieldNames ? '' : 'payloadType', $pb.PbFieldType.OE, defaultOrMaker: PayloadTypeV3.PAYLOAD_APPLICATION_FRAME, valueOf: PayloadTypeV3.valueOf, enumValues: PayloadTypeV3.values)
     ..a<$core.List<$core.int>>(13, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
     ..p<$core.List<$core.int>>(14, _omitFieldNames ? '' : 'visitedDeviceIds', $pb.PbFieldType.PY)
+    ..a<$core.int>(15, _omitFieldNames ? '' : 'senderDataPort', $pb.PbFieldType.OU3)
     ..hasRequiredFields = false
   ;
 
@@ -15316,6 +15385,29 @@ class NetworkPacketV3 extends $pb.GeneratedMessage {
   /// old nodes ignore the field but preserve it on forward (protobuf default).
   @$pb.TagNumber(14)
   $core.List<$core.List<$core.int>> get visitedDeviceIds => $_getList(13);
+
+  ///  §2.3.1 (V3.1.159): der Port, auf dem der Sender TATSAECHLICH lauscht.
+  ///  Der Empfaenger darf ihn dem beobachteten UDP-Quellport nur dann
+  ///  vorziehen, wenn die Quell-IP PRIVAT ist (RFC1918 / ULA / link-local).
+  ///  Hinter NAT/CGNAT bleibt der beobachtete Port autoritativ — nur fuer ihn
+  ///  existiert ein Hole-Punch-Rueckweg.
+  ///
+  ///  Grund: Der Windows-Sende-Socket bindet bewusst ephemer
+  ///  (transport.dart, localPort:0), der UDP-Header traegt dort also nie den
+  ///  Listening-Port. Gemessen: ein einzelner Peer mit 15 gelernten Adressen,
+  ///  davon 14 tot und ~900 fehlgeschlagenen Sendeversuchen.
+  ///
+  ///  Das Feld liegt im Signatur-Umfang des Outer-Device-Sig (ausgenommen sind
+  ///  nur ttl, hop_count, visited_device_ids, die Sigs und network_tag) — ein
+  ///  Relay kann es nicht faelschen. 0 = unbekannt (Peer vor V3.1.159).
+  @$pb.TagNumber(15)
+  $core.int get senderDataPort => $_getIZ(14);
+  @$pb.TagNumber(15)
+  set senderDataPort($core.int v) { $_setUnsignedInt32(14, v); }
+  @$pb.TagNumber(15)
+  $core.bool hasSenderDataPort() => $_has(14);
+  @$pb.TagNumber(15)
+  void clearSenderDataPort() => clearField(15);
 }
 
 ///  ── Inner Layer (ApplicationFrame) — KEM-encrypted unter recipient-User-PK ─
@@ -15749,6 +15841,7 @@ class InfrastructureFrameV3 extends $pb.GeneratedMessage {
     $core.List<$core.int>? messageId,
     MessageTypeV3? messageType,
     $core.List<$core.int>? payload,
+    $core.List<$core.int>? inReplyTo,
   }) {
     final $result = create();
     if (version != null) {
@@ -15772,6 +15865,9 @@ class InfrastructureFrameV3 extends $pb.GeneratedMessage {
     if (payload != null) {
       $result.payload = payload;
     }
+    if (inReplyTo != null) {
+      $result.inReplyTo = inReplyTo;
+    }
     return $result;
   }
   InfrastructureFrameV3._() : super();
@@ -15786,6 +15882,7 @@ class InfrastructureFrameV3 extends $pb.GeneratedMessage {
     ..a<$core.List<$core.int>>(5, _omitFieldNames ? '' : 'messageId', $pb.PbFieldType.OY)
     ..e<MessageTypeV3>(6, _omitFieldNames ? '' : 'messageType', $pb.PbFieldType.OE, defaultOrMaker: MessageTypeV3.MTV3_TEXT, valueOf: MessageTypeV3.valueOf, enumValues: MessageTypeV3.values)
     ..a<$core.List<$core.int>>(7, _omitFieldNames ? '' : 'payload', $pb.PbFieldType.OY)
+    ..a<$core.List<$core.int>>(8, _omitFieldNames ? '' : 'inReplyTo', $pb.PbFieldType.OY)
     ..hasRequiredFields = false
   ;
 
@@ -15872,6 +15969,25 @@ class InfrastructureFrameV3 extends $pb.GeneratedMessage {
   $core.bool hasPayload() => $_has(6);
   @$pb.TagNumber(7)
   void clearPayload() => clearField(7);
+
+  ///  §2.3.5 RPC-Korrelation: jede Response-Zeile der Selektor-Liste MUSS die
+  ///  message_id des Requests hier zurueckspiegeln. Der Empfaenger korreliert
+  ///  primaer ueber dieses Feld; ist es leer, faellt er auf das (Peer, Typ)-
+  ///  Tupel zurueck. Der Fallback ist der Rolling-Upgrade-Pfad fuer Peers vor
+  ///  V3.1.159 und bleibt, bis alle Knoten das Feld setzen.
+  ///
+  ///  Ohne Korrelator vertauschen zwei gleichzeitige Requests desselben Typs an
+  ///  denselben Peer ihre Antworten (Kademlia-Alltag: zwei FIND_NODE auf
+  ///  verschiedene Targets). In S280 hat genau das einen Kontakt-Trust-Anchor
+  ///  ueberschrieben.
+  @$pb.TagNumber(8)
+  $core.List<$core.int> get inReplyTo => $_getN(7);
+  @$pb.TagNumber(8)
+  set inReplyTo($core.List<$core.int> v) { $_setBytes(7, v); }
+  @$pb.TagNumber(8)
+  $core.bool hasInReplyTo() => $_has(7);
+  @$pb.TagNumber(8)
+  void clearInReplyTo() => clearField(8);
 }
 
 ///  ── Payload-Typ TEXT (neu): explizites TextMessage statt raw bytes ──────

@@ -488,44 +488,7 @@ class Transport {
       }
     }
 
-    // §4.5.2 invariant (V3.1.72): exactly ONE process socket must own the
-    // IPv4 data port. A second bound socket (e.g. a NativeUdpSender opened on
-    // the main port) silently captures inbound datagrams it never reads — the
-    // 2fbc879 regression. Self-check via /proc/net/udp on Linux (log-only) so
-    // any future re-introduction of a duplicate data-port socket announces
-    // itself loudly at startup instead of manifesting as a dead mesh.
-    if (Platform.isLinux) {
-      try {
-        final portHex =
-            port.toRadixString(16).toUpperCase().padLeft(4, '0');
-        final n4 = File('/proc/net/udp').readAsLinesSync().where((l) {
-          final p = l.trim().split(RegExp(r'\s+'));
-          return p.length > 1 && p[1].endsWith(':$portHex');
-        }).length;
-        if (n4 > 1) {
-          _log.error('§4.5.2 INVARIANT VIOLATED: $n4 IPv4 UDP sockets bound to '
-              'data port $port (expected 1) — a second socket captures inbound '
-              'and breaks receive. Check for an extra socket on the main port.');
-        } else {
-          _log.debug('§4.5.2 invariant OK: $n4 IPv4 UDP socket on data port $port');
-        }
-        if (_udpSocket6 != null) {
-          final n6 = File('/proc/net/udp6').readAsLinesSync().where((l) {
-            final p = l.trim().split(RegExp(r'\s+'));
-            return p.length > 1 && p[1].endsWith(':$portHex');
-          }).length;
-          if (n6 > 1) {
-            _log.error('§4.5.2 INVARIANT VIOLATED: $n6 IPv6 UDP sockets bound to '
-                'data port $port (expected 1) — a second socket captures inbound '
-                'IPv6 and breaks receive. Check for an extra socket on the main port.');
-          } else {
-            _log.debug('§4.5.2 invariant OK: $n6 IPv6 UDP socket on data port $port');
-          }
-        }
-      } catch (e) {
-        _log.debug('data-port socket self-check skipped: $e');
-      }
-    }
+    verifyDataPortInvariant(phase: 'transport-start');
 
     // Wire fragment reassembler logging
     _reassembler.onLog = (msg) => _log.debug(msg);
@@ -677,6 +640,52 @@ class Transport {
   /// Select the correct UDP socket for an address (IPv4 vs IPv6).
   /// When mobile fallback is active, non-LAN IPv4 destinations use the mobile socket
   /// to bypass broken WiFi (captive portals, dead NAT, etc.).
+  /// §4.5.2 invariant (V3.1.72): exactly ONE process socket must own the
+  /// data port. A second bound socket silently captures inbound datagrams it
+  /// never reads — the 2fbc879 regression. Self-check via `/proc/net/udp`
+  /// (and `/proc/net/udp6`) on Linux, log-only, so any re-introduction of a
+  /// duplicate data-port socket announces itself instead of manifesting as a
+  /// dead mesh.
+  ///
+  /// [phase] identifies the call site. This must be invoked **after** the
+  /// discovery sockets are up as well, not only at the end of [start]: the
+  /// discovery/data-port collision (`nodePort == discoveryPort`) does not
+  /// exist yet while `start()` runs, so a single check there samples the
+  /// invariant at the one moment it cannot be violated.
+  void verifyDataPortInvariant({required String phase}) {
+    if (!Platform.isLinux) return;
+    try {
+      final portHex = port.toRadixString(16).toUpperCase().padLeft(4, '0');
+      final n4 = File('/proc/net/udp').readAsLinesSync().where((l) {
+        final p = l.trim().split(RegExp(r'\s+'));
+        return p.length > 1 && p[1].endsWith(':$portHex');
+      }).length;
+      if (n4 > 1) {
+        _log.error('§4.5.2 INVARIANT VIOLATED [$phase]: $n4 IPv4 UDP sockets '
+            'bound to data port $port (expected 1) — a second socket captures '
+            'inbound and breaks receive. If $port is the LAN-discovery port, '
+            'the data port must be changed (see IdentityManager.drawDataPort).');
+      } else {
+        _log.debug('§4.5.2 invariant OK [$phase]: $n4 IPv4 UDP socket on data port $port');
+      }
+      if (_udpSocket6 != null) {
+        final n6 = File('/proc/net/udp6').readAsLinesSync().where((l) {
+          final p = l.trim().split(RegExp(r'\s+'));
+          return p.length > 1 && p[1].endsWith(':$portHex');
+        }).length;
+        if (n6 > 1) {
+          _log.error('§4.5.2 INVARIANT VIOLATED [$phase]: $n6 IPv6 UDP sockets '
+              'bound to data port $port (expected 1) — a second socket captures '
+              'inbound IPv6 and breaks receive.');
+        } else {
+          _log.debug('§4.5.2 invariant OK [$phase]: $n6 IPv6 UDP socket on data port $port');
+        }
+      }
+    } catch (e) {
+      _log.debug('data-port socket self-check skipped [$phase]: $e');
+    }
+  }
+
   RawDatagramSocket? _socketFor(InternetAddress addr) {
     if (addr.type == InternetAddressType.IPv6) {
       return _udpSocket6 ?? _udpSocket;
@@ -686,6 +695,34 @@ class Transport {
       return _udpSocketMobile!;
     }
     return _udpSocket;
+  }
+
+  /// Collapse an IPv4-mapped IPv6 sender address (`::ffff:a.b.c.d`) to its
+  /// plain IPv4 form. Applied at EVERY receive entry point BEFORE the
+  /// address reaches a callback ([onDiscovery]/[onPacketV3]/[onPortProbe])
+  /// — the node layer records these addresses into the routing table, and
+  /// the mapped textual form walks every IPv6 code path from there on
+  /// (classification `ipv6Global`, send priority 2, no RFC1918 reachability
+  /// filter, IPv6 socket without mobile fallback). Field evidence: a mobile
+  /// node tried `::ffff:192.0.2.202` FIRST and failed every send, while
+  /// the identical dotted endpoint sat one slot further down the target
+  /// list. See `PeerAddress.normalizeIp` for the string-level counterpart.
+  ///
+  /// The dual-stack IPv6 sockets themselves stay as they are — during a
+  /// rebind window their v4-mapped receive path is the only thing still
+  /// bringing IPv4 traffic in, and `IPV6_V6ONLY` cannot be set post-bind
+  /// anyway (Linux rejects it with EINVAL, see the note in [start]).
+  static InternetAddress normalizeRemoteAddress(InternetAddress addr) {
+    if (addr.type != InternetAddressType.IPv6) return addr;
+    final raw = addr.rawAddress;
+    if (raw.length != 16) return addr;
+    // ::ffff:0:0/96 — bytes 0-9 zero, bytes 10-11 0xff (RFC 4291 §2.5.5.2).
+    for (var i = 0; i < 10; i++) {
+      if (raw[i] != 0) return addr;
+    }
+    if (raw[10] != 0xff || raw[11] != 0xff) return addr;
+    return InternetAddress.fromRawAddress(
+        Uint8List.fromList(raw.sublist(12)));
   }
 
   void _onUdpEvent(RawSocketEvent event) {
@@ -764,6 +801,9 @@ class Transport {
   /// dispatches by the 4-byte magic that follows.
   void _processPrefixWrappedPacket(
       Uint8List data, InternetAddress remoteAddress, int remotePort) {
+    // v4-mapped senders (dual-stack IPv6 socket) must surface as plain IPv4
+    // before any callback stores the address — see [normalizeRemoteAddress].
+    remoteAddress = normalizeRemoteAddress(remoteAddress);
     final payload = NetworkSecret.unwrapPacket(data);
     if (payload == null) {
       _maybeSendEpochExpiredHint(data, remoteAddress, remotePort);
@@ -845,6 +885,12 @@ class Transport {
     int remotePort, {
     required bool isUdp,
   }) {
+    // v4-mapped senders (dual-stack IPv6 UDP socket AND the IPv6 TLS
+    // listener) must surface as plain IPv4 before [onPacketV3] stores the
+    // address — see [normalizeRemoteAddress]. Also fixes the §2.3.1
+    // `senderDataPort` gate, whose `_isPrivateIp(from.address)` check never
+    // matched the mapped form of a private sender.
+    remoteAddress = normalizeRemoteAddress(remoteAddress);
     onBytesReceived?.call(bytes.length);
     final packet = parseAndVerifyNetworkPacketV3(bytes);
     if (packet == null) {
@@ -2096,8 +2142,30 @@ class Transport {
   /// Throws SocketException if new port is unavailable.
   Future<void> rebind(int newPort) async {
     _log.info('Rebinding transport: $port → $newPort');
-    // Probe first — fail fast before tearing down existing socket
-    final probe = await RawDatagramSocket.bind(InternetAddress.anyIPv4, newPort);
+    // Probe first — fail fast before tearing down existing socket.
+    //
+    // `reuseAddress: false` is essential here and differs deliberately from
+    // the two real binds in start(). Dart's default is `true`, and with it
+    // the probe is not an availability test at all: SO_REUSEADDR lets it
+    // bind alongside a socket that already owns the port, so the probe
+    // reports "free" for a port that is taken. Measured: against a holder
+    // with SO_REUSEADDR, `reuseAddress: true` succeeds, `false` correctly
+    // fails with EADDRINUSE.
+    //
+    // The case that matters is our own LAN-discovery socket on 41338
+    // (§4.5.2). Without this, rebind(41338) probes green, tears down the
+    // working transport and rebinds onto a port the discovery sockets
+    // already hold — the kernel then splits inbound traffic between them
+    // and a share of all packets is dropped silently.
+    //
+    // Note the asymmetry: the sockets in start() MUST keep SO_REUSEADDR.
+    // With bindv6only=0 the IPv6 wildcard socket also covers IPv4, so
+    // anyIPv4:P and anyIPv6:P only coexist when BOTH set it. Clearing it
+    // there kills the IPv6 bind with EADDRINUSE (verified on Linux for all
+    // three combinations). It is load-bearing for dual-stack, not an
+    // oversight.
+    final probe = await RawDatagramSocket.bind(InternetAddress.anyIPv4, newPort,
+        reuseAddress: false);
     probe.close();
     // Tear down old
     await stop();
